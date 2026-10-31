@@ -448,7 +448,7 @@ where
     limits.validate()?;
     let attempt = intent.seal_attempt(context)?;
     admit_merge_attempt_async(
-        store, cx, context, intent, &attempt, None, limits, projection,
+        store, cx, context, intent, &attempt, None, limits, projection, None,
     )
     .await
 }
@@ -518,6 +518,7 @@ where
         Some(sealed),
         limits,
         projection,
+        None,
     )
     .await
 }
@@ -535,11 +536,31 @@ async fn admit_merge_attempt_async<S, P>(
     sealed: Option<&SealedMerge<'_>>,
     limits: AdmissionLimits,
     projection: &P,
+    landing: Option<&queue::QueueLandingCommand>,
 ) -> Result<TerminalOutcome, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
     P: NativeMergeProjection<S> + ?Sized,
 {
+    let landing_events = landing
+        .map(|command| {
+            let (events, expected) = queue::landing_proposal(context, command)?;
+            if expected != *attempt
+                || sealed.is_some()
+                || NativeMergeIntent::fast_forward_only(
+                    command.pull_request,
+                    command.expected_pull_request_version,
+                    command.source_ref.clone(),
+                    command.head_tip,
+                    command.target_ref.clone(),
+                    command.expected_target_tip,
+                )? != *intent
+            {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
+            }
+            Ok(events)
+        })
+        .transpose()?;
     let admission = fgit_authority::seal_request_async(store, cx, attempt).await?;
     let tx_id = admission.tx_id();
     let merge = intent.merge()?;
@@ -605,8 +626,9 @@ where
             {
                 return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
             }
-            if snapshot.refs.get(&merge.source_ref) != Some(&merge.source_tip)
-                || snapshot.refs.get(&merge.target_ref) != Some(&merge.target_tip_before)
+            if landing.is_none()
+                && (snapshot.refs.get(&merge.source_ref) != Some(&merge.source_tip)
+                    || snapshot.refs.get(&merge.target_ref) != Some(&merge.target_tip_before))
             {
                 return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
             }
@@ -632,6 +654,12 @@ where
                 return Err(
                     ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
                 );
+            }
+            if let (Some(command), Some(events)) = (landing, &landing_events) {
+                queue::validate_landing_at(
+                    store, cx, &basis, &snapshot, &resolved, command, events, projection,
+                )
+                .await?;
             }
             if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
                 return Err(ProjectionFailure::Refuse(code).into());
@@ -666,15 +694,21 @@ where
             }) {
                 return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
             }
-            let mut prepared = prepare_event(
-                context,
-                &intent.event,
-                &closure,
-                tx_id,
-                attempt,
-                &basis,
-                &resolved,
-            )
+            let mut prepared = match (landing, &landing_events) {
+                (Some(command), Some(events)) => queue::prepare_landing(
+                    context, command, events, &closure, tx_id, attempt, &basis, &resolved,
+                ),
+                (None, None) => prepare_event(
+                    context,
+                    &intent.event,
+                    &closure,
+                    tx_id,
+                    attempt,
+                    &basis,
+                    &resolved,
+                ),
+                _ => Err(RefusalCode::EvidenceInvalid),
+            }
             .map_err(ProjectionFailure::Refuse)?;
             protection::attach_prepared_policy_selected_at(
                 store,

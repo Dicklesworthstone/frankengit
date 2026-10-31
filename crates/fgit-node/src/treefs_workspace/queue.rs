@@ -1,7 +1,7 @@
 //! Canonical merge-queue management on the same authority as refs and PRs.
 //!
-//! These commands manage the versioned queue. They do not synthesize a merge,
-//! waive review protection, or publish caller-supplied batch results.
+//! Management records queue intent; guarded landing moves an existing candidate
+//! through ordinary protected merge admission and one atomic queue/PR decision.
 
 use super::issues::snapshots;
 use super::native_merge::NodeNativeMergeProjection;
@@ -57,6 +57,12 @@ impl core::fmt::Display for QueueReadRefusal {
 
 impl core::error::Error for QueueReadRefusal {}
 
+#[derive(Clone, Copy)]
+enum QueuePublication<'a> {
+    Management(&'a QueueCommand),
+    Landing(&'a queue::QueueLandingCommand),
+}
+
 impl OneNode {
     /// Submit enqueue, dequeue or reorder through ordinary metadata admission.
     /// The authenticated session supplies the actor. Enqueue guards and queue
@@ -67,6 +73,42 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         command: &QueueCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        Box::pin(self.publish_queue_in(
+            request,
+            session,
+            QueuePublication::Management(command),
+            limits,
+        ))
+        .await
+    }
+
+    /// Land exactly the first queued PR using the existing fast-forward merge
+    /// profile. Target movement, PR merge and queue completion share one RCR.
+    /// Review/check protection remains mandatory; no caller-supplied batch
+    /// success or derived merge object is accepted by this profile.
+    pub async fn land_queue_head_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &queue::QueueLandingCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        Box::pin(self.publish_queue_in(
+            request,
+            session,
+            QueuePublication::Landing(command),
+            limits,
+        ))
+        .await
+    }
+
+    async fn publish_queue_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        publication: QueuePublication<'_>,
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session
@@ -81,7 +123,14 @@ impl OneNode {
             object_format: self.object_format,
         };
         let error = |source| NodeReceiveTransportRefusal::Admission(Box::new(source));
-        let (_, attempt) = queue::proposal(&context, command).map_err(error)?;
+        let attempt = match publication {
+            QueuePublication::Management(command) => {
+                queue::proposal(&context, command).map_err(error)?.1
+            }
+            QueuePublication::Landing(command) => {
+                queue::landing_proposal(&context, command).map_err(error)?.1
+            }
+        };
         let tx = attempt
             .derive()
             .map_err(|_| {
@@ -116,15 +165,30 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = Box::pin(queue::admit_queue_async(
-            &self.authority,
-            request.authority(),
-            &context,
-            command,
-            limits,
-            &projection,
-        ))
-        .await
+        let terminal = match publication {
+            QueuePublication::Management(command) => {
+                Box::pin(queue::admit_queue_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+            QueuePublication::Landing(command) => {
+                Box::pin(queue::admit_landing_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+        }
         .map_err(error)?;
         Ok((tx, terminal))
     }
@@ -221,3 +285,6 @@ impl OneNode {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod landing_tests;

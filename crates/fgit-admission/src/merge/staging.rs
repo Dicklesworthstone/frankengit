@@ -35,8 +35,7 @@ pub fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Admission
         .outbox
         .entry(prepared.effect.delivery_key())
         .ok_or_else(invalid)?;
-    if prepared.event.events.len() != 1
-        || prepared.request.tx_id != record.tx_id
+    if prepared.request.tx_id != record.tx_id
         || prepared.request.repository != repository
         || prepared.request.canonical_request_digest != record.canonical_request_digest
         || prepared.forge.repository_id() != repository
@@ -79,16 +78,30 @@ pub fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Admission
     fgit_txn::IntentEvaluator::new()
         .validate_report(&prepared.request, &prepared.fold)
         .map_err(unavailable)?;
-    let event = &prepared.event.events[0];
-    let stream =
-        fgit_types::AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
-            .map_err(|_| invalid())?;
-    let position = prepared.forge.entry(stream).ok_or_else(invalid)?;
-    if position.event_count() != 1
-        || position.event_batch_root() != event_root
-        || position.successor_position() != event.version.get()
-    {
-        return Err(invalid());
+    let mut streams = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for event in &prepared.event.events {
+        let stream =
+            fgit_types::AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
+                .map_err(|_| invalid())?;
+        streams.entry(stream).or_default().push(event);
+    }
+    for (stream, events) in streams {
+        let position = prepared.forge.entry(stream).ok_or_else(invalid)?;
+        if usize::try_from(position.event_count()).map_err(|_| invalid())? != events.len()
+            || position.event_batch_root() != event_root
+        {
+            return Err(invalid());
+        }
+        let mut expected = position.predecessor_position();
+        for event in events {
+            expected = expected.checked_add(1).ok_or_else(invalid)?;
+            if event.version.get() != expected {
+                return Err(invalid());
+            }
+        }
+        if expected != position.successor_position() {
+            return Err(invalid());
+        }
     }
     let key = fgit_codec::derive_outbox_delivery_key(fgit_codec::OutboxDeliveryIdentityInput::new(
         repository,
@@ -240,11 +253,15 @@ const fn invalid() -> AdmissionError {
 /// immediate successor. No other forge event may advance the policy epoch.
 fn validate_epoch_transition(prepared: &PreparedNativeMerge) -> Result<(), AdmissionError> {
     use fgit_forge::{AggregateId, ForgeEventPayload};
-    let [event] = prepared.event.events.as_slice() else {
-        return Err(invalid());
-    };
     let record = &prepared.materialization.record;
     let resulting = prepared.materialization.roots.policy_epoch;
+    let [event] = prepared.event.events.as_slice() else {
+        super::native::queue::validate_landing_shape(&prepared.event).map_err(unavailable)?;
+        if resulting != record.policy_epoch {
+            return Err(invalid());
+        }
+        return Ok(());
+    };
     match &event.payload {
         ForgeEventPayload::ReviewProtectionChanged(change) => {
             change.validate().map_err(|_| invalid())?;

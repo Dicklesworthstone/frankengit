@@ -124,7 +124,10 @@ where
         context,
         required,
     };
-    admit_merge_attempt_async(store, cx, context, intent, &attempt, None, limits, &guarded).await
+    admit_merge_attempt_async(
+        store, cx, context, intent, &attempt, None, limits, &guarded, None,
+    )
+    .await
 }
 
 struct GuardedProjection<'a, P: ?Sized> {

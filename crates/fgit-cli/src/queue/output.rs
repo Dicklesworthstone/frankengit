@@ -1,6 +1,7 @@
 //! Complete bounded JSON snapshots and historical terminal decisions.
 use super::options::{Operation, Options, head_token, hex, version};
 use crate::publication_support::quote;
+use fgit_admission::merge::native::queue::QueueLandingCommand;
 use fgit_authority::TerminalOutcome;
 use fgit_forge::QueueNumber;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
@@ -231,6 +232,23 @@ fn action(value: &QueueCommandAction) -> String {
     }
 }
 
+fn landing_action(command: &QueueLandingCommand) -> String {
+    format!(
+        concat!(
+            "{{\"name\":\"land\",\"method\":\"fast-forward-only\",\"pull_request\":{},",
+            "\"expected_pull_request_version\":{},\"expected_policy_epoch\":{},",
+            "\"source_ref\":{},\"source_ref_hex\":{},\"head_tip\":{},\"expected_target_tip\":{}}}"
+        ),
+        command.pull_request.get(),
+        command.expected_pull_request_version.get(),
+        command.expected_policy_epoch.get(),
+        reference(&command.source_ref),
+        quote(&hex(command.source_ref.as_bytes())),
+        quote(&command.head_tip.to_string()),
+        quote(&command.expected_target_tip.to_string()),
+    )
+}
+
 pub(super) fn publication(
     options: &Options,
     incarnation: RepositoryIncarnationId,
@@ -238,12 +256,30 @@ pub(super) fn publication(
     terminal: &TerminalOutcome,
     cleanup: Option<&str>,
 ) -> Result<String, String> {
-    let Operation::Mutate {
-        principal, command, ..
-    } = &options.operation
-    else {
-        return Err("queue terminal result does not match its request".into());
-    };
+    let (principal, number, target_ref, expected_version, proposed_action, moves_ref) =
+        match &options.operation {
+            Operation::Mutate {
+                principal, command, ..
+            } => (
+                principal,
+                command.number,
+                &command.target_ref,
+                version(command.expected_version),
+                action(&command.action),
+                false,
+            ),
+            Operation::Land {
+                principal, command, ..
+            } => (
+                principal,
+                command.number,
+                &command.target_ref,
+                command.expected_version.get(),
+                landing_action(command),
+                command.head_tip != command.expected_target_tip,
+            ),
+            _ => return Err("queue terminal result does not match its request".into()),
+        };
     let (outcome, committed, record, refusal, code) = match terminal.outcome {
         DecisionOutcome::Committed {
             repository_commit_id,
@@ -271,15 +307,15 @@ pub(super) fn publication(
             "\"target_ref\":{},\"target_ref_hex\":{},\"expected_version\":{},\"proposed_action\":{},",
             "\"tx_id\":{},\"decision_sequence\":{},\"outcome\":{},\"committed\":{},",
             "\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},",
-            "\"refs_changed\":false,\"node_closed\":{},\"cleanup_error\":{}}}"
+            "\"refs_changed\":{},\"node_closed\":{},\"cleanup_error\":{}}}"
         ),
         scope(options, incarnation),
-        command.number.get(),
+        number.get(),
         quote(&principal.to_string()),
-        reference(&command.target_ref),
-        quote(&hex(command.target_ref.as_bytes())),
-        version(command.expected_version),
-        action(&command.action),
+        reference(target_ref),
+        quote(&hex(target_ref.as_bytes())),
+        expected_version,
+        proposed_action,
         quote(&tx.to_string()),
         terminal.decision_sequence.get(),
         quote(outcome),
@@ -287,6 +323,7 @@ pub(super) fn publication(
         record,
         refusal,
         code,
+        committed && moves_ref,
         cleanup.is_none(),
         cleanup.map_or_else(|| "null".into(), quote),
     ))

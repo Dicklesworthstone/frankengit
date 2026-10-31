@@ -1,4 +1,4 @@
-//! Canonical merge queue management through the native node publication path.
+//! Canonical merge queue management and guarded native fast-forward landing.
 mod options;
 mod output;
 #[cfg(test)]
@@ -28,13 +28,24 @@ usage: fg queue <enqueue|dequeue|reorder> <storage-root> <tenant-id> <repository
   dequeue: --pull-request <number> --reason <withdrawn|conflict|check-failed|base-moved|evicted|admin-override>
   reorder: --entry <pull-request-number> ... (the complete nonempty order, at most 1024 entries)
 
+usage: fg queue land <storage-root> <tenant-id> <repository-id> <queue-number>
+  --trusted-local --principal <id> --expected-incarnation <id> --idempotency-key <key>
+  --expected-version <positive-version> --expected-policy-epoch <positive-epoch>
+  --pull-request <number> --expected-pull-version <positive-version>
+  --source-ref <refs/heads/source> --target-ref <refs/heads/target>
+  --expected-source-tip <oid> --expected-target-tip <oid> [--object-format sha1|sha256]
+
 Queue numbers and target branches remain bound after their first enqueue.
 Enqueue checks the current open PR, exact PR version and both compared branch tips.
 Higher priorities enter first; equal priorities enter FIFO. Reorder preserves its explicit order.
 All changes publish canonical forge events under the exact queue predecessor and original client key.
 Retry the identical command and key after a lost response, or use fg outcome; never refresh retry versions.
 Receipts describe that terminal decision; use show for the latest queue state.
-Queue management changes no Git refs and does not merge PRs or grant approval.
+Enqueue, dequeue and reorder change queue metadata only.
+Land requires the exact queue-head PR and performs FastForwardOnly native merge admission,
+including current review, required-check and protected-ref rules. The target ref, PR merge
+and queue completion publish atomically; the queue advances twice and the PR once.
+Land accepts existing commit objects; it does not synthesize merge commits or run checks.
 This is a trusted local operator interface. It does not authenticate a remote user.
 Exit 0: committed/read; 3: canonical refusal; 4: queue absent; 2: input/infrastructure/output error.";
 
@@ -48,7 +59,7 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             && args[1] == "--help"
             && matches!(
                 args[0].as_str(),
-                "show" | "list" | "enqueue" | "dequeue" | "reorder"
+                "show" | "list" | "enqueue" | "dequeue" | "reorder" | "land"
             ))
     {
         write_read(out, USAGE)?;
@@ -79,6 +90,25 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             let session = LoopbackReceiveSession::authenticated(*principal, key.clone());
             node.runtime()
                 .block_on(node.admit_queue_durable_in(
+                    &request,
+                    &session,
+                    command,
+                    Default::default(),
+                ))
+                .map(|(tx, outcome)| Completed::Mutation(tx, outcome))
+                .map_err(|error| match service {
+                    Ok(()) => error.to_string(),
+                    Err(service) => format!("{error}; service intake also refused: {service}"),
+                })
+        }
+        Operation::Land {
+            principal,
+            key,
+            command,
+        } => {
+            let session = LoopbackReceiveSession::authenticated(*principal, key.clone());
+            node.runtime()
+                .block_on(node.land_queue_head_durable_in(
                     &request,
                     &session,
                     command,
@@ -163,7 +193,10 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             let cleanup = cleanup.map_or_else(String::new, |error| {
                 format!("; node shutdown also failed: {error}")
             });
-            if matches!(&options.operation, Operation::Mutate { .. }) {
+            if matches!(
+                &options.operation,
+                Operation::Mutate { .. } | Operation::Land { .. }
+            ) {
                 Err(format!(
                     "no terminal queue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover with fg outcome using the same principal and key, or retry the identical command, incarnation, versions and tips. Do not replace the key or refresh the expected versions"
                 ))

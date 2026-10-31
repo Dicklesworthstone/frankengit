@@ -24,9 +24,9 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 impl Scratch {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
             "fg-native-queue-{}-{}",
             std::process::id(),
@@ -35,7 +35,7 @@ impl Scratch {
         fs::create_dir(&path).unwrap();
         Self(path)
     }
-    fn config(&self, format: GitHashAlgorithm) -> NodeConfig {
+    pub(super) fn config(&self, format: GitHashAlgorithm) -> NodeConfig {
         NodeConfig::new(
             self.0.join("node"),
             TenantId::from_bytes([0x81; 16]),
@@ -50,10 +50,10 @@ impl Drop for Scratch {
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn actor() -> PrincipalId {
+pub(super) fn actor() -> PrincipalId {
     PrincipalId::from_bytes([0x83; 16])
 }
-fn session(key: &str) -> LoopbackReceiveSession {
+pub(super) fn session(key: &str) -> LoopbackReceiveSession {
     LoopbackReceiveSession::authenticated(
         actor(),
         IdempotencyKey::new(key.as_bytes().to_vec()).unwrap(),
@@ -84,7 +84,7 @@ fn loose(
     fs::write(dir.join(&hex[2..]), encoded).unwrap();
     id
 }
-fn initialize(
+pub(super) fn initialize(
     scratch: &Scratch,
     format: GitHashAlgorithm,
 ) -> (OneNode, [PullRequestCommand; 3], GitOid) {
@@ -149,7 +149,7 @@ fn initialize(
     }
     (node, pulls, advanced)
 }
-fn apply_pull(node: &OneNode, command: &PullRequestCommand, key: &str) {
+pub(super) fn apply_pull(node: &OneNode, command: &PullRequestCommand, key: &str) {
     let request = node.request_context();
     accepted(node.runtime().block_on(node.admit_pull_request_durable_in(
         &request,
@@ -158,7 +158,12 @@ fn apply_pull(node: &OneNode, command: &PullRequestCommand, key: &str) {
         AdmissionLimits::default(),
     )));
 }
-fn enqueue(number: u64, version: u64, pull: &PullRequestCommand, priority: u32) -> QueueCommand {
+pub(super) fn enqueue(
+    number: u64,
+    version: u64,
+    pull: &PullRequestCommand,
+    priority: u32,
+) -> QueueCommand {
     command(
         number,
         version,
@@ -172,7 +177,7 @@ fn enqueue(number: u64, version: u64, pull: &PullRequestCommand, priority: u32) 
         },
     )
 }
-fn command(number: u64, version: u64, action: QueueCommandAction) -> QueueCommand {
+pub(super) fn command(number: u64, version: u64, action: QueueCommandAction) -> QueueCommand {
     QueueCommand {
         number: QueueNumber::try_new(number).unwrap(),
         target_ref: RefName::try_new(b"refs/heads/main").unwrap(),
@@ -184,7 +189,7 @@ fn command(number: u64, version: u64, action: QueueCommandAction) -> QueueComman
         action,
     }
 }
-fn dequeue(number: u64, version: u64, pull: PullRequestNumber) -> QueueCommand {
+pub(super) fn dequeue(number: u64, version: u64, pull: PullRequestNumber) -> QueueCommand {
     command(
         number,
         version,
@@ -194,7 +199,7 @@ fn dequeue(number: u64, version: u64, pull: PullRequestNumber) -> QueueCommand {
         },
     )
 }
-fn apply(
+pub(super) fn apply(
     node: &OneNode,
     command: &QueueCommand,
     key: &str,
@@ -207,7 +212,7 @@ fn apply(
         AdmissionLimits::default(),
     ))
 }
-fn accepted(
+pub(super) fn accepted(
     result: Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal>,
 ) -> (TxId, TerminalOutcome) {
     let result = result.unwrap();
@@ -217,13 +222,17 @@ fn accepted(
     );
     result
 }
-fn snapshot(node: &OneNode) -> MaterializedAdmission {
+pub(super) fn snapshot(node: &OneNode) -> MaterializedAdmission {
     let request = node.request_context();
     node.runtime()
         .block_on(node.materialize_admission_in(&request))
         .unwrap()
 }
-fn read(node: &OneNode, number: u64, pin: Option<RepositoryAuthorityHeadId>) -> QueueRead {
+pub(super) fn read(
+    node: &OneNode,
+    number: u64,
+    pin: Option<RepositoryAuthorityHeadId>,
+) -> QueueRead {
     let request = node.request_context();
     node.runtime()
         .block_on(node.read_queue_in(

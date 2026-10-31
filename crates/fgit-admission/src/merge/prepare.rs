@@ -18,7 +18,7 @@ use fgit_reference::intent::{
     ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId, ForgeStreamPosition, Intent,
     OutboxDeliveryKey, OutboxIntent, TransactionRequest,
 };
-use fgit_reference::merge_delivery::{MergeDeliveryInput, apply_merge_delivery_transition};
+use fgit_reference::merge_delivery::{MergeDeliveryInput, apply_batch_delivery_transition};
 use fgit_types::{AsciiSlug, RefusalCode, RootLayoutVersion, TxId};
 
 use super::legacy::{SealedMerge, check_parts_describe_one_merge};
@@ -394,30 +394,112 @@ pub fn prepare_event(
         }
         _ => return Err(RefusalCode::EvidenceInvalid),
     };
+    if required_objects
+        .iter()
+        .any(|oid| !closure.objects.contains(oid))
+    {
+        return Err(RefusalCode::ObjectClosureIncomplete);
+    }
+    prepare_coupled_events(
+        context,
+        CoupledForgeEvents {
+            events: ForgeEventBatch::of_one(event.clone()),
+            kinds: vec![kind],
+            refs: ref_effect.into_iter().collect(),
+        },
+        closure,
+        tx_id,
+        attempt,
+        basis,
+        resolved,
+    )
+}
+
+/// Domain validators supply an exact event batch and its reference meanings.
+/// This internal composition is shared by singleton commands and immediate
+/// queue-head landing; it is not an arbitrary public batch-submission API.
+pub(in crate::merge) struct CoupledForgeEvents {
+    pub events: ForgeEventBatch,
+    pub kinds: Vec<ForgeEventKind>,
+    pub refs: BTreeMap<fgit_types::RefName, RefEffect>,
+}
+
+pub(in crate::merge) fn prepare_coupled_events(
+    context: &AdmissionContext,
+    input: CoupledForgeEvents,
+    closure: &ValidatedClosure,
+    tx_id: TxId,
+    attempt: &SealAttempt,
+    basis: &PublicationBasis,
+    resolved: &NativeMergeBasis,
+) -> Result<PreparedNativeMerge, RefusalCode> {
+    let CoupledForgeEvents {
+        events: event,
+        kinds,
+        refs: expected_refs,
+    } = input;
+    if event.events.len() != 1 {
+        super::native::queue::validate_landing_shape(&event)?;
+    }
+    if event.events.is_empty()
+        || event.events.len() > 3
+        || event.events.len() != kinds.len()
+        || attempt.tenant_id != context.tenant_id
+        || attempt.repository_id != context.repository_id
+        || attempt.authenticated_principal_id != context.principal_id
+        || attempt.idempotency_key != context.idempotency_key
+        || attempt
+            .derive()
+            .map_err(|_| RefusalCode::EvidenceInvalid)?
+            .0
+            != tx_id
+        || !attempt.request.atomic()
+    {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    if context.repository_id != basis.body().repository_id
+        || resolved.forge.repository_id() != context.repository_id
+        || resolved.outbox.repository_id() != context.repository_id
+        || crate::ref_state_root(resolved.root_layout, &resolved.refs)? != basis.body().ref_root
+    {
+        return Err(RefusalCode::AuthorityReceiptStale);
+    }
     let objects = PermittedObjectClosure::new(closure.objects.clone());
     if crate::permitted_object_closure_root(&objects)? != closure.object_closure_root
         || closure
             .objects
             .iter()
             .any(|oid| oid.is_zero() || oid.algorithm() != context.object_format)
-        || required_objects
-            .iter()
-            .any(|oid| !closure.objects.contains(oid))
     {
         return Err(RefusalCode::ObjectClosureIncomplete);
     }
-    let stream = ForgeStreamId::new(label);
-    let predecessor = event.version.get() - 1;
-    if resolved
-        .forge
-        .entry(label)
-        .map_or(0, |entry| entry.successor_position())
-        != predecessor
-    {
-        return Err(RefusalCode::EvidenceStale);
+    let mut forge_intents = Vec::with_capacity(kinds.len());
+    let mut expected_forge = BTreeMap::<ForgeStreamId, Vec<ForgeEventKind>>::new();
+    for (event, kind) in event.events.iter().zip(kinds) {
+        let label = AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if kind.entity() != ForgeEntityId::new(label) {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        let stream = ForgeStreamId::new(label);
+        let held = expected_forge.entry(stream).or_default();
+        let original = resolved
+            .forge
+            .entry(label)
+            .map_or(0, |entry| entry.successor_position());
+        let predecessor = original
+            .checked_add(held.len() as u64)
+            .ok_or(RefusalCode::ResourceBudgetExceeded)?;
+        if predecessor.checked_add(1) != Some(event.version.get()) {
+            return Err(RefusalCode::EvidenceStale);
+        }
+        forge_intents.push(Intent::Forge(ForgeIntent {
+            stream,
+            expected_position: ForgeStreamPosition::new(predecessor),
+            event: kind.clone(),
+        }));
+        held.push(kind);
     }
-    let position = ForgeStreamPosition::new(predecessor);
-    let event = ForgeEventBatch::of_one(event.clone());
     let event_root = evidence_root(&event)?;
     let effect_class = AsciiSlug::from_static("forge-event");
     let destination = AsciiSlug::from_static("forge-projection");
@@ -432,43 +514,44 @@ pub fn prepare_event(
     .map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
     let effect =
         CanonicalOutboxEffectState::committed(context.repository_id, key, tx_id, event_root);
-    let transition = apply_merge_delivery_transition(
-        &resolved.forge,
-        &resolved.outbox,
-        MergeDeliveryInput::new(
-            context.repository_id,
-            stream,
-            position,
-            1,
-            event_root,
-            effect_class,
-            destination,
-            event_root,
-            tx_id,
-            basis.body().latest_committed_rcr_id,
-            effect
-                .root()
-                .map_err(|_| RefusalCode::CanonicalFramingInvalid)?,
-        ),
-    )
-    .map_err(|_| RefusalCode::ConflictingSemanticEffects)?;
+    let advances = expected_forge
+        .iter()
+        .map(|(stream, events)| {
+            Ok(MergeDeliveryInput::new(
+                context.repository_id,
+                *stream,
+                ForgeStreamPosition::new(
+                    resolved
+                        .forge
+                        .entry(stream.label())
+                        .map_or(0, |entry| entry.successor_position()),
+                ),
+                u32::try_from(events.len()).map_err(|_| RefusalCode::ResourceBudgetExceeded)?,
+                event_root,
+                effect_class,
+                destination,
+                event_root,
+                tx_id,
+                basis.body().latest_committed_rcr_id,
+                effect
+                    .root()
+                    .map_err(|_| RefusalCode::CanonicalFramingInvalid)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, RefusalCode>>()?;
+    let transition = apply_batch_delivery_transition(&resolved.forge, &resolved.outbox, &advances)
+        .map_err(|_| RefusalCode::ConflictingSemanticEffects)?;
     let mut request = crate::model_request(context, &attempt.request, tx_id, closure)
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let statement = request
         .statements
         .first_mut()
         .ok_or(RefusalCode::EvidenceInvalid)?;
-    statement.intents.extend([
-        Intent::Forge(ForgeIntent {
-            stream,
-            expected_position: position,
-            event: kind.clone(),
-        }),
-        Intent::Outbox(OutboxIntent {
-            delivery_key: OutboxDeliveryKey::new(key),
-            parameters: event_root,
-        }),
-    ]);
+    statement.intents.extend(forge_intents);
+    statement.intents.push(Intent::Outbox(OutboxIntent {
+        delivery_key: OutboxDeliveryKey::new(key),
+        parameters: event_root,
+    }));
     let forge_positions = resolved
         .forge
         .entries()
@@ -507,9 +590,8 @@ pub fn prepare_event(
         FoldOutcome::Folded(effects) => effects,
         FoldOutcome::Aborted { code, .. } => return Err(*code),
     };
-    let expected_refs = ref_effect.into_iter().collect::<BTreeMap<_, _>>();
     if effects.refs != expected_refs
-        || effects.forge != BTreeMap::from([(stream, vec![kind])])
+        || effects.forge != expected_forge
         || effects.outbox != BTreeMap::from([(OutboxDeliveryKey::new(key), event_root)])
         || !effects.retention.is_empty()
     {

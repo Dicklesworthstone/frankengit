@@ -37,7 +37,7 @@ fn input(action: &str) -> Vec<String> {
         ]);
     }
     match action {
-        "enqueue" => args.extend([
+        "enqueue" | "land" => args.extend([
             "--pull-request".into(),
             "42".into(),
             "--source-ref".into(),
@@ -54,6 +54,9 @@ fn input(action: &str) -> Vec<String> {
         }
         "reorder" => args.extend(["--entry", "42", "--entry", "11"].map(str::to_owned)),
         _ => {}
+    }
+    if action == "land" {
+        args.extend(["--expected-policy-epoch", "1"].map(str::to_owned));
     }
     args
 }
@@ -184,7 +187,7 @@ fn enqueue_binds_exact_queue_pr_tips_scope_and_both_hash_formats() {
 
 #[test]
 fn every_write_requires_operator_scope_original_key_and_exact_predecessor() {
-    for action in ["enqueue", "dequeue", "reorder"] {
+    for action in ["enqueue", "dequeue", "reorder", "land"] {
         for flag in [
             "--trusted-local",
             "--principal",
@@ -220,7 +223,7 @@ fn every_write_requires_operator_scope_original_key_and_exact_predecessor() {
             "enqueue accepted missing {flag}"
         );
     }
-    for action in ["dequeue", "reorder"] {
+    for action in ["dequeue", "reorder", "land"] {
         let mut args = input(action);
         replace(&mut args, "--expected-version", "0");
         assert!(options::parse(&args).is_err());
@@ -248,7 +251,7 @@ fn malformed_native_coordinates_and_ambiguous_options_refuse_before_io() {
     let mut args = input("enqueue");
     args.extend(["--object-format", "sha256"].map(str::to_owned));
     assert!(options::parse(&args).is_err());
-    for action in ["enqueue", "dequeue", "reorder", "show", "list"] {
+    for action in ["enqueue", "dequeue", "reorder", "land", "show", "list"] {
         let mut args = input(action);
         args.push("--trusted-local".into());
         assert!(options::parse(&args).is_err());
@@ -406,35 +409,44 @@ fn list_renderer_refuses_cursor_or_order_substitution() {
 
 #[test]
 fn terminal_receipts_bind_guards_and_never_echo_the_retry_key() {
-    let options = options::parse(&input("enqueue")).unwrap();
-    for committed in [true, false] {
-        let (tx, terminal) = terminal(committed);
-        let mut bytes = Vec::new();
-        let exit = finish(&mut bytes, &options, incarnation(), tx, &terminal, None).unwrap();
-        assert_eq!(exit, if committed { 0 } else { 3 });
-        let report = String::from_utf8(bytes).unwrap();
-        assert!(report.contains(&tx.to_string()));
-        assert!(report.contains("\"expected_pull_request_version\":3"));
-        assert!(report.contains(&format!("\"expected_target_tip\":\"{}\"", "bb".repeat(20))));
-        assert!(report.contains("\"refs_changed\":false"));
-        assert!(!report.contains("private-stable-queue-key"));
-        assert!(!report.contains("idempotency_key"));
-        let mut bytes = Vec::new();
-        let error = finish(
-            &mut bytes,
-            &options,
-            incarnation(),
-            tx,
-            &terminal,
-            Some("drain failed"),
-        )
-        .unwrap_err();
-        assert!(error.contains(&tx.to_string()));
-        assert!(
-            String::from_utf8(bytes)
-                .unwrap()
-                .contains("\"node_closed\":false")
-        );
+    for action in ["enqueue", "land"] {
+        let options = options::parse(&input(action)).unwrap();
+        for committed in [true, false] {
+            let (tx, terminal) = terminal(committed);
+            let mut bytes = Vec::new();
+            let exit = finish(&mut bytes, &options, incarnation(), tx, &terminal, None).unwrap();
+            assert_eq!(exit, if committed { 0 } else { 3 });
+            let report = String::from_utf8(bytes).unwrap();
+            assert!(report.contains(&tx.to_string()));
+            assert!(report.contains("\"expected_pull_request_version\":3"));
+            assert!(report.contains(&format!("\"expected_target_tip\":\"{}\"", "bb".repeat(20))));
+            assert!(report.contains(&format!(
+                "\"refs_changed\":{}",
+                action == "land" && committed
+            )));
+            if action == "land" {
+                assert!(report.contains("\"expected_policy_epoch\":1"));
+                assert!(report.contains("\"method\":\"fast-forward-only\""));
+            }
+            assert!(!report.contains("private-stable-queue-key"));
+            assert!(!report.contains("idempotency_key"));
+            let mut bytes = Vec::new();
+            let error = finish(
+                &mut bytes,
+                &options,
+                incarnation(),
+                tx,
+                &terminal,
+                Some("drain failed"),
+            )
+            .unwrap_err();
+            assert!(error.contains(&tx.to_string()));
+            assert!(
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .contains("\"node_closed\":false")
+            );
+        }
     }
 }
 
@@ -450,31 +462,33 @@ impl Write for BrokenOutput {
 
 #[test]
 fn failed_receipt_output_retains_the_known_terminal_decision() {
-    let options = options::parse(&input("dequeue")).unwrap();
-    for committed in [true, false] {
-        let (tx, terminal) = terminal(committed);
-        let error = finish(
-            &mut BrokenOutput,
-            &options,
-            incarnation(),
-            tx,
-            &terminal,
-            None,
-        )
-        .unwrap_err();
-        assert!(error.contains(&tx.to_string()));
-        assert!(error.contains(if committed {
-            "is committed"
-        } else {
-            "canonical refusal"
-        }));
-        assert!(error.contains("receipt output failed"));
+    for action in ["dequeue", "land"] {
+        let options = options::parse(&input(action)).unwrap();
+        for committed in [true, false] {
+            let (tx, terminal) = terminal(committed);
+            let error = finish(
+                &mut BrokenOutput,
+                &options,
+                incarnation(),
+                tx,
+                &terminal,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains(&tx.to_string()));
+            assert!(error.contains(if committed {
+                "is committed"
+            } else {
+                "canonical refusal"
+            }));
+            assert!(error.contains("receipt output failed"));
+        }
     }
 }
 
 #[test]
 fn command_help_is_available_without_opening_a_repository() {
-    for action in ["show", "list", "enqueue", "dequeue", "reorder"] {
+    for action in ["show", "list", "enqueue", "dequeue", "reorder", "land"] {
         let mut bytes = Vec::new();
         assert_eq!(
             run_to(&[action.into(), "--help".into()], &mut bytes).unwrap(),
@@ -483,6 +497,80 @@ fn command_help_is_available_without_opening_a_repository() {
         let help = String::from_utf8(bytes).unwrap();
         assert!(help.contains("--expected-incarnation"));
         assert!(help.contains("--expected-pull-version"));
-        assert!(help.contains("does not merge PRs"));
+        assert!(help.contains("--expected-policy-epoch"));
+        assert!(help.contains("FastForwardOnly"));
+        assert!(help.contains("publish atomically"));
     }
+}
+
+#[test]
+fn landing_requires_exact_protection_scope_and_available_successor_versions() {
+    for flag in [
+        "--pull-request",
+        "--source-ref",
+        "--expected-source-tip",
+        "--expected-target-tip",
+        "--expected-pull-version",
+        "--expected-policy-epoch",
+    ] {
+        let mut args = input("land");
+        remove(&mut args, flag);
+        assert!(
+            options::parse(&args).is_err(),
+            "land accepted missing {flag}"
+        );
+    }
+    for (flag, value) in [
+        ("--expected-version", "18446744073709551614"),
+        ("--expected-pull-version", "18446744073709551615"),
+        ("--expected-policy-epoch", "0"),
+        ("--source-ref", "refs/heads/main"),
+        (
+            "--expected-target-tip",
+            "0000000000000000000000000000000000000000",
+        ),
+    ] {
+        let mut args = input("land");
+        replace(&mut args, flag, value);
+        assert!(
+            options::parse(&args).is_err(),
+            "land accepted invalid {flag}"
+        );
+    }
+    for flag in [
+        "--priority",
+        "--entry",
+        "--reason",
+        "--batch-passed",
+        "--force",
+    ] {
+        let mut args = input("land");
+        args.extend([flag.into(), "1".into()]);
+        assert!(
+            options::parse(&args).is_err(),
+            "land accepted inapplicable {flag}"
+        );
+    }
+    for (format, bytes) in [("sha1", 20), ("sha256", 32)] {
+        let mut args = input("land");
+        args.extend(["--object-format".into(), format.into()]);
+        replace(&mut args, "--expected-source-tip", &"aa".repeat(bytes));
+        replace(&mut args, "--expected-target-tip", &"bb".repeat(bytes));
+        let parsed = options::parse(&args).unwrap();
+        let Operation::Land { command, .. } = parsed.operation else {
+            panic!()
+        };
+        assert_eq!(command.expected_version.get(), 2);
+        assert_eq!(command.expected_pull_request_version.get(), 3);
+        assert_eq!(command.expected_policy_epoch.get(), 1);
+        assert_eq!(command.head_tip.algorithm(), parsed.format);
+        assert_eq!(command.expected_target_tip.algorithm(), parsed.format);
+    }
+}
+
+#[test]
+fn equal_tip_landing_refuses_before_node_io() {
+    let mut args = input("land");
+    replace(&mut args, "--expected-target-tip", &"aa".repeat(20));
+    assert!(options::parse(&args).is_err());
 }

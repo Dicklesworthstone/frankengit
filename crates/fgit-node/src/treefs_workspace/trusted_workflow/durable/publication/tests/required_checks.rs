@@ -11,6 +11,8 @@ use fgit_forge::event::protection::{
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 
+mod queue_landing;
+
 fn branch(name: &str) -> RefName {
     RefName::try_new(format!("refs/heads/{name}").as_bytes()).unwrap()
 }

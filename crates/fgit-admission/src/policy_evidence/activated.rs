@@ -176,14 +176,8 @@ impl ActivatedPolicyDecisionEvidence {
         self.references.verify_decision(context, basis, fold)?;
         if self.publication == RefPolicyPublication::NativeMerge {
             let effects = fold.effects().ok_or(RefusalCode::EvidenceInvalid)?;
-            let mut events = effects.forge.values().flatten();
-            let Some(fgit_reference::intent::ForgeEventKind::PullRequestMerged { target, .. }) =
-                events.next()
-            else {
-                return Err(RefusalCode::EvidenceInvalid);
-            };
-            if events.next().is_some()
-                || self.references.inputs.len() != 1
+            let target = native_merge_target(&effects.forge)?;
+            if self.references.inputs.len() != 1
                 || self.references.inputs[0].name() != target
                 || self.references.inputs[0].next.is_none()
             {
@@ -191,6 +185,141 @@ impl ActivatedPolicyDecisionEvidence {
             }
         }
         self.replay()
+    }
+}
+
+/// Retain the ordinary one-PR normal form, or accept precisely one additional
+/// queue stream with its two same-target lifecycle meanings. Native admission
+/// separately binds those meanings to the exact formed/merged/landed payloads
+/// and sealed guards; unrelated metadata can never borrow merge authorization.
+fn native_merge_target(
+    forge: &std::collections::BTreeMap<
+        fgit_reference::intent::ForgeStreamId,
+        Vec<fgit_reference::intent::ForgeEventKind>,
+    >,
+) -> Result<&RefName, RefusalCode> {
+    use fgit_reference::intent::ForgeEventKind;
+    let mut merged = None;
+    let mut queued = None;
+    for (stream, events) in forge {
+        match events.as_slice() {
+            [
+                ForgeEventKind::PullRequestMerged {
+                    pull_request,
+                    target,
+                },
+            ] if stream.label() == pull_request.label() && merged.is_none() => {
+                merged = Some(target);
+            }
+            [
+                first @ ForgeEventKind::MergeQueueChanged { queue, target },
+                second,
+            ] if stream.label() == queue.label() && first == second && queued.is_none() => {
+                queued = Some(target);
+            }
+            _ => return Err(RefusalCode::EvidenceInvalid),
+        }
+    }
+    let target = merged.ok_or(RefusalCode::EvidenceInvalid)?;
+    if queued.is_some_and(|queue_target| queue_target != target) {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    Ok(target)
+}
+
+#[cfg(test)]
+mod merge_shape_tests {
+    use super::*;
+    use fgit_reference::intent::{ForgeEntityId, ForgeEventKind, ForgeStreamId};
+    use fgit_types::AsciiSlug;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn native_policy_accepts_only_one_merge_and_its_exact_same_target_queue_pair() {
+        let target = RefName::try_new(b"refs/heads/main").unwrap();
+        let pull = ForgeEntityId::new(AsciiSlug::from_static("pull-request/1"));
+        let queue = ForgeEntityId::new(AsciiSlug::from_static("queue/1"));
+        let merged = ForgeEventKind::PullRequestMerged {
+            pull_request: pull,
+            target: target.clone(),
+        };
+        let changed = ForgeEventKind::MergeQueueChanged {
+            queue,
+            target: target.clone(),
+        };
+        let single = BTreeMap::from([(ForgeStreamId::new(pull.label()), vec![merged.clone()])]);
+        assert_eq!(native_merge_target(&single), Ok(&target));
+        let mut landing = single;
+        landing.insert(
+            ForgeStreamId::new(queue.label()),
+            vec![changed.clone(), changed.clone()],
+        );
+        assert_eq!(native_merge_target(&landing), Ok(&target));
+        for change in 0..7 {
+            let mut invalid = landing.clone();
+            match change {
+                0 => {
+                    invalid
+                        .get_mut(&ForgeStreamId::new(queue.label()))
+                        .unwrap()
+                        .pop();
+                }
+                1 => {
+                    invalid
+                        .get_mut(&ForgeStreamId::new(queue.label()))
+                        .unwrap()
+                        .push(changed.clone());
+                }
+                2 => {
+                    invalid.insert(
+                        ForgeStreamId::new(queue.label()),
+                        vec![
+                            ForgeEventKind::MergeQueueChanged {
+                                queue,
+                                target: RefName::try_new(b"refs/heads/other").unwrap(),
+                            },
+                            changed.clone(),
+                        ],
+                    );
+                }
+                3 => {
+                    invalid.insert(
+                        ForgeStreamId::new(AsciiSlug::from_static("pull-request/2")),
+                        vec![merged.clone()],
+                    );
+                }
+                4 => {
+                    invalid.remove(&ForgeStreamId::new(queue.label()));
+                    invalid.insert(
+                        ForgeStreamId::new(AsciiSlug::from_static("queue/2")),
+                        vec![changed.clone(), changed.clone()],
+                    );
+                }
+                5 => {
+                    invalid.remove(&ForgeStreamId::new(pull.label()));
+                }
+                _ => {
+                    let other = ForgeEntityId::new(AsciiSlug::from_static("queue/2"));
+                    invalid.insert(
+                        ForgeStreamId::new(other.label()),
+                        vec![
+                            ForgeEventKind::MergeQueueChanged {
+                                queue: other,
+                                target: target.clone(),
+                            },
+                            ForgeEventKind::MergeQueueChanged {
+                                queue: other,
+                                target: target.clone(),
+                            },
+                        ],
+                    );
+                }
+            }
+            assert_eq!(
+                native_merge_target(&invalid),
+                Err(RefusalCode::EvidenceInvalid)
+            );
+        }
     }
 }
 

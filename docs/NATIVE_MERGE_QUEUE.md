@@ -1,22 +1,25 @@
-# Native merge queue management
+# Native merge queues and atomic head landing
 
 `fg queue` manages durable, versioned merge queues through the same repository
-authority and metadata admission path used by pull requests. Each accepted
-enqueue, dequeue or reorder is a canonical forge event with an outbox obligation
-and one recoverable terminal transaction outcome.
+authority and admission path used by pull requests. Each accepted enqueue,
+dequeue or reorder is a canonical forge event with an outbox obligation and one
+recoverable terminal transaction outcome. `fg queue land` executes an exact
+queue-head PR through native fast-forward admission and atomically publishes the
+target move, PR merge and queue completion.
 
-This interface manages queue membership and order. Speculative batch execution,
-required-check orchestration and atomic batch landing are still separate work
-under `frankengit-fg083a-merge-queue-impl-95fm`. Queue commands do not move Git
-refs, merge a PR or grant review approval. The existing review and protected
-merge APIs continue to enforce their own rules.
+The landing profile handles one existing fast-forward candidate. Speculative
+merge trains, synthetic merge objects and autonomous required-check execution
+remain separate work under `frankengit-fg083a-merge-queue-impl-95fm`. Queue
+membership commands do not grant approval; landing enforces the existing review,
+check, authentication and protected-ref rules.
 
 ## Operator boundary
 
 Every command requires `--trusted-local`. The operator supplies the principal
 for writes; this is the existing explicit operator-asserted authentication
-profile, not a remote credential or an agent capability. A server must establish
-its own authorization before exposing the node methods to a remote caller.
+profile, not a remote credential or an agent capability. Authenticated remote
+membership management is available through the separately scoped
+[HTTP queue API](NATIVE_HTTP_QUEUES.md). That API does not expose landing.
 
 Writes also require the repository's exact incarnation, an original client
 idempotency key, the queue number, its target branch and expected queue version.
@@ -140,6 +143,68 @@ Removing an absent entry refuses. Membership changes refuse while a canonical
 batch is active; replay requires that batch's exact identity and ordered
 membership when accepting its terminal event.
 
+## Land the exact queue head
+
+Read the current queue and its first PR, then supply all observed guards. Landing
+requires a positive queue version, the actual current PR version, current policy
+epoch, and the exact source and target tips:
+
+```bash
+fg queue land "$STORAGE" "$TENANT" "$REPOSITORY" 1 \
+  --trusted-local --principal "$PRINCIPAL" \
+  --expected-incarnation "$INCARNATION" \
+  --idempotency-key land-queue-1-pr-42-observation-1 \
+  --expected-version "$QUEUE_VERSION" \
+  --expected-policy-epoch "$POLICY_EPOCH" \
+  --pull-request 42 --expected-pull-version "$PR_VERSION" \
+  --source-ref refs/heads/feature --target-ref refs/heads/main \
+  --expected-source-tip "$SOURCE_COMMIT" \
+  --expected-target-tip "$TARGET_COMMIT"
+```
+
+The PR must be open, visible, at the exact requested version, and the first entry
+in the queue's persisted execution order. Both the queued entry and canonical
+PR must name the requested source candidate. The queue must be idle and bound to
+the requested target. Live source and target refs must still match their observed
+tips. A stale queue, PR or policy observation refuses; a lower-priority or reordered
+non-head entry cannot skip ahead. A valid landing needs a new target tip, with
+the expected target commit proven to be its ancestor by the native object reader.
+
+Landing uses **FastForwardOnly**. It does not manufacture a merge commit, fall back
+to another merge method, run a workflow, or accept a caller assertion that checks
+passed. Required checks and reviews must already exist as valid evidence for the
+exact native candidate. Withdrawn approval, missing checks, disallowed
+authentication, hidden refs and divergent histories refuse through the ordinary
+native merge rules. These rules are reevaluated at each selected authority head
+if publication races with another transaction.
+
+A successful landing publishes one RCR, one terminal decision and one outbox
+obligation containing this ordered event batch:
+
+| Event | Aggregate version | Result |
+|---|---|---|
+| `BatchFormed` | Queue `q + 1` | Identify the one exact selected entry |
+| `MergeCommittedNative` | PR `p + 1` | Record the native fast-forward merge |
+| `BatchLanded` | Queue `q + 2` | Complete that batch and remove only its entry |
+
+The target ref advances in that same publication. No intermediate formation,
+partially merged PR or separately dequeued state is authoritative. Remaining
+entries preserve their order; their next landing must explicitly account for
+the moved target and the PR's current observation. This profile does not create
+synthetic queue refs or move the source branch.
+
+The sealed request commits to the entire event batch, exact non-force ref move,
+policy epoch and authenticated principal. Retrying the original landing cannot
+silently select a new queue head or new candidate. Two competing requests for the
+same queue predecessor can produce only one successful landing; the loser is a
+durable stale refusal. An identical retry of the winning request recovers the
+original decision even after later queue edits, policy replacement or restart.
+
+Successful landing receipts report `refs_changed: true`. Membership command
+receipts and canonical refusals report `false`. Receipt output failure preserves
+the known terminal transaction identity in the diagnostic; recover it with the
+original key instead of interpreting the failure as rollback.
+
 ## Retry and recovery
 
 A response describes the original terminal decision, not necessarily today's
@@ -176,6 +241,9 @@ is introduced.
 
 Focused tests cover model transitions, command guards, persistent node
 lifecycle, hash formats, conflicting observations, visibility and restart.
+Landing tests also cover atomic coupled stream advancement, real ancestry,
+review withdrawal and reapproval, missing required checks, competing attempts,
+and activated authentication policies with recorded evidence.
 `scripts/e2e/suites/product/merge_queue.sh` drives the prebuilt `FG_BIN` across
 fresh CLI processes. It reports its own results; presence of the suite is not a
 claim that the full speculative merge-queue acceptance has passed.

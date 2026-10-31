@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fresh-process queue lifecycle against fg's real file-backed authority.
+"""Fresh-process queue lifecycle and native fast-forward landing against fg.
 
-Git fixture objects use Python's standard library. No Git subprocess, batch
-submission, or speculative-landing claim. Each command's output is retained.
+Git fixture objects use Python's standard library. No Git subprocess or
+speculative batch submission is used. Each command's output is retained.
 """
 import argparse
 import hashlib
@@ -14,7 +14,7 @@ import zlib
 
 from pull_request_smoke import (
     PRINCIPAL, REPOSITORY, SOURCE, TARGET, TENANT,
-    commit, document, fixture, identity, require,
+    commit, document, fixture, identity, read_header, require,
 )
 
 
@@ -84,7 +84,8 @@ class Campaign:
         require(report["proposed_action"]["name"] == action, "publication action")
         require(report["committed"] is (code is None), "terminal commit flag")
         require(report["outcome"] == ("committed" if code is None else "refused"), "terminal outcome")
-        require(report["refusal_code"] == code and report["refs_changed"] is False, "refusal/metadata-only effect")
+        require(report["refusal_code"] == code, "canonical refusal code")
+        require(report["refs_changed"] is (action == "land" and code is None), "publication ref effect")
         require(report["cleanup_error"] is None, "explicit cleanup")
         require(type(report["decision_sequence"]) is int and report["decision_sequence"] > 0, "decision sequence")
         return report
@@ -107,6 +108,22 @@ def enqueue_flags(pull, pull_version, reference, source, target, priority=0):
             "--expected-target-tip", target, "--priority", priority]
 
 
+def landing_flags(pull, pull_version, reference, source, target, policy_epoch):
+    return ["--pull-request", pull, "--expected-pull-version", pull_version,
+            "--source-ref", reference, "--expected-source-tip", source,
+            "--expected-target-tip", target, "--expected-policy-epoch", policy_epoch]
+
+
+def fixture_branch(source, algorithm, tree, name, parent):
+    body = commit(tree, [parent], name)
+    oid = identity(algorithm, "commit", body)
+    path = source / "objects" / oid[:2] / oid[2:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(zlib.compress(f"commit {len(body)}\0".encode() + body))
+    (source / "refs/heads" / name).write_text(oid + "\n", encoding="ascii")
+    return oid
+
+
 def verify_queue(report, version, order):
     require(report["found"] is True and report["version"] == version, "queue version")
     queue = report["queue"]
@@ -115,7 +132,164 @@ def verify_queue(report, version, order):
     require(len(queue["entries"]) == len(order) and
             sorted(row["pull_request"] for row in queue["entries"]) == sorted(order), "lost/duplicate entries")
     require(all(row["enqueued_by"] == PRINCIPAL for row in queue["entries"]), "derived actor")
-    require(queue["active_batch"] is None, "metadata management fabricated a batch")
+    require(queue["active_batch"] is None, "queue exposed an unfinished batch")
+
+
+def landing_campaign(binary, root, algorithm):
+    """One real queue head lands; the divergent survivor cannot be forced through."""
+    root.mkdir(parents=True, exist_ok=False)
+    source = root / "source"
+    f = fixture(source, algorithm)
+    # The shared PR fixture is deliberately divergent. Replace its source ref
+    # with a real child of main before importing, and retain a sibling candidate.
+    first = fixture_branch(source, algorithm, f["tree"], "topic", f["target"])
+    second = fixture_branch(source, algorithm, f["tree"], "second", f["target"])
+    c = Campaign(binary, root, algorithm)
+    c.run(["init", c.node, TENANT, REPOSITORY, algorithm])
+    c.run(["import", c.node, TENANT, REPOSITORY, PRINCIPAL, "landing-fixture", source])
+    refs_args = ["at", c.node, TENANT, REPOSITORY, "latest", "refs"]
+    refs_before = c.run(refs_args).stdout
+    require(refs_before.count(f["target"].encode()) == 1, "exactly one initial target reference")
+    c.incarnation = c.show(1, 4)["repository_incarnation"]
+
+    def show_pull(number, token=None):
+        args = ["pr", "show", c.node, TENANT, REPOSITORY, number,
+                "--trusted-local", "--object-format", algorithm]
+        if token is not None:
+            args += ["--expected-head", token]
+        report = document(c.run(args))
+        read_header(report, algorithm)
+        require(report["requested_number"] == number and report["found"] is True, "landing PR lookup")
+        return report
+
+    def policy():
+        report = document(c.run(["protection", "show", c.node, TENANT, REPOSITORY,
+                                 "--trusted-local", "--object-format", algorithm]))
+        require(report["type"] == "review_protection" and report["node_closed"] is True, "policy read")
+        return report
+
+    def clear_policy(version, epoch, key):
+        report = document(c.run([
+            "protection", "set", c.node, TENANT, REPOSITORY, "--trusted-local",
+            "--object-format", algorithm, "--principal", PRINCIPAL, "--idempotency-key", key,
+            "--expected-version", version, "--expected-epoch", epoch, "--admin", PRINCIPAL, "--clear",
+        ]))
+        require(report["committed"] is True and report["refs_changed"] is False, "policy publication")
+        require(report["committed_policy_epoch"] == epoch + 1 and report["node_closed"] is True,
+                "exact policy successor")
+        return epoch + 1
+
+    current_policy = policy()
+    require(current_policy["policy_epoch"] == 1 and current_policy["version"] == 0, "initial policy guard")
+    for number, reference, tip in [(7, SOURCE, first), (9, "refs/heads/second", second)]:
+        c.pull("open", number, 0, reference, tip, f["target"], f"open-{number}")
+    c.mutate("enqueue", 1, 0, "enqueue-first", enqueue_flags(7, 1, SOURCE, first, f["target"]))
+    c.mutate("enqueue", 1, 1, "enqueue-priority",
+             enqueue_flags(9, 1, "refs/heads/second", second, f["target"], 10))
+    verify_queue(c.show(1), 2, [9, 7])
+    old_flags = landing_flags(7, 1, SOURCE, first, f["target"], 1)
+    c.mutate("land", 1, 2, "skip-priority-head", old_flags, "ProtectedRefTransitionDenied")
+    c.mutate("reorder", 1, 2, "choose-head", ["--entry", 7, "--entry", 9])
+    stale = c.mutate("land", 1, 2, "stale-queue", old_flags, "EvidenceStale")
+    c.mutate("land", 1, 3, "skip-reordered-head",
+             landing_flags(9, 1, "refs/heads/second", second, f["target"], 1),
+             "ProtectedRefTransitionDenied")
+
+    # Equal commit coordinates do not permit silently refreshing a PR or policy
+    # guard. Both change canonically while the queue remains at version three.
+    c.pull("update", 7, 1, SOURCE, first, f["target"], "same-tips-new-pr-version")
+    c.mutate("land", 1, 3, "stale-pr", old_flags, "EvidenceStale")
+    epoch = clear_policy(0, 1, "install-policy")
+    c.mutate("land", 1, 3, "stale-policy",
+             landing_flags(7, 2, SOURCE, first, f["target"], 1), "EvidenceStale")
+    c.mutate("land", 1, 3, "wrong-source-tip",
+             landing_flags(7, 2, SOURCE, f["base"], f["target"], epoch), "EvidenceStale")
+    c.mutate("land", 1, 3, "wrong-target-tip",
+             landing_flags(7, 2, SOURCE, first, f["base"], epoch), "EvidenceStale")
+    pinned = c.show(1)
+    verify_queue(pinned, 3, [7, 9])
+    pull_before = show_pull(7)
+    survivor_before = show_pull(9)["pull_request"]
+    require(pull_before["source_head"] == pinned["source_head"], "one pre-landing authority head")
+    require(pull_before["pull_request"]["version"] == 2 and
+            pull_before["pull_request"]["state"] == "open", "refusals merged the PR")
+    require(c.run(refs_args).stdout == refs_before, "refused landing changed a ref")
+
+    flags = landing_flags(7, 2, SOURCE, first, f["target"], epoch)
+    landed = c.mutate("land", 1, 3, "land-first", flags)
+    action = landed["proposed_action"]
+    require(action == dict(name="land", method="fast-forward-only", pull_request=7,
+                           expected_pull_request_version=2, expected_policy_epoch=epoch,
+                           source_ref=SOURCE, source_ref_hex=SOURCE.encode().hex(),
+                           head_tip=first, expected_target_tip=f["target"]), "exact sealed landing receipt")
+    completed = c.show(1)
+    verify_queue(completed, 5, [9])
+    require(completed["source_head"] != pinned["source_head"], "landing did not publish authority")
+    merged = show_pull(7)
+    require(merged["source_head"] == completed["source_head"], "queue and PR use one committed head")
+    row = merged["pull_request"]
+    require(row["version"] == 3 and row["state"] == "merged" and row["last_action"] == "merge",
+            "landing did not advance the PR exactly once")
+    require(row["data"] == pull_before["pull_request"]["data"] and
+            row["opened_by"] == PRINCIPAL and row["last_metadata_actor"] == PRINCIPAL,
+            "landing discarded PR metadata or attribution")
+    require(row["merge"] == dict(source_reference_hex=SOURCE.encode().hex(),
+                                  target_reference_hex=TARGET.encode().hex(), source_tip=first,
+                                  target_tip_before=f["target"], base_tip=f["target"], commit=first),
+            "landing invented a merge object or changed its candidate")
+    require(show_pull(9)["pull_request"] == survivor_before, "landing changed the other PR")
+    refs_after = c.run(refs_args).stdout
+    require(refs_after == refs_before.replace(f["target"].encode(), first.encode()),
+            "landing changed a source/unrelated ref or failed to advance the target")
+    require(c.show(1, token=pinned["snapshot_token"]) == pinned, "landing rewrote retained queue state")
+    require(show_pull(7, pinned["snapshot_token"]) == pull_before, "landing rewrote retained PR state")
+
+    # The surviving sibling cannot reuse the old target observation, and an
+    # explicitly refreshed PR/queue still fails the native ancestry check.
+    c.mutate("land", 1, 5, "survivor-old-target",
+             landing_flags(9, 1, "refs/heads/second", second, f["target"], epoch), "TargetRefMoved")
+    c.pull("update", 9, 1, "refs/heads/second", second, first, "refresh-survivor-target")
+    c.mutate("enqueue", 1, 5, "refresh-survivor-queue",
+             enqueue_flags(9, 2, "refs/heads/second", second, first))
+    c.mutate("land", 1, 6, "divergent-survivor",
+             landing_flags(9, 2, "refs/heads/second", second, first, epoch), "NonFastForwardRefused")
+    verify_queue(c.show(1), 6, [9])
+    survivor = show_pull(9)["pull_request"]
+    require(survivor["state"] == "open" and survivor["version"] == 2, "divergent refusal merged a PR")
+    require(c.run(refs_args).stdout == refs_after, "divergent refusal moved the target")
+    c.mutate("dequeue", 1, 6, "remove-divergent", ["--pull-request", 9, "--reason", "conflict"])
+    next_epoch = clear_policy(1, epoch, "later-policy")
+    latest = c.show(1)
+    verify_queue(latest, 7, [])
+
+    # Every invocation is a new process. Retry the original observations and
+    # client key after queue and policy advancement; never refresh the request.
+    require(c.mutate("land", 1, 3, "land-first", flags) == landed, "landing retry lost its original receipt")
+    require(c.mutate("land", 1, 2, "stale-queue", old_flags, "EvidenceStale") == stale,
+            "historical landing refusal changed after later publications")
+    c.run(c.mutation_args("land", 1, 3, "land-first",
+                         landing_flags(7, 2, SOURCE, first, f["target"], next_epoch)), 2)
+    for key, expected, receipt in [("land-first", 0, landed), ("stale-queue", 3, stale)]:
+        outcome = document(c.run([
+            "outcome", c.node, TENANT, REPOSITORY, "--trusted-local", "--object-format", algorithm,
+            "--principal", PRINCIPAL, "--idempotency-key", key,
+        ], expected))
+        require(outcome["transaction"]["tx_id"] == receipt["tx_id"], "landing recovery transaction identity")
+    require(c.show(1) == latest and c.run(refs_args).stdout == refs_after,
+            "landing retry or key reuse changed current queue/refs")
+    require(show_pull(7)["pull_request"] == merged["pull_request"], "landing retry rewrote merged PR")
+    result = dict(
+        campaign="native_merge_queue_fast_forward_landing", object_format=algorithm, command_count=c.calls,
+        transaction=landed["tx_id"], original_target=f["target"], landed_target=first,
+        queue_version=7, merged_pull_request_version=3,
+        passed=["native_fast_forward_head", "atomic_target_pr_queue_post_state", "two_queue_versions_one_pr_version",
+                "priority_and_reorder_head_guard", "stale_queue_guard", "same_tip_pr_version_guard",
+                "policy_epoch_guard", "exact_source_and_target_guards", "retained_pre_landing_snapshots",
+                "moved_target_refusal", "divergent_candidate_refusal", "fresh_process_exact_retry",
+                "changed_guard_key_reuse_refusal", "original_outcome_recovery", "unrelated_refs_unchanged"],
+    )
+    (root / "results.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result
 
 
 def campaign(binary, root, algorithm):
@@ -124,13 +298,7 @@ def campaign(binary, root, algorithm):
     f = fixture(source, algorithm)
 
     def branch(name, parent):
-        body = commit(f["tree"], [parent], name)
-        oid = identity(algorithm, "commit", body)
-        path = source / "objects" / oid[:2] / oid[2:]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(zlib.compress(f"commit {len(body)}\0".encode() + body))
-        (source / "refs/heads" / name).write_text(oid + "\n", encoding="ascii")
-        return oid
+        return fixture_branch(source, algorithm, f["tree"], name, parent)
 
     second, third = branch("second", f["target"]), branch("third", f["target"])
     advance = branch("advance", f["target"])
@@ -222,14 +390,18 @@ def campaign(binary, root, algorithm):
     require(c.mutate("enqueue", 1, 2, "stale", third_flags, "EvidenceStale") == stale,
             "historical refusal changed after later mutations")
     require(c.show(1) == settled and c.run(refs_args).stdout == moved_refs, "failed request/retry changed state")
+    landing = landing_campaign(binary, root / "landing", algorithm)
     result = dict(
-        campaign="native_merge_queue_management", object_format=algorithm, command_count=c.calls,
+        campaign="native_merge_queue_lifecycle", object_format=algorithm,
+        command_count=c.calls + landing["command_count"], management_command_count=c.calls,
+        landing=landing, landing_command_log="landing/commands.jsonl",
         executable=str(binary), executable_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
         passed=["lifecycle", "priority_and_explicit_order", "replacement_without_duplicates",
                 "exact_retry_after_dequeue", "typed_stale_version_refusals", "complete_reorder",
                 "numeric_pinned_pagination", "exact_pr_version", "live_target_guard",
-                "closed_pr_refusal", "lost_response_recovery", "incarnation_guard", "refs_unchanged"],
-        scope="Canonical queue management; speculative batching and merge landing are not exercised.",
+                "closed_pr_refusal", "lost_response_recovery", "incarnation_guard", "management_refs_unchanged"],
+        scope="Canonical queue management and one-candidate native fast-forward landing; "
+              "speculative multi-PR batching and workflow execution are not exercised.",
     )
     (root / "results.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result, sort_keys=True))

@@ -1,6 +1,7 @@
 //! Queue management through the ordinary sealed metadata admission protocol.
-//! A queue records candidate intent; no operation here moves a ref, publishes a
-//! speculative batch, satisfies a check, or grants permission to merge.
+//! Management commands record candidate intent. The separate immediate landing
+//! profile executes one exact queue-head fast-forward through native merge
+//! validation and publishes its ref, PR and queue changes in one transaction.
 use super::{NativeMergeProjection, PreparationFailure, delivery, metadata, storage, unavailable};
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, PermittedObjectClosure,
@@ -20,6 +21,10 @@ use std::collections::BTreeSet;
 
 mod read;
 pub use read::{QueuePage, read_page_at, read_queue_at};
+mod landing;
+pub(super) use landing::validate_landing_at;
+pub use landing::{QueueLandingCommand, admit_landing_async, landing_proposal};
+pub(in crate::merge) use landing::{prepare_landing, validate_landing_shape};
 
 /// Bind actor, queue identity, expected predecessor, action and candidate guards
 /// without placing a selected head or retry counter into transaction identity.

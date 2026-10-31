@@ -1,11 +1,13 @@
 //! Bounded, exact-predecessor queue commands parsed before repository IO.
+use fgit_admission::merge::native::queue::QueueLandingCommand;
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
 use fgit_forge::merge_queue::{DequeueReason, QueueCommand, QueueCommandAction};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, PrincipalId,
-    RefName, RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId, TenantId,
+    CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, PolicyEpoch,
+    PrincipalId, RefName, RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId,
+    TenantId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -36,6 +38,11 @@ pub(super) enum Operation {
         key: IdempotencyKey,
         command: QueueCommand,
     },
+    Land {
+        principal: PrincipalId,
+        key: IdempotencyKey,
+        command: QueueLandingCommand,
+    },
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
@@ -52,7 +59,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         return Err(super::USAGE.to_owned());
     }
     let action = args[0].as_str();
-    if !matches!(action, "show" | "list" | "enqueue" | "dequeue" | "reorder") {
+    if !matches!(
+        action,
+        "show" | "list" | "enqueue" | "dequeue" | "reorder" | "land"
+    ) {
         return Err(super::USAGE.to_owned());
     }
     if args[1].is_empty() {
@@ -97,6 +107,15 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                                 | "--expected-target-tip"
                                 | "--expected-pull-version"
                                 | "--priority"
+                        ),
+                        "land" => matches!(
+                            flag,
+                            "--pull-request"
+                                | "--source-ref"
+                                | "--expected-source-tip"
+                                | "--expected-target-tip"
+                                | "--expected-pull-version"
+                                | "--expected-policy-epoch"
                         ),
                         "dequeue" => matches!(flag, "--pull-request" | "--reason"),
                         "reorder" => flag == "--entry",
@@ -184,61 +203,77 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             ExpectedVersion::Exactly(version)
         };
         let target_ref = branch(required(&flags, "--target-ref")?)?;
-        let command_action = match action {
-            "enqueue" => {
-                let source_ref = branch(required(&flags, "--source-ref")?)?;
-                if source_ref == target_ref {
-                    return Err("queue source and target branches must differ".into());
+        if action == "land" {
+            Operation::Land {
+                principal,
+                key,
+                command: landing(
+                    &flags,
+                    number.ok_or("queue number is required")?,
+                    expected_version,
+                    target_ref,
+                    format,
+                )?,
+            }
+        } else {
+            let command_action = match action {
+                "enqueue" => {
+                    let source_ref = branch(required(&flags, "--source-ref")?)?;
+                    if source_ref == target_ref {
+                        return Err("queue source and target branches must differ".into());
+                    }
+                    QueueCommandAction::Enqueue {
+                        pull_request: pull_number(required(&flags, "--pull-request")?)?,
+                        source_ref,
+                        head_tip: oid(required(&flags, "--expected-source-tip")?, format)?,
+                        expected_target_tip: oid(
+                            required(&flags, "--expected-target-tip")?,
+                            format,
+                        )?,
+                        expected_pull_request_version: AggregateVersion::try_new(decimal(
+                            required(&flags, "--expected-pull-version")?,
+                        )?)
+                        .ok_or("expected PR version must be positive")?,
+                        priority: u32::try_from(decimal(
+                            flags.get("--priority").copied().unwrap_or("0"),
+                        )?)
+                        .map_err(|_| "queue priority exceeds u32")?,
+                    }
                 }
-                QueueCommandAction::Enqueue {
+                "dequeue" => QueueCommandAction::Dequeue {
                     pull_request: pull_number(required(&flags, "--pull-request")?)?,
-                    source_ref,
-                    head_tip: oid(required(&flags, "--expected-source-tip")?, format)?,
-                    expected_target_tip: oid(required(&flags, "--expected-target-tip")?, format)?,
-                    expected_pull_request_version: AggregateVersion::try_new(decimal(required(
-                        &flags,
-                        "--expected-pull-version",
-                    )?)?)
-                    .ok_or("expected PR version must be positive")?,
-                    priority: u32::try_from(decimal(
-                        flags.get("--priority").copied().unwrap_or("0"),
-                    )?)
-                    .map_err(|_| "queue priority exceeds u32")?,
-                }
-            }
-            "dequeue" => QueueCommandAction::Dequeue {
-                pull_request: pull_number(required(&flags, "--pull-request")?)?,
-                reason: match required(&flags, "--reason")? {
-                    "withdrawn" => DequeueReason::Withdrawn,
-                    "conflict" => DequeueReason::Conflict,
-                    "check-failed" => DequeueReason::CheckFailed,
-                    "base-moved" => DequeueReason::BaseMoved,
-                    "evicted" => DequeueReason::Evicted,
-                    "admin-override" => DequeueReason::AdminOverride,
-                    _ => return Err("invalid queue dequeue reason".into()),
+                    reason: match required(&flags, "--reason")? {
+                        "withdrawn" => DequeueReason::Withdrawn,
+                        "conflict" => DequeueReason::Conflict,
+                        "check-failed" => DequeueReason::CheckFailed,
+                        "base-moved" => DequeueReason::BaseMoved,
+                        "evicted" => DequeueReason::Evicted,
+                        "admin-override" => DequeueReason::AdminOverride,
+                        _ => return Err("invalid queue dequeue reason".into()),
+                    },
                 },
-            },
-            "reorder" => {
-                if order.is_empty() {
-                    return Err("reorder requires the complete nonempty --entry order".into());
+                "reorder" => {
+                    if order.is_empty() {
+                        return Err("reorder requires the complete nonempty --entry order".into());
+                    }
+                    QueueCommandAction::Reorder { order }
                 }
-                QueueCommandAction::Reorder { order }
+                _ => return Err(super::USAGE.into()),
+            };
+            let command = QueueCommand {
+                number: number.ok_or("queue number is required")?,
+                target_ref,
+                expected_version,
+                action: command_action,
+            };
+            command
+                .proposed_event(principal, format)
+                .map_err(|_| "invalid canonical queue command")?;
+            Operation::Mutate {
+                principal,
+                key,
+                command,
             }
-            _ => return Err(super::USAGE.into()),
-        };
-        let command = QueueCommand {
-            number: number.ok_or("queue number is required")?,
-            target_ref,
-            expected_version,
-            action: command_action,
-        };
-        command
-            .proposed_event(principal, format)
-            .map_err(|_| "invalid canonical queue command")?;
-        Operation::Mutate {
-            principal,
-            key,
-            command,
         }
     };
     Ok(Options {
@@ -248,6 +283,52 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         incarnation,
         format,
         operation,
+    })
+}
+
+fn landing(
+    flags: &BTreeMap<&str, &str>,
+    number: QueueNumber,
+    expected_version: ExpectedVersion,
+    target_ref: RefName,
+    format: GitHashAlgorithm,
+) -> Result<QueueLandingCommand, String> {
+    let ExpectedVersion::Exactly(expected_version) = expected_version else {
+        return Err("landing requires a positive queue version".into());
+    };
+    expected_version
+        .next()
+        .and_then(AggregateVersion::next)
+        .map_err(|_| "landing requires two available queue versions")?;
+    let expected_pull_request_version =
+        AggregateVersion::try_new(decimal(required(flags, "--expected-pull-version")?)?)
+            .ok_or("expected PR version must be positive")?;
+    expected_pull_request_version
+        .next()
+        .map_err(|_| "PR version is exhausted")?;
+    let source_ref = branch(required(flags, "--source-ref")?)?;
+    if source_ref == target_ref {
+        return Err("queue source and target branches must differ".into());
+    }
+    let head_tip = oid(required(flags, "--expected-source-tip")?, format)?;
+    let expected_target_tip = oid(required(flags, "--expected-target-tip")?, format)?;
+    if head_tip == expected_target_tip {
+        return Err("queue landing requires a new fast-forward target tip".into());
+    }
+    Ok(QueueLandingCommand {
+        number,
+        expected_version,
+        expected_policy_epoch: PolicyEpoch::try_new(decimal(required(
+            flags,
+            "--expected-policy-epoch",
+        )?)?)
+        .map_err(|_| "expected policy epoch must be positive")?,
+        pull_request: pull_number(required(flags, "--pull-request")?)?,
+        expected_pull_request_version,
+        source_ref,
+        head_tip,
+        target_ref,
+        expected_target_tip,
     })
 }
 
