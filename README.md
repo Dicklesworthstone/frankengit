@@ -195,6 +195,21 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Native merge queue management
+
+`fg queue enqueue|dequeue|reorder|show|list` exposes versioned queue management
+through the native metadata admission path. Enqueue binds an open PR's exact
+version and current source/target tips; mutations preserve their original
+idempotency key and terminal outcome across retries and restart. Reads return
+complete, visibility-filtered queues at an authenticated current or retained
+head. See [Native merge queue management](docs/NATIVE_MERGE_QUEUE.md) for command
+examples, snapshot pagination and recovery.
+
+This is a trusted local operator surface. It manages membership and order;
+speculative batch execution, required-check orchestration and atomic batch
+landing remain work under FG-083a. Queue management does not move Git refs or
+grant review approval.
+
 ### Retained outcome checkpoints
 
 `fg checkpoint outcomes` creates an authority-bound checkpoint of terminal

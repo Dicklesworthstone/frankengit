@@ -17,6 +17,7 @@ mod patch_command;
 mod protection;
 mod publication_support;
 mod pull_request;
+mod queue;
 mod rebase;
 mod rebase_apply;
 mod review_commands;
@@ -423,6 +424,18 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         .is_some_and(|argument| argument == "protection")
     {
         return match protection::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "queue")
+    {
+        return match queue::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
                 eprintln!("fg: {error}");
