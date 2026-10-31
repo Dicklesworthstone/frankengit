@@ -84,7 +84,8 @@ def fixture(root, algorithm, conflict=False):
               result_tree: ('tree',result_tree_bytes), result: ('commit',result_commit_bytes)}
     return dict(algorithm=algorithm, objects=objects, parent_objects=parent_objects, base=base, target=target,
                 source=source, selected=selected, target_tree=target_tree, borrowed=borrowed,
-                candidate=result, tree=result_tree, packed=packed, conflict=conflict)
+                candidate=result, tree=result_tree, packed=packed, conflict=conflict,
+                inverse_borrowed={target_tree: objects[target_tree], ours: objects[ours]})
 
 
 def pack_bytes(algorithm, objects):
@@ -227,9 +228,16 @@ def run(binary, algorithm):
         response = json.loads(invoke(binary,reverse).stdout)
         reverse_body = commit(f['target_tree'], [f['candidate']], b'inverse\n', 3)
         inverse = oid(algorithm,'commit',reverse_body)
+        # The authenticated frontier is the current candidate tree, not its
+        # entire ancestor history (NATIVE_COMMIT_REPLAY.md). Reverting restores
+        # both the old root tree and the old text blob outside that frontier.
+        # Keep the exact object-set/byte oracle: unchanged frontier blobs and
+        # source history must still be absent from this three-object bundle.
+        inverse_objects = {inverse: ('commit', reverse_body), **f['inverse_borrowed']}
         validate(response, reverse[6].read_bytes(), f, operation='revert', target=f['candidate'], source=f['candidate'],
             selected=f['candidate'], parent=f['target'], expected_tree=f['target_tree'], candidate=inverse,
-            message=b'inverse\n', timestamp=3, expected_objects={inverse:('commit',reverse_body)}, generated=1, borrowed=0)
+            message=b'inverse\n', timestamp=3, expected_objects=inverse_objects,
+            generated=1, borrowed=len(f['inverse_borrowed']))
         apply_reverse = apply.copy(); apply_reverse[6] = reverse[6]
         for flag,value in [('--idempotency-key','reverted'),('--expected-base',f['candidate']),('--expected-commit',inverse)]:
             apply_reverse[apply_reverse.index(flag)+1] = value
