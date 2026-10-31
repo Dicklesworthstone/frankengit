@@ -566,6 +566,20 @@ impl NodeNativeMergeProjection<'_> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        head_key: &'a fgit_authority::HeadKey,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<
+        Output = Result<fgit_authority::CumulativeOutcomes, fgit_authority::OutcomeFailure>,
+    > + Send
+    + 'a {
+        self.inner
+            .collect_cumulative_outcomes_async(authority, cx, head_key, authenticated)
+    }
+
     fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,

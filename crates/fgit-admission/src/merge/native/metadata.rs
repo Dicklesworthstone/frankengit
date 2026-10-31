@@ -89,8 +89,9 @@ where
         }
         let (basis, receipt, authenticated) =
             crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative =
-            fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        let cumulative = projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await?;
         if cumulative.observed() != receipt.token() {
             continue;
         }

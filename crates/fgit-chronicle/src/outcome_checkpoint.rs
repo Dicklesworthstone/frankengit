@@ -306,7 +306,11 @@ where
     Ok((checkpoint, decisions))
 }
 
-fn outcome_index_leaf_archive_namespace(repository_id: RepositoryId) -> Vec<u8> {
+/// The repository-scoped fabric namespace of retained outcome-index chunks.
+/// Hosts open this namespace separately from native Git-object storage; the
+/// manifest verifier requires these exact bytes before reading any leaves.
+#[must_use]
+pub fn outcome_index_leaf_archive_namespace(repository_id: RepositoryId) -> Vec<u8> {
     let mut namespace = b"frankengit/outcome-index-checkpoint-leaves/v1/".to_vec();
     namespace.extend_from_slice(repository_id.as_bytes());
     namespace

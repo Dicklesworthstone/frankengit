@@ -1,6 +1,7 @@
 //! Deterministic publication races and uncertain delivery through real admission.
 //! The model store schedules faults; it does not establish filesystem durability.
 use super::*;
+use fgit_admission::merge::native::pull_request::{self as native_pr, PullRequestView};
 use fgit_authority::SealAttempt;
 use fgit_forge::event::pull_request_comment::PullRequestAppendCommentCommand;
 
@@ -30,9 +31,29 @@ fn seal(case: &PrFixture, command: &PullRequestAppendCommentCommand) -> SealAtte
         .unwrap()
         .1
 }
+fn current_pr(case: &PrFixture) -> PullRequestView {
+    let page = poll_ready(native_pr::read_page_at(
+        case.fixture.store.as_ref(),
+        &(),
+        &basis(case),
+        PullRequestNumber::FIRST.get() - 1,
+        1,
+        &|_, _| true,
+        &|| false,
+    ))
+    .unwrap();
+    assert_eq!(page.pull_requests.len(), 1);
+    page.pull_requests.into_iter().next().unwrap()
+}
 fn interleave(case: &PrFixture, close: bool) {
     let mut competitor = case.with_key(b"winner-before-append");
     if close {
+        // The shared fixture carries an unsubmitted metadata update. Closing
+        // must retain the authority-selected data, not accidentally submit that
+        // edit and be refused before the append can lose its head CAS.
+        let selected = current_pr(case);
+        competitor.command.expected_version = ExpectedVersion::Exactly(selected.event.version);
+        competitor.command.data = selected.data.unwrap();
         competitor.command.action = PullRequestAction::Close;
     }
     *case.fixture.store.before_publish.lock().unwrap() = Some(Box::new(move || {
@@ -46,10 +67,10 @@ fn interleave(case: &PrFixture, close: bool) {
             )
             .unwrap()
         };
-        assert!(matches!(
-            terminal.outcome,
-            DecisionOutcome::Committed { .. }
-        ));
+        assert!(
+            matches!(terminal.outcome, DecisionOutcome::Committed { .. }),
+            "the competing publication must commit before the append: {terminal:?}"
+        );
     }));
 }
 fn once(case: &PrFixture, command: &PullRequestAppendCommentCommand, count: usize) {
@@ -80,6 +101,7 @@ fn append_replans_after_real_comment_or_close_cas_without_changing_original_seal
             let case = opened(format);
             case.fixture.store.publications.lock().unwrap().clear();
             let before = case.fixture.head();
+            let original_pr = current_pr(&case);
             let command = append("Original append survives contention é\r\n");
             let original = seal(&case, &command);
             let (tx, sealed) = original.derive().unwrap();
@@ -115,6 +137,29 @@ fn append_replans_after_real_comment_or_close_cas_without_changing_original_seal
                 sealed.canonical_request_digest
             );
             once(&case, &command, if close { 1 } else { 2 });
+            let retained_pr = current_pr(&case);
+            assert_eq!(retained_pr.data, original_pr.data);
+            assert_eq!(retained_pr.opened_by, original_pr.opened_by);
+            assert_eq!(
+                retained_pr.last_metadata_actor,
+                original_pr.last_metadata_actor
+            );
+            if close {
+                assert!(
+                    matches!(
+                        &retained_pr.event.payload,
+                        ForgeEventPayload::PullRequestChangedNative(change)
+                            if change.action == PullRequestAction::Close
+                    ),
+                    "replanning a comment must not reopen the competing close"
+                );
+                assert_eq!(
+                    retained_pr.event.version,
+                    original_pr.event.version.next().unwrap()
+                );
+            } else {
+                assert_eq!(retained_pr, original_pr);
+            }
             let (_, state) = selected_state(&case.fixture);
             assert_eq!(
                 state

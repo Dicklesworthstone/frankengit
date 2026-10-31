@@ -17,7 +17,6 @@ use fgit_authority::{
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
     VerifiedPublication, collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
-    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async,
     publish_with_cumulative, verify_pair,
 };
 use fgit_codec::{CryptoBodyIdentity, RefusalRecordBody, RepositoryDecisionBatchBody, encode_body};
@@ -788,14 +787,14 @@ where
             {
                 Some(outcomes) => outcomes,
                 None => {
-                    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async(
-                        store,
-                        cx,
-                        &CryptoBodyIdentity,
-                        &context.head_key,
-                        &authenticated,
-                    )
-                    .await?
+                    projection
+                        .collect_cumulative_outcomes_async(
+                            store,
+                            cx,
+                            &context.head_key,
+                            &authenticated,
+                        )
+                        .await?
                 }
             };
             if cumulative.observed() != receipt.token() {

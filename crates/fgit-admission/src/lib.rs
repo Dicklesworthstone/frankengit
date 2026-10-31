@@ -1319,6 +1319,29 @@ pub trait AsyncAdmissionProjection<Authority>: Sync
 where
     Authority: AsyncAuthorityStore + ?Sized,
 {
+    /// Collects authority-owned outcome leaves for this publication attempt.
+    ///
+    /// Hosts with a checkpoint fabric may select the chronicle's verified
+    /// retained-leaf collector. Hosts without that capability retain the
+    /// bounded genesis walk. Neither route may fabricate a cumulative root:
+    /// the returned witness is constructed by authority and remains bound to
+    /// its exact observed head token, which the driver checks before planning.
+    fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        authority: &'a Authority,
+        cx: &'a Authority::Context,
+        head_key: &'a HeadKey,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<CumulativeOutcomes, OutcomeFailure>> + Send + 'a {
+        collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async(
+            authority,
+            cx,
+            &CryptoBodyIdentity,
+            head_key,
+            authenticated,
+        )
+    }
+
     /// Opts into the same bounded ref microbatch semantics as the blocking seam.
     fn supports_ref_microbatching(&self) -> bool {
         false
@@ -4264,14 +4287,8 @@ where
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative_outcomes =
-            collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async(
-                store,
-                cx,
-                &CryptoBodyIdentity,
-                &context.head_key,
-                &authenticated,
-            )
+        let cumulative_outcomes = projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
             .await?;
         if cumulative_outcomes.observed() != receipt.token() {
             continue;

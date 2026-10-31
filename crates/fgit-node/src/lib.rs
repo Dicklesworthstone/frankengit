@@ -60,6 +60,7 @@ pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod bounded_receive_intake;
 mod capsule_history;
 mod closure_selection;
+mod outcome_collection;
 pub mod source_retrieval;
 mod treefs_workspace;
 #[cfg(target_os = "linux")]
@@ -2536,6 +2537,7 @@ struct AsyncMaterializedBasis {
 #[derive(Debug)]
 pub struct DurableAsyncAdmissionProjection<'materializer> {
     materializer: &'materializer DurableAdmissionMaterializer,
+    outcome_checkpoint_fabric: Option<&'materializer LocalFilesystemFabric>,
     context: AdmissionContext,
     authentication: Option<AdmissionAuthentication>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
@@ -2560,6 +2562,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
     ) -> Self {
         Self {
             materializer,
+            outcome_checkpoint_fabric: None,
             context,
             authentication: None,
             prepared: Mutex::new(None),
@@ -2574,6 +2577,18 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         authentication: AdmissionAuthentication,
     ) -> Self {
         self.authentication = Some(authentication);
+        self
+    }
+
+    /// Enables retained-leaf checkpoint reads in their dedicated fabric
+    /// namespace. The authority-selected capsule and exact position/root
+    /// verifier remain the only source of cumulative outcome evidence.
+    #[must_use]
+    pub const fn with_outcome_checkpoint_fabric(
+        mut self,
+        fabric: &'materializer LocalFilesystemFabric,
+    ) -> Self {
+        self.outcome_checkpoint_fabric = Some(fabric);
         self
     }
 
@@ -2685,6 +2700,23 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {
+    async fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a FsqliteCx,
+        head_key: &'a fgit_authority::HeadKey,
+        authenticated: &'a AuthenticatedHead,
+    ) -> Result<fgit_authority::CumulativeOutcomes, fgit_authority::OutcomeFailure> {
+        outcome_collection::collect(
+            authority,
+            cx,
+            head_key,
+            authenticated,
+            self.outcome_checkpoint_fabric,
+        )
+        .await
+    }
+
     fn validation_authority(
         &self,
         basis: &PublicationBasis,
@@ -8222,6 +8254,9 @@ pub struct OneNode {
     admission_materializer: DurableAdmissionMaterializer,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
+    /// Retained outcome leaves use their own repository-scoped fabric
+    /// namespace. They are checkpoint evidence, never native source objects.
+    outcome_checkpoint_fabric: LocalFilesystemFabric,
     git_daemon_repository_path: GitDaemonRepositoryPath,
     tenant_id: TenantId,
     repository_id: RepositoryId,
@@ -8581,6 +8616,12 @@ impl OneNode {
             config.fabric_stored_object_limit(),
             config.segment_limits.clone(),
         )?;
+        let outcome_checkpoint_fabric = open_local_fabric(
+            config.storage_root.clone(),
+            fgit_chronicle::outcome_index_leaf_archive_namespace(config.repository_id),
+            config.fabric_stored_object_limit(),
+            config.segment_limits.clone(),
+        )?;
 
         let head_key = head_key(config.repository_id)?;
         let admission_cache_scope = admission_cache_scope().map_err(NodeRefusal::from)?;
@@ -8605,6 +8646,7 @@ impl OneNode {
             ),
             head_key,
             fabric,
+            outcome_checkpoint_fabric,
             git_daemon_repository_path: config.git_daemon_repository_path,
             tenant_id: config.tenant_id,
             repository_id: config.repository_id,
@@ -9357,7 +9399,8 @@ impl OneNode {
         }
         Ok(
             DurableAsyncAdmissionProjection::new(&self.admission_materializer, context.clone())
-                .with_authentication(AdmissionAuthentication::OperatorAssertion),
+                .with_authentication(AdmissionAuthentication::OperatorAssertion)
+                .with_outcome_checkpoint_fabric(&self.outcome_checkpoint_fabric),
         )
     }
 
@@ -11761,6 +11804,7 @@ mod tests {
     mod capsule_history;
     mod closure_selection;
     mod fabric_read_budget;
+    mod outcome_collection;
     mod policy_evidence;
     mod upload_work_budget;
 

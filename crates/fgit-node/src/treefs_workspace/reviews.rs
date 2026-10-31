@@ -392,6 +392,20 @@ struct ReviewOwner<'a> {
     bundle: Option<&'a [u8]>,
 }
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
+    fn collect_cumulative_outcomes_async<'a>(
+        &'a self,
+        store: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        head_key: &'a fgit_authority::HeadKey,
+        head: &'a AuthenticatedHead,
+    ) -> impl Future<
+        Output = Result<fgit_authority::CumulativeOutcomes, fgit_authority::OutcomeFailure>,
+    > + Send
+    + 'a {
+        self.inner
+            .collect_cumulative_outcomes_async(store, cx, head_key, head)
+    }
+
     fn snapshot_async<'a>(
         &'a self,
         store: &'a FsqliteAuthorityStore,
