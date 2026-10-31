@@ -261,3 +261,99 @@ tmp_ok_slug=$(fge_tempdir mech-tempdir-slug)
 fge_assert_dir FG-000A-MECH-051 "$tmp_ok_dot"  'fge_tempdir still accepts uppercase and a dot, as the license suite passes'
 fge_assert_dir FG-000A-MECH-052 "$tmp_ok_slug" 'fge_tempdir still accepts an ordinary slug'
 
+# Inspect a separate harness AFTER its exit trap. The parent cannot test its
+# own successful cleanup before that cleanup has run. These are real shells
+# and filesystem effects, not a simulated cleanup implementation.
+cleanup_root=$(fge_tempdir cleanup-probes)
+fge_preserve "$cleanup_root" 'post-exit cleanup probes and child receipts'
+cleanup_lib=${FGE_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib.sh}
+cat >"$cleanup_root/probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$FGE_TEMP_LIB"
+fge_init tempdir-child
+fge_kind static-check
+mode=$1
+mkdir -p "$FGE_ARTIFACT_DIR/outside/scratch"
+printf 'outside sentinel\n' >"$FGE_ARTIFACT_DIR/outside/scratch/sentinel"
+if [ "$mode" = direct ]; then
+  fge_tempdir scratch >"$FGE_ARTIFACT_DIR/allocated"
+  printf '\n' >>"$FGE_ARTIFACT_DIR/allocated"
+  probe_work=$(<"$FGE_ARTIFACT_DIR/allocated")
+else
+  probe_work=$(fge_tempdir scratch)
+  printf '%s\n' "$probe_work" >"$FGE_ARTIFACT_DIR/allocated"
+fi
+printf 'retained evidence\n' >"$probe_work/payload"
+case $mode in
+  success)
+    second=$(fge_tempdir scratch)
+    printf '%s\n' "$second" >>"$FGE_ARTIFACT_DIR/allocated"
+    ;;
+  failure) fge_assert_eq TEMP-CHILD-FAIL expected different 'planted assertion failure' ;;
+  keep) FGE_KEEP_TEMP=1 ;;
+  preserve) fge_preserve "$probe_work/payload" 'explicit evidence retention' ;;
+  artifact) fge_artifact "$probe_work/payload" text ;;
+  malformed) printf '../outside\n' >>"$FGE_STATE_DIR/tempdirs" ;;
+  symlink)
+    mv "$FGE_ARTIFACT_DIR/work" "$FGE_ARTIFACT_DIR/real-work"
+    ln -s "$FGE_ARTIFACT_DIR/outside" "$FGE_ARTIFACT_DIR/work"
+    ;;
+esac
+fge_assert_eq TEMP-CHILD-001 ok ok 'ordinary permitted child assertion'
+PROBE
+
+cleanup_probe() {
+  local mode=$1 want_rc=$2 want_status=$3 dir probe_work probe_rc=0
+  local child_status child_cleanup child_preserved last
+  dir="$cleanup_root/$mode"
+  FGE_KEEP_TEMP= FGE_RUN_DIR="$dir" FGE_TEMP_LIB="$cleanup_lib" \
+    bash "$cleanup_root/probe.sh" "$mode" \
+    >"$cleanup_root/$mode.stdout" 2>"$cleanup_root/$mode.stderr" || probe_rc=$?
+  IFS= read -r probe_work <"$dir/allocated"
+  last=$(tail -n 1 "$dir/e2e.ndjson")
+  fge_json_top "$last"
+  fge_json_top "${FGE_JSON[terminal]}"
+  child_status=$(fge_json_unquote "${FGE_JSON[status]}")
+  child_cleanup=$(fge_json_unquote "${FGE_JSON[cleanup_state]}")
+  child_preserved=${FGE_JSON[preserved]}
+  fge_assert_exit "FG-000A-TEMP-$mode-EXIT" "$want_rc" "$probe_rc" 'child exit preserves cleanup outcome'
+  fge_assert_eq "FG-000A-TEMP-$mode-STATUS" "$want_status" "$child_status" 'child terminal reports its own outcome'
+  fge_assert_eq "FG-000A-TEMP-$mode-OUTSIDE" 'outside sentinel' \
+    "$(<"$dir/outside/scratch/sentinel")" 'cleanup never removes outside data'
+  case $mode in
+    success | direct)
+      fge_assert_no_file "FG-000A-TEMP-$mode-REMOVED" "$probe_work" 'successful disposable work is removed after exit'
+      if [ "$mode" = success ]; then
+        local second
+        second=$(tail -n 1 "$dir/allocated")
+        fge_assert_ne FG-000A-TEMP-success-DISTINCT "$probe_work" "$second" 'repeated command substitutions own distinct directories'
+        fge_assert_no_file FG-000A-TEMP-success-SECOND "$second" 'second subshell allocation is also removed'
+      fi
+      ;;
+    malformed | symlink)
+      fge_assert_eq "FG-000A-TEMP-$mode-CLEANUP" failed "$child_cleanup" 'unsafe cleanup metadata is a reported failure'
+      ;;
+    *)
+      fge_assert_dir "FG-000A-TEMP-$mode-RETAINED" "$probe_work" 'required evidence work remains available'
+      fge_assert_contains "FG-000A-TEMP-$mode-RECEIPT" "$child_preserved" \
+        "$(fge_json_escape "$probe_work")" 'terminal identifies the retained work directory'
+      fge_assert_eq "FG-000A-TEMP-$mode-BYTES" 'retained evidence' \
+        "$(<"$probe_work/payload")" 'retained evidence bytes are unchanged'
+      if [ "$mode" = artifact ]; then
+        fge_assert_digest FG-000A-TEMP-artifact-DIGEST \
+          "$(fge_digest_string 'retained evidence
+')" "$probe_work/payload" 'registered artifact remains readable with its original digest'
+      fi
+      ;;
+  esac
+}
+cleanup_probe success 0 pass
+cleanup_probe direct 0 pass
+cleanup_probe failure 1 fail
+cleanup_probe keep 0 pass
+cleanup_probe preserve 0 pass
+cleanup_probe artifact 0 pass
+cleanup_probe malformed 1 fail
+cleanup_probe symlink 1 fail
+

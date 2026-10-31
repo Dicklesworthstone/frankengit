@@ -1653,6 +1653,7 @@ fge_init() {
   FGE_STATE_DIR="$FGE_ARTIFACT_DIR/.state"
   mkdir -p "$FGE_STATE_DIR"
   : >"$FGE_STATE_DIR/assertions.tsv"
+  : >"$FGE_STATE_DIR/tempdirs"
   mkdir -p "$FGE_STATE_DIR/seq.d"
   printf '1\n' >"$FGE_STATE_DIR/seqhint"
   FGE_LOG="$FGE_ARTIFACT_DIR/e2e.ndjson"
@@ -1938,14 +1939,62 @@ fge_tempdir() {
   if [ -z "${name//./}" ]; then
     fge_die "fge_tempdir: NAME must not be all dots, refusing: $name"
   fi
+  [ ! -L "$FGE_ARTIFACT_DIR/work" ] || fge_die 'fge_tempdir: work parent is a symlink'
   d="$FGE_ARTIFACT_DIR/work/$name"
   while [ -e "$d" ]; do
     n=$((n + 1))
     d="$FGE_ARTIFACT_DIR/work/$name.$n"
   done
   mkdir -p "$d"
+  # The documented command-substitution caller runs this function in a
+  # subshell. Persist only the validated basename in private run state, so the
+  # parent can recover ownership without trusting arbitrary deletion paths.
+  printf '%s\n' "${d##*/}" >>"$FGE_STATE_DIR/tempdirs" ||
+    fge_die 'fge_tempdir: cannot record owned work directory'
   FGE_TEMPDIRS+=("$d")
   printf '%s' "$d"
+}
+
+# Reload after owned children have drained. Validate the whole registry before
+# deleting anything; malformed state or changed symlinks never widen cleanup.
+fge__load_tempdirs() {
+  local name d invalid=0
+  local -A seen=()
+  FGE_TEMPDIRS=()
+  [ -f "$FGE_STATE_DIR/tempdirs" ] && [ ! -L "$FGE_STATE_DIR/tempdirs" ] &&
+    [ ! -L "$FGE_ARTIFACT_DIR/work" ] || return 1
+  while IFS= read -r name || [ -n "$name" ]; do
+    case $name in
+      '' | *[!A-Za-z0-9._-]* | *..* | .) invalid=1; continue ;;
+    esac
+    d="$FGE_ARTIFACT_DIR/work/$name"
+    [ ! -L "$d" ] || invalid=1
+    [ -z "${seen[$name]+x}" ] || continue
+    seen[$name]=1
+    FGE_TEMPDIRS+=("$d")
+  done <"$FGE_STATE_DIR/tempdirs"
+  return "$invalid"
+}
+
+fge__tempdir_retained() {
+  local d=$1 name path
+  for name in "${!FGE_ARTIFACT_DIGESTS[@]}"; do
+    path="$FGE_ARTIFACT_DIR/$name"
+    case $path in "$d" | "$d"/*) return 0 ;; esac
+  done
+  for path in "${FGE_PRESERVED_PATHS[@]+"${FGE_PRESERVED_PATHS[@]}"}"; do
+    [ -n "$path" ] || continue
+    case $path in "$d" | "$d"/*) return 0 ;; esac
+    case $d in "$path" | "$path"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+fge__tempdir_cleanup_error() {
+  FGE_FAILED=1
+  FGE_CLEANUP_STATE=failed
+  FGE_CLEANUP_FAILED_LIST+=("temporary work: $1")
+  fge__emit step cleanup temporary-work error '' '' "$1" '' '' null
 }
 
 fge_preserve() {
@@ -2521,15 +2570,27 @@ fge__on_exit() {
   local orphans=0
   fge__contain_children || orphans=$?
 
-  # Work directories are removed only on a fully clean run. On any failure the
-  # entire run directory, including every work dir, survives for triage.
+  # Command substitutions cannot update the parent's arrays. Reconstitute only
+  # validated run-owned names before deciding what can be removed.
+  fge__load_tempdirs || fge__tempdir_cleanup_error 'invalid temporary-work ownership or symlink'
+
+  # Clean disposable scratch after success, while registered artifacts and
+  # explicit preservation keep their containing work directory intact. Any
+  # failure or FGE_KEEP_TEMP retains work for triage.
   local d keep=0
   [ "$FGE_FAILED" -ne 0 ] && keep=1
   [ -n "${FGE_KEEP_TEMP:-}" ] && keep=1
   if [ "$keep" -eq 0 ]; then
     for d in "${FGE_TEMPDIRS[@]+"${FGE_TEMPDIRS[@]}"}"; do
       [ -n "$d" ] || continue
-      rm -rf "$d" 2>/dev/null || true
+      if fge__tempdir_retained "$d"; then
+        FGE_PRESERVED_PATHS+=("$d")
+        FGE_PRESERVED_REASONS+=('work dir contains registered evidence or explicit preservation')
+      elif ! rm -rf -- "$d"; then
+        fge__tempdir_cleanup_error 'owned temporary-work removal failed'
+        keep=1
+        break
+      fi
     done
   fi
 
@@ -2620,6 +2681,7 @@ fge__on_exit() {
   if [ "$keep" -eq 1 ]; then
     for d in "${FGE_TEMPDIRS[@]+"${FGE_TEMPDIRS[@]}"}"; do
       [ -n "$d" ] || continue
+      [ -e "$d" ] || [ -L "$d" ] || continue
       [ "$first" -eq 1 ] || FGE__J+=','
       first=0
       FGE__J+='{'
