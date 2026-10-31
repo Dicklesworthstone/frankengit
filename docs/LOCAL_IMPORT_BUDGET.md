@@ -39,8 +39,9 @@ Library callers should mint `node.import_request_context(None)` (or supply an
 explicit `GitDaemonSessionTimeout`) and pass it to
 `import_loose_git_directory_durable_in`. That `_in` API still honors arbitrary
 caller-owned contexts unchanged. The older `fgit_cli::run` library dispatcher
-retains its legacy context; the executable routes import to the dedicated
-command module, as it does for other extended commands.
+also mints `import_request_context(None)`. The executable routes import to the
+dedicated command module, which selects the same default profile and honors
+explicit timeout and expanded-byte options.
 
 ## Limits and evidence
 
