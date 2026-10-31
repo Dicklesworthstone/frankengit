@@ -38,34 +38,40 @@ impl DispatchTransport<()> for Routes {
     fn routes(&self) -> &[DispatchRoute] {
         &self.definitions
     }
-    async fn deliver<'a>(
+    fn deliver<'a>(
         &'a mut self,
         (): &'a (),
         route: u64,
         _: &'a DeliveryRequest<'_>,
         attempt: u32,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
-    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
-        checkpoint()?;
-        self.calls.push((route, attempt));
-        if let Some(stop) = &self.stopped {
-            stop.store(true, Ordering::SeqCst);
-        }
-        Ok((
-            self.outcomes.pop_front().expect("unexpected send"),
-            b"actual scripted observation".to_vec(),
-        ))
+    ) -> impl Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + 'a {
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(checkpoint().map(|()| {
+                self.calls.push((route, attempt));
+                if let Some(stop) = &self.stopped {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                (
+                    self.outcomes.pop_front().expect("unexpected send"),
+                    b"actual scripted observation".to_vec(),
+                )
+            }))
+        })
     }
-    async fn probe<'a>(
+    fn probe<'a>(
         &'a mut self,
         (): &'a (),
         _: u64,
         _: &'a DeliveryRequest<'_>,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
-    ) -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
-        checkpoint()?;
-        self.probes += 1;
-        Ok((ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec()))
+    ) -> impl Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + 'a {
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(checkpoint().map(|()| {
+                self.probes += 1;
+                (ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec())
+            }))
+        })
     }
 }
 fn drive(
