@@ -274,21 +274,93 @@ set -euo pipefail
 fge_init tempdir-child
 fge_kind static-check
 mode=$1
+allocation_name=scratch
+[ "$mode" != trailing ] || allocation_name=valid.
+[ "$mode" != long ] || printf -v allocation_name '%0240d' 0
 mkdir -p "$FGE_ARTIFACT_DIR/outside/scratch"
 printf 'outside sentinel\n' >"$FGE_ARTIFACT_DIR/outside/scratch/sentinel"
+: >"$FGE_ARTIFACT_DIR/allocated"
+if [ "$mode" = parentfile ]; then
+  printf 'occupied parent\n' >"$FGE_ARTIFACT_DIR/work"
+  fge_assert_eq TEMP-CHILD-PARENT ok ok 'permitted assertion before allocation failure'
+  fge_tempdir scratch >"$FGE_ARTIFACT_DIR/allocated"
+  exit 0
+elif [ "$mode" = collision ]; then
+  mkdir -p "$FGE_ARTIFACT_DIR/work"
+  printf 'occupied candidate\n' >"$FGE_ARTIFACT_DIR/work/scratch"
+  ln -s "$FGE_ARTIFACT_DIR/outside/missing" "$FGE_ARTIFACT_DIR/work/scratch.1"
+elif [ "$mode" = reserved ]; then
+  mkdir -p "$FGE_STATE_DIR/tempdir-claims"
+  printf 'prior reservation\n' >"$FGE_STATE_DIR/tempdir-claims/scratch"
+elif [ "$mode" = claimlink ]; then
+  ln -s "$FGE_ARTIFACT_DIR/outside/scratch" "$FGE_STATE_DIR/tempdir-claims"
+fi
 if [ "$mode" = direct ]; then
   fge_tempdir scratch >"$FGE_ARTIFACT_DIR/allocated"
   printf '\n' >>"$FGE_ARTIFACT_DIR/allocated"
   probe_work=$(<"$FGE_ARTIFACT_DIR/allocated")
 else
-  probe_work=$(fge_tempdir scratch)
+  probe_work=$(fge_tempdir "$allocation_name")
   printf '%s\n' "$probe_work" >"$FGE_ARTIFACT_DIR/allocated"
 fi
 printf 'retained evidence\n' >"$probe_work/payload"
 case $mode in
-  success)
-    second=$(fge_tempdir scratch)
+  success | trailing | long)
+    second=$(fge_tempdir "$allocation_name")
     printf '%s\n' "$second" >>"$FGE_ARTIFACT_DIR/allocated"
+    ;;
+  concurrent)
+    # Exercise the actual filesystem allocator: release sixteen owned children
+    # together, then inspect every returned path and payload after joining them.
+    # Four fixed rounds avoid an unbounded retry-until-green race campaign.
+    allocate_child() {
+      local round=$1 worker=$2 deadline=$((SECONDS + 15)) allocated
+      : >"$FGE_ARTIFACT_DIR/ready-$round-$worker"
+      until [ -f "$FGE_ARTIFACT_DIR/go-$round" ]; do
+        [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep 0.01
+      done
+      allocated=$(fge_tempdir "parallel-$round") || return
+      printf '%s\n' "$allocated" >"$FGE_ARTIFACT_DIR/path-$round-$worker"
+      printf '%s\n' "$worker" >"$allocated/owner"
+    }
+    parallel_ok=yes
+    for round in 1 2 3 4; do
+      children=()
+      for worker in {1..16}; do
+        fge_spawn "allocator-$round-$worker" allocate_child "$round" "$worker"
+        children+=("$FGE_LAST_PID")
+      done
+      deadline=$((SECONDS + 15))
+      for worker in {1..16}; do
+        until [ -f "$FGE_ARTIFACT_DIR/ready-$round-$worker" ]; do
+          if [ "$SECONDS" -ge "$deadline" ]; then parallel_ok=no; break; fi
+          sleep 0.01
+        done
+      done
+      : >"$FGE_ARTIFACT_DIR/go-$round"
+      for child in "${children[@]}"; do
+        wait "$child" || parallel_ok=no
+      done
+      declare -A allocated_paths=()
+      for worker in {1..16}; do
+        allocated=''
+        if ! IFS= read -r allocated <"$FGE_ARTIFACT_DIR/path-$round-$worker"; then
+          parallel_ok=no
+          continue
+        fi
+        if [ -z "$allocated" ] || [ -n "${allocated_paths[$allocated]+x}" ]; then
+          parallel_ok=no
+          continue
+        fi
+        allocated_paths[$allocated]=1
+        printf '%s\n' "$allocated" >>"$FGE_ARTIFACT_DIR/allocated"
+        [ -f "$allocated/owner" ] && [ "$(<"$allocated/owner")" = "$worker" ] || parallel_ok=no
+      done
+      [ "${#allocated_paths[@]}" -eq 16 ] || parallel_ok=no
+      unset allocated_paths
+    done
+    fge_assert_eq TEMP-CHILD-PARALLEL yes "$parallel_ok" 'concurrent allocations have distinct paths and isolated payloads'
     ;;
   failure) fge_assert_eq TEMP-CHILD-FAIL expected different 'planted assertion failure' ;;
   keep) FGE_KEEP_TEMP=1 ;;
@@ -316,7 +388,7 @@ cleanup_probe() {
   FGE_KEEP_TEMP= FGE_RUN_DIR="$dir" FGE_TEMP_LIB="$cleanup_lib" \
     bash "$cleanup_root/probe.sh" "$mode" \
     >"$cleanup_root/$mode.stdout" 2>"$cleanup_root/$mode.stderr" || probe_rc=$?
-  IFS= read -r probe_work <"$dir/allocated"
+  IFS= read -r probe_work <"$dir/allocated" || probe_work=''
   last=$(tail -n 1 "$dir/e2e.ndjson")
   fge_json_top "$last"
   fge_json_top "${FGE_JSON[terminal]}"
@@ -328,14 +400,38 @@ cleanup_probe() {
   fge_assert_eq "FG-000A-TEMP-$mode-OUTSIDE" 'outside sentinel' \
     "$(<"$dir/outside/scratch/sentinel")" 'cleanup never removes outside data'
   case $mode in
-    success | direct)
+    success | direct | trailing | long | concurrent | collision | reserved)
       fge_assert_no_file "FG-000A-TEMP-$mode-REMOVED" "$probe_work" 'successful disposable work is removed after exit'
-      if [ "$mode" = success ]; then
+      if [ "$mode" = success ] || [ "$mode" = trailing ] || [ "$mode" = long ]; then
         local second
         second=$(tail -n 1 "$dir/allocated")
-        fge_assert_ne FG-000A-TEMP-success-DISTINCT "$probe_work" "$second" 'repeated command substitutions own distinct directories'
-        fge_assert_no_file FG-000A-TEMP-success-SECOND "$second" 'second subshell allocation is also removed'
+        fge_assert_ne "FG-000A-TEMP-$mode-DISTINCT" "$probe_work" "$second" 'repeated command substitutions own distinct directories'
+        fge_assert_no_file "FG-000A-TEMP-$mode-SECOND" "$second" 'second subshell allocation is also removed'
+      elif [ "$mode" = concurrent ]; then
+        local allocated all_removed=yes allocations=0
+        while IFS= read -r allocated; do
+          [ ! -e "$allocated" ] || all_removed=no
+          allocations=$((allocations + 1))
+        done <"$dir/allocated"
+        fge_assert_eq FG-000A-TEMP-concurrent-COUNT 65 "$allocations" 'all sixty-four parallel allocations are distinct'
+        fge_assert_eq FG-000A-TEMP-concurrent-REMOVED-ALL yes "$all_removed" 'parent owns and removes every concurrent allocation'
+      elif [ "$mode" = collision ]; then
+        fge_assert_eq FG-000A-TEMP-collision-NAME "$dir/work/scratch.2" "$probe_work" 'file and broken symlink collisions are skipped'
+        fge_assert_eq FG-000A-TEMP-collision-FILE 'occupied candidate' "$(<"$dir/work/scratch")" 'allocator preserves a pre-existing file'
+        fge_assert_cmd FG-000A-TEMP-collision-LINK 'allocator preserves a pre-existing broken symlink' test -L "$dir/work/scratch.1"
+      elif [ "$mode" = reserved ]; then
+        fge_assert_eq FG-000A-TEMP-reserved-NAME "$dir/work/scratch.1" "$probe_work" 'an earlier reservation cannot be reissued'
+        fge_assert_eq FG-000A-TEMP-reserved-BYTES 'prior reservation' "$(<"$dir/.state/tempdir-claims/scratch")" 'existing reservation bytes are unchanged'
       fi
+      ;;
+    claimlink)
+      fge_assert_eq FG-000A-TEMP-claimlink-EMPTY '' "$probe_work" 'unsafe claim parent returns no path'
+      fge_assert_no_file FG-000A-TEMP-claimlink-OUTSIDE-CLAIM "$dir/outside/scratch/scratch" 'a symlink cannot redirect reservation writes outside private state'
+      ;;
+    parentfile)
+      fge_assert_eq FG-000A-TEMP-parentfile-EMPTY '' "$probe_work" 'failed allocation returns no owned path'
+      fge_assert_eq FG-000A-TEMP-parentfile-BYTES 'occupied parent' "$(<"$dir/work")" 'allocation failure preserves the existing parent file'
+      fge_assert_contains FG-000A-TEMP-parentfile-ERROR "$(<"$cleanup_root/$mode.stderr")" mkdir 'unexpected mkdir failure retains its diagnostic'
       ;;
     malformed | symlink)
       fge_assert_eq "FG-000A-TEMP-$mode-CLEANUP" failed "$child_cleanup" 'unsafe cleanup metadata is a reported failure'
@@ -356,6 +452,13 @@ cleanup_probe() {
 }
 cleanup_probe success 0 pass
 cleanup_probe direct 0 pass
+cleanup_probe trailing 0 pass
+cleanup_probe long 0 pass
+cleanup_probe concurrent 0 pass
+cleanup_probe collision 0 pass
+cleanup_probe reserved 0 pass
+cleanup_probe claimlink 1 fail
+cleanup_probe parentfile 1 fail
 cleanup_probe failure 1 fail
 cleanup_probe keep 0 pass
 cleanup_probe preserve 0 pass
