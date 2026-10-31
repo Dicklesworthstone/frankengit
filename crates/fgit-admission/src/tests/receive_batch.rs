@@ -335,20 +335,18 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         // moves. A distinct test omits its commitment and requires stale refusal.
         Some(ReceiveValidationAuthority([42; 32]))
     }
-    fn snapshot_async<'a>(
+    async fn snapshot_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
         (): &'a (),
         basis: &'a PublicationBasis,
         head: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
-        async move {
-            self.snapshots.fetch_add(1, Ordering::SeqCst);
-            self.snapshot(basis, head)
-                .map_err(ProjectionFailure::Refuse)
-        }
+    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        self.snapshot(basis, head)
+            .map_err(ProjectionFailure::Refuse)
     }
-    fn materialize_commit_async<'a>(
+    async fn materialize_commit_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
         (): &'a (),
@@ -356,10 +354,10 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        async move { self.materialize_commit(basis, request, fold, closure) }
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        self.materialize_commit(basis, request, fold, closure)
     }
-    fn materialize_batch_commit_async<'a>(
+    async fn materialize_batch_commit_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
         (): &'a (),
@@ -367,31 +365,27 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            self.check(request)?;
-            crate::microbatch::materialize_canonical(
-                &self.inner,
-                state.basis(),
-                state.refs().clone(),
-                request,
-                fold,
-                closure,
-            )
-        }
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        self.check(request)?;
+        crate::microbatch::materialize_canonical(
+            &self.inner,
+            state.basis(),
+            state.refs().clone(),
+            request,
+            fold,
+            closure,
+        )
     }
-    fn materialize_refusal_async<'a>(
+    async fn materialize_refusal_async<'a>(
         &'a self,
         _: &'a AsyncMemory,
         (): &'a (),
         basis: &'a PublicationBasis,
         tx: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            self.materialize_refusal(basis, tx, code)
-                .map_err(ProjectionFailure::Refuse)
-        }
+    ) -> Result<RefusalMaterialization, ProjectionFailure> {
+        self.materialize_refusal(basis, tx, code)
+            .map_err(ProjectionFailure::Refuse)
     }
 }
 

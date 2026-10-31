@@ -102,8 +102,9 @@ fn independent_seal_verifier_rejects_substituted_pr_actor_body_anchor_and_profil
             match field {
                 0 => comment.actor = PrincipalId::from_bytes([4; 16]),
                 1 => {
-                    event.aggregate =
-                        AggregateId::PullRequestConversation(PullRequestNumber::try_new(2).unwrap())
+                    event.aggregate = AggregateId::PullRequestConversation(
+                        PullRequestNumber::try_new(2).unwrap(),
+                    );
                 }
                 2 => comment.body.push('!'),
                 3 => comment.anchor.as_mut().unwrap().byte_end += 1,

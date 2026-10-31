@@ -95,7 +95,7 @@ fn append_seal_binds_semantics_and_keeps_exact_comment_identity_distinct() {
                 2 => changed_context.principal_id = PrincipalId::from_bytes([4; 16]),
                 3 => {
                     changed_context.idempotency_key =
-                        IdempotencyKey::new(b"other-key".to_vec()).unwrap()
+                        IdempotencyKey::new(b"other-key".to_vec()).unwrap();
                 }
                 4 => {
                     changed_context.object_format = match format {

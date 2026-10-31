@@ -4234,7 +4234,7 @@ where
 /// history is reached. Only these collection failures permit that narrower
 /// replay; authentication, cancellation, conflicts and root failures remain
 /// faults. An undecided replay never substitutes for the missing full witness.
-pub(crate) fn collect_terminal_retryable(error: &OutcomeFailure) -> bool {
+pub(crate) const fn collect_terminal_retryable(error: &OutcomeFailure) -> bool {
     matches!(
         error,
         OutcomeFailure::ReplayBoundExceeded { .. } | OutcomeFailure::StreamBodyMissing { .. }

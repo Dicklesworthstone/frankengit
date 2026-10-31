@@ -7,7 +7,13 @@
 //! top-k selection. Neither a late read failure nor a work refusal can return a
 //! successful prefix. Corpus statistics are derived, never authorization.
 
-use super::*;
+use super::{
+    AsyncAuthorityStore, AuthorityStore, IndexError, IndexedLexicalReport, LexicalError,
+    LexicalHit, LexicalIndexStore, LexicalNamespace, LexicalOmission, LexicalQuery,
+    LexicalQueryLimits, LexicalReadLimits, LexicalSegment, LexicalSelection, MAX_INDEX_DOCUMENTS,
+    MAX_RESULT_BYTES, Postings, QueryBudget, Scan, SegmentRef, Term, bounded_add, check, omissions,
+    payload, payload_key,
+};
 use crate::lexical::{LexicalSpan, under};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -177,9 +183,7 @@ impl RankedScan {
         // Precharge comparisons AND their worst-case raw-path byte scans.
         // Equal coverage/rarity may force a complete common-prefix comparison;
         // a long path must not turn one work unit into thousands of byte reads.
-        let heap_work = 2
-            * (usize::BITS - maximum.leading_zeros() + 1) as u64
-            * (self.max_path_bytes as u64 + 1);
+        let heap_work = 2 * u64::from(maximum.bit_width() + 1) * (self.max_path_bytes as u64 + 1);
         for hit in self.candidates {
             self.scan
                 .budget

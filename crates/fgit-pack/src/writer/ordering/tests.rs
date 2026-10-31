@@ -270,7 +270,9 @@ fn mismatched_lookup_and_source_identity_or_type_are_never_relabelled() {
             ordered.load(&valid.id).unwrap_err(),
             ordered.open_blob(&valid.id).unwrap_err(),
         ] {
-            if invalid.id != valid.id {
+            if invalid.id == valid.id {
+                assert_eq!(error, PackWriteError::SourceOrderMismatch(valid.id));
+            } else {
                 assert_eq!(
                     error,
                     PackWriteError::SourceIdentityMismatch {
@@ -278,8 +280,6 @@ fn mismatched_lookup_and_source_identity_or_type_are_never_relabelled() {
                         returned: invalid.id
                     }
                 );
-            } else {
-                assert_eq!(error, PackWriteError::SourceOrderMismatch(valid.id));
             }
         }
         assert_eq!(source.reads.get(), 0);
@@ -290,7 +290,9 @@ fn mismatched_lookup_and_source_identity_or_type_are_never_relabelled() {
             ordered.load(&valid.id).unwrap_err(),
             ordered.open_blob(&valid.id).unwrap_err(),
         ] {
-            if invalid.id != valid.id {
+            if invalid.id == valid.id {
+                assert_eq!(error, PackWriteError::SourceOrderMismatch(valid.id));
+            } else {
                 assert_eq!(
                     error,
                     PackWriteError::SourceIdentityMismatch {
@@ -298,8 +300,6 @@ fn mismatched_lookup_and_source_identity_or_type_are_never_relabelled() {
                         returned: invalid.id
                     }
                 );
-            } else {
-                assert_eq!(error, PackWriteError::SourceOrderMismatch(valid.id));
             }
         }
         assert_eq!(source.reads.get(), 0);

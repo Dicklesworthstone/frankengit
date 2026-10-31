@@ -482,7 +482,7 @@ fn anonymous(parent: &File) -> rustix::io::Result<File> {
     .map(File::from)
 }
 
-fn unsupported(error: rustix::io::Errno) -> bool {
+const fn unsupported(error: rustix::io::Errno) -> bool {
     matches!(
         error,
         rustix::io::Errno::OPNOTSUPP

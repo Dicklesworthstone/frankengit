@@ -3,6 +3,7 @@ use crate::history::commit_history;
 use crate::preparation::{CommitInput, MergeEntry, MergeObjectSource, MergeSourceError};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 struct Source {
     format: GitHashAlgorithm,
@@ -25,11 +26,11 @@ impl Source {
         let tree = git_object_id(self.format, GitObjectKind::Tree, b"");
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").unwrap();
         }
-        body.push_str(&format!(
+        write!(body,
             "author Untrusted <u@example.invalid> 1 +0000\ncommitter Untrusted <u@example.invalid> 1 +0000\n\n{message}"
-        ));
+        ).unwrap();
         let body = body.into_bytes();
         let id = git_object_id(self.format, GitObjectKind::Commit, &body);
         self.commits.insert(

@@ -126,7 +126,7 @@ impl Fixture {
     fn assert_identity_and_spread(&self) {
         assert_eq!(PROFILE.delta_window, 32);
         assert_eq!(PROFILE.delta_window_bytes, Some(128 * 1024 * 1024));
-        assert!(INTERVENING_BLOBS > PROFILE.delta_window);
+        const { assert!(INTERVENING_BLOBS > PROFILE.delta_window) };
         assert_eq!(
             self.blobs.len(),
             FAMILY_SEEDS.len() * VERSIONS + (VERSIONS - 1) * INTERVENING_BLOBS
@@ -150,7 +150,7 @@ impl Fixture {
             assert_eq!(positions.len(), VERSIONS);
             for adjacent in positions.windows(2) {
                 assert!(
-                    adjacent[1] - adjacent[0] - 1 >= INTERVENING_BLOBS,
+                    adjacent[1] - adjacent[0] > INTERVENING_BLOBS,
                     "related native IDs must lie beyond the actual frozen delta window"
                 );
             }

@@ -503,7 +503,7 @@ fn integrity_scan_detects_mutation_after_open_and_keeps_the_checked_descriptor()
                 match fault {
                     "payload" => assert_eq!(result, Err(StoreRefusal::PayloadCommitmentMismatch)),
                     "short" | "extra" => {
-                        assert_eq!(result, Err(StoreRefusal::MalformedStoredObject))
+                        assert_eq!(result, Err(StoreRefusal::MalformedStoredObject));
                     }
                     "replace" => {
                         assert_eq!(result.unwrap().identity(), fixture.id);

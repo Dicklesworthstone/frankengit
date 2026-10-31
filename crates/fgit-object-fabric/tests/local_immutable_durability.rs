@@ -142,7 +142,7 @@ fn retention(root_byte: u8) -> RetentionRootProposal {
     .unwrap()
 }
 
-fn interrupted(operation: StorageOperation) -> StoreRefusal {
+const fn interrupted(operation: StorageOperation) -> StoreRefusal {
     StoreRefusal::StorageIo {
         operation,
         kind: std::io::ErrorKind::Interrupted,

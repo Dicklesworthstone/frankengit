@@ -3677,10 +3677,7 @@ impl VerifiedFabricPackSource<'_> {
     /// alone, under the same session and Database probes as a body read. The
     /// payload is neither read nor verified (frankengit-8xyq): a caller that
     /// discloses or packs bytes must finish a verified body read or blob stream.
-    fn read_object_header(&self, id: &GitOid) -> Result<(ObjectType, usize), PackWriteError> {
-        self.read_object_header_within(id, self.maximum_object_bytes)
-    }
-
+    ///
     /// Metadata reads keep the fabric's independent stored-file and envelope
     /// limits. A disclosure walk can retain an oversized blob's length without
     /// allocating or reading its body. Selected bodies retain the separate

@@ -38,38 +38,34 @@ impl DispatchTransport<()> for Routes {
     fn routes(&self) -> &[DispatchRoute] {
         &self.definitions
     }
-    fn deliver<'a>(
+    async fn deliver<'a>(
         &'a mut self,
         (): &'a (),
         route: u64,
         _: &'a DeliveryRequest<'_>,
         attempt: u32,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
-    ) -> impl Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + 'a {
-        async move {
-            checkpoint()?;
-            self.calls.push((route, attempt));
-            if let Some(stop) = &self.stopped {
-                stop.store(true, Ordering::SeqCst);
-            }
-            Ok((
-                self.outcomes.pop_front().expect("unexpected send"),
-                b"actual scripted observation".to_vec(),
-            ))
+    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        checkpoint()?;
+        self.calls.push((route, attempt));
+        if let Some(stop) = &self.stopped {
+            stop.store(true, Ordering::SeqCst);
         }
+        Ok((
+            self.outcomes.pop_front().expect("unexpected send"),
+            b"actual scripted observation".to_vec(),
+        ))
     }
-    fn probe<'a>(
+    async fn probe<'a>(
         &'a mut self,
         (): &'a (),
         _: u64,
         _: &'a DeliveryRequest<'_>,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
-    ) -> impl Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + 'a {
-        async move {
-            checkpoint()?;
-            self.probes += 1;
-            Ok((ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec()))
-        }
+    ) -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
+        checkpoint()?;
+        self.probes += 1;
+        Ok((ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec()))
     }
 }
 fn drive(
