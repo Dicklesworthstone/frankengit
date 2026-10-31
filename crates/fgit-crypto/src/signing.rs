@@ -17,6 +17,10 @@
 //! one, because those facts are inside the signed bytes rather than beside
 //! them.
 //!
+//! External DSSE control statements use the distinct
+//! [`DsseEd25519SigningKey`] and DSSE v1 PAE framing. That interoperability path
+//! does not derive native purpose keys or issue native signed envelopes.
+//!
 //! # A signature is evidence of authorship, never of trustworthiness
 //!
 //! Plan section 35.6 keeps those claims separate and so does this API. There
@@ -32,7 +36,8 @@
 mod dsse;
 
 pub use dsse::{
-    DsseSignatureError, MAX_DSSE_PAYLOAD_BYTES, MAX_DSSE_PAYLOAD_TYPE_BYTES, verify_dsse_ed25519,
+    DsseEd25519SigningKey, DsseSignatureError, MAX_DSSE_PAYLOAD_BYTES, MAX_DSSE_PAYLOAD_TYPE_BYTES,
+    verify_dsse_ed25519,
 };
 
 use core::fmt;
