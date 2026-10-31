@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <repository-id> <branch>
   --trusted-local --workflow <repository-directory> --input <top-level-path> [--input ...]
   --run-parent <absolute-private-directory> [--object-format sha1|sha256]
-  [--pull-request <positive-native-pr-number>]
+  [--pull-request <positive-native-pr-number> | --merge-queue <positive-queue-number>]
   [--merge-candidate-ref <separate-ci-branch> --merge-principal <id>
    --merge-author <name-and-email> --merge-committer <name-and-email>
    --merge-timestamp <positive-unix-seconds> --merge-message <text>
@@ -55,7 +55,8 @@ native same-repository PR is open and its source branch matches the explicit bra
 By default it executes the current SOURCE HEAD, not the recorded old tip.
 The explicit merge-candidate option group instead prepares the actual combined tree,
 publishes it on the selected CI branch through ordinary exact-old admission, and
-executes that exact candidate. It requires --pull-request and --expected-incarnation.
+executes that exact candidate. It requires --pull-request or --merge-queue, plus
+--expected-incarnation.
 The CI branch must differ from both PR branches; this operator configuration permits
 its create/rewrite, without modifying either PR branch. Use --merge-candidate-ref-hex
 instead of --merge-candidate-ref for exact raw branch bytes. All commit metadata is
@@ -64,6 +65,15 @@ Optional --publish-checks binds results to the CI branch and candidate, so exist
 exact-candidate protection can require that fixed CI branch. Source-head PR check
 views remain source-head views. The exact bundle is retained for review/publication.
 Retain the same merge configuration across restart; changed configuration refuses.
+With --merge-queue, the positional branch is the fixed queue TARGET. The current
+canonical head selects its PR and source branch. Queue mode requires the complete
+merge-candidate group and merge-commit style; --pull-request and squash are refused.
+It prepares and runs only the exact current head, retaining queue version, tips,
+PR version and policy epoch. Queue changes select new events; unresolved custody
+blocks the entire queue scope, even if its head changes or disappears. Original
+settled checks can still publish after removal without rerunning scripts. The watch
+retains landing.bundle for guarded queue landing of the exact tested commit. It
+does not land the target or change queue membership itself.
 PR metadata versions (including reopen), source decisions and observed target tips
 select distinct events; unrelated comments/checks do not. Closed/merged/missing
 PRs execute nothing. Old reporting can recover after closure without rerunning code.
@@ -80,6 +90,7 @@ struct WatchOptions {
     interval: Duration,
     publisher: Option<fgit_types::PrincipalId>,
     pull_request: Option<u64>,
+    merge_queue: Option<u64>,
     merge_candidate: Option<crate::workflow_merge_watch::Options>,
     stop_file: Option<PathBuf>,
     attempt_timeout: Duration,
@@ -110,6 +121,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let mut publish = false;
     let mut publisher = None;
     let mut pull_request = None;
+    let mut merge_queue = None;
     let mut merge_fields = std::collections::BTreeMap::new();
     let mut continuous = false;
     let mut stop_file = None;
@@ -144,12 +156,19 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
             if attempt_timeout.replace(number(value, 1, 3600)?).is_some() {
                 return Err("duplicate --attempt-timeout-secs".into());
             }
-        } else if flag == "--pull-request" {
-            let value = args.get(i).ok_or("missing --pull-request number")?;
+        } else if matches!(flag.as_str(), "--pull-request" | "--merge-queue") {
+            let value = args
+                .get(i)
+                .ok_or_else(|| format!("missing {flag} number"))?;
             i += 1;
             let number = super::publish::decimal(value, 1, u64::MAX)?;
-            if pull_request.replace(number).is_some() {
-                return Err("duplicate --pull-request".into());
+            let slot = if flag == "--pull-request" {
+                &mut pull_request
+            } else {
+                &mut merge_queue
+            };
+            if slot.replace(number).is_some() {
+                return Err(format!("duplicate {flag}"));
             }
         } else if flag == "--publish-checks" {
             if publish {
@@ -192,12 +211,23 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
         return Err("watch requires a branch ref".into());
     }
     let merge_candidate = crate::workflow_merge_watch::parse(&merge_fields)?;
+    if merge_queue.is_some() && pull_request.is_some() {
+        return Err("--merge-queue and --pull-request are mutually exclusive".into());
+    }
+    if merge_queue.is_some() && merge_candidate.is_none() {
+        return Err("--merge-queue requires the complete merge-candidate option group".into());
+    }
     if let Some(merge) = &merge_candidate {
-        merge.validate_selection(
-            &execution.reference,
-            pull_request,
-            execution.incarnation.is_some(),
-        )?;
+        if merge_queue.is_some() {
+            merge
+                .validate_queue_selection(&execution.reference, execution.incarnation.is_some())?;
+        } else {
+            merge.validate_selection(
+                &execution.reference,
+                pull_request,
+                execution.incarnation.is_some(),
+            )?;
+        }
     }
     if publish != publisher.is_some() {
         return Err("--publish-checks and --principal-id must be supplied together".into());
@@ -217,6 +247,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     Ok(WatchOptions {
         publisher,
         pull_request,
+        merge_queue,
         merge_candidate,
         execution,
         polls: polls.unwrap_or(1),
@@ -366,6 +397,15 @@ fn poll_once(
         .as_ref()
         .map(crate::workflow_merge_watch::Options::node_config)
         .transpose()?;
+    let queue = options
+        .merge_queue
+        .map(|number| {
+            merge
+                .as_ref()
+                .map(|config| (number, config))
+                .ok_or("queue watch requires merge candidate configuration")
+        })
+        .transpose()?;
     if let Some(publisher) = options.publisher {
         publish_pending(
             node,
@@ -373,6 +413,7 @@ fn poll_once(
             opt,
             publisher,
             options.pull_request,
+            options.merge_queue,
             merge.as_ref(),
             summary,
             output,
@@ -385,6 +426,21 @@ fn poll_once(
     let poll = node
         .runtime()
         .block_on(async {
+            if let Some((number, merge)) = queue {
+                return node
+                    .poll_trusted_queue_head_merge_workflows_in(
+                        request,
+                        &opt.reference,
+                        number,
+                        &opt.workflow,
+                        &opt.parent,
+                        &opt.inputs,
+                        Default::default(),
+                        config,
+                        merge,
+                    )
+                    .await;
+            }
             match (options.pull_request, merge.as_ref()) {
                 (Some(number), Some(merge)) => {
                     node.poll_trusted_pull_request_merge_workflows_in(
@@ -463,6 +519,7 @@ fn poll_once(
             opt,
             publisher,
             options.pull_request,
+            options.merge_queue,
             merge.as_ref(),
             summary,
             output,
@@ -480,16 +537,38 @@ fn publish_pending(
     options: &Options,
     publisher: fgit_types::PrincipalId,
     pull_number: Option<u64>,
+    queue_number: Option<u64>,
     merge: Option<&fgit_node::workflow_watch::PullRequestMergeWatchConfig>,
     summary: &mut Summary,
     output: &mut impl Write,
 ) -> Result<(), String> {
+    let queue = queue_number
+        .map(|number| {
+            merge
+                .map(|config| (number, config))
+                .ok_or("queue reporting requires merge candidate configuration")
+        })
+        .transpose()?;
     let observe = |text: &str| {
         writeln!(output, "{text}")
             .and_then(|()| output.flush())
             .map_err(|e| e.to_string())
     };
     let result = node.runtime().block_on(async {
+        if let Some((number, merge)) = queue {
+            return node
+                .publish_trusted_queue_head_merge_workflow_checks_in(
+                    request,
+                    &options.reference,
+                    number,
+                    &options.workflow,
+                    &options.parent,
+                    publisher,
+                    merge,
+                    observe,
+                )
+                .await;
+        }
         match (pull_number, merge) {
             (Some(number), Some(merge)) => {
                 node.publish_trusted_pull_request_merge_workflow_checks_in(

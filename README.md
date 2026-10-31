@@ -219,8 +219,12 @@ Authenticated [HTTP queue operations](docs/NATIVE_HTTP_QUEUES.md) independently
 grant queue reads, management and landing. Both fast-forward and uploaded
 two-parent candidate landing use `queues-land`, the separate deployment switch
 and the credential's target reference ceiling. Queue membership and preparation
-alone never grant publication approval. Speculative multi-PR trains, synthetic
-queue refs and autonomous queue execution remain work under FG-083a.
+alone never grant publication approval. The [queue candidate CI
+watcher](docs/NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md) selects the current head,
+prepares and executes its actual two-parent candidate on a fixed CI branch, and
+optionally publishes canonical checks. Its queue-wide custody survives head
+changes and restart. Speculative multi-PR trains, synthetic queue refs and
+autonomous target landing remain work under FG-083a.
 See [Native merge queues](docs/NATIVE_MERGE_QUEUE.md) for exact commands,
 [branch protection](docs/MANDATORY_REVIEW_PROTECTION.md) for queue-required
 policies, and the HTTP guide for upload limits and recovery.

@@ -2,6 +2,11 @@
 
 Branch-selected execution is documented in [native branch filters](NATIVE_WORKFLOW_BRANCH_FILTERS.md).
 
+For the current head of a canonical merge queue, use
+[`--merge-queue` candidate CI](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md). That mode
+watches a fixed target and selects the head's PR/source dynamically under one
+queue-wide custody scope.
+
 
 The native node `poll_trusted_ref_workflows_in` composes authenticated decision
 history with the existing trusted workflow dispatcher. It is not a wire-push

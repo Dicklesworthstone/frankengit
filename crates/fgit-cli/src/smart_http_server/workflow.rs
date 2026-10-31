@@ -63,9 +63,20 @@ pub(super) fn parse(
             PrincipalId::from_hex(publisher).map_err(|_| "invalid workflow check publisher")?,
         );
     }
+    if flags.contains_key("--workflow-pull-request") && flags.contains_key("--workflow-merge-queue")
+    {
+        return Err(
+            "--workflow-pull-request and --workflow-merge-queue are mutually exclusive".into(),
+        );
+    }
     if flags.contains_key("--workflow-pull-request") {
         config = config
             .with_pull_request(number(flags, "--workflow-pull-request", 1, u64::MAX)?)
+            .map_err(|error| error.to_string())?;
+    }
+    if flags.contains_key("--workflow-merge-queue") {
+        config = config
+            .with_merge_queue(number(flags, "--workflow-merge-queue", 1, u64::MAX)?)
             .map_err(|error| error.to_string())?;
     }
     let merge_fields: BTreeMap<_, _> = flags
@@ -74,12 +85,25 @@ pub(super) fn parse(
             crate::workflow_merge_watch::server_option(name).map(|name| (name, *value))
         })
         .collect();
-    if let Some(merge) = crate::workflow_merge_watch::parse(&merge_fields)? {
-        merge.validate_selection(
-            config.reference(),
-            config.pull_request(),
-            flags.contains_key("--expected-incarnation"),
-        )?;
+    let merge = crate::workflow_merge_watch::parse(&merge_fields)?;
+    if config.merge_queue().is_some() && merge.is_none() {
+        return Err(
+            "--workflow-merge-queue requires the complete workflow merge-candidate group".into(),
+        );
+    }
+    if let Some(merge) = merge {
+        if config.merge_queue().is_some() {
+            merge.validate_queue_selection(
+                config.reference(),
+                flags.contains_key("--expected-incarnation"),
+            )?;
+        } else {
+            merge.validate_selection(
+                config.reference(),
+                config.pull_request(),
+                flags.contains_key("--expected-incarnation"),
+            )?;
+        }
         config = config
             .with_merge_candidate(merge.node_config()?)
             .map_err(|error| error.to_string())?;
@@ -161,6 +185,129 @@ mod tests {
             .map(str::to_owned),
         );
         arguments
+    }
+
+    fn queue_arguments() -> Vec<String> {
+        let mut arguments = merge_arguments();
+        let at = arguments
+            .iter()
+            .position(|value| value == "--workflow-pull-request")
+            .unwrap();
+        arguments[at] = "--workflow-merge-queue".into();
+        arguments
+    }
+
+    #[test]
+    fn queue_service_selects_target_and_retains_independent_endpoint_and_publisher_grants() {
+        let options = parse_server(&queue_arguments()).unwrap();
+        assert!(!options.allow_receive);
+        assert!(!options.allow_queues);
+        assert!(!options.allow_queue_landings);
+        assert!(!options.allow_pulls);
+        let service = options.workflow_service.unwrap();
+        assert_eq!(service.merge_queue(), Some(7));
+        assert!(service.pull_request().is_none());
+        assert!(service.publisher().is_none());
+        assert_eq!(service.reference().as_bytes(), b"refs/heads/main");
+        assert_eq!(
+            service.merge_candidate().unwrap().style(),
+            fgit_forge::preparation::MergeCommitStyle::TwoParent
+        );
+
+        let mut arguments = queue_arguments();
+        arguments.extend([
+            "--workflow-publish-checks".into(),
+            "--workflow-principal".into(),
+            "55".repeat(16),
+            "--workflow-merge-profile".into(),
+            "exact-renames".into(),
+            "--allow-queue-landings".into(),
+        ]);
+        let options = parse_server(&arguments).unwrap();
+        assert!(options.allow_queue_landings);
+        assert!(!options.allow_queues);
+        assert!(!options.allow_receive);
+        let service = options.workflow_service.unwrap();
+        assert_ne!(
+            service.publisher().unwrap(),
+            service.merge_candidate().unwrap().principal()
+        );
+        assert_eq!(
+            service.merge_candidate().unwrap().profile(),
+            fgit_forge::preparation::MergeProfile::ExactRenamesV1
+        );
+    }
+
+    #[test]
+    fn queue_service_refuses_missing_candidate_identity_squash_or_ambiguous_selection() {
+        for flag in [
+            "--expected-incarnation",
+            "--workflow-merge-candidate-ref",
+            "--workflow-merge-principal",
+            "--workflow-merge-author",
+            "--workflow-merge-committer",
+            "--workflow-merge-timestamp",
+            "--workflow-merge-message",
+        ] {
+            let mut arguments = queue_arguments();
+            let at = arguments.iter().position(|value| value == flag).unwrap();
+            arguments.drain(at..at + 2);
+            assert!(parse_server(&arguments).is_err(), "{flag}");
+        }
+        let mut absent = server_arguments();
+        absent.extend(["--workflow-merge-queue".into(), "7".into()]);
+        assert!(parse_server(&absent).is_err());
+        for extra in [
+            vec!["--workflow-pull-request", "7"],
+            vec!["--workflow-merge-queue", "7"],
+            vec!["--workflow-merge-method", "squash"],
+        ] {
+            let mut arguments = queue_arguments();
+            arguments.extend(extra.into_iter().map(str::to_owned));
+            assert!(parse_server(&arguments).is_err());
+        }
+        let mut arguments = queue_arguments();
+        let at = arguments
+            .iter()
+            .position(|value| value == "--workflow-merge-candidate-ref")
+            .unwrap();
+        arguments[at + 1] = "refs/heads/main".into();
+        assert!(parse_server(&arguments).is_err());
+        for invalid in ["0", "01", "-1", "+1", "1.0", "18446744073709551616", ""] {
+            let mut arguments = queue_arguments();
+            let at = arguments
+                .iter()
+                .position(|value| value == "--workflow-merge-queue")
+                .unwrap();
+            arguments[at + 1] = invalid.into();
+            assert!(parse_server(&arguments).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn queue_service_preserves_raw_candidate_ref_and_literal_message() {
+        let mut arguments = queue_arguments();
+        let at = arguments
+            .iter()
+            .position(|value| value == "--workflow-merge-candidate-ref")
+            .unwrap();
+        arguments[at] = "--workflow-merge-candidate-ref-hex".into();
+        arguments[at + 1] = "726566732f68656164732f63692fff".into();
+        let at = arguments
+            .iter()
+            .position(|value| value == "--workflow-merge-message")
+            .unwrap();
+        arguments[at + 1] = "--workflow-merge-queue".into();
+        let service = parse_server(&arguments).unwrap().workflow_service.unwrap();
+        assert_eq!(service.merge_queue(), Some(7));
+        assert_eq!(
+            service.merge_candidate().unwrap().reference().as_bytes(),
+            b"refs/heads/ci/\xff"
+        );
+        assert_eq!(
+            service.merge_candidate().unwrap().metadata().message,
+            b"--workflow-merge-queue"
+        );
     }
 
     #[test]

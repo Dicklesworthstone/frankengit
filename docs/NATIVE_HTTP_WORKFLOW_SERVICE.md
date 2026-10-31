@@ -128,6 +128,22 @@ original bundle/key/lease and stops later work. See
 [exact PR candidate CI](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md) for
 protected-merge setup, immutable configuration and recovery.
 
+### Execute the current merge-queue head
+
+Use `--workflow-merge-queue NUMBER` instead of `--workflow-pull-request`, and
+set `--workflow-ref` to the queue's fixed target branch. Queue mode requires
+the complete merge-candidate group, explicit incarnation and `merge-commit`
+style. The controller selects the current head PR/source, prepares and executes
+the exact two-parent candidate, and optionally publishes its canonical checks.
+The CI ref must differ from the target and selected source.
+
+One queue-wide custody scope fences unresolved work even after the head changes;
+settled check publication can recover after dequeue or an empty queue. Candidate
+publication and execution still wait for listener readiness and drain with the
+service. No target landing, queue-management grant or remote execution endpoint
+is implied. See the [queue candidate CI guide](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md)
+for complete commands, exact check/landing coordinates and recovery behavior.
+
 ### Retained logs
 
 Optional `--workflow-artifact-logs --artifact-root /private/artifacts` captures

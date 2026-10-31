@@ -47,6 +47,136 @@ fn merge_args() -> Vec<String> {
     .concat()
 }
 
+fn queue_args() -> Vec<String> {
+    let mut input = merge_args();
+    let index = input
+        .iter()
+        .position(|value| value == "--pull-request")
+        .unwrap();
+    input[index] = "--merge-queue".into();
+    input
+}
+
+#[test]
+fn queue_watch_selects_target_and_current_head_without_implicit_check_publication() {
+    let mut input = queue_args();
+    let parsed = options(&input).unwrap();
+    assert_eq!(parsed.merge_queue, Some(7));
+    assert!(parsed.pull_request.is_none());
+    assert!(parsed.publisher.is_none());
+    assert_eq!(parsed.execution.reference.as_bytes(), b"refs/heads/main");
+    assert_eq!(
+        parsed.merge_candidate.unwrap().style,
+        fgit_forge::preparation::MergeCommitStyle::TwoParent
+    );
+    input.extend([
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "55".repeat(16),
+        "--merge-profile".into(),
+        "exact-renames".into(),
+        "--continuous".into(),
+        "--stop-file".into(),
+        "/private/queue.stop".into(),
+        "--attempt-timeout-secs".into(),
+        "120".into(),
+    ]);
+    let parsed = options(&input).unwrap();
+    assert_eq!(parsed.merge_queue, Some(7));
+    assert_ne!(
+        parsed.publisher.unwrap(),
+        parsed.merge_candidate.as_ref().unwrap().principal
+    );
+    assert_eq!(
+        parsed.merge_candidate.unwrap().profile,
+        fgit_forge::preparation::MergeProfile::ExactRenamesV1
+    );
+    assert_eq!(parsed.attempt_timeout, Duration::from_secs(120));
+}
+
+#[test]
+fn queue_watch_requires_exact_exclusive_selection_complete_identity_and_two_parents() {
+    for flag in [
+        "--expected-incarnation",
+        "--merge-candidate-ref",
+        "--merge-principal",
+        "--merge-author",
+        "--merge-committer",
+        "--merge-timestamp",
+        "--merge-message",
+    ] {
+        let mut input = queue_args();
+        let at = input.iter().position(|value| value == flag).unwrap();
+        input.drain(at..at + 2);
+        assert!(options(&input).is_err(), "{flag}");
+    }
+    assert!(options(&[args(), vec!["--merge-queue".into(), "7".into()]].concat()).is_err());
+    for extra in [
+        vec!["--pull-request", "7"],
+        vec!["--merge-queue", "7"],
+        vec!["--merge-method", "squash"],
+    ] {
+        let mut input = queue_args();
+        input.extend(extra.into_iter().map(str::to_owned));
+        assert!(options(&input).is_err());
+    }
+    let mut input = queue_args();
+    let at = input
+        .iter()
+        .position(|value| value == "--merge-candidate-ref")
+        .unwrap();
+    input[at + 1] = input[4].clone();
+    assert!(options(&input).is_err());
+    for invalid in [
+        "0",
+        "01",
+        "-1",
+        "+1",
+        "1.0",
+        "18446744073709551616",
+        "",
+        "7\n",
+    ] {
+        let mut input = queue_args();
+        let at = input
+            .iter()
+            .position(|value| value == "--merge-queue")
+            .unwrap();
+        input[at + 1] = invalid.into();
+        assert!(options(&input).is_err(), "{invalid:?}");
+    }
+    let mut input = queue_args();
+    let at = input
+        .iter()
+        .position(|value| value == "--merge-queue")
+        .unwrap();
+    input[at + 1] = u64::MAX.to_string();
+    assert_eq!(options(&input).unwrap().merge_queue, Some(u64::MAX));
+}
+
+#[test]
+fn queue_watch_keeps_raw_target_bytes_and_flag_looking_values_exact() {
+    let mut input = queue_args();
+    input[4] = "726566732f68656164732fff".into();
+    input.push("--ref-hex".into());
+    let at = input
+        .iter()
+        .position(|value| value == "--merge-message")
+        .unwrap();
+    input[at + 1] = "--merge-queue".into();
+    let parsed = options(&input).unwrap();
+    assert_eq!(parsed.execution.reference.as_bytes(), b"refs/heads/\xff");
+    assert_eq!(parsed.merge_queue, Some(7));
+    assert_eq!(
+        parsed.merge_candidate.unwrap().metadata.message,
+        b"--merge-queue"
+    );
+    let mut input = args();
+    input[7] = "--merge-queue".into();
+    input[9] = "--merge-queue".into();
+    assert!(options(&input).unwrap().merge_queue.is_none());
+}
+
 #[test]
 fn merge_watch_is_explicit_and_does_not_implicitly_publish_checks() {
     let options = options(&merge_args()).unwrap();

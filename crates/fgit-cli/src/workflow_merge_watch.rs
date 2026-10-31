@@ -143,6 +143,23 @@ fn decode_ref(value: &str) -> Result<Vec<u8>, String> {
 }
 
 impl Options {
+    pub(crate) fn validate_queue_selection(
+        &self,
+        target: &RefName,
+        incarnation_pinned: bool,
+    ) -> Result<(), String> {
+        if !incarnation_pinned {
+            return Err("queue candidate publication requires --expected-incarnation".into());
+        }
+        if self.reference == *target {
+            return Err("merge candidate ref must differ from the watched queue target ref".into());
+        }
+        if self.style != MergeCommitStyle::TwoParent {
+            return Err("merge-queue watch requires --merge-method merge-commit".into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_selection(
         &self,
         source: &RefName,
