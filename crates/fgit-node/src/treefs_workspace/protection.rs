@@ -63,14 +63,14 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = protection::admit_async(
+        let terminal = Box::pin(protection::admit_async(
             &self.authority,
             request.authority(),
             &context,
             command,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e)))?;
         Ok((tx, terminal))

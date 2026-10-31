@@ -264,7 +264,7 @@ impl OneNode {
             }
         });
         let mut worker_live = || (gate.borrow_mut())();
-        let operation = self.import_full_git_bundle_reader_inner(
+        let operation = Box::pin(self.import_full_git_bundle_reader_inner(
             request,
             session,
             input,
@@ -272,7 +272,7 @@ impl OneNode {
             query,
             limits,
             &mut worker_live,
-        );
+        ));
         // Keep a completed terminal outcome even if stop arrives after its CAS.
         super::streaming::drain_materialization(self, operation, started, timeout, || {
             let _ = (gate.borrow_mut())();

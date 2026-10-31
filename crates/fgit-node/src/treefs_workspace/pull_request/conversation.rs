@@ -125,25 +125,25 @@ impl OneNode {
         };
         let terminal = match submission {
             CommentSubmission::Exact(command) => {
-                comments::admit_async(
+                Box::pin(comments::admit_async(
                     &self.authority,
                     request.authority(),
                     &context,
                     command,
                     limits,
                     &projection,
-                )
+                ))
                 .await
             }
             CommentSubmission::Append(command) => {
-                comments::admit_append_async(
+                Box::pin(comments::admit_append_async(
                     &self.authority,
                     request.authority(),
                     &context,
                     command,
                     limits,
                     &projection,
-                )
+                ))
                 .await
             }
         }

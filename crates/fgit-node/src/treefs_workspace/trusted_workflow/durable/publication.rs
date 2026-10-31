@@ -2,7 +2,6 @@
 //! A successful conclusion is admitted only after the trusted-workflow evidence
 //! verifier replays the exact retained job observation. No journal is acknowledged here.
 use std::cell::Cell;
-use std::future::Future;
 
 use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_admission::merge::native::{NativeMergeProjection, workflow_checks};
@@ -148,114 +147,112 @@ impl OneNode {
 impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore>
     for NodeNativeMergeProjection<'_>
 {
-    fn validate_workflow_check_async<'a>(
+    async fn validate_workflow_check_async<'a>(
         &'a self,
         store: &'a FsqliteAuthorityStore,
         cx: &'a Cx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         record: &'a WorkflowCheckRecord,
-    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
-        async move {
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            // A correct hash alone is not a matching observation. Use the one
-            // bounded runner decoder, then match every submitted semantic field.
-            validate_record(
-                record,
-                self.node.tenant_id,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        // A correct hash alone is not a matching observation. Use the one
+        // bounded runner decoder, then match every submitted semantic field.
+        validate_record(
+            record,
+            self.node.tenant_id,
+            self.node.repository_id,
+            &|| self.merge_checkpoint(cx).is_ok(),
+        )
+        .map_err(|code| {
+            self.merge_checkpoint(cx).err().map_or(
+                ProjectionFailure::Refuse(code),
+                ProjectionFailure::Unavailable,
+            )
+        })?;
+        let materialized = self
+            .inner
+            .materializer
+            .materialize_exact_in(
+                store,
+                cx,
                 self.node.repository_id,
-                &|| self.merge_checkpoint(cx).is_ok(),
+                basis,
+                authenticated,
+                &|| self.merge_checkpoint(cx).is_err(),
             )
-            .map_err(|code| {
-                self.merge_checkpoint(cx).err().map_or(
-                    ProjectionFailure::Refuse(code),
-                    ProjectionFailure::Unavailable,
-                )
-            })?;
-            let materialized = self
-                .inner
-                .materializer
-                .materialize_exact_in(
-                    store,
-                    cx,
-                    self.node.repository_id,
-                    basis,
-                    authenticated,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-                .map_err(crate::async_projection_unavailable)?;
-            // The exact materializer selects `basis`; a different basis means the
-            // authenticated receipt and the publication basis no longer agree.
-            if materialized.basis() != basis {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::AuthorityReceiptStale,
-                ));
-            }
-            if materialized.snapshot().refs.get(&record.source_ref) != Some(&record.source_commit) {
-                return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved));
-            }
-            if record.source_commit.algorithm() != self.node.object_format {
-                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-            }
-            let closure = materialized.selected_closure().closure();
-            if !closure.objects().contains(&record.source_commit) {
-                return Err(ProjectionFailure::Refuse(
-                    RefusalCode::ObjectClosureIncomplete,
-                ));
-            }
-            let exhaustion = Cell::new(None);
-            let source = VerifiedFabricPackSource {
-                fabric: &self.node.fabric,
-                object_format: self.node.object_format,
-                maximum_object_bytes: self
-                    .object_limits
-                    .max_object_bytes
-                    .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
-                database_context: cx,
-                database_exhaustion: &exhaustion,
-                session_is_live: None,
-            };
-            let result = source.read_object(&record.source_commit);
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            if exhaustion.get().is_some() {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::ResourceBudgetExceeded,
-                ));
-            }
-            let (kind, body) =
-                result.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
-            if kind != ObjectType::Commit {
-                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-            }
-            let ParsedObject::Commit(commit) = parse_object_body(
-                kind,
-                &body,
-                AcceptanceProfile::GitCompatibleImport,
-                &source.parse_limits(),
-            )
-            .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
-            else {
-                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
-            };
-            let tree = commit
-                .tree_reference()
-                .and_then(|value| std::str::from_utf8(value).ok())
-                .and_then(|value| {
-                    GitOid::from_hex(self.node.object_format, &value.to_ascii_lowercase()).ok()
-                })
-                .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
-            if !closure.objects().contains(&tree) {
-                return Err(ProjectionFailure::Refuse(
-                    RefusalCode::ObjectClosureIncomplete,
-                ));
-            }
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            crate::named_object_closure(closure, &[record.source_commit])
+            .await
+            .map_err(crate::async_projection_unavailable)?;
+        // The exact materializer selects `basis`; a different basis means the
+        // authenticated receipt and the publication basis no longer agree.
+        if materialized.basis() != basis {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
         }
+        if materialized.snapshot().refs.get(&record.source_ref) != Some(&record.source_commit) {
+            return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved));
+        }
+        if record.source_commit.algorithm() != self.node.object_format {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+        }
+        let closure = materialized.selected_closure().closure();
+        if !closure.objects().contains(&record.source_commit) {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete,
+            ));
+        }
+        let exhaustion = Cell::new(None);
+        let source = VerifiedFabricPackSource {
+            fabric: &self.node.fabric,
+            object_format: self.node.object_format,
+            maximum_object_bytes: self
+                .object_limits
+                .max_object_bytes
+                .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
+            database_context: cx,
+            database_exhaustion: &exhaustion,
+            session_is_live: None,
+        };
+        let result = source.read_object(&record.source_commit);
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        if exhaustion.get().is_some() {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::ResourceBudgetExceeded,
+            ));
+        }
+        let (kind, body) =
+            result.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+        if kind != ObjectType::Commit {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+        }
+        let ParsedObject::Commit(commit) = parse_object_body(
+            kind,
+            &body,
+            AcceptanceProfile::GitCompatibleImport,
+            &source.parse_limits(),
+        )
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
+        else {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+        };
+        let tree = commit
+            .tree_reference()
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| {
+                GitOid::from_hex(self.node.object_format, &value.to_ascii_lowercase()).ok()
+            })
+            .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
+        if !closure.objects().contains(&tree) {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete,
+            ));
+        }
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        crate::named_object_closure(closure, &[record.source_commit])
     }
 }
 

@@ -26,7 +26,7 @@ impl OneNode {
         limits: SearchLimits,
         read_limits: GenerationReadLimits,
     ) -> Result<(data::Source, GenerationActivation), Failure> {
-        self.reconcile_source_symbol_index_guarded_local_in(
+        Box::pin(self.reconcile_source_symbol_index_guarded_local_in(
             request,
             reference,
             expected_head,
@@ -34,7 +34,7 @@ impl OneNode {
             limits,
             read_limits,
             &mut |_| Ok(()),
-        )
+        ))
         .await
     }
 

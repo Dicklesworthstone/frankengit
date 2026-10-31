@@ -550,10 +550,16 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
         request: &'a DeliveryRequest<'_>,
     ) -> impl std::future::Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + Send + 'a
     {
-        async move {
+        let mut work = Some(move || {
             request_checkpoint(cx)?;
             Ok((self.probe_acknowledgement(request)?, Vec::new()))
-        }
+        });
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(work
+                .take()
+                .expect("completed webhook probe cannot be repolled")(
+            ))
+        })
     }
 
     fn deliver<'a>(
@@ -563,7 +569,15 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
         attempt: u32,
     ) -> impl std::future::Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a
     {
-        async move { self.dispatch_http_with_checkpoint(request, attempt, &|| request_checkpoint(cx)) }
+        let mut work = Some(move || {
+            self.dispatch_http_with_checkpoint(request, attempt, &|| request_checkpoint(cx))
+        });
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(work
+                .take()
+                .expect("completed webhook delivery cannot be repolled")(
+            ))
+        })
     }
 }
 
