@@ -410,6 +410,7 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
         branches: branches
             .into_iter()
             .map(|(name, (reviewers, required_checks))| ProtectedBranch {
+                require_merge_queue: false,
                 required_approvals: quorums
                     .get(&name)
                     .copied()

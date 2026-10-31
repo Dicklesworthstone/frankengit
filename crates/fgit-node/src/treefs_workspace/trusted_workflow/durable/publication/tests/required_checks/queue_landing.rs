@@ -146,7 +146,8 @@ fn queue_landing_accepts_persisted_success_from_actual_exact_candidate_execution
             graph_root: older.graph_root,
             job: older.job.clone(),
         };
-        let installed = install(&node, &required, b"queue-required-check");
+        let installed =
+            install_with_queue_requirement(&node, &required, b"queue-required-check", true);
         let landing = QueueLandingCommand {
             number: QueueNumber::FIRST,
             expected_version: AggregateVersion::FIRST,

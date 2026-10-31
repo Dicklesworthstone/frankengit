@@ -16,7 +16,7 @@ use fgit_forge::merge_queue::{QueueBatchEntry, QueueBatchId};
 use fgit_forge::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_reference::effect::RefEffect;
 use fgit_reference::intent::{ForgeEntityId, ForgeEventKind};
-use fgit_types::{AsciiSlug, GitOid, PolicyEpoch, RefName, RefusalCode, TxId};
+use fgit_types::{AsciiSlug, Digest, GitOid, PolicyEpoch, PrincipalId, RefName, RefusalCode, TxId};
 
 use super::super::{
     NativeMergeIntent, NativeMergeProjection, PreparationFailure, admit_merge_attempt_async,
@@ -55,6 +55,102 @@ impl QueueLandingCommand {
             self.target_ref.clone(),
             self.expected_target_tip,
         )
+    }
+}
+
+/// Attempt-local proof that this exact native merge is the authenticated queue
+/// head at one immutable authority basis. Only queue admission can construct
+/// it, after replaying that queue and checking the selected PR, live refs,
+/// policy epoch, visibility and complete sealed publication. It is not a
+/// caller-selected merge mode or a receipt that survives a CAS replan.
+#[derive(Debug)]
+pub struct ValidatedQueueLanding {
+    context: AdmissionContext,
+    basis: PublicationBasis,
+    intent: NativeMergeIntent,
+    attempt: SealAttempt,
+    event_root: Digest,
+}
+
+impl ValidatedQueueLanding {
+    pub(in crate::merge::native) fn verify_intent(
+        &self,
+        basis: &PublicationBasis,
+        intent: &NativeMergeIntent,
+        submitter: PrincipalId,
+    ) -> Result<(), RefusalCode> {
+        if self.basis != *basis || self.intent != *intent || self.context.principal_id != submitter
+        {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        Ok(())
+    }
+
+    pub(in crate::merge::native) fn verify_effect(
+        &self,
+        basis: &PublicationBasis,
+        submitter: Option<PrincipalId>,
+        target: &RefName,
+        previous: Option<GitOid>,
+        effect: &RefEffect,
+    ) -> Result<(), RefusalCode> {
+        let merge = self
+            .intent
+            .merge()
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if self.basis != *basis
+            || submitter != Some(self.context.principal_id)
+            || target != &merge.target_ref
+            || previous != Some(merge.target_tip_before)
+            || *effect != RefEffect::Set(merge.merge_commit)
+        {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        Ok(())
+    }
+
+    /// The final policy attachment must see the same fully folded publication,
+    /// not merely a caller choosing the generic `NativeMerge` policy profile.
+    pub(in crate::merge::native) fn verify_prepared(
+        &self,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        prepared: &PreparedNativeMerge,
+    ) -> Result<(), RefusalCode> {
+        let (tx_id, seal) = self
+            .attempt
+            .derive()
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        let event_root =
+            storage::root(&prepared.event).map_err(|_| RefusalCode::EvidenceInvalid)?;
+        let record = &prepared.materialization.record;
+        let effects = prepared
+            .fold
+            .effects()
+            .ok_or(RefusalCode::EvidenceInvalid)?;
+        let merge = self
+            .intent
+            .merge()
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if self.context != *context
+            || self.basis != *basis
+            || prepared.request.tx_id != tx_id
+            || prepared.request.tenant != context.tenant_id
+            || prepared.request.repository != context.repository_id
+            || prepared.request.principal != context.principal_id
+            || prepared.request.canonical_request_digest != seal.canonical_request_digest
+            || record.tx_id != tx_id
+            || record.canonical_request_digest != seal.canonical_request_digest
+            || record.policy_epoch != basis.body().policy_epoch
+            || event_root != self.event_root
+            || record.forge_event_batch_root != self.event_root
+            || super::validate_publication_shape(&prepared.event)? != self.intent.event()
+            || effects.refs.len() != 1
+            || effects.refs.get(&merge.target_ref) != Some(&RefEffect::Set(merge.merge_commit))
+        {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        Ok(())
     }
 }
 
@@ -266,13 +362,16 @@ pub(in crate::merge) fn validate_landing_shape(
 pub(in crate::merge::native) async fn validate_landing_at<S, P>(
     store: &S,
     cx: &S::Context,
+    context: &AdmissionContext,
     basis: &PublicationBasis,
     snapshot: &AdmissionSnapshot,
     resolved: &NativeMergeBasis,
     selection: super::Landing<'_>,
     events: &ForgeEventBatch,
+    intent: &NativeMergeIntent,
+    attempt: &SealAttempt,
     projection: &P,
-) -> Result<(), PreparationFailure>
+) -> Result<ValidatedQueueLanding, PreparationFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
     P: NativeMergeProjection<S> + ?Sized,
@@ -378,7 +477,21 @@ where
     projection
         .merge_checkpoint(cx)
         .map_err(ProjectionFailure::Unavailable)?;
-    Ok(())
+    let (expected_events, expected_attempt) = selection.proposal(context)?;
+    if expected_events != *events
+        || expected_attempt != *attempt
+        || selection.intent()? != *intent
+        || context.repository_id != basis.body().repository_id
+    {
+        return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+    }
+    Ok(ValidatedQueueLanding {
+        context: context.clone(),
+        basis: basis.clone(),
+        intent: intent.clone(),
+        attempt: attempt.clone(),
+        event_root: storage::root(events)?,
+    })
 }
 
 /// Independently reconstruct the sealed command at the shared fold boundary.

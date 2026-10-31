@@ -746,6 +746,9 @@ fn vote(
 }
 
 fn protect(node: &OneNode) -> PolicyEpoch {
+    protect_with_queue_requirement(node, false)
+}
+fn protect_with_queue_requirement(node: &OneNode, require_merge_queue: bool) -> PolicyEpoch {
     let command = ProtectionCommand {
         expected_version: ExpectedVersion::NewStream,
         expected_epoch: PolicyEpoch::FIRST,
@@ -753,10 +756,15 @@ fn protect(node: &OneNode) -> PolicyEpoch {
             ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
-                required_approvals: 1,
+                require_merge_queue,
+                required_approvals: u16::from(!require_merge_queue),
                 required_checks: Vec::new(),
                 name: target_ref(),
-                reviewers: vec![actor(3)],
+                reviewers: if require_merge_queue {
+                    Vec::new()
+                } else {
+                    vec![actor(3)]
+                },
             }],
         },
     };
@@ -947,4 +955,43 @@ fn cancellation_before_squash_admission_leaves_the_exact_request_retryable() {
     .unwrap();
     committed(&accepted.1);
     f.node.shutdown().unwrap();
+}
+
+#[test]
+fn queue_only_policy_refuses_both_ordinary_squash_and_two_parent_publication() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let f = fixture(&scratch.0, format);
+        protect_with_queue_requirement(&f.node, true);
+        for (style, method, key) in [
+            (
+                MergeCommitStyle::Squash,
+                NativeMergeMethod::Squash,
+                b"queue-squash-bypass".as_slice(),
+            ),
+            (
+                MergeCommitStyle::TwoParent,
+                NativeMergeMethod::MergeCommit,
+                b"queue-merge-bypass".as_slice(),
+            ),
+        ] {
+            let candidate = prepare(&f.node, style, b"Queue requirement cannot be bypassed\n");
+            let before = snapshot(&f.node);
+            let original = apply(&f.node, &candidate, key, version(), method).unwrap();
+            refused(&original.1, RefusalCode::ProtectedRefTransitionDenied);
+            let after = snapshot(&f.node);
+            assert_eq!(after.snapshot().refs, before.snapshot().refs);
+            assert_eq!(
+                after.basis().body().forge_position_root,
+                before.basis().body().forge_position_root
+            );
+            assert_eq!(after.snapshot().outbox, before.snapshot().outbox);
+            assert_discarded(&f, &candidate);
+            assert_eq!(
+                apply(&f.node, &candidate, key, version(), method).unwrap(),
+                original
+            );
+        }
+        f.node.shutdown().unwrap();
+    }
 }

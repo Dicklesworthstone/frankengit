@@ -66,6 +66,7 @@ fn source_candidate(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, Candi
             ref_policy: None,
             administrators: vec![OWNER],
             branches: vec![ProtectedBranch {
+                require_merge_queue: false,
                 required_approvals: 1,
                 required_checks: Vec::new(),
                 name: data.target_ref.clone(),

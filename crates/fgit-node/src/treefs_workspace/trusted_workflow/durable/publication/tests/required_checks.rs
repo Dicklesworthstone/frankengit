@@ -60,6 +60,14 @@ fn update(
     result.commands[0].terminal
 }
 fn install(node: &OneNode, required: &RequiredWorkflowCheck, key: &[u8]) -> ProtectionCommand {
+    install_with_queue_requirement(node, required, key, false)
+}
+fn install_with_queue_requirement(
+    node: &OneNode,
+    required: &RequiredWorkflowCheck,
+    key: &[u8],
+    require_merge_queue: bool,
+) -> ProtectionCommand {
     let selected = node
         .runtime()
         .block_on(node.read_review_protection_in(&node.request_context()))
@@ -76,6 +84,7 @@ fn install(node: &OneNode, required: &RequiredWorkflowCheck, key: &[u8]) -> Prot
             branches: ["main", "release"]
                 .into_iter()
                 .map(|name| ProtectedBranch {
+                    require_merge_queue,
                     required_approvals: 0,
                     name: branch(name),
                     reviewers: Vec::new(),

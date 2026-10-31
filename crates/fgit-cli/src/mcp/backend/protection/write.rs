@@ -316,6 +316,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             None => reviewers.len() as u16,
         };
         branches.push(ProtectedBranch {
+            require_merge_queue: false,
             required_approvals,
             required_checks,
             name,

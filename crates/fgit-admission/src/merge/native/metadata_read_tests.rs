@@ -34,7 +34,7 @@ use fgit_types::{
 use super::{delivery, issues, pull_request, storage};
 use crate::{AdmissionError, RefusalCode};
 
-fn run<F: Future>(future: F) -> F::Output {
+pub(super) fn run<F: Future>(future: F) -> F::Output {
     match Box::pin(future)
         .as_mut()
         .poll(&mut Context::from_waker(Waker::noop()))
@@ -50,7 +50,7 @@ enum Fault {
     Replaced(Vec<u8>),
 }
 
-struct Store {
+pub(super) struct Store {
     backend: MemoryAuthorityStore,
     fault: Mutex<Option<(ImmutableKey, Fault)>>,
     reads: Mutex<Vec<ImmutableKey>>,
@@ -58,7 +58,7 @@ struct Store {
 }
 
 impl Store {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             backend: MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x4_0007)),
             fault: Mutex::new(None),

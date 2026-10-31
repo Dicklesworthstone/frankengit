@@ -280,6 +280,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 reviewers.sort();
                 required_checks.sort();
                 ProtectedBranch {
+                    require_merge_queue: false,
                     required_approvals: quorums
                         .get(&name)
                         .copied()

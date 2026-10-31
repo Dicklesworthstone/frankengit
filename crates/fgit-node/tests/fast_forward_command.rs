@@ -316,6 +316,7 @@ fn receipt_api_keeps_mandatory_review_protection_on_the_real_publication_path() 
             ref_policy: None,
             administrators: vec![actor(2)],
             branches: vec![ProtectedBranch {
+                require_merge_queue: false,
                 required_approvals: 1,
                 required_checks: Vec::new(),
                 name: main_ref(),

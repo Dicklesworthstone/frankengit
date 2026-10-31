@@ -329,6 +329,37 @@ where
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a;
 
+    /// Validate a merge whose exact canonical queue selection was independently
+    /// authenticated by the driver at this basis. Object owners that enforce
+    /// installed queue requirements may pass this opaque proof to the native
+    /// protection gate. The default retains the existing method-specific object
+    /// checks and grants no queue-policy exemption on its own.
+    fn validate_queued_merge_async<'a>(
+        &'a self,
+        authority: &'a S,
+        cx: &'a S::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+        _landing: &'a queue::ValidatedQueueLanding,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        async move {
+            match intent.method() {
+                NativeMergeMethod::MergeCommit => {
+                    self.validate_merge_async(authority, cx, basis, authenticated, intent)
+                        .await
+                }
+                NativeMergeMethod::FastForwardOnly => {
+                    self.validate_fast_forward_async(authority, cx, basis, authenticated, intent)
+                        .await
+                }
+                NativeMergeMethod::Squash => Err(ProjectionFailure::Refuse(
+                    RefusalCode::PublicationPolicyRefused,
+                )),
+            }
+        }
+    }
+
     /// Explicit opt-in for the no-new-commit method. Existing projections fail
     /// closed rather than accidentally treating a fast-forward as an already
     /// validated two-parent merge. Implementations must verify parent ancestry,
@@ -645,30 +676,41 @@ where
                     ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
                 );
             }
-            if let (Some(command), Some(events)) = (landing, &landing_events) {
-                queue::validate_landing_at(
-                    store, cx, &basis, &snapshot, &resolved, command, events, projection,
-                )
-                .await?;
-            }
+            let validated_landing = match (landing, &landing_events) {
+                (Some(command), Some(events)) => Some(
+                    queue::validate_landing_at(
+                        store, cx, context, &basis, &snapshot, &resolved, command, events, intent,
+                        attempt, projection,
+                    )
+                    .await?,
+                ),
+                (None, None) => None,
+                _ => return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into()),
+            };
             if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
                 return Err(ProjectionFailure::Refuse(code).into());
             }
-            let closure = match intent.method() {
-                NativeMergeMethod::MergeCommit => {
-                    projection
-                        .validate_merge_async(store, cx, &basis, &authenticated, intent)
-                        .await?
-                }
-                NativeMergeMethod::FastForwardOnly => {
-                    projection
-                        .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
-                        .await?
-                }
-                NativeMergeMethod::Squash => {
-                    projection
-                        .validate_squash_async(store, cx, &basis, &authenticated, intent)
-                        .await?
+            let closure = if let Some(landing) = &validated_landing {
+                projection
+                    .validate_queued_merge_async(store, cx, &basis, &authenticated, intent, landing)
+                    .await?
+            } else {
+                match intent.method() {
+                    NativeMergeMethod::MergeCommit => {
+                        projection
+                            .validate_merge_async(store, cx, &basis, &authenticated, intent)
+                            .await?
+                    }
+                    NativeMergeMethod::FastForwardOnly => {
+                        projection
+                            .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
+                            .await?
+                    }
+                    NativeMergeMethod::Squash => {
+                        projection
+                            .validate_squash_async(store, cx, &basis, &authenticated, intent)
+                            .await?
+                    }
                 }
             };
             // A self-consistent caller-supplied set is not native-object
@@ -709,6 +751,7 @@ where
                 &mut prepared,
                 crate::evidence::RefPolicyPublication::NativeMerge,
                 projection.admission_authentication(),
+                validated_landing.as_ref(),
                 &|| projection.merge_checkpoint(cx).is_err(),
             )
             .await?;

@@ -396,6 +396,7 @@ fn current_review_protection_blocks_root_creation_without_weakening_other_branch
                 ref_policy: None,
                 administrators: vec![actor(1)],
                 branches: vec![ProtectedBranch {
+                    require_merge_queue: false,
                     required_approvals: 1,
                     required_checks: Vec::new(),
                     name: reference("refs/heads/main"),

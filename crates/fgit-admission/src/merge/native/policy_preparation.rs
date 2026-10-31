@@ -120,6 +120,7 @@ where
             &mut prepared,
             crate::evidence::RefPolicyPublication::NativeMerge,
             projection.admission_authentication(),
+            None,
             &|| projection.merge_checkpoint(cx).is_err(),
         )
         .await?;

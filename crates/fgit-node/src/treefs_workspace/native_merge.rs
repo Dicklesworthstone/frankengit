@@ -12,6 +12,7 @@ use fgit_admission::merge::native::objects::{
     ObjectFrontier, validate_fast_forward_objects_above, validate_merge_objects_above,
     validate_squash_objects_above,
 };
+use fgit_admission::merge::native::queue::ValidatedQueueLanding;
 use fgit_admission::merge::native::{
     NativeMergeIntent, NativeMergeMethod, NativeMergeProjection, admit_native_merge_async,
     admit_sealed_native_merge_async,
@@ -729,13 +730,39 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         })
     }
 
-    async fn validate_merge_async<'a>(
+    fn validate_merge_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a Cx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        self.validate_native_merge_at(authority, cx, basis, authenticated, intent, None)
+    }
+
+    fn validate_queued_merge_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+        landing: &'a ValidatedQueueLanding,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        self.validate_native_merge_at(authority, cx, basis, authenticated, intent, Some(landing))
+    }
+}
+
+impl NodeNativeMergeProjection<'_> {
+    async fn validate_native_merge_at<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+        landing: Option<&'a ValidatedQueueLanding>,
     ) -> Result<ValidatedClosure, ProjectionFailure> {
         let selected = self
             .inner
@@ -896,8 +923,22 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             }
             closure
         };
-        match self.inner.authentication {
-            Some(authentication) => {
+        match (landing, self.inner.authentication) {
+            (Some(landing), authentication) => {
+                fgit_admission::merge::native::protection::enforce_queued_merge_at(
+                    authority,
+                    cx,
+                    basis,
+                    &selected.snapshot().refs,
+                    intent,
+                    self.inner.context.principal_id,
+                    authentication,
+                    landing,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+            }
+            (None, Some(authentication)) => {
                 fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
                     authority,
                     cx,
@@ -910,7 +951,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 )
                 .await
             }
-            None => {
+            (None, None) => {
                 fgit_admission::merge::native::protection::enforce_merge_at(
                     authority,
                     cx,

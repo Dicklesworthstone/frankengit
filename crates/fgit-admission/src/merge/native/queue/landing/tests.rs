@@ -10,6 +10,8 @@ use fgit_types::{
     RegistryEpoch, RepositoryId, RootLayoutVersion, TenantId,
 };
 
+mod required_queue;
+
 fn digest(byte: u8) -> Digest {
     Digest::new(
         DigestAlgorithmId::try_new(2).unwrap(),

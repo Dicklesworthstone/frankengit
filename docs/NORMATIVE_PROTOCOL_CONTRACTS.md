@@ -896,8 +896,10 @@ version and names its exact TxId, decision sequence and RCR instead.
 Repository review protection binds a sorted set of eligible reviewer principals
 and an explicit `required_approvals: u16` to each protected branch. For a rule
 with (M > 0) reviewers, the count must be in `1..=M`; (M) remains bounded
-by 32. A check-only rule has no reviewers and count zero. A rule with neither
-reviewers nor required checks remains invalid. Administrator and branch limits,
+by 32. A check-only rule has no reviewers and count zero. Historical protection
+kinds require a reviewer or required check on every branch; the explicit
+queue-required extension in §20.4 also permits queue-only rules with zero
+reviewers and approvals. Administrator and branch limits,
 strictly increasing unique lists, ownership, exact predecessor versions and
 policy-epoch advancement retain their existing contracts.
 
@@ -947,6 +949,63 @@ after any competing publication, so a losing attempt cannot reuse an earlier
 quorum. Workflow check requirements remain independently mandatory. Review
 protection continues to deny ordinary direct ref changes. Previously recorded
 terminal decisions retain their original outcomes under their original keys.
+
+### 20.4 Native queue-required branch protection
+
+Each exact native protected branch may set `require_merge_queue: bool`. The
+default is false, including when decoding any historical protection kind. A
+true value requires a canonically validated queue landing targeting that exact
+branch. The requirement does not select a queue number: distinct queues may
+target the same branch, but each landing must independently validate its actual
+queue and selected head. A branch with no reviewers and no workflow checks is
+valid only when this flag is true; its `required_approvals` is zero. All existing
+administrator, reviewer, check, branch-namespace and sorted-set bounds remain
+mandatory.
+
+Required forge event kind **19** carries a policy with at least one queue-required
+branch. Its actor, predecessor policy epoch, administrator vector and branch
+vector prefixes retain their existing encodings. Each branch encodes its exact
+ref name and reviewer vector, an explicit big-endian `u16` approval count, the
+existing `u32` check count and check selectors, then one canonical boolean byte
+for `require_merge_queue` (`0x00` or `0x01`). The approval, check and boolean
+fields are present on every branch, including queue-only branches and branches
+whose flag is false. Other boolean bytes, missing fields and an all-false
+kind-19 body refuse; no redundant spelling of an older policy is accepted.
+
+Policies without a true queue flag retain every byte of kinds **9**, **13** and
+**14** and continue to use their existing smallest encoding. The compiled DSL
+wrappers **16**, **17** and **18** may name base kind **19** in addition to their
+historical bases. They retain their exact reference-facts, actor-ID and
+authentication profile checks, canonical snapshot bytes and all existing
+bounds. A wrapper with no true queue flag keeps its original base and bytes.
+An older reader refuses the unfamiliar required kind or inner base kind; it
+must not discard the queue requirement. Upgrade every writer before activation.
+
+The requirement is checked against the policy selected by each attempted
+publication's authenticated predecessor. Ordinary receive, import, branch,
+workspace, rebase and non-queue merge publication cannot change the protected
+ref, including creating, deleting or renaming it. Surviving ref effects govern
+this check: a metadata-only operation or a ref identity operation does not gain
+a mutation merely because protection is configured. Administrators may replace
+the policy through its existing exact-version, predecessor-authorized canonical
+transition; administrator status alone does not bypass a required queue.
+
+The permitted path authenticates the current queue state, queue order, exact
+PR/version and native source/target coordinates, current policy epoch and the
+one coupled queue/merge publication. Queue authority is internal to that exact
+validated attempt. Caller-provided flags, generic evidence receipts, event
+shape alone and a generic native-merge classification cannot grant it. A
+competing publication requires validation at the new basis. Queue qualification
+does not waive required approvals, actual canonical workflow checks, native
+object validation or authentication policy. Ref movement, the PR merge event
+and queue advancement remain one publication decision.
+
+The new policy flag is part of the canonical protection event and its sealed
+request identity. Enabling or disabling it advances the policy epoch through
+the existing authorized replacement protocol. Exact retries recover their
+original terminal decision under the original policy, including after restart
+or subsequent policy changes; an old decision is never reinterpreted as a new
+queue-authorized operation.
 
 ## 21. Graph and search generations
 

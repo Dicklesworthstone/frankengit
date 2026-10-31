@@ -86,6 +86,7 @@ fn fixture(format: GitHashAlgorithm, before: u64, policy: bool) -> PreparedNativ
                 ref_policy: None,
                 administrators: vec![actor],
                 branches: vec![ProtectedBranch {
+                    require_merge_queue: false,
                     required_approvals: 1,
                     required_checks: Vec::new(),
                     name: name("refs/heads/main"),

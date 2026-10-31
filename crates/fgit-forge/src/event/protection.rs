@@ -1,4 +1,4 @@
-//! Canonical, repository-scoped review and trusted-workflow protection. Trust
+//! Canonical, repository-scoped review, workflow and merge-queue protection. Trust
 //! is explicitly granted by the current policy administrators, never by a job.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::aggregate::{AggregateId, AggregateVersion, ExpectedVersion};
@@ -110,10 +110,14 @@ pub struct ProtectedBranch {
     /// original PR opener and merge submitter cannot satisfy this requirement.
     pub reviewers: Vec<PrincipalId>,
     /// Required distinct approvals. Legacy policies decode to reviewers.len();
-    /// review-bearing rules require 1..=reviewers.len(), check-only rules zero.
+    /// review-bearing rules require 1..=reviewers.len(), other rules zero.
     pub required_approvals: u16,
     /// Strictly sorted, unique exact selectors. Empty grants no workflow trust.
     pub required_checks: Vec<RequiredWorkflowCheck>,
+    /// Ref changes must come from a canonically validated landing of a queue
+    /// targeting this branch. A caller-provided queue receipt is not authority.
+    /// Historical policy encodings decode to false.
+    pub require_merge_queue: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewProtection {
@@ -156,7 +160,9 @@ impl ReviewProtection {
             {
                 return Err(invalid_native("review_protection.required_approvals"));
             }
-            if (branch.reviewers.is_empty() && branch.required_checks.is_empty())
+            if (branch.reviewers.is_empty()
+                && branch.required_checks.is_empty()
+                && !branch.require_merge_queue)
                 || branch.required_checks.len() > MAX_BRANCH_REQUIRED_CHECKS
                 || branch
                     .required_checks
@@ -176,6 +182,14 @@ impl ReviewProtection {
         self.branches
             .iter()
             .any(|branch| !branch.required_checks.is_empty())
+    }
+    /// Queue-bearing policies require the explicit queue wire kind. Policies
+    /// without this restriction retain every historical byte and identity.
+    #[must_use]
+    pub fn has_required_merge_queue(&self) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| branch.require_merge_queue)
     }
     /// A non-unanimous rule requires the explicit quorum wire kind. Unanimous
     /// defaults retain their historical canonical bytes and request identity.
@@ -217,10 +231,13 @@ impl NativeProtectionEvent {
     }
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
-        // Kinds 16 through 18 wrap an explicitly named historical protection encoding.
-        // This preserves every old byte when no custom policy is selected.
+        let with_queue = self.protection.has_required_merge_queue();
+        // Kinds 16 through 18 wrap an explicitly named protection encoding.
+        // No queue restriction means exactly the historical base and bytes.
         if self.protection.ref_policy.is_some() {
-            out.write_scalar(if self.protection.has_review_quorum() {
+            out.write_scalar(if with_queue {
+                19_u32
+            } else if self.protection.has_review_quorum() {
                 14_u32
             } else if self.protection.has_required_checks() {
                 13_u32
@@ -235,7 +252,7 @@ impl NativeProtectionEvent {
             out.write_opaque_id(id.as_bytes());
         }
         out.write_scalar(self.protection.branches.len() as u32);
-        let with_quorum = self.protection.has_review_quorum();
+        let with_quorum = with_queue || self.protection.has_review_quorum();
         let with_checks = with_quorum || self.protection.has_required_checks();
         for branch in &self.protection.branches {
             out.write_ref_name(&branch.name)?;
@@ -243,7 +260,7 @@ impl NativeProtectionEvent {
             for id in &branch.reviewers {
                 out.write_opaque_id(id.as_bytes());
             }
-            // Kinds 9 and 13 retain every historical byte. Kind 14 carries
+            // Kinds 9 and 13 retain every historical byte. Kinds 14 and 19 carry
             // the threshold and check count on EVERY branch, even empty checks.
             if with_quorum {
                 out.write_scalar(branch.required_approvals);
@@ -256,6 +273,9 @@ impl NativeProtectionEvent {
                     out.write_raw(&check.graph_root);
                     out.write_bytes("review_protection.check_job", check.job.as_bytes())?;
                 }
+            }
+            if with_queue {
+                out.write_bool(branch.require_merge_queue);
             }
         }
         if let Some(snapshot) = &self.protection.ref_policy {
@@ -287,13 +307,15 @@ impl NativeProtectionEvent {
         input: &mut Decoder<'_>,
         profile: fgit_policy::reference_profile::ReferencePolicyProfile,
     ) -> Result<Self, CodecRefusal> {
-        let (checks, quorum) = match input.read_scalar::<u32>("review_protection.base_kind")? {
-            9 => (false, false),
-            13 => (true, false),
-            14 => (true, true),
-            _ => return Err(invalid_native("review_protection.base_kind")),
-        };
-        let mut value = Self::read(input, checks, quorum)?;
+        let (checks, quorum, queue) =
+            match input.read_scalar::<u32>("review_protection.base_kind")? {
+                9 => (false, false, false),
+                13 => (true, false, false),
+                14 => (true, true, false),
+                19 => (true, true, true),
+                _ => return Err(invalid_native("review_protection.base_kind")),
+            };
+        let mut value = Self::read(input, checks, quorum, queue)?;
         let frame = input.read_bytes("review_protection.ref_policy")?;
         let snapshot = decode_ref_policy_with_limits(frame, input.limits())?;
         if fgit_policy::reference_profile::classify(&snapshot).ok() != Some(profile) {
@@ -307,6 +329,7 @@ impl NativeProtectionEvent {
         input: &mut Decoder<'_>,
         with_checks: bool,
         with_quorum: bool,
+        with_queue: bool,
     ) -> Result<Self, CodecRefusal> {
         fn count(
             input: &mut Decoder<'_>,
@@ -384,6 +407,8 @@ impl NativeProtectionEvent {
                 reviewers,
                 required_approvals,
                 required_checks,
+                require_merge_queue: with_queue
+                    && input.read_bool("review_protection.require_merge_queue")?,
             });
         }
         let value = Self {
@@ -396,11 +421,16 @@ impl NativeProtectionEvent {
             },
         };
         value.validate()?;
-        // Reject redundant new spellings of historical unanimous policies.
-        if value.protection.has_review_quorum() != with_quorum
-            || (!with_quorum && value.protection.has_required_checks() != with_checks)
-            || (with_quorum && !with_checks)
-        {
+        // Queue kind 19 always carries quorum/check fields and at least one
+        // true queue flag. Historical kinds retain their smallest encoding.
+        let canonical_kind = if with_queue {
+            with_quorum && with_checks && value.protection.has_required_merge_queue()
+        } else {
+            value.protection.has_review_quorum() == with_quorum
+                && (with_quorum || value.protection.has_required_checks() == with_checks)
+                && (!with_quorum || with_checks)
+        };
+        if !canonical_kind {
             return Err(invalid_native("review_protection.check_kind"));
         }
         Ok(value)
@@ -493,3 +523,6 @@ mod ref_policy_tests;
 
 #[cfg(test)]
 mod authentication_policy_tests;
+
+#[cfg(test)]
+mod queue_tests;

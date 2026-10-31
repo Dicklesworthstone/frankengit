@@ -24,7 +24,9 @@ mod read;
 pub use read::{QueuePage, read_page_at, read_queue_at};
 mod landing;
 pub(super) use landing::validate_landing_at;
-pub use landing::{QueueLandingCommand, admit_landing_async, landing_proposal};
+pub use landing::{
+    QueueLandingCommand, ValidatedQueueLanding, admit_landing_async, landing_proposal,
+};
 mod candidate;
 pub use candidate::{
     QueueCandidateLandingCommand, admit_candidate_landing_async, candidate_landing_proposal,

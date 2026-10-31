@@ -13,6 +13,8 @@ use fgit_forge::preparation::{
 };
 use std::fs;
 
+mod queue_required;
+
 fn metadata() -> MergeMetadata {
     MergeMetadata {
         author: "Queue operator <queue@example.invalid>".into(),
@@ -594,6 +596,7 @@ fn candidate_landing_requires_an_approval_for_the_actual_prepared_merge() {
         protect(
             &node,
             vec![ProtectedBranch {
+                require_merge_queue: true,
                 name: pulls[0].data.target_ref.clone(),
                 required_approvals: 1,
                 reviewers: vec![reviewer],
@@ -666,7 +669,8 @@ fn candidate_landing_preserves_authenticated_policy_evidence_and_exact_retry() {
             ref_policy: Some(compile_ref_policy(
                 "policy queue_credential { rule verified { when actor.authentication >= single_factor then allow } default deny \"verified credential required\" }"
             ).unwrap()),
-            administrators: vec![actor()], branches: Vec::new(),
+            administrators: vec![actor()],
+            branches: vec![super::protection::queue_only(pulls[0].data.target_ref.clone())],
         }, "candidate-auth-policy");
         let prepared = prepare(
             &node,

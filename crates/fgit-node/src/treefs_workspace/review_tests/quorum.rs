@@ -19,6 +19,7 @@ fn install(fixture: &mut Fixture, reviewers: &[u8], required_approvals: u16, key
             ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                require_merge_queue: false,
                 name: target(),
                 reviewers: reviewers.iter().copied().map(actor).collect(),
                 required_approvals,

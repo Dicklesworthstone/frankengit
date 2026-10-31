@@ -31,6 +31,7 @@ use fgit_types::{
 use std::{future::Future, task::Poll};
 
 mod candidate;
+mod protection;
 
 fn version(value: u64) -> AggregateVersion {
     AggregateVersion::try_new(value).unwrap()
@@ -536,6 +537,7 @@ fn queue_landing_requires_current_exact_candidate_approval_and_honors_withdrawal
         offered.expected_policy_epoch = protect(
             &node,
             vec![ProtectedBranch {
+                require_merge_queue: true,
                 name: offered.target_ref.clone(),
                 required_approvals: 1,
                 reviewers: vec![reviewer],
@@ -597,6 +599,7 @@ fn queue_landing_cannot_bypass_a_required_workflow_check_with_a_live_source_ref(
     offered.expected_policy_epoch = protect(
         &node,
         vec![ProtectedBranch {
+            require_merge_queue: true,
             name: offered.target_ref.clone(),
             required_approvals: 0,
             reviewers: Vec::new(),
@@ -679,7 +682,8 @@ fn activated_authentication_policy_records_real_landing_evidence_and_survives_re
             ref_policy: Some(compile_ref_policy(&format!(
                 "policy queue_credentials {{ rule credential {{ when actor.authentication >= {strength} then allow }} default deny \"verified credential required\" }}",
             )).unwrap()),
-            administrators: vec![actor()], branches: Vec::new(),
+            administrators: vec![actor()],
+            branches: vec![protection::queue_only(pulls[0].data.target_ref.clone())],
         }
         };
         let mut offered = landing(&pulls[0], 1);

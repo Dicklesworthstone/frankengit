@@ -55,6 +55,7 @@ impl Fixture {
                     ref_policy: None,
                     administrators: vec![ADMIN],
                     branches: vec![ProtectedBranch {
+                        require_merge_queue: false,
                         required_approvals: 1,
                         required_checks: Vec::new(),
                         name: RefName::try_new(b"refs/heads/protected-\xff").unwrap(),

@@ -250,6 +250,7 @@ fn successful_inspection_grants_no_branch_protection_exception_and_pins_remain_s
                         ref_policy: None,
                         administrators: vec![actor(1)],
                         branches: vec![ProtectedBranch {
+                            require_merge_queue: false,
                             required_approvals: 1,
                             required_checks: Vec::new(),
                             name: reference(),

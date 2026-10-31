@@ -23,6 +23,7 @@ use fgit_types::{
 use std::collections::{BTreeMap, BTreeSet};
 
 mod checks;
+mod queue_gate;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectionState {
@@ -256,6 +257,7 @@ where
             principal,
             authentication,
         )?;
+        queue_gate::enforce(policy, basis, refs, &effects.refs, principal, None)?;
         let has_protected = effects.refs.keys().any(|name| {
             policy
                 .branch(name)
@@ -612,6 +614,7 @@ where
         prepared,
         publication,
         None,
+        None,
         cancelled,
     )
     .await
@@ -643,6 +646,7 @@ where
         prepared,
         publication,
         Some(authentication),
+        None,
         cancelled,
     )
     .await
@@ -657,12 +661,21 @@ pub(super) async fn attach_prepared_policy_selected_at<S, C>(
     prepared: &mut crate::merge::PreparedNativeMerge,
     publication: crate::evidence::RefPolicyPublication,
     authentication: Option<AdmissionAuthentication>,
+    landing: Option<&super::queue::ValidatedQueueLanding>,
     cancelled: &C,
 ) -> Result<(), ProjectionFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    if let Some(landing) = landing {
+        if publication != crate::evidence::RefPolicyPublication::NativeMerge {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+        }
+        landing
+            .verify_prepared(context, basis, prepared)
+            .map_err(ProjectionFailure::Refuse)?;
+    }
     let selected = if publication == crate::evidence::RefPolicyPublication::Direct {
         enforce_direct_selected_at(
             store,
@@ -691,6 +704,20 @@ where
             .await
             .map_err(infrastructure)?
     };
+    if let Some(policy) = selected.protection() {
+        let effects = prepared
+            .fold
+            .effects()
+            .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+        queue_gate::enforce(
+            policy,
+            basis,
+            resolved.refs.refs(),
+            &effects.refs,
+            Some(context.principal_id),
+            landing,
+        )?;
+    }
     if let Some(authentication) = authentication {
         prepared.evidence = crate::evidence::DecisionEvidenceBodies::derive_with_authentication(
             context,
@@ -855,7 +882,10 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    enforce_merge_selected_at(store, cx, basis, refs, intent, submitter, None, cancelled).await
+    enforce_merge_selected_at(
+        store, cx, basis, refs, intent, submitter, None, None, cancelled,
+    )
+    .await
 }
 
 /// Enforce the native merge gate with authentication established by its host.
@@ -882,6 +912,39 @@ where
         intent,
         submitter,
         Some(authentication),
+        None,
+        cancelled,
+    )
+    .await
+}
+
+/// Enforce every native merge requirement for the exact queue attempt already
+/// authenticated by admission. The opaque context cannot be created from a
+/// caller-selected policy profile or a well-formed event batch alone.
+pub async fn enforce_queued_merge_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
+    intent: &NativeMergeIntent,
+    submitter: PrincipalId,
+    authentication: Option<AdmissionAuthentication>,
+    landing: &super::queue::ValidatedQueueLanding,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    enforce_merge_selected_at(
+        store,
+        cx,
+        basis,
+        refs,
+        intent,
+        submitter,
+        authentication,
+        Some(landing),
         cancelled,
     )
     .await
@@ -895,12 +958,18 @@ async fn enforce_merge_selected_at<S, C>(
     intent: &NativeMergeIntent,
     submitter: PrincipalId,
     authentication: Option<AdmissionAuthentication>,
+    landing: Option<&super::queue::ValidatedQueueLanding>,
     cancelled: &C,
 ) -> Result<(), ProjectionFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    if let Some(landing) = landing {
+        landing
+            .verify_intent(basis, intent, submitter)
+            .map_err(ProjectionFailure::Refuse)?;
+    }
     let selected = read_at(store, cx, basis, cancelled)
         .await
         .map_err(infrastructure)?;
@@ -915,6 +984,17 @@ where
             )]),
             Some(submitter),
             authentication,
+        )?;
+        queue_gate::enforce(
+            policy,
+            basis,
+            refs,
+            &BTreeMap::from([(
+                merge.target_ref.clone(),
+                fgit_reference::effect::RefEffect::Set(merge.merge_commit),
+            )]),
+            Some(submitter),
+            landing,
         )?;
     }
     if let Some(rule) = selected

@@ -101,6 +101,7 @@ pub fn initialized(
                 ref_policy: None,
                 administrators: vec![OWNER],
                 branches: vec![ProtectedBranch {
+                    require_merge_queue: false,
                     name: candidate.data.target_ref.clone(),
                     required_approvals: 1,
                     reviewers: vec![REVIEWER],

@@ -45,6 +45,7 @@ const KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED: u32 = 15;
 const KIND_REPOSITORY_REF_POLICY_CHANGED: u32 = 16;
 const KIND_REPOSITORY_ACTOR_REF_POLICY_CHANGED: u32 = 17;
 const KIND_REPOSITORY_AUTHENTICATED_REF_POLICY_CHANGED: u32 = 18;
+const KIND_QUEUE_REQUIRED_PROTECTION_CHANGED: u32 = 19;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -128,7 +129,7 @@ const fn invalid_native(field: &'static str) -> CodecRefusal {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeEventPayload {
     /// Canonical protection replacement: historical unanimous-review kind 9,
-    /// required-check kind 13, or explicit review-quorum kind 14.
+    /// required-check kind 13, explicit review-quorum kind 14, or queue kind 19.
     ReviewProtectionChanged(protection::NativeProtectionEvent),
     PullRequestOpened {
         source_ref: Vec<u8>,
@@ -191,6 +192,8 @@ impl ForgeEventPayload {
                         }
                         _ => KIND_REPOSITORY_REF_POLICY_CHANGED,
                     }
+                } else if change.protection.has_required_merge_queue() {
+                    KIND_QUEUE_REQUIRED_PROTECTION_CHANGED
                 } else if change.protection.has_review_quorum() {
                     KIND_REVIEW_QUORUM_PROTECTION_CHANGED
                 } else if change.protection.has_required_checks() {
@@ -491,13 +494,16 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
             ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?)
         }
         KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
-            protection::NativeProtectionEvent::read(input, false, false)?,
+            protection::NativeProtectionEvent::read(input, false, false, false)?,
         ),
         KIND_REQUIRED_CHECK_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
-            protection::NativeProtectionEvent::read(input, true, false)?,
+            protection::NativeProtectionEvent::read(input, true, false, false)?,
         ),
         KIND_REVIEW_QUORUM_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
-            protection::NativeProtectionEvent::read(input, true, true)?,
+            protection::NativeProtectionEvent::read(input, true, true, false)?,
+        ),
+        KIND_QUEUE_REQUIRED_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
+            protection::NativeProtectionEvent::read(input, true, true, true)?,
         ),
         KIND_REPOSITORY_REF_POLICY_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read_with_policy(input)?,

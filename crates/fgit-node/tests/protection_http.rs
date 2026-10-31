@@ -57,6 +57,7 @@ fn install(node: &OneNode) -> u64 {
             ref_policy: None,
             administrators: vec![OWNER],
             branches: vec![ProtectedBranch {
+                require_merge_queue: false,
                 required_approvals: 1,
                 required_checks: Vec::new(),
                 name: RefName::try_new(b"refs/heads/main").unwrap(),

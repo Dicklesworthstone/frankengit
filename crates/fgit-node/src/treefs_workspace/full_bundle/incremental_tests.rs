@@ -482,6 +482,7 @@ fn incremental_atomic_update_cannot_bypass_repository_required_review_protection
                 ref_policy: None,
                 administrators: vec![principal()],
                 branches: vec![ProtectedBranch {
+                    require_merge_queue: false,
                     required_approvals: 1,
                     required_checks: Vec::new(),
                     name: reference("refs/heads/main"),

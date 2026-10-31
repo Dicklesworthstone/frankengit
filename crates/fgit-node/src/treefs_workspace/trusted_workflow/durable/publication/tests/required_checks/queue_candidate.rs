@@ -163,7 +163,12 @@ fn two_parent_queue_candidate_requires_its_actual_canonical_workflow_success() {
             graph_root: old_green.graph_root,
             job: old_green.job,
         };
-        let policy = install(&node, &required, b"queue-candidate-required-check");
+        let policy = install_with_queue_requirement(
+            &node,
+            &required,
+            b"queue-candidate-required-check",
+            true,
+        );
         let selected = ReviewSubject {
             pull_request: pull.number,
             pull_request_version: AggregateVersion::FIRST,

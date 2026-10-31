@@ -25,6 +25,7 @@ fn protection_policy(names: &[&[u8]], administrators: &[u8], reviewers: &[u8]) -
         branches: names
             .iter()
             .map(|name| ProtectedBranch {
+                require_merge_queue: false,
                 required_approvals: reviewers.len() as u16,
                 required_checks: Vec::new(),
                 name: RefName::try_new(name).unwrap(),
@@ -264,103 +265,110 @@ fn direct_branch(
 #[test]
 fn protected_branch_creation_updates_deletion_and_import_share_the_same_mandatory_gate() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let scratch = Scratch::new();
-        let f = fixture(&scratch, format);
-        let branch = RefName::try_new(b"refs/heads/protected").unwrap();
-        let unborn = RefName::try_new(b"refs/heads/protected-unborn").unwrap();
-        committed(&direct_branch(
-            &f,
-            "create-before",
-            &branch,
-            ExpectedOld::Absent,
-            ProposedNew::Update(f.data.target_tip),
-        ));
-        let command = policy_command(
-            0,
-            PolicyEpoch::FIRST,
-            protection_policy(&[branch.as_bytes(), unborn.as_bytes()], &[1], &[3]),
-        );
-        committed(&change_policy(&f, 1, b"protect-direct-paths", &command).unwrap());
-        let before = snapshot(&f.node);
-        let create = direct_branch(
-            &f,
-            "forbidden-create",
-            &unborn,
-            ExpectedOld::Absent,
-            ProposedNew::Update(f.data.source_tip),
-        );
-        let delete = direct_branch(
-            &f,
-            "forbidden-delete",
-            &branch,
-            ExpectedOld::Exactly(f.data.target_tip),
-            ProposedNew::Delete,
-        );
-        for result in [&create, &delete] {
-            assert!(matches!(
-                result.1.outcome,
+        for require_merge_queue in [false, true] {
+            let scratch = Scratch::new();
+            let f = fixture(&scratch, format);
+            let branch = RefName::try_new(b"refs/heads/protected").unwrap();
+            let unborn = RefName::try_new(b"refs/heads/protected-unborn").unwrap();
+            committed(&direct_branch(
+                &f,
+                "create-before",
+                &branch,
+                ExpectedOld::Absent,
+                ProposedNew::Update(f.data.target_tip),
+            ));
+            let mut protection =
+                protection_policy(&[branch.as_bytes(), unborn.as_bytes()], &[1], &[3]);
+            if require_merge_queue {
+                for branch in &mut protection.branches {
+                    branch.reviewers.clear();
+                    branch.required_approvals = 0;
+                    branch.require_merge_queue = true;
+                }
+            }
+            let command = policy_command(0, PolicyEpoch::FIRST, protection);
+            committed(&change_policy(&f, 1, b"protect-direct-paths", &command).unwrap());
+            let before = snapshot(&f.node);
+            let create = direct_branch(
+                &f,
+                "forbidden-create",
+                &unborn,
+                ExpectedOld::Absent,
+                ProposedNew::Update(f.data.source_tip),
+            );
+            let delete = direct_branch(
+                &f,
+                "forbidden-delete",
+                &branch,
+                ExpectedOld::Exactly(f.data.target_tip),
+                ProposedNew::Delete,
+            );
+            for result in [&create, &delete] {
+                assert!(matches!(
+                    result.1.outcome,
+                    DecisionOutcome::Refused {
+                        code: RefusalCode::ProtectedRefTransitionDenied,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(snapshot(&f.node).snapshot().refs, before.snapshot().refs);
+            let closure = before.selected_closure().closure().clone();
+            let imported = validate_source_import(
+                &[SourceRefUpdate {
+                    old: f.data.target_tip,
+                    new: f.data.source_tip,
+                    ref_name: branch.as_bytes().to_vec(),
+                }],
+                &SourceImportReceipt {
+                    object_format: format,
+                    object_count: closure.objects().len().try_into().unwrap(),
+                    delete_only: false,
+                    origin: SourceImportOrigin::LocalGitDirectory,
+                },
+                ValidatedClosure {
+                    object_closure_root: permitted_object_closure_root(&closure).unwrap(),
+                    objects: closure.objects().clone(),
+                },
+            )
+            .unwrap();
+            let context = protection_context(&f, 2, b"direct-import");
+            let request = f.node.request_context();
+            let imported = f
+                .node
+                .runtime()
+                .block_on(f.node.admit_validated_source_import_durable_in(
+                    &request,
+                    &context,
+                    &imported,
+                    AdmissionLimits::default(),
+                ))
+                .unwrap();
+            assert!(imported.commands.iter().all(|c| matches!(
+                c.terminal.outcome,
                 DecisionOutcome::Refused {
                     code: RefusalCode::ProtectedRefTransitionDenied,
                     ..
                 }
+            )));
+            let free = RefName::try_new(b"refs/heads/unprotected").unwrap();
+            committed(&direct_branch(
+                &f,
+                "permitted-direct-twin",
+                &free,
+                ExpectedOld::Absent,
+                ProposedNew::Update(f.data.source_tip),
             ));
+            assert_eq!(
+                snapshot(&f.node).snapshot().refs.get(&branch),
+                Some(&f.data.target_tip)
+            );
+            assert_eq!(
+                snapshot(&f.node).snapshot().refs.get(&free),
+                Some(&f.data.source_tip)
+            );
+            f.node.shutdown().unwrap();
         }
-        assert_eq!(snapshot(&f.node).snapshot().refs, before.snapshot().refs);
-        let closure = before.selected_closure().closure().clone();
-        let imported = validate_source_import(
-            &[SourceRefUpdate {
-                old: f.data.target_tip,
-                new: f.data.source_tip,
-                ref_name: branch.as_bytes().to_vec(),
-            }],
-            &SourceImportReceipt {
-                object_format: format,
-                object_count: closure.objects().len().try_into().unwrap(),
-                delete_only: false,
-                origin: SourceImportOrigin::LocalGitDirectory,
-            },
-            ValidatedClosure {
-                object_closure_root: permitted_object_closure_root(&closure).unwrap(),
-                objects: closure.objects().clone(),
-            },
-        )
-        .unwrap();
-        let context = protection_context(&f, 2, b"direct-import");
-        let request = f.node.request_context();
-        let imported = f
-            .node
-            .runtime()
-            .block_on(f.node.admit_validated_source_import_durable_in(
-                &request,
-                &context,
-                &imported,
-                AdmissionLimits::default(),
-            ))
-            .unwrap();
-        assert!(imported.commands.iter().all(|c| matches!(
-            c.terminal.outcome,
-            DecisionOutcome::Refused {
-                code: RefusalCode::ProtectedRefTransitionDenied,
-                ..
-            }
-        )));
-        let free = RefName::try_new(b"refs/heads/unprotected").unwrap();
-        committed(&direct_branch(
-            &f,
-            "permitted-direct-twin",
-            &free,
-            ExpectedOld::Absent,
-            ProposedNew::Update(f.data.source_tip),
-        ));
-        assert_eq!(
-            snapshot(&f.node).snapshot().refs.get(&branch),
-            Some(&f.data.target_tip)
-        );
-        assert_eq!(
-            snapshot(&f.node).snapshot().refs.get(&free),
-            Some(&f.data.source_tip)
-        );
-        f.node.shutdown().unwrap();
     }
 }
 

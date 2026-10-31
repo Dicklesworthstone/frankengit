@@ -312,61 +312,68 @@ fn cancellation_cannot_publish_a_prefix_and_terminal_retry_precedes_quota() {
 }
 
 #[test]
-fn mandatory_review_protection_rejects_whole_transaction_not_just_protected_member() {
+fn mandatory_review_or_queue_protection_rejects_whole_transaction_not_just_protected_member() {
     use fgit_forge::ExpectedVersion;
     use fgit_forge::event::protection::{ProtectedBranch, ProtectionCommand, ReviewProtection};
     use fgit_types::PolicyEpoch;
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let scratch = Scratch::new();
-        let (node, base, _, _) = fixture(&scratch, format);
-        let command = ProtectionCommand {
-            expected_version: ExpectedVersion::NewStream,
-            expected_epoch: PolicyEpoch::FIRST,
-            protection: ReviewProtection {
-                ref_policy: None,
-                administrators: vec![principal()],
-                branches: vec![ProtectedBranch {
-                    required_approvals: 1,
-                    name: reference("refs/heads/guarded"),
-                    reviewers: vec![PrincipalId::from_bytes([9; 16])],
-                    required_checks: vec![],
-                }],
-            },
-        };
-        let (_, terminal) = node
-            .runtime()
-            .block_on(node.admit_review_protection_durable_in(
-                &node.request_context(),
-                &session("install-protection"),
-                &command,
-                AdmissionLimits::default(),
-            ))
-            .unwrap();
-        assert!(matches!(
-            terminal.outcome,
-            DecisionOutcome::Committed { .. }
-        ));
-        let before = snapshot(&node);
-        let commands = [
-            create("refs/heads/allowed", base),
-            create("refs/heads/guarded", base),
-            create("refs/heads/also-allowed", base),
-        ];
-        let result = transact(&node, &commands, "protected-batch");
-        assert!(
-            result.as_ref().is_err()
-                || result
-                    .unwrap()
-                    .commands
-                    .iter()
-                    .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Refused { .. }))
-        );
-        assert_eq!(snapshot(&node).snapshot().refs, before.snapshot().refs);
-        accepted(transact(
-            &node,
-            &[commands[0].clone(), commands[2].clone()],
-            "unprotected-batch",
-        ));
-        node.shutdown().unwrap();
+        for require_merge_queue in [false, true] {
+            let scratch = Scratch::new();
+            let (node, base, _, _) = fixture(&scratch, format);
+            let command = ProtectionCommand {
+                expected_version: ExpectedVersion::NewStream,
+                expected_epoch: PolicyEpoch::FIRST,
+                protection: ReviewProtection {
+                    ref_policy: None,
+                    administrators: vec![principal()],
+                    branches: vec![ProtectedBranch {
+                        require_merge_queue,
+                        required_approvals: u16::from(!require_merge_queue),
+                        name: reference("refs/heads/guarded"),
+                        reviewers: if require_merge_queue {
+                            Vec::new()
+                        } else {
+                            vec![PrincipalId::from_bytes([9; 16])]
+                        },
+                        required_checks: vec![],
+                    }],
+                },
+            };
+            let (_, terminal) = node
+                .runtime()
+                .block_on(node.admit_review_protection_durable_in(
+                    &node.request_context(),
+                    &session("install-protection"),
+                    &command,
+                    AdmissionLimits::default(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ));
+            let before = snapshot(&node);
+            let commands = [
+                create("refs/heads/allowed", base),
+                create("refs/heads/guarded", base),
+                create("refs/heads/also-allowed", base),
+            ];
+            let result = transact(&node, &commands, "protected-batch");
+            assert!(
+                result.as_ref().is_err()
+                    || result
+                        .unwrap()
+                        .commands
+                        .iter()
+                        .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Refused { .. }))
+            );
+            assert_eq!(snapshot(&node).snapshot().refs, before.snapshot().refs);
+            accepted(transact(
+                &node,
+                &[commands[0].clone(), commands[2].clone()],
+                "unprotected-batch",
+            ));
+            node.shutdown().unwrap();
+        }
     }
 }

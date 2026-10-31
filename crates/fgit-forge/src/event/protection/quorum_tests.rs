@@ -46,6 +46,8 @@ fn historical_unanimity_and_check_encodings_keep_exact_bytes_and_effective_count
             panic!()
         };
         assert!(!change.protection.has_review_quorum());
+        assert!(!change.protection.has_required_merge_queue());
+        assert!(!change.protection.branches[0].require_merge_queue);
         assert_eq!(change.protection.branches[0].required_approvals, 2);
     }
 }
@@ -55,12 +57,14 @@ fn quorum_is_a_required_new_kind_and_mixed_rules_keep_all_counts_and_checks() {
     let mut settings = quorum_policy();
     settings.branches[0].required_checks.push(required_check());
     settings.branches.push(ProtectedBranch {
+        require_merge_queue: false,
         name: RefName::try_new(b"refs/heads/release").unwrap(),
         reviewers: vec![actor(8)],
         required_approvals: 1,
         required_checks: Vec::new(),
     });
     settings.branches.push(ProtectedBranch {
+        require_merge_queue: false,
         name: RefName::try_new(b"refs/heads/staging").unwrap(),
         reviewers: Vec::new(),
         required_approvals: 0,
