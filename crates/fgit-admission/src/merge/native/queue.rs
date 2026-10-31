@@ -245,7 +245,7 @@ where
         let mut queues = read::replay_selected(
             store,
             cx,
-            basis.body().repository_id,
+            basis,
             &resolved.forge,
             &resolved.outbox,
             &BTreeSet::from([command.number]),

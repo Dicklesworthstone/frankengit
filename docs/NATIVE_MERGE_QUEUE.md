@@ -89,12 +89,20 @@ a whole. Hidden and absent queues have the same single-queue response. Pages
 contain up to 100 complete visible queues, ordered by queue number. CLI output
 is bounded to 8 MiB; request a smaller page if a complete response exceeds it.
 
-Queue reads currently reconstruct state from the canonical outbox history. A
-request scans at most 65,536 events and 128 MiB of encoded event batches, and
-retains at most 32 MiB of selected queue events. Listing reconstructs all queues
-after the cursor before selecting the visible page, so a small page limit does
-not avoid these history limits. Single-queue reads and writes also scan the
-outbox. Exceeding a bound produces an explicit resource refusal; indexed,
+Queue reads reconstruct state from canonically committed events. The active
+outbox provides a fast path. Successful delivery may retire its entries, so
+missing queue events are recovered from the verified repository record history
+at the selected head. Acknowledgment does not erase the queue's prior state.
+
+A request scans at most 65,536 forge events and 128 MiB of encoded event and
+decision batches, and retains at most 32 MiB of selected queue events. History
+recovery additionally bounds traversal to 4,096 predecessor steps and 65,536
+decisions. Refusals and checkpoint steps count toward the work bounds even
+though they do not change a queue. Listing reconstructs all queues after the
+cursor before selecting the visible page, so a small page limit does not avoid
+these history limits. Single-queue reads and writes also scan the outbox and
+may require history recovery. Exceeding a bound produces an explicit resource
+refusal; unavailable or compacted required history also refuses. Indexed,
 incremental queue reconstruction remains future work.
 
 ## Reorder and remove

@@ -2,14 +2,19 @@
 //! No Git subprocess, in-memory authority substitute, or synthetic batch result.
 use super::*;
 use crate::{MaterializedAdmission, NodeConfig};
+use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
 use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::merge_queue::{DequeueReason, QueueCommandAction};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
+use fgit_resource::settlement::{DeliveryVerdict, ProbeVerdict};
+use fgit_resource::{DownstreamIdempotency, ObligationState, ReconcilePolicy};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RepositoryId, TenantId,
+    AsciiSlug, DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId,
+    RepositoryId, TenantId,
 };
+use fsqlite_types::cx::Cx;
 use std::{
     fs,
     future::Future,
@@ -745,4 +750,234 @@ fn invalid_transitions_reused_keys_and_cancelled_requests_preserve_the_queue() {
     );
     assert_eq!(snapshot(&node).basis(), after.basis());
     node.shutdown().unwrap();
+}
+
+/// A real local receiver with synced, immutable receipts. Only its transport
+/// observation is test-owned: normal node settlement publishes every authority
+/// transition and removes the acknowledged obligation from the active outbox.
+struct QueueReceiptDestination {
+    root: PathBuf,
+    probes: usize,
+    sends: usize,
+}
+
+impl QueueReceiptDestination {
+    fn bytes(&self, request: &DeliveryRequest<'_>) -> Result<Vec<u8>, RefusalCode> {
+        if request.destination != self.destination() {
+            return Err(RefusalCode::PublicationPolicyRefused);
+        }
+        if fgit_admission::evidence::evidence_root(request.events)? != request.payload_root {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        fgit_codec::encode_body(request.events).map_err(|_| RefusalCode::CanonicalFramingInvalid)
+    }
+
+    fn sync_directory(&self) -> Result<(), RefusalCode> {
+        fs::File::open(&self.root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| RefusalCode::EvidenceMissing)
+    }
+}
+
+impl OutboxDestination<Cx> for QueueReceiptDestination {
+    fn destination(&self) -> AsciiSlug {
+        AsciiSlug::from_static("forge-projection")
+    }
+
+    fn idempotency(&self) -> DownstreamIdempotency {
+        DownstreamIdempotency::Strong
+    }
+
+    async fn probe<'a>(
+        &'a mut self,
+        _cx: &'a Cx,
+        request: &'a DeliveryRequest<'_>,
+    ) -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
+        self.probes += 1;
+        let expected = self.bytes(request)?;
+        match fs::read(self.root.join(request.key.to_string())) {
+            Ok(bytes) if bytes == expected => {
+                self.sync_directory()?;
+                Ok((
+                    ProbeVerdict::Delivered,
+                    b"synced queue receiver receipt".to_vec(),
+                ))
+            }
+            Ok(_) => Err(RefusalCode::EvidenceInvalid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok((ProbeVerdict::NotDelivered, Vec::new()))
+            }
+            Err(_) => Err(RefusalCode::EvidenceMissing),
+        }
+    }
+
+    async fn deliver<'a>(
+        &'a mut self,
+        _cx: &'a Cx,
+        request: &'a DeliveryRequest<'_>,
+        _attempt: u32,
+    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        use std::io::Write;
+        self.sends += 1;
+        let bytes = self.bytes(request)?;
+        fs::create_dir_all(&self.root).map_err(|_| RefusalCode::EvidenceMissing)?;
+        fs::File::open(self.root.parent().ok_or(RefusalCode::EvidenceMissing)?)
+            .and_then(|parent| parent.sync_all())
+            .map_err(|_| RefusalCode::EvidenceMissing)?;
+        let staging = self
+            .root
+            .join(format!(".pending-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staging)
+            .map_err(|_| RefusalCode::EvidenceMissing)?;
+        let result = (|| {
+            file.write_all(&bytes)
+                .map_err(|_| RefusalCode::EvidenceMissing)?;
+            file.sync_all().map_err(|_| RefusalCode::EvidenceMissing)?;
+            let target = self.root.join(request.key.to_string());
+            match fs::hard_link(&staging, &target) {
+                Ok(()) => Ok(DeliveryVerdict::Accepted),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if fs::read(&target).map_err(|_| RefusalCode::EvidenceMissing)? == bytes {
+                        Ok(DeliveryVerdict::DuplicateSuppressed)
+                    } else {
+                        Err(RefusalCode::EvidenceInvalid)
+                    }
+                }
+                Err(_) => Err(RefusalCode::EvidenceMissing),
+            }
+        })();
+        drop(file);
+        fs::remove_file(&staging).map_err(|_| RefusalCode::EvidenceMissing)?;
+        self.sync_directory()?;
+        Ok((result?, b"synced queue receiver receipt".to_vec()))
+    }
+}
+
+#[test]
+fn settled_queue_events_remain_replayable_after_retirement_restart_and_later_mutation() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, pulls, _) = initialize(&scratch, format);
+        let before = snapshot(&node);
+        let first = enqueue(1, 0, &pulls[0], 0);
+        let original = accepted(apply(&node, &first, "retirement-first"));
+        let first_head = read(&node, 1, None);
+        let after_first = snapshot(&node);
+        let added: Vec<_> = after_first
+            .snapshot()
+            .outbox
+            .keys()
+            .filter(|key| !before.snapshot().outbox.contains_key(*key))
+            .collect();
+        assert_eq!(added.len(), 1);
+        let key = added[0].label();
+        accepted(apply(
+            &node,
+            &enqueue(1, 1, &pulls[1], 0),
+            "retirement-second",
+        ));
+        let expected = read(&node, 1, None);
+        assert_eq!(expected.queue.as_ref().unwrap().version.get(), 2);
+        let before_delivery = snapshot(&node);
+        let mut receiver = QueueReceiptDestination {
+            root: scratch.0.join("receiver"),
+            probes: 0,
+            sends: 0,
+        };
+        let request = node.request_context();
+        let selected = node
+            .runtime()
+            .block_on(node.select_forge_delivery_in(
+                &request,
+                key,
+                receiver.destination(),
+                Some(before_delivery.basis().id()),
+            ))
+            .unwrap();
+        let delivered_events = selected.as_request();
+        assert_eq!(delivered_events.events.events.len(), 1);
+        assert_eq!(
+            delivered_events.events.events[0].aggregate,
+            fgit_forge::aggregate::AggregateId::MergeQueue(QueueNumber::FIRST)
+        );
+        assert_eq!(
+            delivered_events.events.events[0].version,
+            AggregateVersion::FIRST
+        );
+        let payload_root = delivered_events.payload_root;
+        let request = node.outbox_delivery_context();
+        let acknowledged = node
+            .runtime()
+            .block_on(node.deliver_forge_outbox_in(
+                &request,
+                &session("queue-delivery-worker"),
+                key,
+                &mut receiver,
+                ReconcilePolicy::new(std::num::NonZeroU32::new(4).unwrap()),
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+        assert_eq!((receiver.probes, receiver.sends), (1, 1));
+        let retired = snapshot(&node);
+        assert_eq!(
+            retired.snapshot().outbox.len() + 1,
+            before_delivery.snapshot().outbox.len()
+        );
+        assert!(
+            !retired
+                .snapshot()
+                .outbox
+                .keys()
+                .any(|entry| entry.label() == key)
+        );
+        assert_eq!(
+            retired.basis().body().forge_position_root,
+            before_delivery.basis().body().forge_position_root
+        );
+        no_code_changes(&before_delivery, &retired);
+        let request = node.request_context();
+        let receipt = node
+            .runtime()
+            .block_on(node.read_retired_forge_receipt_in(
+                &request,
+                key,
+                receiver.destination(),
+                Some(retired.basis().id()),
+            ))
+            .unwrap();
+        assert_eq!(receipt.effect(), &acknowledged);
+        assert_eq!(receipt.receipt().payload_root(), payload_root);
+        // v2 is still pending, but v1 has disappeared from the active outbox.
+        // Only authenticated canonical history can reconstruct the full queue.
+        assert_eq!(read(&node, 1, None).queue, expected.queue);
+        assert_eq!(read(&node, 1, Some(expected.source_head)), expected);
+        assert_eq!(read(&node, 1, Some(first_head.source_head)), first_head);
+        node.shutdown().unwrap();
+
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert_eq!(read(&reopened, 1, None).queue, expected.queue);
+        assert_eq!(
+            apply(&reopened, &first, "retirement-first").unwrap(),
+            original
+        );
+        assert_eq!(snapshot(&reopened).basis(), retired.basis());
+        accepted(apply(
+            &reopened,
+            &enqueue(1, 2, &pulls[2], 0),
+            "after-retirement",
+        ));
+        let current = read(&reopened, 1, None).queue.unwrap();
+        assert_eq!(current.version.get(), 3);
+        assert_eq!(
+            current.deterministic_order(),
+            pulls.iter().map(|pull| pull.number).collect::<Vec<_>>()
+        );
+        no_code_changes(&retired, &snapshot(&reopened));
+        reopened.shutdown().unwrap();
+    }
 }
