@@ -7,6 +7,7 @@ use crate::OneNode;
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_types::{GitHashAlgorithm, RefName};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 pub(super) fn parse(bytes: &[u8], format: GitHashAlgorithm) -> Result<Vec<RefCommand>, ApiError> {
     let fields = parse_form(bytes, OneNode::MAX_BRANCH_TRANSACTION_COMMANDS + 1)?;
@@ -112,11 +113,13 @@ mod tests {
     fn form(format: GitHashAlgorithm, count: usize) -> String {
         let mut form = format!("object_format={}", format.as_str());
         for i in 0..count {
-            form.push_str(&format!(
+            write!(
+                form,
                 "&create={}:{}",
                 hex(format!("refs/heads/a{i}").as_bytes()),
                 "a".repeat(format.digest_len() * 2)
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         form
     }

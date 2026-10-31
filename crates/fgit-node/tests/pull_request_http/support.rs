@@ -1,6 +1,7 @@
 //! Real repository fixture and TCP client. Native objects are imported through
 //! the node's production importer; no alternate HTTP or authority server exists.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -96,7 +97,7 @@ fn loose(
 fn commit(tree: GitOid, parent: Option<GitOid>, message: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     if let Some(parent) = parent {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
     body.push_str("author Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\n");
     body.push_str(message);

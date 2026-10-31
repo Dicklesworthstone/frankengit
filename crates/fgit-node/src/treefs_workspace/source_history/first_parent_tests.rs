@@ -1,6 +1,7 @@
 use super::*;
 use fgit_forge::history::first_parent::FirstParentCursor;
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm};
+use std::fmt::Write as _;
 
 #[test]
 fn native_pages_are_read_only_and_revalidate_the_first_parent_cursor() {
@@ -318,11 +319,11 @@ fn recent_native_history_above_4096_commits_succeeds_without_raising_the_dag_lim
         for index in 0..4097 {
             let mut body = format!("tree {tree}\n");
             if let Some(parent) = parents.last() {
-                body.push_str(&format!("parent {parent}\n"));
+                writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
             }
-            body.push_str(&format!(
+            write!(body,
                 "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\ncommit {index}"
-            ));
+            ).expect("writing to a String cannot fail");
             tip = node
                 .put_git_object(ObjectType::Commit, body.into_bytes())
                 .unwrap()

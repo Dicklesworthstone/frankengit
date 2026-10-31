@@ -3,6 +3,7 @@
 
 use super::reachability::ParentReachability;
 use super::*;
+use std::fmt::Write as _;
 
 #[derive(Default)]
 struct Objects {
@@ -29,7 +30,7 @@ impl Objects {
     fn commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut bytes = format!("tree {tree}\n");
         for parent in parents {
-            bytes.push_str(&format!("parent {parent}\n"));
+            writeln!(bytes, "parent {parent}").expect("writing to a String cannot fail");
         }
         bytes.push_str("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n");
         bytes.push_str(label);

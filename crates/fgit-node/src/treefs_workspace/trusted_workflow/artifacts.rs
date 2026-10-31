@@ -21,6 +21,7 @@ use fgit_object_fabric::artifact::{
 use fgit_treefs::FileMode;
 use fgit_types::{Digest, DigestBytes};
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::time::Duration;
 mod inputs;
 mod logs;
@@ -197,7 +198,8 @@ impl TrustedWorkflowArtifactConfig {
         );
         if !self.inputs.is_empty() {
             json.pop();
-            json.push_str(&format!(",\"input_delivery\":{}}}", self.inputs_json()));
+            write!(json, ",\"input_delivery\":{}}}", self.inputs_json())
+                .expect("writing to a String cannot fail");
         }
         if self.capture_logs {
             json.pop();
@@ -553,7 +555,8 @@ impl<'a> Collector<'a> {
         );
         if let Some(inputs) = self.inputs.iter().find(|inputs| inputs.job_id == job) {
             manifest.pop();
-            manifest.push_str(&format!(",\"artifact_inputs\":{}}}", inputs.to_json()));
+            write!(manifest, ",\"artifact_inputs\":{}}}", inputs.to_json())
+                .expect("writing to a String cannot fail");
         }
         manifest
     }

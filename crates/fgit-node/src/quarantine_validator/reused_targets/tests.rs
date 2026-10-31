@@ -14,6 +14,7 @@ use fgit_wire::receive::{
     ReceiveCommand, ReceiveContext, ReceiveLimits, ReceivePack, SignedPushProfile,
 };
 use fgit_wire::{Capabilities, Packet, encode_packets};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -63,11 +64,13 @@ fn raw(format: GitHashAlgorithm, kind: ObjectType, bytes: Vec<u8>) -> Raw {
 fn commit(format: GitHashAlgorithm, tree: GitOid, parents: &[GitOid], label: &str) -> Raw {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
-    body.push_str(&format!(
-        "author T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\n{label}\n"
-    ));
+    writeln!(
+        body,
+        "author T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\n{label}"
+    )
+    .expect("writing to a String cannot fail");
     raw(format, ObjectType::Commit, body.into_bytes())
 }
 fn tree(format: GitHashAlgorithm, entries: &[(&str, GitOid)]) -> Raw {

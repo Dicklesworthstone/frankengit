@@ -14,6 +14,7 @@ use fgit_types::{
 };
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Page {
@@ -531,10 +532,12 @@ mod tests {
         let actor = PrincipalId::from_bytes([255; 16]);
         let mut body = fields() + "&method=squash";
         for byte in 1..=32 {
-            body.push_str(&format!(
+            write!(
+                body,
                 "&required_reviewer={}",
                 PrincipalId::from_bytes([byte; 16])
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         let Command::Merge {
             required, method, ..
@@ -546,10 +549,12 @@ mod tests {
         };
         assert_eq!(required.reviewers().len(), 32);
         assert_eq!(method, NativeMergeMethod::Squash);
-        body.push_str(&format!(
+        write!(
+            body,
             "&required_reviewer={}",
             PrincipalId::from_bytes([33; 16])
-        ));
+        )
+        .expect("writing to a String cannot fail");
         assert!(
             request(Operation::Merge)
                 .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)

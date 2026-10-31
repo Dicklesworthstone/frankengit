@@ -14,6 +14,7 @@ use fgit_types::{
     DigestAlgorithmId, DigestBytes, HeadGeneration, RepositoryId, RepositoryIncarnationId, TenantId,
 };
 use fgit_wire::smart_http::{HttpLimits, head};
+use std::fmt::Write as _;
 use std::{
     fs,
     io::Cursor,
@@ -129,10 +130,12 @@ impl Scratch {
             binding.tenant, binding.repository, binding.incarnation
         );
         if !scopes.is_empty() {
-            body.push_str(&format!(
-                "{digest} {} {scopes}\n",
+            writeln!(
+                body,
+                "{digest} {} {scopes}",
                 PrincipalId::from_bytes([0xd3; 16])
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         let temp = self.0.join("credentials.next");
         fs::write(&temp, body).unwrap();

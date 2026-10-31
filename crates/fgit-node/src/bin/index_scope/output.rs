@@ -4,6 +4,7 @@ use fgit_graph::lexical::scoped::ScopedLexicalReport;
 use fgit_graph::lexical::{LexicalChannel, LexicalRefreshStats, LexicalSource, OMISSION_PROFILE};
 use fgit_graph::{GenerationActivation, GenerationRecovery, GraphGenerationId};
 use fgit_types::{InternalObjectId, RepositoryIncarnationId};
+use std::fmt::Write as _;
 use std::io;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 pub fn hex(bytes: &[u8]) -> String {
@@ -22,7 +23,9 @@ fn quote(value: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if c <= '\u{1f}' => {
+                write!(out, "\\u{:04x}", u32::from(c)).expect("writing to a String cannot fail");
+            }
             c => out.push(c),
         }
     }

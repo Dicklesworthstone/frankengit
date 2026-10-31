@@ -6,6 +6,7 @@ use super::{
 };
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{DecisionOutcome, PrincipalId};
+use std::fmt::Write as _;
 mod sources;
 use sources::Sources;
 pub(super) use sources::read_private;
@@ -314,7 +315,9 @@ fn quote(text: &str) -> String {
         match c {
             '"' => s.push_str("\\\""),
             '\\' => s.push_str("\\\\"),
-            c if c < '\u{20}' => s.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c < '\u{20}' => {
+                write!(s, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
             c => s.push(c),
         }
     }

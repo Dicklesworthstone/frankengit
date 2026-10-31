@@ -1,6 +1,7 @@
 //! One explicit local dispatch, not an unattended or remotely trusted trigger.
 //! All definitions and inputs come from one immutable authenticated snapshot.
 
+use std::fmt::Write as _;
 mod merge_candidate;
 
 use super::super::{
@@ -577,12 +578,12 @@ fn dispatch_at<A: GitHashAlgorithm>(
         limits.total_output_bytes,
     );
     if let Some(candidate) = candidate {
-        identity.push_str(&format!(
+        write!(identity,
             ",\"input_kind\":\"unpublished_candidate\",\"executed_commit\":\"{}\",\"executed_tree\":\"{}\",\"candidate\":{{\"commit\":\"{}\",\"tree\":\"{}\",\"bundle_sha256\":\"{}\",\"admitted\":false}},\"merge\":{}",
             candidate.commit, candidate.tree, candidate.commit, candidate.tree,
             hex(&candidate.bundle_sha256),
             candidate::merge_json(inputs.merge(), inputs.merge_style())
-        ));
+        ).expect("writing to a String cannot fail");
     }
     if let Some(changes) = &path_changes {
         let profile = match path_basis {
@@ -597,22 +598,25 @@ fn dispatch_at<A: GitHashAlgorithm>(
         }
         let oid =
             |id: Option<GitOid>| id.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
-        identity.push_str(&format!(
+        write!(identity,
             ",\"changed_paths\":{{\"profile\":\"{}\",\"requested_before\":{},\"compared_before\":{},\"after\":\"{}\",\"before_tree\":{},\"after_tree\":\"{}\",\"count\":{},\"sha256\":\"{}\",\"complete\":true}}",
             profile, oid(changes.requested_before), oid(changes.compared_before), changes.after,
             oid(changes.before_tree), changes.after_tree, changes.paths.len(), hex(&sha256_digest(&bytes))
-        ));
+        ).expect("writing to a String cannot fail");
     }
     if branch_filtered {
         let selected_ref = trigger_reference.ok_or_else(|| invalid("missing trigger branch"))?;
-        identity.push_str(&format!(
+        write!(
+            identity,
             ",\"trigger_ref_hex\":\"{}\"",
             hex(selected_ref.as_bytes())
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
 
     if let Some(config) = artifacts {
-        identity.push_str(&format!(",\"artifact_contract\":{}", config.to_json()));
+        write!(identity, ",\"artifact_contract\":{}", config.to_json())
+            .expect("writing to a String cannot fail");
     }
     let mut report = TrustedWorkflowDispatch {
         run_directory,

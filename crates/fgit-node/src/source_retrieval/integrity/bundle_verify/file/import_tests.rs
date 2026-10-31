@@ -2,6 +2,7 @@
 //! verification receipts, scratch spans or authority evidence.
 
 use super::*;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -554,7 +555,8 @@ fn named_fetch_bundle(
 fn fetch_commit(tree: GitOid, parent: Option<GitOid>, message: &str) -> Vec<u8> {
     let mut body = format!("tree {}\n", lowercase_hex(tree.as_bytes()));
     if let Some(parent) = parent {
-        body.push_str(&format!("parent {}\n", lowercase_hex(parent.as_bytes())));
+        writeln!(body, "parent {}", lowercase_hex(parent.as_bytes()))
+            .expect("writing to a String cannot fail");
     }
     body.push_str("author A <a@example.test> 0 +0000\ncommitter A <a@example.test> 0 +0000\n\n");
     body.push_str(message);

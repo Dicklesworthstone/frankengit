@@ -5,6 +5,7 @@ use fgit_authority::TerminalOutcome;
 use fgit_forge::event::issue::{IssueAction, IssueSnapshot, IssueState, validate_assignees};
 use fgit_forge::{AggregateId, ForgeEventPayload, IssueNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
+use std::fmt::Write as _;
 
 use super::{
     ApiError,
@@ -24,7 +25,7 @@ pub(super) fn quote(text: &str) -> String {
                 || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
                 | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
             {
-                out.push_str(&format!("\\u{:04x}", u32::from(c)));
+                write!(out, "\\u{:04x}", u32::from(c)).expect("writing to a String cannot fail");
             }
             c => out.push(c),
         }

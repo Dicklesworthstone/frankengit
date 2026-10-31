@@ -1,6 +1,7 @@
 //! Native merge preparation over one authenticated source snapshot. Unlike
 //! merge admission, this path performs NO object staging, seal or head write.
 
+use std::fmt::Write as _;
 #[path = "comment_anchor.rs"]
 mod comment_anchor;
 #[path = "commit_replay.rs"]
@@ -659,9 +660,9 @@ mod tests {
     ) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}"));
+        write!(body, "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}").expect("writing to a String cannot fail");
         object(node, ObjectType::Commit, body.into_bytes(), ids)
     }
     pub(super) fn fixture(

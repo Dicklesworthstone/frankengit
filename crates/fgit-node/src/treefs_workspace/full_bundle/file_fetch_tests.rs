@@ -9,6 +9,7 @@ use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_pack::full_bundle::fetch::BundleRefMapping;
 use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::io::{self, Read, Seek, SeekFrom};
 
 struct GraphFixture {
@@ -47,9 +48,9 @@ fn graph_fixture(scratch: &Scratch, format: GitHashAlgorithm) -> GraphFixture {
     let commit = |tree, parents: &[GitOid], label| {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author Native <native@example.test> 1 +0000\ncommitter Native <native@example.test> 1 +0000\n\n{label}\n"));
+        writeln!(body, "author Native <native@example.test> 1 +0000\ncommitter Native <native@example.test> 1 +0000\n\n{label}").expect("writing to a String cannot fail");
         body.into_bytes()
     };
     let base = put(GitObjectKind::Commit, &commit(tree, &[], "base"));

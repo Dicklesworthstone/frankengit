@@ -10,6 +10,7 @@ use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackError, PackWrite
 use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 #[derive(Default)]
 struct Source {
@@ -82,9 +83,9 @@ fn fixture(format: GitHashAlgorithm, count: usize, selected_count: usize) -> Fix
         );
         let mut body = format!("tree {tree}\n");
         if let Some(parent) = parent {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author A <a@example.invalid> 1 +0000\ncommitter A <a@example.invalid> 2 +0000\n\n{index}\n"));
+        writeln!(body, "author A <a@example.invalid> 1 +0000\ncommitter A <a@example.invalid> 2 +0000\n\n{index}").expect("writing to a String cannot fail");
         parent = Some(source.put(format, GitObjectKind::Commit, body.into_bytes()));
         if index + 1 == selected_count {
             selected = source.objects.keys().copied().collect();

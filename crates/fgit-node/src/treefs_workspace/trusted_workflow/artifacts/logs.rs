@@ -8,6 +8,7 @@ use super::{
 };
 use fgit_runner::Commitment;
 use fgit_runner::workflow::{JobOutcome, JobReport, StepOutcome};
+use std::fmt::Write as _;
 
 /// The exact process stream represented by a retained binary payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,7 +260,8 @@ impl Collector<'_> {
         );
         if let Some(inputs) = self.inputs.iter().find(|inputs| inputs.job_id == report.id) {
             manifest.pop();
-            manifest.push_str(&format!(",\"artifact_inputs\":{}}}", inputs.to_json()));
+            write!(manifest, ",\"artifact_inputs\":{}}}", inputs.to_json())
+                .expect("writing to a String cannot fail");
         }
         manifest
     }

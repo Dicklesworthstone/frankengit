@@ -2,6 +2,7 @@
 //! It is not a durable-node or pack-inflation substitute.
 use super::*;
 use std::cell::RefCell;
+use std::fmt::Write as _;
 
 #[derive(Default)]
 struct Objects {
@@ -25,9 +26,9 @@ impl Objects {
     fn commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}\n"));
+        writeln!(body, "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}").expect("writing to a String cannot fail");
         self.put(tree.algorithm(), ObjectType::Commit, body.into_bytes())
     }
     fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError> {

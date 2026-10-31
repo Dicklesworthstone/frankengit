@@ -10,6 +10,7 @@ use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackError, PackWrite
 use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 struct Source {
     bodies: BTreeMap<GitOid, (GitObjectKind, Vec<u8>)>,
@@ -91,9 +92,9 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
     let commit = |tree, parents: &[GitOid], message| {
         let mut text = format!("tree {tree}\n");
         for parent in parents {
-            text.push_str(&format!("parent {parent}\n"));
+            writeln!(text, "parent {parent}").expect("writing to a String cannot fail");
         }
-        text.push_str(&format!("author A <a@example.invalid> 1 +0000\ncommitter A <a@example.invalid> 1 +0000\n\n{message}\n"));
+        writeln!(text, "author A <a@example.invalid> 1 +0000\ncommitter A <a@example.invalid> 1 +0000\n\n{message}").expect("writing to a String cannot fail");
         text.into_bytes()
     };
     let parent = source.put(format, GitObjectKind::Commit, commit(old_tree, &[], "base"));

@@ -9,6 +9,7 @@ use super::super::{
 use super::dispatch::TrustedWorkflowDispatch;
 use fgit_crypto::sha256_digest;
 use fgit_types::RepositoryDecisionBatchId;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
@@ -294,16 +295,19 @@ impl OneNode {
         );
         if let Some(pull) = &selected.pull {
             event.pop();
-            event.push_str(&format!(
+            write!(
+                event,
                 ",\"pull_request\":{}}}",
                 pull.to_json(merge_config.is_some())
-            ));
+            )
+            .expect("writing to a String cannot fail");
         } else {
             let before = selected
                 .previous_commit
                 .map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
             event.pop();
-            event.push_str(&format!(",\"previous_commit\":{before}}}"));
+            write!(event, ",\"previous_commit\":{before}}}")
+                .expect("writing to a String cannot fail");
         }
         match fs::symlink_metadata(&event_directory) {
             Ok(_) => {
@@ -333,10 +337,8 @@ impl OneNode {
             {
                 pull_request_merge::Preparation::Ready(prepared) => {
                     event.pop();
-                    event.push_str(&format!(
-                        ",\"merge_candidate\":{}}}",
-                        prepared.to_json(config)
-                    ));
+                    write!(event, ",\"merge_candidate\":{}}}", prepared.to_json(config))
+                        .expect("writing to a String cannot fail");
                     Some(prepared)
                 }
                 pull_request_merge::Preparation::Idle(state) => {

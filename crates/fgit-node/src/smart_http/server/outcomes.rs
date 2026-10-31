@@ -4,6 +4,7 @@
 //! scope. The authority's existing key/seal verifier and outcome resolver own
 //! every reported fact. In particular, absence is never an abort certificate.
 
+use std::fmt::Write as _;
 mod sessions;
 
 use std::io::{self, Write};
@@ -356,7 +357,9 @@ fn quote(text: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if c.is_control() => {
+                write!(out, "\\u{:04x}", u32::from(c)).expect("writing to a String cannot fail");
+            }
             c => out.push(c),
         }
     }

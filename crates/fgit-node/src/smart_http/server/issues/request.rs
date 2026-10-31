@@ -9,6 +9,7 @@ use fgit_forge::event::issue::{
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
+use std::fmt::Write as _;
 
 use super::ApiError;
 
@@ -534,10 +535,12 @@ mod tests {
             }
             let mut maximum = "expected_version=2".to_owned();
             for seed in 1..=16u8 {
-                maximum.push_str(&format!("&assignee={}", format!("{seed:02x}").repeat(16)));
+                write!(maximum, "&assignee={}", format!("{seed:02x}").repeat(16))
+                    .expect("writing to a String cannot fail");
             }
             assert!(command(action, maximum.as_bytes()).is_ok());
-            maximum.push_str(&format!("&assignee={}", "ff".repeat(16)));
+            write!(maximum, "&assignee={}", "ff".repeat(16))
+                .expect("writing to a String cannot fail");
             assert_eq!(
                 command(action, maximum.as_bytes()).unwrap_err().code,
                 "resource_limit"

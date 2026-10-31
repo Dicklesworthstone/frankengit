@@ -3,6 +3,7 @@
 use super::super::Objects;
 use super::*;
 use fgit_pack::{CanonicalPackObject, PackPlanner, PackWriteProfile, PackWriter};
+use std::fmt::Write as _;
 
 #[path = "persisted_tests.rs"]
 mod persisted;
@@ -14,7 +15,7 @@ fn reference() -> RefName {
 fn commit(format: GitHashAlgorithm, root: GitOid, parent: Option<GitOid>) -> (GitOid, Object) {
     let mut body = format!("tree {root}\n");
     if let Some(parent) = parent {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
     body.push_str(
         "author A <a@example.invalid> 1 +0000\ncommitter C <c@example.invalid> 2 +0000\n\nroot\n",

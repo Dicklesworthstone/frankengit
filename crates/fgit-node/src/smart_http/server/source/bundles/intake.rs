@@ -21,6 +21,7 @@ use fgit_pack::full_bundle::{
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefName};
 use fgit_wire::smart_http::{BodyFraming, HttpLimits};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::io::Read;
 
 // Match the sealed native transaction ceiling; form/MIME bytes remain independently bounded.
@@ -496,10 +497,12 @@ mod tests {
             };
             // Match the browser's percent-encoded form, using short names so
             // the count boundary is independent of the unchanged byte budget.
-            value += &format!(
+            write!(
+                value,
                 "&mapping={}",
                 item("refs/a", &format!("refs/d{i:04}"), lease).replace(':', "%3A")
-            );
+            )
+            .expect("writing to a String cannot fail");
         }
         value
     }

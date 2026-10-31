@@ -13,6 +13,7 @@ use fgit_types::{
     DecisionOutcome, PrincipalId, RefName, RepositoryId, RepositoryIncarnationId, TenantId, TxId,
 };
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 const MAX_JOBS: usize = 128;
@@ -449,7 +450,9 @@ fn quote(text: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c <= '\u{1f}' => {
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
             c => out.push(c),
         }
     }
