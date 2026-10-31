@@ -220,7 +220,7 @@ fn refresh_refuses_search_recovery_and_duplicate_or_unknown_options() {
 #[test]
 fn refresh_rejects_malformed_predecessors_and_wrong_hash_domain_source_pins() {
     for token in [
-        "".into(),
+        String::new(),
         "alg:2:aa".into(),
         format!("alg:2:{}", "0".repeat(64)),
         format!("alg:1:{}", "a".repeat(64)),

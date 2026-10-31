@@ -342,11 +342,13 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         basis: &'a PublicationBasis,
         head: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
-        async move {
+        std::future::poll_fn(move |_| {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
-            self.snapshot(basis, head)
-                .map_err(ProjectionFailure::Refuse)
-        }
+            std::task::Poll::Ready(
+                self.snapshot(basis, head)
+                    .map_err(ProjectionFailure::Refuse),
+            )
+        })
     }
     fn materialize_commit_async<'a>(
         &'a self,
@@ -357,7 +359,9 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
     ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        async move { self.materialize_commit(basis, request, fold, closure) }
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(self.materialize_commit(basis, request, fold, closure))
+        })
     }
     fn materialize_batch_commit_async<'a>(
         &'a self,
@@ -368,17 +372,18 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
     ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            self.check(request)?;
-            crate::microbatch::materialize_canonical(
-                &self.inner,
-                state.basis(),
-                state.refs().clone(),
-                request,
-                fold,
-                closure,
-            )
-        }
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(self.check(request).and_then(|()| {
+                crate::microbatch::materialize_canonical(
+                    &self.inner,
+                    state.basis(),
+                    state.refs().clone(),
+                    request,
+                    fold,
+                    closure,
+                )
+            }))
+        })
     }
     fn materialize_refusal_async<'a>(
         &'a self,
@@ -388,10 +393,12 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
         tx: TxId,
         code: RefusalCode,
     ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            self.materialize_refusal(basis, tx, code)
-                .map_err(ProjectionFailure::Refuse)
-        }
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(
+                self.materialize_refusal(basis, tx, code)
+                    .map_err(ProjectionFailure::Refuse),
+            )
+        })
     }
 }
 

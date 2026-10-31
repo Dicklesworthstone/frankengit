@@ -31,7 +31,7 @@ use super::{CanonicalBlobReader, PackPayloadSource};
 use fgit_pack::basename_path_hash;
 use std::cell::RefCell;
 mod partial_clone;
-pub(crate) use partial_clone::unserved_filter_name;
+pub use partial_clone::unserved_filter_name;
 pub mod shallow;
 pub mod tags;
 
@@ -547,7 +547,7 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
 /// reads no object, and the planner reads and verifies only what it packs.
 /// Before, selection re-read every reachable body, blobs included, so even a
 /// small incremental fetch read the whole repository once.
-pub(super) struct VisibleGraphSelection<'a, S> {
+pub struct VisibleGraphSelection<'a, S> {
     objects: &'a BTreeMap<GitOid, partial_clone::FilterObject>,
     source: &'a S,
 }
@@ -1029,7 +1029,7 @@ pub fn bundle_visible_closure(
 /// transfer. Blob facts, including untyped roots, use checked envelopes only;
 /// this does not certify the present health of omitted blob payloads. The caller
 /// binds the admitted set and visible roots to its authenticated snapshot.
-pub(super) struct BundleVisibleGraph {
+pub struct BundleVisibleGraph {
     graph: VisibleGraph,
 }
 
@@ -1058,7 +1058,7 @@ impl BundleVisibleGraph {
 /// Preserve the ordinary visible-closure API and its callers. Streaming export
 /// additionally retains the checked facts and applies its independent index,
 /// metadata-byte and graph-work ceilings to the complete visibility proof.
-pub(super) fn bundle_visible_graph_bounded(
+pub fn bundle_visible_graph_bounded(
     source: &VerifiedFabricPackSource<'_>,
     admitted: &PermittedObjectClosure,
     roots: impl IntoIterator<Item = GitOid>,

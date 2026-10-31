@@ -161,7 +161,7 @@ fn transaction_limits_force_duplicates_formats_and_default_branch_remain_guarded
         vec![create("refs/tags/not-branch", base)],
         vec![good.clone(), delete("refs/heads/main", child)],
         vec![good.clone(), create("refs/heads/blob", blob)],
-        vec![good.clone(), advance("refs/heads/main", child, base)],
+        vec![good, advance("refs/heads/main", child, base)],
     ] {
         assert!(transact(&node, &commands, "invalid-many").is_err());
         assert_eq!(snapshot(&node).basis(), before.basis());

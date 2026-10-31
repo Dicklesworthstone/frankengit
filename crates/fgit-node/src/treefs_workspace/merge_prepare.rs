@@ -615,6 +615,7 @@ mod tests {
     use fgit_forge::{ExpectedVersion, PullRequestNumber};
     use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId, RepositoryId, TenantId};
     use std::collections::BTreeSet;
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -659,9 +660,9 @@ mod tests {
     ) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}"));
+        write!(body, "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}").expect("writing to a String cannot fail");
         object(node, ObjectType::Commit, body.into_bytes(), ids)
     }
     pub(super) fn fixture(

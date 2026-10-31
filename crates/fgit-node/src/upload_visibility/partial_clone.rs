@@ -13,7 +13,7 @@ use fgit_wire::ObjectFilter;
 /// upstream's `ERR filter '<name>' not supported`, so a stock client reports a
 /// typed remote error instead of a hang-up. The pack-time refusal in
 /// [`Predicate::compile`] stays as the backstop for callers that skip this.
-pub(crate) fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
+pub fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
     let mut pending = vec![filter];
     while let Some(filter) = pending.pop() {
         match filter {

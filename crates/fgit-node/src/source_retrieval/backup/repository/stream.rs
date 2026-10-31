@@ -229,7 +229,11 @@ impl<W: Write> StreamEncoder<W> {
         self.push(&length.to_be_bytes(), live)?;
         self.push(commitment, live)?;
         let mut remaining = length;
-        let mut buffer = [0; CHUNK_BYTES];
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(CHUNK_BYTES)
+            .map_err(|_| "repository backup stream buffer allocation failed")?;
+        buffer.resize(CHUNK_BYTES, 0);
         while remaining != 0 {
             let offered = usize::try_from(remaining.min(CHUNK_BYTES as u64))
                 .map_err(|_| "repository backup object length cannot fit a chunk")?;

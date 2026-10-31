@@ -115,7 +115,7 @@ impl From<PrincipalSnapshot> for PrincipalSnapshotRecord {
 }
 
 impl PrincipalSnapshotRecord {
-    pub(super) fn from_context(
+    pub(super) const fn from_context(
         context: &AdmissionContext,
         basis: &PublicationBasis,
         authentication: Option<AdmissionAuthentication>,
@@ -130,7 +130,7 @@ impl PrincipalSnapshotRecord {
         }
     }
 
-    fn identity(&self) -> &PrincipalSnapshot {
+    const fn identity(&self) -> &PrincipalSnapshot {
         match self {
             Self::Legacy(snapshot) => snapshot,
             Self::Authenticated(snapshot) => &snapshot.identity,
@@ -138,7 +138,7 @@ impl PrincipalSnapshotRecord {
     }
 
     #[must_use]
-    pub fn repository_id(&self) -> RepositoryId {
+    pub const fn repository_id(&self) -> RepositoryId {
         self.identity().repository_id()
     }
 

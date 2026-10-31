@@ -185,7 +185,7 @@ fn lexical_omissions_share_the_initial_result_budget_with_hits_in_each_channel()
         lexical_result_bytes(&report, &mut short, channel_bytes - 1),
         Err(RetrievalError::Limit("retained result bytes"))
     ));
-    assert!(short <= channel_bytes - 1);
+    assert!(short < channel_bytes);
 
     // Initial keeps each channel's receipt, including duplicate omissions.
     lexical_result_bytes(&report, &mut total, 2 * channel_bytes).unwrap();
@@ -214,7 +214,7 @@ fn same_source_and_generation_cannot_join_different_lexical_coverage_inventories
                 0 => path.omissions[0].path = b"vendor/other.bin".to_vec(),
                 1 => {
                     path.omissions[0].blob =
-                        git_object_id(format, GitObjectKind::Blob, &[b'y'; 128])
+                        git_object_id(format, GitObjectKind::Blob, &[b'y'; 128]);
                 }
                 2 => path.omissions[0].source_bytes += 1,
                 3 => path.omissions[0].limit += 1,
@@ -413,7 +413,7 @@ fn symbol_join_checks_all_source_and_namespace_coordinates_not_just_commit() {
                         CodecVersion::new(1, 0),
                         b"other",
                     ))
-                    .unwrap()
+                    .unwrap();
             }
             6 => {
                 changed.rcr = RepositoryCommitId::from_internal_object_id(internal_object_id(
@@ -422,7 +422,7 @@ fn symbol_join_checks_all_source_and_namespace_coordinates_not_just_commit() {
                     CodecVersion::new(1, 0),
                     b"other",
                 ))
-                .unwrap()
+                .unwrap();
             }
             7 => {
                 changed.forge = Digest::new(
@@ -432,10 +432,10 @@ fn symbol_join_checks_all_source_and_namespace_coordinates_not_just_commit() {
                         SchemaId::new(SchemaFamily::from_static("test"), 1, 0),
                         b"other",
                     ),
-                )
+                );
             }
             _ => {
-                changed.tree = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, b"other")
+                changed.tree = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, b"other");
             }
         }
         assert!(matches!(

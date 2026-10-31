@@ -355,6 +355,7 @@ fn receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     fn form(payload: &[u8], format: GitHashAlgorithm) -> String {
         format!(
             "object_format={}&artifact_sha256={}",
@@ -496,10 +497,12 @@ mod tests {
             };
             // Match the browser's percent-encoded form, using short names so
             // the count boundary is independent of the unchanged byte budget.
-            value += &format!(
+            write!(
+                value,
                 "&mapping={}",
                 item("refs/a", &format!("refs/d{i:04}"), lease).replace(':', "%3A")
-            );
+            )
+            .expect("writing to a String cannot fail");
         }
         value
     }

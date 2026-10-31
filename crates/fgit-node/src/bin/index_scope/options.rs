@@ -218,7 +218,7 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
                     unhex(text(value)?, 4096)?
                 } else {
                     text(value)?.as_bytes().to_vec()
-                })
+                });
             }
             _ => {
                 if !name.starts_with("--")

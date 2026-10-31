@@ -9,7 +9,7 @@ use super::{
 #[cfg(test)]
 use super::{GitHashAlgorithm, UploadPackVersion};
 use fgit_wire::closure::ShallowUpdate;
-pub(crate) mod cutoffs;
+pub mod cutoffs;
 mod relative;
 
 /// Shared only with the repository view for the lifetime of this connection.

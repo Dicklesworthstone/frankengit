@@ -155,7 +155,7 @@ fn source(root: &Path, format: GitHashAlgorithm) -> GitOid {
 fn pin(path: &Path) -> [u8; 32] {
     let mut file = File::open(path).unwrap();
     let mut hash = Sha256Hasher::new();
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = vec![0; 64 * 1024];
     loop {
         let count = file.read(&mut buffer).unwrap();
         if count == 0 {

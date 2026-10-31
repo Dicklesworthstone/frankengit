@@ -327,7 +327,7 @@ fn forged_commitments_length_and_terminal_source_failures_never_create_an_owner_
                 2 => payload[0] ^= 1,
                 3 => expected.payload_commitment[0] ^= 1,
                 4 => {
-                    expected.object_identity = git_object_id(format, GitObjectKind::Blob, b"other")
+                    expected.object_identity = git_object_id(format, GitObjectKind::Blob, b"other");
                 }
                 5 => {}
                 _ => unreachable!(),

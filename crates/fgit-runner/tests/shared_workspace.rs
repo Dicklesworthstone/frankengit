@@ -217,7 +217,7 @@ impl<A: GitHashAlgorithm> Fixture<A> {
         }
     }
 
-    fn payload_bytes(&self) -> u64 {
+    const fn payload_bytes(&self) -> u64 {
         (NAMES.len() * self.body.len()) as u64
     }
 }
@@ -527,11 +527,7 @@ fn cache_scope_and_capabilities_are_rechecked_and_job_inputs_stay_separate() {
     .unwrap();
     let (other_plan, other_capability) = fixture.plan(2, false);
     let mut cases = vec![
-        (
-            other_plan,
-            capability.clone(),
-            HostRefusal::IdentityMismatch,
-        ),
+        (other_plan, capability, HostRefusal::IdentityMismatch),
         (
             subset,
             subset_capability,

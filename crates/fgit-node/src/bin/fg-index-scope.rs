@@ -83,7 +83,7 @@ fn execute(
             let result =
                 node.runtime()
                     .block_on(node.refresh_scoped_source_index_guarded_local_in(
-                        &request,
+                        request,
                         &options.reference,
                         &options.scope,
                         options.head,
@@ -199,7 +199,7 @@ fn run(options: &Options, budget: OperatorDeadline) -> io::Result<(String, bool)
     })();
     // Always finish node shutdown after the native future settles. Do not
     // report a committed index as rolled back when output or shutdown fails.
-    let shutdown = node.shutdown().map(|_| ()).map_err(failure);
+    let shutdown = node.shutdown().map_err(failure);
     match (outcome, shutdown) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),

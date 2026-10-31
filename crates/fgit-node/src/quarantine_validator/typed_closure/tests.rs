@@ -11,6 +11,7 @@ use fgit_types::{
 };
 use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId, RefName};
 use fgit_wire::receive::ReceiveCommand;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -77,11 +78,13 @@ fn raw(format: GitHashAlgorithm, kind: ObjectType, body: Vec<u8>) -> Raw {
 fn commit(format: GitHashAlgorithm, tree: GitOid, parents: &[GitOid], label: &str) -> Raw {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
-    body.push_str(&format!(
-        "author T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\n{label}\n"
-    ));
+    writeln!(
+        body,
+        "author T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\n{label}"
+    )
+    .expect("writing to a String cannot fail");
     raw(format, ObjectType::Commit, body.into_bytes())
 }
 fn tree(format: GitHashAlgorithm, entries: &[(&str, &str, GitOid)]) -> Raw {
@@ -347,18 +350,21 @@ fn selected_frontier_requires_real_typed_bytes_and_never_uses_unselected_presenc
             (absent, RefusalCode::EvidenceMissing),
         ] {
             let bad = commit(format, id, &[], "bad frontier");
-            assert_eq!(check(&selected, &[bad.clone()], &[bad.id]), Err(expected));
+            assert_eq!(
+                check(&selected, std::slice::from_ref(&bad), &[bad.id]),
+                Err(expected)
+            );
             assert!(node.read_git_object(bad.id).is_err());
         }
         let allowed = commit(format, empty, &[], "selected tree");
         let unselected = selected_validator(&node, format, &[], PackLimits::default());
         assert_eq!(
-            check(&unselected, &[allowed.clone()], &[allowed.id]),
+            check(&unselected, std::slice::from_ref(&allowed), &[allowed.id]),
             Err(RefusalCode::ObjectClosureIncomplete)
         );
         assert!(node.read_git_object(allowed.id).is_err());
         assert_eq!(
-            check(&selected, &[allowed.clone()], &[allowed.id])
+            check(&selected, std::slice::from_ref(&allowed), &[allowed.id])
                 .unwrap()
                 .objects,
             BTreeSet::from([allowed.id])

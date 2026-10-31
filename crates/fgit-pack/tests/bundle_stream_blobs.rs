@@ -53,7 +53,7 @@ enum Payload {
     Repeated { byte: u8, length: usize },
 }
 impl Payload {
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         match self {
             Self::Bytes(bytes) => bytes.len(),
             Self::Repeated { length, .. } => *length,
@@ -109,7 +109,7 @@ struct Source {
     active: Cell<usize>,
 }
 impl Source {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             metadata: BTreeMap::new(),
             blobs: BTreeMap::new(),
@@ -662,14 +662,14 @@ fn short_growing_corrupt_overflowing_and_failed_reader_completion_never_issue_a_
             };
             match fault {
                 Fault::Short | Fault::Extra => {
-                    assert!(matches!(error, PackWriteError::SourceLengthMismatch { .. }))
+                    assert!(matches!(error, PackWriteError::SourceLengthMismatch { .. }));
                 }
                 Fault::Corrupt => assert_eq!(
                     error,
                     PackWriteError::Pack(PackError::NativeObjectIdMismatch)
                 ),
                 Fault::Overflow => {
-                    assert!(matches!(error, PackWriteError::SourceReadOverflow { .. }))
+                    assert!(matches!(error, PackWriteError::SourceReadOverflow { .. }));
                 }
                 Fault::Read | Fault::Eof => assert_eq!(error, PackWriteError::TemporaryReadRefused),
                 Fault::None => unreachable!(),

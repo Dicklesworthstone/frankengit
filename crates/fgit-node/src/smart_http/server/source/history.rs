@@ -714,7 +714,7 @@ mod tests {
         let mut forged = row.clone();
         forged.body.push(b'x');
         assert!(commit(&mut Output::new(4096), &forged, format, &mut || true).is_err());
-        let mut partial = page.clone();
+        let mut partial = page;
         partial.total_commits = 2;
         assert!(validate_page(&partial, LogOptions::default(), format).is_err());
         partial.commits.push(row);

@@ -3,9 +3,10 @@
 use super::*;
 use fgit_crypto::{lowercase_hex, sha1_digest};
 use fgit_pack::{DeltaBase, EntryKind};
+use std::fmt::Write as _;
 
 fn zlib(body: &[u8]) -> Vec<u8> {
-    assert!(body.len() <= u16::MAX as usize);
+    assert!(u16::try_from(body.len()).is_ok());
     let length = body.len() as u16;
     let mut bytes = vec![0x78, 0x01, 0x01];
     bytes.extend_from_slice(&length.to_le_bytes());
@@ -65,7 +66,8 @@ fn bundle(format: GitHashAlgorithm, records: &[Vec<u8>], refs: &[(Vec<u8>, GitOi
 fn commit(tree: GitOid, parents: &[GitOid]) -> Vec<u8> {
     let mut value = format!("tree {}\n", lowercase_hex(tree.as_bytes()));
     for parent in parents {
-        value.push_str(&format!("parent {}\n", lowercase_hex(parent.as_bytes())));
+        writeln!(value, "parent {}", lowercase_hex(parent.as_bytes()))
+            .expect("writing to a String cannot fail");
     }
     value.push_str("author A <a@example.invalid> 1700000000 +0000\ncommitter A <a@example.invalid> 1700000000 +0000\n\nmessage\n");
     value.into_bytes()

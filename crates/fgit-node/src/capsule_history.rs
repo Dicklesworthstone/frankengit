@@ -7,9 +7,9 @@ use fgit_types::Digest;
 
 use crate::AdmissionMaterializationRefusal;
 
-pub(crate) use fgit_chronicle::HistoryStep;
+pub use fgit_chronicle::HistoryStep;
 
-pub(crate) async fn predecessor_in<S>(
+pub async fn predecessor_in<S>(
     store: &S,
     cx: &S::Context,
     successor: &RepositoryAuthorityHeadBody,

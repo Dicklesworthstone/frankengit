@@ -10,6 +10,7 @@ use fgit_authority::IdempotencyKey;
 use fgit_crypto::{sha1_digest, sha256_digest};
 use fgit_forge::review::ReviewContent;
 use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId, RepositoryId, TenantId};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,9 +43,9 @@ fn incoming() -> RefName {
 fn body(tree: GitOid, parents: &[GitOid], label: &str) -> Vec<u8> {
     let mut value = format!("tree {tree}\n");
     for parent in parents {
-        value.push_str(&format!("parent {parent}\n"));
+        writeln!(value, "parent {parent}").expect("writing to a String cannot fail");
     }
-    value.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}\n"));
+    writeln!(value, "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}").expect("writing to a String cannot fail");
     value.into_bytes()
 }
 fn tree(file: GitOid, keep: GitOid) -> Vec<u8> {
@@ -401,9 +402,11 @@ fn minimal_and_thick_workspace_merge_and_squash_have_identical_reviews_and_spars
                     f.target
                 );
                 if mode != 0 {
-                    header.push_str(&format!("-{} source\n", f.source));
+                    writeln!(header, "-{} source", f.source)
+                        .expect("writing to a String cannot fail");
                 }
-                header.push_str(&format!("{id} refs/heads/main\n\n"));
+                writeln!(header, "{id} refs/heads/main\n")
+                    .expect("writing to a String cannot fail");
                 [header.into_bytes(), pack(format, entries)].concat()
             };
             let minimal = bundle(&entries);

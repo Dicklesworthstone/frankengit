@@ -38,7 +38,6 @@ fn service_scope_cannot_widen_or_remove_schedule_bounds() {
     }
     assert_eq!(
         allowed
-            .clone()
             .with_attempt_timeout(Duration::from_secs(1))
             .unwrap()
             .attempt_timeout(),
@@ -102,9 +101,7 @@ fn maintenance_groups_keep_independent_profiles_and_refuse_conflicting_owners() 
     assert_eq!(group.configs()[1].directory(), Path::new("/symbols"));
     assert_eq!(MaintenanceGroup::from(lexical.clone()).configs().len(), 1);
     assert!(MaintenanceGroup::try_new(Vec::new()).is_err());
-    assert!(
-        MaintenanceGroup::try_new(vec![lexical.clone(), symbols.clone(), lexical.clone()]).is_err()
-    );
+    assert!(MaintenanceGroup::try_new(vec![lexical.clone(), symbols, lexical.clone()]).is_err());
     assert!(
         MaintenanceGroup::try_new(vec![
             lexical.clone(),

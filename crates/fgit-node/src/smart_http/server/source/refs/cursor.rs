@@ -102,7 +102,7 @@ mod tests {
             assert!(CursorEncoding::parse(Some(bad)).is_err());
         }
         for bad in [
-            "".to_owned(),
+            String::new(),
             "abc".into(),
             "GG".into(),
             "aa".repeat(4097),

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! Real authority and context-packet boundary tests for FG-030.
 
-#[path = "publication/fixture.rs"]
+#[path = "publication/evidence.rs"]
 mod publication_fixture;
 
 use fgit_agent::{

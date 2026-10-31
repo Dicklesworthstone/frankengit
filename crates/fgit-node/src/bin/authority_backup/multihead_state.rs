@@ -42,7 +42,7 @@ const MAGIC: &[u8; 8] = b"FGARM002";
 #[derive(Debug)]
 pub(super) struct Custody {
     root: PathBuf,
-    _lock: File,
+    lock: File,
 }
 impl Custody {
     pub(super) fn acquire(
@@ -77,7 +77,7 @@ impl Custody {
             .map_err(|e| format!("restore already running or lock unavailable: {e}"))?;
         let custody = Self {
             root: root.to_path_buf(),
-            _lock: lock,
+            lock,
         };
         let binding = binding(pin, instance);
         let marker = root.join(INTENT);
@@ -102,7 +102,7 @@ impl Custody {
             // to recreate a previously published/later advanced store.
             create_private(&root.join(QUARANTINE))?;
             sync_directory(&root.join(QUARANTINE)).map_err(|e| e.to_string())?;
-            custody._lock.sync_all().map_err(|e| e.to_string())?;
+            custody.lock.sync_all().map_err(|e| e.to_string())?;
             // Whole-file, same-directory, no-replace publication: a torn marker
             // can never authorize an import. A pre-marker crash is not adopted.
             publish_new(&marker, &binding)?;

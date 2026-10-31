@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as _;
 
 use std::fs;
 use std::io::Cursor;
@@ -49,10 +50,12 @@ impl Fixture {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
-            table.push_str(&format!(
-                "{digest} {} {scopes}\n",
+            writeln!(
+                table,
+                "{digest} {} {scopes}",
                 PrincipalId::from_bytes([principal; 16])
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         fs::write(&path, table).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();

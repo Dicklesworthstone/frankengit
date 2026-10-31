@@ -13,6 +13,7 @@ use fgit_types::{
     RepositoryId, TenantId,
 };
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -251,11 +252,11 @@ fn execute(
                     report.omissions.len(),
                 );
                 for (ordinal, omission) in report.omissions.iter().enumerate() {
-                    coverage.push_str(&format!(
+                    write!(coverage,
                         "{}{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"source_bytes\":{},\"reason\":\"{}\",\"limit\":{}}}",
                         if ordinal == 0 { "" } else { "," }, hex(&omission.path), omission.blob,
                         omission.source_bytes, omission.reason.as_str(), omission.limit,
-                    ));
+                    ).expect("writing to a String cannot fail");
                     if coverage.len() > 8 * 1024 * 1024 {
                         return Err(NodeWorkspaceRefusal::SourceIndex(Box::new(
                             fgit_graph::lexical::LexicalError::Limit("coverage output bytes")

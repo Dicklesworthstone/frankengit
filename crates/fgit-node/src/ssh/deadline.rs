@@ -136,7 +136,9 @@ mod tests {
         let (mut client, mut server) = pair();
         client.write_all(b"queued").unwrap();
         let mut expired = budget(Duration::from_millis(1));
-        expired.started = Instant::now() - Duration::from_secs(1);
+        expired.started = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock supports a past deadline");
         let mut input = [0u8; 6];
         assert_eq!(
             read(&mut server, &expired, &mut input).unwrap_err().kind(),
@@ -180,7 +182,9 @@ mod tests {
         assert_eq!(deadline.shared.admitted_bytes.load(Ordering::Relaxed), 0);
 
         client.write_all(b"x").unwrap();
-        deadline.started = Instant::now() - Duration::from_secs(10);
+        deadline.started = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("test clock supports a past deadline");
         assert_eq!(
             read(&mut server, &deadline, &mut input).unwrap_err().kind(),
             io::ErrorKind::TimedOut
@@ -230,7 +234,9 @@ mod tests {
     fn terminal_writes_and_window_control_do_not_reopen_git_reads_or_handshake() {
         let (mut client, mut server) = pair();
         let mut deadline = budget(Duration::from_secs(5));
-        deadline.started = Instant::now() - Duration::from_secs(10);
+        deadline.started = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("test clock supports a past deadline");
         let work = deadline.clone();
         deadline.begin_terminal_response();
         client.write_all(b"window").unwrap();
@@ -271,7 +277,9 @@ mod tests {
     fn a_silent_terminal_window_wait_has_its_own_finite_bound() {
         let (_client, mut server) = pair();
         let mut deadline = budget(Duration::from_millis(40));
-        deadline.started = Instant::now() - Duration::from_secs(1);
+        deadline.started = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock supports a past deadline");
         deadline.begin_terminal_response();
         let started = Instant::now();
         let error = read_for_write(&mut server, &deadline, &mut [0u8; 1]).unwrap_err();

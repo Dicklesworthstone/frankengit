@@ -24,7 +24,7 @@ use fgit_types::{Digest, GitOid, RefName};
 /// Dense requests need no projection when the full working copy is already
 /// bounded by the number of intents. This also avoids an extra copy for empty
 /// and tiny repositories. Overflow cannot select an understated basis size.
-pub(super) fn full_basis_fits_request(basis: FoldBasis<'_>, request: &TransactionRequest) -> bool {
+pub fn full_basis_fits_request(basis: FoldBasis<'_>, request: &TransactionRequest) -> bool {
     let Some(entries) = basis
         .refs
         .len()
@@ -44,7 +44,7 @@ pub(super) fn full_basis_fits_request(basis: FoldBasis<'_>, request: &Transactio
 }
 
 #[derive(Default)]
-pub(super) struct SparseBasis {
+pub struct SparseBasis {
     refs: BTreeMap<RefName, GitOid>,
     forge_positions: BTreeMap<ForgeStreamId, ForgeStreamPosition>,
     retention: BTreeSet<RetentionRoot>,

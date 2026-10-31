@@ -14,13 +14,5 @@ fn main() -> ExitCode {
     }
 }
 
-// Preserve the original focused binary test target and repository:: test names.
-// Production calls the library above; tests compile the SAME host and repository
-// sources, not a second implementation or an independent verification oracle.
-#[cfg(test)]
-pub use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeRequestContext, OneNode};
-#[cfg(test)]
-#[path = "../source_retrieval/backup/repository/mod.rs"]
-mod repository;
-#[cfg(test)]
-include!("../source_retrieval/backup/host.rs");
+// Recovery unit tests live in source_retrieval::backup in the owning library.
+// repository_backup_command exercises this executable through real processes.

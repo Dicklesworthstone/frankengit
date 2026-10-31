@@ -1,6 +1,7 @@
 //! Repository-bound execution of the existing trusted workflow profile.
 //! Never expose this local-owner operation as a remote or hostile CI endpoint.
 
+use std::fmt::Write as _;
 pub(super) mod artifacts;
 mod candidate;
 mod completion;
@@ -183,7 +184,8 @@ impl TrustedWorkflowRun {
             candidate::merge_json(self.merge.as_ref(), self.merge_style)
         );
         if let Some(contract) = &self.artifact_contract {
-            identity.push_str(&format!(",\"artifact_contract\":{}", contract.to_json()));
+            write!(identity, ",\"artifact_contract\":{}", contract.to_json())
+                .expect("writing to a String cannot fail");
         }
         identity
     }
@@ -224,34 +226,40 @@ impl TrustedWorkflowRun {
             .as_ref()
             .is_some_and(|config| config.capture_logs())
         {
-            artifacts.push_str(&format!(
+            write!(
+                artifacts,
                 ",\"artifact_logs\":[{}]",
                 self.artifact_logs
                     .iter()
                     .map(artifacts::TrustedWorkflowJobLogs::to_json)
                     .collect::<Vec<_>>()
                     .join(","),
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         if self
             .artifact_contract
             .as_ref()
             .is_some_and(|config| !config.inputs().is_empty())
         {
-            artifacts.push_str(&format!(
+            write!(
+                artifacts,
                 ",\"artifact_inputs\":[{}]",
                 self.artifact_inputs
                     .iter()
                     .map(artifacts::TrustedWorkflowJobArtifactInputs::to_json)
                     .collect::<Vec<_>>()
                     .join(",")
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         if let Some(stats) = &self.shared_inputs {
-            artifacts.push_str(&format!(
+            write!(
+                artifacts,
                 ",\"shared_inputs\":{}",
                 shared_inputs::statistics_json(stats)
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         format!(
             concat!(

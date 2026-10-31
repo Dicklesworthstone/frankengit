@@ -10,6 +10,7 @@ use fgit_forge::{AggregateVersion, ForgeEventPayload};
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, RefName, RepositoryId, TenantId,
 };
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +60,7 @@ fn incoming() -> RefName {
 fn commit(tree: GitOid, parents: &[GitOid], label: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
     body.push_str("author Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\n");
     body.push_str(label);

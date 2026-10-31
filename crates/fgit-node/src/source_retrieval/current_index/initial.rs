@@ -286,11 +286,11 @@ impl OneNode {
             &mut || live(request),
         )?;
         Ok(RevalidatedInitialReport {
-            vector,
             current_source,
             content,
             path,
             symbols,
+            vector,
             result_bytes,
             authorization,
         })

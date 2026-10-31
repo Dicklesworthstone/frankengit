@@ -7,7 +7,7 @@ use std::sync::{Arc, atomic::AtomicI64};
 
 const ISSUED_MS: i64 = 1_577_836_800_000; // 2020-01-01T00:00:00Z
 const EXPIRES_MS: i64 = 2_208_988_800_000; // 2040-01-01T00:00:00Z
-const ISSUER_PROGRAM: &str = r#"
+const ISSUER_PROGRAM: &str = r"
 import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -28,7 +28,7 @@ if (mode === 'mutated') {
 await writeFile(approval, envelope, { flag: 'wx', mode: 0o600 });
 await writeFile(trustKey, createPublicKey(key).export({ format: 'pem', type: 'spki' }),
   { flag: 'wx', mode: 0o600 });
-"#;
+";
 
 struct Signed {
     flags: Vec<String>,

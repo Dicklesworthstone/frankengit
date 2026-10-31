@@ -158,7 +158,22 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         // This method is reached only by reviewed-candidate reuse after a
         // verified original Blob edge. Bodies and external delta bases retain
         // their separate buffered limits in with_object.
-        let maximum = self.validator.node.reused_merge_blob_limit() as u64;
+        let mut maximum = self.validator.node.reused_merge_blob_limit();
+        if self
+            .validator
+            .node
+            .service_config
+            .selected_pack_blob_limit
+            .is_none()
+        {
+            // Without an explicit separate blob policy, preserve the caller's
+            // existing per-object narrowing. The opt-in only separates typed
+            // inherited blob lengths from buffered candidate/parser limits.
+            maximum = maximum
+                .min(self.validator.pack_limits.max_object_bytes)
+                .min(self.validator.parse_limits.max_object_bytes);
+        }
+        let maximum = maximum as u64;
         let result = self.validator.node.fabric.read_header_bounded(id, maximum);
         checkpoint(deadline)?;
         let header = result.map_err(|error| match error {

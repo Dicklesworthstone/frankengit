@@ -128,7 +128,7 @@ mod tests {
         );
         assert_eq!(
             profile
-                .with_timeout_cap(Some(Duration::from_secs(900)))
+                .with_timeout_cap(Some(Duration::from_mins(15)))
                 .unwrap()
                 .timeout,
             Duration::from_secs(300)

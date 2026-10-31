@@ -211,7 +211,7 @@ fn exact_membership_kinds_and_formats_cannot_be_widened() {
                 .is_none()
         );
     }
-    let mut hints = f.keys.clone();
+    let mut hints = f.keys;
     for key in &mut hints {
         key.path_hash = 42;
         key.recency = 17;
@@ -360,7 +360,7 @@ fn current_entry_output_native_object_and_total_limits_are_inclusive() {
         },
         PackLimits {
             max_total_expanded_bytes: 5,
-            ..exact.clone()
+            ..exact
         },
     ] {
         assert!(
@@ -408,7 +408,7 @@ fn inflated_delta_programs_cannot_bypass_smaller_current_envelopes() {
         },
         PackLimits {
             max_total_expanded_bytes: 3,
-            ..exact.clone()
+            ..exact
         },
     ] {
         assert!(

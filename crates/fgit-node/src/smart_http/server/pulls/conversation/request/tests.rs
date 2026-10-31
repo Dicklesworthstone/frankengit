@@ -328,7 +328,7 @@ fn nonblank_utf8_comments_have_the_exact_native_byte_boundary() {
 fn read_continuations_need_a_pinned_head_and_preserve_the_rendering_request() {
     let token = format!("alg:1:{}", "ab".repeat(32));
     for (query, accepted) in [
-        ("".to_owned(), true),
+        (String::new(), true),
         ("limit=1".to_owned(), true),
         (
             format!("after=1&limit=2&expected_head={token}&render=html_safe"),

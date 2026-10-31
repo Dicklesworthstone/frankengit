@@ -72,7 +72,7 @@ impl OwnedScope {
 /// An immutable certificate of one complete native parse. Fields stay private:
 /// parsed adjacency cannot be substituted by an unverified caller.
 #[derive(Debug)]
-pub(crate) struct VerifiedCommitMetadata {
+pub struct VerifiedCommitMetadata {
     id: GitOid,
     tree: GitOid,
     parents: Vec<GitOid>,
@@ -167,7 +167,7 @@ impl VerifiedCommitMetadata {
         )
     }
 
-    fn fits(&self, limits: &ParseLimits, object_limit: usize) -> bool {
+    const fn fits(&self, limits: &ParseLimits, object_limit: usize) -> bool {
         self.body_bytes <= object_limit
             && self.body_bytes <= limits.max_object_bytes
             && self.header_lines <= limits.max_header_lines
@@ -199,7 +199,7 @@ impl VerifiedCommitMetadata {
     }
 }
 
-fn parse_error(id: GitOid, error: ObjectError) -> MergeSourceError {
+const fn parse_error(id: GitOid, error: ObjectError) -> MergeSourceError {
     match error {
         ObjectError::ObjectTooLarge { .. }
         | ObjectError::TooManyTreeEntries { .. }
@@ -222,7 +222,7 @@ struct State {
 /// Lock contention/poison, a disabled cache and scope mismatch all mean a miss.
 /// Neither a cache read nor insertion performs I/O or chooses repository state.
 #[derive(Debug)]
-pub(crate) struct AncestryMetadataCache {
+pub struct AncestryMetadataCache {
     max_bytes: usize,
     state: Mutex<State>,
     #[cfg(test)]
@@ -352,7 +352,7 @@ impl AncestryMetadataCache {
 
 /// Borrowed service scope plus cache; SelectedSource retains responsibility for
 /// current membership, logical byte accounting and runtime checkpoints.
-pub(crate) struct AncestryMetadataAccess<'a> {
+pub struct AncestryMetadataAccess<'a> {
     cache: &'a AncestryMetadataCache,
     scope: Scope<'a>,
 }

@@ -120,7 +120,7 @@ impl OneNode {
                 })
             }
         };
-        receive_session::admit_with_checkpoint(
+        Box::pin(receive_session::admit_with_checkpoint(
             &self.authority,
             request.authority(),
             &context,
@@ -128,7 +128,7 @@ impl OneNode {
             limits,
             &projection,
             &checkpoint,
-        )
+        ))
         .await
         .map_err(|error| NodeSmartHttpRefusal::ReceiveInterrupted(Box::new(error)))
     }

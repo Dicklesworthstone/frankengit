@@ -46,16 +46,17 @@ impl OneNode {
                 false
             }
         };
-        let control = ImportControl::new(&mut live);
-        let result = self.stage_loose_git_import_controlled(
-            source,
-            max_refs,
-            maximum_bytes,
-            &control,
-            staging,
-        );
-        let result = control.after(result, |error| error);
-        drop(control);
+        let result = {
+            let control = ImportControl::new(&mut live);
+            let result = self.stage_loose_git_import_controlled(
+                source,
+                max_refs,
+                maximum_bytes,
+                &control,
+                staging,
+            );
+            control.after(result, |error| error)
+        };
         if matches!(&result, Err(LooseGitImportRefusal::Node(error))
             if matches!(**error, crate::NodeRefusal::ResourceContainment))
         {

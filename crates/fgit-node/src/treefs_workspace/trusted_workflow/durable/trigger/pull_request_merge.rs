@@ -1,6 +1,11 @@
 //! Exact PR candidates admitted on an operator-owned CI branch before execution.
 //! Local custody suppresses retries; ordinary sealed ref admission owns truth.
-use super::*;
+use super::{
+    File, Format, GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode, Path, RefName,
+    RepositoryAuthorityHeadId, Selected, TrustedRefWorkflowPoll, TrustedWorkflowArtifactConfig,
+    TrustedWorkflowFailure, WorkflowLimits, cancellation, commitment, hex, invalid, invalid_owned,
+    io, pull_request, reporting, sha256_digest, workspace_request_live, write_new,
+};
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::{
@@ -47,29 +52,34 @@ impl PullRequestMergeWatchConfig {
             style,
         })
     }
-    pub fn reference(&self) -> &RefName {
+    #[must_use]
+    pub const fn reference(&self) -> &RefName {
         &self.reference
     }
+    #[must_use]
     pub const fn principal(&self) -> PrincipalId {
         self.principal
     }
-    pub fn metadata(&self) -> &MergeMetadata {
+    #[must_use]
+    pub const fn metadata(&self) -> &MergeMetadata {
         &self.metadata
     }
+    #[must_use]
     pub const fn profile(&self) -> MergeProfile {
         self.profile
     }
+    #[must_use]
     pub const fn style(&self) -> MergeCommitStyle {
         self.style
     }
 
-    fn profile_name(&self) -> &'static str {
+    const fn profile_name(&self) -> &'static str {
         match self.profile {
             MergeProfile::PathMergeV1 => "path",
             MergeProfile::ExactRenamesV1 => "exact-renames",
         }
     }
-    fn style_name(&self) -> &'static str {
+    const fn style_name(&self) -> &'static str {
         match self.style {
             MergeCommitStyle::TwoParent => "merge-commit",
             MergeCommitStyle::Squash => "squash",

@@ -88,7 +88,7 @@ serving remains mandatory. The lock does not make unrelated node tools cooperate
 
 ```sh
 cargo test --locked -p fgit-authority-fsqlite --lib portable_store::resume
-cargo test --locked -p fgit-node --bin fg-repository-backup
+cargo test --locked -p fgit-node --lib source_retrieval::backup::
 cargo test --locked -p fgit-node --test repository_backup_resume
 cargo test --locked -p fgit-node --test repository_backup_command
 cargo test --locked -p fgit-node --test repository_backup_large

@@ -2,6 +2,7 @@
 //! Operator-owned progress, NOT repository authority. Pure std so its actual
 //! codec, transition rules and file boundary have a standalone test lane.
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -147,10 +148,8 @@ impl State {
             } else {
                 "0"
             };
-            out.push_str(&format!(
-                "{} {floor} {number} {pending} {phase}\n",
-                hex(reference)
-            ));
+            writeln!(out, "{} {floor} {number} {pending} {phase}", hex(reference))
+                .expect("writing to a String cannot fail");
             if out.len() > MAX_STATE_BYTES {
                 return Err(invalid("progress size limit"));
             }

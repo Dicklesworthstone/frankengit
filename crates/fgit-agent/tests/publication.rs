@@ -107,7 +107,7 @@ fn ordinary_sealing<A: GitHashAlgorithm>() {
 
     // A changed ref command gets its own evidence subject and still encounters
     // the ordinary authority's same-key/different-request refusal.
-    let mut changed = change.clone();
+    let mut changed = change;
     let mut intents = changed.proposal.ref_intents().to_vec();
     intents[0].name = b"refs/heads/other".to_vec();
     changed.proposal = ProposedTransaction::seal(
@@ -300,7 +300,7 @@ fn actual_overlay_export_and_proposal_paths_cannot_be_substituted() {
         publication_refusal(&paths_changed, &evidence),
         AgentPublicationRefusal::WorkspaceBinding
     );
-    let mut missing_body = change.clone();
+    let mut missing_body = change;
     missing_body
         .overlay
         .content_mut()
@@ -478,7 +478,7 @@ fn failed_shared_unreported_or_unlinked_verifiers_never_satisfy_independence() {
         publication_refusal(&change, &unlinked),
         AgentPublicationRefusal::RequirementIndependence(_)
     ));
-    let mut duplicate = evidence.clone();
+    let mut duplicate = evidence;
     duplicate
         .change
         .verifiers
@@ -493,7 +493,7 @@ fn failed_shared_unreported_or_unlinked_verifiers_never_satisfy_independence() {
 fn approval_mode_and_root_are_bound_to_the_independent_host_expectation() {
     let (change, evidence) = fixture();
     assert!(prepare(&change, &evidence).is_ok());
-    let mut wrong = evidence.clone();
+    let mut wrong = evidence;
     wrong.approval = PlanApproval::Granted {
         approval_root: digest(99),
     };
@@ -554,7 +554,8 @@ fn unresolved_real_broker_responsibility_blocks_preparation_until_aborted() {
         publication_refusal(&change, &evidence),
         AgentPublicationRefusal::Reconciliation
     );
-    broker.abort(grant).unwrap();
+    let release = broker.abort(grant).unwrap();
+    assert_eq!(release.amount(), ResourceVector::single(Grade::Bytes, 8));
     evidence.report =
         RunReconciliationReport::build(run, broker.records(), LogicalTime::new(12)).unwrap();
     let accepted = prepare(&change, &evidence).unwrap();

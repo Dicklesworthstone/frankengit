@@ -130,7 +130,11 @@ pub(super) fn read_bytes(
 ) -> Result<Vec<u8>, ReadFailure> {
     let mut remaining = limit.saturating_add(1);
     let mut bytes = Vec::new();
-    let mut buffer = [0_u8; IO_CHUNK_BYTES];
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(IO_CHUNK_BYTES)
+        .map_err(|_| ReadFailure::Io(io::ErrorKind::OutOfMemory.into()))?;
+    buffer.resize(IO_CHUNK_BYTES, 0);
     loop {
         control.checkpoint().map_err(ReadFailure::Interrupted)?;
         if remaining == 0 {

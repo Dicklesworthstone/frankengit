@@ -328,6 +328,7 @@ fn page(query: Option<&str>) -> Result<Page, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     fn fields() -> String {
         format!(
             "object_format=sha1&pull_request_version=1&policy_epoch=1&source_ref=refs%2Fheads%2Ftopic&target_ref=refs%2Fheads%2Fmain&source_tip={}&target_tip={}&merge_base={}&candidate_commit={}",
@@ -531,10 +532,12 @@ mod tests {
         let actor = PrincipalId::from_bytes([255; 16]);
         let mut body = fields() + "&method=squash";
         for byte in 1..=32 {
-            body.push_str(&format!(
+            write!(
+                body,
                 "&required_reviewer={}",
                 PrincipalId::from_bytes([byte; 16])
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         let Command::Merge {
             required, method, ..
@@ -546,10 +549,12 @@ mod tests {
         };
         assert_eq!(required.reviewers().len(), 32);
         assert_eq!(method, NativeMergeMethod::Squash);
-        body.push_str(&format!(
+        write!(
+            body,
             "&required_reviewer={}",
             PrincipalId::from_bytes([33; 16])
-        ));
+        )
+        .expect("writing to a String cannot fail");
         assert!(
             request(Operation::Merge)
                 .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)

@@ -36,7 +36,9 @@ fn selected_upload_allowance_is_shared_bounded_and_never_added_twice() {
 #[test]
 fn terminal_upload_report_never_revives_work_and_is_only_armed_once() {
     let mut deadline = session_deadline();
-    deadline.started = Instant::now() - Duration::from_secs(11);
+    deadline.started = Instant::now()
+        .checked_sub(Duration::from_secs(11))
+        .expect("test clock supports a past deadline");
     assert!(deadline.expired());
     assert!(!deadline.note_selected_upload_work(usize::MAX));
     assert!(deadline.remaining_write().is_err());
@@ -45,14 +47,18 @@ fn terminal_upload_report_never_revives_work_and_is_only_armed_once() {
     assert!(deadline.remaining_write().is_ok());
     assert!(deadline.remaining().is_err());
     assert!(!deadline.note_selected_upload_work(usize::MAX));
-    deadline.clone().begin_terminal_response();
+    deadline.begin_terminal_response();
     assert_eq!(deadline.shared.terminal_response.get(), Some(&expiry));
     // A terminal phase already in the past cannot be replaced by retrying.
     let stopped = session_deadline();
     stopped
         .shared
         .terminal_response
-        .set(Instant::now() - Duration::from_secs(1))
+        .set(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test clock supports a past deadline"),
+        )
         .unwrap();
     stopped.begin_terminal_response();
     assert!(stopped.remaining_write().is_err());
@@ -70,7 +76,9 @@ fn raw_upload_timeout_writes_an_actionable_fatal_after_its_work_clock_expires() 
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let (mut stream, _) = listener.accept().unwrap();
         let mut deadline = session_deadline();
-        deadline.started = Instant::now() - Duration::from_secs(11);
+        deadline.started = Instant::now()
+            .checked_sub(Duration::from_secs(11))
+            .expect("test clock supports a past deadline");
         let request = fgit_wire::PackRequest {
             version,
             wants: Vec::new(),

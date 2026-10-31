@@ -221,7 +221,7 @@ struct AuditCheckpoints<'a> {
     refusal: RefCell<Option<GraphAuditRefusal>>,
 }
 impl<'a> AuditCheckpoints<'a> {
-    fn new(request: &'a NodeRequestContext, started: Instant, timeout: Duration) -> Self {
+    const fn new(request: &'a NodeRequestContext, started: Instant, timeout: Duration) -> Self {
         Self {
             request,
             started,
@@ -510,7 +510,13 @@ impl OneNode {
                                 ),
                             })
                     } else {
-                        let mut buffer = [0; 64 * 1024];
+                        let mut buffer = Vec::new();
+                        buffer.try_reserve_exact(64 * 1024).map_err(|_| {
+                            GraphAuditRefusal::Graph(GraphRefusal::Limit(
+                                "audit stream buffer allocation",
+                            ))
+                        })?;
+                        buffer.resize(64 * 1024, 0);
                         loop {
                             match read_audit_blob(&mut stream, &mut buffer, &checkpoints) {
                                 Ok(0) => break Ok(()),

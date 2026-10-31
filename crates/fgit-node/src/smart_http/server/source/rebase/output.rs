@@ -395,7 +395,10 @@ mod tests {
             tree: id(4),
             kind: RebaseStepKind::DroppedEmpty,
         };
-        assert_eq!(validate_steps(&command, &[dropped.clone()]).unwrap(), id(3));
+        assert_eq!(
+            validate_steps(&command, std::slice::from_ref(&dropped)).unwrap(),
+            id(3)
+        );
         let mut bad = dropped.clone();
         bad.rewritten = id(5);
         assert!(validate_steps(&command, &[bad]).is_err());

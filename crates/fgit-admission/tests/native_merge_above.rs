@@ -295,13 +295,11 @@ fn a_false_base_and_a_rewound_fast_forward_refuse_beside_their_twins() {
         base_tip: h.main[h.main.len() - 2],
         ..h.merge.clone()
     };
-    for merge in [&false_base] {
-        assert!(matches!(
-            validate_merge_objects_above(&h.objects, merge, &h.selected, limits, &mut || true),
-            Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
-        ));
-        assert!(validate_merge_objects(&h.objects, merge, limits, &mut || true).is_err());
-    }
+    assert!(matches!(
+        validate_merge_objects_above(&h.objects, &false_base, &h.selected, limits, &mut || true),
+        Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
+    ));
+    assert!(validate_merge_objects(&h.objects, &false_base, limits, &mut || true).is_err());
     // A fast-forward of main from main~3 to its tip is permitted and adds
     // nothing; rewinding it is refused.
     let forward = NativeMerge {

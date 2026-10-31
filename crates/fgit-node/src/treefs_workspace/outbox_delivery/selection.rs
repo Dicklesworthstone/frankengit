@@ -181,7 +181,7 @@ impl OneNode {
             .iter()
             .filter(|entry| after.is_none_or(|key| entry.delivery_key() > key))
             .take(usize::from(limit) + 1)
-            .cloned()
+            .copied()
             .collect();
         let more = entries.len() > usize::from(limit);
         entries.truncate(usize::from(limit));
@@ -251,7 +251,7 @@ impl OneNode {
         checkpoint(request)?;
         Ok(SelectedForgeDelivery {
             source_head,
-            entry: entry.clone(),
+            entry: *entry,
             events,
             unclaimed: effect.state() == fgit_resource::ObligationState::Committed,
         })

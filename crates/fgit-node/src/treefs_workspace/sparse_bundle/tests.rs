@@ -2,6 +2,7 @@
 //! The map is a read-only object-source oracle, not a durable node substitute.
 use super::*;
 use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
 
 use fgit_admission::merge::native::objects::{CanonicalObjectHeader, validate_commit_closure};
 use fgit_crypto::git_object_id;
@@ -41,9 +42,9 @@ impl Source {
     fn commit(&mut self, tree: GitOid, parents: &[GitOid], sequence: usize) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\ncommit {sequence}\n"));
+        writeln!(body, "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\ncommit {sequence}").expect("writing to a String cannot fail");
         self.put(ObjectType::Commit, body.into_bytes())
     }
     fn full(&self, commit: GitOid) -> BTreeSet<GitOid> {

@@ -337,7 +337,7 @@ fn disclosure_walk_bounds_unique_nodes_frontier_and_aggregate_bytes_inclusively(
             [tree],
             &PackLimits {
                 max_entries: 2,
-                ..exact.clone()
+                ..exact
             },
         ),
         RefusalCode::ResourceBudgetExceeded,

@@ -179,7 +179,7 @@ impl NativeBlobHash {
 
 /// Protects even custom encoders from accepting a short, growing, or forged
 /// source. The final one-byte probe is never included in the native hash.
-pub(crate) struct VerifiedBlobReader<'a> {
+pub struct VerifiedBlobReader<'a> {
     reader: &'a mut dyn CanonicalBlobReader,
     id: ObjectId,
     declared: usize,

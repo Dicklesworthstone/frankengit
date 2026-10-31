@@ -1,17 +1,5 @@
 name: Authenticated publication and immutable replay
 on:
-  push:
-    branches: [main]
-    paths:
-      - crates/fgit-admission/**
-      - crates/fgit-policy/**
-      - crates/fgit-forge/**
-      - crates/fgit-node/**
-      - crates/fgit-object-fabric/**
-      - Cargo.lock
-      - rust-toolchain.toml
-      - scripts/verify-authenticated-publication.sh
-      - .github/workflows/authenticated-publication.yml
   workflow_dispatch:
 permissions:
   contents: read
@@ -42,7 +30,7 @@ jobs:
           key: fg-auth-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: fg-auth-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Verify the exact committed implementation
-        run: bash scripts/verify-authenticated-publication.sh
+        run: ./scripts/verify.sh authenticated-publication
       - uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         if: always() && steps.cache.outputs.cache-hit != 'true'
         with:

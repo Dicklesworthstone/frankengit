@@ -34,7 +34,7 @@ echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
   printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|full|release}\n' "$0" >&2
-  printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|native-rebase-check|native-rebase-test|pull-request-checks|continuous-serve|tier-a\n' >&2
+  printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|authenticated-publication|native-rebase-check|native-rebase-test|pull-request-checks|continuous-serve|tier-a\n' >&2
 }
 refuse_dormant() {
   printf '\033[1;33m==> %s\033[0m\n' "$1" >&2
@@ -233,6 +233,7 @@ run_lane() {
     symbol-index-maintenance) exec "$ROOT/scripts/verify_symbol_index.sh" maintenance ;;
     review-protection) exec "$ROOT/scripts/verify_review_protection.sh" ;;
     admission-tests) exec cargo test --locked -p fgit-admission --all-targets --no-fail-fast ;;
+    authenticated-publication) exec bash "$ROOT/scripts/verify-authenticated-publication.sh" ;;
     native-rebase-check) exec "$ROOT/scripts/verify_native_rebase.sh" check ;;
     native-rebase-test) exec "$ROOT/scripts/verify_native_rebase.sh" test ;;
     pull-request-checks) exec "$ROOT/scripts/verify_pull_request_checks.sh" ;;

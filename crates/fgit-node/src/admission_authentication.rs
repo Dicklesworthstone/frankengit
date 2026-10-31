@@ -18,7 +18,7 @@ use super::{
     ensure_materializer_catch_up_live, evidence_root, stage_evidence_body_in,
 };
 
-pub(super) async fn stage_principal_snapshot_in<S, C>(
+pub async fn stage_principal_snapshot_in<S, C>(
     store: &S,
     cx: &S::Context,
     repository: RepositoryId,
@@ -55,7 +55,7 @@ where
     }
 }
 
-pub(super) async fn read_principal_snapshot_in<S, C>(
+pub async fn read_principal_snapshot_in<S, C>(
     store: &S,
     cx: &S::Context,
     repository: RepositoryId,
@@ -94,7 +94,7 @@ where
     Ok(body)
 }
 
-pub(super) async fn direct_decision_evidence_in<S, C>(
+pub async fn direct_decision_evidence_in<S, C>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
@@ -135,7 +135,7 @@ where
     }
 }
 
-pub(super) async fn attach_prepared_policy_in<S, C>(
+pub async fn attach_prepared_policy_in<S, C>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
@@ -242,14 +242,17 @@ impl OneNode {
         let projection = self
             .durable_admission_projection_publishing(context, staging)?
             .with_authentication(authentication);
-        admit_basis_bound_validated_receive_async(
+        // Keep the measured admission state on one bounded heap frame instead
+        // of embedding it in every caller. It remains awaited by this request;
+        // cancellation and responsibility finalization keep the same owner.
+        Box::pin(admit_basis_bound_validated_receive_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 }

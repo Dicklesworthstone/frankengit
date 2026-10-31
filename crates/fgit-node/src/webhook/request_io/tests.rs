@@ -72,7 +72,11 @@ fn repeated_progress_cannot_renew_the_absolute_deadline() {
     for seconds in (1..=10).rev() {
         let remaining = Duration::from_secs(seconds);
         assert_eq!(
-            attempt.remaining_at(original_deadline - remaining),
+            attempt.remaining_at(
+                original_deadline
+                    .checked_sub(remaining)
+                    .expect("test clock supports the original deadline window")
+            ),
             Ok(remaining)
         );
         assert_eq!(attempt.deadline, original_deadline);

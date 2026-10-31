@@ -106,17 +106,20 @@ fn reference(text: &str) -> Result<RefName, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
     fn form(format: GitHashAlgorithm, count: usize) -> String {
         let mut form = format!("object_format={}", format.as_str());
         for i in 0..count {
-            form.push_str(&format!(
+            write!(
+                form,
                 "&create={}:{}",
                 hex(format!("refs/heads/a{i}").as_bytes()),
                 "a".repeat(format.digest_len() * 2)
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         form
     }

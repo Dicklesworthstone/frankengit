@@ -234,7 +234,10 @@ fn connected(timeout: Duration) -> Connection {
         GitDaemonSessionTimeout::try_new(timeout).unwrap(),
         GitDaemonSessionWorkScaling::FLAT,
     );
-    work.started = Instant::now() - timeout - Duration::from_secs(1);
+    work.started = Instant::now()
+        .checked_sub(timeout)
+        .and_then(|instant| instant.checked_sub(Duration::from_secs(1)))
+        .expect("test clock supports the expired work deadline");
     Connection {
         state: RefCell::new(SshConnectionState {
             session,

@@ -32,7 +32,7 @@ const OBJECT_OVERHEAD: usize = 512;
 
 /// Metadata established by the native validator for EVERY raw pack entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct VerifiedReceivedObject {
+pub struct VerifiedReceivedObject {
     pub(crate) id: GitOid,
     pub(crate) kind: ObjectType,
     pub(crate) bytes: usize,
@@ -117,7 +117,7 @@ struct State {
 /// Shared by serving children. Pinned readers remain charged and cannot be
 /// evicted while their payloads still hold the immutable allocation.
 #[derive(Debug)]
-pub(crate) struct ReceivedPackCache {
+pub struct ReceivedPackCache {
     max_bytes: usize,
     state: Arc<Mutex<State>>,
 }
@@ -431,7 +431,7 @@ impl Drop for Reservation {
 /// Native-verified bytes awaiting the fabric's final collision check.
 /// Drop releases the entry before its reservation; no lookup can see it.
 #[derive(Debug)]
-pub(crate) struct PendingReceivedPack {
+pub struct PendingReceivedPack {
     entry: Entry,
     reservation: Reservation,
 }
@@ -445,7 +445,7 @@ impl PendingReceivedPack {
 
 /// Each active reader has its own cursor and pins the accounted bytes.
 #[derive(Debug)]
-pub(crate) struct ReceivedPackPayload {
+pub struct ReceivedPackPayload {
     entry: Arc<Entry>,
     offset: usize,
 }

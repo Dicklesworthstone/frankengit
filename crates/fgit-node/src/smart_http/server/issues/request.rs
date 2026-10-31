@@ -153,7 +153,7 @@ impl<'a> Request<'a> {
         for (key, value) in fields {
             match key.as_str() {
                 "expected_version" if action != "append-comment" => {
-                    set_once(&mut version, decimal(&value)?)?
+                    set_once(&mut version, decimal(&value)?)?;
                 }
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
                 "body" if matches!(action, "open" | "edit" | "comment" | "append-comment") => {
@@ -421,6 +421,7 @@ pub(super) fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     use fgit_wire::smart_http::{HttpLimits, head};
 
@@ -534,10 +535,12 @@ mod tests {
             }
             let mut maximum = "expected_version=2".to_owned();
             for seed in 1..=16u8 {
-                maximum.push_str(&format!("&assignee={}", format!("{seed:02x}").repeat(16)));
+                write!(maximum, "&assignee={}", format!("{seed:02x}").repeat(16))
+                    .expect("writing to a String cannot fail");
             }
             assert!(command(action, maximum.as_bytes()).is_ok());
-            maximum.push_str(&format!("&assignee={}", "ff".repeat(16)));
+            write!(maximum, "&assignee={}", "ff".repeat(16))
+                .expect("writing to a String cannot fail");
             assert_eq!(
                 command(action, maximum.as_bytes()).unwrap_err().code,
                 "resource_limit"

@@ -4,6 +4,7 @@
 
 use super::*;
 use fgit_wire::smart_http::head;
+use std::fmt::Write as _;
 
 fn encoded_policy(source: &str) -> String {
     source
@@ -66,9 +67,11 @@ fn http_large_reference_policy_frame_roundtrips_without_expanding_other_form_lim
     let literal = "a".repeat(900);
     let mut source = String::from("policy large { ");
     for index in 0..40 {
-        source.push_str(&format!(
+        write!(
+            source,
             "rule r{index:02} {{ when ref.name == \"{literal}\" then deny \"blocked\" }} "
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     source.push_str("default allow }");
     let source_form = format!("{prefix}&ref_policy_source={}", encoded_policy(&source));
@@ -320,7 +323,7 @@ fn principal_and_reference_hex_are_exact_and_non_utf8_branches_remain_lossless()
     assert!(!json.contains("reference\":"));
 
     for bad in [
-        "".to_owned(),
+        String::new(),
         "abc".to_owned(),
         hex(b"refs/heads/main").to_uppercase(),
         "zz".to_owned(),
@@ -334,7 +337,7 @@ fn principal_and_reference_hex_are_exact_and_non_utf8_branches_remain_lossless()
         assert!(reference(&bad).is_err(), "{bad}");
     }
     for bad in [
-        "".to_owned(),
+        String::new(),
         "a".repeat(31),
         "a".repeat(33),
         "A".repeat(32),
@@ -365,14 +368,16 @@ fn reference_limit_is_the_native_byte_limit_and_has_an_exact_accepted_boundary()
 fn every_native_collection_limit_is_enforced_without_silently_truncating_sets() {
     let mut administrators = "expected_version=1&expected_epoch=2&clear=true".to_owned();
     for byte in 1..=MAX_POLICY_ADMINISTRATORS {
-        administrators.push_str(&format!("&administrator={}", person(byte as u8)));
+        write!(administrators, "&administrator={}", person(byte as u8))
+            .expect("writing to a String cannot fail");
     }
     let command = parse_command(administrators.as_bytes()).unwrap();
     assert_eq!(
         command.protection.administrators.len(),
         MAX_POLICY_ADMINISTRATORS
     );
-    administrators.push_str(&format!("&administrator={}", person(99)));
+    write!(administrators, "&administrator={}", person(99))
+        .expect("writing to a String cannot fail");
     assert_eq!(
         parse_command(administrators.as_bytes()).unwrap_err().status,
         Status::TooLarge
@@ -383,22 +388,26 @@ fn every_native_collection_limit_is_enforced_without_silently_truncating_sets() 
         person(1)
     );
     for byte in 1..=MAX_BRANCH_REVIEWERS {
-        reviewers.push_str(&format!(
+        write!(
+            reviewers,
             "&required_reviewer={}:{}",
             hex(b"refs/heads/main"),
             person(byte as u8)
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     let command = parse_command(reviewers.as_bytes()).unwrap();
     assert_eq!(
         command.protection.branches[0].reviewers.len(),
         MAX_BRANCH_REVIEWERS
     );
-    reviewers.push_str(&format!(
+    write!(
+        reviewers,
         "&required_reviewer={}:{}",
         hex(b"refs/heads/main"),
         person(99)
-    ));
+    )
+    .expect("writing to a String cannot fail");
     assert_eq!(
         parse_command(reviewers.as_bytes()).unwrap_err().status,
         Status::TooLarge
@@ -409,19 +418,23 @@ fn every_native_collection_limit_is_enforced_without_silently_truncating_sets() 
         person(1)
     );
     for branch in 0..MAX_PROTECTED_BRANCHES {
-        branches.push_str(&format!(
+        write!(
+            branches,
             "&required_reviewer={}:{}",
             hex(format!("refs/heads/branch-{branch:03}").as_bytes()),
             person(2)
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     let command = parse_command(branches.as_bytes()).unwrap();
     assert_eq!(command.protection.branches.len(), MAX_PROTECTED_BRANCHES);
-    branches.push_str(&format!(
+    write!(
+        branches,
         "&required_reviewer={}:{}",
         hex(b"refs/heads/one-more"),
         person(2)
-    ));
+    )
+    .expect("writing to a String cannot fail");
     assert_eq!(
         parse_command(branches.as_bytes()).unwrap_err().status,
         Status::TooLarge
@@ -563,7 +576,7 @@ fn check_only_http_commands_preserve_exact_selectors_and_read_representation() {
     assert!(json.contains(&format!("\"source_ref_hex\":\"{source}\"")));
     assert!(json.contains(&format!("\"job\":{}", quote(job))));
     assert!(parse_command(format!("{body}&{check}").as_bytes()).is_err());
-    for bad in ["".to_owned(), "00".into(), "ff".into(), "61".repeat(1025)] {
+    for bad in [String::new(), "00".into(), "ff".into(), "61".repeat(1025)] {
         let malformed = format!(
             "{base}&required_check={}:{}:{}:{}:{bad}",
             hex(b"refs/heads/main"),

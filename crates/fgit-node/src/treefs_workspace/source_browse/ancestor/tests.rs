@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 struct Fixture {
     format: Format,
@@ -21,9 +22,9 @@ impl Fixture {
         let tree = fgit_crypto::git_object_id(self.format, GitObjectKind::Tree, &[]);
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author A <a@example.invalid> 1 +0000\ncommitter A <a@example.invalid> 1 +0000\n\n{message}\n"));
+        writeln!(body, "author A <a@example.invalid> 1 +0000\ncommitter A <a@example.invalid> 1 +0000\n\n{message}").expect("writing to a String cannot fail");
         self.body(body.into_bytes())
     }
     fn run(&self, tip: Oid, wanted: Oid, limits: Limits) -> Result<Receipt, NodeWorkspaceRefusal> {

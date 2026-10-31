@@ -446,13 +446,13 @@ impl OneNode {
 /// A candidate validator's source, never an upload or disclosure source.
 /// New objects are read from this request's synced custody; dependencies not
 /// owned by it use the existing verified fabric path.
-pub(crate) struct StagedCandidatePackSource<'source, 'staging> {
+pub struct StagedCandidatePackSource<'source, 'staging> {
     source: VerifiedFabricPackSource<'source>,
     staging: &'staging ReceiveStaging,
 }
 
 impl<'source> VerifiedFabricPackSource<'source> {
-    pub(crate) fn with_staging<'staging>(
+    pub(crate) const fn with_staging<'staging>(
         self,
         staging: &'staging ReceiveStaging,
     ) -> StagedCandidatePackSource<'source, 'staging> {

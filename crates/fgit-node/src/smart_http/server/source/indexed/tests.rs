@@ -173,7 +173,7 @@ fn indexed_renderers_refuse_inconsistent_or_understated_coverage_before_output()
             6 => report.omissions[0].source_bytes = usize::MAX,
             7 => {
                 report.omissions[0].blob =
-                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap()
+                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap();
             }
             8 => report.indexed_documents = 20_000,
             9 => report.indexed_source_bytes = 64 * 1024 * 1024,
@@ -402,7 +402,7 @@ fn result_rows_refuse_wrong_coordinates_order_counts_format_and_scope() {
             2 => r.results.hits[0].document_id = 0,
             3 => {
                 r.results.hits[0].blob =
-                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap()
+                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap();
             }
             4 => r.results.hits[0].path = b"../file".to_vec(),
             5 => r.results.next_after = Some(1),

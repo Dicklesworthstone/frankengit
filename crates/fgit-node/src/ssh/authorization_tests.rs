@@ -71,7 +71,9 @@ fn expired_and_disconnected_sessions_never_invoke_the_authorization_source() {
         let observed = Arc::clone(&calls);
         let mut limit = deadline(Duration::from_secs(5));
         if expired {
-            limit.started = Instant::now() - Duration::from_secs(10);
+            limit.started = Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .expect("test clock supports a past deadline");
         } else {
             client.shutdown(Shutdown::Both).unwrap();
         }
@@ -102,7 +104,9 @@ fn deadline_or_disconnect_during_source_io_discards_an_otherwise_valid_grant() {
         GitDaemonSessionTimeout::try_new(Duration::from_secs(1)).unwrap(),
         GitDaemonSessionWorkScaling::DEFAULT,
     );
-    limit.started = Instant::now() - Duration::from_secs(10);
+    limit.started = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .expect("test clock supports a past deadline");
     limit.note_admitted(1 << 30);
     assert!(!limit.expired());
     let source_limit = limit.clone();

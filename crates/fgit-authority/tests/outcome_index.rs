@@ -2315,6 +2315,88 @@ fn the_two_collector_surfaces_agree_that_an_absent_head_is_an_empty_index() {
 // which of its two failure sites was reached.
 
 #[test]
+fn empty_checkpoint_replay_reaches_genesis_and_keeps_the_entire_decision_tail() {
+    let store = store();
+    let mut genesis = genesis_head();
+    genesis.outcome_index_root = fgit_authority::outcome_index_root(&[]).unwrap();
+    initialize_repository(&store, &head_slot(), &genesis).unwrap();
+    let decisions = vec![committed(tx(0xA1), 1, 0x51), refused(tx(0xB2), 2, 0x52)];
+    let first = batch(&genesis, 1, decisions.clone());
+    let head = successor_head(&genesis, batch_id_of(&first), 2);
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).unwrap() else {
+        panic!("genesis must be published");
+    };
+    assert!(matches!(
+        publish_decisions(
+            &store,
+            &head_slot(),
+            receipt.token(),
+            &first,
+            &head,
+            tenant()
+        )
+        .unwrap(),
+        PublicationOutcome::Published(_)
+    ));
+    let baseline = fgit_authority::collect_cumulative_outcomes(&store, &head_slot()).unwrap();
+    let from_empty = fgit_authority::collect_cumulative_outcomes_from_checkpoint(
+        &store,
+        &head_slot(),
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(from_empty, baseline);
+    assert_eq!(from_empty.len(), decisions.len());
+    for decision in &decisions {
+        assert_eq!(
+            from_empty.decision_for(decision.tx_id),
+            Some(TerminalOutcome {
+                decision_sequence: decision.decision_sequence,
+                outcome: decision.outcome,
+            })
+        );
+    }
+    let view = AsyncView(store);
+    let asynchronous = poll_ready(
+        fgit_authority::collect_cumulative_outcomes_from_checkpoint_async(
+            &view,
+            &(),
+            &head_slot(),
+            &[],
+            None,
+            None,
+        ),
+    )
+    .unwrap();
+    assert_eq!(asynchronous, baseline);
+    assert!(matches!(
+        fgit_authority::collect_cumulative_outcomes_from_checkpoint(
+            &view.0,
+            &head_slot(),
+            &decisions,
+            None,
+            None,
+        ),
+        Err(OutcomeFailure::CheckpointRootMismatch)
+    ));
+    assert!(matches!(
+        poll_ready(
+            fgit_authority::collect_cumulative_outcomes_from_checkpoint_async(
+                &view,
+                &(),
+                &head_slot(),
+                &decisions,
+                None,
+                None,
+            )
+        ),
+        Err(OutcomeFailure::CheckpointRootMismatch)
+    ));
+}
+
+#[test]
 fn async_checkpoint_collector_refuses_same_tail_with_a_different_sequence() {
     let (store, head) = published_repository();
     let view = AsyncView(store);

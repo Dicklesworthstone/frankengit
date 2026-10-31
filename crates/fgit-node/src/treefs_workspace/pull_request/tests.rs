@@ -12,6 +12,7 @@ use fgit_forge::event::{ForgeEventPayload, NativeMerge};
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RefName, RepositoryId, TenantId,
 };
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,7 +64,7 @@ fn session(key: &str) -> LoopbackReceiveSession {
 fn commit(tree: GitOid, parents: &[GitOid], label: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
     body.push_str("author Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\n");
     body.push_str(label);
@@ -331,7 +332,7 @@ fn stale_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
     let f = fixture(&node, &scratch, GitHashAlgorithm::Sha1);
     let open = command(&f, 1);
     accepted(apply(&node, &open, "open"));
-    let mut winner = open.clone();
+    let mut winner = open;
     winner.action = PullRequestAction::Update;
     winner.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
     winner.data.title = "Winner".into();
@@ -361,11 +362,11 @@ fn stale_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
     );
     assert_eq!(apply(&node, &loser, "loser").unwrap(), refused);
     assert_eq!(snapshot(&node).basis(), after.basis());
-    let mut close = winner.clone();
+    let mut close = winner;
     close.action = PullRequestAction::Close;
     close.expected_version = ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap());
     accepted(apply(&node, &close, "close"));
-    let mut resurrection = close.clone();
+    let mut resurrection = close;
     resurrection.action = PullRequestAction::Update;
     resurrection.expected_version = ExpectedVersion::Exactly(AggregateVersion::try_new(3).unwrap());
     let refused = apply(&node, &resurrection, "resurrection").unwrap();

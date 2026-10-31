@@ -3677,10 +3677,7 @@ impl VerifiedFabricPackSource<'_> {
     /// alone, under the same session and Database probes as a body read. The
     /// payload is neither read nor verified (frankengit-8xyq): a caller that
     /// discloses or packs bytes must finish a verified body read or blob stream.
-    fn read_object_header(&self, id: &GitOid) -> Result<(ObjectType, usize), PackWriteError> {
-        self.read_object_header_within(id, self.maximum_object_bytes)
-    }
-
+    ///
     /// Metadata reads keep the fabric's independent stored-file and envelope
     /// limits. A disclosure walk can retain an oversized blob's length without
     /// allocating or reading its body. Selected bodies retain the separate
@@ -9473,7 +9470,7 @@ impl OneNode {
                 .await;
         }
         let projection = self.durable_admission_projection(context)?;
-        fgit_admission::merge::admit_merge_async(
+        Box::pin(fgit_admission::merge::admit_merge_async(
             &self.authority,
             request.authority(),
             context,
@@ -9481,7 +9478,7 @@ impl OneNode {
             limits,
             &projection,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -9566,14 +9563,14 @@ impl OneNode {
             .durable_admission_projection(&context)
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
             .with_authentication(authenticated.authentication());
-        admit_validated_receive_async(
+        Box::pin(admit_validated_receive_async(
             &self.authority,
             request.authority(),
             &context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
@@ -11833,9 +11830,9 @@ mod tests {
     use std::time::Duration;
 
     use fgit_admission::evidence::{
-        DURABLE_REFUSAL_EVIDENCE_DETAIL, EvaluatedPolicyDecisionEvidence, ForgeEventBatch,
-        InvariantEvidence, OutboxEffectBatch, RefusalEvidence, RefusalEvidenceBodies,
-        RetentionDelta, evidence_root,
+        AdmissionAuthentication, DURABLE_REFUSAL_EVIDENCE_DETAIL, EvaluatedPolicyDecisionEvidence,
+        ForgeEventBatch, InvariantEvidence, OutboxEffectBatch, RefusalEvidence,
+        RefusalEvidenceBodies, RetentionDelta, evidence_root,
     };
     use fgit_admission::{
         AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionSnapshot,
@@ -11879,16 +11876,16 @@ mod tests {
     use super::{
         ADMISSION_CLOSURE_KEY_PREFIX, ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
         ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX, ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
-        ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-        ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
-        AdmissionMaterializationRefusal, AdmissionUploadPackRefusal, AdmissionUploadPackRepository,
-        BudgetClass, BudgetPolicy, ClosureSelectionSource, Exhaustion, FsqliteCx,
-        GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
-        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
-        NodeRefusal, NodeRequestContext, OneNode, PackContextCheckpoint, RuntimeProfile,
-        admission_immutable_key, authority_head_id, checkpoint_pack_context, genesis_head,
-        genesis_root, git_daemon_capabilities, initialize_embedded_repository, object_namespace,
-        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+        ADMISSION_RETENTION_DELTA_KEY_PREFIX, AdmissionMaterializationRefusal,
+        AdmissionUploadPackRefusal, AdmissionUploadPackRepository, BudgetClass, BudgetPolicy,
+        ClosureSelectionSource, Exhaustion, FsqliteCx, GitDaemonServeError,
+        GitDaemonSessionOutcome, GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig,
+        NodeGitDaemonServeRefusal, NodeInitialization, NodeRefusal, NodeRequestContext, OneNode,
+        PackContextCheckpoint, RuntimeProfile, admission_immutable_key, authority_head_id,
+        checkpoint_pack_context, genesis_head, genesis_root, git_daemon_capabilities,
+        initialize_embedded_repository, object_namespace, parse_git_daemon_request,
+        read_principal_snapshot_in, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -12775,7 +12772,7 @@ mod tests {
 
         // An explicit operator timeout is the command's ceiling, larger or
         // smaller than the class default.
-        let long = GitDaemonSessionTimeout::try_new(Duration::from_secs(1800)).unwrap();
+        let long = GitDaemonSessionTimeout::try_new(Duration::from_mins(30)).unwrap();
         let explicit = remaining(&node.command_request_context(Some(long)));
         assert!(
             explicit
@@ -12952,7 +12949,7 @@ mod tests {
     /// Materializes fixture ref intents through the production projection so
     /// the RCR names its staged canonical evidence bodies. Publication remains
     /// the caller's independently checked plan.
-    pub(super) fn stage_fixture_ref_record(
+    pub fn stage_fixture_ref_record(
         node: &OneNode,
         authority_request: &NodeRequestContext,
         basis: &PublicationBasis,
@@ -14253,11 +14250,12 @@ mod tests {
                 RefusalCode::ExpectedOldRefMismatch,
             ))
             .expect("the production projection stages canonical refusal evidence");
-        let expected_refusal = RefusalEvidenceBodies::derive(
+        let expected_refusal = RefusalEvidenceBodies::derive_with_authentication(
             &context,
             materialized.basis(),
             refusal_tx_id,
             RefusalCode::ExpectedOldRefMismatch,
+            AdmissionAuthentication::OperatorAssertion,
         )
         .expect("fixed terminal refusal has canonical evidence");
         assert_eq!(
@@ -14591,11 +14589,12 @@ mod tests {
         else {
             panic!("the stale expected-old assertion receives its authenticated terminal refusal");
         };
-        let expected_refusal = RefusalEvidenceBodies::derive(
+        let expected_refusal = RefusalEvidenceBodies::derive_with_authentication(
             &stale_context,
             basis_before_refusal.basis(),
             refusal_command.tx_id,
             RefusalCode::ExpectedOldRefMismatch,
+            AdmissionAuthentication::OperatorAssertion,
         )
         .expect("the terminal refusal derives its basis-bound evidence");
         assert_published_evidence_body::<RefusalEvidence>(

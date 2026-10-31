@@ -311,7 +311,7 @@ mod tests {
         for end in 0..bytes.len() - 2 {
             assert!(parse(&bytes[..end], "example", &mut || true).is_err());
         }
-        let mut extra = bytes.clone();
+        let mut extra = bytes;
         extra.extend_from_slice(b"HTTP/1.1");
         assert!(parse(&extra, "example", &mut || true).is_err());
         let mut duplicate = part("command", "application/x-www-form-urlencoded", b"a=b");

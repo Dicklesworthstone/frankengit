@@ -21,7 +21,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const MFA_POLICY: &str = "policy code_credentials { rule credential { when actor.authentication >= multi_factor then allow } default deny \"MFA required for code publication\" }";
-const SCOPES: &str = "issues-read,issues-write,pulls-read,pulls-write,protection-read,protection-write,outcomes-read";
+const SCOPES: &str = "issues-read,issues-write,outcomes-read,pulls-read,pulls-write,protection-read,protection-write";
 const ISSUE_OPEN_KEY: &str = "metadata-http-issue-open";
 
 fn operator(key: &str) -> LoopbackReceiveSession {

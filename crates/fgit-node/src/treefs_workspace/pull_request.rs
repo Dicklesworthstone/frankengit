@@ -103,14 +103,14 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = pull_request::admit_pull_request_async(
+        let terminal = Box::pin(pull_request::admit_pull_request_async(
             &self.authority,
             request.authority(),
             &context,
             command,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(map_error)?;
         // Cancellation after this point cannot erase an authenticated result.

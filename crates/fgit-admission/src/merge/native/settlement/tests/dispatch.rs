@@ -46,17 +46,18 @@ impl DispatchTransport<()> for Routes {
         attempt: u32,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
     ) -> impl Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + 'a {
-        async move {
-            checkpoint()?;
-            self.calls.push((route, attempt));
-            if let Some(stop) = &self.stopped {
-                stop.store(true, Ordering::SeqCst);
-            }
-            Ok((
-                self.outcomes.pop_front().expect("unexpected send"),
-                b"actual scripted observation".to_vec(),
-            ))
-        }
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(checkpoint().map(|()| {
+                self.calls.push((route, attempt));
+                if let Some(stop) = &self.stopped {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                (
+                    self.outcomes.pop_front().expect("unexpected send"),
+                    b"actual scripted observation".to_vec(),
+                )
+            }))
+        })
     }
     fn probe<'a>(
         &'a mut self,
@@ -65,11 +66,12 @@ impl DispatchTransport<()> for Routes {
         _: &'a DeliveryRequest<'_>,
         checkpoint: &'a (dyn Fn() -> Result<(), RefusalCode> + Sync),
     ) -> impl Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + 'a {
-        async move {
-            checkpoint()?;
-            self.probes += 1;
-            Ok((ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec()))
-        }
+        std::future::poll_fn(move |_| {
+            std::task::Poll::Ready(checkpoint().map(|()| {
+                self.probes += 1;
+                (ProbeVerdict::Unknown, b"non-probing weak receiver".to_vec())
+            }))
+        })
     }
 }
 fn drive(

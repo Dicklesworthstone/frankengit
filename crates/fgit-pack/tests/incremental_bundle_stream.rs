@@ -114,10 +114,8 @@ fn fixture(format: ObjectFormat) -> Fixture {
     let tag = source.add(
         format,
         ObjectType::Tag,
-        format!(
-            "object {tip}\ntype commit\ntag v2\ntagger A <a@example.invalid> 2 +0000\n\nv2\n"
-        )
-        .into_bytes(),
+        format!("object {tip}\ntype commit\ntag v2\ntagger A <a@example.invalid> 2 +0000\n\nv2\n")
+            .into_bytes(),
     );
     Fixture {
         format,
@@ -200,18 +198,22 @@ fn both_domains_omit_old_history_and_round_trip_exact_native_bytes_in_oid_order(
         assert_eq!(receipt.header_bytes() + receipt.pack_bytes(), bytes.len());
         assert_eq!(
             receipt.total_object_bytes(),
-            fixture.source.objects.values().map(|o| o.body().len()).sum::<usize>()
+            fixture
+                .source
+                .objects
+                .values()
+                .map(|o| o.body().len())
+                .sum::<usize>()
         );
         assert_eq!(*fixture.source.loaded.borrow(), ids);
-        assert!(
-            ids.iter()
-                .all(|id| !fixture.external.contains_key(id))
-        );
+        assert!(ids.iter().all(|id| !fixture.external.contains_key(id)));
         let input =
             FullBundleInput::parse_incremental(&bytes, limits.envelope, &mut || true).unwrap();
         assert_eq!(input.prerequisites(), &[fixture.base]);
         assert_eq!(input.head(), None);
-        input.verify_pack_framing(&limits.pack, &mut || true).unwrap();
+        input
+            .verify_pack_framing(&limits.pack, &mut || true)
+            .unwrap();
         assert!(FullBundleInput::parse(&bytes, limits.envelope, &mut || true).is_err());
         let mut recovered = Vec::new();
         let decoded = read_streamed_pack(
@@ -337,7 +339,12 @@ fn malformed_frontiers_and_external_branch_kinds_refuse_before_io() {
         let ids = fixture.source.ids();
         let base = [fixture.base];
         refuses_before_io(
-            &fixture, &fixture.refs, &[], &ids, &fixture.external, &limits,
+            &fixture,
+            &fixture.refs,
+            &[],
+            &ids,
+            &fixture.external,
+            &limits,
         );
         refuses_before_io(
             &fixture,
@@ -358,7 +365,12 @@ fn malformed_frontiers_and_external_branch_kinds_refuse_before_io() {
             external.insert(id, ObjectType::Commit);
             refuses_before_io(&fixture, &fixture.refs, &base, &ids, &external, &limits);
             refuses_before_io(
-                &fixture, &fixture.refs, &[id], &ids, &fixture.external, &limits,
+                &fixture,
+                &fixture.refs,
+                &[id],
+                &ids,
+                &fixture.external,
+                &limits,
             );
         }
         let mut overlap = fixture.external.clone();
@@ -404,12 +416,22 @@ fn malformed_frontiers_and_external_branch_kinds_refuse_before_io() {
         let mut duplicate_refs = fixture.refs.clone();
         duplicate_refs.push(fixture.refs[0].clone());
         refuses_before_io(
-            &fixture, &duplicate_refs, &base, &ids, &fixture.external, &limits,
+            &fixture,
+            &duplicate_refs,
+            &base,
+            &ids,
+            &fixture.external,
+            &limits,
         );
         let mut short_header = limits.clone();
         short_header.envelope.max_header_bytes = 1;
         refuses_before_io(
-            &fixture, &fixture.refs, &base, &ids, &fixture.external, &short_header,
+            &fixture,
+            &fixture.refs,
+            &base,
+            &ids,
+            &fixture.external,
+            &short_header,
         );
     }
 }
@@ -434,9 +456,7 @@ fn prerequisite_count_boundary_and_header_order_are_exact() {
             prerequisites.push(id);
         }
         let refs = [reference(prerequisites[0], b"refs/heads/main")];
-        refuses_before_io(
-            &fixture, &refs, &prerequisites, &[], &external, &limits,
-        );
+        refuses_before_io(&fixture, &refs, &prerequisites, &[], &external, &limits);
         let excess = prerequisites.pop().unwrap();
         external.remove(&excess);
         let mut bytes = Vec::new();
@@ -523,8 +543,15 @@ fn omitted_edge_kinds_and_missing_dependencies_are_checked_from_native_bodies() 
             wrong.insert(external_target, wrong_kind);
             assert!(matches!(
                 write_incremental_bundle_stream(
-                    format, &refs, &[fixture.base], &[root], &wrong, &source, &limits,
-                    &mut || true, &mut Vec::new(),
+                    format,
+                    &refs,
+                    &[fixture.base],
+                    &[root],
+                    &wrong,
+                    &source,
+                    &limits,
+                    &mut || true,
+                    &mut Vec::new(),
                 ),
                 Err(StreamFullBundleError::Bundle(FullBundleError::Invalid(
                     "graph edge target kind"
@@ -590,7 +617,12 @@ fn unreachable_selected_objects_and_corrupt_native_sources_cannot_complete() {
         fixture.source.objects.insert(
             selected,
             CanonicalPackObject::new(
-                selected, original.object_type(), b"changed bytes".to_vec(), vec![], 0, 0,
+                selected,
+                original.object_type(),
+                b"changed bytes".to_vec(),
+                vec![],
+                0,
+                0,
             ),
         );
         assert!(matches!(
@@ -625,8 +657,13 @@ fn exact_independent_budgets_include_edges_into_omitted_history() {
         let mut exact = baseline;
         exact.pack.max_entries = receipt.object_count();
         exact.pack.max_index_entries = fixture.source.objects.len();
-        exact.pack.max_object_bytes = fixture.source.objects.values()
-            .map(|object| object.body().len()).max().unwrap();
+        exact.pack.max_object_bytes = fixture
+            .source
+            .objects
+            .values()
+            .map(|object| object.body().len())
+            .max()
+            .unwrap();
         exact.pack.max_total_expanded_bytes = receipt.total_object_bytes();
         exact.pack.max_input_bytes = receipt.pack_bytes();
         exact.envelope.max_bundle_bytes = receipt.bundle_bytes();
@@ -678,7 +715,13 @@ fn cancellation_is_sticky_across_frontier_parsing_compression_and_final_output()
     )
     .unwrap();
     for cancel_at in [
-        1, 5, 15, checkpoints / 3, checkpoints / 2, checkpoints - 1, checkpoints,
+        1,
+        5,
+        15,
+        checkpoints / 3,
+        checkpoints / 2,
+        checkpoints - 1,
+        checkpoints,
     ] {
         let mut count = 0;
         let result = write_incremental_bundle_stream(
@@ -718,7 +761,10 @@ impl Write for ShortWriter {
         if self.zero {
             return Ok(0);
         }
-        if self.fail_after.is_some_and(|limit| self.bytes.len() >= limit) {
+        if self
+            .fail_after
+            .is_some_and(|limit| self.bytes.len() >= limit)
+        {
             return Err(io::Error::other("injected output failure"));
         }
         let length = input.len().min(3);
@@ -789,9 +835,17 @@ impl CanonicalObjectSource for GeneratedSource {
         self.previous_output.set(self.progress.get());
         assert!(!self.loaded.borrow().contains(id), "source loaded twice");
         self.loaded.borrow_mut().push(*id);
-        let index = self.ids.get(id).ok_or(PackWriteError::MissingCanonicalObject(*id))?;
+        let index = self
+            .ids
+            .get(id)
+            .ok_or(PackWriteError::MissingCanonicalObject(*id))?;
         Ok(CanonicalPackObject::new(
-            *id, ObjectType::Blob, generated_body(*index), vec![], 0, 0,
+            *id,
+            ObjectType::Blob,
+            generated_body(*index),
+            vec![],
+            0,
+            0,
         ))
     }
 }
@@ -822,7 +876,9 @@ fn generated_bodies_are_emitted_before_the_next_load_and_external_objects_are_no
             })
             .collect();
         let selected: Vec<_> = ids.keys().copied().collect();
-        let refs: Vec<_> = selected.iter().enumerate()
+        let refs: Vec<_> = selected
+            .iter()
+            .enumerate()
             .map(|(index, id)| reference(*id, format!("refs/tags/blob-{index}").as_bytes()))
             .collect();
         let progress = Rc::new(Cell::new(0));
@@ -834,8 +890,14 @@ fn generated_bodies_are_emitted_before_the_next_load_and_external_objects_are_no
             loaded: RefCell::new(Vec::new()),
         };
         let receipt = write_incremental_bundle_stream(
-            format, &refs, &[fixture.base], &selected, &fixture.external, &source,
-            &StreamFullBundleLimits::default(), &mut || true,
+            format,
+            &refs,
+            &[fixture.base],
+            &selected,
+            &fixture.external,
+            &source,
+            &StreamFullBundleLimits::default(),
+            &mut || true,
             &mut ProgressWriter(Rc::clone(&progress)),
         )
         .unwrap();
@@ -855,7 +917,14 @@ fn full_profile_keeps_zero_prerequisite_counts_and_the_same_pack_encoding() {
         let limits = StreamFullBundleLimits::default();
         let mut full_bytes = Vec::new();
         let full = write_full_bundle_stream(
-            format, &refs, None, &[blob], &source, &limits, &mut || true, &mut full_bytes,
+            format,
+            &refs,
+            None,
+            &[blob],
+            &source,
+            &limits,
+            &mut || true,
+            &mut full_bytes,
         )
         .unwrap();
         assert_eq!(full.profile_id(), STREAM_FULL_BUNDLE_PROFILE);
@@ -863,8 +932,15 @@ fn full_profile_keeps_zero_prerequisite_counts_and_the_same_pack_encoding() {
         assert_eq!(full.external_object_count(), 0);
         let mut incremental_bytes = Vec::new();
         let incremental = write_incremental_bundle_stream(
-            format, &refs, &[fixture.base], &[blob], &fixture.external, &source,
-            &limits, &mut || true, &mut incremental_bytes,
+            format,
+            &refs,
+            &[fixture.base],
+            &[blob],
+            &fixture.external,
+            &source,
+            &limits,
+            &mut || true,
+            &mut incremental_bytes,
         )
         .unwrap();
         let full_input =

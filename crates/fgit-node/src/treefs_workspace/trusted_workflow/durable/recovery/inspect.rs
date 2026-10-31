@@ -11,6 +11,7 @@ use fgit_runner::coordinator::delivery::journal::history::{
 };
 use fgit_runner::coordinator::{CheckRunConclusion, CheckRunStatus, CoordinatorExecutionProfile};
 use fgit_types::{RepositoryId, TenantId};
+use std::fmt::Write as _;
 
 impl OneNode {
     /// Read one page of saved custody history, including acknowledged batches.
@@ -240,7 +241,9 @@ fn quoted(value: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c < '\u{20}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c < '\u{20}' => {
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
             c => out.push(c),
         }
     }

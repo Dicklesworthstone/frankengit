@@ -2017,10 +2017,10 @@ where
                 },
             ));
         }
-        let Some(previous) = read_predecessor(store, batch.predecessor_head_id)? else {
-            return Err(OutcomeFailure::CheckpointPositionMismatch);
-        };
-        head = previous;
+        // Unlike a from-genesis walk, checkpoint replay must inspect the
+        // genesis head itself: an empty retained prefix names that position.
+        // The next loop validates both its absent position and empty root.
+        head = read_authority_head_body(store, batch.predecessor_head_id)?;
     }
 
     Ok(CumulativeOutcomes {
@@ -2092,11 +2092,9 @@ where
                 },
             ));
         }
-        let Some(previous) = read_predecessor_async(store, cx, batch.predecessor_head_id).await?
-        else {
-            return Err(OutcomeFailure::CheckpointPositionMismatch);
-        };
-        head = previous;
+        // Keep genesis observable so an empty checkpoint is checked against
+        // its original position and commitment before the tail is appended.
+        head = read_authority_head_body_async(store, cx, batch.predecessor_head_id).await?;
     }
 
     Ok(CumulativeOutcomes {

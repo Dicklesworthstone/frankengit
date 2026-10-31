@@ -1,6 +1,7 @@
-// Shared host adapter included by the library and the legacy binary test target.
-// Keeping the latter at its original repository:: test paths prevents existing
-// focused commands from silently selecting zero tests after library promotion.
+// Library-owned adapter shared by the primary and compatibility commands.
+// Unit tests compile here so private checkpoint helpers remain private.
+// repository_backup_command covers the compatibility executable itself.
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -67,7 +68,7 @@ fn quote(text: &str) -> String {
                 || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
                 | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
             {
-                out.push_str(&format!("\\u{:04x}", u32::from(c)));
+                write!(out, "\\u{:04x}", u32::from(c)).expect("writing to a String cannot fail");
             }
             c => out.push(c),
         }

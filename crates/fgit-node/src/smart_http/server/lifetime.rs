@@ -48,7 +48,7 @@ impl Acceptance<'_> {
                 idle_timeout,
             } => Ok(accepted < *max_sessions && (active != 0 || idle < *idle_timeout)),
             Self::UntilStopped(stop) => {
-                let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()))
+                let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop))
                     .map_err(|_| io::Error::other("HTTP stop control panicked"))??;
                 if stopped {
                     return Ok(false);

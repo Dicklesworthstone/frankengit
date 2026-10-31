@@ -229,9 +229,9 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: None,
         };
-        fgit_admission::merge::native::policy_preparation::prepare_sealed_native_merge_evidence_async(
+        Box::pin(fgit_admission::merge::native::policy_preparation::prepare_sealed_native_merge_evidence_async(
             &self.authority, request.authority(), context, sealed, workspace_snapshot, &projection,
-        ).await
+        )).await
     }
 
     /// Native continuation of the original sealed-package node API. Preserve
@@ -260,14 +260,14 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: None,
         };
-        admit_sealed_native_merge_async(
+        Box::pin(admit_sealed_native_merge_async(
             &self.authority,
             request.authority(),
             context,
             sealed,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -410,14 +410,14 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: Some(&staging),
         };
-        let terminal = admit_native_merge_async(
+        let terminal = Box::pin(admit_native_merge_async(
             &self.authority,
             request.authority(),
             &context,
             &intent,
             AdmissionLimits::default(),
             &projection,
-        )
+        ))
         .await
         .map_err(map_admission)?;
         // Preserve known terminal results even if cancellation arrives now.
@@ -505,14 +505,14 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: None,
         };
-        admit_native_merge_async(
+        Box::pin(admit_native_merge_async(
             &self.authority,
             request.authority(),
             &context,
             intent,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
@@ -783,7 +783,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     .min(self.node.reused_merge_blob_limit()),
                 ..self.object_limits
             };
-            let source = VerifiedFabricPackSource {
+            let make_source = || VerifiedFabricPackSource {
                 fabric: &self.node.fabric,
                 object_format: self.node.object_format,
                 maximum_object_bytes: object_limits.max_object_bytes,
@@ -791,12 +791,13 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
             };
+            let source = make_source();
             let parse_limits = source.parse_limits();
             let existing_only = ReceiveStaging::default();
             let staging = self.staging.unwrap_or(&existing_only);
             let objects = selected.selected_closure().closure().objects();
             let headers = NativeFrontierHeaders {
-                source: VerifiedFabricPackSource { ..source },
+                source: make_source(),
                 selected: objects,
                 staging,
                 maximum_blob_bytes: object_limits.max_reused_blob_bytes,

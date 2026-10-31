@@ -11,6 +11,7 @@ use fgit_types::{
     RepositoryCommitId, RepositoryId, TenantId,
 };
 use fgit_wire::receive::ReceiveCommand;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -65,11 +66,13 @@ fn tree(format: GitHashAlgorithm, entries: &[(&str, GitOid)]) -> Raw {
 fn commit(format: GitHashAlgorithm, tree: GitOid, parents: &[GitOid], label: &str) -> Raw {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
-        body.push_str(&format!("parent {parent}\n"));
+        writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
     }
-    body.push_str(&format!(
-        "author T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\n{label}\n"
-    ));
+    writeln!(
+        body,
+        "author T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\n{label}"
+    )
+    .expect("writing to a String cannot fail");
     raw(format, ObjectType::Commit, body.into_bytes())
 }
 fn stored(body: &[u8]) -> Vec<u8> {
@@ -316,8 +319,13 @@ fn complete_uploaded_bodies_and_forward_deltas_remain_valid_without_visible_orig
         let scratch = Scratch::new();
         let node = OneNode::init(scratch.config(format)).unwrap().0;
         let base = raw(format, ObjectType::Blob, b"known uploaded bytes".to_vec());
-        put(&node, &[base.clone()]);
-        let v = fixture_validator(&node, &[base.clone()], &[], PackLimits::default());
+        put(&node, std::slice::from_ref(&base));
+        let v = fixture_validator(
+            &node,
+            std::slice::from_ref(&base),
+            &[],
+            PackLimits::default(),
+        );
         let result = raw(
             format,
             ObjectType::Blob,
@@ -345,7 +353,7 @@ fn one_visibility_walk_and_kind_cache_keep_the_original_byte_limit_inclusive() {
     let scratch = Scratch::new();
     let node = OneNode::init(scratch.config(format)).unwrap().0;
     let base = raw(format, ObjectType::Blob, b"shared original".to_vec());
-    put(&node, &[base.clone()]);
+    put(&node, std::slice::from_ref(&base));
     let result = raw(
         format,
         ObjectType::Blob,
@@ -356,7 +364,7 @@ fn one_visibility_walk_and_kind_cache_keep_the_original_byte_limit_inclusive() {
     for (bytes, allowed) in [(base.body.len() - 1, false), (base.body.len(), true)] {
         let v = fixture_validator(
             &node,
-            &[base.clone()],
+            std::slice::from_ref(&base),
             &[base.id],
             PackLimits {
                 max_cached_bytes: bytes,

@@ -5,6 +5,7 @@ use crate::{NodeConfig, OneNode};
 use fgit_crypto::{git_object_id, sha1_digest, sha256_digest};
 use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId, RefName, RepositoryId, TenantId};
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,9 +72,9 @@ impl Objects {
     ) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            writeln!(body, "parent {parent}").expect("writing to a String cannot fail");
         }
-        body.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}\n"));
+        writeln!(body, "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}").expect("writing to a String cannot fail");
         self.put(format, ObjectType::Commit, body.into_bytes())
     }
     fn tag(&mut self, format: GitHashAlgorithm, child: GitOid, kind: &str) -> GitOid {

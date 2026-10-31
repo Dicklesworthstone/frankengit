@@ -176,7 +176,7 @@ impl WorkflowWatchConfig {
         self.pull_request
     }
     #[must_use]
-    pub fn merge_candidate(&self) -> Option<&PullRequestMergeWatchConfig> {
+    pub const fn merge_candidate(&self) -> Option<&PullRequestMergeWatchConfig> {
         self.merge_candidate.as_ref()
     }
 }

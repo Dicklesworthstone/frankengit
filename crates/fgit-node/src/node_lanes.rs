@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// At most `capacity` idle, in-service nodes for one repository.
-pub(crate) struct NodeLanes {
+pub struct NodeLanes {
     config: NodeConfig,
     idle: Mutex<Vec<OneNode>>,
     capacity: usize,

@@ -3,7 +3,10 @@
 //! add a typed original edge. Compare matching directory names without opening
 //! unchanged siblings, original blobs, or the parents' old commit histories.
 
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, GitOid, MergeSourceError, ObjectType, ParentReachability,
+    PlannedMergeObject, git_object_id, native_edges,
+};
 
 pub(super) fn guide(
     proof: &mut ParentReachability,
