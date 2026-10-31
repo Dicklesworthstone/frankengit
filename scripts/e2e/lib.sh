@@ -1941,6 +1941,8 @@ fge_tempdir() {
   fi
   [ ! -L "$FGE_ARTIFACT_DIR/work" ] || fge_die 'fge_tempdir: work parent is a symlink'
   mkdir -p "$FGE_ARTIFACT_DIR/work" || fge_die 'fge_tempdir: cannot create work parent'
+  [ ! -L "$FGE_STATE_DIR/tempdir-claims" ] || fge_die 'fge_tempdir: claim parent is a symlink'
+  mkdir -p "$FGE_STATE_DIR/tempdir-claims" || fge_die 'fge_tempdir: cannot create claim parent'
   # A legal trailing dot must not become a forbidden ".." in retry names.
   case $name in *.) suffix='' ;; esac
   d="$FGE_ARTIFACT_DIR/work/$name"
@@ -1950,7 +1952,8 @@ fge_tempdir() {
   # Claims stay in private run state so a child crash cannot reissue a name.
   # Keep collision diagnostics in run state; surface unexpected failures.
   while :; do
-    claim="$FGE_STATE_DIR/tempdir-claim-${d##*/}"
+    # A separate directory preserves the candidate's filename-length budget.
+    claim="$FGE_STATE_DIR/tempdir-claims/${d##*/}"
     if (set -o noclobber; : >"$claim") 2>>"$FGE_STATE_DIR/tempdir-allocation.stderr"; then
       if [ ! -e "$d" ] && [ ! -L "$d" ]; then
         mkdir "$d" 2>>"$FGE_STATE_DIR/tempdir-allocation.stderr" &&

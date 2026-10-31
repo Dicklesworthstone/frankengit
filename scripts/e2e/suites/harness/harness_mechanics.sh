@@ -276,8 +276,10 @@ fge_kind static-check
 mode=$1
 allocation_name=scratch
 [ "$mode" != trailing ] || allocation_name=valid.
+[ "$mode" != long ] || printf -v allocation_name '%0240d' 0
 mkdir -p "$FGE_ARTIFACT_DIR/outside/scratch"
 printf 'outside sentinel\n' >"$FGE_ARTIFACT_DIR/outside/scratch/sentinel"
+: >"$FGE_ARTIFACT_DIR/allocated"
 if [ "$mode" = parentfile ]; then
   printf 'occupied parent\n' >"$FGE_ARTIFACT_DIR/work"
   fge_assert_eq TEMP-CHILD-PARENT ok ok 'permitted assertion before allocation failure'
@@ -287,6 +289,11 @@ elif [ "$mode" = collision ]; then
   mkdir -p "$FGE_ARTIFACT_DIR/work"
   printf 'occupied candidate\n' >"$FGE_ARTIFACT_DIR/work/scratch"
   ln -s "$FGE_ARTIFACT_DIR/outside/missing" "$FGE_ARTIFACT_DIR/work/scratch.1"
+elif [ "$mode" = reserved ]; then
+  mkdir -p "$FGE_STATE_DIR/tempdir-claims"
+  printf 'prior reservation\n' >"$FGE_STATE_DIR/tempdir-claims/scratch"
+elif [ "$mode" = claimlink ]; then
+  ln -s "$FGE_ARTIFACT_DIR/outside/scratch" "$FGE_STATE_DIR/tempdir-claims"
 fi
 if [ "$mode" = direct ]; then
   fge_tempdir scratch >"$FGE_ARTIFACT_DIR/allocated"
@@ -298,7 +305,7 @@ else
 fi
 printf 'retained evidence\n' >"$probe_work/payload"
 case $mode in
-  success | trailing)
+  success | trailing | long)
     second=$(fge_tempdir "$allocation_name")
     printf '%s\n' "$second" >>"$FGE_ARTIFACT_DIR/allocated"
     ;;
@@ -393,9 +400,9 @@ cleanup_probe() {
   fge_assert_eq "FG-000A-TEMP-$mode-OUTSIDE" 'outside sentinel' \
     "$(<"$dir/outside/scratch/sentinel")" 'cleanup never removes outside data'
   case $mode in
-    success | direct | trailing | concurrent | collision)
+    success | direct | trailing | long | concurrent | collision | reserved)
       fge_assert_no_file "FG-000A-TEMP-$mode-REMOVED" "$probe_work" 'successful disposable work is removed after exit'
-      if [ "$mode" = success ] || [ "$mode" = trailing ]; then
+      if [ "$mode" = success ] || [ "$mode" = trailing ] || [ "$mode" = long ]; then
         local second
         second=$(tail -n 1 "$dir/allocated")
         fge_assert_ne "FG-000A-TEMP-$mode-DISTINCT" "$probe_work" "$second" 'repeated command substitutions own distinct directories'
@@ -412,7 +419,14 @@ cleanup_probe() {
         fge_assert_eq FG-000A-TEMP-collision-NAME "$dir/work/scratch.2" "$probe_work" 'file and broken symlink collisions are skipped'
         fge_assert_eq FG-000A-TEMP-collision-FILE 'occupied candidate' "$(<"$dir/work/scratch")" 'allocator preserves a pre-existing file'
         fge_assert_cmd FG-000A-TEMP-collision-LINK 'allocator preserves a pre-existing broken symlink' test -L "$dir/work/scratch.1"
+      elif [ "$mode" = reserved ]; then
+        fge_assert_eq FG-000A-TEMP-reserved-NAME "$dir/work/scratch.1" "$probe_work" 'an earlier reservation cannot be reissued'
+        fge_assert_eq FG-000A-TEMP-reserved-BYTES 'prior reservation' "$(<"$dir/.state/tempdir-claims/scratch")" 'existing reservation bytes are unchanged'
       fi
+      ;;
+    claimlink)
+      fge_assert_eq FG-000A-TEMP-claimlink-EMPTY '' "$probe_work" 'unsafe claim parent returns no path'
+      fge_assert_no_file FG-000A-TEMP-claimlink-OUTSIDE-CLAIM "$dir/outside/scratch/scratch" 'a symlink cannot redirect reservation writes outside private state'
       ;;
     parentfile)
       fge_assert_eq FG-000A-TEMP-parentfile-EMPTY '' "$probe_work" 'failed allocation returns no owned path'
@@ -439,8 +453,11 @@ cleanup_probe() {
 cleanup_probe success 0 pass
 cleanup_probe direct 0 pass
 cleanup_probe trailing 0 pass
+cleanup_probe long 0 pass
 cleanup_probe concurrent 0 pass
 cleanup_probe collision 0 pass
+cleanup_probe reserved 0 pass
+cleanup_probe claimlink 1 fail
 cleanup_probe parentfile 1 fail
 cleanup_probe failure 1 fail
 cleanup_probe keep 0 pass
