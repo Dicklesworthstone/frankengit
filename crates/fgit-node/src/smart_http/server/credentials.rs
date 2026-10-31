@@ -71,6 +71,7 @@ enum Scope {
     ArtifactRead,
     QueuesRead,
     QueuesWrite,
+    QueuesLand,
 }
 
 impl Scope {
@@ -93,6 +94,7 @@ impl Scope {
             "artifact-read" => Ok(Self::ArtifactRead),
             "queues-read" => Ok(Self::QueuesRead),
             "queues-write" => Ok(Self::QueuesWrite),
+            "queues-land" => Ok(Self::QueuesLand),
             _ => Err(CredentialFailure::InvalidFile),
         }
     }
@@ -154,6 +156,11 @@ impl Grant {
         } else {
             self.scopes.contains(Scope::QueuesRead)
         }
+    }
+    /// Queue-head code publication is independent of membership and PR merges.
+    /// The target's reference ceiling and canonical protection remain mandatory.
+    pub const fn permits_queue_landing(&self) -> bool {
+        self.scopes.contains(Scope::QueuesLand)
     }
     /// A vote always uses this credential's principal, not a form field.
     pub const fn permits_reviews(&self, mutation: bool) -> bool {
@@ -730,6 +737,7 @@ mod tests {
         let old = "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read";
         let legacy = grant(principal, old).unwrap();
         assert!(!legacy.permits_queues(false) && !legacy.permits_queues(true));
+        assert!(!legacy.permits_queue_landing());
         for (scope, read, write) in [
             ("queues-read", true, false),
             ("queues-write", false, true),
@@ -752,6 +760,7 @@ mod tests {
             assert!(!selected.permits_lfs(false) && !selected.permits_lfs(true));
             assert!(!selected.permits_outcomes() && !selected.permits_reviewed_merge());
             assert!(!selected.permits_artifact_read());
+            assert!(!selected.permits_queue_landing());
         }
         let all = grant(principal, &format!("{old},queues-read,queues-write")).unwrap();
         assert!(all.permits_queues(false) && all.permits_queues(true));
@@ -762,7 +771,9 @@ mod tests {
             "queues-read,queues-read",
             "queues-write,read",
             "queue-write",
-            "queues-land",
+            "queue-land",
+            "queues-land,queues-write",
+            "queues-land,queues-land",
         ] {
             assert!(matches!(
                 grant(principal, invalid),
@@ -778,6 +789,30 @@ mod tests {
             .authenticate(Some(&format!("Bearer {token}")))
             .unwrap();
         assert!(!static_grant.permits_queues(false) && !static_grant.permits_queues(true));
+        assert!(!static_grant.permits_queue_landing());
+        let landing = grant(principal, "queues-land").unwrap();
+        assert!(landing.permits_queue_landing());
+        assert!(!landing.permits_queues(false) && !landing.permits_queues(true));
+        assert!(!landing.permits(Service::UploadPack) && !landing.permits(Service::ReceivePack));
+        assert!(!landing.permits_pulls(false) && !landing.permits_pulls(true));
+        assert!(!landing.permits_reviews(false) && !landing.permits_reviews(true));
+        assert!(!landing.permits_protection(false) && !landing.permits_protection(true));
+        assert!(!landing.permits_outcomes() && !landing.permits_reviewed_merge());
+        assert!(!landing.permits_issues(false) && !landing.permits_issues(true));
+        assert!(!landing.permits_lfs(false) && !landing.permits_lfs(true));
+        assert!(!landing.permits_artifact_read());
+        assert_eq!(
+            selected_session(&landing).authentication(),
+            AdmissionAuthentication::HttpToken
+        );
+        assert!(
+            grant(
+                principal,
+                &format!("{old},queues-read,queues-write,queues-land")
+            )
+            .unwrap()
+            .permits_queue_landing()
+        );
     }
 
     #[test]

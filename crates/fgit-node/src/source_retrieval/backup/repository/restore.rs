@@ -92,7 +92,7 @@ struct Options {
     resume: bool,
     approval: Option<ApprovalOptions>,
 }
-fn digest(value: &str) -> Result<[u8; 32], String> {
+pub(super) fn digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
         || !value
             .bytes()
@@ -259,9 +259,9 @@ enum ArchiveGraphMode {
     Install,
     ReadBack,
 }
-fn graph_from_archive(
+fn graph_from_archive<R: Read + std::io::Seek>(
     node: &OneNode,
-    archive: &mut PinnedArchive,
+    archive: &mut PinnedArchive<R>,
     expected: &HeadReadReceipt,
     mode: ArchiveGraphMode,
     profile: Profile,
@@ -748,9 +748,9 @@ fn check_approval_current(
     Ok(())
 }
 
-fn match_approval(
+fn match_approval<R: Read + std::io::Seek>(
     approval: Option<&VerifiedApproval>,
-    archive: &PinnedArchive,
+    archive: &PinnedArchive<R>,
     deadline: Deadline,
 ) -> Result<(), String> {
     if let Some(approval) = approval {

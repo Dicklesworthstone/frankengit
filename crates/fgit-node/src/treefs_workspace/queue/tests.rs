@@ -59,7 +59,7 @@ pub(super) fn session(key: &str) -> LoopbackReceiveSession {
         IdempotencyKey::new(key.as_bytes().to_vec()).unwrap(),
     )
 }
-fn loose(
+pub(super) fn loose(
     root: &Path,
     format: GitHashAlgorithm,
     kind: GitObjectKind,

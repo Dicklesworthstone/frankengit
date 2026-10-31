@@ -6,7 +6,94 @@ than the portable Git bundles supported by `attest_git_bundle.mjs`. It is NOT
 a signed Repository Capsule, service backup, canonical authorization, or a
 replacement for the native authority/graph/payload checks.
 
-## Create and check an independent approval
+## Native verified attestation
+
+`fg backup attest` verifies a repository-source archive and issues its detached
+Ed25519 approval in the native executable. It uses the same authority import,
+materialization, exact selected-object inventory, graph, native identity,
+original payload commitment and retained-checkpoint checks as `fg backup verify`.
+It does not invoke JavaScript, another `fg` process or an external Git engine.
+
+Run it beneath a stable, owner-private parent directory. The approval and scratch
+paths must be new. Supply the archive checksum and repository declarations from
+independently reviewed information:
+
+```sh
+fg backup attest backup.fgit backup.approval.json verify-scratch \
+  --trusted-local --private-key /private/backup-signing.pem \
+  --expected-sha256 "$BACKUP_SHA256" --verification-instance 990 \
+  --tenant-id "$TENANT" --repository-id "$REPOSITORY" \
+  --incarnation-id "$INCARNATION" --object-format sha256 \
+  --head-generation "$HEAD_GENERATION" \
+  --expires-at 2030-01-01T00:00:00Z \
+  --max-archive-bytes 2147483648 --max-blob-bytes 536870912 \
+  --max-objects 250000 --timeout-secs 1800
+```
+
+The verification instance is a positive signed-SQL integer distinct from the
+archive's original authority-store instance. The declared generation is exact,
+not a lower bound. Every namespace, incarnation, format and generation
+declaration must match the authenticated native state. The complete preflight
+and its owned node shutdown finish before the private key is read. Verification
+scratch is removed on success; a failed native preflight can retain its owned
+scratch for diagnosis.
+
+The private key must be a canonical RFC 8410 Ed25519 PKCS#8 PEM, in a nonempty
+regular, owner-private file with one hard link. Symlinks, devices, foreign owners
+and group/world permissions refuse. The secret-file profile requires Unix file
+identity and ownership checks; unsupported platforms refuse explicitly. Key bytes
+are absent from receipts, diagnostics and debug output. This profile makes no
+locked-memory or comprehensive secret-erasure guarantee.
+
+The command retains one opened, checksum-pinned archive and one original
+deadline across verification and issuance. It rechecks actual archive bytes
+before publication. Its staged approval is synchronized and read back before
+create-only publication; an existing output is never replaced. Approval expiry
+and the operation deadline remain effective at the publication boundary. A
+failure after visibility or while writing the final receipt must be treated as
+possible completed publication; inspect the existing approval rather than
+overwriting it or inferring rollback.
+
+The successful JSON receipt has type `repository_backup_approval_created`,
+includes the exact canonical statement and SPKI-derived `trusted_key_id`, and
+reports native verification, scratch removal and durable approval publication.
+The signed statement and DSSE envelope use the existing approval format below.
+Native `verify` and `restore`, and the existing JavaScript checker, can consume
+the resulting approval without translation. Restore still authenticates its own
+independently supplied key, namespace and generation floor and verifies the
+archive again.
+
+All four native resource controls apply: `--max-archive-bytes`,
+`--max-blob-bytes`, `--max-objects` and `--timeout-secs`. A leading global
+`fg --timeout-secs` can only narrow the leaf deadline. Issuing this operator
+approval does not activate a canonical key policy, prove that the checkpoint is
+the newest one, or turn a source archive into a signed Repository Capsule.
+
+The native process regression in
+`crates/fgit-cli/tests/backup_attestation.rs` imports real SHA-1/SHA-256 bundles,
+creates forge state and a retained-outcome checkpoint, exports and removes the
+original source, then attests, verifies and restores through actual `fg`
+processes with no external programs on `PATH`. It checks native refs, terminal
+retry identity and subsequent admission. Its presence is a test implementation,
+not an execution result for an arbitrary revision.
+
+## Native catalogs and damaged-copy reconstruction
+
+The same detached approval also gates `fg backup catalog` and
+`fg backup reconstruct`. Catalog creation verifies an intact archive before
+writing the existing `FGCHNK01` range catalog. Reconstruction combines surviving
+ranges from explicit copies, then verifies the private output against the
+original signed size/digest and the full native recovery preflight before
+publishing it. Neither command issues a replacement signature or treats catalog
+hashes as authority. The recovered bytes use the original approval for later
+signed verification and restore.
+
+See [native backup reconstruction](NATIVE_BACKUP_RECONSTRUCTION.md) for complete
+examples, independently supplied trust inputs, aggregate read accounting and
+publication uncertainty. The JavaScript catalog/repair tooling below remains
+interoperable with the unchanged binary catalog format.
+
+## JavaScript creation and independent checking
 
 Export with the native `fg backup export` command. Independently review its
 namespace, incarnation, hash format and head-generation receipt. Then:

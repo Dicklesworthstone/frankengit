@@ -1,7 +1,7 @@
 //! Complete bounded queue JSON and immutable terminal receipts.
 use std::collections::BTreeSet;
 
-use fgit_admission::merge::native::queue::QueuePage;
+use fgit_admission::merge::native::queue::{QueueLandingCommand, QueuePage};
 use fgit_authority::TerminalOutcome;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
 use fgit_forge::merge_queue::{
@@ -316,5 +316,65 @@ pub(super) fn mutation(
         record,
         refusal,
         code
+    )
+}
+
+pub(super) fn landing(
+    node: &OneNode,
+    principal: PrincipalId,
+    command: &QueueLandingCommand,
+    tx: TxId,
+    terminal: TerminalOutcome,
+) -> String {
+    let (outcome, committed, record, refusal, code) = match terminal.outcome {
+        DecisionOutcome::Committed {
+            repository_commit_id,
+        } => (
+            "committed",
+            true,
+            quote(&repository_commit_id.to_string()),
+            "null".into(),
+            "null".into(),
+        ),
+        DecisionOutcome::Refused {
+            code,
+            refusal_record_id,
+        } => (
+            "refused",
+            false,
+            "null".into(),
+            quote(&refusal_record_id.to_string()),
+            quote(&format!("{code:?}")),
+        ),
+    };
+    format!(
+        concat!(
+            "{{\"type\":\"merge_queue_publication\",{},\"principal_id\":{},\"number\":{},{},\"expected_version\":{},",
+            "\"proposed_action\":{{\"name\":\"land\",\"method\":\"fast-forward-only\",\"pull_request\":{},",
+            "\"expected_pull_request_version\":{},\"expected_policy_epoch\":{},{},",
+            "\"expected_source_tip\":{},\"expected_target_tip\":{}}},",
+            "\"tx_id\":{},\"decision_sequence\":{},\"outcome\":{},\"committed\":{},",
+            "\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},",
+            "\"refs_changed\":{},\"delivery_acknowledged\":null,\"historical_outcome\":true,\"complete\":true}}"
+        ),
+        scope(node),
+        quote(&principal.to_string()),
+        command.number.get(),
+        ref_fields("target_ref", &command.target_ref),
+        command.expected_version.get(),
+        command.pull_request.get(),
+        command.expected_pull_request_version.get(),
+        command.expected_policy_epoch.get(),
+        ref_fields("source_ref", &command.source_ref),
+        quote(&command.head_tip.to_string()),
+        quote(&command.expected_target_tip.to_string()),
+        quote(&tx.to_string()),
+        terminal.decision_sequence.get(),
+        quote(outcome),
+        committed,
+        record,
+        refusal,
+        code,
+        committed
     )
 }

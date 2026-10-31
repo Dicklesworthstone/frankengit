@@ -184,9 +184,9 @@ pub use screened::{
     Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid, sha1_git_oid_with_profile,
 };
 pub use signing::{
-    DetachedSignature, DsseSignatureError, ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_FAMILY,
-    MAX_DSSE_PAYLOAD_BYTES, MAX_DSSE_PAYLOAD_TYPE_BYTES, PUBLIC_KEY_BYTES, SIGNATURE_BYTES,
-    SignatureError, VerifyingKey, verify_dsse_ed25519,
+    DetachedSignature, DsseEd25519SigningKey, DsseSignatureError, ENVELOPE_SCHEMA,
+    ENVELOPE_SCHEMA_FAMILY, MAX_DSSE_PAYLOAD_BYTES, MAX_DSSE_PAYLOAD_TYPE_BYTES, PUBLIC_KEY_BYTES,
+    SIGNATURE_BYTES, SignatureError, VerifyingKey, verify_dsse_ed25519,
 };
 
 // Identity *values* belong to `fgit-types`; they are re-exported here so a

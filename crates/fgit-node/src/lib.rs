@@ -87,6 +87,7 @@ pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
+pub use treefs_workspace::{PreparedQueueHeadBundle, QueueRead, QueueReadRefusal};
 pub use treefs_workspace::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,
@@ -94,7 +95,6 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
-pub use treefs_workspace::{QueueRead, QueueReadRefusal};
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
     StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
@@ -7573,6 +7573,8 @@ pub struct NodeConfig {
     http_protection_admin: bool,
     /// Independent HTTP queue-management ceiling; token scopes remain required.
     http_queue_management: bool,
+    /// Independent HTTP queue-head landing ceiling; grants and ref scope still apply.
+    http_queue_landings: bool,
     /// Explicit local artifact-fabric custody for the HTTP Git LFS basic
     /// transfer profile. Disabled unless an operator selects a private root;
     /// per-request LFS credentials remain independently required.
@@ -7646,6 +7648,7 @@ impl NodeConfig {
             http_trusted_origin: None,
             http_protection_admin: false,
             http_queue_management: false,
+            http_queue_landings: false,
             http_lfs_root: None,
             workflow_artifact_root: None,
         }
@@ -7838,6 +7841,20 @@ impl NodeConfig {
     #[must_use]
     pub const fn http_queue_management_enabled(&self) -> bool {
         self.http_queue_management
+    }
+
+    /// Enables exact fast-forward queue-head landing through authenticated HTTP.
+    /// This grants no token scope, queue management, or exemption from protection.
+    #[must_use]
+    pub const fn with_http_queue_landings(mut self) -> Self {
+        self.http_queue_landings = true;
+        self
+    }
+
+    /// Whether HTTP queue-head landing was independently enabled.
+    #[must_use]
+    pub const fn http_queue_landings_enabled(&self) -> bool {
+        self.http_queue_landings
     }
 
     /// Enables Git LFS basic transfers in the authenticated HTTP service.

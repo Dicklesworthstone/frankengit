@@ -6,7 +6,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 fge_init product-merge-queue
 fge_kind e2e-binary
 fge_context bead frankengit-fg083a-merge-queue-impl-95fm
-fge_context non_claim 'Canonical queue management and one-head fast-forward landing; no speculative multi-PR batches or required-check execution.'
+fge_context non_claim 'Canonical queue management, one-head fast-forward and prepared two-parent landing; no speculative multi-PR batches or required-check execution.'
 : "${FG_BIN:?Supply the compiled native fg binary}"
 fge_context fg_digest "$(fge_digest_file "$FG_BIN")"
 work="$(fge_tempdir merge-queue)"

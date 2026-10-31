@@ -26,7 +26,23 @@ cargo run --locked -p fgit-node --bin fg-repository-backup -- \
 ```
 
 The same operations are available as `fg backup export` and `fg backup restore`.
-Export, verification and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
+`fg backup attest` adds a detached operator approval after complete native
+verification of an existing archive. It reads the private key only after the
+archive's authority, inventory, graph and operator declarations agree, retains
+one input descriptor and deadline, and publishes the approval without replacing
+an existing file. The archive bytes and recovery format are unchanged. See
+[native verified attestation](SIGNED_REPOSITORY_BACKUPS.md#native-verified-attestation)
+for the explicit trust inputs, private-key profile and signed recovery commands.
+
+`fg backup catalog` records the existing `FGCHNK01` range hashes after signed
+native verification. `fg backup reconstruct` can then recover the original
+approved archive from intact ranges of explicitly supplied damaged copies. The
+reconstructed file must pass its original whole-file pin and complete native
+preflight before create-only publication. See
+[native backup reconstruction](NATIVE_BACKUP_RECONSTRUCTION.md) for the commands,
+aggregate read allowance and replica failure rules.
+
+Export, verification, attestation and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
 `--max-objects` and `--timeout-secs`. For a 2 GiB archive containing up to
 250,000 objects and blobs up to 512 MiB, with a 30-minute cooperative operation
 deadline, append the following to each command:

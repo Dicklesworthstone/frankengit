@@ -2,6 +2,8 @@
 //! This authenticates an operator's signed statement, not a capsule or authority.
 //! The real archive reader and restore engine still verify every source input.
 
+pub(super) mod issuer;
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, Metadata};
 use std::io::Read;
@@ -248,6 +250,13 @@ pub(super) struct VerifiedApproval {
 }
 
 impl VerifiedApproval {
+    pub(super) fn artifact_seal(&self) -> Seal {
+        Seal {
+            digest: self.statement.digest,
+            bytes: self.statement.archive_bytes,
+        }
+    }
+
     pub(super) fn check_current(&self) -> Result<(), String> {
         self.deadline.check()?;
         #[cfg(test)]
@@ -281,8 +290,7 @@ impl VerifiedApproval {
         if header.identity != self.statement.identity
             || header.authority.head.as_ref().map(|head| head.generation)
                 != Some(self.statement.generation)
-            || seal.digest != self.statement.digest
-            || seal.bytes != self.statement.archive_bytes
+            || seal != self.artifact_seal()
         {
             return Err("signed backup identity, generation or artifact does not match the verified archive".into());
         }

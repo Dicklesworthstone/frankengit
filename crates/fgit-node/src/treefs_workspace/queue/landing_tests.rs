@@ -30,6 +30,8 @@ use fgit_types::{
 };
 use std::{future::Future, task::Poll};
 
+mod candidate;
+
 fn version(value: u64) -> AggregateVersion {
     AggregateVersion::try_new(value).unwrap()
 }

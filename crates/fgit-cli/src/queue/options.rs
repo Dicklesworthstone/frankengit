@@ -1,8 +1,11 @@
 //! Bounded, exact-predecessor queue commands parsed before repository IO.
-use fgit_admission::merge::native::queue::QueueLandingCommand;
+use fgit_admission::merge::native::queue::{QueueCandidateLandingCommand, QueueLandingCommand};
 use fgit_authority::IdempotencyKey;
+use fgit_forge::event::NativeMerge;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
+use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::merge_queue::{DequeueReason, QueueCommand, QueueCommandAction};
+use fgit_forge::preparation::{MergeMetadata, MergeProfile};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, PolicyEpoch,
@@ -43,6 +46,23 @@ pub(super) enum Operation {
         key: IdempotencyKey,
         command: QueueLandingCommand,
     },
+    Prepare(Box<Preparation>),
+    LandCandidate {
+        principal: PrincipalId,
+        key: IdempotencyKey,
+        command: QueueCandidateLandingCommand,
+        bundle: PathBuf,
+    },
+}
+
+#[derive(Debug)]
+pub(super) struct Preparation {
+    pub number: QueueNumber,
+    pub expected_version: AggregateVersion,
+    pub subject: ReviewSubject,
+    pub metadata: MergeMetadata,
+    pub profile: MergeProfile,
+    pub output: PathBuf,
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
@@ -61,7 +81,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let action = args[0].as_str();
     if !matches!(
         action,
-        "show" | "list" | "enqueue" | "dequeue" | "reorder" | "land"
+        "show" | "list" | "enqueue" | "dequeue" | "reorder" | "land" | "prepare" | "land-candidate"
     ) {
         return Err(super::USAGE.to_owned());
     }
@@ -94,6 +114,23 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             || match action {
                 "show" => flag == "--expected-head",
                 "list" => matches!(flag, "--expected-head" | "--after" | "--limit"),
+                "prepare" => matches!(
+                    flag,
+                    "--expected-version"
+                        | "--expected-policy-epoch"
+                        | "--pull-request"
+                        | "--expected-pull-version"
+                        | "--source-ref"
+                        | "--target-ref"
+                        | "--expected-source-tip"
+                        | "--expected-target-tip"
+                        | "--profile"
+                        | "--author"
+                        | "--committer"
+                        | "--timestamp"
+                        | "--message"
+                        | "--output-bundle"
+                ),
                 _ => {
                     matches!(
                         flag,
@@ -108,15 +145,21 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                                 | "--expected-pull-version"
                                 | "--priority"
                         ),
-                        "land" => matches!(
-                            flag,
-                            "--pull-request"
-                                | "--source-ref"
-                                | "--expected-source-tip"
-                                | "--expected-target-tip"
-                                | "--expected-pull-version"
-                                | "--expected-policy-epoch"
-                        ),
+                        "land" | "land-candidate" => {
+                            matches!(
+                                flag,
+                                "--pull-request"
+                                    | "--source-ref"
+                                    | "--expected-source-tip"
+                                    | "--expected-target-tip"
+                                    | "--expected-pull-version"
+                                    | "--expected-policy-epoch"
+                            ) || (action == "land-candidate"
+                                && matches!(
+                                    flag,
+                                    "--merge-base" | "--expected-commit" | "--bundle"
+                                ))
+                        }
                         "dequeue" => matches!(flag, "--pull-request" | "--reason"),
                         "reorder" => flag == "--entry",
                         _ => false,
@@ -183,6 +226,20 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 expected_head,
             }
         }
+    } else if action == "prepare" {
+        if incarnation.is_none() {
+            return Err("queue preparation requires --expected-incarnation".into());
+        }
+        let version = AggregateVersion::try_new(decimal(required(&flags, "--expected-version")?)?)
+            .ok_or("queue preparation requires a positive queue version")?;
+        let guard = landing(
+            &flags,
+            number.ok_or("queue number is required")?,
+            ExpectedVersion::Exactly(version),
+            branch(required(&flags, "--target-ref")?)?,
+            format,
+        )?;
+        Operation::Prepare(Box::new(preparation(&flags, guard)?))
     } else {
         if incarnation.is_none() {
             return Err("queue writes require --expected-incarnation".into());
@@ -203,7 +260,44 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             ExpectedVersion::Exactly(version)
         };
         let target_ref = branch(required(&flags, "--target-ref")?)?;
-        if action == "land" {
+        if action == "land-candidate" {
+            let guard = landing(
+                &flags,
+                number.ok_or("queue number is required")?,
+                expected_version,
+                target_ref,
+                format,
+            )?;
+            let merge = NativeMerge {
+                source_ref: guard.source_ref,
+                source_tip: guard.head_tip,
+                target_ref: guard.target_ref,
+                target_tip_before: guard.expected_target_tip,
+                base_tip: oid(required(&flags, "--merge-base")?, format)?,
+                merge_commit: oid(required(&flags, "--expected-commit")?, format)?,
+            };
+            merge
+                .validate()
+                .map_err(|_| "invalid native merge coordinates")?;
+            if [merge.source_tip, merge.target_tip_before, merge.base_tip]
+                .contains(&merge.merge_commit)
+            {
+                return Err("candidate landing requires a distinct two-parent merge commit".into());
+            }
+            Operation::LandCandidate {
+                principal,
+                key,
+                command: QueueCandidateLandingCommand {
+                    number: guard.number,
+                    expected_version: guard.expected_version,
+                    expected_policy_epoch: guard.expected_policy_epoch,
+                    pull_request: guard.pull_request,
+                    expected_pull_request_version: guard.expected_pull_request_version,
+                    merge,
+                },
+                bundle: artifact_path(required(&flags, "--bundle")?)?,
+            }
+        } else if action == "land" {
             Operation::Land {
                 principal,
                 key,
@@ -313,7 +407,7 @@ fn landing(
     let head_tip = oid(required(flags, "--expected-source-tip")?, format)?;
     let expected_target_tip = oid(required(flags, "--expected-target-tip")?, format)?;
     if head_tip == expected_target_tip {
-        return Err("queue landing requires a new fast-forward target tip".into());
+        return Err("queue landing requires distinct source and target tips".into());
     }
     Ok(QueueLandingCommand {
         number,
@@ -330,6 +424,49 @@ fn landing(
         target_ref,
         expected_target_tip,
     })
+}
+
+fn preparation(
+    flags: &BTreeMap<&str, &str>,
+    guard: QueueLandingCommand,
+) -> Result<Preparation, String> {
+    let profile = match required(flags, "--profile")? {
+        "path-v1" => MergeProfile::PathMergeV1,
+        "exact-renames-v1" => MergeProfile::ExactRenamesV1,
+        _ => return Err("--profile must be path-v1 or exact-renames-v1".into()),
+    };
+    let author = required(flags, "--author")?;
+    let metadata = MergeMetadata {
+        author: author.into(),
+        committer: flags.get("--committer").copied().unwrap_or(author).into(),
+        timestamp: decimal(required(flags, "--timestamp")?)?,
+        message: required(flags, "--message")?.as_bytes().to_vec(),
+    };
+    metadata.validate().map_err(|error| error.to_string())?;
+    Ok(Preparation {
+        number: guard.number,
+        expected_version: guard.expected_version,
+        subject: ReviewSubject {
+            pull_request: guard.pull_request,
+            pull_request_version: guard.expected_pull_request_version,
+            source_ref: guard.source_ref,
+            source_tip: guard.head_tip,
+            target_ref: guard.target_ref,
+            target_tip: guard.expected_target_tip,
+            policy_epoch: guard.expected_policy_epoch,
+        },
+        metadata,
+        profile,
+        output: artifact_path(required(flags, "--output-bundle")?)?,
+    })
+}
+
+fn artifact_path(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if value.is_empty() || path.file_name().is_none() {
+        return Err("candidate artifact must name a regular file".into());
+    }
+    Ok(path)
 }
 
 fn required<'a>(flags: &BTreeMap<&str, &'a str>, flag: &str) -> Result<&'a str, String> {

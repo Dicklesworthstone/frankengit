@@ -256,7 +256,7 @@ fn validate_epoch_transition(prepared: &PreparedNativeMerge) -> Result<(), Admis
     let record = &prepared.materialization.record;
     let resulting = prepared.materialization.roots.policy_epoch;
     let [event] = prepared.event.events.as_slice() else {
-        super::native::queue::validate_landing_shape(&prepared.event).map_err(unavailable)?;
+        super::native::queue::validate_publication_shape(&prepared.event).map_err(unavailable)?;
         if resulting != record.policy_epoch {
             return Err(invalid());
         }

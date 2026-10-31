@@ -2,11 +2,13 @@
 //! the same head. Payload bytes stream through a private, unpublished file.
 mod approval;
 mod archive;
+mod attest;
 mod blob_io;
 mod checkpoint;
 mod input;
 mod payload;
 mod profile;
+mod reconstruct;
 mod restore;
 
 use std::fs::File;
@@ -370,7 +372,18 @@ pub(super) fn run_with_timeout(
     if args == ["--help"] {
         emit(output, USAGE)?;
         emit(output, restore::USAGE)?;
-        return emit(output, restore::verify::USAGE);
+        emit(output, restore::verify::USAGE)?;
+        emit(output, attest::USAGE)?;
+        return emit(output, reconstruct::USAGE);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "catalog" | "reconstruct"))
+    {
+        return reconstruct::run(args, output, timeout);
+    }
+    if args.first().is_some_and(|arg| arg == "attest") {
+        return attest::run(args, output, timeout);
     }
     if args.first().is_some_and(|arg| arg == "verify") {
         return restore::verify::run(args, output, timeout);

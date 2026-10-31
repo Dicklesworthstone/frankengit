@@ -536,7 +536,7 @@ async fn admit_merge_attempt_async<S, P>(
     sealed: Option<&SealedMerge<'_>>,
     limits: AdmissionLimits,
     projection: &P,
-    landing: Option<&queue::QueueLandingCommand>,
+    landing: Option<queue::Landing<'_>>,
 ) -> Result<TerminalOutcome, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -544,18 +544,8 @@ where
 {
     let landing_events = landing
         .map(|command| {
-            let (events, expected) = queue::landing_proposal(context, command)?;
-            if expected != *attempt
-                || sealed.is_some()
-                || NativeMergeIntent::fast_forward_only(
-                    command.pull_request,
-                    command.expected_pull_request_version,
-                    command.source_ref.clone(),
-                    command.head_tip,
-                    command.target_ref.clone(),
-                    command.expected_target_tip,
-                )? != *intent
-            {
+            let (events, expected) = command.proposal(context)?;
+            if expected != *attempt || sealed.is_some() || command.intent()? != *intent {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
             Ok(events)
@@ -695,9 +685,9 @@ where
                 return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
             }
             let mut prepared = match (landing, &landing_events) {
-                (Some(command), Some(events)) => queue::prepare_landing(
-                    context, command, events, &closure, tx_id, attempt, &basis, &resolved,
-                ),
+                (Some(command), Some(events)) => {
+                    command.prepare(context, events, &closure, tx_id, attempt, &basis, &resolved)
+                }
                 (None, None) => prepare_event(
                     context,
                     &intent.event,
