@@ -458,6 +458,8 @@ fn actual_node_jobs_reopen_exact_evidence_without_publishing_or_reexecution() {
             SOURCE.as_bytes(),
         );
         let tree = [b"100644 workflow.yml\0".as_slice(), workflow.as_bytes()].concat();
+        let workflow_tree = loose(&source, format, GitObjectKind::Tree, "tree", &tree);
+        let tree = [b"40000 ci\0".as_slice(), workflow_tree.as_bytes(), &tree].concat();
         let tree = loose(&source, format, GitObjectKind::Tree, "tree", &tree);
         let body = format!(
             "tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nworkflow input\n"
@@ -494,8 +496,24 @@ fn actual_node_jobs_reopen_exact_evidence_without_publishing_or_reexecution() {
                 DecisionOutcome::Committed { .. }
             ))
         );
+        let stale_head = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&node.request_context()))
+            .unwrap()
+            .basis()
+            .id();
+        fs::write(source.join("refs/heads/unrelated"), format!("{tip}\n")).unwrap();
+        node.runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &node.request_context(),
+                &source,
+                PrincipalId::from_bytes([0x43; 16]),
+                b"workflow-unrelated-transition",
+            ))
+            .unwrap();
         let before = generation(&node);
         let reference = RefName::try_new(b"refs/heads/main").unwrap();
+        assert_dispatch_reservation_after_source_pin(&node, &temp, &reference, tip, stale_head);
         let mut report = node
             .runtime()
             .block_on(node.run_trusted_workflow_in(
@@ -599,5 +617,64 @@ fn actual_node_jobs_reopen_exact_evidence_without_publishing_or_reexecution() {
             fs::read(report.run_directory.join("report.json")).unwrap(),
             saved
         );
+    }
+}
+
+// The stale-head twin retains the exact same source commit. Only an unrelated
+// authority transition separates selection from dispatch, as in the HTTP race.
+fn assert_dispatch_reservation_after_source_pin(
+    node: &OneNode,
+    temp: &Temp,
+    reference: &RefName,
+    tip: GitOid,
+    stale_head: RepositoryAuthorityHeadId,
+) {
+    let head = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .unwrap()
+        .basis()
+        .id();
+    assert_ne!(head, stale_head);
+    for (expected, should_reserve) in [(stale_head, false), (head, true)] {
+        let parent = temp.0.join(if should_reserve {
+            "pinned-event"
+        } else {
+            "stale-event"
+        });
+        let mut reservations = 0;
+        let result =
+            node.runtime()
+                .block_on(node.dispatch_trusted_workflows_with_trigger_branch_in(
+                    &node.request_context(),
+                    reference,
+                    b"ci",
+                    "push",
+                    [0x81; 16],
+                    &parent,
+                    &[b"ci".to_vec()],
+                    (expected, tip),
+                    limits(),
+                    None,
+                    None,
+                    None,
+                    Some(|| {
+                        reservations += 1;
+                        fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+                        Ok(())
+                    }),
+                ));
+        assert_eq!(reservations, usize::from(should_reserve));
+        assert_eq!(parent.exists(), should_reserve);
+        if should_reserve {
+            let dispatch = result.unwrap();
+            assert!(dispatch.succeeded());
+            assert_eq!(dispatch.runs().len(), 1);
+            assert_eq!(dispatch.runs()[0].execution.jobs.len(), 2);
+        } else {
+            assert!(matches!(result, Err(TrustedWorkflowFailure::Source(
+                NodeWorkspaceRefusal::SourceBrowse(error)
+            )) if matches!(error.as_ref(), fgit_forge::source_browse::SourceBrowseError::SnapshotMoved)));
+        }
     }
 }
