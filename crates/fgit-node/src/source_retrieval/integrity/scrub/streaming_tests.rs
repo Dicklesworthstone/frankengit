@@ -25,7 +25,7 @@ fn a_corrupt_boundary_payload_is_not_read_or_counted_until_its_next_page() {
         // inspected, but its corrupt payload must not become a finding here.
         let page = run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 max_payload_bytes: first_size,
                 ..Default::default()
             },
@@ -42,7 +42,7 @@ fn a_corrupt_boundary_payload_is_not_read_or_counted_until_its_next_page() {
 
         let next = run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 cursor: page.next_cursor(),
                 ..Default::default()
             },
@@ -63,7 +63,7 @@ fn a_corrupt_boundary_payload_is_not_read_or_counted_until_its_next_page() {
 
         fs::write(path, original).unwrap();
         assert!(
-            run(&node, ScrubQuery::default())
+            run(&node, &ScrubQuery::default())
                 .unwrap()
                 .entire_selection_verified()
         );
@@ -88,7 +88,7 @@ fn an_oversized_first_payload_refuses_before_integrity_work_and_a_sufficient_pag
         assert!(matches!(
             run(
                 &node,
-                ScrubQuery {
+                &ScrubQuery {
                     max_payload_bytes: 1,
                     ..Default::default()
                 },
@@ -96,7 +96,7 @@ fn an_oversized_first_payload_refuses_before_integrity_work_and_a_sufficient_pag
             Err(ScrubRefusal::ObjectExceedsPage { oid, payload_bytes, maximum: 1 })
                 if oid == first && payload_bytes == size
         ));
-        let checked = run(&node, ScrubQuery::default()).unwrap();
+        let checked = run(&node, &ScrubQuery::default()).unwrap();
         assert!(checked.entire_selection_checked());
         assert_eq!(checked.findings().len(), 1);
         assert_eq!(checked.findings()[0].oid, first);
@@ -104,7 +104,7 @@ fn an_oversized_first_payload_refuses_before_integrity_work_and_a_sufficient_pag
 
         fs::write(path, original).unwrap();
         assert!(
-            run(&node, ScrubQuery::default())
+            run(&node, &ScrubQuery::default())
                 .unwrap()
                 .entire_selection_verified()
         );
@@ -131,7 +131,7 @@ fn multi_chunk_objects_keep_exact_accounting_and_the_independent_node_ceiling() 
             max_payload_bytes: total,
             ..Default::default()
         };
-        let complete = run(&node, query).unwrap();
+        let complete = run(&node, &query).unwrap();
         assert!(complete.entire_selection_verified());
         assert_eq!(complete.payload_bytes(), total);
         assert_eq!(complete.read_attempts(), objects.len());
@@ -141,7 +141,7 @@ fn multi_chunk_objects_keep_exact_accounting_and_the_independent_node_ceiling() 
         assert!(matches!(
             run(
                 &node,
-                ScrubQuery {
+                &ScrubQuery {
                     expected_head: Some(complete.head()),
                     cursor: previous.map(|after| ScrubCursor::new(complete.head(), after)),
                     max_payload_bytes: large_bytes - 1,
@@ -157,7 +157,7 @@ fn multi_chunk_objects_keep_exact_accounting_and_the_independent_node_ceiling() 
         let mut narrow =
             OneNode::open_existing(config.clone().with_max_object_bytes(64 * 1024)).unwrap();
         narrow.bring_into_service(HeadGeneration::FIRST).unwrap();
-        let limited = run(&narrow, query).unwrap();
+        let limited = run(&narrow, &query).unwrap();
         assert!(limited.entire_selection_checked());
         assert!(!limited.entire_selection_verified());
         assert_eq!(limited.findings().len(), 1);
@@ -172,7 +172,7 @@ fn multi_chunk_objects_keep_exact_accounting_and_the_independent_node_ceiling() 
 
         let mut reopened = OneNode::open_existing(config).unwrap();
         reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
-        let recovered = run(&reopened, query).unwrap();
+        let recovered = run(&reopened, &query).unwrap();
         assert!(recovered.entire_selection_verified());
         assert_eq!(recovered.payload_bytes(), total);
         reopened.shutdown().unwrap();

@@ -45,9 +45,9 @@ pub(super) fn setup(format: GitHashAlgorithm) -> (Scratch, OneNode) {
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     (scratch, node)
 }
-pub(super) fn run(node: &OneNode, query: ScrubQuery) -> Result<SelectedObjectScrub, ScrubRefusal> {
+pub(super) fn run(node: &OneNode, query: &ScrubQuery) -> Result<SelectedObjectScrub, ScrubRefusal> {
     node.runtime()
-        .block_on(node.scrub_selected_objects_local_in(&node.request_context(), query))
+        .block_on(node.scrub_selected_objects_local_in(&node.request_context(), *query))
 }
 fn put(node: &OneNode, kind: GitKind, payload: Vec<u8>) -> GitOid {
     node.put_git_object(kind, payload).unwrap().identity()
@@ -173,7 +173,7 @@ fn fresh_complete_inventory_is_deterministic_in_both_domains_and_does_not_publis
         let (_scratch, node) = setup(format);
         let (objects, _) = publish(&node);
         let before = node.runtime().block_on(node.read_authority_head()).unwrap();
-        let report = run(&node, ScrubQuery::default()).unwrap();
+        let report = run(&node, &ScrubQuery::default()).unwrap();
         assert!(report.entire_selection_verified());
         assert_eq!(report.selected_objects(), objects.len());
         assert_eq!(report.checked_objects(), objects.len());
@@ -188,7 +188,7 @@ fn fresh_complete_inventory_is_deterministic_in_both_domains_and_does_not_publis
         );
         assert_eq!(
             format!("{report:?}"),
-            format!("{:?}", run(&node, ScrubQuery::default()).unwrap())
+            format!("{:?}", run(&node, &ScrubQuery::default()).unwrap())
         );
         assert_eq!(
             node.runtime().block_on(node.read_authority_head()).unwrap(),
@@ -209,7 +209,7 @@ fn missing_and_corrupt_history_are_both_reported_but_unselected_residue_is_not_r
         fs::write(body_path(&scratch.0, extra[0]), b"damaged native body").unwrap();
         fs::remove_file(body_path(&scratch.0, extra[1])).unwrap();
         let before = node.runtime().block_on(node.read_authority_head()).unwrap();
-        let report = run(&node, ScrubQuery::default()).unwrap();
+        let report = run(&node, &ScrubQuery::default()).unwrap();
         assert!(report.entire_selection_checked());
         assert!(!report.entire_selection_verified());
         assert_eq!(report.checked_objects(), objects.len());
@@ -264,7 +264,7 @@ fn cursor_pages_resume_across_real_reopen_without_skips_duplicates_or_health_inf
         loop {
             let report = run(
                 &node,
-                ScrubQuery {
+                &ScrubQuery {
                     cursor,
                     max_page_objects: 2,
                     max_findings: 2,
@@ -308,7 +308,7 @@ fn a_finding_limit_continues_after_the_observed_failure_not_after_an_unread_obje
     loop {
         let report = run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 cursor,
                 max_findings: 1,
                 ..Default::default()
@@ -348,7 +348,7 @@ fn payload_pages_account_exactly_and_never_advance_past_the_boundary_read() {
     loop {
         let report = run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 cursor,
                 max_payload_bytes: budget,
                 ..Default::default()
@@ -376,7 +376,7 @@ fn payload_pages_account_exactly_and_never_advance_past_the_boundary_read() {
     assert!(matches!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 max_payload_bytes: 1,
                 ..Default::default()
             }
@@ -384,7 +384,7 @@ fn payload_pages_account_exactly_and_never_advance_past_the_boundary_read() {
         Err(ScrubRefusal::ObjectExceedsPage { .. })
     ));
     assert!(
-        run(&node, ScrubQuery::default())
+        run(&node, &ScrubQuery::default())
             .unwrap()
             .entire_selection_verified()
     );
@@ -394,17 +394,17 @@ fn payload_pages_account_exactly_and_never_advance_past_the_boundary_read() {
 #[test]
 fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness() {
     let (_scratch, node) = setup(GitHashAlgorithm::Sha1);
-    let genesis = run(&node, ScrubQuery::default()).unwrap();
+    let genesis = run(&node, &ScrubQuery::default()).unwrap();
     assert!(genesis.entire_selection_verified());
     assert_eq!(genesis.checked_objects(), 0);
     let (objects, _) = publish(&node);
-    let current = run(&node, ScrubQuery::default()).unwrap();
+    let current = run(&node, &ScrubQuery::default()).unwrap();
     let first = *objects.first().unwrap();
     let last = *objects.last().unwrap();
     assert!(matches!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 cursor: Some(ScrubCursor::new(genesis.head(), first)),
                 ..Default::default()
             }
@@ -415,7 +415,7 @@ fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness
     assert!(matches!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 cursor: Some(ScrubCursor::new(current.head(), outsider)),
                 ..Default::default()
             }
@@ -425,7 +425,7 @@ fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness
     assert!(matches!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 expected_head: Some(genesis.head()),
                 cursor: Some(ScrubCursor::new(current.head(), first)),
                 ..Default::default()
@@ -436,7 +436,7 @@ fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness
     assert!(matches!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 expected_generation: Some(genesis.generation()),
                 ..Default::default()
             }
@@ -447,7 +447,7 @@ fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness
     ));
     let empty_suffix = run(
         &node,
-        ScrubQuery {
+        &ScrubQuery {
             cursor: Some(ScrubCursor::new(current.head(), last)),
             ..Default::default()
         },
@@ -491,12 +491,12 @@ fn limits_and_cancelled_requests_are_not_object_findings_or_success_pages() {
             ..Default::default()
         },
     ] {
-        assert!(run(&node, query).is_err());
+        assert!(run(&node, &query).is_err());
     }
     assert!(matches!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 max_selected_objects: 1,
                 max_page_objects: 1,
                 max_findings: 1,
@@ -508,7 +508,7 @@ fn limits_and_cancelled_requests_are_not_object_findings_or_success_pages() {
     assert!(
         run(
             &node,
-            ScrubQuery {
+            &ScrubQuery {
                 max_selected_objects: objects.len(),
                 max_page_objects: objects.len(),
                 max_findings: objects.len(),

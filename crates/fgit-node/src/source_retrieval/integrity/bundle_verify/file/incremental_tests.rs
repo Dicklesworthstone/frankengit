@@ -170,10 +170,10 @@ impl BundleOriginalSource for Originals {
             if self.truncate == Some(identity) {
                 return Ok(());
             }
-            if let Some((stop, selected)) = &self.stop {
-                if *selected == identity {
-                    stop.set(false);
-                }
+            if let Some((stop, selected)) = &self.stop
+                && *selected == identity
+            {
+                stop.set(false);
             }
         }
         if !live() {

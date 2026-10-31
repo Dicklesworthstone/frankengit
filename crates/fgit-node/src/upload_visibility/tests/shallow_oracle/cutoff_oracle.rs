@@ -111,8 +111,8 @@ fn pinned_git_cutoffs_clone_widen_checkout_and_unshallow() {
             .unwrap()
             .identity();
         let mut extra = BTreeSet::from([inner, tag]);
-        for (c, t, b) in [first, second, third, fourth] {
-            extra.extend([c, t, b]);
+        for objects in [first, second, third, fourth] {
+            extra.extend(<[GitOid; 3]>::from(objects));
         }
         let zero = GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
         publish(

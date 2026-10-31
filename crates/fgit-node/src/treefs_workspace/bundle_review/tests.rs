@@ -281,13 +281,15 @@ fn copy_then_exclaim(base: &[u8]) -> Vec<u8> {
     vec![length, length + 1, 0x90, length, 1, b'!']
 }
 
+type SparseInputBodies = Vec<(Vec<u8>, Vec<u8>)>;
+
 fn sparse_input_bodies<A: fgit_crypto::GitHashAlgorithm>(
     node: &OneNode,
     f: &Fixture,
     candidate: GitOid,
     bytes: &[u8],
     merge: Option<(&NativeMerge, fgit_forge::preparation::MergeCommitStyle)>,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BundleInspectionRefusal> {
+) -> Result<SparseInputBodies, BundleInspectionRefusal> {
     use fgit_treefs::{SparseLimits, TreeCapability, TreePath, WorkspaceId};
 
     let mut capability = TreeCapability::new(
@@ -353,7 +355,7 @@ fn sparse_inputs(
     candidate: GitOid,
     bytes: &[u8],
     merge: Option<(&NativeMerge, fgit_forge::preparation::MergeCommitStyle)>,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BundleInspectionRefusal> {
+) -> Result<SparseInputBodies, BundleInspectionRefusal> {
     match format {
         GitHashAlgorithm::Sha1 => {
             sparse_input_bodies::<fgit_crypto::Sha1>(node, f, candidate, bytes, merge)
