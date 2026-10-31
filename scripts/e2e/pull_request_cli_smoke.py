@@ -185,6 +185,16 @@ def run_format(binary, algorithm):
                 "a retained continuation changed after a later update")
         require(read(extra=["--limit", "2", "--expected-head", first["snapshot_token"]]) == first,
                 "a retained first page changed after a later update")
+        before_unknown = invoke(binary, ["at", node, TENANT, REPOSITORY, "latest"])
+        token = first["snapshot_token"]
+        unknown = token[:-1] + ("e" if token.endswith("f") else "f")
+        unknown_page = ["pr", "list", node, TENANT, REPOSITORY, "--trusted-local",
+                        "--object-format", algorithm, "--limit", "2", "--after", "7",
+                        "--expected-head", unknown]
+        require(invoke(binary, unknown_page, 2) == b"",
+                "an unknown pin emitted a successful or substituted page")
+        require(invoke(binary, ["at", node, TENANT, REPOSITORY, "latest"]) == before_unknown,
+                "an unknown-pin read changed canonical state")
         check_view(read("show", 7)["pull_request"], updated_data, 7, 2, "open")
         stale = mutate("update", 7, 1, "stale-update", dict(data, title="Must not win"), False)
         require(stale["refusal_code"] == "EvidenceStale", "stale version refusal")
