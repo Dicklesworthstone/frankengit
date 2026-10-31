@@ -555,10 +555,10 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
             Ok((self.probe_acknowledgement(request)?, Vec::new()))
         });
         std::future::poll_fn(move |_| {
-            std::task::Poll::Ready(work
+            let work = work
                 .take()
-                .expect("completed webhook probe cannot be repolled")(
-            ))
+                .expect("completed webhook probe cannot be repolled");
+            std::task::Poll::Ready(work())
         })
     }
 
@@ -573,10 +573,10 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
             self.dispatch_http_with_checkpoint(request, attempt, &|| request_checkpoint(cx))
         });
         std::future::poll_fn(move |_| {
-            std::task::Poll::Ready(work
+            let work = work
                 .take()
-                .expect("completed webhook delivery cannot be repolled")(
-            ))
+                .expect("completed webhook delivery cannot be repolled");
+            std::task::Poll::Ready(work())
         })
     }
 }
