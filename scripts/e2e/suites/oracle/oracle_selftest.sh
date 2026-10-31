@@ -93,6 +93,28 @@ if [ "$1" = "emit" ]; then
     printf 'stable stderr\n' >&2
     exit 0
 fi
+if [ "$1" = "-c" ]; then
+    [ "$2" = "protocol.version=1" ] || exit 52
+    [ "${GIT_ALLOW_PROTOCOL}" = git ] || exit 53
+    shift 2
+    if [ "$1" = "ls-remote" ]; then
+        [ "$2" = "--tags" ] || exit 54
+        [ "$3" = "git://127.0.0.1:9418/11111111111111111111111111111111.git" ] || exit 55
+        [ "$#" -eq 3 ] || exit 56
+        printf 'loopback tag refs accepted\n'
+        exit 0
+    fi
+    if [ "$1" = "clone" ]; then
+        [ "$2" = "-q" ] || exit 57
+        [ "$3" = "--no-local" ] || exit 58
+        [ "$4" = "git://127.0.0.1:9418/11111111111111111111111111111111.git" ] || exit 59
+        [ "$5" = "loopback-clone-v1" ] || exit 60
+        [ "$#" -eq 5 ] || exit 61
+        printf 'loopback v1 clone accepted\n'
+        exit 0
+    fi
+    exit 62
+fi
 if [ "$1" = "clone" ]; then
     [ "${GIT_ALLOW_PROTOCOL}" = git ] || exit 41
     [ "$2" = "--no-local" ] || exit 42
@@ -282,6 +304,34 @@ expect_exit FG-000B-ORACLE-025 64 "loopback fetch refuses an unknown protocol ve
 "${ORACLE}" push-loopback testgit "${RUN_DIRECTORY}" push-permitted 127.0.0.1:9418 "${PUSH_REPO}" pushsrc atomic \
   +refs/heads/topic:refs/heads/topic :refs/tags/old >/dev/null
 PUSH_CAPTURE_EXIT=$?
+
+# Fixed protocol-v1 tag clients have the same closed endpoint/path policy.
+expect_exit FG-000B-ORACLE-033 64 "tag listing refuses a non-loopback endpoint" \
+    "${ORACLE}" ls-remote-tags-loopback testgit "${RUN_DIRECTORY}" tags-remote 192.0.2.1:9418 "${PUSH_REPO}"
+expect_exit FG-000B-ORACLE-034 64 "tag listing refuses an escaping repository path" \
+    "${ORACLE}" ls-remote-tags-loopback testgit "${RUN_DIRECTORY}" tags-path 127.0.0.1:9418 /../escape.git
+expect_exit FG-000B-ORACLE-035 64 "tag listing refuses caller-supplied Git options" \
+    "${ORACLE}" ls-remote-tags-loopback testgit "${RUN_DIRECTORY}" tags-options 127.0.0.1:9418 "${PUSH_REPO}" --upload-pack=/bin/false
+expect_exit FG-000B-ORACLE-036 64 "tag listing refuses an unpinned identity" \
+    "${ORACLE}" ls-remote-tags-loopback unknown-git "${RUN_DIRECTORY}" tags-pin 127.0.0.1:9418 "${PUSH_REPO}"
+expect_exit FG-000B-ORACLE-037 0 "tag listing uses exactly the permitted v1 ls-remote invocation" \
+    "${ORACLE}" ls-remote-tags-loopback testgit "${RUN_DIRECTORY}" tags-permitted 127.0.0.1:9418 "${PUSH_REPO}"
+expect_exit FG-000B-ORACLE-038 64 "tag listing never overwrites an existing transcript" \
+    "${ORACLE}" ls-remote-tags-loopback testgit "${RUN_DIRECTORY}" tags-permitted 127.0.0.1:9418 "${PUSH_REPO}"
+expect_exit FG-000B-ORACLE-039 64 "v1 clone refuses a non-loopback endpoint" \
+    "${ORACLE}" clone-v1-loopback testgit "${RUN_DIRECTORY}" clone-v1-remote 192.0.2.1:9418 "${PUSH_REPO}" loopback-clone-v1
+expect_exit FG-000B-ORACLE-040 64 "v1 clone refuses an escaping destination" \
+    "${ORACLE}" clone-v1-loopback testgit "${RUN_DIRECTORY}" clone-v1-path 127.0.0.1:9418 "${PUSH_REPO}" ../escape
+expect_exit FG-000B-ORACLE-041 0 "v1 clone fixes protocol and arguments while preserving the old clone mode" \
+    "${ORACLE}" clone-v1-loopback testgit "${RUN_DIRECTORY}" clone-v1-permitted 127.0.0.1:9418 "${PUSH_REPO}" loopback-clone-v1
+expect_file_contains FG-000B-ORACLE-042 'protocol_version=1' \
+    "${RUN_DIRECTORY}/transcripts/clone-v1-permitted/receipt.tsv" "v1 clone receipt binds its selected protocol"
+expect_file_contains FG-000B-ORACLE-043 'protocol_version=1' \
+    "${RUN_DIRECTORY}/transcripts/tags-permitted/receipt.tsv" "tag listing receipt binds its selected protocol"
+expect_file_contains FG-000B-ORACLE-044 'operation=ls-remote-tags' \
+    "${RUN_DIRECTORY}/transcripts/tags-permitted/receipt.tsv" "tag listing receipt binds its fixed operation"
+fge_assert_cmd FG-000B-ORACLE-045 'refused tag endpoint creates no transcript' \
+    test ! -e "${RUN_DIRECTORY}/transcripts/tags-remote"
 
 fge_phase assert
 expect_file_contains FG-000B-ORACLE-007 '"classification":"byte_equal"' "${TEST_ROOT}/verdict.json" "identical transcripts receive a byte-equal NDJSON verdict"

@@ -16,6 +16,8 @@
 #   oracle.sh run <pin-id> <run-directory> <relative-workdir> -- <git-args...>
 #   oracle.sh capture <pin-id> <run-directory> <relative-workdir> <label> -- <git-args...>
 #   oracle.sh clone-loopback <pin-id> <run-directory> <label> <127.0.0.1:port> <repository-path> <destination>
+#   oracle.sh clone-v1-loopback <same arguments as clone-loopback>
+#   oracle.sh ls-remote-tags-loopback <pin-id> <run-directory> <label> <127.0.0.1:port> <repository-path>
 #   oracle.sh fetch-loopback <pin-id> <run-directory> <label> <127.0.0.1:port> <repository-path> <existing-workdir> <v1|v2> <refspec>
 #   oracle.sh compare <left-transcript> <right-transcript> <byte_equal|semantically_equal_declared|divergent> [accepted-divergence-id]
 #
@@ -740,6 +742,8 @@ oracle_run_loopback_clone() {
     local endpoint="$3"
     local repository_path="$4"
     local destination="$5"
+    local protocol="${6:-default}"
+    local -a clone_command=()
     local run_directory=""
     local install_dir=""
     local remote_url=""
@@ -751,6 +755,65 @@ oracle_run_loopback_clone() {
     oracle_validate_git_daemon_repository_path "${repository_path}"
     run_directory="$(oracle_validate_run_directory "${supplied_run_directory}")"
     oracle_require_new_clone_destination "${run_directory}" "${destination}"
+    install_dir="$(oracle_install_dir)"
+    remote_url="git://${endpoint}${repository_path}"
+    case "${protocol}" in
+        default) clone_command=(clone --no-local "${remote_url}" "${destination}") ;;
+        v1) clone_command=(-c protocol.version=1 clone -q --no-local "${remote_url}" "${destination}") ;;
+        *) oracle_die "REFUSED" "unknown loopback clone protocol" ;;
+    esac
+
+    # `--share-net` is deliberately paired with the fixed loopback-only
+    # invocation below.  The generic file-only runner retains `--unshare-all`
+    # without this exception.  Numeric loopback avoids DNS, GIT_ALLOW_PROTOCOL
+    # denies every non-git transport, and this command accepts no caller-owned
+    # Git arguments, so an E2E cannot repurpose the mode for broader egress.
+    bwrap --die-with-parent --new-session --unshare-all --share-net --clearenv \
+        --ro-bind /usr /usr \
+        --symlink usr/bin /bin \
+        --symlink usr/lib /lib \
+        --symlink usr/lib64 /lib64 \
+        --proc /proc \
+        --dev /dev \
+        --tmpfs /tmp \
+        --dir /home \
+        --bind "${run_directory}/home" /home/oracle \
+        --bind "${run_directory}/work" /work \
+        --ro-bind "${install_dir}" /oracle \
+        --chdir /work \
+        --setenv HOME /home/oracle \
+        --setenv PATH /usr/bin:/bin \
+        --setenv GIT_CONFIG_NOSYSTEM 1 \
+        --setenv GIT_CONFIG_GLOBAL /dev/null \
+        --setenv GIT_TEMPLATE_DIR /home/oracle/template \
+        --setenv GIT_EXEC_PATH /oracle/libexec/git-core \
+        --setenv GIT_CEILING_DIRECTORIES /work \
+        --setenv GIT_ALLOW_PROTOCOL git \
+        --setenv GIT_CONFIG_COUNT 2 \
+        --setenv GIT_CONFIG_KEY_0 core.hooksPath \
+        --setenv GIT_CONFIG_VALUE_0 /home/oracle/empty-hooks \
+        --setenv GIT_CONFIG_KEY_1 credential.helper \
+        --setenv GIT_CONFIG_VALUE_1 '' \
+        --setenv GIT_ASKPASS /bin/false \
+        --setenv GIT_TERMINAL_PROMPT 0 \
+        -- /oracle/bin/git "${clone_command[@]}"
+}
+
+oracle_run_loopback_tag_refs() {
+    local requested_id="$1"
+    local supplied_run_directory="$2"
+    local endpoint="$3"
+    local repository_path="$4"
+    local run_directory=""
+    local install_dir=""
+    local remote_url=""
+
+    oracle_load_pin "${requested_id}"
+    FGIT_ORACLE_QUIET=1 oracle_verify "${requested_id}"
+    oracle_require_bwrap
+    oracle_validate_loopback_endpoint "${endpoint}"
+    oracle_validate_git_daemon_repository_path "${repository_path}"
+    run_directory="$(oracle_validate_run_directory "${supplied_run_directory}")"
     install_dir="$(oracle_install_dir)"
     remote_url="git://${endpoint}${repository_path}"
 
@@ -787,7 +850,7 @@ oracle_run_loopback_clone() {
         --setenv GIT_CONFIG_VALUE_1 '' \
         --setenv GIT_ASKPASS /bin/false \
         --setenv GIT_TERMINAL_PROMPT 0 \
-        -- /oracle/bin/git clone --no-local "${remote_url}" "${destination}"
+        -- /oracle/bin/git -c protocol.version=1 ls-remote --tags "${remote_url}"
 }
 
 oracle_run_loopback_fetch() {
@@ -857,6 +920,7 @@ oracle_clone_loopback() {
     local endpoint="$4"
     local repository_path="$5"
     local destination="$6"
+    local protocol="${7:-default}"
     local run_directory=""
     local transcript_directory=""
     local exit_code=0
@@ -874,7 +938,7 @@ oracle_clone_loopback() {
     mkdir -p "${transcript_directory}"
 
     set +e
-    oracle_run_loopback_clone "${requested_id}" "${run_directory}" "${endpoint}" "${repository_path}" "${destination}" \
+    oracle_run_loopback_clone "${requested_id}" "${run_directory}" "${endpoint}" "${repository_path}" "${destination}" "${protocol}" \
         > "${transcript_directory}/stdout.bin" 2> "${transcript_directory}/stderr.bin"
     exit_code=$?
     set -e
@@ -891,6 +955,57 @@ oracle_clone_loopback() {
         printf 'allowed_endpoint=%s\n' "${endpoint}"
         printf 'repository_path=%s\n' "${repository_path}"
         printf 'destination=%s\n' "${destination}"
+        if [[ "${protocol}" == v1 ]]; then
+            printf 'protocol_version=1\n'
+        fi
+        printf 'exit_code=%s\n' "${exit_code}"
+        printf 'stdout_sha256=%s\n' "$(oracle_sha256 "${transcript_directory}/stdout.bin")"
+        printf 'stderr_sha256=%s\n' "$(oracle_sha256 "${transcript_directory}/stderr.bin")"
+    } > "${transcript_directory}/receipt.tsv"
+    oracle_note "CAPTURED" "${transcript_directory} exit=${exit_code} loopback=${endpoint}"
+    return "${exit_code}"
+}
+
+oracle_tag_refs_loopback() {
+    local requested_id="$1"
+    local supplied_run_directory="$2"
+    local label="$3"
+    local endpoint="$4"
+    local repository_path="$5"
+    local run_directory=""
+    local transcript_directory=""
+    local exit_code=0
+    local install_receipt=""
+    local binary_sha256=""
+
+    oracle_load_pin "${requested_id}"
+    oracle_require_safe_token "${label}" "loopback tag-refs transcript label"
+    oracle_validate_loopback_endpoint "${endpoint}"
+    oracle_validate_git_daemon_repository_path "${repository_path}"
+    run_directory="$(oracle_validate_run_directory "${supplied_run_directory}")"
+    transcript_directory="${run_directory}/transcripts/${label}"
+    [[ ! -e "${transcript_directory}" ]] || oracle_die "REFUSED" "transcript label already exists: ${label}"
+    mkdir -p "${transcript_directory}"
+
+    set +e
+    oracle_run_loopback_tag_refs "${requested_id}" "${run_directory}" "${endpoint}" "${repository_path}" \
+        > "${transcript_directory}/stdout.bin" 2> "${transcript_directory}/stderr.bin"
+    exit_code=$?
+    set -e
+    install_receipt="$(oracle_receipt_path)"
+    binary_sha256="$(oracle_receipt_value "${install_receipt}" binary_sha256)"
+    [[ "${binary_sha256}" =~ ^[0-9a-f]{64}$ ]] || \
+        oracle_die "REFUSED" "pinned oracle receipt has no valid binary digest for loopback tag-refs"
+    {
+        printf 'schema_version=%s\n' "${ORACLE_SCHEMA_VERSION}"
+        printf 'oracle_id=%s\n' "${PIN_ID}"
+        printf 'oracle_version=%s\n' "${PIN_VERSION}"
+        printf 'oracle_binary_sha256=%s\n' "${binary_sha256}"
+        printf 'network_profile=loopback-git-only\n'
+        printf 'allowed_endpoint=%s\n' "${endpoint}"
+        printf 'repository_path=%s\n' "${repository_path}"
+        printf 'operation=ls-remote-tags\n'
+        printf 'protocol_version=1\n'
         printf 'exit_code=%s\n' "${exit_code}"
         printf 'stdout_sha256=%s\n' "$(oracle_sha256 "${transcript_directory}/stdout.bin")"
         printf 'stderr_sha256=%s\n' "$(oracle_sha256 "${transcript_directory}/stderr.bin")"
@@ -1169,7 +1284,7 @@ oracle_compare() {
 }
 
 usage() {
-    printf 'usage: %s {fetch-source|build|record-installed|verify|create-run|run|capture|clone-loopback|fetch-loopback|push-loopback|compare} ...\n' "$0" >&2
+    printf 'usage: %s {fetch-source|build|record-installed|verify|create-run|run|capture|clone-loopback|clone-v1-loopback|ls-remote-tags-loopback|fetch-loopback|push-loopback|compare} ...\n' "$0" >&2
     exit "${ORACLE_REFUSED}"
 }
 
@@ -1208,6 +1323,14 @@ main() {
         clone-loopback)
             [[ "$#" -eq 6 ]] || usage
             oracle_clone_loopback "$@"
+            ;;
+        clone-v1-loopback)
+            [[ "$#" -eq 6 ]] || usage
+            oracle_clone_loopback "$@" v1
+            ;;
+        ls-remote-tags-loopback)
+            [[ "$#" -eq 5 ]] || usage
+            oracle_tag_refs_loopback "$@"
             ;;
         fetch-loopback)
             [[ "$#" -eq 8 ]] || usage

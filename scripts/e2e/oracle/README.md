@@ -34,7 +34,8 @@ mutates the shared E2E harness.
 
 ## Constrained loopback modes
 
-`clone-loopback`, `fetch-loopback` and `push-loopback` are the only exceptions
+`clone-loopback`, `clone-v1-loopback`, `ls-remote-tags-loopback`,
+`fetch-loopback` and `push-loopback` are the only exceptions
 to the ordinary runner's file-only transport policy. They exist so a pinned
 upstream Git client can talk to a live local `fg serve` git-daemon (FG-028b
 FIRST CLONE, incremental fetch, and the Tier A differential lane). None of them
@@ -44,6 +45,11 @@ is a generic networked Git runner:
 scripts/e2e/oracle/oracle.sh clone-loopback \
   git-2.54.0 <run-directory> <label> \
   127.0.0.1:<port> /<32-lower-hex-repository-id>.git <new-relative-destination>
+scripts/e2e/oracle/oracle.sh clone-v1-loopback \
+  git-2.54.0 <run-directory> <label> \
+  127.0.0.1:<port> /<id>.git <new-relative-destination>
+scripts/e2e/oracle/oracle.sh ls-remote-tags-loopback \
+  git-2.54.0 <run-directory> <label> 127.0.0.1:<port> /<id>.git
 scripts/e2e/oracle/oracle.sh fetch-loopback \
   git-2.54.0 <run-directory> <label> 127.0.0.1:<port> /<id>.git \
   <relative-repository> v0|v1|v2 'refs/heads/*:refs/remotes/origin/*'
@@ -68,10 +74,21 @@ repository path, the mode-specific arguments, output digests and exit status.
 is reachable; every other oracle command remains network-unshared and
 file-only.
 
+`clone-v1-loopback` fixes protocol version 1 and a quiet, non-local clone;
+the original `clone-loopback` invocation remains unchanged.
+`ls-remote-tags-loopback` fixes protocol version 1 and `ls-remote --tags`,
+accepting no additional Git options. Both bind the selected protocol in their
+transcript receipts. The native tag campaign uses these modes and the ordinary
+file-only oracle for its fixture and object observations, so all of its Git
+calls use the same verified pin and sandbox. Native `fg init` and `fg import`
+output is captured separately by the E2E harness.
+
 `../suites/oracle/oracle_selftest.sh` is a discovered E2E suite that exercises
 planted refusals for an unknown pin, missing source input, wrong binary version,
 caller configuration leakage, sandbox path escape, the loopback-only clone
 boundary, and the push grammar (non-loopback endpoint, renaming refspec, path
 escape, unknown mode, foreign namespace, unknown fetch protocol), each beside a
-permitted push twin. Its fake Git/Bubblewrap fixtures prove harness mechanics only, not
-Git conformance.
+permitted push twin. It also checks the closed v1 tag-listing/clone arguments,
+their adjacent endpoint/path/option refusals, transcript non-overwrite, and
+protocol receipts. Its fake Git/Bubblewrap fixtures prove harness mechanics
+only, not Git conformance; the real native tag campaign remains separate.
