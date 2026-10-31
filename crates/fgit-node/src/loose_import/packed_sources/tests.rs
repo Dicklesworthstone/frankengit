@@ -152,7 +152,7 @@ fn multiple_packs_reuse_exact_disk_custody_after_sources_are_removed() {
                 &scratch,
                 format,
                 &format!("part-{ordinal}"),
-                &[body.clone()],
+                std::slice::from_ref(&body),
             )[0];
             expected.insert(id, body);
         }

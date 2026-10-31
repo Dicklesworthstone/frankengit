@@ -265,7 +265,7 @@ fn publish(
     let validator = node
         .production_quarantine_validator(
             &selected,
-            limits.pack.clone(),
+            limits.pack,
             ParseLimits {
                 tree_reference_bytes: old.algorithm().digest_len(),
                 ..ParseLimits::default()

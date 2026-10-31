@@ -194,7 +194,7 @@ fn corrupt_seal_is_an_error_not_an_absent_or_undecided_observation() {
         .unwrap();
     let session = LoopbackReceiveSession::authenticated(
         attempt.authenticated_principal_id,
-        attempt.idempotency_key.clone(),
+        attempt.idempotency_key,
     );
     let request = Request {
         repository_route: "/unused-after-authentication",

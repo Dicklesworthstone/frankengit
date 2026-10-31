@@ -325,7 +325,7 @@ mod tests {
         let mut row = PullRequestView {
             number: command.number,
             event: command.proposed_event(actor, format).unwrap(),
-            data: Some(command.data.clone()),
+            data: Some(command.data),
             opened_by: Some(actor),
             last_metadata_actor: Some(actor),
         };

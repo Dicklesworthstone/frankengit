@@ -40,7 +40,7 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
     let server_addr = listener.local_addr().unwrap();
 
     let secret = test_secret();
-    let secret_clone = secret.clone();
+    let secret_clone = secret;
 
     let server_handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();

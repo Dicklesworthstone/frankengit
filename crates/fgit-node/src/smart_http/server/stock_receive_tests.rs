@@ -379,7 +379,7 @@ fn conflicting_duplicate_and_hop_by_hop_keys_are_refused() {
 fn alias_syntax_cannot_select_foreign_endpoints_or_ambiguous_nonces() {
     let profile = profile();
     for identifier in [
-        "".to_owned(),
+        String::new(),
         "a".repeat(63),
         "a".repeat(65),
         "A".repeat(64),

@@ -144,7 +144,7 @@ fn truncated_extra_missing_foreign_or_swapped_evidence_refuses() {
     assert!(CheckpointEvidence::decode(&foreign.encode().unwrap(), identity).is_err());
     let swapped = CheckpointEvidence {
         objects: foreign.objects,
-        ..original.clone()
+        ..original
     };
     assert!(CheckpointEvidence::decode(&swapped.encode().unwrap(), identity).is_err());
     let mut input = Cursor(&bytes);

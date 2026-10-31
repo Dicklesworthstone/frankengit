@@ -87,7 +87,7 @@ impl Method {
         }
     }
 
-    fn roots(self, merge: &NativeMerge) -> [GitOid; 2] {
+    const fn roots(self, merge: &NativeMerge) -> [GitOid; 2] {
         match self {
             Self::Squash => [merge.merge_commit, merge.source_tip],
             Self::Merge | Self::FastForward => [merge.merge_commit; 2],

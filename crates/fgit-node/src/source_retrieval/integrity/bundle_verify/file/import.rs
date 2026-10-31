@@ -20,7 +20,7 @@ use super::{FileBundleVerification, checkpoint, verify_reader_inventory};
 /// Bounded facts about a selected object. No scratch offset or caller-supplied
 /// commitment can be used to manufacture a reader.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct FullBundleImportObject {
+pub struct FullBundleImportObject {
     pub(crate) kind: ObjectType,
     pub(crate) length: usize,
 }
@@ -34,7 +34,7 @@ struct SelectedObject {
 /// Complete native content evidence plus exclusive scratch custody. Only the
 /// advertised-ref closure and its transport delta bases may be read for import.
 /// All supplied objects, including unselected ones, were nevertheless verified.
-pub(crate) struct FullBundleImportPlan {
+pub struct FullBundleImportPlan {
     scratch: OwnedScratch,
     verification: FileBundleVerification,
     receipt: StreamPackReceipt,
@@ -192,7 +192,7 @@ impl FullBundleImportPlan {
 
 /// Exact-span reader over the plan's original descriptor. Failure poisons its
 /// plan, and dropping before authenticated EOF poisons it too.
-pub(crate) struct FullBundleImportBlobReader<'a> {
+pub struct FullBundleImportBlobReader<'a> {
     span: SpanReader<'a, File>,
     live: &'a mut dyn FnMut() -> bool,
     failed: &'a mut bool,
@@ -229,7 +229,7 @@ impl Drop for FullBundleImportBlobReader<'_> {
 /// file; replaced or missing paths cause a typed refusal from `finish` and are
 /// left untouched by drop. This custody profile requires Unix file identity;
 /// other platforms refuse before creating scratch or reading the source.
-pub(crate) fn prepare_full_bundle_import_reader<R: Read + Seek>(
+pub fn prepare_full_bundle_import_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
     scratch_path: &Path,
@@ -256,7 +256,7 @@ pub(crate) fn prepare_full_bundle_import_reader<R: Read + Seek>(
 /// Callers retain the complete original header/receipt through the plan and
 /// prove those request-specific conditions before staging or publication.
 /// Scratch has the same exclusive custody rules as the all-ref import above.
-pub(crate) fn prepare_full_bundle_fetch_reader<R: Read + Seek>(
+pub fn prepare_full_bundle_fetch_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
     scratch_path: &Path,

@@ -320,7 +320,7 @@ fn principal_and_reference_hex_are_exact_and_non_utf8_branches_remain_lossless()
     assert!(!json.contains("reference\":"));
 
     for bad in [
-        "".to_owned(),
+        String::new(),
         "abc".to_owned(),
         hex(b"refs/heads/main").to_uppercase(),
         "zz".to_owned(),
@@ -334,7 +334,7 @@ fn principal_and_reference_hex_are_exact_and_non_utf8_branches_remain_lossless()
         assert!(reference(&bad).is_err(), "{bad}");
     }
     for bad in [
-        "".to_owned(),
+        String::new(),
         "a".repeat(31),
         "a".repeat(33),
         "A".repeat(32),
@@ -563,7 +563,7 @@ fn check_only_http_commands_preserve_exact_selectors_and_read_representation() {
     assert!(json.contains(&format!("\"source_ref_hex\":\"{source}\"")));
     assert!(json.contains(&format!("\"job\":{}", quote(job))));
     assert!(parse_command(format!("{body}&{check}").as_bytes()).is_err());
-    for bad in ["".to_owned(), "00".into(), "ff".into(), "61".repeat(1025)] {
+    for bad in [String::new(), "00".into(), "ff".into(), "61".repeat(1025)] {
         let malformed = format!(
             "{base}&required_check={}:{}:{}:{}:{bad}",
             hex(b"refs/heads/main"),

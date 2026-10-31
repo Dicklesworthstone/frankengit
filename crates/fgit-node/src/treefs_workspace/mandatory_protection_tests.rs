@@ -466,7 +466,7 @@ fn concurrent_activation_and_direct_publication_cannot_commit_a_bypass_after_act
     drop(activate);
     drop(update);
     assert!(overlap, "the real authority operations must overlap");
-    committed(activated.clone());
+    committed(activated);
     for row in updated.commands {
         if matches!(row.terminal.outcome, DecisionOutcome::Committed { .. }) {
             assert!(

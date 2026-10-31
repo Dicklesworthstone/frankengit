@@ -47,29 +47,34 @@ impl PullRequestMergeWatchConfig {
             style,
         })
     }
+    #[must_use]
     pub fn reference(&self) -> &RefName {
         &self.reference
     }
+    #[must_use]
     pub const fn principal(&self) -> PrincipalId {
         self.principal
     }
+    #[must_use]
     pub fn metadata(&self) -> &MergeMetadata {
         &self.metadata
     }
+    #[must_use]
     pub const fn profile(&self) -> MergeProfile {
         self.profile
     }
+    #[must_use]
     pub const fn style(&self) -> MergeCommitStyle {
         self.style
     }
 
-    fn profile_name(&self) -> &'static str {
+    const fn profile_name(&self) -> &'static str {
         match self.profile {
             MergeProfile::PathMergeV1 => "path",
             MergeProfile::ExactRenamesV1 => "exact-renames",
         }
     }
-    fn style_name(&self) -> &'static str {
+    const fn style_name(&self) -> &'static str {
         match self.style {
             MergeCommitStyle::TwoParent => "merge-commit",
             MergeCommitStyle::Squash => "squash",

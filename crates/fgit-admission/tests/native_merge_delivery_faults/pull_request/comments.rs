@@ -328,7 +328,7 @@ fn competing_first_comments_cannot_merge_or_relabel_the_losing_command() {
     let losing_command = command(0, "Losing discussion");
     let winner = Arc::new(Mutex::new(None));
     let captured = winner.clone();
-    let competing = competitor.clone();
+    let competing = competitor;
     *case.fixture.store.before_publish.lock().unwrap() = Some(Box::new(move || {
         *captured.lock().unwrap() = Some(submit(&competing, &winner_command).unwrap());
     }));

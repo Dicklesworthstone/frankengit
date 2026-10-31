@@ -122,7 +122,7 @@ impl OneNode {
     }
 }
 
-pub(super) async fn collect(
+pub async fn collect(
     authority: &FsqliteAuthorityStore,
     cx: &FsqliteCx,
     head_key: &HeadKey,
@@ -172,7 +172,7 @@ fn live(cx: &FsqliteCx) -> Result<(), OutcomeFailure> {
 /// The file backend is synchronous but bounded. Every archive manifest and
 /// chunk operation checks the same runtime-owned context before and after I/O;
 /// no detached worker or new request budget is introduced.
-pub(super) struct RequestFabric<'a> {
+pub struct RequestFabric<'a> {
     fabric: &'a LocalFilesystemFabric,
     cx: &'a FsqliteCx,
 }

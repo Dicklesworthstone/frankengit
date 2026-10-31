@@ -897,7 +897,7 @@ mod tests {
                 ],
             )
             .expect("forge map"),
-            outbox: state.outbox.clone(),
+            outbox: state.outbox,
         };
         assert!(matches!(
             node.runtime().block_on(stage_in(

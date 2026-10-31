@@ -72,7 +72,7 @@ impl Drop for ScratchFile {
 
 /// A pack being written: the scratch file and its unflushed tail.
 #[derive(Debug)]
-pub(crate) struct SpoolTemporary {
+pub struct SpoolTemporary {
     scratch: Option<ScratchFile>,
     pending: Vec<u8>,
     len: u64,
@@ -91,7 +91,7 @@ impl SpoolTemporary {
 }
 
 /// The streamed writer's sink. A promoted pack becomes a [`SpooledPack`].
-pub(crate) struct PackSpool<'root> {
+pub struct PackSpool<'root> {
     root: &'root Path,
     promoted: Option<SpooledPack>,
 }
@@ -182,7 +182,7 @@ impl PackArtifactSink for PackSpool<'_> {
 
 /// A complete pack in scratch custody, read back in bounded chunks.
 #[derive(Debug)]
-pub(crate) struct SpooledPack {
+pub struct SpooledPack {
     scratch: ScratchFile,
     len: u64,
     offset: u64,

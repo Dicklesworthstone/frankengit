@@ -152,7 +152,7 @@ fn relative_offset_and_selection_share_one_exact_work_and_cancellation_budget() 
     );
     let short = PackLimits {
         max_delta_work: polls - 1,
-        ..exact.clone()
+        ..exact
     };
     assert!(matches!(
         select(&graph.objects, &query, &short, &mut || true),

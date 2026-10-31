@@ -8,7 +8,7 @@ use fgit_wire::receive::{ReceiveError, ReceivePack};
 
 const CHUNK_BYTES: usize = 16 * 1024;
 
-pub(super) fn push(
+pub fn push(
     receive: &mut ReceivePack,
     input: &[u8],
     wire: &WireLimits,

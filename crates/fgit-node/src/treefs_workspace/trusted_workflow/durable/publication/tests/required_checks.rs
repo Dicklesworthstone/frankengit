@@ -54,7 +54,7 @@ fn update(
         ))
         .unwrap();
     assert_eq!(result.commands.len(), 1);
-    result.commands[0].terminal.clone()
+    result.commands[0].terminal
 }
 fn install(node: &OneNode, required: &RequiredWorkflowCheck, key: &[u8]) -> ProtectionCommand {
     let selected = node

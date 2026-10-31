@@ -849,7 +849,7 @@ mod tests {
             format!("user:{token}:extra"),
             format!("user:{}", "a".repeat(63)),
             format!("user:{}", "A".repeat(64)),
-            token.clone(),
+            token,
             format!("user:{}", "b".repeat(64)),
         ] {
             assert!(matches!(

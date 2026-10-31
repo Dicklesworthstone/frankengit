@@ -221,7 +221,7 @@ struct AuditCheckpoints<'a> {
     refusal: RefCell<Option<GraphAuditRefusal>>,
 }
 impl<'a> AuditCheckpoints<'a> {
-    fn new(request: &'a NodeRequestContext, started: Instant, timeout: Duration) -> Self {
+    const fn new(request: &'a NodeRequestContext, started: Instant, timeout: Duration) -> Self {
         Self {
             request,
             started,

@@ -60,7 +60,7 @@ impl NodeRequestContext {
         &self,
         runtime: &NodeRuntime,
         requested: impl Fn() -> bool + Send + 'static,
-        work: impl FnOnce(&NodeRequestContext) -> T,
+        work: impl FnOnce(&Self) -> T,
     ) -> io::Result<(T, io::Result<()>)> {
         let owner = bind(runtime, self, requested)?;
         let result = work(owner.request());

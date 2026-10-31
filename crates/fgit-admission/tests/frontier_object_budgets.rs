@@ -26,7 +26,7 @@ struct Source {
     oversized: Cell<Option<GitOid>>,
 }
 impl Source {
-    fn new(format: GitHashAlgorithm) -> Self {
+    const fn new(format: GitHashAlgorithm) -> Self {
         Self {
             format,
             objects: BTreeMap::new(),

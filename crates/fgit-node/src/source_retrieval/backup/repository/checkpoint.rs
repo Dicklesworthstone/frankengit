@@ -333,7 +333,7 @@ impl ArchiveView<'_> {
         }
     }
 }
-fn read_only(operation: StorageOperation) -> StoreRefusal {
+const fn read_only(operation: StorageOperation) -> StoreRefusal {
     StoreRefusal::StorageIo {
         operation,
         kind: std::io::ErrorKind::PermissionDenied,

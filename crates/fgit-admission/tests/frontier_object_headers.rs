@@ -163,7 +163,7 @@ fn validate(f: &Fixture, limits: MergeObjectLimits) -> Result<ValidatedClosure, 
         &mut || !f.headers.cancelled.get(),
     )
 }
-fn budget() -> ProjectionFailure {
+const fn budget() -> ProjectionFailure {
     ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
 }
 

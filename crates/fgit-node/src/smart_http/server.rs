@@ -1791,7 +1791,7 @@ mod tests {
     fn bearer_and_explicit_retry_identity_are_both_required() {
         let profile = profile();
         for extra in [
-            "".to_owned(),
+            String::new(),
             "X-Forwarded-User: trusted\r\nIdempotency-Key: k\r\n".to_owned(),
             format!(
                 "Authorization: Bearer {}\r\nIdempotency-Key: k\r\n",
@@ -1817,7 +1817,7 @@ mod tests {
         ));
         let request = parse_head(&bytes, profile.http).unwrap().unwrap();
         assert!(authenticated_session(&request, &bytes, &profile).is_ok());
-        let mut readonly = profile.clone();
+        let mut readonly = profile;
         readonly.allow_receive = false;
         assert_eq!(
             authenticated_session(&request, &bytes, &readonly),
@@ -1860,7 +1860,7 @@ mod tests {
             authenticated_session(&basic_request, &basic, &readonly),
             Err(Status::Forbidden)
         );
-        let mut foreign = profile.clone();
+        let mut foreign = profile;
         foreign.route = b"/different.git".to_vec();
         assert_eq!(
             authenticated_session(&basic_request, &basic, &foreign),

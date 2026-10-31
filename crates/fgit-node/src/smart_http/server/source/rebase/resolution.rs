@@ -483,7 +483,7 @@ mod tests {
             &command,
             &outcome,
             &recipes,
-            &[receipt.clone()],
+            std::slice::from_ref(&receipt),
             &mut || true,
         )
         .unwrap();

@@ -347,18 +347,21 @@ fn selected_frontier_requires_real_typed_bytes_and_never_uses_unselected_presenc
             (absent, RefusalCode::EvidenceMissing),
         ] {
             let bad = commit(format, id, &[], "bad frontier");
-            assert_eq!(check(&selected, &[bad.clone()], &[bad.id]), Err(expected));
+            assert_eq!(
+                check(&selected, std::slice::from_ref(&bad), &[bad.id]),
+                Err(expected)
+            );
             assert!(node.read_git_object(bad.id).is_err());
         }
         let allowed = commit(format, empty, &[], "selected tree");
         let unselected = selected_validator(&node, format, &[], PackLimits::default());
         assert_eq!(
-            check(&unselected, &[allowed.clone()], &[allowed.id]),
+            check(&unselected, std::slice::from_ref(&allowed), &[allowed.id]),
             Err(RefusalCode::ObjectClosureIncomplete)
         );
         assert!(node.read_git_object(allowed.id).is_err());
         assert_eq!(
-            check(&selected, &[allowed.clone()], &[allowed.id])
+            check(&selected, std::slice::from_ref(&allowed), &[allowed.id])
                 .unwrap()
                 .objects,
             BTreeSet::from([allowed.id])

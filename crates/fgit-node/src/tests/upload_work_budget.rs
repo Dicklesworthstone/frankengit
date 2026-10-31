@@ -45,7 +45,7 @@ fn terminal_upload_report_never_revives_work_and_is_only_armed_once() {
     assert!(deadline.remaining_write().is_ok());
     assert!(deadline.remaining().is_err());
     assert!(!deadline.note_selected_upload_work(usize::MAX));
-    deadline.clone().begin_terminal_response();
+    deadline.begin_terminal_response();
     assert_eq!(deadline.shared.terminal_response.get(), Some(&expiry));
     // A terminal phase already in the past cannot be replaced by retrying.
     let stopped = session_deadline();

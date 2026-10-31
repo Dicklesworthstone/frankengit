@@ -331,7 +331,7 @@ fn stale_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
     let f = fixture(&node, &scratch, GitHashAlgorithm::Sha1);
     let open = command(&f, 1);
     accepted(apply(&node, &open, "open"));
-    let mut winner = open.clone();
+    let mut winner = open;
     winner.action = PullRequestAction::Update;
     winner.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
     winner.data.title = "Winner".into();
@@ -361,11 +361,11 @@ fn stale_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
     );
     assert_eq!(apply(&node, &loser, "loser").unwrap(), refused);
     assert_eq!(snapshot(&node).basis(), after.basis());
-    let mut close = winner.clone();
+    let mut close = winner;
     close.action = PullRequestAction::Close;
     close.expected_version = ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap());
     accepted(apply(&node, &close, "close"));
-    let mut resurrection = close.clone();
+    let mut resurrection = close;
     resurrection.action = PullRequestAction::Update;
     resurrection.expected_version = ExpectedVersion::Exactly(AggregateVersion::try_new(3).unwrap());
     let refused = apply(&node, &resurrection, "resurrection").unwrap();

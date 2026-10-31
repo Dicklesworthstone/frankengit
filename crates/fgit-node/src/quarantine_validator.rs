@@ -195,7 +195,7 @@ fn visible_roots(materialized: &MaterializedAdmission) -> BTreeSet<GitOid> {
 /// The receive-validation authority of one materialized basis. The validator
 /// factory and the admission projection both use this, so a basis prepared
 /// for publication commits to exactly what a validator built from it would.
-pub(crate) fn receive_validation_authority(
+pub fn receive_validation_authority(
     materialized: &MaterializedAdmission,
 ) -> ReceiveValidationAuthority {
     ReceiveValidationAuthority::new(

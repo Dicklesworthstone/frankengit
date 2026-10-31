@@ -262,7 +262,7 @@ fn refused_http_responses_are_typed_bearer_only_and_never_open_a_missing_reposit
         "issues-read",
     );
     for headers in [
-        "".to_owned(),
+        String::new(),
         "X-Forwarded-User: admin\r\n".to_owned(),
         "Authorization: Basic Z2l0OmFhYQ==\r\n".to_owned(),
         format!("Authorization: Bearer {}\r\n", "b".repeat(64)),

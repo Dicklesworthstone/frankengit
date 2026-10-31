@@ -313,7 +313,7 @@ impl PackedObjectSources {
             control.checkpoint()?;
             if rows.insert(entry.pack_offset, entry.clone()).is_some() {
                 return Err(pack_refusal(
-                    index_path.clone(),
+                    index_path,
                     PackError::DuplicateObjectOffset(entry.pack_offset),
                 ));
             }

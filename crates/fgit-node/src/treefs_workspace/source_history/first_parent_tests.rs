@@ -222,7 +222,7 @@ fn a_real_authority_advance_invalidates_the_original_cursor_even_when_the_ref_is
         .unwrap();
     let continuation = FirstParentOptions {
         cursor: first.continuation(head, &reference),
-        ..query.clone()
+        ..query
     };
     let command = IssueCommand {
         number: IssueNumber::FIRST,

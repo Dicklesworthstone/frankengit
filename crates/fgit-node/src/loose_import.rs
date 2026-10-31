@@ -77,7 +77,7 @@ const MAX_IMPORT_REF_DEPTH: usize = 32;
 const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 
 /// The shared source-import metadata preflight, before candidate object staging.
-pub(crate) fn preflight_import_metadata(
+pub fn preflight_import_metadata(
     format: GitHashAlgorithm,
     object_count: usize,
     refs: &CanonicalRefState,

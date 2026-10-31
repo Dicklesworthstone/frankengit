@@ -75,7 +75,7 @@ impl AsyncAdmissionProjection<Model> for PublishingProjection {
 }
 
 impl NativeMergeProjection<Model> for PublishingProjection {
-    fn merge_publication_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
+    fn merge_publication_checkpoint(&self, (): &()) -> Result<(), RefusalCode> {
         if self.expired.load(Ordering::SeqCst) {
             Err(RefusalCode::CapabilityExpired)
         } else {
@@ -83,7 +83,7 @@ impl NativeMergeProjection<Model> for PublishingProjection {
         }
     }
 
-    fn publish_merge_objects(&self, _: &()) -> Result<(), RefusalCode> {
+    fn publish_merge_objects(&self, (): &()) -> Result<(), RefusalCode> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             Err(RefusalCode::ResourceBudgetExceeded)

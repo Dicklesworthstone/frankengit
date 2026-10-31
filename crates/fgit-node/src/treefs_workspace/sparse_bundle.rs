@@ -350,7 +350,7 @@ const fn invalid() -> ProjectionFailure {
 const fn budget() -> ProjectionFailure {
     ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
 }
-fn parse_failure(error: PackError) -> ProjectionFailure {
+const fn parse_failure(error: PackError) -> ProjectionFailure {
     match error {
         PackError::ObjectParse(
             ObjectError::ObjectTooLarge { .. }

@@ -18,7 +18,7 @@ use super::{
 /// One disposable verified prefix shared by independently opened service
 /// children. Their complete admission snapshots remain private to each child.
 #[derive(Debug, Default)]
-pub(super) struct AdmissionClosureCache {
+pub struct AdmissionClosureCache {
     prefix: RwLock<Option<Arc<ClosurePrefix>>>,
 }
 
@@ -63,7 +63,7 @@ impl AdmissionClosureCache {
 /// Previously verified closure material owned by one admitted cache entry.
 /// Store, repository, head slot and permit are checked on every lookup.
 #[derive(Debug)]
-pub(super) struct ClosurePrefix {
+pub struct ClosurePrefix {
     pub(super) authenticated: AuthenticatedHead,
     pub(super) basis: PublicationBasis,
     pub(super) cache_permit: CachePermit,
@@ -85,7 +85,7 @@ impl ClosurePrefix {
 
 /// Selection precedes configuration validation; immutable closure reads remain
 /// after it, preserving the materializer's existing refusal precedence.
-pub(super) struct ClosureSelection {
+pub struct ClosureSelection {
     roots: BTreeSet<Digest>,
     pending: BTreeSet<Digest>,
     inherited: BTreeSet<GitOid>,
@@ -153,7 +153,7 @@ impl ClosureSelection {
     }
 }
 
-pub(super) async fn select_in<Authority>(
+pub async fn select_in<Authority>(
     authority: &Authority,
     cx: &Authority::Context,
     current: &PublicationBasis,

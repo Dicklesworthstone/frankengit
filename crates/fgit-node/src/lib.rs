@@ -12772,7 +12772,7 @@ mod tests {
 
         // An explicit operator timeout is the command's ceiling, larger or
         // smaller than the class default.
-        let long = GitDaemonSessionTimeout::try_new(Duration::from_secs(1800)).unwrap();
+        let long = GitDaemonSessionTimeout::try_new(Duration::from_mins(30)).unwrap();
         let explicit = remaining(&node.command_request_context(Some(long)));
         assert!(
             explicit
@@ -12949,7 +12949,7 @@ mod tests {
     /// Materializes fixture ref intents through the production projection so
     /// the RCR names its staged canonical evidence bodies. Publication remains
     /// the caller's independently checked plan.
-    pub(super) fn stage_fixture_ref_record(
+    pub fn stage_fixture_ref_record(
         node: &OneNode,
         authority_request: &NodeRequestContext,
         basis: &PublicationBasis,

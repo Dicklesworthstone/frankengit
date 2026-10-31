@@ -342,7 +342,7 @@ mod tests {
             };
             assert_eq!(root, GitOid::from_hex(format, &"b".repeat(width)).unwrap());
             for invalid in [
-                "".to_owned(),
+                String::new(),
                 "0".repeat(width),
                 "B".repeat(width),
                 "g".repeat(width),

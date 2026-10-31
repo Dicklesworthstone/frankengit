@@ -296,7 +296,7 @@ fn hidden_only_disconnected_and_merely_present_targets_cannot_be_resurrected() {
         let stray = commit(format, empty.id, &[], "unselected presence");
         let objects = [empty, visible.clone(), hidden.clone()];
         put(&node, &objects);
-        put(&node, &[stray.clone()]);
+        put(&node, std::slice::from_ref(&stray));
         let v = validator(&node, &objects, &[visible.id], PackLimits::default());
         for id in [hidden.id, stray.id] {
             assert_eq!(
@@ -344,18 +344,18 @@ fn missing_selected_bytes_and_bad_reused_roots_fail_before_staging_any_upload() 
     let upload = raw(format, ObjectType::Blob, b"valid new upload".to_vec());
     let v = validator(
         &node,
-        &[absent.clone()],
+        std::slice::from_ref(&absent),
         &[absent.id],
         PackLimits::default(),
     );
     assert_eq!(
-        validate(&v, &[upload.clone()], &[upload.id, absent.id]),
+        validate(&v, std::slice::from_ref(&upload), &[upload.id, absent.id]),
         Err(RefusalCode::EvidenceMissing)
     );
     assert!(node.read_git_object(upload.id).is_err());
-    put(&node, &[absent.clone()]);
+    put(&node, std::slice::from_ref(&absent));
     assert_eq!(
-        validate(&v, &[upload.clone()], &[upload.id, absent.id])
+        validate(&v, std::slice::from_ref(&upload), &[upload.id, absent.id])
             .unwrap()
             .objects,
         BTreeSet::from([upload.id, absent.id])
@@ -369,11 +369,11 @@ fn duplicate_targets_and_uploaded_frontiers_share_one_inclusive_original_byte_bu
     let scratch = Scratch::new();
     let node = scratch.node(format);
     let blob = raw(format, ObjectType::Blob, vec![b'x'; 1024]);
-    put(&node, &[blob.clone()]);
+    put(&node, std::slice::from_ref(&blob));
     let uploaded = tree(format, &[("a", blob.id), ("b", blob.id)]);
     let bounded = validator(
         &node,
-        &[blob.clone()],
+        std::slice::from_ref(&blob),
         &[blob.id],
         PackLimits {
             max_cached_bytes: 1023,
@@ -384,7 +384,7 @@ fn duplicate_targets_and_uploaded_frontiers_share_one_inclusive_original_byte_bu
     assert_eq!(
         validate(
             &bounded,
-            &[uploaded.clone()],
+            std::slice::from_ref(&uploaded),
             &[blob.id, blob.id, uploaded.id]
         ),
         Err(RefusalCode::ResourceBudgetExceeded)
@@ -392,7 +392,7 @@ fn duplicate_targets_and_uploaded_frontiers_share_one_inclusive_original_byte_bu
     assert!(node.read_git_object(uploaded.id).is_err());
     let inclusive = validator(
         &node,
-        &[blob.clone()],
+        std::slice::from_ref(&blob),
         &[blob.id],
         PackLimits {
             max_cached_bytes: 1024,
@@ -403,7 +403,7 @@ fn duplicate_targets_and_uploaded_frontiers_share_one_inclusive_original_byte_bu
     assert_eq!(
         validate(
             &inclusive,
-            &[uploaded.clone()],
+            std::slice::from_ref(&uploaded),
             &[blob.id, blob.id, uploaded.id]
         )
         .unwrap()
@@ -454,7 +454,7 @@ fn missing_pack_stays_distinct_and_cancellation_precedes_original_reads() {
     let absent = raw(format, ObjectType::Blob, b"selected absent".to_vec());
     let v = validator(
         &node,
-        &[absent.clone()],
+        std::slice::from_ref(&absent),
         &[absent.id],
         PackLimits::default(),
     );
@@ -612,13 +612,13 @@ fn empty_wire_pack_creates_historical_branch_and_recovers_after_advance_and_reop
                 fgit_admission::AdmissionLimits::default(),
             ))
             .unwrap();
-        let original = applied.commands[0].terminal.clone();
+        let original = applied.commands[0].terminal;
         assert!(matches!(
             original.outcome,
             DecisionOutcome::Committed { .. }
         ));
         let child = commit(format, empty.id, &[base.id], "later copied branch");
-        let advance = wire_proof(&node, base.id, child.id, &[child.clone()]);
+        let advance = wire_proof(&node, base.id, child.id, std::slice::from_ref(&child));
         let later = LoopbackReceiveSession::authenticated(
             principal(),
             IdempotencyKey::new(b"advance-existing".to_vec()).unwrap(),

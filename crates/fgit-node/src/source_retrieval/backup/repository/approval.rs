@@ -692,8 +692,8 @@ fn instant(text: &str) -> Result<i64, String> {
 enum Value {
     Null,
     String(String),
-    Array(Vec<Value>),
-    Object(BTreeMap<String, Value>),
+    Array(Vec<Self>),
+    Object(BTreeMap<String, Self>),
 }
 
 fn parse_json(bytes: &[u8], maximum: usize) -> Result<Value, String> {

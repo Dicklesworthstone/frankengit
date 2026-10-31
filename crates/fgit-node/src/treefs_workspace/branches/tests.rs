@@ -190,7 +190,7 @@ fn branch_lifecycle_is_atomic_and_exact_retries_survive_reopen_and_deleted_sourc
             proposed_new: ProposedNew::Update(child),
             force: false,
         };
-        accepted(apply(&node, &[updated.clone()], "advance"));
+        accepted(apply(&node, std::slice::from_ref(&updated), "advance"));
         let rename = [
             delete("refs/heads/topic", child),
             create("refs/heads/renamed", child),
@@ -409,7 +409,7 @@ fn branch_pages_are_byte_sorted_visibility_filtered_and_snapshot_pinned() {
 fn malformed_branch_requests_cannot_weaken_expected_old_or_atomic_rename() {
     let oid = GitOid::from_hex(GitHashAlgorithm::Sha1, &"1".repeat(40)).unwrap();
     let good = create("refs/heads/a", oid);
-    assert!(branch_request(GitHashAlgorithm::Sha1, &[good.clone()]).is_ok());
+    assert!(branch_request(GitHashAlgorithm::Sha1, std::slice::from_ref(&good)).is_ok());
     let mut unsafe_command = good.clone();
     unsafe_command.expected_old = ExpectedOld::Unspecified;
     assert!(branch_request(GitHashAlgorithm::Sha1, &[unsafe_command]).is_err());
