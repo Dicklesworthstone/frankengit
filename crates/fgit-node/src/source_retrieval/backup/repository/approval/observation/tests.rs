@@ -377,6 +377,48 @@ fn conversion_preserves_explicit_digest_budget_and_original_deadline_gates() {
 }
 
 #[test]
+fn completed_authentication_hands_off_observation_even_if_deadline_expires_before_return() {
+    let fixture = Fixture::new();
+    let format = GitHashAlgorithm::Sha256;
+    let mut loaded = fixture.loaded(format, 1);
+    let envelope = encoded(&payload(format, u64::MAX, 30));
+    let (statement, original_payload) = authenticated_statement(
+        &envelope,
+        &loaded.key,
+        &loaded.trusted_key_id,
+        loaded.policy.identity,
+        MAX_SIGNED_ARCHIVE_BYTES,
+        loaded.deadline,
+    )
+    .unwrap();
+
+    // The actual signature, canonical payload and independent identity are
+    // already authenticated. Expire at that precise boundary without timing
+    // assumptions: completion cannot turn known evidence into an ordinary Err.
+    loaded.deadline = Profile {
+        timeout: Duration::ZERO,
+        ..Profile::default()
+    }
+    .start();
+    let observed = loaded.completed_observation(envelope.clone(), statement);
+    assert_eq!(observed.generation(), u64::MAX);
+    assert_eq!(observed.envelope_bytes(), envelope);
+    assert_eq!(observed.statement_json().as_bytes(), original_payload);
+    assert!(
+        observed
+            .into_verified(PIN, 30)
+            .unwrap_err()
+            .contains("deadline")
+    );
+    fixture
+        .loaded(format, 1)
+        .inspect_bytes(&envelope)
+        .unwrap()
+        .into_verified(PIN, 30)
+        .unwrap();
+}
+
+#[test]
 fn selection_trust_grammar_requires_each_external_field_without_an_approval_path() {
     let fixture = Fixture::new();
     let fields = [

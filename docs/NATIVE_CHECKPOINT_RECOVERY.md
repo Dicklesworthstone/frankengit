@@ -12,6 +12,11 @@ and expected archive checksum remain required. Selection proves which checkpoint
 is highest **among the supplied approvals**. It cannot establish that an omitted
 or unseen newer checkpoint does not exist.
 
+An optional independently retained witness also remembers authenticated higher
+checkpoints and conflicts across invocations. Initialize it explicitly with
+`fg backup witness init`, then pass `--witness <directory>` to either native
+selected operation. Ordinary unwitnessed commands retain their supplied-set scope.
+
 ## Verify the selected checkpoint
 
 Supply each archive and its detached approval together. Candidate order does not
@@ -98,6 +103,62 @@ metadata bounds remain independent. Payload memory continues to use the existing
 streaming verification and restore paths; candidate metadata is separately bounded.
 The output receipt contains `selection` evidence and the directly embedded `native`
 completion receipt. No child executable or receipt parser composes these commands.
+
+## Retain recovery knowledge between invocations
+
+Create the witness once under an existing owner-private directory, independently
+of the repository and all recovery inputs:
+
+```sh
+fg backup witness init /private/recovery-witness --trusted-local \
+  --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT" --repository-id "$REPOSITORY" \
+  --incarnation-id "$INCARNATION" --object-format sha256 \
+  --minimum-head-generation "$MINIMUM_GENERATION"
+```
+
+Append `--witness /private/recovery-witness` to `verify-selected` or `recover`,
+including explicit resume. `fg backup witness inspect` accepts the same directory
+and trust flags, reauthenticates retained signatures and reports the remembered
+generation and conflict state without reading an archive.
+
+Every authentic higher observation is persisted before checking its availability,
+expiry or the selected payload budget. A later invalid candidate does not erase
+observations already retained during the attempt. Two distinct statements at the
+highest generation retain an ambiguity that cannot be hidden by omitting one on
+the next invocation. A strictly higher authentic observation can supersede that
+conflict. Raising the independent generation floor persists it; a later weaker
+floor refuses. Missing or corrupt state never becomes an empty witness, and
+initialization never replaces an existing directory.
+
+Witness state uses the existing canonical `repository_backup_witness_v1` JSON,
+with at most two original envelopes and a 64 KiB total bound. Private staged
+writes are synchronized and read back before atomic state replacement and parent
+directory synchronization. The exact independently supplied key and repository
+identity remain mandatory; retained files cannot supply their own trust policy.
+
+The exclusive durable lease spans observation, selection, native preflight or
+restore, publication checks, node shutdown and cleanup. Witness custody and the
+selected statement are checked again at native publication boundaries, alongside
+the original approval's eligibility. Witness storage must be physically separate
+from candidate/control paths and the native destination, including aliases through
+parent directories. Lower archive payloads are not opened for these checks.
+
+Ordinary failures before native work release the lease when no persistence debt
+remains. A persistence failure, process crash, or error after entry into the native
+engine conservatively retains `.witness-lock`: an untyped native error does not
+prove that all owned work settled. No automatic lease stealing, age heuristic or
+reset is provided. Independently establish that the owning work has stopped and
+preserve and inspect its state before manually resolving such a lease. Successful
+native completion remains completed if later receipt delivery or lease cleanup
+fails; diagnostics preserve that distinction.
+
+The witness constrains selection without changing the original approval's sealed
+resume identity. It is optional local recovery memory, not repository authority
+or an external freshness oracle. Its storage owner must preserve its latest state;
+replacing the entire directory with an older copy is not detectable without an
+external durable trust anchor. See [Recovery Checkpoint Witness](RECOVERY_CHECKPOINT_WITNESS.md)
+for the shared format and existing operator interfaces.
 
 ## Scope
 

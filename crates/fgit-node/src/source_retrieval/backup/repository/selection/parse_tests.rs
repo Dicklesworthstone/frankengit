@@ -42,6 +42,7 @@ fn native_modes_require_all_independent_inputs_and_propagate_each_profile_limit(
         let parsed = parse(&basic).unwrap();
         assert_eq!(parsed.instance.raw(), 992);
         assert!(!parsed.resume);
+        assert!(parsed.witness.is_none());
         let mut full = basic.clone();
         full.extend(
             [
@@ -99,6 +100,63 @@ fn native_modes_require_all_independent_inputs_and_propagate_each_profile_limit(
         .into();
         assert!(parse(&wrong_instance).is_err());
     }
+}
+
+#[test]
+fn optional_witness_is_bounded_unique_and_separate_from_every_protected_name() {
+    for operation in ["verify-selected", "recover"] {
+        let basic = arguments(operation);
+        let mut witnessed = basic.clone();
+        witnessed.extend(["--witness".into(), "independent-witness".into()]);
+        assert!(parse(&witnessed).unwrap().witness.is_some());
+        witnessed.extend(["--witness".into(), "second-witness".into()]);
+        assert!(parse(&witnessed).is_err());
+        for path in [
+            "/",
+            "destination",
+            "destination/witness",
+            "archive",
+            "archive/witness",
+            "approval",
+            "public.pem",
+            "public.pem/witness",
+        ] {
+            let mut bad = basic.clone();
+            bad.extend(["--witness".into(), path.into()]);
+            assert!(parse(&bad).is_err(), "{path}");
+        }
+        for at in [1, 4, 5, 11] {
+            let mut bad = basic.clone();
+            bad[at] = "witness/nested/name".into();
+            bad.extend(["--witness".into(), "witness".into()]);
+            assert!(parse(&bad).is_err(), "{at}");
+        }
+    }
+    let mut maximum = arguments("recover");
+    for index in 1..64 {
+        maximum.extend([
+            "--candidate".into(),
+            format!("copy-{index}"),
+            "approval".into(),
+        ]);
+    }
+    maximum.extend([
+        "--max-archive-bytes".into(),
+        "1099511627776".into(),
+        "--max-blob-bytes".into(),
+        "1099511627776".into(),
+        "--max-objects".into(),
+        "1000000".into(),
+        "--timeout-secs".into(),
+        "86400".into(),
+        "--witness".into(),
+        "independent-witness".into(),
+        "--resume".into(),
+    ]);
+    assert_eq!(maximum.len(), 222);
+    let parsed = parse(&maximum).unwrap();
+    assert_eq!(parsed.candidates.len(), 64);
+    assert!(parsed.resume && parsed.witness.is_some());
 }
 
 #[test]

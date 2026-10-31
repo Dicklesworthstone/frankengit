@@ -376,7 +376,11 @@ pub(super) fn run_with_timeout(
         emit(output, restore::verify::USAGE)?;
         emit(output, attest::USAGE)?;
         emit(output, reconstruct::USAGE)?;
-        return emit(output, selection::USAGE);
+        emit(output, selection::USAGE)?;
+        return emit(output, approval::witness::USAGE);
+    }
+    if args.first().is_some_and(|arg| arg == "witness") {
+        return approval::witness::run(args, output, timeout);
     }
     if args
         .first()

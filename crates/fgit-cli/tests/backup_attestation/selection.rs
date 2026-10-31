@@ -1,7 +1,7 @@
 //! Highest signed checkpoint selection through real native fg processes.
 use super::*;
 
-fn selected_arguments(
+pub(super) fn selected_arguments(
     export: &Value,
     operation: &str,
     destination: &str,

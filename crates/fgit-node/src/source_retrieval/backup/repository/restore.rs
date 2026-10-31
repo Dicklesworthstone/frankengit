@@ -557,7 +557,7 @@ fn execute_with_checkpoints(
         Ok((archive, approval))
     })()
     .map_err(|error| before_resume_inspection(options, error))?;
-    execute_prepared_in(options, archive, approval, deadline, checkpoint)
+    execute_prepared_in(options, archive, approval, deadline, checkpoint, || Ok(()))
         .map(|receipt| receipt.json)
 }
 
@@ -586,6 +586,32 @@ pub(super) fn execute_selected_in(
     resume: bool,
     deadline: Deadline,
 ) -> Result<RestoreReceipt, String> {
+    execute_selected_guarded_in(
+        archive,
+        approval,
+        destination,
+        instance,
+        profile,
+        resume,
+        deadline,
+        &mut || Ok(()),
+    )
+}
+
+/// Keep a recovery witness owned by the caller live at the same boundaries as
+/// signed eligibility. The guard is checked before any destination inspection,
+/// before visible publication, and after the final native node has closed.
+/// It can only narrow the existing approval; it cannot authorize native state.
+pub(super) fn execute_selected_guarded_in(
+    archive: PinnedArchive<File>,
+    approval: VerifiedApproval,
+    destination: &Path,
+    instance: StoreInstanceId,
+    profile: Profile,
+    resume: bool,
+    deadline: Deadline,
+    guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<RestoreReceipt, String> {
     let options = Options {
         input: PathBuf::new(),
         output: destination.to_path_buf(),
@@ -595,7 +621,14 @@ pub(super) fn execute_selected_in(
         resume,
         approval: None,
     };
-    execute_prepared_in(&options, archive, Some(approval), deadline, |_| Ok(()))
+    execute_prepared_in(
+        &options,
+        archive,
+        Some(approval),
+        deadline,
+        |_| Ok(()),
+        guard,
+    )
 }
 
 fn execute_prepared_in(
@@ -604,9 +637,11 @@ fn execute_prepared_in(
     approval: Option<VerifiedApproval>,
     deadline: Deadline,
     mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
+    mut guard: impl FnMut() -> Result<(), String>,
 ) -> Result<RestoreReceipt, String> {
     (|| {
         deadline.check()?;
+        guard()?;
         if !options.resume {
             require_absent(&options.output)?;
         }
@@ -690,6 +725,7 @@ fn execute_prepared_in(
             }
             checkpoint(Stage::QuarantineVerified)?;
             check_approval_current(approval.as_ref(), deadline)?;
+            guard()?;
             let publication = PreparedPublication::prepare(&quarantine, &options.output)?;
             checkpoint(Stage::DataPrepared)?;
             deadline.check()?;
@@ -701,9 +737,17 @@ fn execute_prepared_in(
                 options.output.display()
             )
         })?;
-        // This is the final approval observation before the no-replace link.
-        // It also applies to resumed unpublished work. No later expiry may
-        // reinterpret an already successful publication as prevented.
+        guard().map_err(|error| {
+            format!(
+                "{error}; destination authority not published; retained restore state at {}",
+                options.output.display()
+            )
+        })?;
+        // Check signed eligibility after the filesystem-backed guard: its I/O
+        // may cross the approval lifetime or command deadline. This is the
+        // final approval observation before the no-replace link, including
+        // resumed unpublished work. Later expiry cannot prevent publication
+        // that has already succeeded.
         check_approval_current(approval.as_ref(), deadline).map_err(|error| {
             format!(
                 "{error}; destination authority not published; retained restore state at {}",
@@ -735,6 +779,9 @@ fn execute_prepared_in(
     }
     checkpoint(Stage::FinalVerified)
         .map_err(|e| format!("destination authority is visible; {e}"))?;
+    guard().map_err(|error| {
+        format!("destination authority is visible and native readback completed; recovery witness check failed: {error}")
+    })?;
     intent.cleanup()?;
     checkpoint(Stage::Cleaned).map_err(|e| format!("destination authority is visible; {e}"))?;
     let header = archive.header();

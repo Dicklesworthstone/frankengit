@@ -1,6 +1,9 @@
 //! Real source archives and native recovery; adversarial observations use real
 //! independent DSSE signatures, never fabricated native verification evidence.
 
+#[path = "witness_tests.rs"]
+mod witness_tests;
+
 use super::super::super::hex;
 use super::super::attest;
 use super::super::attest::tests::Fixture;

@@ -290,6 +290,12 @@ mod adapter_tests {
                 assert!(help.contains(required), "{operation}: {required}");
             }
         }
+        assert!(text.contains("fg backup witness init|inspect"));
+        let mut output = Vec::new();
+        run(&["witness".into(), "--help".into()], &mut output).unwrap();
+        let help = String::from_utf8(output).unwrap();
+        assert!(help.contains("--minimum-head-generation"));
+        assert!(help.contains("--trusted-local"));
         assert!(run(&[], &mut Vec::new()).is_err());
         assert!(run(&["unknown".into()], &mut Vec::new()).is_err());
     }

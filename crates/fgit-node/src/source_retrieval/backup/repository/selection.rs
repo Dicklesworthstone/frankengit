@@ -3,6 +3,7 @@
 //! An unusable higher checkpoint never licenses recovery of an older one.
 
 mod engine;
+mod separation;
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -26,6 +27,7 @@ pub(super) const USAGE: &str = "usage: fg backup verify-selected <new-scratch-ro
          --trust-key <independently-trusted-public-PEM>
          --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
          --object-format sha1|sha256 --minimum-head-generation <positive-u64>
+         [--witness <existing-independent-witness-directory>]
          [--max-archive-bytes <1..1099511627776>] [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>] [--timeout-secs <1..86400>]
 
@@ -52,10 +54,20 @@ Control-file replacement cannot switch the captured approval or trusted key.
 Existing restore publication, retained diagnostics and uncertain-outcome rules
 remain in force. An output failure after native completion preserves that result.
 
+An optional --witness retains each authenticated higher generation or conflict
+before checking that checkpoint's lifetime, size or readability. Initialize it
+separately with fg backup witness init; missing or corrupt state never resets it.
+Its exclusive durable lease spans selection and the complete native operation.
+Native failures retain the lease for independent containment inspection. Settled
+completion releases it even if later receipt delivery fails. No automatic lease
+stealing, reset or weakening of its remembered generation floor is permitted.
+
 Trusted stable parent paths and whole-repository local authority are required.
 Destination/scratch must be disjoint from every archive, approval and key path.
+Witness storage must be physically separate from every input/control path and
+the destination; parent aliases are checked without opening lower payloads.
 This selects the highest SUPPLIED checkpoint, not the newest global checkpoint;
-there is no persistent high-water witness in this operation. This is source
+without --witness there is no persistent high-water protection. This is source
 recovery, not a complete signed Capsule, external-artifact restore, routing
 publication or permission to replay external effects.
 Exit 0: selected checkpoint and native operation completed; 2: refusal or an
@@ -83,10 +95,11 @@ pub(super) struct Options {
     trust: SelectionTrustOptions,
     profile: Profile,
     resume: bool,
+    witness: Option<PathBuf>,
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if !(22..=220).contains(&args.len())
+    if !(22..=222).contains(&args.len())
         || args
             .iter()
             .any(|value| value.is_empty() || value.len() > 8192 || value.contains('\0'))
@@ -108,6 +121,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let mut profile = ProfileFlags::default();
     let mut trust = SelectionTrustFlags::default();
     let mut candidates = Vec::new();
+    let mut witness = None;
     let mut path_bytes = 0_usize;
     let mut cursor = 2;
     while let Some(flag) = args.get(cursor) {
@@ -159,6 +173,13 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                         .ok_or("selected recovery paths must be UTF-8")?,
                 )?;
             }
+            "--witness" if witness.is_none() => {
+                let path = normalized(&base, Path::new(value))?;
+                if path.file_name().is_none() {
+                    return Err("selected recovery witness requires a named directory".into());
+                }
+                witness = Some(path);
+            }
             "--max-archive-bytes" | "--max-blob-bytes" | "--max-objects" | "--timeout-secs" => {
                 profile.set(flag, value)?;
             }
@@ -195,6 +216,20 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                     .into(),
             );
         }
+        if witness
+            .as_ref()
+            .is_some_and(|directory| directory.starts_with(path) || path.starts_with(directory))
+        {
+            return Err(
+                "selected recovery witness must be separate from every input and control path"
+                    .into(),
+            );
+        }
+    }
+    if witness.as_ref().is_some_and(|directory| {
+        directory.starts_with(&destination) || destination.starts_with(directory)
+    }) {
+        return Err("selected recovery witness must be separate from the destination".into());
     }
     Ok(Options {
         operation,
@@ -209,6 +244,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         trust,
         profile: profile.finish(),
         resume,
+        witness,
     })
 }
 

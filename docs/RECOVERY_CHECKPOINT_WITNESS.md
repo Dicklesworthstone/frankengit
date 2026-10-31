@@ -11,6 +11,34 @@ Related work: `frankengit-root-doctrine-x2mv.4.21`. Normative boundary:
 native graph/authority verification, independent trust policy and exact resume
 binding remain unchanged.
 
+## Native executable
+
+The same retained-observation profile is available directly in `fg`:
+
+```sh
+fg backup witness init /private/recovery-witness --trusted-local \
+  --trust-key /private/public.pem \
+  --tenant-id 11111111111111111111111111111111 \
+  --repository-id 22222222222222222222222222222222 \
+  --incarnation-id 33333333333333333333333333333333 \
+  --object-format sha256 --minimum-head-generation 1
+```
+
+Use `fg backup witness inspect` with the same trust inputs to reauthenticate the
+retained state. Add `--witness /private/recovery-witness` to native
+`fg backup verify-selected` or `fg backup recover`. The native path keeps one
+captured public key, one operation deadline and one owned witness lease across
+selection and the actual archive/authority/graph engine. It does not invoke a
+JavaScript tool or another `fg` process. Its state bytes and create-only lease
+name match the existing operator format below.
+
+The native integration retains the lease conservatively after any error once
+the native engine has been entered, because a string error may include unresolved
+shutdown or drain responsibility. Pre-native refusals may release a settled
+lease; failed persistence cannot. Completion and late cleanup failures remain
+distinct from prevented publication. Commands, scope and native resume behavior
+are documented in [Native Checkpoint Recovery](NATIVE_CHECKPOINT_RECOVERY.md).
+
 ## Commands
 
 Initialize once in a new directory under an existing owner-private parent:

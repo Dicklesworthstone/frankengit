@@ -4,6 +4,7 @@
 
 pub(super) mod issuer;
 mod observation;
+pub(super) mod witness;
 
 pub(super) use observation::{
     AuthenticatedApprovalObservation, SelectionTrustFlags, SelectionTrustOptions,

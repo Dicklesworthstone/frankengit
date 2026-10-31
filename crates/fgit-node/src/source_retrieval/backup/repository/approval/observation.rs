@@ -95,6 +95,34 @@ pub(in super::super) struct LoadedApprovalTrust {
 }
 
 impl LoadedApprovalTrust {
+    #[cfg(unix)]
+    pub(super) fn policy(&self) -> Policy {
+        self.policy
+    }
+
+    #[cfg(unix)]
+    pub(super) fn trusted_key_id(&self) -> &str {
+        &self.trusted_key_id
+    }
+
+    pub(super) fn check_deadline(&self) -> Result<(), String> {
+        self.deadline.check()
+    }
+
+    /// A typed observation can carry newly learned recovery obligations even
+    /// after its deadline expires. Establish trust without an eligibility or
+    /// clock check so the witness poisons ownership before attempting to retain
+    /// that knowledge. The independent floor constrains selection separately.
+    #[cfg(unix)]
+    pub(super) fn matches_observation(
+        &self,
+        observation: &AuthenticatedApprovalObservation,
+    ) -> bool {
+        self.policy.identity == observation.policy.identity
+            && self.der == observation.der
+            && self.trusted_key_id == observation.trusted_key_id
+    }
+
     pub(in super::super) fn inspect_path(
         &self,
         path: &Path,
@@ -109,25 +137,42 @@ impl LoadedApprovalTrust {
         &self,
         encoded: &[u8],
     ) -> Result<AuthenticatedApprovalObservation, String> {
-        let (statement, payload) = authenticated_statement(
-            encoded,
+        self.deadline.check()?;
+        if encoded.is_empty() || encoded.len() > MAX_ENVELOPE_BYTES {
+            return Err("backup approval JSON byte limit".into());
+        }
+        // Capture bounded original bytes before authentication can establish a
+        // recovery obligation. A later allocation refusal must not hide known
+        // higher or conflicting evidence from a live witness guard.
+        let mut envelope = Vec::new();
+        envelope
+            .try_reserve_exact(encoded.len())
+            .map_err(|_| "backup approval observation allocation refused")?;
+        envelope.extend_from_slice(encoded);
+        let (statement, _) = authenticated_statement(
+            &envelope,
             &self.key,
             &self.trusted_key_id,
             self.policy.identity,
             MAX_SIGNED_ARCHIVE_BYTES,
             self.deadline,
         )?;
-        let mut envelope = Vec::new();
-        envelope
-            .try_reserve_exact(encoded.len())
-            .map_err(|_| "backup approval observation allocation refused")?;
-        envelope.extend_from_slice(encoded);
-        let canonical = String::from_utf8(payload)
-            .map_err(|_| "authenticated backup statement is not UTF-8")?;
-        self.deadline.check()?;
-        Ok(AuthenticatedApprovalObservation {
+        Ok(self.completed_observation(envelope, statement))
+    }
+
+    /// Cryptographic, canonical and namespace inspection has completed. This
+    /// handoff is deliberately infallible: the witness must receive the typed
+    /// observation before any subsequent deadline or eligibility refusal.
+    fn completed_observation(
+        &self,
+        envelope: Vec<u8>,
+        statement: Statement,
+    ) -> AuthenticatedApprovalObservation {
+        AuthenticatedApprovalObservation {
             envelope,
-            canonical,
+            // Statement::parse already compared these exact canonical bytes
+            // with the signed payload. No new UTF-8 validation can fail here.
+            canonical: statement.canonical(),
             statement,
             der: self.der,
             trusted_key_id: self.trusted_key_id.clone(),
@@ -135,7 +180,7 @@ impl LoadedApprovalTrust {
             deadline: self.deadline,
             #[cfg(test)]
             clock: self.clock.clone(),
-        })
+        }
     }
 }
 

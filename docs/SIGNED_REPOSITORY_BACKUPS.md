@@ -14,6 +14,9 @@ checkpoint, and `fg backup recover` restores it through the authority-last nativ
 engine. The independent digest/key/identity/floor remain required. See
 [native checkpoint recovery](NATIVE_CHECKPOINT_RECOVERY.md) for selection,
 no-fallback behavior and exact resume.
+The selected native commands also accept an independently retained `--witness`
+to prevent later omission of known higher or conflicting signed checkpoints;
+`fg backup witness init|inspect` owns explicit initialization and inspection.
 
 `fg backup attest` verifies a repository-source archive and issues its detached
 Ed25519 approval in the native executable. It uses the same authority import,

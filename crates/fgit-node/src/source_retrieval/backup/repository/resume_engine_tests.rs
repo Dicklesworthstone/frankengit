@@ -193,6 +193,114 @@ fn stop(options: &Options, stop: Stage) {
 }
 
 #[test]
+fn approval_expiring_inside_final_recovery_guard_cannot_publish_authority() {
+    use super::super::approval::issuer::{self, Declarations};
+    use fgit_crypto::DsseEd25519SigningKey;
+    use std::cell::Cell;
+    use std::sync::{Arc, atomic::AtomicI64};
+
+    const ISSUED: i64 = 1_893_456_000_000; // 2030-01-01T00:00:00Z
+    const EXPIRES: i64 = ISSUED + 1000;
+    const PUBLIC_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n";
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (input, pin, _) = fixture(&scratch, format);
+        let mut request = options(&input, scratch.0.join("expires-inside-guard"), pin);
+        let deadline = request.profile.start();
+        let archive = PinnedArchive::open(&input, pin, request.profile.transfer, deadline).unwrap();
+        let identity = archive.header().identity;
+        let generation = archive.header().authority.head.as_ref().unwrap().generation;
+        let clock = Arc::new(AtomicI64::new(ISSUED));
+        // Public RFC8032 test material produces a real signature over this
+        // native fixture. No ignored JavaScript issuer campaign is required.
+        let signer = DsseEd25519SigningKey::from_seed(
+            digest("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").unwrap(),
+        );
+        let signed = issuer::issue(
+            &Declarations {
+                identity,
+                generation,
+                expires_at: Some("2030-01-01T00:00:01Z".into()),
+                clock: Some(Arc::clone(&clock)),
+            },
+            archive.header(),
+            archive.seal(),
+            request.profile.transfer.max_archive_bytes,
+            &signer,
+            deadline,
+        )
+        .unwrap();
+        let approval_path = scratch.0.join("guard-expiry.approval.json");
+        let key_path = scratch.0.join("guard-expiry.public.pem");
+        fs::write(&approval_path, signed.bytes()).unwrap();
+        fs::write(&key_path, PUBLIC_PEM).unwrap();
+        let mut flags = ApprovalFlags::default();
+        for (flag, value) in [
+            ("--approval", approval_path.to_str().unwrap().to_owned()),
+            ("--trust-key", key_path.to_str().unwrap().to_owned()),
+            ("--tenant-id", identity.tenant.to_string()),
+            ("--repository-id", identity.repository.to_string()),
+            ("--incarnation-id", identity.incarnation.to_string()),
+            ("--object-format", format.as_str().to_owned()),
+            ("--minimum-head-generation", generation.to_string()),
+        ] {
+            flags.set(flag, &value).unwrap();
+        }
+        let mut approval = flags.finish().unwrap().unwrap();
+        approval.set_test_clock(Arc::clone(&clock));
+        request.approval = Some(approval);
+        let approval = authenticate_approval(&request, deadline).unwrap();
+        let data_prepared = Cell::new(false);
+        let expired_inside_guard = Cell::new(false);
+        let publication_reached = Cell::new(false);
+        let error = execute_prepared_in(
+            &request,
+            archive,
+            approval,
+            deadline,
+            |stage| {
+                if stage == Stage::DataPrepared {
+                    data_prepared.set(true);
+                }
+                if stage == Stage::Published {
+                    publication_reached.set(true);
+                }
+                Ok(())
+            },
+            || {
+                // Earlier guard checks leave the approval eligible. Only the
+                // guard after data preparation crosses the wall-clock expiry,
+                // modelling time spent in witness/path custody I/O.
+                if data_prepared.get() && !expired_inside_guard.replace(true) {
+                    assert!(!request.output.join("authority.fsqlite").exists());
+                    clock.store(EXPIRES, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+        )
+        .err()
+        .expect("expiry during the final guard must prevent authority publication");
+        assert!(data_prepared.get(), "{error}");
+        assert!(expired_inside_guard.get(), "{error}");
+        assert!(error.contains("expired"), "{error}");
+        assert!(
+            error.contains("destination authority not published"),
+            "{error}"
+        );
+        assert!(!publication_reached.get());
+        assert!(!request.output.join("authority.fsqlite").exists());
+        assert!(request.output.join(".restore-intent").is_file());
+        assert!(
+            request
+                .output
+                .join(".restore-quarantine/authority.fsqlite")
+                .is_file()
+        );
+    }
+}
+
+#[test]
 fn each_restore_boundary_resumes_in_both_domains_without_new_authority_tokens() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();

@@ -178,6 +178,29 @@ pub(in super::super) fn execute_selected_in(
     profile: Profile,
     deadline: Deadline,
 ) -> Result<VerificationReceipt, String> {
+    execute_selected_guarded_in(
+        archive,
+        approval,
+        scratch,
+        instance,
+        profile,
+        deadline,
+        &mut || Ok(()),
+    )
+}
+
+/// A retained recovery witness narrows admission before scratch creation and
+/// after complete native shutdown/cleanup, without becoming archive authority.
+pub(in super::super) fn execute_selected_guarded_in(
+    archive: PinnedArchive<File>,
+    approval: super::VerifiedApproval,
+    scratch: &Path,
+    instance: StoreInstanceId,
+    profile: Profile,
+    deadline: Deadline,
+    guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<VerificationReceipt, String> {
+    guard()?;
     let options = Options {
         input: PathBuf::new(),
         output: scratch.to_path_buf(),
@@ -189,7 +212,14 @@ pub(in super::super) fn execute_selected_in(
     };
     let verified =
         verify_pinned_with_checkpoints(archive, &options, Some(&approval), deadline, |_| Ok(()))?;
-    check_approval_current(Some(&approval), deadline)?;
+    guard().map_err(|error| {
+        format!("archive verified and scratch removed; recovery witness check failed: {error}")
+    })?;
+    // Guard I/O may outlive signed eligibility, so perform the final lifetime
+    // and deadline check after the filesystem-backed recovery constraints.
+    check_approval_current(Some(&approval), deadline).map_err(|error| {
+        format!("archive verified and scratch removed; approval check failed: {error}")
+    })?;
     Ok(verification_receipt(&verified, instance, Some(&approval)))
 }
 

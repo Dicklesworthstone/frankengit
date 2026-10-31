@@ -47,6 +47,9 @@ of signed approvals before reading payloads and select the highest unambiguous
 generation. They refuse an unusable newer checkpoint instead of falling back to
 an older supplied one, and use the same native preflight/restore engine and exact
 resume binding. See [native checkpoint recovery](NATIVE_CHECKPOINT_RECOVERY.md).
+An optional `--witness` retains higher or conflicting authenticated observations
+across invocations. Initialize or inspect it with `fg backup witness init|inspect`;
+missing witness state is never recreated automatically.
 
 Export, verification, attestation and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
 `--max-objects` and `--timeout-secs`. For a 2 GiB archive containing up to
