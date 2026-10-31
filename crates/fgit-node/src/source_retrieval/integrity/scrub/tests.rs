@@ -201,7 +201,7 @@ fn fresh_complete_inventory_is_deterministic_in_both_domains_and_does_not_publis
 #[test]
 fn missing_and_corrupt_history_are_both_reported_but_unselected_residue_is_not_read() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let (scratch, mut node) = setup(format);
+        let (scratch, node) = setup(format);
         let (objects, extra) = publish(&node);
         let outsider = put(&node, GitKind::Blob, b"not selected\n".to_vec());
         let outsider_path = body_path(&scratch.0, outsider);
@@ -334,7 +334,7 @@ fn a_finding_limit_continues_after_the_observed_failure_not_after_an_unread_obje
 
 #[test]
 fn payload_pages_account_exactly_and_never_advance_past_the_boundary_read() {
-    let (_scratch, mut node) = setup(GitHashAlgorithm::Sha1);
+    let (_scratch, node) = setup(GitHashAlgorithm::Sha1);
     let (objects, _) = publish(&node);
     let sizes = objects
         .iter()
@@ -393,7 +393,7 @@ fn payload_pages_account_exactly_and_never_advance_past_the_boundary_read() {
 
 #[test]
 fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness() {
-    let (_scratch, mut node) = setup(GitHashAlgorithm::Sha1);
+    let (_scratch, node) = setup(GitHashAlgorithm::Sha1);
     let genesis = run(&node, ScrubQuery::default()).unwrap();
     assert!(genesis.entire_selection_verified());
     assert_eq!(genesis.checked_objects(), 0);
@@ -462,7 +462,7 @@ fn stale_or_nonmember_cursors_refuse_and_an_end_cursor_cannot_forge_completeness
 
 #[test]
 fn limits_and_cancelled_requests_are_not_object_findings_or_success_pages() {
-    let (_scratch, mut node) = setup(GitHashAlgorithm::Sha1);
+    let (_scratch, node) = setup(GitHashAlgorithm::Sha1);
     let (objects, _) = publish(&node);
     for query in [
         ScrubQuery {

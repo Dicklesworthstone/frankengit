@@ -104,7 +104,7 @@ impl Sources {
         }
         let mut runs = Vec::new();
         let mut seen = BTreeSet::new();
-        for row in bytes[offset + 4..end].chunks_exact(88) {
+        for row in bytes[offset + 4..end].as_chunks::<88>().0 {
             let run: [u8; 16] = row[..16]
                 .try_into()
                 .map_err(|_| invalid("watch run width"))?;

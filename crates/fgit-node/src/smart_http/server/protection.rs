@@ -435,7 +435,7 @@ fn principal(text: &str) -> Result<PrincipalId, ApiError> {
 }
 
 fn reference(text: &str) -> Result<RefName, ApiError> {
-    if text.is_empty() || text.len() > 2 * MAX_REF_NAME_LEN || text.len() % 2 != 0 {
+    if text.is_empty() || text.len() > 2 * MAX_REF_NAME_LEN || !text.len().is_multiple_of(2) {
         return Err(ApiError::bad("invalid_reference_hex"));
     }
     let bytes = text
@@ -461,11 +461,13 @@ const fn hex_digit(byte: u8) -> Result<u8, ApiError> {
 }
 
 fn hex_bytes(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
-    if text.is_empty() || text.len() % 2 != 0 || text.len() > maximum * 2 {
+    if text.is_empty() || !text.len().is_multiple_of(2) || text.len() > maximum * 2 {
         return Err(ApiError::bad("invalid_check_hex"));
     }
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Ok((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?))
         .collect()
 }

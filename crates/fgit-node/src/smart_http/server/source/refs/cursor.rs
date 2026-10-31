@@ -39,7 +39,7 @@ impl CursorEncoding {
                 bytes
                     .try_reserve_exact(value.len() / 2)
                     .map_err(|_| ApiError::unavailable())?;
-                for pair in value.as_bytes().chunks_exact(2) {
+                for pair in value.as_bytes().as_chunks::<2>().0 {
                     bytes.push(digit(pair[0]) * 16 + digit(pair[1]));
                 }
                 bytes

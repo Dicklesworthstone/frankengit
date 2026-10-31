@@ -604,7 +604,7 @@ fn base64(text: &str, maximum: usize) -> Result<Vec<u8>, String> {
         return Err(invalid());
     }
     let mut out = Vec::with_capacity(decoded_bytes);
-    for (index, quad) in text.as_bytes().chunks_exact(4).enumerate() {
+    for (index, quad) in text.as_bytes().as_chunks::<4>().0.iter().enumerate() {
         let last = (index + 1) * 4 == text.len();
         let a = digit(quad[0]).ok_or_else(invalid)?;
         let b = digit(quad[1]).ok_or_else(invalid)?;

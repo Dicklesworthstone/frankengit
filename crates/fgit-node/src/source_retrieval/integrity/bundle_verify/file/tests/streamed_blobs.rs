@@ -158,11 +158,11 @@ impl Read for BoundedScratch {
             "object-sized scratch read request"
         );
         let count = self.file.read(output)?;
-        if let Some(at) = self.corrupt_at {
-            if (self.read_bytes..self.read_bytes + count).contains(&at) {
-                output[at - self.read_bytes] ^= 1;
-                self.corrupt_at = None;
-            }
+        if let Some(at) = self.corrupt_at
+            && (self.read_bytes..self.read_bytes + count).contains(&at)
+        {
+            output[at - self.read_bytes] ^= 1;
+            self.corrupt_at = None;
         }
         self.read_bytes += count;
         if let Some(cancel) = &self.cancel_on_read {

@@ -25,10 +25,10 @@ pub(super) fn seek(
     let result = file.seek(position);
     checkpoint(live)?;
     let observed = result.map_err(|error| io_error(operation, error))?;
-    if let SeekFrom::Start(expected) = position {
-        if observed != expected {
-            return Err(BundleVerifyError::SourceChanged);
-        }
+    if let SeekFrom::Start(expected) = position
+        && observed != expected
+    {
+        return Err(BundleVerifyError::SourceChanged);
     }
     Ok(observed)
 }

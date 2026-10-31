@@ -56,7 +56,9 @@ pub fn unhex(value: &str, maximum: usize) -> io::Result<Vec<u8>> {
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| digit(p[0]) * 16 + digit(p[1]))
         .collect())
 }

@@ -490,7 +490,7 @@ fn stale_source_pins_cancellation_and_unresolved_generation_floors_never_fallbac
             .block_on(node.search_source_initial_revalidated_local_in(
                 &node.request_context(),
                 &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
-                    &node
+                    node
                 ),
                 &f.reference,
                 Some(original.source_head),
@@ -508,7 +508,7 @@ fn stale_source_pins_cancellation_and_unresolved_generation_floors_never_fallbac
             .block_on(node.search_source_initial_revalidated_local_in(
                 &request,
                 &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
-                    &node
+                    node
                 ),
                 &f.reference,
                 None,

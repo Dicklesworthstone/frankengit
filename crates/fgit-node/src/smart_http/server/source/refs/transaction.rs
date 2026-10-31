@@ -94,7 +94,7 @@ fn reference(text: &str) -> Result<RefName, ApiError> {
         .try_reserve_exact(text.len() / 2)
         .map_err(|_| ApiError::unavailable())?;
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
-    for pair in text.as_bytes().chunks_exact(2) {
+    for pair in text.as_bytes().as_chunks::<2>().0 {
         bytes.push(digit(pair[0]) * 16 + digit(pair[1]));
     }
     if !bytes.starts_with(b"refs/heads/") {

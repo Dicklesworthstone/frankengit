@@ -7312,7 +7312,7 @@ fn upload_envelope_error(
 /// Whole MiB when exact, otherwise exact bytes: a limit is never rounded.
 fn envelope_size(bytes: usize) -> String {
     const MIB: usize = 1024 * 1024;
-    if bytes % MIB == 0 {
+    if bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
     } else {
         format!("{bytes} bytes")

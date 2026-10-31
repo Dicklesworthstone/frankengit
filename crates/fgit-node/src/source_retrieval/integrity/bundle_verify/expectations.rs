@@ -219,13 +219,13 @@ impl BundleExpectations {
     ) -> Result<(), BundleVerifyError> {
         let refuse = BundleVerifyError::Expectation;
         checkpoint(live)?;
-        if let Some(expected) = self.format {
-            if format != expected {
-                return Err(refuse(BundleExpectationError::FormatMismatch {
-                    expected,
-                    actual: format,
-                }));
-            }
+        if let Some(expected) = self.format
+            && format != expected
+        {
+            return Err(refuse(BundleExpectationError::FormatMismatch {
+                expected,
+                actual: format,
+            }));
         }
         for (name, expected) in &self.references {
             checkpoint(live)?;
