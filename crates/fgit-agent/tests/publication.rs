@@ -554,7 +554,8 @@ fn unresolved_real_broker_responsibility_blocks_preparation_until_aborted() {
         publication_refusal(&change, &evidence),
         AgentPublicationRefusal::Reconciliation
     );
-    broker.abort(grant).unwrap();
+    let release = broker.abort(grant).unwrap();
+    assert_eq!(release.amount(), ResourceVector::single(Grade::Bytes, 8));
     evidence.report =
         RunReconciliationReport::build(run, broker.records(), LogicalTime::new(12)).unwrap();
     let accepted = prepare(&change, &evidence).unwrap();
