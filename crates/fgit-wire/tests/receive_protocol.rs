@@ -327,7 +327,7 @@ fn atomic_and_non_atomic_report_status_are_deterministic_and_ordered() {
         vec![
             Packet::Data(b"unpack ok\n".to_vec()),
             Packet::Data(b"ng refs/heads/a atomic push failed\n".to_vec()),
-            Packet::Data(b"ng refs/heads/b atomic push failed\n".to_vec()),
+            Packet::Data(b"ng refs/heads/b protected branch\n".to_vec()),
             Packet::Flush,
         ]
     );

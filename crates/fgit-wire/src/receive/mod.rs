@@ -1595,12 +1595,17 @@ fn apply_atomic_status(
             .iter()
             .any(|status| matches!(status, ReceiveCommandStatus::Rejected { .. }))
     {
-        return vec![
-            ReceiveCommandStatus::Rejected {
-                message: ATOMIC_FAILURE_MESSAGE.to_vec(),
-            };
-            statuses.len()
-        ];
+        // Preserve the actual refusal for commands that already failed. Only
+        // otherwise successful siblings need the atomic-abort diagnostic.
+        return statuses
+            .iter()
+            .map(|status| match status {
+                ReceiveCommandStatus::Ok => ReceiveCommandStatus::Rejected {
+                    message: ATOMIC_FAILURE_MESSAGE.to_vec(),
+                },
+                rejected => rejected.clone(),
+            })
+            .collect();
     }
     statuses.to_vec()
 }
