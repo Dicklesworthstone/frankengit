@@ -102,12 +102,13 @@ impl Inventory {
     }
 
     pub(super) fn original(&self, id: GitOid) -> Result<Resolved, BundleVerifyError> {
-        self.originals.get(&id).copied().ok_or_else(|| {
-            BundleVerifyError::Graph(GraphRefusal::MissingTarget {
+        self.originals
+            .get(&id)
+            .copied()
+            .ok_or(BundleVerifyError::Graph(GraphRefusal::MissingTarget {
                 source: None,
                 target: id,
-            })
-        })
+            }))
     }
 
     fn base_object(&self, base: Base) -> Option<Resolved> {
@@ -161,10 +162,9 @@ impl Inventory {
             .get(&id)
             .and_then(|at| self.entries.get(*at))
             .and_then(|entry| entry.resolved)
+            && (uploaded.kind != kind || !uploaded.span.same_content(span))
         {
-            if uploaded.kind != kind || !uploaded.span.same_content(span) {
-                return Err(BundleVerifyError::DuplicateObject(id));
-            }
+            return Err(BundleVerifyError::DuplicateObject(id));
         }
         let total = self
             .original_expanded_bytes
@@ -200,10 +200,10 @@ impl Inventory {
     }
 
     fn check_original_overlap(&self, resolved: Resolved) -> Result<(), BundleVerifyError> {
-        if let Some(original) = self.originals.get(&resolved.id) {
-            if original.kind != resolved.kind || !original.span.same_content(resolved.span) {
-                return Err(BundleVerifyError::DuplicateObject(resolved.id));
-            }
+        if let Some(original) = self.originals.get(&resolved.id)
+            && (original.kind != resolved.kind || !original.span.same_content(resolved.span))
+        {
+            return Err(BundleVerifyError::DuplicateObject(resolved.id));
         }
         Ok(())
     }

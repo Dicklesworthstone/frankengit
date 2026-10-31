@@ -282,21 +282,39 @@ fn original_sink_failure_cancellation_and_independent_graph_limits_are_sticky() 
         Err(BundleVerifyError::Stopped)
     ));
     let mut limited = BundleVerifyLimits::default();
-    limited.graph.max_objects = 2;
-    assert!(matches!(
-        SelectedBundleOriginals::new(
-            &node,
-            &request,
-            &materialized,
-            &[base],
-            &limited,
-            usize::MAX,
-            &mut || true
-        ),
-        Err(StreamBundleImportRefusal::Verification(
-            BundleVerifyError::Graph(GraphRefusal::Limit("original objects"))
-        ))
-    ));
+    // Four unique visible objects include two commits sharing one tree/blob.
+    // Repeated edges must not spend another identity at the exact object cap.
+    limited.graph.max_objects = 4;
+    let child = materialized.snapshot().refs[&reference("refs/heads/main")];
+    let exact = SelectedBundleOriginals::new(
+        &node,
+        &request,
+        &materialized,
+        &[child],
+        &limited,
+        usize::MAX,
+        &mut || true,
+    )
+    .unwrap();
+    assert_eq!(exact.objects().len(), 4);
+    drop(exact);
+    for maximum in [2, 3] {
+        limited.graph.max_objects = maximum;
+        assert!(matches!(
+            SelectedBundleOriginals::new(
+                &node,
+                &request,
+                &materialized,
+                &[base],
+                &limited,
+                usize::MAX,
+                &mut || true
+            ),
+            Err(StreamBundleImportRefusal::Verification(
+                BundleVerifyError::Graph(GraphRefusal::Limit("original objects"))
+            ))
+        ));
+    }
     limited.graph.max_objects = 100;
     limited.graph.max_edges = 0;
     assert!(matches!(
