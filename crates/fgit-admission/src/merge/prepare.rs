@@ -118,6 +118,9 @@ pub fn prepare_event(
                 fgit_forge::AggregateId::PullRequestConversation(_)
             )
         }
+        ForgeEventPayload::MergeQueueChangedNative(change) => {
+            event.aggregate == fgit_forge::AggregateId::MergeQueue(change.queue_number)
+        }
         _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
     };
     if !aggregate_matches
@@ -145,6 +148,50 @@ pub fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::MergeQueueChangedNative(change) => {
+            if !attempt.request.ref_commands().is_empty() || !closure.objects.is_empty() {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            let command = super::native::queue::verify_event_seal(context, event, attempt)?;
+            if let fgit_forge::merge_queue::QueueCommandAction::Enqueue {
+                pull_request,
+                expected_pull_request_version,
+                source_ref,
+                head_tip,
+                expected_target_tip,
+                ..
+            } = &command.action
+            {
+                let pull = AsciiSlug::try_new(
+                    "forge_stream",
+                    fgit_forge::AggregateId::PullRequest(*pull_request)
+                        .to_string()
+                        .as_bytes(),
+                )
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                if resolved
+                    .forge
+                    .entry(pull)
+                    .map(|entry| entry.successor_position())
+                    != Some(expected_pull_request_version.get())
+                {
+                    return Err(RefusalCode::EvidenceStale);
+                }
+                if resolved.refs.refs().get(source_ref) != Some(head_tip)
+                    || resolved.refs.refs().get(&command.target_ref) != Some(expected_target_tip)
+                {
+                    return Err(RefusalCode::TargetRefMoved);
+                }
+            }
+            (
+                ForgeEventKind::MergeQueueChanged {
+                    queue: entity,
+                    target: change.target_ref.clone(),
+                },
+                Vec::new(),
+                None,
+            )
+        }
         ForgeEventPayload::PullRequestCommentedNative(comment) => {
             comment
                 .validate()

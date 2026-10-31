@@ -536,7 +536,8 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
             ForgeEventKind::PullRequestOpened { target, .. }
             | ForgeEventKind::PullRequestMerged { target, .. }
             | ForgeEventKind::PullRequestUpdated { target, .. }
-            | ForgeEventKind::PullRequestReviewed { target, .. } => Some(target),
+            | ForgeEventKind::PullRequestReviewed { target, .. }
+            | ForgeEventKind::MergeQueueChanged { target, .. } => Some(target),
             ForgeEventKind::WorkflowCheckObserved { source, .. } => Some(source),
             ForgeEventKind::PullRequestClosed { .. }
             | ForgeEventKind::IssueChanged { .. }
@@ -638,6 +639,7 @@ fn build_witness(
                 // request a ref effect. Retain that read in refined witnesses.
                 let subject = match &forge.event {
                     ForgeEventKind::WorkflowCheckObserved { source, .. } => Some(source),
+                    ForgeEventKind::MergeQueueChanged { target, .. } => Some(target),
                     _ => forge.event.required_ref_effect(),
                 };
                 if let Some(target) = subject {

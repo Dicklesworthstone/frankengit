@@ -43,6 +43,7 @@ pub mod prepare;
 pub mod progress;
 pub mod protection;
 pub mod pull_request;
+pub mod queue;
 pub mod settlement;
 mod storage;
 pub mod workflow_checks;

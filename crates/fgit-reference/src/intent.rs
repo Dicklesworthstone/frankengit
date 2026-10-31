@@ -202,6 +202,12 @@ pub enum ForgeEventKind {
     PullRequestCommented {
         conversation: ForgeEntityId,
     },
+    /// Queue membership/order changed. The target is observed metadata, not a
+    /// ref movement or a grant to publish a speculative merge.
+    MergeQueueChanged {
+        queue: ForgeEntityId,
+        target: RefName,
+    },
 }
 
 impl ForgeEventKind {
@@ -217,7 +223,8 @@ impl ForgeEventKind {
             | Self::IssueChanged { .. }
             | Self::ReviewProtectionChanged { .. }
             | Self::WorkflowCheckObserved { .. }
-            | Self::PullRequestCommented { .. } => None,
+            | Self::PullRequestCommented { .. }
+            | Self::MergeQueueChanged { .. } => None,
         }
     }
 
@@ -234,6 +241,7 @@ impl ForgeEventKind {
             Self::ReviewProtectionChanged { policy } => *policy,
             Self::WorkflowCheckObserved { check, .. } => *check,
             Self::PullRequestCommented { conversation } => *conversation,
+            Self::MergeQueueChanged { queue, .. } => *queue,
         }
     }
 }

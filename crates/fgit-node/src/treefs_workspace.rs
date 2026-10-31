@@ -21,6 +21,7 @@ mod issues;
 mod protection;
 mod publication;
 mod pull_request;
+mod queue;
 pub use issues::IssueReadRefusal;
 pub use pull_request::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
@@ -29,6 +30,7 @@ pub use pull_request::{
 pub use pull_request::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use queue::{QueueRead, QueueReadRefusal};
 mod session_state;
 mod sessions;
 mod source_browse;

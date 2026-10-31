@@ -610,6 +610,11 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(9);
             out.write_text("ForgeEntityId", conversation.label().as_str())?;
         }
+        ForgeEventKind::MergeQueueChanged { queue, target } => {
+            out.write_raw_byte(10);
+            out.write_text("ForgeEntityId", queue.label().as_str())?;
+            out.write_ref_name(target)?;
+        }
     }
     Ok(())
 }
@@ -634,6 +639,7 @@ mod tests {
     include!("issue_normal_form_tests.rs");
     include!("workflow_check_normal_form_tests.rs");
     include!("pull_request_comment_normal_form_tests.rs");
+    include!("merge_queue_normal_form_tests.rs");
 
     use std::collections::BTreeMap;
 

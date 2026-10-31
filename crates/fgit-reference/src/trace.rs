@@ -358,6 +358,11 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(9);
             write_slug(out, "ForgeEntityId", conversation.label())?;
         }
+        ForgeEventKind::MergeQueueChanged { queue, target } => {
+            out.write_raw_byte(10);
+            write_slug(out, "ForgeEntityId", queue.label())?;
+            out.write_ref_name(target)?;
+        }
     }
     Ok(())
 }
@@ -409,6 +414,10 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         9 => Ok(ForgeEventKind::PullRequestCommented {
             conversation: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        10 => Ok(ForgeEventKind::MergeQueueChanged {
+            queue: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+            target: input.read_ref_name()?,
         }),
         other => malformed("ForgeEventKind", u64::from(other)),
     }
@@ -2224,5 +2233,41 @@ mod tests {
         }
         assert_eq!(event.required_ref_effect(), None);
         assert_eq!(event.entity().label().as_str(), "conversation/1");
+    }
+
+    #[test]
+    fn merge_queue_trace_uses_tag_ten_and_requires_exact_queue_and_target() {
+        let event = ForgeEventKind::MergeQueueChanged {
+            queue: ForgeEntityId::new(crate::harness::label("queue/1")),
+            target: RefName::try_new(b"refs/heads/main").unwrap(),
+        };
+        let literal = b"\x0a\0\0\0\x07queue/1\0\0\0\x0frefs/heads/main";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut input).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity().label().as_str(), "queue/1");
+        for (queue, target) in [
+            ("queue/2", "refs/heads/main"),
+            ("queue/1", "refs/heads/next"),
+        ] {
+            let changed = ForgeEventKind::MergeQueueChanged {
+                queue: ForgeEntityId::new(crate::harness::label(queue)),
+                target: RefName::try_new(target.as_bytes()).unwrap(),
+            };
+            let mut bytes = Encoder::new();
+            write_forge_event(&mut bytes, &changed).unwrap();
+            assert_ne!(bytes.as_bytes(), literal);
+            let mut decoded = Decoder::new(bytes.as_bytes(), DecodeLimits::DEFAULT);
+            assert_eq!(read_forge_event(&mut decoded).unwrap(), changed);
+            decoded.finish().unwrap();
+        }
     }
 }
