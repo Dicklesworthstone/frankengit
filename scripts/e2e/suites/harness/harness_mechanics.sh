@@ -294,13 +294,19 @@ case $mode in
   keep) FGE_KEEP_TEMP=1 ;;
   preserve) fge_preserve "$probe_work/payload" 'explicit evidence retention' ;;
   artifact) fge_artifact "$probe_work/payload" text ;;
+  skip) fge_skip TEMP-CHILD-SKIP 'planted required-cell skip' ;;
+  unsupported) fge_unsupported TEMP-CHILD-UNSUPPORTED 'planted unsupported required cell' ;;
+  obligation) fge_obligation_open unclosed lease ;;
+  duplicate) fge_assert_eq TEMP-CHILD-001 ok ok 'planted duplicate ID' ;;
   malformed) printf '../outside\n' >>"$FGE_STATE_DIR/tempdirs" ;;
   symlink)
     mv "$FGE_ARTIFACT_DIR/work" "$FGE_ARTIFACT_DIR/real-work"
     ln -s "$FGE_ARTIFACT_DIR/outside" "$FGE_ARTIFACT_DIR/work"
     ;;
 esac
-fge_assert_eq TEMP-CHILD-001 ok ok 'ordinary permitted child assertion'
+if [ "$mode" != zero ]; then
+  fge_assert_eq TEMP-CHILD-001 ok ok 'ordinary permitted child assertion'
+fi
 PROBE
 
 cleanup_probe() {
@@ -354,6 +360,11 @@ cleanup_probe failure 1 fail
 cleanup_probe keep 0 pass
 cleanup_probe preserve 0 pass
 cleanup_probe artifact 0 pass
+cleanup_probe zero 1 fail
+cleanup_probe skip 1 fail
+cleanup_probe unsupported 1 fail
+cleanup_probe obligation 1 fail
+cleanup_probe duplicate 1 fail
 cleanup_probe malformed 1 fail
 cleanup_probe symlink 1 fail
 

@@ -2574,26 +2574,6 @@ fge__on_exit() {
   # validated run-owned names before deciding what can be removed.
   fge__load_tempdirs || fge__tempdir_cleanup_error 'invalid temporary-work ownership or symlink'
 
-  # Clean disposable scratch after success, while registered artifacts and
-  # explicit preservation keep their containing work directory intact. Any
-  # failure or FGE_KEEP_TEMP retains work for triage.
-  local d keep=0
-  [ "$FGE_FAILED" -ne 0 ] && keep=1
-  [ -n "${FGE_KEEP_TEMP:-}" ] && keep=1
-  if [ "$keep" -eq 0 ]; then
-    for d in "${FGE_TEMPDIRS[@]+"${FGE_TEMPDIRS[@]}"}"; do
-      [ -n "$d" ] || continue
-      if fge__tempdir_retained "$d"; then
-        FGE_PRESERVED_PATHS+=("$d")
-        FGE_PRESERVED_REASONS+=('work dir contains registered evidence or explicit preservation')
-      elif ! rm -rf -- "$d"; then
-        fge__tempdir_cleanup_error 'owned temporary-work removal failed'
-        keep=1
-        break
-      fi
-    done
-  fi
-
   # Assertion bookkeeping comes from the on-disk ledger, not from shell
   # variables, so assertions emitted inside background subshells are counted.
   local -a ids=() dups=() passed=() failed_a=() skipped=() unsupported=() errored=()
@@ -2639,6 +2619,27 @@ fge__on_exit() {
   [ "$orphans" -gt 0 ] && status=fail
   [ "$ob_out" -gt 0 ] && status=fail
   [ "$timeouts" -gt 0 ] && status=fail
+
+  # Prune only after ALL terminal conditions are known. A zero-run, required
+  # skip, outstanding obligation or orphan is a failure even if no earlier
+  # assertion set FGE_FAILED. Its evidence must survive too.
+  local d keep=0
+  [ "$status" = pass ] || keep=1
+  [ -n "${FGE_KEEP_TEMP:-}" ] && keep=1
+  if [ "$keep" -eq 0 ]; then
+    for d in "${FGE_TEMPDIRS[@]+"${FGE_TEMPDIRS[@]}"}"; do
+      [ -n "$d" ] || continue
+      if fge__tempdir_retained "$d"; then
+        FGE_PRESERVED_PATHS+=("$d")
+        FGE_PRESERVED_REASONS+=('work dir contains registered evidence or explicit preservation')
+      elif ! rm -rf -- "$d"; then
+        fge__tempdir_cleanup_error 'owned temporary-work removal failed'
+        status=fail
+        keep=1
+        break
+      fi
+    done
+  fi
 
   local containment=ok
   { [ "$orphans" -gt 0 ] || [ "$ob_out" -gt 0 ]; } && containment=failed
