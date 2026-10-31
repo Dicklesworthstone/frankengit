@@ -86,8 +86,8 @@ pub(super) fn serve(
         asset_enabled(
             &profile.route,
             request.target,
-            profile.allow_pulls,
-            profile.allow_issues,
+            profile.allow_pulls(),
+            profile.allow_issues(),
         ),
         profile.maximum_response_bytes,
         request,

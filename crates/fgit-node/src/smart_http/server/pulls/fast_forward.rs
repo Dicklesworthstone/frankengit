@@ -181,7 +181,7 @@ pub(super) fn authenticate(
     }
     // Reuse the code-publication grant, not the weaker metadata-write grant.
     // Current canonical branch protection remains the native driver's job.
-    if !profile.allow_pulls || !grant.permits_reviewed_merge() {
+    if !profile.allow_pulls() || !grant.permits_reviewed_merge() {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head)

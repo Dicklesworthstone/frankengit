@@ -216,11 +216,11 @@ pub(super) fn authenticate(
         return Err(ApiError::not_found());
     }
     let permitted = if request.is_mutation() {
-        profile.allow_receive && grant.permits(Service::ReceivePack)
+        profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else {
         grant.permits(Service::UploadPack)
     };
-    if !profile.allow_source || !permitted {
+    if !profile.allow_source() || !permitted {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let supplied_key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;

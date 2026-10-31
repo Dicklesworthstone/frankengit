@@ -68,7 +68,7 @@ pub(super) fn authenticate(
         Operation::Review(_) => grant.permits_reviews(true),
         Operation::Merge => grant.permits_reviewed_merge(),
     };
-    if !profile.allow_pulls || !permitted {
+    if !profile.allow_pulls() || !permitted {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;

@@ -157,7 +157,7 @@ fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::new(Status::NotFound, "not_found"));
     }
-    if !profile.allow_outcomes || !grant.permits_outcomes() {
+    if !profile.allow_outcomes() || !grant.permits_outcomes() {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let original = retry_key(raw_head)

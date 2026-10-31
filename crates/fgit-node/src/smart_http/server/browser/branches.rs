@@ -76,7 +76,7 @@ pub(super) fn serve(
 ) -> Result<bool, Status> {
     let Some((media, body)) = checked_asset(
         &profile.route,
-        profile.allow_source,
+        profile.allow_source(),
         profile.maximum_response_bytes,
         request,
         !trailing.is_empty(),

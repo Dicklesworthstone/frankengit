@@ -109,8 +109,8 @@ fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    let issues = profile.allow_issues && grant.permits_issues(false);
-    let pulls = profile.allow_pulls && grant.permits_pulls(false);
+    let issues = profile.allow_issues() && grant.permits_issues(false);
+    let pulls = profile.allow_pulls() && grant.permits_pulls(false);
     if !issues && !pulls {
         return Err(ApiError::new(Status::Forbidden, "events_not_granted"));
     }

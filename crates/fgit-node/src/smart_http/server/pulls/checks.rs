@@ -29,7 +29,7 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    if !profile.allow_pulls || !grant.permits_pulls(false) {
+    if !profile.allow_pulls() || !grant.permits_pulls(false) {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     if request.evidence.is_some() && !grant.permits_artifact_read() {

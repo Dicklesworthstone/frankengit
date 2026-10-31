@@ -2,6 +2,7 @@
 //! Every progress owner is ready before any child may build an index. Every
 //! return requests stop and releases all launch gates before joining children.
 
+use super::{RepositoryHttpService, RepositoryHttpServices};
 use std::io;
 use std::net::TcpListener;
 use std::path::Path;
@@ -283,11 +284,12 @@ impl OneNode {
             listener,
             limits.max_in_flight(),
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            true,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, allow_pulls)
+                .with(RepositoryHttpService::Source, true),
             Acceptance::Bounded {
                 max_sessions: limits.max_sessions(),
                 idle_timeout,
@@ -321,11 +323,12 @@ impl OneNode {
             listener,
             max_in_flight,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            true,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, allow_pulls)
+                .with(RepositoryHttpService::Source, true),
             Acceptance::UntilStopped(should_stop),
             Controllers {
                 maintenance: Some(maintenance.into()),

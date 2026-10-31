@@ -1,3 +1,4 @@
+use super::super::{RepositoryHttpService, RepositoryHttpServices};
 use super::*;
 use crate::{GitDaemonSessionTimeout, NodeConfig, PushQuota};
 use fgit_crypto::sha256_digest;
@@ -17,11 +18,12 @@ fn profile() -> Profile {
             digest: sha256_digest(&[b'a'; 64]),
             principal: PrincipalId::from_bytes([3; 16]),
         },
-        allow_receive: true,
-        allow_issues: false,
-        allow_outcomes: false,
-        allow_pulls: false,
-        allow_source: false,
+        services: RepositoryHttpServices::NONE
+            .with(RepositoryHttpService::Receive, true)
+            .with(RepositoryHttpService::Issues, false)
+            .with(RepositoryHttpService::Outcomes, false)
+            .with(RepositoryHttpService::Pulls, false)
+            .with(RepositoryHttpService::Source, false),
         #[cfg(target_os = "linux")]
         lfs: None,
         http: HttpLimits::default(),
@@ -191,7 +193,9 @@ fn no_redirect_or_entropy_before_authentication_and_receive_permission() {
         assert!(output.is_empty());
     }
     let mut readonly = profile;
-    readonly.allow_receive = false;
+    readonly.services = readonly
+        .services
+        .with(RepositoryHttpService::Receive, false);
     let mut output = Vec::new();
     assert_eq!(
         adapt_with_nonce(
@@ -214,12 +218,12 @@ fn scoped_url_never_authenticates_a_post_or_overrides_revocation() {
     let envelope = head::parse(&normalized, profile.http).unwrap().unwrap();
     let parsed = parse_head(&normalized, profile.http).unwrap().unwrap();
     assert!(authenticated_session(&parsed, &normalized[..envelope.consumed], &profile).is_ok());
-    profile.allow_receive = false;
+    profile.services = profile.services.with(RepositoryHttpService::Receive, false);
     assert_eq!(
         authenticated_session(&parsed, &normalized[..envelope.consumed], &profile),
         Err(Status::Forbidden)
     );
-    profile.allow_receive = true;
+    profile.services = profile.services.with(RepositoryHttpService::Receive, true);
     profile.credentials = super::super::CredentialSource::Static {
         digest: sha256_digest(&[b'b'; 64]),
         principal: PrincipalId::from_bytes([3; 16]),
@@ -237,7 +241,9 @@ fn scoped_url_never_authenticates_a_post_or_overrides_revocation() {
 fn unscoped_keyless_rpc_is_a_fresh_attempt_only_after_authentication() {
     let input = || request("POST", &format!("/repo.git{RPC}"), RPC_HEADERS, b"0000");
     let mut readonly = profile();
-    readonly.allow_receive = false;
+    readonly.services = readonly
+        .services
+        .with(RepositoryHttpService::Receive, false);
     for (bytes, profile, expected) in [
         (
             String::from_utf8(input())

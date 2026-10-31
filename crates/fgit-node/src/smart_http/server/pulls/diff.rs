@@ -78,7 +78,8 @@ pub(super) fn authenticate(
     }
     // Like native PR preparation, PR diffs are enabled by the PR API switch;
     // the separate source-browser switch is not an implicit PR permission.
-    if !profile.allow_pulls || !grant.permits(Service::UploadPack) || !grant.permits_pulls(false) {
+    if !profile.allow_pulls() || !grant.permits(Service::UploadPack) || !grant.permits_pulls(false)
+    {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     if retry_key(raw_head)
