@@ -258,7 +258,9 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
         GitDaemonSessionTimeout::try_new(Duration::from_millis(1)).unwrap(),
         GitDaemonSessionWorkScaling::FLAT,
     );
-    expired.started = Instant::now() - Duration::from_secs(1);
+    expired.started = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("test clock supports a past deadline");
     let state = RefCell::new(SshConnectionState {
         session,
         stream,
@@ -317,7 +319,9 @@ fn terminal_write_allowance_flushes_without_restarting_buffered_git_reads() {
         GitDaemonSessionTimeout::try_new(Duration::from_secs(5)).unwrap(),
         GitDaemonSessionWorkScaling::FLAT,
     );
-    work.started = Instant::now() - Duration::from_secs(10);
+    work.started = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .expect("test clock supports a past deadline");
     let state = RefCell::new(SshConnectionState {
         session,
         stream,

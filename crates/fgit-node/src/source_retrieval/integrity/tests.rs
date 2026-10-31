@@ -743,7 +743,9 @@ fn checked_stream_progress_keeps_exact_cancellation_and_deadline_causes() {
                     .unwrap()
                     .set_cancel_reason(asupersync::types::CancelReason::poll_quota());
             } else {
-                checkpoints.started = Instant::now() - Duration::from_secs(6);
+                checkpoints.started = Instant::now()
+                    .checked_sub(Duration::from_secs(6))
+                    .expect("test clock supports a past deadline");
             }
             assert!(matches!(
                 read_audit_blob(&mut stream, &mut buffer, &checkpoints),
