@@ -149,7 +149,8 @@ fn real_preflight_checks_both_domains_without_writing_payloads_or_publishing_aut
         let scratch = Scratch::new();
         let (input, pin, ids) = fixture(&scratch, format);
         let output = scratch.0.join("verification");
-        let request_options = options(&input, &output, pin);
+        let mut request_options = options(&input, &output, pin);
+        request_options.profile.transfer.max_objects = ids.len();
         let mut observed = Vec::new();
         let receipt = execute_with_checkpoints(&request_options, |stage| {
             observed.push(stage);
@@ -183,14 +184,15 @@ fn real_preflight_checks_both_domains_without_writing_payloads_or_publishing_aut
         assert!(!output.exists());
         assert_eq!(hash(&fs::read(&input).unwrap()), pin);
         // A separate actual restore still installs and reads the payloads back.
-        let restored = options(&input, &scratch.0.join("restored"), pin);
+        let mut restored = options(&input, &scratch.0.join("restored"), pin);
+        restored.profile.transfer.max_objects = ids.len();
         let receipt = super::super::execute(&restored).unwrap();
         assert!(receipt.contains("\"reopened_and_verified\":true"));
     }
 }
 
 #[test]
-fn pin_size_and_deadline_refusals_never_create_scratch() {
+fn pin_size_inventory_and_deadline_refusals_never_create_scratch() {
     let scratch = Scratch::new();
     let (input, pin, _) = fixture(&scratch, GitHashAlgorithm::Sha1);
     let output = scratch.0.join("verification");
@@ -202,6 +204,13 @@ fn pin_size_and_deadline_refusals_never_create_scratch() {
     small.profile.transfer.max_archive_bytes = fs::metadata(&input).unwrap().len() - 1;
     assert!(execute(&small).unwrap_err().contains("archive-byte limit"));
     assert!(!output.exists());
+    let mut small_inventory = options(&input, &output, pin);
+    small_inventory.profile.transfer.max_objects = 2;
+    assert!(execute(&small_inventory).is_err());
+    assert!(!output.exists());
+    small_inventory.output = scratch.0.join("restore-refused");
+    assert!(super::super::execute(&small_inventory).is_err());
+    assert!(!small_inventory.output.exists());
     let mut expired = options(&input, &output, pin);
     expired.profile.timeout = Duration::ZERO;
     assert!(execute(&expired).unwrap_err().contains("deadline"));
@@ -311,6 +320,11 @@ fn verification_parser_is_bounded_and_has_no_restore_or_resume_authority() {
         vec!["--destination-instance", "3"],
         vec!["--expected-sha256", "00"],
         vec!["--timeout-secs", "0"],
+        vec!["--max-objects"],
+        vec!["--max-objects", "0"],
+        vec!["--max-objects", "0100000"],
+        vec!["--max-objects", "1000001"],
+        vec!["--max-objects", "100000", "--max-objects", "200000"],
     ] {
         let mut bad = base.clone();
         bad.extend(extra.into_iter().map(str::to_owned));
@@ -343,6 +357,28 @@ fn verification_accepts_only_complete_signed_policy_and_still_requires_the_pin()
             .flat_map(|(flag, value)| [flag.to_string(), value.to_string()]),
     );
     assert!(parse(&complete).unwrap().approval.is_some());
+    let mut all_limits = complete.clone();
+    all_limits.extend(
+        [
+            "--max-archive-bytes",
+            "2147483648",
+            "--max-blob-bytes",
+            "536870912",
+            "--max-objects",
+            "1000000",
+            "--timeout-secs",
+            "900",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    assert_eq!(all_limits.len(), 30);
+    let parsed = parse(&all_limits).unwrap();
+    assert!(parsed.approval.is_some());
+    assert_eq!(parsed.profile.transfer.max_objects, 1_000_000);
+    assert_eq!(parsed.profile.transfer.max_blob_bytes, 512 * 1024 * 1024);
+    assert_eq!(parsed.profile.transfer.max_archive_bytes, 2 << 30);
+    assert_eq!(parsed.profile.timeout.as_secs(), 900);
     for missing in 0..flags.len() {
         let mut input = base.clone();
         input.extend(

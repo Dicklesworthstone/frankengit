@@ -211,8 +211,10 @@ also accept `--max-blob-bytes` from 1 through 1099511627776 bytes, defaulting to
 32 MiB. This independently permits larger blob payloads through chunked native
 verification and restore; commit, tree and tag bodies retain their 32 MiB
 limit. The total archive ceiling still applies. Authority metadata retains its
-independent 64 MiB bound, and the existing object-count/reference/graph limits
-remain in force. Selecting larger budgets changes neither the signed archive
+independent 64 MiB bound. Native export, verification and restore also accept
+`--max-objects` from 1 through 1,000,000, defaulting to 100,000. The selected
+inventory bound applies to the streaming count checks and complete graph audits;
+reference and graph-edge limits remain independent. Selecting larger budgets changes neither the signed archive
 identity nor its original payload commitments. Control input is bounded separately to 16 KiB per approval envelope,
 4096 bytes per decoded signed payload and 8192 bytes per trusted public-key
 file. Reading and verification use one operation deadline; no subsequent

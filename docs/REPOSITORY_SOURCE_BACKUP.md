@@ -26,18 +26,22 @@ cargo run --locked -p fgit-node --bin fg-repository-backup -- \
 ```
 
 The same operations are available as `fg backup export` and `fg backup restore`.
-Export, verification and restore accept `--max-archive-bytes`, `--max-blob-bytes`
-and `--timeout-secs`. For a 2 GiB archive containing blobs up to 512 MiB, with a
-30-minute cooperative operation deadline, append the following to each command:
+Export, verification and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
+`--max-objects` and `--timeout-secs`. For a 2 GiB archive containing up to
+250,000 objects and blobs up to 512 MiB, with a 30-minute cooperative operation
+deadline, append the following to each command:
 
 ```sh
---max-archive-bytes 2147483648 --max-blob-bytes 536870912 --timeout-secs 1800
+--max-archive-bytes 2147483648 --max-blob-bytes 536870912 \
+  --max-objects 250000 --timeout-secs 1800
 ```
 
 Limits are explicit operator input and are never enlarged automatically to fit
 an archive. Integers must be positive canonical decimal; duplicate or
 unsupported flags refuse. Omitting `--max-blob-bytes` retains the 32 MiB per-blob
-default, independently of the archive budget.
+default, independently of the archive budget. Omitting `--max-objects` retains
+the 100,000-object default; values from 1 through 1,000,000 explicitly select
+the inventory budget. Raising either limit does not widen another.
 
 Export's native format defaults to SHA-1; SHA-256 is explicit. A mismatch with
 the authenticated repository configuration refuses. Restore takes repository,
@@ -74,8 +78,18 @@ values from 1 byte through 1 TiB. This replaces the former 64 MiB whole-archive
 buffer ceiling. Blob payloads have a separate `--max-blob-bytes` ceiling:
 32 MiB by default, with explicit values from 1 byte through 1 TiB. Commit, tree
 and tag bodies retain their 32 MiB limit even when a larger blob is allowed.
-The inventory remains bounded at 100,000 objects, refs at 100,000, and inspected
-graph edges at 1,000,000. Authority metadata keeps its separate 64 MiB
+The inventory defaults to 100,000 objects and accepts an explicit
+`--max-objects` budget from 1 through 1,000,000. Export checks the complete
+authority-selected object count before iterating payloads; the streaming
+encoder and decoder enforce the same chosen bound. The decoder checks the
+declared count before visiting records. Complete graph validation and every
+restore recheck use that original inventory budget. Missing or extra objects
+still refuse against the exact authority-selected set; a larger budget cannot
+authorize unrelated records.
+
+Refs remain bounded at 100,000 and inspected graph edges at 1,000,000. Increasing
+the inventory allowance does not increase either bound or the metadata-body,
+archive-byte, blob-byte or deadline allowances. Authority metadata keeps its separate 64 MiB
 encoded-field bound; portable-store row/body and canonical-codec limits
 additionally apply and can refuse sooner. Both blob and total archive limits
 must hold, so a payload exactly as large as the archive ceiling cannot fit once
@@ -98,6 +112,17 @@ exact EOF also validate. Commit, tree and tag parsing retains one bounded
 metadata-object buffer. Authority metadata, graph object/edge tables, storage
 and runtime state have their own bounds. The archive byte counter is not a
 measurement or limit of total process memory.
+
+Inventory and graph metadata remain bounded in memory by the selected object,
+edge and authority limits. Raising `--max-objects` permits more native objects;
+it is not an unbounded-memory or disk-backed-index claim. Blob and archive bodies
+continue to stream. Per-record transfer and graph-verification buffers use at
+most 64 KiB and shrink to the declared record length, with one byte retained for
+the exact-EOF probe. Small records therefore do not initialize a full 64 KiB
+buffer on each pass. This changes allocation work without changing encoded
+bytes, identities, checksums or EOF requirements. Archives above the former fixed 100,000-object ceiling use
+the existing wire format and require a sufficient explicit inventory budget for
+each export, verification and restore invocation.
 
 ## Snapshot and publication rules
 
@@ -192,6 +217,9 @@ unchanged format does not imply that every historical implementation supports
 the newer resource profile. The blob ceiling changes no wire bytes: newer
 binaries read large blob records only when the operator explicitly selects a
 sufficient `--max-blob-bytes` value. Commit/tree/tag limits remain separate.
+Likewise, `--max-objects` changes only the accepted inventory profile, not the
+encoded count, object ordering, native identities or archive checksum rules.
+Older binaries and the default profile continue to refuse larger inventories.
 
 The transport is intentionally not a `CanonicalBody`. Host file locations and
 these transport bytes never replace the existing canonical authority, object,

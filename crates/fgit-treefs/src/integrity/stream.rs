@@ -113,11 +113,14 @@ fn verify_blob<A: fgit_crypto::GitHashAlgorithm, E>(
 ) -> Result<(), BlobGraphError<E>> {
     let mut hash = GitObjectHasher::<A>::new(ObjectKind::Blob, length as u64);
     let mut remaining = length;
+    // Large inventories often contain many tiny blobs. Allocate only their
+    // bounded body size while preserving a nonempty buffer for the EOF probe.
+    let buffer_bytes = length.min(CHUNK_BYTES).max(1);
     let mut buffer = Vec::new();
     buffer
-        .try_reserve_exact(CHUNK_BYTES)
+        .try_reserve_exact(buffer_bytes)
         .map_err(|_| GraphRefusal::Allocation)?;
-    buffer.resize(CHUNK_BYTES, 0_u8);
+    buffer.resize(buffer_bytes, 0_u8);
     while remaining != 0 {
         checkpoint(live)?;
         let offered = remaining.min(buffer.len());
@@ -319,6 +322,73 @@ mod tests {
                 .payload_bytes,
             0
         );
+    }
+
+    #[test]
+    fn tiny_blobs_bound_read_buffers_and_preserve_exact_eof_checks() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for body in [b"".as_slice(), b"12345678".as_slice()] {
+                let id = git_object_id(format, ObjectKind::Blob, body);
+                let mut graph = audit(format, id, body.len() as u64);
+                let mut input = Cursor::new(body);
+                let mut offered = Vec::new();
+                graph
+                    .observe_blob_stream(
+                        id,
+                        body.len(),
+                        body.len(),
+                        &mut |out| {
+                            offered.push(out.len());
+                            input.read(out)
+                        },
+                        &mut || true,
+                    )
+                    .unwrap();
+                assert_eq!(offered.last(), Some(&1));
+                assert_eq!(offered.iter().max(), Some(&body.len().max(1)));
+                graph.finish(&BTreeMap::new(), &mut || true).unwrap();
+
+                let mut graph = audit(format, id, body.len() as u64);
+                let mut input = Cursor::new([body, b"x"].concat());
+                assert!(matches!(
+                    graph.observe_blob_stream(
+                        id,
+                        body.len(),
+                        body.len(),
+                        &mut |out| input.read(out),
+                        &mut || true,
+                    ),
+                    Err(BlobGraphError::Graph(GraphRefusal::IdentityMismatch(_)))
+                ));
+                assert_eq!(
+                    graph.finish(&BTreeMap::new(), &mut || true),
+                    Err(GraphRefusal::Failed)
+                );
+
+                let mut graph = audit(format, id, body.len() as u64);
+                let mut input = Cursor::new(body);
+                assert!(matches!(
+                    graph.observe_blob_stream(
+                        id,
+                        body.len(),
+                        body.len(),
+                        &mut |out| {
+                            if input.position() == body.len() as u64 {
+                                Err("late storage refusal")
+                            } else {
+                                Ok(input.read(out).unwrap())
+                            }
+                        },
+                        &mut || true,
+                    ),
+                    Err(BlobGraphError::Reader("late storage refusal"))
+                ));
+                assert_eq!(
+                    graph.finish(&BTreeMap::new(), &mut || true),
+                    Err(GraphRefusal::Failed)
+                );
+            }
+        }
     }
 
     #[test]

@@ -28,18 +28,23 @@ const CHUNK_BYTES: usize = 64 * 1024;
 // Authority portability has its own codec and row bounds. A larger source
 // payload budget must not silently widen that separate allocation boundary.
 const MAX_AUTHORITY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_INVENTORY_OBJECTS: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransferLimits {
     pub max_archive_bytes: u64,
     /// Streaming-only allowance. Commit, tree and tag bodies retain 32 MiB.
     pub max_blob_bytes: u64,
+    /// Complete Git inventory, independent of payload bytes and authority rows.
+    /// This bounds graph metadata; it never permits a partial inventory.
+    pub max_objects: usize,
 }
 impl Default for TransferLimits {
     fn default() -> Self {
         Self {
             max_archive_bytes: 1 << 30,
             max_blob_bytes: MAX_OBJECT_BYTES as u64,
+            max_objects: MAX_OBJECTS,
         }
     }
 }
@@ -50,6 +55,9 @@ impl TransferLimits {
         }
         if self.max_blob_bytes == 0 || self.max_blob_bytes > (1_u64 << 40) {
             return Err("blob byte budget must be in 1..=1099511627776".into());
+        }
+        if self.max_objects == 0 || self.max_objects > MAX_INVENTORY_OBJECTS {
+            return Err("repository backup object budget must be in 1..=1000000".into());
         }
         Ok(())
     }
@@ -111,7 +119,7 @@ impl<W: Write> StreamEncoder<W> {
     ) -> Result<Self, String> {
         limits.validate()?;
         live()?;
-        if objects > MAX_OBJECTS {
+        if objects > limits.max_objects {
             return Err("repository backup object-count limit".into());
         }
         if authority.is_empty() || authority.len() > MAX_AUTHORITY_BYTES {
@@ -153,6 +161,10 @@ impl<W: Write> StreamEncoder<W> {
             encoder.push(&bytes, live)?;
         }
         encoder.push(&(objects as u64).to_be_bytes(), live)?;
+        // The declared inventory's framing must fit independently of its
+        // payloads, before the first object reader is asked to do any work.
+        let minimum = (identity.format.digest_len() + 1 + 8 + 32) as u64;
+        check_room(encoder.bytes, objects as u64 * minimum, limits)?;
         Ok(encoder)
     }
     /// Encode one buffered record through the same identity-checked stream path.
@@ -174,7 +186,7 @@ impl<W: Write> StreamEncoder<W> {
             live,
         )
     }
-    /// Consume one exact-length source through a 64 KiB buffer. Both native
+    /// Consume one exact-length source through a buffer of at most 64 KiB. Both native
     /// identity and the original independent commitment must match before this
     /// record completes. The source's EOF operation is required, so a late
     /// fabric verification error cannot be hidden behind the declared length.
@@ -229,13 +241,16 @@ impl<W: Write> StreamEncoder<W> {
         self.push(&length.to_be_bytes(), live)?;
         self.push(commitment, live)?;
         let mut remaining = length;
+        // Tiny records do not initialize a full chunk for each inventory row.
+        // Empty bodies still require one byte of capacity for authenticated EOF.
+        let buffer_bytes = (length.min(CHUNK_BYTES as u64) as usize).max(1);
         let mut buffer = Vec::new();
         buffer
-            .try_reserve_exact(CHUNK_BYTES)
+            .try_reserve_exact(buffer_bytes)
             .map_err(|_| "repository backup stream buffer allocation failed")?;
-        buffer.resize(CHUNK_BYTES, 0);
+        buffer.resize(buffer_bytes, 0);
         while remaining != 0 {
-            let offered = usize::try_from(remaining.min(CHUNK_BYTES as u64))
+            let offered = usize::try_from(remaining.min(buffer.len() as u64))
                 .map_err(|_| "repository backup object length cannot fit a chunk")?;
             let count = read_source(input, &mut buffer[..offered], live)?;
             if count == 0 {
@@ -480,7 +495,7 @@ impl<R: Read> StreamDecoder<R> {
         } else {
             None
         };
-        let objects = input.length(MAX_OBJECTS, live)?;
+        let objects = input.length(limits.max_objects, live)?;
         let minimum = (format.digest_len() + 1 + 8 + 32) as u64;
         check_room(input.bytes, objects as u64 * minimum, limits)?;
         Ok(Self {

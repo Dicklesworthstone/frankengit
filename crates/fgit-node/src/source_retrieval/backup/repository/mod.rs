@@ -23,7 +23,7 @@ use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
 use super::{emit, hex, publish_streamed, quote, regular, require_absent, with_store};
 use archive::stream::{Seal, StreamDecoder, StreamEncoder, StreamHeader, TransferLimits};
-use archive::{Identity, MAX_OBJECT_BYTES, MAX_OBJECTS};
+use archive::{Identity, MAX_OBJECT_BYTES};
 use profile::{Deadline, Profile, ProfileFlags};
 use std::time::Duration;
 
@@ -32,6 +32,7 @@ pub const USAGE: &str =
          --trusted-local [--object-format sha1|sha256]
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
+         [--max-objects <1..1000000>]
 
 Authority metadata plus every authority-selected Git object, including admitted
 history unreachable from current refs. Source head, complete local graph, native
@@ -47,7 +48,9 @@ or a full service backup. External artifacts, private keys, runner workspaces,
 search indexes and routing are excluded. Stable trusted parent paths required.
 Default archive budget: 1 GiB; default operation deadline: 300 seconds.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
-Independent bounds: 100000 objects, 32 MiB per metadata object, 100000 refs and
+The complete Git inventory defaults to 100000 objects; --max-objects selects
+an explicit allowance through 1000000. It never truncates the selected set.
+Independent bounds: 32 MiB per metadata object, 100000 refs and
 1000000 inspected edges. Authority metadata retains its separate 64 MiB bound.
 Retained checkpoint transport is separately bounded at 32 MiB; its existing
 16 MiB reconstructed segment and 8 MiB manifest limits cannot be widened here.
@@ -67,7 +70,7 @@ struct Options {
     profile: Profile,
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(6..=14).contains(&args.len())
+    if !(6..=16).contains(&args.len())
         || args[0] != "export"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -93,7 +96,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     _ => return Err("object format must be sha1 or sha256".into()),
                 });
             }
-            "--max-archive-bytes" | "--max-blob-bytes" | "--timeout-secs" => {
+            "--max-archive-bytes" | "--max-blob-bytes" | "--max-objects" | "--timeout-secs" => {
                 let value = args
                     .get(cursor)
                     .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -127,7 +130,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
 }
 fn limits(transfer: TransferLimits) -> GraphLimits {
     GraphLimits {
-        max_objects: MAX_OBJECTS,
+        max_objects: transfer.max_objects,
         max_object_bytes: MAX_OBJECT_BYTES,
         max_payload_bytes: transfer.max_archive_bytes,
         ..Default::default()
@@ -202,9 +205,12 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
                     "repository head moved after authority capture; no backup published".into(),
                 );
             }
+            let objects = selected.selected_closure().closure().objects();
+            if objects.len() > options.profile.transfer.max_objects {
+                return Err("repository backup object-count limit".into());
+            }
             let retained =
                 checkpoint::CheckpointEvidence::capture(node, &request, &selected, deadline)?;
-            let objects = selected.selected_closure().closure().objects();
             let identity = Identity {
                 tenant: options.tenant,
                 repository: options.repository,
@@ -394,3 +400,6 @@ mod tests;
 
 #[cfg(test)]
 mod publication_tests;
+
+#[cfg(test)]
+mod inventory_tests;

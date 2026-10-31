@@ -18,6 +18,7 @@ pub(in super::super) const USAGE: &str =
          --expected-sha256 <64-lowercase-hex> --verification-instance <positive-integer>
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
+         [--max-objects <1..1000000>]
          [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
           --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
           --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
@@ -45,6 +46,8 @@ All passes share one deadline and one open checksum-pinned archive. Default:
 1 GiB archive, 300 seconds; metadata retains its independent 64 MiB bound.
 Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
 Commit, tree and tag bodies keep their independent 32 MiB metadata limit.
+The complete Git inventory defaults to 100000 objects. --max-objects permits
+up to 1000000 without widening authority, graph-edge, reference or byte limits.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 This verifies SOURCE recovery inputs, not destination disk readback, the newest
 full backup checkpoint, a complete signed capsule, external artifacts, routing or external-effect replay.
@@ -52,7 +55,7 @@ Exit 0: complete scoped preflight and cleanup; 2: refusal, incomplete verificati
 cleanup failure or receipt-output failure.";
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=28).contains(&args.len())
+    if !(8..=30).contains(&args.len())
         || args[0] != "verify"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -91,7 +94,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or("verification instance must fit a positive SQL integer")?;
                 instance = Some(StoreInstanceId::from_raw(number));
             }
-            "--max-archive-bytes" | "--max-blob-bytes" | "--timeout-secs" => {
+            "--max-archive-bytes" | "--max-blob-bytes" | "--max-objects" | "--timeout-secs" => {
                 profile.set(flag, value)?;
             }
             _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,

@@ -356,6 +356,63 @@ fn incomplete_or_failed_visitors_and_swallowed_verification_errors_poison_the_pa
 struct LateFailure<'a> {
     bytes: &'a [u8],
 }
+
+#[test]
+fn empty_and_tiny_sources_preserve_exact_length_and_eof_with_small_chunks() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for body in [b"".as_slice(), b"12345678".as_slice()] {
+            let id = git_object_id(format, GitObjectKind::Blob, body);
+            for scenario in 0..3 {
+                let mut encoder = StreamEncoder::new(
+                    io::sink(),
+                    identity(format),
+                    &authority(),
+                    1,
+                    Default::default(),
+                    &mut || Ok(()),
+                )
+                .unwrap();
+                let supplied = if scenario == 1 {
+                    [body, b"x"].concat()
+                } else {
+                    body.to_vec()
+                };
+                let mut input = Fragmented {
+                    input: supplied.as_slice(),
+                    interrupted: false,
+                    largest: 0,
+                };
+                let result = if scenario == 2 {
+                    encoder.object_stream(
+                        id,
+                        GitObjectKind::Blob,
+                        body.len() as u64,
+                        &proof(body),
+                        &mut LateFailure { bytes: body },
+                        &mut || Ok(()),
+                    )
+                } else {
+                    encoder.object_stream(
+                        id,
+                        GitObjectKind::Blob,
+                        body.len() as u64,
+                        &proof(body),
+                        &mut input,
+                        &mut || Ok(()),
+                    )
+                };
+                if scenario == 0 {
+                    assert!(result.is_ok());
+                    assert_eq!(input.largest, body.len().max(1));
+                    assert!(encoder.finish(&mut || Ok(())).is_ok());
+                } else {
+                    assert!(result.is_err());
+                    assert!(encoder.finish(&mut || Ok(())).is_err());
+                }
+            }
+        }
+    }
+}
 impl Read for LateFailure<'_> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if self.bytes.is_empty() {

@@ -30,6 +30,7 @@ pub(super) const USAGE: &str =
          --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer>
          [--resume] [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
+         [--max-objects <1..1000000>]
          [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
           --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
           --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
@@ -54,6 +55,8 @@ with archive size. Default archive budget: 1 GiB; authority metadata: 64 MiB.
 The 300 second default deadline is shared across ALL passes of one invocation.
 Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
 Commit, tree and tag bodies keep their independent 32 MiB metadata limit.
+The complete Git inventory defaults to 100000 objects. --max-objects permits
+up to 1000000 without widening authority, graph-edge, reference or byte limits.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 An explicit resume gets a new bounded attempt, not an unbounded automatic retry.
 
@@ -108,7 +111,7 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
     Ok(result)
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=29).contains(&args.len())
+    if !(8..=31).contains(&args.len())
         || args[0] != "restore"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -151,7 +154,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or("destination instance must fit a positive SQL integer")?;
                 instance = Some(StoreInstanceId::from_raw(number));
             }
-            "--max-archive-bytes" | "--max-blob-bytes" | "--timeout-secs" => {
+            "--max-archive-bytes" | "--max-blob-bytes" | "--max-objects" | "--timeout-secs" => {
                 profile.set(flag, value)?;
             }
             _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
@@ -212,11 +215,12 @@ fn verify_stored(
         if body.length() != record.length || body.commitment() != record.commitment {
             return Err(format!("restored blob envelope changed: {}", record.oid));
         }
+        let buffer_bytes = (record.length.min(64 * 1024) as usize).max(1);
         let mut buffer = Vec::new();
         buffer
-            .try_reserve_exact(64 * 1024)
+            .try_reserve_exact(buffer_bytes)
             .map_err(|_| "restored blob verification buffer allocation failed")?;
-        buffer.resize(64 * 1024, 0);
+        buffer.resize(buffer_bytes, 0);
         loop {
             match body.read(&mut buffer) {
                 Ok(0) => break,

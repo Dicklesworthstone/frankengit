@@ -53,12 +53,13 @@ impl<R: Read + Seek> PinnedArchive<R> {
         input.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let mut live = || deadline.check();
         let mut decoded = StreamDecoder::new(&mut input, limits, &mut live)?;
-        while decoded.visit_record(&mut live, |_, body| {
+        while decoded.visit_record(&mut live, |header, body| {
+            let buffer_bytes = (header.length.min(64 * 1024) as usize).max(1);
             let mut buffer = Vec::new();
             buffer
-                .try_reserve_exact(64 * 1024)
+                .try_reserve_exact(buffer_bytes)
                 .map_err(|_| "repository backup validation buffer allocation failed")?;
-            buffer.resize(64 * 1024, 0);
+            buffer.resize(buffer_bytes, 0);
             loop {
                 deadline.check()?;
                 if body.read(&mut buffer).map_err(|e| e.to_string())? == 0 {

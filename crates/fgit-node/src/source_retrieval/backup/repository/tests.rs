@@ -114,9 +114,10 @@ fn export_profile_controls_total_bytes_without_widening_per_object_or_graph_limi
 }
 
 #[test]
-fn export_blob_profile_is_explicit_and_leaves_metadata_and_inventory_bounded() {
+fn export_profile_accepts_explicit_independent_blob_and_inventory_budgets() {
     let defaults = parse(&args(&[])).unwrap();
     assert_eq!(defaults.profile.transfer.max_blob_bytes, 32 * 1024 * 1024);
+    assert_eq!(defaults.profile.transfer.max_objects, 100_000);
     let options = parse(&args(&[
         "--object-format",
         "sha256",
@@ -124,6 +125,8 @@ fn export_blob_profile_is_explicit_and_leaves_metadata_and_inventory_bounded() {
         "2147483648",
         "--max-blob-bytes",
         "536870912",
+        "--max-objects",
+        "1000000",
         "--timeout-secs",
         "900",
     ]))
@@ -131,10 +134,12 @@ fn export_blob_profile_is_explicit_and_leaves_metadata_and_inventory_bounded() {
     assert_eq!(options.format, GitHashAlgorithm::Sha256);
     assert_eq!(options.profile.transfer.max_blob_bytes, 512 * 1024 * 1024);
     assert_eq!(options.profile.transfer.max_archive_bytes, 2 << 30);
+    assert_eq!(options.profile.transfer.max_objects, 1_000_000);
     assert_eq!(options.profile.timeout.as_secs(), 900);
     let graph = limits(options.profile.transfer);
     assert_eq!(graph.max_object_bytes, 32 * 1024 * 1024);
-    assert_eq!(graph.max_objects, 100_000);
+    assert_eq!(graph.max_objects, 1_000_000);
+    assert_eq!(graph.max_references, 100_000);
     assert_eq!(graph.max_edges, 1_000_000);
     assert_eq!(graph.max_payload_bytes, 2 << 30);
     for extra in [
@@ -142,6 +147,11 @@ fn export_blob_profile_is_explicit_and_leaves_metadata_and_inventory_bounded() {
         vec!["--max-blob-bytes", "0"],
         vec!["--max-blob-bytes", "033554432"],
         vec!["--max-blob-bytes", "1099511627777"],
+        vec!["--max-objects"],
+        vec!["--max-objects", "0"],
+        vec!["--max-objects", "0100000"],
+        vec!["--max-objects", "1000001"],
+        vec!["--max-objects", "100000", "--max-objects", "200000"],
         vec![
             "--max-blob-bytes",
             "33554432",

@@ -68,6 +68,7 @@ impl Deadline {
 pub(super) struct ProfileFlags {
     bytes: Option<u64>,
     blob_bytes: Option<u64>,
+    objects: Option<u64>,
     seconds: Option<u64>,
 }
 impl ProfileFlags {
@@ -95,6 +96,15 @@ impl ProfileFlags {
                 .validate()?;
                 &mut self.blob_bytes
             }
+            "--max-objects" => {
+                TransferLimits {
+                    max_objects: usize::try_from(value)
+                        .map_err(|_| "backup object budget is not representable on this host")?,
+                    ..TransferLimits::default()
+                }
+                .validate()?;
+                &mut self.objects
+            }
             "--timeout-secs" if value <= 86_400 => &mut self.seconds,
             "--timeout-secs" => return Err("timeout must be in 1..=86400 seconds".into()),
             _ => return Err(format!("unknown backup profile flag: {flag}")),
@@ -110,6 +120,10 @@ impl ProfileFlags {
             transfer: TransferLimits {
                 max_archive_bytes: self.bytes.unwrap_or(defaults.transfer.max_archive_bytes),
                 max_blob_bytes: self.blob_bytes.unwrap_or(defaults.transfer.max_blob_bytes),
+                // set() already checked the finite ceiling and host width.
+                max_objects: self
+                    .objects
+                    .map_or(defaults.transfer.max_objects, |count| count as usize),
             },
             timeout: Duration::from_secs(self.seconds.unwrap_or(defaults.timeout.as_secs())),
         }
@@ -145,6 +159,7 @@ mod tests {
             narrowed.transfer.max_blob_bytes,
             profile.transfer.max_blob_bytes
         );
+        assert_eq!(narrowed.transfer.max_objects, profile.transfer.max_objects);
         assert!(profile.with_timeout_cap(Some(Duration::ZERO)).is_err());
     }
     #[test]
@@ -152,19 +167,27 @@ mod tests {
         let defaults = ProfileFlags::default().finish();
         assert_eq!(defaults.transfer.max_archive_bytes, 1 << 30);
         assert_eq!(defaults.transfer.max_blob_bytes, 32 * 1024 * 1024);
+        assert_eq!(defaults.transfer.max_objects, 100_000);
         assert_eq!(defaults.timeout, Duration::from_secs(300));
         let mut flags = ProfileFlags::default();
         flags.set("--max-archive-bytes", "1099511627776").unwrap();
         flags.set("--max-blob-bytes", "536870912").unwrap();
+        flags.set("--max-objects", "1000000").unwrap();
         flags.set("--timeout-secs", "86400").unwrap();
         let profile = flags.finish();
         assert_eq!(profile.transfer.max_archive_bytes, 1 << 40);
         assert_eq!(profile.transfer.max_blob_bytes, 512 * 1024 * 1024);
+        assert_eq!(profile.transfer.max_objects, 1_000_000);
         assert_eq!(profile.timeout, Duration::from_hours(24));
     }
     #[test]
     fn malformed_duplicate_and_excessive_budgets_refuse() {
-        for flag in ["--max-archive-bytes", "--max-blob-bytes", "--timeout-secs"] {
+        for flag in [
+            "--max-archive-bytes",
+            "--max-blob-bytes",
+            "--max-objects",
+            "--timeout-secs",
+        ] {
             for text in [
                 "",
                 "0",
@@ -196,6 +219,11 @@ mod tests {
                 .set("--timeout-secs", "86401")
                 .is_err()
         );
+        assert!(
+            ProfileFlags::default()
+                .set("--max-objects", "1000001")
+                .is_err()
+        );
     }
     #[test]
     fn selecting_a_blob_limit_preserves_archive_and_deadline_bounds() {
@@ -205,6 +233,7 @@ mod tests {
             let profile = flags.finish();
             assert_eq!(profile.transfer.max_blob_bytes, maximum);
             assert_eq!(profile.transfer.max_archive_bytes, 1 << 30);
+            assert_eq!(profile.transfer.max_objects, 100_000);
             assert_eq!(profile.timeout, Duration::from_secs(300));
         }
         let mut archive_only = ProfileFlags::default();
@@ -213,6 +242,19 @@ mod tests {
             archive_only.finish().transfer.max_blob_bytes,
             32 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn inventory_allowance_does_not_increase_byte_budgets_or_deadline() {
+        for maximum in [1, 100_000, 100_001, 1_000_000] {
+            let mut flags = ProfileFlags::default();
+            flags.set("--max-objects", &maximum.to_string()).unwrap();
+            let profile = flags.finish();
+            assert_eq!(profile.transfer.max_objects, maximum);
+            assert_eq!(profile.transfer.max_archive_bytes, 1 << 30);
+            assert_eq!(profile.transfer.max_blob_bytes, 32 * 1024 * 1024);
+            assert_eq!(profile.timeout, Duration::from_secs(300));
+        }
     }
 
     #[test]

@@ -194,6 +194,27 @@ fn complete_approval_policy_is_required_without_weakening_the_checksum_pin() {
             .flat_map(|(flag, value)| [flag.to_string(), value.to_string()]),
     );
     assert!(parse(&complete).unwrap().approval.is_some());
+    let mut all_limits = complete.clone();
+    all_limits.extend(
+        [
+            "--resume",
+            "--max-archive-bytes",
+            "2147483648",
+            "--max-blob-bytes",
+            "536870912",
+            "--max-objects",
+            "1000000",
+            "--timeout-secs",
+            "900",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    assert_eq!(all_limits.len(), 31);
+    let parsed = parse(&all_limits).unwrap();
+    assert!(parsed.approval.is_some());
+    assert!(parsed.resume);
+    assert_eq!(parsed.profile.transfer.max_objects, 1_000_000);
     for missing in 0..flags.len() {
         let mut input = args();
         input.extend(
@@ -249,11 +270,17 @@ fn restore_accepts_shared_profile_flags_and_rejects_duplicate_limits() {
     input.extend([
         "--max-archive-bytes".into(),
         "2147483648".into(),
+        "--max-blob-bytes".into(),
+        "536870912".into(),
+        "--max-objects".into(),
+        "1000000".into(),
         "--timeout-secs".into(),
         "900".into(),
     ]);
     let options = parse(&input).unwrap();
     assert_eq!(options.profile.transfer.max_archive_bytes, 2 << 30);
+    assert_eq!(options.profile.transfer.max_blob_bytes, 512 * 1024 * 1024);
+    assert_eq!(options.profile.transfer.max_objects, 1_000_000);
     assert_eq!(options.profile.timeout.as_secs(), 900);
     let mut input = args();
     input.extend([
@@ -263,6 +290,17 @@ fn restore_accepts_shared_profile_flags_and_rejects_duplicate_limits() {
         "2".into(),
     ]);
     assert!(parse(&input).is_err());
+    for extra in [
+        vec!["--max-objects"],
+        vec!["--max-objects", "0"],
+        vec!["--max-objects", "0100000"],
+        vec!["--max-objects", "1000001"],
+        vec!["--max-objects", "100000", "--max-objects", "200000"],
+    ] {
+        let mut input = args();
+        input.extend(extra.into_iter().map(str::to_owned));
+        assert!(parse(&input).is_err());
+    }
 }
 
 #[test]
@@ -274,10 +312,14 @@ fn resume_is_explicit_unique_and_compatible_with_all_resource_flags() {
     input.extend([
         "--max-archive-bytes".into(),
         "2147483648".into(),
+        "--max-blob-bytes".into(),
+        "536870912".into(),
+        "--max-objects".into(),
+        "1000000".into(),
         "--timeout-secs".into(),
         "900".into(),
     ]);
-    assert_eq!(input.len(), 13);
+    assert_eq!(input.len(), 17);
     assert!(parse(&input).unwrap().resume);
     let mut duplicate = args();
     duplicate.extend(["--resume".into(), "--resume".into()]);
