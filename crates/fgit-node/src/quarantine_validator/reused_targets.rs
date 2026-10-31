@@ -275,7 +275,7 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
                 self.read_kind(*id, deadline)?;
             }
             checkpoint(deadline)?;
-            self.authorized = required.clone();
+            self.authorized.clone_from(required);
             return Ok(());
         }
         let mut pending = Vec::new();
@@ -303,7 +303,7 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
                 wanted.remove(&id);
                 if wanted.is_empty() {
                     checkpoint(deadline)?;
-                    self.authorized = required.clone();
+                    self.authorized.clone_from(required);
                     return Ok(());
                 }
                 continue;
@@ -312,7 +312,7 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
                 let actual = self.read_kind(id, deadline)?;
                 check_kind(actual, expected)?;
                 checkpoint(deadline)?;
-                self.authorized = required.clone();
+                self.authorized.clone_from(required);
                 return Ok(());
             }
             // Irrelevant file contents cannot lead to a wanted object. Do not

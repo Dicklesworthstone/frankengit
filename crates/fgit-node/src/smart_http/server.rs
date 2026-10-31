@@ -70,6 +70,10 @@ const MAX_SESSIONS: usize = 1_000_000;
 const FRAMING_ALLOWANCE: u64 = 4 * 1024 * 1024;
 
 /// Local owners are configured before serving and never from request data.
+#[cfg(target_os = "linux")]
+type WorkflowDrainObserver<'a> =
+    &'a dyn Fn(&crate::workflow_watch::WorkflowWatchReceipt) -> io::Result<()>;
+
 #[derive(Default)]
 struct Controllers<'a> {
     maintenance: Option<crate::index_maintenance::MaintenanceGroup>,
@@ -77,8 +81,7 @@ struct Controllers<'a> {
     #[cfg(target_os = "linux")]
     workflow: Option<crate::workflow_watch::WorkflowWatchConfig>,
     #[cfg(target_os = "linux")]
-    on_workflow_drained:
-        Option<&'a dyn Fn(&crate::workflow_watch::WorkflowWatchReceipt) -> io::Result<()>>,
+    on_workflow_drained: Option<WorkflowDrainObserver<'a>>,
 }
 
 fn validate_controller_capacity(

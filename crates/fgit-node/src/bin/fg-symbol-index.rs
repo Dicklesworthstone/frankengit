@@ -147,7 +147,7 @@ fn execute(
             let (source, activation) =
                 node.runtime()
                     .block_on(node.build_source_symbol_index_local_in(
-                        &request,
+                        request,
                         &options.reference,
                         None,
                         None,
@@ -167,7 +167,7 @@ fn execute(
             let (source, activation, stats) =
                 node.runtime()
                     .block_on(node.refresh_source_symbol_index_local_in(
-                        &request,
+                        request,
                         &options.reference,
                         None,
                         None,
@@ -192,7 +192,7 @@ fn execute(
             let report =
                 node.runtime()
                     .block_on(node.search_source_symbols_index_snapshot_local_in(
-                        &request,
+                        request,
                         &options.reference,
                         None,
                         None,
@@ -235,7 +235,7 @@ fn execute(
             let report = node
                 .runtime()
                 .block_on(node.recover_source_symbol_index_local_in(
-                    &request,
+                    request,
                     &options.reference,
                     *candidate,
                     None,

@@ -41,7 +41,7 @@ fn decode(
 #[test]
 fn forward_and_backward_local_ref_bases_never_read_selected_hidden_originals() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let (_scratch, mut node, f) = fixture(format);
+        let (_scratch, node, f) = fixture(format);
         let base = b"unrelated secret\n";
         let result_body = [base.as_slice(), b"!"].concat();
         let result_id = git_object_id(format, ObjectType::Blob, &result_body);
@@ -85,7 +85,7 @@ fn forward_and_backward_local_ref_bases_never_read_selected_hidden_originals() {
 #[test]
 fn mixed_local_and_external_refs_only_prove_the_missing_visible_base() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let (_scratch, mut node, f) = fixture(format);
+        let (_scratch, node, f) = fixture(format);
         let local = b"unrelated secret\n";
         let external = b"original\n";
         let local_result = [local.as_slice(), b"!"].concat();
@@ -130,7 +130,7 @@ fn mixed_local_and_external_refs_only_prove_the_missing_visible_base() {
 #[test]
 fn thin_ref_lookup_still_requires_visible_parent_reachability() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let (_scratch, mut node, f) = fixture(format);
+        let (_scratch, node, f) = fixture(format);
         let visible_body = b"original\n";
         let visible_result = [visible_body.as_slice(), b"!"].concat();
         let visible_id = git_object_id(format, ObjectType::Blob, &visible_result);
@@ -171,7 +171,7 @@ fn thin_ref_lookup_still_requires_visible_parent_reachability() {
 #[test]
 fn local_ref_chain_keeps_the_existing_depth_and_pass_ceiling() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let (_scratch, mut node, f) = fixture(format);
+        let (_scratch, node, f) = fixture(format);
         let base = b"unrelated secret\n";
         let middle = [base.as_slice(), b"!"].concat();
         let middle_id = git_object_id(format, ObjectType::Blob, &middle);

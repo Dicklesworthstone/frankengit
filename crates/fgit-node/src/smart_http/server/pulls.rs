@@ -32,11 +32,13 @@ pub(super) fn read_resolution_upload(
 ) -> Result<Vec<u8>, ApiError> {
     collaboration::read_upload_bounded(reader, framing, limits, MAX_RESOLUTION_UPLOAD_BYTES)
 }
+pub(super) type ResolutionUpload<'a> = (&'a [u8], std::collections::BTreeMap<&'a str, &'a [u8]>);
+
 pub(super) fn resolution_upload<'a>(
     bytes: &'a [u8],
     boundary: &str,
     live: &mut impl FnMut() -> bool,
-) -> Result<(&'a [u8], std::collections::BTreeMap<&'a str, &'a [u8]>), ApiError> {
+) -> Result<ResolutionUpload<'a>, ApiError> {
     let upload = collaboration::resolution_upload::parse(bytes, boundary, live)?;
     Ok((upload.command, upload.files))
 }

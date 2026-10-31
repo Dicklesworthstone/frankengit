@@ -81,13 +81,13 @@ impl Query {
         if self.end.is_some_and(|end| end < self.start) {
             return Err(Error::new("invalid_range", "start exceeds end"));
         }
-        if let Predicate::RefEquals { target, .. } = self.predicate {
-            if target.algorithm() != format || target.is_zero() {
-                return Err(Error::new(
-                    "object_format",
-                    "the target must be a nonzero native object ID in this repository's hash domain",
-                ));
-            }
+        if let Predicate::RefEquals { target, .. } = self.predicate
+            && (target.algorithm() != format || target.is_zero())
+        {
+            return Err(Error::new(
+                "object_format",
+                "the target must be a nonzero native object ID in this repository's hash domain",
+            ));
         }
         Ok(())
     }

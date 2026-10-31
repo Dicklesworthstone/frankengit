@@ -538,7 +538,9 @@ fn unchanged_large_parent_content_is_not_read_for_review_or_sparse_candidate_inp
     // one body at a time so the fixture does not retain all payloads in RAM.
     const BLOB_BYTES: usize = 20 * 1024 * 1024;
     const BLOB_COUNT: usize = 7;
-    assert!(BLOB_BYTES * BLOB_COUNT > MAX_ORIGINAL_READ_BYTES);
+    const {
+        assert!(BLOB_BYTES * BLOB_COUNT > MAX_ORIGINAL_READ_BYTES);
+    }
     for index in 0..BLOB_COUNT {
         let id = node
             .put_git_object(ObjectType::Blob, vec![b'A' + index as u8; BLOB_BYTES])

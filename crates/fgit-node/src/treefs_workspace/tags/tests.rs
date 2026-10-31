@@ -538,15 +538,15 @@ fn overlapping_tag_creates_have_one_winner_and_stable_scoped_outcomes() {
         let mut fb = std::pin::pin!(n.admit_tag_durable_in(&b, &sb, &right, Default::default()));
         let (mut ra, mut rb) = (None, None);
         let (first, second) = n.runtime().block_on(poll_fn(|cx| {
-            if ra.is_none() {
-                if let Poll::Ready(value) = fa.as_mut().poll(cx) {
-                    ra = Some(value);
-                }
+            if ra.is_none()
+                && let Poll::Ready(value) = fa.as_mut().poll(cx)
+            {
+                ra = Some(value);
             }
-            if rb.is_none() {
-                if let Poll::Ready(value) = fb.as_mut().poll(cx) {
-                    rb = Some(value);
-                }
+            if rb.is_none()
+                && let Poll::Ready(value) = fb.as_mut().poll(cx)
+            {
+                rb = Some(value);
             }
             if ra.is_some() && rb.is_some() {
                 Poll::Ready((ra.take().unwrap(), rb.take().unwrap()))

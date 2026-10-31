@@ -69,6 +69,11 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
             headers.push(trimmed.to_string());
         }
 
+        assert_eq!(
+            headers.first().map(String::as_str),
+            Some("POST /hook HTTP/1.1")
+        );
+
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body).unwrap();
 
@@ -111,6 +116,106 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
     assert_eq!(dead_letters.list().len(), 0);
 
     server_handle.join().unwrap();
+}
+
+#[test]
+fn webhook_trait_delivery_defers_contact_until_poll_and_never_dispatches_twice() {
+    use fgit_runtime::{BudgetClass, boot::RuntimeProfile};
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
+    let mut destination = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    destination.timeout = Duration::from_millis(200);
+    let events = ForgeEventBatch { events: Vec::new() };
+    let request = DeliveryRequest {
+        key: AsciiSlug::from_static("deferred-trait-delivery"),
+        destination: destination.destination_slug,
+        payload_root: dummy_digest(),
+        events: &events,
+    };
+    let runtime = RuntimeProfile::production(2).build().unwrap();
+    let cx = Cx::new();
+    cx.set_native_cx(runtime.request_cx(BudgetClass::Database));
+
+    let abandoned = <WebhookDeliveryDestination as OutboxDestination<Cx>>::deliver(
+        &mut destination,
+        &cx,
+        &request,
+        1,
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    drop(abandoned);
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+
+    let server = thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && started.elapsed() < Duration::from_secs(2) =>
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("webhook trait did not contact the real receiver: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        consume_webhook_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .unwrap();
+        listener
+    });
+    let mut future = Box::pin(
+        <WebhookDeliveryDestination as OutboxDestination<Cx>>::deliver(
+            &mut destination,
+            &cx,
+            &request,
+            1,
+        ),
+    );
+    let mut context = Context::from_waker(Waker::noop());
+    let Poll::Ready(result) = future.as_mut().poll(&mut context) else {
+        panic!("the synchronous HTTP adapter completes its first poll");
+    };
+    assert_eq!(result.unwrap().0, DeliveryVerdict::Accepted);
+    let listener = server.join().unwrap();
+    // Match an async state machine's terminal-poll contract and ensure even an
+    // invalid repoll cannot repeat the externally observed HTTP operation.
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = future.as_mut().poll(&mut context);
+        }))
+        .is_err()
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    drop(future);
+    drop(cx);
+    assert!(runtime.join_root(Duration::from_secs(2)));
 }
 
 #[test]
@@ -328,7 +433,7 @@ fn webhook_store_persists_registrations_and_dead_letters() {
 
 mod hex {
     pub fn decode(s: &str) -> Result<Vec<u8>, ()> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err(());
         }
         let mut bytes = Vec::with_capacity(s.len() / 2);

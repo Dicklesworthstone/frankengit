@@ -103,10 +103,11 @@ pub(super) fn guide(
             if !trees.contains_key(child) {
                 continue;
             }
-            if let Some(previous) = before.get(name) {
-                if child != previous && !paired.contains(&(*child, *previous)) {
-                    pending.insert((*child, *previous));
-                }
+            if let Some(previous) = before.get(name)
+                && child != previous
+                && !paired.contains(&(*child, *previous))
+            {
+                pending.insert((*child, *previous));
             }
         }
     }

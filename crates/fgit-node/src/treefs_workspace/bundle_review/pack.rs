@@ -141,10 +141,10 @@ impl Unpacked {
         let mut pending = graph.clone();
         let mut covered = BTreeSet::new();
         while let Some(id) = pending.pop_first() {
-            if covered.insert(id) {
-                if let Some(bases) = self.dependencies.get(&id) {
-                    pending.extend(bases.iter().copied());
-                }
+            if covered.insert(id)
+                && let Some(bases) = self.dependencies.get(&id)
+            {
+                pending.extend(bases.iter().copied());
             }
         }
         covered

@@ -278,10 +278,9 @@ fn load_dead_letters(path: &Path) -> Result<Vec<DeadLetterEntry>, String> {
         if let Some((root, event)) = payloads.insert(
             entry.delivery_id,
             (entry.payload_root, entry.event_name.as_str()),
-        ) {
-            if root != entry.payload_root || event != entry.event_name.as_str() {
-                return Err("dead-letter delivery ID has conflicting payload bindings".into());
-            }
+        ) && (root != entry.payload_root || event != entry.event_name.as_str())
+        {
+            return Err("dead-letter delivery ID has conflicting payload bindings".into());
         }
     }
     Ok(entries)

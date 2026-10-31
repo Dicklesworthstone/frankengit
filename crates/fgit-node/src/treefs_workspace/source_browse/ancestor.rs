@@ -253,11 +253,10 @@ fn walk(
         }
         for parent in parents {
             checkpoint()?;
-            if !seen.contains(&parent) {
-                if seen.len() >= limits.commits {
-                    return Err(budget("historical commit count"));
-                }
-                seen.insert(parent);
+            if seen.len() >= limits.commits && !seen.contains(&parent) {
+                return Err(budget("historical commit count"));
+            }
+            if seen.insert(parent) {
                 queue.push_back(parent);
             }
         }

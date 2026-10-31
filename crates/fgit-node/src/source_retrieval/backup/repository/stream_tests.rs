@@ -5,9 +5,6 @@ use fgit_authority_fsqlite::{
     ExportedHead, ExportedIssuance, IssuanceSequence, SCHEMA_VERSION, export_bundle, mint_token,
 };
 
-fn live() -> Result<(), String> {
-    Ok(())
-}
 fn hash(bytes: &[u8]) -> [u8; 32] {
     let mut hash = Sha256Hasher::new();
     hash.update(bytes);
@@ -66,16 +63,18 @@ fn sample(format: GitHashAlgorithm) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 fn scan(input: impl Read, expected: [u8; 32], limits: TransferLimits) -> Result<Seal, String> {
-    let mut decoder = StreamDecoder::new(input, limits, &mut live)?;
-    while decoder.record(&mut live)?.is_some() {}
-    decoder.finish(expected, &mut live).map(|(_, seal)| seal)
+    let mut decoder = StreamDecoder::new(input, limits, &mut || Ok(()))?;
+    while decoder.record(&mut || Ok(()))?.is_some() {}
+    decoder
+        .finish(expected, &mut || Ok(()))
+        .map(|(_, seal)| seal)
 }
 
 #[test]
 fn streaming_is_byte_identical_to_the_original_transport_in_both_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let old = sample(format);
-        let parsed = decode(&old, live).unwrap();
+        let parsed = decode(&old, || Ok(())).unwrap();
         let mut output = Vec::new();
         let mut encoder = StreamEncoder::new(
             &mut output,
@@ -83,7 +82,7 @@ fn streaming_is_byte_identical_to_the_original_transport_in_both_domains() {
             &authority(),
             parsed.records.len(),
             Default::default(),
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         for row in &parsed.records {
@@ -93,11 +92,11 @@ fn streaming_is_byte_identical_to_the_original_transport_in_both_domains() {
                     row.kind,
                     row.payload,
                     &proof(row.payload),
-                    &mut live,
+                    &mut || Ok(()),
                 )
                 .unwrap();
         }
-        let seal = encoder.finish(&mut live).unwrap();
+        let seal = encoder.finish(&mut || Ok(())).unwrap();
         assert_eq!(old, output);
         assert_eq!(
             seal,
@@ -172,14 +171,14 @@ fn exact_byte_budget_is_inclusive_and_payload_allocation_is_preflighted() {
     oversized[length_at..length_at + 8]
         .copy_from_slice(&((MAX_OBJECT_BYTES + 1) as u64).to_be_bytes());
     let mut decoder =
-        StreamDecoder::new(oversized.as_slice(), Default::default(), &mut live).unwrap();
-    assert!(decoder.record(&mut live).is_err());
+        StreamDecoder::new(oversized.as_slice(), Default::default(), &mut || Ok(())).unwrap();
+    assert!(decoder.record(&mut || Ok(())).is_err());
     assert_eq!(
         decoder.payload.capacity(),
         0,
         "declared size refused before object allocation"
     );
-    assert!(decoder.finish(hash(&oversized), &mut live).is_err());
+    assert!(decoder.finish(hash(&oversized), &mut || Ok(())).is_err());
 }
 
 #[test]
@@ -281,13 +280,13 @@ fn partial_writes_flush_failure_and_abandoned_records_cannot_finish() {
             &authority(),
             1,
             Default::default(),
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         encoder
-            .object(oid, GitObjectKind::Blob, body, &proof(body), &mut live)
+            .object(oid, GitObjectKind::Blob, body, &proof(body), &mut || Ok(()))
             .unwrap();
-        assert_eq!(encoder.finish(&mut live).is_err(), flush_fails);
+        assert_eq!(encoder.finish(&mut || Ok(())).is_err(), flush_fails);
         assert_eq!(sink.bytes, sample(format));
     }
     let mut sink = ShortWriter {
@@ -301,24 +300,24 @@ fn partial_writes_flush_failure_and_abandoned_records_cannot_finish() {
         &authority(),
         1,
         Default::default(),
-        &mut live,
+        &mut || Ok(()),
     )
     .unwrap();
     assert!(
         encoder
-            .object(oid, GitObjectKind::Blob, body, &proof(body), &mut live)
+            .object(oid, GitObjectKind::Blob, body, &proof(body), &mut || Ok(()))
             .is_err()
     );
     assert!(
         encoder
-            .object(oid, GitObjectKind::Blob, body, &proof(body), &mut live)
+            .object(oid, GitObjectKind::Blob, body, &proof(body), &mut || Ok(()))
             .is_err()
     );
-    assert!(encoder.finish(&mut live).is_err());
+    assert!(encoder.finish(&mut || Ok(())).is_err());
     let input = sample(format);
-    let decoder = StreamDecoder::new(input.as_slice(), Default::default(), &mut live).unwrap();
+    let decoder = StreamDecoder::new(input.as_slice(), Default::default(), &mut || Ok(())).unwrap();
     assert!(
-        decoder.finish(hash(&input), &mut live).is_err(),
+        decoder.finish(hash(&input), &mut || Ok(())).is_err(),
         "unconsumed records cannot yield a verified pass"
     );
 }
@@ -338,7 +337,8 @@ fn cancellation_is_checked_during_payload_io_and_poisons_the_decoder() {
         .unwrap();
     let bytes = encoder.finish().unwrap();
     let mut steps = 0;
-    let mut decoder = StreamDecoder::new(bytes.as_slice(), Default::default(), &mut live).unwrap();
+    let mut decoder =
+        StreamDecoder::new(bytes.as_slice(), Default::default(), &mut || Ok(())).unwrap();
     assert!(
         decoder
             .record(&mut || {
@@ -352,7 +352,7 @@ fn cancellation_is_checked_during_payload_io_and_poisons_the_decoder() {
             .is_err()
     );
     assert!(decoder.input.bytes < bytes.len() as u64);
-    assert!(decoder.finish(hash(&bytes), &mut live).is_err());
+    assert!(decoder.finish(hash(&bytes), &mut || Ok(())).is_err());
 }
 
 struct InterruptForever;

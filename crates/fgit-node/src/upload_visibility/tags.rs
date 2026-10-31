@@ -179,6 +179,54 @@ pub fn legacy_advertised_refs(
     Ok(output)
 }
 
+/// Negotiation must use the same expanded advertisement the legacy client saw.
+/// In particular, a peeled target in a tag-only repository is an advertised
+/// legacy want, not an exception to the unadvertised-ancestor restriction.
+pub struct LegacyTagRepository<'a, R: UploadPackRepository> {
+    source: &'a R,
+    refs: Vec<AdvertisedRef>,
+}
+impl<'a, R: UploadPackRepository> LegacyTagRepository<'a, R> {
+    pub(crate) fn new(source: &'a R, limits: &WireLimits) -> Result<Self, WireError> {
+        Ok(Self {
+            source,
+            refs: legacy_advertised_refs(source, limits)?,
+        })
+    }
+}
+impl<R: UploadPackRepository> UploadPackRepository for LegacyTagRepository<'_, R> {
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.source.object_format()
+    }
+    fn advertised_refs(&self) -> &[AdvertisedRef] {
+        &self.refs
+    }
+    fn contains_want(&self, oid: AnyGitOid) -> bool {
+        self.source.contains_want(oid)
+    }
+    fn is_common(&self, oid: AnyGitOid) -> bool {
+        self.source.is_common(oid)
+    }
+    fn supports_shallow(&self) -> bool {
+        self.source.supports_shallow()
+    }
+    fn shallow_update(
+        &self,
+        request: &PackRequest,
+    ) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
+        self.source.shallow_update(request)
+    }
+    fn symref_target(&self, name: &[u8]) -> Option<&[u8]> {
+        self.source.symref_target(name)
+    }
+    fn unborn_symref_target(&self) -> Option<&[u8]> {
+        self.source.unborn_symref_target()
+    }
+    fn peeled(&self, oid: AnyGitOid) -> Option<AnyGitOid> {
+        self.source.peeled(oid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,53 +302,5 @@ mod tests {
             )))
             .is_err()
         );
-    }
-}
-
-/// Negotiation must use the same expanded advertisement the legacy client saw.
-/// In particular, a peeled target in a tag-only repository is an advertised
-/// legacy want, not an exception to the unadvertised-ancestor restriction.
-pub struct LegacyTagRepository<'a, R: UploadPackRepository> {
-    source: &'a R,
-    refs: Vec<AdvertisedRef>,
-}
-impl<'a, R: UploadPackRepository> LegacyTagRepository<'a, R> {
-    pub(crate) fn new(source: &'a R, limits: &WireLimits) -> Result<Self, WireError> {
-        Ok(Self {
-            source,
-            refs: legacy_advertised_refs(source, limits)?,
-        })
-    }
-}
-impl<R: UploadPackRepository> UploadPackRepository for LegacyTagRepository<'_, R> {
-    fn object_format(&self) -> GitHashAlgorithm {
-        self.source.object_format()
-    }
-    fn advertised_refs(&self) -> &[AdvertisedRef] {
-        &self.refs
-    }
-    fn contains_want(&self, oid: AnyGitOid) -> bool {
-        self.source.contains_want(oid)
-    }
-    fn is_common(&self, oid: AnyGitOid) -> bool {
-        self.source.is_common(oid)
-    }
-    fn supports_shallow(&self) -> bool {
-        self.source.supports_shallow()
-    }
-    fn shallow_update(
-        &self,
-        request: &PackRequest,
-    ) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
-        self.source.shallow_update(request)
-    }
-    fn symref_target(&self, name: &[u8]) -> Option<&[u8]> {
-        self.source.symref_target(name)
-    }
-    fn unborn_symref_target(&self) -> Option<&[u8]> {
-        self.source.unborn_symref_target()
-    }
-    fn peeled(&self, oid: AnyGitOid) -> Option<AnyGitOid> {
-        self.source.peeled(oid)
     }
 }

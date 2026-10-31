@@ -55,20 +55,20 @@ impl Batch {
         {
             return Err("unsupported_lfs_hash");
         }
-        if let Some(reference) = fields.get("ref") {
-            if *reference != Value::Null {
-                let reference = reference.object().ok_or("invalid_lfs_ref")?;
-                let name = reference
-                    .get("name")
-                    .and_then(Value::text)
-                    .ok_or("invalid_lfs_ref")?;
-                if reference.len() != 1 || !name.starts_with("refs/") {
-                    return Err("invalid_lfs_ref");
-                }
-                RefName::try_new(name.as_bytes()).map_err(|_| "invalid_lfs_ref")?;
-                // This optional name is context only. It neither authorizes
-                // access nor becomes a mutable alias or a retention decision.
+        if let Some(reference) = fields.get("ref")
+            && *reference != Value::Null
+        {
+            let reference = reference.object().ok_or("invalid_lfs_ref")?;
+            let name = reference
+                .get("name")
+                .and_then(Value::text)
+                .ok_or("invalid_lfs_ref")?;
+            if reference.len() != 1 || !name.starts_with("refs/") {
+                return Err("invalid_lfs_ref");
             }
+            RefName::try_new(name.as_bytes()).map_err(|_| "invalid_lfs_ref")?;
+            // This optional name is context only. It neither authorizes
+            // access nor becomes a mutable alias or a retention decision.
         }
         let Some(Value::Array(objects)) = fields.get("objects") else {
             return Err("invalid_lfs_objects");

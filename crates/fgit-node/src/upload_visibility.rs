@@ -1047,7 +1047,10 @@ impl BundleVisibleGraph {
 
     /// Traverse facts already checked under the visible roots, without loading
     /// the omitted prerequisite bodies again.
-    pub(super) fn selection_source<'a, S>(&'a self, source: &'a S) -> VisibleGraphSelection<'a, S> {
+    pub(super) const fn selection_source<'a, S>(
+        &'a self,
+        source: &'a S,
+    ) -> VisibleGraphSelection<'a, S> {
         VisibleGraphSelection {
             objects: &self.graph.objects,
             source,

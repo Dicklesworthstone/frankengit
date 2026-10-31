@@ -158,11 +158,11 @@ impl Read for BoundedScratch {
             "object-sized scratch read request"
         );
         let count = self.file.read(output)?;
-        if let Some(at) = self.corrupt_at {
-            if (self.read_bytes..self.read_bytes + count).contains(&at) {
-                output[at - self.read_bytes] ^= 1;
-                self.corrupt_at = None;
-            }
+        if let Some(at) = self.corrupt_at
+            && (self.read_bytes..self.read_bytes + count).contains(&at)
+        {
+            output[at - self.read_bytes] ^= 1;
+            self.corrupt_at = None;
         }
         self.read_bytes += count;
         if let Some(cancel) = &self.cancel_on_read {
@@ -218,7 +218,7 @@ fn native_large_blob_verifies_from_real_files_with_exact_chunk_and_payload_bound
     assert_eq!(scratch.write_bytes, LARGE);
     assert_eq!(scratch.read_bytes, LARGE);
     assert_eq!(actual.verified().sha256(), &sha256_digest(&input));
-    assert!(actual.verified().delta_objects() == 0);
+    assert_eq!(actual.verified().delta_objects(), 0);
     // The same input still refuses under the unchanged default and byte-slice
     // profile. A large aggregate allowance alone grants no larger blob.
     for (index, mut denied) in [

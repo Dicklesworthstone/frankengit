@@ -1705,7 +1705,7 @@ impl DurableAdmissionMaterializer {
                 &context,
                 basis,
                 request,
-                evidence,
+                &evidence,
                 record.ref_basis_root(),
                 is_cancelled,
             )
@@ -3219,7 +3219,7 @@ async fn verify_policy_overlay_history_in<Authority, IsCancelled>(
     context: &AdmissionContext,
     basis: &PublicationBasis,
     request: &TransactionRequest,
-    evidence: CommitEvidence,
+    evidence: &CommitEvidence,
     overlay_root: Digest,
     is_cancelled: &IsCancelled,
 ) -> Result<(), AdmissionMaterializationRefusal>
@@ -7312,7 +7312,7 @@ fn upload_envelope_error(
 /// Whole MiB when exact, otherwise exact bytes: a limit is never rounded.
 fn envelope_size(bytes: usize) -> String {
     const MIB: usize = 1024 * 1024;
-    if bytes % MIB == 0 {
+    if bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
     } else {
         format!("{bytes} bytes")
@@ -7333,19 +7333,18 @@ impl OneNode {
         writer: &mut impl Write,
     ) -> Result<upload_visibility::VisibleUploadPack, NodeGitDaemonServeRefusal> {
         self.prepare_visible_upload_pack(request, materialized, limits, deadline)
-            .map_err(|refusal| {
+            .inspect_err(|refusal| {
                 let object_bytes = self
                     .selected_pack_limits
                     .max_object_bytes
                     .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
                 if let Some(line) = upload_envelope_error(
-                    &refusal,
+                    refusal,
                     self.selected_pack_limits.max_total_expanded_bytes,
                     object_bytes,
                 ) {
                     let _ = write_packet_group(writer, &[Packet::Data(line)], limits);
                 }
-                refusal
             })
     }
 }

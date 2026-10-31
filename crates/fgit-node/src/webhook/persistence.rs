@@ -233,11 +233,13 @@ fn quote(text: &str) -> String {
 }
 
 pub(super) fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    if !text.is_ascii() || text.len() % 2 != 0 {
+    if !text.is_ascii() || !text.len().is_multiple_of(2) {
         return None;
     }
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = char::from(pair[0]).to_digit(16)?;
             let low = char::from(pair[1]).to_digit(16)?;

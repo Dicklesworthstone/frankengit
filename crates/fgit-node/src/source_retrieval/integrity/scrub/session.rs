@@ -82,7 +82,7 @@ impl SelectedObjectScrubSession<'_> {
             ..self.query
         };
         self.node
-            .scrub_selected_page_in(self.request, &self.selected, query, self.started)
+            .scrub_selected_page_in(self.request, &self.selected, &query, self.started)
             .await
     }
 }
@@ -100,7 +100,7 @@ impl OneNode {
     ) -> Result<SelectedObjectScrubSession<'a>, ScrubRefusal> {
         let started = Instant::now();
         let selected = self
-            .prepare_scrub_selection_in(request, query, started)
+            .prepare_scrub_selection_in(request, &query, started)
             .await?;
         checkpoint(request, started, query.timeout)?;
         Ok(SelectedObjectScrubSession {

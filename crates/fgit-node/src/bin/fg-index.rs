@@ -162,7 +162,7 @@ fn execute(
         Action::Build(predecessor) => {
             let (source, activation) =
                 node.runtime().block_on(node.build_source_index_local_in(
-                    &context,
+                    context,
                     &command.reference,
                     None,
                     None,
@@ -180,7 +180,7 @@ fn execute(
         Action::Refresh(predecessor) => {
             let (source, activation, stats) =
                 node.runtime().block_on(node.refresh_source_index_local_in(
-                    &context,
+                    context,
                     &command.reference,
                     None,
                     None,
@@ -206,7 +206,7 @@ fn execute(
         }
         Action::Recover(candidate) => {
             let recovered = node.runtime().block_on(node.recover_source_index_local_in(
-                &context,
+                context,
                 &command.reference,
                 *candidate,
                 None,
@@ -231,7 +231,7 @@ fn execute(
         }
         Action::Query(query) => {
             let report = node.runtime().block_on(node.search_source_index_local_in(
-                &context,
+                context,
                 &command.reference,
                 None,
                 None,

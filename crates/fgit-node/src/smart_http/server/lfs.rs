@@ -178,10 +178,10 @@ impl<'a> Request<'a> {
         ) {
             return Err(Failure::new(Status::Method, "lfs_method_not_allowed"));
         }
-        if let Endpoint::Object(object) | Endpoint::Verify(object) = endpoint {
-            if object.size > MAX_OBJECT_BYTES {
-                return Err(Failure::new(Status::TooLarge, "lfs_object_size_limit"));
-            }
+        if let Endpoint::Object(object) | Endpoint::Verify(object) = endpoint
+            && object.size > MAX_OBJECT_BYTES
+        {
+            return Err(Failure::new(Status::TooLarge, "lfs_object_size_limit"));
         }
         if envelope.method == "GET" {
             if !matches!(

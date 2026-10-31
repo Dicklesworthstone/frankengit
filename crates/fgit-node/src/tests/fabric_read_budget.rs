@@ -251,9 +251,7 @@ fn poisoned_candidate_publication_cannot_turn_drained_custody_into_success() {
             let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 staging.publish(&node.fabric, &mut || {
                     probes += 1;
-                    if probes == panic_probe {
-                        panic!("injected publication unwind");
-                    }
+                    assert_ne!(probes, panic_probe, "injected publication unwind");
                     true
                 })
             }));
