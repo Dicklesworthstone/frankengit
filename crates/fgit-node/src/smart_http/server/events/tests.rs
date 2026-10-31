@@ -351,6 +351,34 @@ fn real_node_http_reads_exact_frames_and_closes_failed_output_before_retry() {
         assert_eq!(serve(&profile, &envelope, &[], &mut response), Ok(()));
         let response = String::from_utf8(response).unwrap();
         assert_eq!(response.split_once("\r\n\r\n").unwrap().1, expected);
+        // Endpoint deployment switches are independent ceilings. Exercise the
+        // real credential reader and canonical event response for every profile,
+        // including profiles that expose unrelated Git/recovery/source services.
+        for switches in 0_u8..32 {
+            let mut selected = profile.clone();
+            selected.allow_receive = switches & 1 != 0;
+            selected.allow_issues = switches & 2 != 0;
+            selected.allow_outcomes = switches & 4 != 0;
+            selected.allow_pulls = switches & 8 != 0;
+            selected.allow_source = switches & 16 != 0;
+            let mut selected_response = Vec::new();
+            let outcome = serve(&selected, &envelope, &[], &mut selected_response);
+            let selected_response = String::from_utf8(selected_response).unwrap();
+            if switches & 2 != 0 {
+                assert_eq!(outcome, Ok(()), "profile {switches}");
+                assert_eq!(
+                    selected_response.split_once("\r\n\r\n").unwrap().1,
+                    expected,
+                    "profile {switches}"
+                );
+            } else {
+                assert_eq!(outcome, Err(Status::Forbidden), "profile {switches}");
+                assert!(
+                    !selected_response.contains("Exact event body"),
+                    "profile {switches} disclosed a disabled issue event"
+                );
+            }
+        }
         struct LostOutput(usize);
         impl Write for LostOutput {
             fn write(&mut self, _: &[u8]) -> io::Result<usize> {
