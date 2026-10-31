@@ -113,7 +113,7 @@ fn mandatory_policy_blocks_plain_merge_and_caller_selected_weaker_review_sets() 
             PolicyEpoch::FIRST,
             protection_policy(&[b"refs/heads/main"], &[1], &[3, 4]),
         );
-        let installed = committed(change_policy(&f, 1, b"activate", &command).unwrap());
+        let installed = committed(&change_policy(&f, 1, b"activate", &command).unwrap());
         let policy = current_policy(&f);
         assert_eq!(policy.version(), Some(AggregateVersion::FIRST));
         assert_eq!(policy.policy_epoch, PolicyEpoch::FIRST.next().unwrap());
@@ -134,7 +134,7 @@ fn mandatory_policy_blocks_plain_merge_and_caller_selected_weaker_review_sets() 
         let failed = plain_merge(&f, b"missing-review").unwrap();
         denied(&failed.1);
         f.command.review.subject.policy_epoch = policy.policy_epoch;
-        committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "approve-three").unwrap());
+        committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "approve-three").unwrap());
         let weakened =
             publish(&f.node, &f.command, &f.bundle, &[actor(3)], "weaker-caller").unwrap();
         denied(&weakened.1);
@@ -142,10 +142,10 @@ fn mandatory_policy_blocks_plain_merge_and_caller_selected_weaker_review_sets() 
             snapshot(&f.node).snapshot().refs.get(&f.data.target_ref),
             Some(&f.data.target_tip)
         );
-        committed(vote(&f.node, &f.command, Some(&f.bundle), 4, "approve-four").unwrap());
+        committed(&vote(&f.node, &f.command, Some(&f.bundle), 4, "approve-four").unwrap());
         // A canonical missing-review refusal never changes after later votes.
         assert_eq!(plain_merge(&f, b"missing-review").unwrap(), failed);
-        let applied = committed(plain_merge(&f, b"permitted-plain-merge").unwrap());
+        let applied = committed(&plain_merge(&f, b"permitted-plain-merge").unwrap());
         assert_eq!(
             snapshot(&f.node).snapshot().refs.get(&f.data.target_ref),
             Some(&f.command.candidate.commit)
@@ -166,7 +166,7 @@ fn protection_replacement_invalidates_old_votes_and_clear_preserves_administrato
         let mut f = fixture(&scratch, format);
         let policy = protection_policy(&[b"refs/heads/main"], &[1], &[3]);
         committed(
-            change_policy(
+            &change_policy(
                 &f,
                 1,
                 b"set-one",
@@ -176,10 +176,10 @@ fn protection_replacement_invalidates_old_votes_and_clear_preserves_administrato
         );
         let epoch = current_policy(&f).policy_epoch;
         f.command.review.subject.policy_epoch = epoch;
-        committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "old-approval").unwrap());
+        committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "old-approval").unwrap());
         // Even byte-identical settings form a new explicit policy epoch.
         committed(
-            change_policy(
+            &change_policy(
                 &f,
                 1,
                 b"replace-policy",
@@ -194,7 +194,7 @@ fn protection_replacement_invalidates_old_votes_and_clear_preserves_administrato
         let refusal = change_policy(&f, 9, b"takeover", &takeover).unwrap();
         denied(&refusal.1);
         let clear = policy_command(2, epoch, protection_policy(&[], &[1], &[]));
-        let cleared = committed(change_policy(&f, 1, b"clear", &clear).unwrap());
+        let cleared = committed(&change_policy(&f, 1, b"clear", &clear).unwrap());
         assert!(current_policy(&f).protection().unwrap().branches.is_empty());
         assert_eq!(
             change_policy(&f, 9, b"takeover", &takeover).unwrap(),
@@ -229,7 +229,7 @@ fn protection_replacement_invalidates_old_votes_and_clear_preserves_administrato
         );
         assert_eq!(snapshot(&f.node).basis(), epoch_before_cancel.basis());
         assert_eq!(change_policy(&f, 1, b"clear", &clear).unwrap(), cleared);
-        committed(plain_merge(&f, b"permitted-disabled").unwrap());
+        committed(&plain_merge(&f, b"permitted-disabled").unwrap());
         f.node.shutdown().unwrap();
     }
 }
@@ -268,7 +268,7 @@ fn protected_branch_creation_updates_deletion_and_import_share_the_same_mandator
         let f = fixture(&scratch, format);
         let branch = RefName::try_new(b"refs/heads/protected").unwrap();
         let unborn = RefName::try_new(b"refs/heads/protected-unborn").unwrap();
-        committed(direct_branch(
+        committed(&direct_branch(
             &f,
             "create-before",
             &branch,
@@ -280,7 +280,7 @@ fn protected_branch_creation_updates_deletion_and_import_share_the_same_mandator
             PolicyEpoch::FIRST,
             protection_policy(&[branch.as_bytes(), unborn.as_bytes()], &[1], &[3]),
         );
-        committed(change_policy(&f, 1, b"protect-direct-paths", &command).unwrap());
+        committed(&change_policy(&f, 1, b"protect-direct-paths", &command).unwrap());
         let before = snapshot(&f.node);
         let create = direct_branch(
             &f,
@@ -345,7 +345,7 @@ fn protected_branch_creation_updates_deletion_and_import_share_the_same_mandator
             }
         )));
         let free = RefName::try_new(b"refs/heads/unprotected").unwrap();
-        committed(direct_branch(
+        committed(&direct_branch(
             &f,
             "permitted-direct-twin",
             &free,
@@ -374,7 +374,7 @@ fn current_policy_and_historical_results_survive_real_node_reopen() {
             PolicyEpoch::FIRST,
             protection_policy(&[b"refs/heads/main"], &[1], &[3]),
         );
-        let receipt = committed(change_policy(&f, 1, b"persist-policy", &command).unwrap());
+        let receipt = committed(&change_policy(&f, 1, b"persist-policy", &command).unwrap());
         let before = current_policy(&f);
         let config = scratch.config(format);
         f.node.shutdown().unwrap();
@@ -397,7 +397,7 @@ fn concurrent_activation_and_direct_publication_cannot_commit_a_bypass_after_act
     let scratch = Scratch::new();
     let f = fixture(&scratch, GitHashAlgorithm::Sha1);
     let initial = policy_command(0, PolicyEpoch::FIRST, protection_policy(&[], &[1], &[]));
-    committed(change_policy(&f, 1, b"initial-disabled", &initial).unwrap());
+    committed(&change_policy(&f, 1, b"initial-disabled", &initial).unwrap());
     let command = policy_command(
         1,
         current_policy(&f).policy_epoch,
@@ -466,7 +466,7 @@ fn concurrent_activation_and_direct_publication_cannot_commit_a_bypass_after_act
     drop(activate);
     drop(update);
     assert!(overlap, "the real authority operations must overlap");
-    committed(activated);
+    committed(&activated);
     for row in updated.commands {
         if matches!(row.terminal.outcome, DecisionOutcome::Committed { .. }) {
             assert!(
@@ -527,7 +527,7 @@ fn direct_native_merge_recovers_committed_bundle_after_policy_activation_and_reo
         let mut f = fixture(&scratch, format);
         let key = b"direct-recovery-committed";
         let intent = recovery_intent(&f);
-        let original = committed(plain_merge(&f, key).unwrap());
+        let original = committed(&plain_merge(&f, key).unwrap());
         let proposed = intent
             .seal_attempt(&protection_context(&f, 2, key))
             .unwrap();
@@ -537,7 +537,7 @@ fn direct_native_merge_recovers_committed_bundle_after_policy_activation_and_reo
             "bundle and direct APIs must recover the identical semantic seal"
         );
         committed(
-            change_policy(
+            &change_policy(
                 &f,
                 1,
                 b"protect-after-commit",
@@ -626,7 +626,7 @@ fn direct_native_merge_preserves_refusal_after_policy_clear_but_new_request_can_
             );
         };
         committed(
-            change_policy(
+            &change_policy(
                 &f,
                 1,
                 b"protect-before-refusal",
@@ -653,7 +653,7 @@ fn direct_native_merge_preserves_refusal_after_policy_clear_but_new_request_can_
             refused.0
         );
         committed(
-            change_policy(
+            &change_policy(
                 &f,
                 1,
                 b"clear-after-refusal",
@@ -711,7 +711,7 @@ fn direct_native_merge_preserves_refusal_after_policy_clear_but_new_request_can_
                 .unwrap(),
             fgit_authority::OutcomeLookup::Undecided
         );
-        let fresh = committed(plain_merge(&f, fresh_key).unwrap());
+        let fresh = committed(&plain_merge(&f, fresh_key).unwrap());
         assert_eq!(fresh.0, fresh_tx);
         assert_eq!(
             direct_native_recovery(&f, 2, fresh_key, &intent, MergeObjectLimits::default())
@@ -743,7 +743,7 @@ fn direct_native_merge_retry_does_not_consume_quota_but_undecided_requests_still
         let scratch = Scratch::new();
         let mut f = fixture(&scratch, format);
         let key = b"quota-recovered-merge";
-        let original = committed(plain_merge(&f, key).unwrap());
+        let original = committed(&plain_merge(&f, key).unwrap());
         let intent = recovery_intent(&f);
         let before = snapshot(&f.node);
         f.node.push_quota = crate::PushQuota::default();
