@@ -248,6 +248,7 @@ fn seeded(format: GitHashAlgorithm, indexes: bool) -> (Scratch, NodeTools) {
         writes: Default::default(),
         outcomes: false,
         principal: None,
+        queues: Default::default(),
         agent_context: false,
         artifacts: false,
         artifact_root: None,

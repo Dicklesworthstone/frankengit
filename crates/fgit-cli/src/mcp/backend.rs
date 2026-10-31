@@ -16,6 +16,7 @@ mod pull_comments;
 mod pull_reviews;
 mod pull_writes;
 mod pulls;
+mod queues;
 mod refs;
 mod retrieval;
 mod review;
@@ -38,7 +39,8 @@ pub(super) struct NodeTools {
 impl NodeTools {
     pub(super) fn open(options: Options) -> Result<Self, String> {
         options.validate_access()?;
-        let allow_stopped_intake = options.writes.any() || options.outcomes;
+        let allow_stopped_intake =
+            options.writes.any() || options.queues.mutation() || options.outcomes;
         Self::open_authorized(options, allow_stopped_intake)
     }
     // Each profile validates its own launch grants before sharing this node
@@ -125,6 +127,7 @@ impl NodeTools {
 
 pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     let mut tools = Vec::new();
+    tools.extend(queues::tools(options.queues));
     if options.agent_context {
         tools.push(agent_context::tool());
     }
@@ -187,6 +190,11 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         issues: true,
         pulls: true,
         source: true,
+        queues: super::QueueGrants {
+            read: true,
+            write: true,
+            land: true,
+        },
         agent_context: true,
         artifacts: true,
         artifact_root: None,
@@ -221,6 +229,7 @@ impl ReadTools for NodeTools {
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
             || (self.options.writes.merges && merge_writes::is_tool(name))
+            || queues::is_mutation(self.options.queues, name)
     }
     fn result_is_error(&self, name: &str, value: &Value) -> bool {
         self.is_mutation(name)
@@ -231,6 +240,9 @@ impl ReadTools for NodeTools {
                 == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        if queues::permitted(self.options.queues, name) {
+            return queues::call(self, name, args);
+        }
         if name == events::NAME && (self.options.issues || self.options.pulls) {
             return events::call(self, args);
         }

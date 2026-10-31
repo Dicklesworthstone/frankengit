@@ -87,6 +87,7 @@ impl Fixture {
             writes: WriteGrants::default(),
             outcomes: true,
             principal: Some(actor(OPENER)),
+            queues: Default::default(),
             agent_context: false,
             artifacts: false,
             artifact_root: None,

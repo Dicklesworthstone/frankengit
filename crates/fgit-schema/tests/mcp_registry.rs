@@ -55,7 +55,7 @@ const fn valid_prototype() -> McpToolEntry {
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 53);
+    assert_eq!(REGISTRY.len(), 59);
     assert!(find_tool("frankengit_pull_append_comment").is_some());
 
     // Verify strict alphabetical ASCII sort order
@@ -373,8 +373,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 53"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 49"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 59"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 55"));
     assert!(
         mcp_tools
             .contents
@@ -386,7 +386,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 53"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 59"));
 }
 
 #[test]
@@ -396,7 +396,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 49);
+    assert_eq!(active_names.len(), 55);
     assert!(active_names.contains(&"frankengit_pull_append_comment"));
 
     // 1. Consistent twin passes.
@@ -424,4 +424,178 @@ fn test_server_parity_and_planted_drift() {
             tool: "frankengit_events",
         })
     );
+}
+
+#[test]
+fn queue_registry_separates_read_management_and_landing_authority() {
+    let queue_tools: Vec<_> = REGISTRY
+        .iter()
+        .filter(|tool| tool.name.starts_with("frankengit_queue_"))
+        .collect();
+    assert_eq!(queue_tools.len(), 6);
+    for tool in queue_tools {
+        assert_eq!(tool.support_profile, SupportProfile::Active);
+        assert_eq!(tool.owner_subsystem, "forge");
+        assert_eq!(tool.budget.max_input_bytes, 65_536);
+        assert_eq!(tool.budget.max_output_bytes, 1_048_576);
+        assert!(!tool.input_fields.iter().any(|field| matches!(
+            field.name,
+            "principal" | "principal_id" | "tenant_id" | "repository_id" | "storage_root"
+        )));
+        match tool.name {
+            "frankengit_queue_list" | "frankengit_queue_show" => {
+                assert_eq!(tool.read_mutation, ReadMutationClass::ReadOnly);
+                assert_eq!(
+                    tool.capability,
+                    CapabilityRequirement::READ_CANONICAL_OBJECT
+                );
+                assert_eq!(tool.principal, PrincipalRequirement::None);
+                assert_eq!(tool.idempotency, IdempotencyRequirement::NotApplicable);
+                assert!(tool.description.contains("--allow-queues"));
+                assert!(admit_call(tool.name, 1, "{}", &["read_canonical_object"], None).is_ok());
+            }
+            _ => {
+                assert_eq!(tool.read_mutation, ReadMutationClass::Mutation);
+                assert_eq!(tool.principal, PrincipalRequirement::OperatorBound);
+                assert_eq!(tool.idempotency, IdempotencyRequirement::RequiredDurableKey);
+                assert_eq!(
+                    tool.authority_root,
+                    InputAuthorityRootRequirement::ExactPredecessorVersion
+                );
+                for field in [
+                    "number",
+                    "expected_version",
+                    "idempotency_key",
+                    "expected_incarnation",
+                    "object_format",
+                ] {
+                    assert!(
+                        tool.input_fields
+                            .iter()
+                            .any(|entry| entry.name == field && entry.required)
+                    );
+                }
+                let is_landing = tool.name == "frankengit_queue_land";
+                let capability = if is_landing {
+                    "prepare_publication"
+                } else {
+                    "mutate_forge_entity"
+                };
+                let opposite = if is_landing {
+                    "mutate_forge_entity"
+                } else {
+                    "prepare_publication"
+                };
+                assert_eq!(tool.capability.as_str(), capability);
+                assert!(tool.description.contains(if is_landing {
+                    "--allow-queue-landings"
+                } else {
+                    "--allow-queue-writes"
+                }));
+                assert!(matches!(
+                    admit_call(tool.name, 1, "{}", &[opposite], Some("operator")),
+                    Err(McpRefusal::CapabilityDenied { .. })
+                ));
+                assert!(matches!(
+                    admit_call(tool.name, 1, "{}", &[capability], None),
+                    Err(McpRefusal::PrincipalRequired { .. })
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn queue_schemas_preserve_exact_versions_reference_aliases_and_complete_bounded_reorder() {
+    let enqueue = find_tool("frankengit_queue_enqueue").unwrap();
+    let landing = find_tool("frankengit_queue_land").unwrap();
+    for tool in [enqueue, landing] {
+        for name in [
+            "pull_request",
+            "expected_pull_request_version",
+            "expected_source",
+            "expected_target",
+        ] {
+            assert!(
+                tool.input_fields
+                    .iter()
+                    .any(|field| field.name == name && field.required)
+            );
+        }
+        for name in [
+            "source_reference",
+            "source_reference_hex",
+            "target_reference",
+            "target_reference_hex",
+        ] {
+            let field = tool
+                .input_fields
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap();
+            assert!(
+                !field.required,
+                "reference representations are an exclusive pair"
+            );
+            assert_eq!(field.classification, FieldClassification::SelectorPosition);
+        }
+    }
+    assert!(
+        landing
+            .input_fields
+            .iter()
+            .any(|field| field.name == "expected_policy_epoch" && field.required)
+    );
+    assert!(
+        !enqueue
+            .input_fields
+            .iter()
+            .any(|field| field.name == "expected_policy_epoch")
+    );
+    assert_eq!(
+        enqueue
+            .input_fields
+            .iter()
+            .find(|field| field.name == "expected_version")
+            .unwrap()
+            .pattern,
+        Some("^(0|[1-9][0-9]*)$")
+    );
+    assert_eq!(
+        landing
+            .input_fields
+            .iter()
+            .find(|field| field.name == "expected_version")
+            .unwrap()
+            .pattern,
+        Some("^[1-9][0-9]*$")
+    );
+    let reorder = find_tool("frankengit_queue_reorder").unwrap();
+    let order = reorder
+        .input_fields
+        .iter()
+        .find(|field| field.name == "order")
+        .unwrap();
+    assert_eq!(order.field_type, "array");
+    assert!(order.required);
+    assert!(order.description.contains("1..256"));
+    assert!(order.description.contains("Complete desired permutation"));
+    assert_eq!(reorder.budget.max_items, 256);
+    assert_eq!(
+        find_tool("frankengit_queue_list").unwrap().pagination,
+        PaginationRules::SnapshotBoundCursor
+    );
+}
+
+#[test]
+fn queue_landing_catalog_explicitly_declares_no_http_endpoint() {
+    let landing = find_tool("frankengit_queue_land").unwrap();
+    assert_eq!(landing.cli_command, "fg queue land");
+    assert_eq!(landing.rest_api_path, "local-only: fg queue land");
+    assert!(landing.description.contains("no HTTP landing route"));
+    assert!(!landing.rest_api_path.starts_with("POST "));
+    assert!(!landing.rest_api_path.contains("/api/"));
+    let manifest = fgit_schema::emit::mcp_parity_manifest();
+    assert!(manifest.contains("\"rest_api_path\": \"local-only: fg queue land\""));
+    assert!(!manifest.contains("/queues/{number}/land"));
 }

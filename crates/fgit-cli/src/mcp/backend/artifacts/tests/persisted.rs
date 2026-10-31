@@ -60,6 +60,7 @@ impl Fixture {
                 issues: false,
                 pulls: false,
                 source: false,
+                queues: Default::default(),
                 agent_context: false,
                 artifacts: true,
                 artifact_root: Some(artifact_root),

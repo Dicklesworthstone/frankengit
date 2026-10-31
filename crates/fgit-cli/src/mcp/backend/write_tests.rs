@@ -69,6 +69,7 @@ impl Fixture {
             },
             outcomes,
             principal: (writes || outcomes).then_some(PrincipalId::from_bytes([principal; 16])),
+            queues: Default::default(),
             agent_context: false,
             artifacts: false,
             artifact_root: None,

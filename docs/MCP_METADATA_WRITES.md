@@ -132,6 +132,92 @@ their canonical request digest so an old binding is not confused with a newly
 changed command. A successful query of a canonical refusal has `isError: false`:
 the read succeeded even though the historical mutation was refused.
 
+## Merge queue management and native landing
+
+Three independent launch grants expose the canonical merge queue APIs:
+
+| Grant | Tools | Effect |
+| --- | --- | --- |
+| `--allow-queues` | `frankengit_queue_list`, `frankengit_queue_show` | Complete visible snapshots. |
+| `--allow-queue-writes` | `frankengit_queue_enqueue`, `frankengit_queue_dequeue`, `frankengit_queue_reorder` | Queue membership and order only. |
+| `--allow-queue-landings` | `frankengit_queue_land` | Exact queue-head fast-forward, coupled PR merge and queue completion. |
+
+None implies another grant, PR/source access, approval authority, or outcome
+recovery. A queue writer cannot land, and a landing-only process cannot edit
+membership. Both mutation grants require a canonical lowercase launch principal
+and exact repository incarnation. The existing trusted-local operator sponsors
+the action; no client argument authenticates a remote principal.
+
+```sh
+fg-mcp "$STORAGE" "$TENANT" "$REPOSITORY" --trusted-local \
+  --principal "$PRINCIPAL" --expected-incarnation "$INCARNATION" \
+  --object-format sha256 --allow-queues --allow-queue-writes \
+  --allow-queue-landings --allow-outcomes
+```
+
+List accepts `after` as a canonical decimal string, integer `limit` from 1
+through 20 (default 5), and `expected_head`. A nonzero cursor requires the first
+page's `snapshot_token`. Show requires positive decimal-string `number` and
+accepts `expected_head`. Current canonical hidden-ref policy applies to both
+current and retained snapshots: a hidden target or any hidden source suppresses
+the entire queue. A queue is returned completely or the read fails; no truncated
+membership list is presented as canonical state.
+
+Every queue mutation requires `number`, `expected_version`, `idempotency_key`,
+`expected_incarnation`, `object_format`, and exactly one of `target_reference`
+or `target_reference_hex`. The incarnation and format must match the launch
+binding; they cannot select a different repository. Reference fields contain
+full `refs/heads/` names, bounded to 1024 raw bytes. The hex alternative is
+lowercase and preserves non-UTF-8 bytes. A receipt returns both representations,
+with a null text field when the name is not UTF-8.
+
+All queue/PR numbers, versions, priorities, and policy epochs are canonical
+unsigned decimal **strings**. Enqueue accepts version `"0"` for a new queue or
+the exact positive existing version. Dequeue/reorder require a positive queue
+version. Unknown, duplicate, inapplicable, floating-point, or identity override
+fields are rejected before admission.
+
+| Tool suffix | Additional arguments |
+| --- | --- |
+| `enqueue` | `pull_request`, positive `expected_pull_request_version`, exactly one `source_reference` or `source_reference_hex`, `expected_source`, `expected_target`; optional `priority` from `"0"` through `"4294967295"`, default `"0"`. |
+| `dequeue` | `pull_request` and `reason`: `withdrawn`, `conflict`, `check-failed`, `base-moved`, `evicted`, or `admin-override`. |
+| `reorder` | `order`, the complete desired array of 1–256 distinct positive PR-number strings, without added or omitted members. |
+| `land` | The enqueue candidate coordinates without `priority`, plus positive `expected_policy_epoch`. |
+
+The source and target OIDs are explicit nonzero lowercase IDs in the pinned
+native hash format. Landing additionally requires distinct tips, the exact
+current queue head, exact PR version, two available queue successor versions,
+and one available PR successor. The operator must supply observed coordinates;
+the adapter never updates a stale observation automatically.
+
+`frankengit_queue_land` invokes the native `FastForwardOnly` profile. Existing
+commit ancestry, current required reviews/checks, and protected-ref rules are
+enforced by the node. It accepts no bundle, merge-method override, force flag, or
+caller assertion that checks passed. One successful canonical decision moves
+the target to the existing source tip, advances the PR once, and advances the
+queue twice for batch formation/completion. No intermediate active batch is
+published. Source refs remain unchanged. See
+[NATIVE_MERGE_QUEUE.md](NATIVE_MERGE_QUEUE.md) for the native landing contract.
+
+```json
+{"jsonrpc":"2.0","id":"queue-enqueue-1","method":"tools/call","params":{"name":"frankengit_queue_enqueue","arguments":{"number":"1","expected_version":"0","idempotency_key":"queue-1-pr-7","expected_incarnation":"11111111111111111111111111111111","object_format":"sha1","target_reference":"refs/heads/main","pull_request":"7","expected_pull_request_version":"1","source_reference":"refs/heads/topic","expected_source":"2222222222222222222222222222222222222222","expected_target":"3333333333333333333333333333333333333333"}}}
+```
+
+Replace every example observation with the actual repository values. Use the
+original complete arguments and durable key for a retry, including after later
+queue/PR/policy changes or a lost reply. `proposed_action` preserves the exact
+requested action and guards; `historical_outcome: true` identifies the original
+terminal result. Management receipts have `refs_changed: false`; only a committed
+landing reports the target move. Neither a receipt nor `delivery_acknowledged:
+null` claims downstream delivery or the latest queue state. Independently grant
+`--allow-outcomes` to resolve the same principal's original key without retrying.
+
+The ordinary 64 KiB MCP request and 256-item array bounds remain unchanged.
+Complete queue results are limited to 1 MiB. Native queues can hold 1024 entries;
+use the CLI or HTTP profile for complete reorders above 256 entries. Oversized
+reads fail without a partial result. Multi-PR speculative execution and workflow
+execution are not exposed by these tools.
+
 ## Verification and remaining scope
 
 Added deterministic parser/protocol tests cover exact integer and key bounds,

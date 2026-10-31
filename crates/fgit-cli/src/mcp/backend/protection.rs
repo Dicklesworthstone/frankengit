@@ -107,6 +107,7 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
                 .map_err(|_| "invalid repository ID")?,
             format,
             incarnation: Some(incarnation),
+            queues: Default::default(),
             agent_context: false,
             artifacts: false,
             artifact_root: None,

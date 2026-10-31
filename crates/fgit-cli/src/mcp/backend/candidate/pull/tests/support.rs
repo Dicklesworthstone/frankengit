@@ -223,6 +223,7 @@ impl Fixture {
             writes: Default::default(),
             outcomes: false,
             principal: Some(actor(1)),
+            queues: Default::default(),
             agent_context: false,
             artifacts: false,
             artifact_root: None,

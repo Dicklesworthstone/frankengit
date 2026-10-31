@@ -11,6 +11,12 @@ mutations and principal-scoped recovery are documented in
 [MCP_METADATA_WRITES.md](MCP_METADATA_WRITES.md). No read flag enables them.
 The restrictions below remain the boundary of a read-only launch.
 
+The independent `--allow-queues` grant adds `frankengit_queue_list` and
+`frankengit_queue_show`. They read complete queues at a selected authority head
+and retain current hidden-ref filtering, including for historical snapshots.
+Queue membership writes and fast-forward landing each require their own explicit
+grant; see [queue arguments and grants](MCP_METADATA_WRITES.md#merge-queue-management-and-native-landing).
+
 ## Launch
 
 ```sh

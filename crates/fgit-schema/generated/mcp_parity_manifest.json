@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 53,
+  "total_tools": 59,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -384,6 +384,66 @@
       "capability": "mutate_forge_entity",
       "cli_command": "fg pr update",
       "rest_api_path": "PATCH /repos/{id}/pulls/{number}"
+    },
+    {
+      "tool": "frankengit_queue_dequeue",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg queue dequeue",
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/dequeue"
+    },
+    {
+      "tool": "frankengit_queue_enqueue",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg queue enqueue",
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/enqueue"
+    },
+    {
+      "tool": "frankengit_queue_land",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg queue land",
+      "rest_api_path": "local-only: fg queue land"
+    },
+    {
+      "tool": "frankengit_queue_list",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg queue list",
+      "rest_api_path": "GET /{repository}/api/v1/queues"
+    },
+    {
+      "tool": "frankengit_queue_reorder",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg queue reorder",
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/reorder"
+    },
+    {
+      "tool": "frankengit_queue_show",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg queue show",
+      "rest_api_path": "GET /{repository}/api/v1/queues/{number}"
     },
     {
       "tool": "frankengit_raw_sql_query",

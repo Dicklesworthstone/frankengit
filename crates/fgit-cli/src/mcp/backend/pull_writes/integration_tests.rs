@@ -45,6 +45,7 @@ impl Fixture {
             },
             outcomes: true,
             principal: Some(actor()),
+            queues: Default::default(),
             agent_context: false,
             artifacts: false,
             artifact_root: None,

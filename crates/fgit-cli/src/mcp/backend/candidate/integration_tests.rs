@@ -97,6 +97,7 @@ fn setup(format: GitHashAlgorithm) -> (Scratch, NodeTools, GitOid) {
         writes: Default::default(),
         outcomes: false,
         principal: None,
+        queues: Default::default(),
         agent_context: false,
         artifacts: false,
         artifact_root: None,
