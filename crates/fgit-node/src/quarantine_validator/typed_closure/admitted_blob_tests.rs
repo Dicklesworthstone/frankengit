@@ -204,6 +204,38 @@ fn missing_malformed_and_oversized_reused_envelopes_fail_before_upload_staging()
     }
 }
 #[test]
+fn explicit_reused_blob_policy_is_separate_from_buffered_candidate_limits() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for maximum in [4095, 4096] {
+            let scratch = ScratchDirectory::new();
+            let (node, _) = OneNode::init(
+                NodeConfig::new(
+                    scratch.path().to_path_buf(),
+                    TenantId::from_bytes([0x71; 16]),
+                    RepositoryId::from_bytes([0x72; 16]),
+                )
+                .with_object_format(format)
+                .with_selected_pack_blob_limit(maximum)
+                .with_worker_threads(2),
+            )
+            .unwrap();
+            let f = case(&node, format);
+            let mut bounded = scoped(&node, format, &f, 2048, true);
+            bounded.pack_limits.max_object_bytes = 1024;
+            bounded.parse_limits.max_object_bytes = 1024;
+            let result = check(&bounded, &f.upload, &[f.candidate]);
+            if maximum == 4095 {
+                assert_eq!(result, Err(RefusalCode::ResourceBudgetExceeded));
+                assert!(node.read_git_object(f.candidate).is_err());
+            } else {
+                assert!(result.is_ok());
+            }
+            node.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
 fn reused_blob_cannot_satisfy_an_uploaded_tree_edge() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = ScratchDirectory::new();

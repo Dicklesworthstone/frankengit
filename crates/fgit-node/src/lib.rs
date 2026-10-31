@@ -14250,11 +14250,12 @@ mod tests {
                 RefusalCode::ExpectedOldRefMismatch,
             ))
             .expect("the production projection stages canonical refusal evidence");
-        let expected_refusal = RefusalEvidenceBodies::derive(
+        let expected_refusal = RefusalEvidenceBodies::derive_with_authentication(
             &context,
             materialized.basis(),
             refusal_tx_id,
             RefusalCode::ExpectedOldRefMismatch,
+            AdmissionAuthentication::OperatorAssertion,
         )
         .expect("fixed terminal refusal has canonical evidence");
         assert_eq!(
@@ -14588,11 +14589,12 @@ mod tests {
         else {
             panic!("the stale expected-old assertion receives its authenticated terminal refusal");
         };
-        let expected_refusal = RefusalEvidenceBodies::derive(
+        let expected_refusal = RefusalEvidenceBodies::derive_with_authentication(
             &stale_context,
             basis_before_refusal.basis(),
             refusal_command.tx_id,
             RefusalCode::ExpectedOldRefMismatch,
+            AdmissionAuthentication::OperatorAssertion,
         )
         .expect("the terminal refusal derives its basis-bound evidence");
         assert_published_evidence_body::<RefusalEvidence>(
