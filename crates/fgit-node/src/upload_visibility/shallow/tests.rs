@@ -102,7 +102,7 @@ fn a_have_at_the_old_boundary_does_not_subtract_the_ancestors_being_deepened() {
         let request = request(tip.0, Some(2), vec![tip.0], vec![tip.0]);
         assert_eq!(
             ids(&graph, &request),
-            BTreeSet::from([middle.0, middle.1, middle.2])
+            BTreeSet::from(<[GitOid; 3]>::from(middle))
         );
         assert_eq!(
             update(&graph, &request),
@@ -130,7 +130,7 @@ fn unshallow_also_removes_an_authorized_natural_root_outside_the_wanted_history(
         );
         assert_eq!(
             ids(&graph, &request),
-            BTreeSet::from([root.0, root.1, root.2])
+            BTreeSet::from(<[GitOid; 3]>::from(root))
         );
         assert_eq!(
             update(&graph, &request),
@@ -149,7 +149,10 @@ fn ordinary_fetch_preserves_existing_shallow_history_without_unshallowing_it() {
     let previous = graph.commit(&[root.0]);
     let tip = graph.commit(&[previous.0]);
     let request = request(tip.0, None, vec![previous.0], vec![previous.0]);
-    assert_eq!(ids(&graph, &request), BTreeSet::from([tip.0, tip.1, tip.2]));
+    assert_eq!(
+        ids(&graph, &request),
+        BTreeSet::from(<[GitOid; 3]>::from(tip))
+    );
     assert_eq!(
         update(&graph, &request),
         ShallowUpdate {
@@ -213,7 +216,10 @@ fn unknown_client_markers_are_not_disclosed_and_never_authorize_wants() {
     let tip = graph.commit(&[]);
     let missing = GitOid::from_hex(graph.format, &"f".repeat(40)).unwrap();
     let mut request = request(tip.0, Some(2), vec![missing], vec![missing]);
-    assert_eq!(ids(&graph, &request), BTreeSet::from([tip.0, tip.1, tip.2]));
+    assert_eq!(
+        ids(&graph, &request),
+        BTreeSet::from(<[GitOid; 3]>::from(tip))
+    );
     assert_eq!(
         update(&graph, &request),
         ShallowUpdate {
@@ -399,7 +405,7 @@ fn unshallow_supplies_other_visible_histories_but_finite_depth_does_not() {
         );
         assert_eq!(
             ids(&graph, &request),
-            BTreeSet::from([root.0, root.1, root.2]),
+            BTreeSet::from(<[GitOid; 3]>::from(root)),
             "a finite depth change does not remove a separate client's boundary"
         );
     }

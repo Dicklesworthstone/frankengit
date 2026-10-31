@@ -217,26 +217,24 @@ impl<'a> Probe<'a> {
     }
 }
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for Probe<'_> {
-    fn snapshot_async<'a>(
+    async fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a FsqliteCx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
-        async move {
-            let index = self.snapshots.fetch_add(1, Ordering::SeqCst);
-            if matches!(self.mode, Mode::InterruptSecondSnapshot) && index == 1 {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::DurabilityProfileUnavailable,
-                ));
-            }
-            self.inner
-                .snapshot_async(authority, cx, basis, authenticated)
-                .await
+    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
+        let index = self.snapshots.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.mode, Mode::InterruptSecondSnapshot) && index == 1 {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::DurabilityProfileUnavailable,
+            ));
         }
+        self.inner
+            .snapshot_async(authority, cx, basis, authenticated)
+            .await
     }
-    fn materialize_commit_async<'a>(
+    async fn materialize_commit_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a FsqliteCx,
@@ -244,27 +242,25 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for Probe<'_> {
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            let prepared = self
-                .inner
-                .materialize_commit_async(authority, cx, basis, request, fold, closure)
-                .await?;
-            let index = self.commits.fetch_add(1, Ordering::SeqCst);
-            if matches!(self.mode, Mode::RaceSecondCommit) && index == 1 {
-                // The second candidate is staged but has not attempted CAS.
-                // Advance the real head now, forcing its next CAS to lose.
-                Box::pin(publish_unrelated_refusal(
-                    authority,
-                    cx,
-                    self.materializer,
-                    &self.context,
-                    basis,
-                ))
-                .await;
-            }
-            Ok(prepared)
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        let prepared = self
+            .inner
+            .materialize_commit_async(authority, cx, basis, request, fold, closure)
+            .await?;
+        let index = self.commits.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.mode, Mode::RaceSecondCommit) && index == 1 {
+            // The second candidate is staged but has not attempted CAS.
+            // Advance the real head now, forcing its next CAS to lose.
+            Box::pin(publish_unrelated_refusal(
+                authority,
+                cx,
+                self.materializer,
+                &self.context,
+                basis,
+            ))
+            .await;
         }
+        Ok(prepared)
     }
     fn materialize_refusal_async<'a>(
         &'a self,

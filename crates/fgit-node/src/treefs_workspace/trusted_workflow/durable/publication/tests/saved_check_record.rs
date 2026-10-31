@@ -44,7 +44,7 @@ fn selection(run: &TrustedWorkflowRun) -> Selection {
 
 fn load(
     run: &TrustedWorkflowRun,
-    selected: Selection,
+    selected: &Selection,
     live: &dyn Fn() -> bool,
 ) -> Result<WorkflowCheckRecord, super::super::super::TrustedWorkflowFailure> {
     OneNode::trusted_workflow_check_record(
@@ -66,7 +66,7 @@ fn actual_saved_job_loads_exact_publication_record_without_source_node_or_final_
         let selected = selection(&run);
         let expected = submitted_record(&run);
         let before = materialize(&node).basis().id();
-        assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
+        assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
         assert_eq!(
             materialize(&node).basis().id(),
             before,
@@ -82,7 +82,7 @@ fn actual_saved_job_loads_exact_publication_record_without_source_node_or_final_
         let marker = fs::read(&marker_path).unwrap();
         let owner = fs::read(&owner_path).unwrap();
         for _ in 0..2 {
-            let record = load(&run, selected, &|| true).unwrap();
+            let record = load(&run, &selected, &|| true).unwrap();
             assert_eq!(record, expected);
             assert_eq!(record.source_commit.algorithm(), format);
             assert_eq!(record.conclusion, WorkflowCheckConclusion::Success);
@@ -118,22 +118,22 @@ fn exact_saved_job_selection_rejects_foreign_scope_pin_batch_fact_lock_and_cance
             6 => invalid.minimum.1 = Commitment::of_bytes(b"unretained checkpoint").digest(),
             _ => invalid.minimum.0 = 71,
         }
-        assert!(load(&run, invalid, &|| true).is_err(), "selection {case}");
-        assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
+        assert!(load(&run, &invalid, &|| true).is_err(), "selection {case}");
+        assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
         assert_eq!(fs::read(&journal_path).unwrap(), before);
     }
     let held = run.open_check_journal(None, &|| true).unwrap();
     assert!(
-        load(&run, selected, &|| true).is_err(),
+        load(&run, &selected, &|| true).is_err(),
         "another owner holds the journal lock"
     );
     drop(held);
-    assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
-    assert!(load(&run, selected, &|| false).is_err());
-    assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
+    assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
+    assert!(load(&run, &selected, &|| false).is_err());
+    assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
     let checkpoints = std::cell::Cell::new(0_usize);
     assert_eq!(
-        load(&run, selected, &|| {
+        load(&run, &selected, &|| {
             checkpoints.set(checkpoints.get() + 1);
             true
         })
@@ -144,14 +144,14 @@ fn exact_saved_job_selection_rejects_foreign_scope_pin_batch_fact_lock_and_cance
     assert!(last > 1);
     checkpoints.set(0);
     assert!(
-        load(&run, selected, &|| {
+        load(&run, &selected, &|| {
             checkpoints.set(checkpoints.get() + 1);
             checkpoints.get() < last
         })
         .is_err(),
         "cancellation during final lowering cannot return a partial record"
     );
-    assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
+    assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
     assert!(
         OneNode::trusted_workflow_check_record(
             &run.run_directory,
@@ -179,7 +179,7 @@ fn exact_saved_job_selection_rejects_foreign_scope_pin_batch_fact_lock_and_cance
     );
     assert!(!missing.exists());
     assert_eq!(fs::read(&journal_path).unwrap(), before);
-    assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
+    assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
     // Roll back to a VALID earlier prefix. Without the independently retained
     // newer pin this is still an internally consistent completed-job history.
     let mut journal = run.open_check_journal(None, &|| true).unwrap();
@@ -195,13 +195,13 @@ fn exact_saved_job_selection_rejects_foreign_scope_pin_batch_fact_lock_and_cance
         ..selected
     };
     drop(journal);
-    assert_eq!(load(&run, pinned, &|| true).unwrap(), expected);
+    assert_eq!(load(&run, &pinned, &|| true).unwrap(), expected);
     fs::write(&journal_path, &before).unwrap();
     assert!(
-        load(&run, pinned, &|| true).is_err(),
+        load(&run, &pinned, &|| true).is_err(),
         "the saved minimum must detect prefix rollback"
     );
-    assert_eq!(load(&run, selected, &|| true).unwrap(), expected);
+    assert_eq!(load(&run, &selected, &|| true).unwrap(), expected);
     assert_eq!(fs::read(&journal_path).unwrap(), before);
     node.shutdown().unwrap();
 }
@@ -227,7 +227,7 @@ fn acknowledged_saved_failure_stays_publishable_without_fabricating_success_or_c
     let retained = journal.retained_batches();
     drop(journal);
     let before = fs::read(run.run_directory.join("check-proposals.journal")).unwrap();
-    let record = load(&run, selected, &|| true).unwrap();
+    let record = load(&run, &selected, &|| true).unwrap();
     assert_eq!(record, expected);
     assert_eq!(record.conclusion, WorkflowCheckConclusion::Failure);
     assert_eq!(

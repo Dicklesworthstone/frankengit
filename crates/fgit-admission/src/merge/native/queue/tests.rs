@@ -71,7 +71,7 @@ fn queue_guards_are_sealed_even_when_canonical_event_bytes_are_identical() {
             different
         );
     }
-    let mut actor = context.clone();
+    let mut actor = context;
     actor.principal_id = PrincipalId::from_bytes([9; 16]);
     assert_ne!(
         proposal(&actor, &command).unwrap().1.derive().unwrap().0,

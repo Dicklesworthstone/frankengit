@@ -26,23 +26,21 @@ struct FailSecond<'a> {
     snapshots: AtomicUsize,
 }
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for FailSecond<'_> {
-    fn snapshot_async<'a>(
+    async fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a FsqliteCx,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
-        async move {
-            if self.snapshots.fetch_add(1, Ordering::SeqCst) == 1 {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::DurabilityProfileUnavailable,
-                ));
-            }
-            self.inner
-                .snapshot_async(authority, cx, basis, authenticated)
-                .await
+    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
+        if self.snapshots.fetch_add(1, Ordering::SeqCst) == 1 {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::DurabilityProfileUnavailable,
+            ));
         }
+        self.inner
+            .snapshot_async(authority, cx, basis, authenticated)
+            .await
     }
     fn materialize_commit_async<'a>(
         &'a self,

@@ -18,7 +18,7 @@ fn repeated_relative_deepening_crosses_successive_old_boundaries_without_resendi
             let request = relative(tip.0, 1, vec![old], vec![tip.0]);
             assert_eq!(
                 ids(&graph, &request),
-                BTreeSet::from([next.0, next.1, next.2])
+                BTreeSet::from(<[GitOid; 3]>::from(next))
             );
             assert_eq!(
                 update(&graph, &request),
@@ -68,7 +68,7 @@ fn nearest_reachable_marker_defines_the_offset_not_input_order_or_a_foreign_hist
         assert_eq!(update(&graph, &no_match).shallow, vec![tip.0]);
         assert_eq!(
             ids(&graph, &no_match),
-            BTreeSet::from([tip.0, tip.1, tip.2])
+            BTreeSet::from(<[GitOid; 3]>::from(tip))
         );
     }
 }

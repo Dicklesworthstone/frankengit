@@ -31,7 +31,7 @@ fn session_pages_match_stateless_oracle_with_damage_in_both_git_domains() {
             let mut checked = 0;
             let mut findings = 0;
             while let Some(page) = node.runtime().block_on(session.next_page()).unwrap() {
-                let oracle = run(&node, query).unwrap();
+                let oracle = run(&node, &query).unwrap();
                 assert_eq!(format!("{page:?}"), format!("{oracle:?}"));
                 checked += page.checked_objects();
                 findings += page.findings().len();
@@ -89,7 +89,7 @@ fn current_authority_movement_is_terminal_even_with_identical_membership() {
         ));
         drop(session);
         assert!(
-            run(&node, ScrubQuery::default())
+            run(&node, &ScrubQuery::default())
                 .unwrap()
                 .entire_selection_verified()
         );
@@ -172,7 +172,7 @@ fn page_byte_allowance_may_shrink_but_never_widen() {
         .unwrap();
     let oracle = run(
         &node,
-        ScrubQuery {
+        &ScrubQuery {
             max_payload_bytes: first_size,
             ..pages()
         },
@@ -232,7 +232,7 @@ fn retained_membership_does_not_cache_object_health() {
 fn resumed_session_cannot_claim_unobserved_prefix_coverage() {
     let (_scratch, node) = setup(GitHashAlgorithm::Sha1);
     let (objects, _) = publish(&node);
-    let first = run(&node, pages()).unwrap();
+    let first = run(&node, &pages()).unwrap();
     let request = node.request_context();
     let mut session = node
         .runtime()

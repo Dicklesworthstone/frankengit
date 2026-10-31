@@ -779,6 +779,16 @@ impl QueueReceiptDestination {
     }
 }
 
+fn deferred_once<T>(
+    work: impl FnOnce() -> T + Send,
+) -> impl std::future::Future<Output = T> + Send {
+    let mut work = Some(work);
+    std::future::poll_fn(move |_| match work.take() {
+        Some(work) => std::task::Poll::Ready(work()),
+        None => std::task::Poll::Pending,
+    })
+}
+
 impl OutboxDestination<Cx> for QueueReceiptDestination {
     fn destination(&self) -> AsciiSlug {
         AsciiSlug::from_static("forge-projection")
@@ -788,71 +798,77 @@ impl OutboxDestination<Cx> for QueueReceiptDestination {
         DownstreamIdempotency::Strong
     }
 
-    async fn probe<'a>(
+    fn probe<'a>(
         &'a mut self,
         _cx: &'a Cx,
         request: &'a DeliveryRequest<'_>,
-    ) -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
-        self.probes += 1;
-        let expected = self.bytes(request)?;
-        match fs::read(self.root.join(request.key.to_string())) {
-            Ok(bytes) if bytes == expected => {
-                self.sync_directory()?;
-                Ok((
-                    ProbeVerdict::Delivered,
-                    b"synced queue receiver receipt".to_vec(),
-                ))
+    ) -> impl std::future::Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + Send + 'a
+    {
+        deferred_once(move || {
+            self.probes += 1;
+            let expected = self.bytes(request)?;
+            match fs::read(self.root.join(request.key.to_string())) {
+                Ok(bytes) if bytes == expected => {
+                    self.sync_directory()?;
+                    Ok((
+                        ProbeVerdict::Delivered,
+                        b"synced queue receiver receipt".to_vec(),
+                    ))
+                }
+                Ok(_) => Err(RefusalCode::EvidenceInvalid),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok((ProbeVerdict::NotDelivered, Vec::new()))
+                }
+                Err(_) => Err(RefusalCode::EvidenceMissing),
             }
-            Ok(_) => Err(RefusalCode::EvidenceInvalid),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok((ProbeVerdict::NotDelivered, Vec::new()))
-            }
-            Err(_) => Err(RefusalCode::EvidenceMissing),
-        }
+        })
     }
 
-    async fn deliver<'a>(
+    fn deliver<'a>(
         &'a mut self,
         _cx: &'a Cx,
         request: &'a DeliveryRequest<'_>,
         _attempt: u32,
-    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
-        use std::io::Write;
-        self.sends += 1;
-        let bytes = self.bytes(request)?;
-        fs::create_dir_all(&self.root).map_err(|_| RefusalCode::EvidenceMissing)?;
-        fs::File::open(self.root.parent().ok_or(RefusalCode::EvidenceMissing)?)
-            .and_then(|parent| parent.sync_all())
-            .map_err(|_| RefusalCode::EvidenceMissing)?;
-        let staging = self
-            .root
-            .join(format!(".pending-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&staging)
-            .map_err(|_| RefusalCode::EvidenceMissing)?;
-        let result = (|| {
-            file.write_all(&bytes)
+    ) -> impl std::future::Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a
+    {
+        deferred_once(move || {
+            use std::io::Write;
+            self.sends += 1;
+            let bytes = self.bytes(request)?;
+            fs::create_dir_all(&self.root).map_err(|_| RefusalCode::EvidenceMissing)?;
+            fs::File::open(self.root.parent().ok_or(RefusalCode::EvidenceMissing)?)
+                .and_then(|parent| parent.sync_all())
                 .map_err(|_| RefusalCode::EvidenceMissing)?;
-            file.sync_all().map_err(|_| RefusalCode::EvidenceMissing)?;
-            let target = self.root.join(request.key.to_string());
-            match fs::hard_link(&staging, &target) {
-                Ok(()) => Ok(DeliveryVerdict::Accepted),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if fs::read(&target).map_err(|_| RefusalCode::EvidenceMissing)? == bytes {
-                        Ok(DeliveryVerdict::DuplicateSuppressed)
-                    } else {
-                        Err(RefusalCode::EvidenceInvalid)
+            let staging = self
+                .root
+                .join(format!(".pending-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&staging)
+                .map_err(|_| RefusalCode::EvidenceMissing)?;
+            let result = (|| {
+                file.write_all(&bytes)
+                    .map_err(|_| RefusalCode::EvidenceMissing)?;
+                file.sync_all().map_err(|_| RefusalCode::EvidenceMissing)?;
+                let target = self.root.join(request.key.to_string());
+                match fs::hard_link(&staging, &target) {
+                    Ok(()) => Ok(DeliveryVerdict::Accepted),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if fs::read(&target).map_err(|_| RefusalCode::EvidenceMissing)? == bytes {
+                            Ok(DeliveryVerdict::DuplicateSuppressed)
+                        } else {
+                            Err(RefusalCode::EvidenceInvalid)
+                        }
                     }
+                    Err(_) => Err(RefusalCode::EvidenceMissing),
                 }
-                Err(_) => Err(RefusalCode::EvidenceMissing),
-            }
-        })();
-        drop(file);
-        fs::remove_file(&staging).map_err(|_| RefusalCode::EvidenceMissing)?;
-        self.sync_directory()?;
-        Ok((result?, b"synced queue receiver receipt".to_vec()))
+            })();
+            drop(file);
+            fs::remove_file(&staging).map_err(|_| RefusalCode::EvidenceMissing)?;
+            self.sync_directory()?;
+            Ok((result?, b"synced queue receiver receipt".to_vec()))
+        })
     }
 }
 
