@@ -217,14 +217,17 @@ Dequeue requires pull_request and reason. Reorder repeats entry=N for every
 queued PR in its exact desired order. Queue management moves no refs and grants
 no review or merge authority. Outcome recovery retains its separate grant.
 
---allow-queue-landings independently enables POST /api/v1/queues/N/land for
-queues-land tokens whose reference-write ceiling permits the target branch.
-The exact queue head is fast-forwarded to its existing source commit; queue
-formation, PR merge and queue completion publish in one canonical decision.
-Supply the enqueue coordinates with positive expected_version and add
-expected_policy_epoch; priority is inapplicable. Required reviews, checks and
-current branch protection still apply. This grants no queue reads or management
-and accepts no merge-method fallback, actor override or supplied success claim.
+--allow-queue-landings independently enables POST /api/v1/queues/N/land and
+/land-candidate for queues-land tokens whose reference-write ceiling permits
+the target branch. /land uses form metadata and fast-forwards the exact head.
+/land-candidate uses multipart command + bundle parts to publish an exact
+prepared two-parent candidate. Queue formation, PR merge and queue completion
+publish with the target move in one canonical decision. Supply the enqueue
+coordinates with positive expected_version and expected_policy_epoch; candidate
+metadata also requires merge_base and expected_commit. Priority is inapplicable.
+Required reviews, checks and queue-required branch policy still apply. This grants
+no queue reads or management and accepts no merge-method fallback, actor override
+or supplied success claim. A decided candidate retry may omit the bundle part.
 A narrowed token cannot retry a denied target; use outcomes-read to recover the
 original key. See docs/NATIVE_HTTP_QUEUES.md for exact guards and recovery.
 

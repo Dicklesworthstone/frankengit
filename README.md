@@ -200,20 +200,30 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
-### Native merge queue management
+### Native merge queues
 
-`fg queue enqueue|dequeue|reorder|show|list` exposes versioned queue management
-through the native metadata admission path. Enqueue binds an open PR's exact
-version and current source/target tips; mutations preserve their original
-idempotency key and terminal outcome across retries and restart. Reads return
-complete, visibility-filtered queues at an authenticated current or retained
-head. See [Native merge queue management](docs/NATIVE_MERGE_QUEUE.md) for command
-examples, snapshot pagination and recovery.
+`fg queue enqueue|dequeue|reorder|show|list` manages durable queue membership and
+order at exact native PR/ref observations. `fg queue land` fast-forwards the
+first queued PR; `fg queue prepare` and `land-candidate` construct and publish a
+real two-parent candidate for a divergent head. Each landing moves the target,
+merges the PR and completes the queue entry in one Repository Commit Record.
+Commands retain their original transaction outcome across retries and restart.
 
-This is a trusted local operator surface. It manages membership and order;
-speculative batch execution, required-check orchestration and atomic batch
-landing remain work under FG-083a. Queue management does not move Git refs or
-grant review approval.
+Administrators can require canonical queue landing for an exact branch with
+`fg protection set ... --require-merge-queue refs/heads/main`. Ordinary ref
+publication and PR merges then refuse; queue landing still requires the selected
+reviews, workflow checks and authentication policy. The local CLI, authenticated
+HTTP, MCP and browser policy controls expose the same queue requirement.
+
+Authenticated [HTTP queue operations](docs/NATIVE_HTTP_QUEUES.md) independently
+grant queue reads, management and landing. Both fast-forward and uploaded
+two-parent candidate landing use `queues-land`, the separate deployment switch
+and the credential's target reference ceiling. Queue membership and preparation
+alone never grant publication approval. Speculative multi-PR trains, synthetic
+queue refs and autonomous queue execution remain work under FG-083a.
+See [Native merge queues](docs/NATIVE_MERGE_QUEUE.md) for exact commands,
+[branch protection](docs/MANDATORY_REVIEW_PROTECTION.md) for queue-required
+policies, and the HTTP guide for upload limits and recovery.
 
 ### Retained outcome checkpoints
 

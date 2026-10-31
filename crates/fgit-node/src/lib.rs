@@ -7913,7 +7913,7 @@ impl NodeConfig {
         self.http_queue_management
     }
 
-    /// Enables exact fast-forward queue-head landing through authenticated HTTP.
+    /// Enables exact fast-forward and two-parent queue-head landing through HTTP.
     /// This grants no token scope, queue management, or exemption from protection.
     #[must_use]
     pub const fn with_http_queue_landings(mut self) -> Self {

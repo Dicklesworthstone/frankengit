@@ -18,6 +18,27 @@ pub(super) use collaboration::source_upload::{
     SourceUploadKind, read_source_upload, source_upload, source_upload_boundary,
 };
 
+// Queue candidate publication shares only bounded byte ingress. These helpers
+// confer no PR capability and retain optional bundle bytes for terminal recovery.
+pub(super) const CANDIDATE_UPLOAD_BYTES: usize = collaboration::CANDIDATE_UPLOAD_BYTES;
+pub(super) fn candidate_boundary(media: &str) -> Result<&str, ApiError> {
+    collaboration::candidate_boundary(media)
+}
+pub(super) fn read_candidate_upload(
+    reader: &mut impl Read,
+    framing: BodyFraming,
+    limits: HttpLimits,
+) -> Result<Vec<u8>, ApiError> {
+    collaboration::read_upload_bounded(reader, framing, limits, CANDIDATE_UPLOAD_BYTES)
+}
+pub(super) fn candidate_upload<'a>(
+    bytes: &'a [u8],
+    boundary: &str,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(&'a [u8], Option<&'a [u8]>), ApiError> {
+    collaboration::publication_upload(bytes, boundary, live)
+}
+
 // Replay resolution uses exactly the existing resolution part policy. Expose
 // byte-only adapters, not a PR request, subject, credential or execution method.
 pub(super) const MAX_RESOLUTION_UPLOAD_BYTES: usize =

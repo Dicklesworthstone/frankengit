@@ -91,7 +91,7 @@ must be permitted before publication starts.
 | Bundle fetch | Every explicit destination mapping; an allowed source does not authorize a different destination. |
 | Reviewed merge or squash | The target branch. |
 | Pull-request fast-forward | The target branch. |
-| Merge queue head fast-forward | The target branch; queue membership authority alone cannot publish it. |
+| Merge queue head fast-forward or two-parent candidate | The target branch; queue membership authority alone cannot publish it. |
 
 A mixed request containing one denied reference is refused as a whole. In
 particular, a non-atomic Git push cannot publish an allowed first command before
@@ -117,7 +117,7 @@ merge it. Issue/PR metadata, reviews, check reads, protection administration, LF
 and workflow-artifact reads retain their existing independent service grants.
 Deployment enablement switches remain additional ceilings.
 
-Queue head landing requires `queues-land` and `--allow-queue-landings` as well
+Both queue head landing profiles require `queues-land` and `--allow-queue-landings` as well
 as a permitted target. The separate `queues-read` / `queues-write` scopes and
 `--allow-queues` manage intent without moving refs and can use a `none` ceiling.
 See [the HTTP queue API](NATIVE_HTTP_QUEUES.md) for exact landing guards.

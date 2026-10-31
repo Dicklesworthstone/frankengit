@@ -4,6 +4,9 @@
 mod support;
 use support::*;
 
+#[path = "queue_landing_http/candidate.rs"]
+mod candidate;
+
 use std::io::Write;
 use std::net::Shutdown;
 

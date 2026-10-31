@@ -1,4 +1,5 @@
 use super::*;
+mod candidate;
 use fgit_forge::merge_queue::QueueCommandAction;
 use fgit_forge::{ExpectedVersion, QueueNumber};
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryIncarnationId};

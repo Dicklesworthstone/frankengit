@@ -11,8 +11,8 @@ target move, PR merge and queue completion.
 queue head. `fg queue land-candidate` validates its bundle and publishes the
 candidate with the same atomic queue/PR/ref transition. Both landing profiles
 handle one exact queue head. Speculative multi-PR trains, synthetic queue refs,
-autonomous landing and native queue-required branch protection remain separate
-work under `frankengit-fg083a-merge-queue-impl-95fm`. Queue membership and
+autonomous landing remain separate work under
+`frankengit-fg083a-merge-queue-impl-95fm`. Queue membership and
 preparation do not grant approval; landing enforces current review, check,
 authentication and protected-ref rules.
 
@@ -21,9 +21,10 @@ authentication and protected-ref rules.
 Every command requires `--trusted-local`. The operator supplies the principal
 for writes; this is the existing explicit operator-asserted authentication
 profile, not a remote credential or an agent capability. Authenticated remote
-membership management and fast-forward landing are available through the
-separately scoped [HTTP queue API](NATIVE_HTTP_QUEUES.md). Candidate bundle
-landing is currently a local CLI/native API operation.
+membership management and both landing profiles are available through the
+separately scoped [HTTP queue API](NATIVE_HTTP_QUEUES.md). The candidate endpoint
+accepts an exact prepared bundle with the queue/PR/ref/policy observations;
+HTTP publication does not construct or refresh that candidate implicitly.
 
 Writes also require the repository's exact incarnation, an original client
 idempotency key, the queue number, its target branch and expected queue version.
@@ -32,6 +33,28 @@ the first enqueue. Existing queues require their exact positive version.
 
 The queue number remains bound to its original target branch even after every
 entry is removed. An empty existing queue is not a new stream.
+
+## Require queue landing on a protected branch
+
+An administrator can add `--require-merge-queue refs/heads/main` to a complete
+`fg protection set` replacement. The branch may require only a queue, or combine
+that requirement with exact candidate reviews and workflow checks. Preserve all
+other intended branch rules and administrators when replacing the policy; see
+[mandatory branch protection](MANDATORY_REVIEW_PROTECTION.md).
+
+Ordinary receive, imports, branch changes, workspace/rebase publication and
+ordinary PR merges cannot supply queue authority. Only a validated canonical
+queue landing at the selected repository basis can satisfy the requirement.
+Both `land` and `land-candidate`, including their authenticated HTTP counterparts,
+can qualify. Any native queue targeting that exact branch can qualify, but only
+its current head may land. Queue membership, a synthetic-looking event batch,
+a successful local workflow journal or a caller-supplied receipt is insufficient.
+
+Installing or replacing protection advances the policy epoch. A newly intended
+landing must name the current epoch; an already decided request keeps its
+original outcome. Upgrade all writers before activating the required policy
+encoding. Queue preparation, inspection, review votes and workflow execution
+remain available because they do not publish a protected target move.
 
 ## Enqueue an exact pull request
 
@@ -271,6 +294,13 @@ fg queue land-candidate "$STORAGE" "$TENANT" "$REPOSITORY" 1 \
   --merge-base "$MERGE_BASE" --expected-commit "$CANDIDATE_COMMIT" \
   --bundle queue-head.bundle
 ```
+
+For authenticated remote publication, send the same exact observations and
+bundle to `POST /api/v1/queues/{number}/land-candidate` using the
+[bounded multipart profile](NATIVE_HTTP_QUEUES.md#prepared-two-parent-candidate-landing).
+The remote bundle limit is 64 MiB, subject to a smaller configured HTTP limit.
+The `queues-land` grant and current target reference ceiling apply independently
+of queue management and ordinary PR merge permissions.
 
 The node privately quarantines the bundle, verifies the actual commit and
 closure, proves ordered parents `[target-before, source]` and common ancestry,

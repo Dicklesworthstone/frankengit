@@ -35,6 +35,10 @@ pub(super) enum Operation {
     Land {
         number: QueueNumber,
     },
+    LandCandidate {
+        number: QueueNumber,
+        boundary: String,
+    },
 }
 
 #[derive(Debug)]
@@ -104,6 +108,26 @@ impl<'a> Request<'a> {
                 {
                     return Err(ApiError::bad("invalid_mutation_envelope"));
                 }
+                if let Some(number_text) = suffix
+                    .strip_prefix('/')
+                    .and_then(|text| text.strip_suffix("/land-candidate"))
+                {
+                    let boundary = super::super::pulls::candidate_boundary(
+                        head.content_type.ok_or_else(ApiError::media)?,
+                    )?;
+                    if matches!(head.body, BodyFraming::ContentLength(size)
+                        if size > super::super::pulls::CANDIDATE_UPLOAD_BYTES as u64)
+                    {
+                        return Err(ApiError::too_large());
+                    }
+                    return Ok(Self {
+                        repository_route,
+                        operation: Operation::LandCandidate {
+                            number: number(number_text)?,
+                            boundary: boundary.to_owned(),
+                        },
+                    });
+                }
                 if !head.content_type.is_some_and(|media| {
                     media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
                         || media.eq_ignore_ascii_case(
@@ -150,12 +174,15 @@ impl<'a> Request<'a> {
     pub(in crate::smart_http::server) const fn is_mutation(&self) -> bool {
         matches!(
             self.operation,
-            Operation::Mutate { .. } | Operation::Land { .. }
+            Operation::Mutate { .. } | Operation::Land { .. } | Operation::LandCandidate { .. }
         )
     }
 
     pub(super) const fn is_landing(&self) -> bool {
-        matches!(self.operation, Operation::Land { .. })
+        matches!(
+            self.operation,
+            Operation::Land { .. } | Operation::LandCandidate { .. }
+        )
     }
 
     pub(super) fn landing_command(
@@ -351,7 +378,7 @@ impl<'a> Request<'a> {
     }
 }
 
-fn binding(
+pub(super) fn binding(
     fields: &mut BTreeMap<String, String>,
     format: GitHashAlgorithm,
     incarnation: RepositoryIncarnationId,
@@ -374,7 +401,7 @@ fn binding(
     Ok(())
 }
 
-fn take(fields: &mut BTreeMap<String, String>, key: &str) -> Result<String, ApiError> {
+pub(super) fn take(fields: &mut BTreeMap<String, String>, key: &str) -> Result<String, ApiError> {
     fields
         .remove(key)
         .ok_or_else(|| ApiError::bad("required_field_missing"))
@@ -382,11 +409,11 @@ fn take(fields: &mut BTreeMap<String, String>, key: &str) -> Result<String, ApiE
 fn number(text: &str) -> Result<QueueNumber, ApiError> {
     QueueNumber::try_new(parse_decimal(text)?).ok_or_else(|| ApiError::bad("invalid_queue_number"))
 }
-fn pull_number(text: &str) -> Result<PullRequestNumber, ApiError> {
+pub(super) fn pull_number(text: &str) -> Result<PullRequestNumber, ApiError> {
     PullRequestNumber::try_new(parse_decimal(text)?)
         .ok_or_else(|| ApiError::bad("invalid_pull_request_number"))
 }
-fn branch(
+pub(super) fn branch(
     fields: &mut BTreeMap<String, String>,
     plain: &str,
     hex: &str,
@@ -423,7 +450,7 @@ fn branch(
     }
     RefName::try_new(&bytes).map_err(|_| ApiError::bad("invalid_ref"))
 }
-fn oid(value: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
+pub(super) fn oid(value: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
     if value.len() != format.digest_len() * 2
         || !value
             .bytes()

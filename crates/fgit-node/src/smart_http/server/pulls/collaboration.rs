@@ -31,6 +31,20 @@ pub(super) const CANDIDATE_UPLOAD_BYTES: usize = multipart::MAX_UPLOAD_BYTES;
 pub(super) fn candidate_boundary(content_type: &str) -> Result<&str, ApiError> {
     multipart::boundary(content_type).map_err(|_| ApiError::media())
 }
+/// Publication may recover an original terminal without the candidate bytes.
+/// This is the established closed command/bundle parser, without a PR grant.
+pub(super) fn publication_upload<'a>(
+    bytes: &'a [u8],
+    boundary: &str,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(&'a [u8], Option<&'a [u8]>), ApiError> {
+    let upload = multipart::parse(bytes, boundary, live).map_err(|error| match error {
+        multipart::Error::Limit => ApiError::too_large(),
+        multipart::Error::Framing => ApiError::bad("invalid_candidate_upload"),
+        multipart::Error::Cancelled => ApiError::from_status(Status::Timeout, false),
+    })?;
+    Ok((upload.command, upload.bundle))
+}
 /// Inspection requires actual bytes even when a similar review is terminal.
 /// The shared MIME parser still owns part order, byte bounds and delimiters.
 pub(super) fn inspection_upload<'a>(

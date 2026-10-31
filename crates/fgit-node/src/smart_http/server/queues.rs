@@ -1,5 +1,6 @@
-//! Independently granted queue management and exact fast-forward head landing.
+//! Independently granted queue management and exact native head landing.
 //! Membership grants never authorize the separate protected code publication.
+mod candidate;
 mod output;
 mod request;
 #[cfg(test)]
@@ -16,7 +17,8 @@ use super::super::drive_request_while;
 use super::issues::{ApiError, Reply, admission_error, read_form};
 use super::{Profile, Status, retry_key};
 use crate::{
-    GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
+    GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
+    NodeWorkspaceRefusal, OneNode,
 };
 use request::Operation;
 pub(super) use request::Request;
@@ -137,6 +139,54 @@ pub(super) fn execute(
                 },
                 body: output::show(node, *number, *expected_head, &selected, maximum)?,
                 terminal: None,
+            })
+        }
+        Operation::LandCandidate { boundary, .. } => {
+            let bytes = super::pulls::read_candidate_upload(reader, framing, limits)?;
+            let (metadata, bundle) = super::pulls::candidate_upload(&bytes, boundary, &mut live)?;
+            if !live() {
+                return Err(ApiError::from_status(Status::Timeout, false));
+            }
+            let command = request.candidate_landing_command(
+                metadata,
+                node.object_format,
+                node.repository_incarnation_id(),
+            )?;
+            // This gateway ceiling applies even to known original outcomes;
+            // narrowed credentials can instead use independent outcomes-read.
+            super::require_ref_writes(authenticated, [&command.merge.target_ref])?;
+            let (tx, terminal) = drive_request_while(
+                node,
+                &context,
+                node.land_queue_head_bundle_durable_in(
+                    &context,
+                    session,
+                    &command,
+                    bundle.unwrap_or(&[]),
+                    Default::default(),
+                ),
+                &mut live,
+            )
+            .map_err(|error| match error {
+                NodeWorkspaceRefusal::WorkspacePublication(source) => admission_error(*source),
+                _ => ApiError::unknown(),
+            })?;
+            // A canonical terminal wins over a late timeout. Never reread a
+            // later queue, policy or PR to describe this historical decision.
+            let body = output::candidate_landing(node, principal, &command, tx, terminal);
+            if body.len() > maximum {
+                eprintln!(
+                    "Queue candidate HTTP response limit after canonical outcome for transaction {tx}; recover the original key"
+                );
+                return Err(ApiError::unknown());
+            }
+            Ok(Reply {
+                status: match terminal.outcome {
+                    DecisionOutcome::Committed { .. } => Status::Success,
+                    DecisionOutcome::Refused { .. } => Status::Conflict,
+                },
+                body,
+                terminal: Some((tx, terminal)),
             })
         }
         Operation::Mutate { .. } | Operation::Land { .. } => {
