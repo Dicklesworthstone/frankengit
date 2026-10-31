@@ -26,7 +26,7 @@ Every advertised direct ref is created in one atomic transaction; an existing
 destination name refuses all updates. HEAD remains an advertisement. Native
 SHA-1 and SHA-256, internal OFS/REF deltas and forward REF bases are supported.
 Prerequisites, external bases, filtered bundles and implicit force are refused.
-Incremental sync-import and mapped fetch keep their existing buffered profiles.
+Mapped fetch also accepts --file-backed. Incremental sync-import remains buffered.
 
 Input and expanded-byte defaults are 128 MiB; each accepts 1..16384 MiB.
 The independent blob allowance defaults to 32 MiB and accepts 1..16384 MiB.
@@ -34,8 +34,9 @@ The metadata/delta-program allocation limit defaults to 32 MiB, accepts 1..32,
 and does not grow when the blob allowance grows. Object count defaults to
 100000 (ceiling 1000000), ref headers to 4096 (including HEAD, ceiling 4096),
 and graph edges to 1000000 (ceiling 8000000). Independent work limits remain.
-Timeout defaults to 300 seconds, accepts 1..3600, and is narrowed by an
-explicit global timeout. Cancellation is cooperative at native checkpoints.
+Native processing timeout defaults to 300 seconds, accepts 1..3600, and is
+narrowed by an explicit global timeout. It begins after stdin credentials are
+collected. Cancellation is cooperative at native checkpoints.
 
 The Unix input must be an ordinary non-symlink regular file whose components
 remain under the local operator's control. Verified payloads use private
@@ -94,6 +95,54 @@ fn mib(flag: &str, value: &str, maximum: u64) -> Result<usize, String> {
     usize::try_from(bytes).map_err(|_| format!("{flag} exceeds this platform"))
 }
 
+/// Resource parsing shared by full import and mapped fetch. Payload, metadata
+/// and graph allowances stay independent across both file-backed profiles.
+pub(super) fn apply_limit(
+    flag: &str,
+    value: &str,
+    query: &mut StreamBundleImportQuery,
+) -> Result<bool, String> {
+    match flag {
+        "--max-input-mib" => {
+            let bytes = mib(flag, value, 16_384)?;
+            query.limits.envelope.max_bundle_bytes = bytes;
+            query.limits.pack.max_input_bytes = bytes;
+        }
+        "--max-expanded-mib" => {
+            let bytes = mib(flag, value, 16_384)?;
+            query.limits.pack.max_total_expanded_bytes = bytes;
+            query.limits.graph.max_payload_bytes = bytes as u64;
+        }
+        "--max-blob-mib" => {
+            query.limits.max_streamed_blob_bytes = mib(flag, value, 16_384)?;
+        }
+        "--max-object-mib" => {
+            let bytes = mib(flag, value, 32)?;
+            query.limits.pack.max_object_bytes = bytes;
+            query.limits.graph.max_object_bytes = bytes;
+        }
+        "--max-objects" => {
+            let count = number(flag, value, 1_000_000)? as usize;
+            query.limits.pack.max_entries = count as u32;
+            query.limits.pack.max_index_entries = count;
+            query.limits.graph.max_objects = count;
+        }
+        "--max-refs" => {
+            let count = number(flag, value, 4096)? as usize;
+            query.limits.envelope.max_references = count;
+            query.limits.graph.max_references = count;
+        }
+        "--max-edges" => {
+            query.limits.graph.max_edges = number(flag, value, 8_000_000)? as usize;
+        }
+        "--timeout-secs" => {
+            query.timeout = Duration::from_secs(number(flag, value, 3600)?);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 7
         || args.len() > 48
@@ -135,41 +184,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 common.push(flag.into());
                 common.push(value.clone());
             }
-            "--max-input-mib" => {
-                let bytes = mib(flag, value, 16_384)?;
-                query.limits.envelope.max_bundle_bytes = bytes;
-                query.limits.pack.max_input_bytes = bytes;
-            }
-            "--max-expanded-mib" => {
-                let bytes = mib(flag, value, 16_384)?;
-                query.limits.pack.max_total_expanded_bytes = bytes;
-                query.limits.graph.max_payload_bytes = bytes as u64;
-            }
-            "--max-blob-mib" => {
-                query.limits.max_streamed_blob_bytes = mib(flag, value, 16_384)?;
-            }
-            "--max-object-mib" => {
-                let bytes = mib(flag, value, 32)?;
-                query.limits.pack.max_object_bytes = bytes;
-                query.limits.graph.max_object_bytes = bytes;
-            }
-            "--max-objects" => {
-                let count = number(flag, value, 1_000_000)? as usize;
-                query.limits.pack.max_entries = count as u32;
-                query.limits.pack.max_index_entries = count;
-                query.limits.graph.max_objects = count;
-            }
-            "--max-refs" => {
-                let count = number(flag, value, 4096)? as usize;
-                query.limits.envelope.max_references = count;
-                query.limits.graph.max_references = count;
-            }
-            "--max-edges" => {
-                query.limits.graph.max_edges = number(flag, value, 8_000_000)? as usize;
-            }
-            "--timeout-secs" => {
-                query.timeout = Duration::from_secs(number(flag, value, 3600)?);
-            }
+            _ if apply_limit(flag, value, &mut query)? => {}
             _ => return Err(format!("unknown file-backed import option {flag}")),
         }
     }
@@ -196,6 +211,19 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
         return Ok(0);
     }
     let mut options = parse(args)?;
+    // Credential input retains ordinary process signal behavior. Native
+    // cancellable work begins after the exact key has been collected.
+    let principal = options.common.principal.ok_or("missing import principal")?;
+    let key = options
+        .common
+        .key
+        .as_ref()
+        .ok_or("missing exact import key")?;
+    let session = LoopbackReceiveSession::authenticated(
+        principal,
+        IdempotencyKey::new(super::key_bytes(key, &mut std::io::stdin().lock())?)
+            .map_err(|error| error.to_string())?,
+    );
     let signals = TerminationSignals::install().map_err(|error| error.to_string())?;
     let timeout = fgit_cli::command_timeout_override_duration()
         .map_or(options.query.timeout, |global| {
@@ -212,17 +240,6 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
         options.query.limits.envelope.max_bundle_bytes as u64,
         &mut live,
     )?;
-    let principal = options.common.principal.ok_or("missing import principal")?;
-    let key = options
-        .common
-        .key
-        .as_ref()
-        .ok_or("missing exact import key")?;
-    let session = LoopbackReceiveSession::authenticated(
-        principal,
-        IdempotencyKey::new(super::key_bytes(key, &mut std::io::stdin().lock())?)
-            .map_err(|error| error.to_string())?,
-    );
     if !live() {
         return Err("file-backed import stopped before opening the destination".into());
     }

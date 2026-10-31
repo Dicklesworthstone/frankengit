@@ -627,7 +627,8 @@ fn publish_unchecked_progress(
             &context,
             head.token(),
             &publication,
-            sealed.tx_id()
+            sealed.tx_id(),
+            &cumulative,
         ))
         .unwrap(),
         Some(true)
@@ -989,6 +990,7 @@ fn publish_replay_with_only_staged_failed_source(f: &Fixture) -> AsciiSlug {
             head.token(),
             &publication,
             sealed.tx_id(),
+            &cumulative,
         ))
         .unwrap(),
         Some(true),

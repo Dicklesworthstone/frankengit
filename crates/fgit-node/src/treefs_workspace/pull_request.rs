@@ -79,16 +79,10 @@ impl OneNode {
         // Recover the exact immutable request before applying gates for new
         // publication. A stopped cell or exhausted push quota cannot erase an
         // authenticated terminal outcome. Preserve the core seal/key check.
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            self.tenant_id,
-            self.repository_id,
-            tx_id,
-        )
-        .await
-        .map_err(|error| map_error(error.into()))?
+        if let OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx_id)
+            .await
+            .map_err(|error| map_error(error.into()))?
         {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await

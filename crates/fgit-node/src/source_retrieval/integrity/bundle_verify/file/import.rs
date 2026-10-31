@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 
 use fgit_git_object::{AcceptanceProfile, ObjectError, ObjectType, ParseLimits, parse_object_body};
 use fgit_pack::StreamPackReceipt;
-use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
+use fgit_types::{GitHashAlgorithm, GitOid, RefName, RefusalCode};
 
-use super::super::{BundleVerifyError, BundleVerifyLimits, GraphRefusal, VerifiedGitBundle};
+use super::super::{
+    BundleVerifyError, BundleVerifyLimits, FullBundleError, GraphRefusal, VerifiedGitBundle,
+};
 use super::resolve::Inventory;
 use super::storage::{Scratch, Span, SpanReader, io_error};
 use super::{FileBundleVerification, checkpoint, verify_reader_inventory};
@@ -234,6 +236,52 @@ pub(crate) fn prepare_full_bundle_import_reader<R: Read + Seek>(
     limits: &BundleVerifyLimits,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<FullBundleImportPlan, BundleVerifyError> {
+    prepare_reader_profile(
+        input,
+        expected_format,
+        scratch_path,
+        None,
+        limits,
+        allow_work,
+    )
+}
+
+/// Verify the complete supplied full bundle, retaining only the native closure
+/// of the named advertised sources and its required transport delta bases.
+/// Source names are resolved against the completed verified advertisement;
+/// repeated names (one source mapped to several destinations) are deduplicated.
+/// Every supplied object is still checked, including unselected objects.
+///
+/// This performs no ref mapping, destination-kind or fast-forward admission.
+/// Callers retain the complete original header/receipt through the plan and
+/// prove those request-specific conditions before staging or publication.
+/// Scratch has the same exclusive custody rules as the all-ref import above.
+pub(crate) fn prepare_full_bundle_fetch_reader<R: Read + Seek>(
+    input: &mut R,
+    expected_format: GitHashAlgorithm,
+    scratch_path: &Path,
+    sources: &[RefName],
+    limits: &BundleVerifyLimits,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<FullBundleImportPlan, BundleVerifyError> {
+    prepare_reader_profile(
+        input,
+        expected_format,
+        scratch_path,
+        Some(sources),
+        limits,
+        allow_work,
+    )
+}
+
+fn prepare_reader_profile<R: Read + Seek>(
+    input: &mut R,
+    expected_format: GitHashAlgorithm,
+    scratch_path: &Path,
+    sources: Option<&[RefName]>,
+    limits: &BundleVerifyLimits,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<FullBundleImportPlan, BundleVerifyError> {
     let mut stopped = false;
     let mut live = || {
         if !stopped && !allow_work() {
@@ -263,6 +311,7 @@ pub(crate) fn prepare_full_bundle_import_reader<R: Read + Seek>(
             &mut verified.inventory,
             &mut workspace,
             verified.file.verified(),
+            sources,
             limits,
             &mut live,
         )?;
@@ -295,10 +344,37 @@ fn select_closure<W: Read + io::Write + Seek>(
     inventory: &mut Inventory,
     scratch: &mut Scratch<'_, W>,
     verified: &VerifiedGitBundle,
+    sources: Option<&[RefName]>,
     limits: &BundleVerifyLimits,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Selection, BundleVerifyError> {
-    let mut pending: BTreeSet<_> = verified.references().values().copied().collect();
+    let mut pending = match sources {
+        None => verified.references().values().copied().collect(),
+        Some(sources) => {
+            if sources.is_empty() {
+                return Err(BundleVerifyError::Envelope(FullBundleError::Limit(
+                    "fetch sources",
+                )));
+            }
+            let mut roots = BTreeSet::new();
+            for source in sources {
+                checkpoint(live)?;
+                // Continue the original resolution/selection work ledger.
+                // Fanout is charged but does not create duplicate object roots
+                // or confuse the header-reference and command-count limits.
+                inventory.charge_selection_work(source.as_bytes().len(), limits)?;
+                let target =
+                    verified
+                        .references()
+                        .get(source)
+                        .ok_or(BundleVerifyError::Envelope(FullBundleError::Invalid(
+                            "unadvertised fetch source",
+                        )))?;
+                roots.insert(*target);
+            }
+            roots
+        }
+    };
     let mut selected = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut total = 0_u64;

@@ -81,7 +81,7 @@ empty direct-ref sets and implicit hash-domain conversions. Limits include
 4096 header records, a 1 MiB header, a 128 MiB whole-file bound and the node's
 stricter pack, expansion, object-size, graph-work and cancellation budgets.
 These are the buffered profile's bounds. For larger independently bounded
-inputs or blobs, select the [file-backed full import](NATIVE_GIT_BUNDLE_FILE_IMPORT.md)
+inputs or blobs, select the [file-backed full import and mapped fetch](NATIVE_GIT_BUNDLE_FILE_IMPORT.md)
 and [streaming export](NATIVE_GIT_BUNDLE_STREAMING_EXPORT.md) profiles explicitly.
 Their byte allowances remain separate from metadata, graph and work limits.
 
@@ -153,6 +153,14 @@ bandwidth-efficient incremental transfer. Existing pack byte, object, graph,
 and cancellation bounds remain in force. An additional finite ancestry-work
 budget is shared across every update and parent edge in the batch.
 
+Add `--file-backed` for chunked large-blob intake with independent input,
+expanded-byte, metadata, blob, inventory and graph limits. For example,
+`--max-object-mib 1 --max-blob-mib 256` keeps metadata bounded while permitting
+256 MiB blobs. The same exact-old mappings and `git_bundle_fetch` receipt apply.
+Every supplied object is verified, but only mapped closures and their required
+transport bases are staged. See the [file-backed fetch guide](NATIVE_GIT_BUNDLE_FILE_IMPORT.md#fetch-into-selected-destinations)
+for complete options, source custody, cancellation, and retry behavior.
+
 The receipt type is `git_bundle_fetch`; it includes tenant, repository,
 principal, native format, canonical transaction/decision identity, sorted
 requested mappings, reference count, outcome and cleanup state. Exit 0 means
@@ -172,7 +180,11 @@ Library users call `OneNode::fetch_full_git_bundle_durable_in` with
 `fgit_node::BundleRefMapping` values. The codec's `select_updates` derives
 bounded, deterministic update targets; it provides no authority or object
 proof. Node quarantine verifies supplied native objects and ancestry before
-staging, then uses the existing basis-bound admission path.
+staging, then uses the existing basis-bound admission path. File-backed callers
+use `OneNode::fetch_full_git_bundle_reader_durable_in` and
+`StreamBundleImportQuery`; complete independent source evidence enters the
+ordinary authenticated source-import driver, which rechecks current policy
+and exact-old leases on each publication attempt.
 
 The bundle verification script also runs mapped-fetch unit/integration cases
 and `native_bundle_fetch_smoke`. The fresh-process test exercises both hash

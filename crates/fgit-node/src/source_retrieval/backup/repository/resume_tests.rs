@@ -149,40 +149,76 @@ fn truncated_extended_and_unknown_markers_and_legacy_roots_refuse() {
 }
 
 #[test]
-fn every_object_and_wal_move_prefix_normalizes_idempotently() {
+fn every_object_manifest_and_wal_move_combination_normalizes_idempotently() {
     for moved_objects in [false, true] {
-        for moved_wal in [false, true] {
-            let scratch = Scratch::new();
-            let root = scratch.root();
-            let intent = Intent::reserve(&root, PIN, instance()).unwrap();
-            let q = intent.quarantine().unwrap();
-            fs::write(q.join("authority.fsqlite"), b"closed database fixture").unwrap();
-            fs::create_dir(q.join("objects")).unwrap();
-            fs::write(q.join("objects/body"), b"object fixture").unwrap();
-            fs::write(q.join("authority.fsqlite-wal"), b"closed WAL fixture").unwrap();
-            if moved_objects {
-                fs::rename(q.join("objects"), root.join("objects")).unwrap();
-            }
-            if moved_wal {
-                fs::rename(
-                    q.join("authority.fsqlite-wal"),
-                    root.join("authority.fsqlite-wal"),
-                )
-                .unwrap();
-            }
-            for _ in 0..2 {
-                assert_eq!(intent.quarantine().unwrap(), q);
-                assert_eq!(fs::read(q.join("objects/body")).unwrap(), b"object fixture");
-                assert_eq!(
-                    fs::read(q.join("authority.fsqlite-wal")).unwrap(),
-                    b"closed WAL fixture"
-                );
-                assert!(!root.join("objects").exists());
-                assert!(!root.join("authority.fsqlite-wal").exists());
-                assert!(!intent.published().unwrap());
+        for moved_manifests in [false, true] {
+            for moved_wal in [false, true] {
+                let scratch = Scratch::new();
+                let root = scratch.root();
+                let intent = Intent::reserve(&root, PIN, instance()).unwrap();
+                let q = intent.quarantine().unwrap();
+                fs::write(q.join("authority.fsqlite"), b"closed database fixture").unwrap();
+                fs::create_dir(q.join("objects")).unwrap();
+                fs::write(q.join("objects/body"), b"object fixture").unwrap();
+                fs::create_dir(q.join("manifests")).unwrap();
+                fs::write(q.join("manifests/root"), b"manifest fixture").unwrap();
+                fs::write(q.join("authority.fsqlite-wal"), b"closed WAL fixture").unwrap();
+                if moved_objects {
+                    fs::rename(q.join("objects"), root.join("objects")).unwrap();
+                }
+                if moved_wal {
+                    fs::rename(
+                        q.join("authority.fsqlite-wal"),
+                        root.join("authority.fsqlite-wal"),
+                    )
+                    .unwrap();
+                }
+                if moved_manifests {
+                    fs::rename(q.join("manifests"), root.join("manifests")).unwrap();
+                }
+                for _ in 0..2 {
+                    assert_eq!(intent.quarantine().unwrap(), q);
+                    assert_eq!(fs::read(q.join("objects/body")).unwrap(), b"object fixture");
+                    assert_eq!(
+                        fs::read(q.join("authority.fsqlite-wal")).unwrap(),
+                        b"closed WAL fixture"
+                    );
+                    assert!(!root.join("objects").exists());
+                    assert!(!root.join("manifests").exists());
+                    assert_eq!(
+                        fs::read(q.join("manifests/root")).unwrap(),
+                        b"manifest fixture"
+                    );
+                    assert!(!root.join("authority.fsqlite-wal").exists());
+                    assert!(!intent.published().unwrap());
+                }
             }
         }
     }
+}
+
+#[test]
+fn conflicting_manifest_locations_refuse_before_moving_objects_or_wal() {
+    let scratch = Scratch::new();
+    let root = scratch.root();
+    let intent = Intent::reserve(&root, PIN, instance()).unwrap();
+    let q = intent.quarantine().unwrap();
+    fs::write(q.join("authority.fsqlite"), b"database fixture").unwrap();
+    fs::create_dir(root.join("objects")).unwrap();
+    fs::write(root.join("objects/body"), b"object fixture").unwrap();
+    fs::write(root.join("authority.fsqlite-wal"), b"WAL fixture").unwrap();
+    fs::create_dir(q.join("manifests")).unwrap();
+    fs::create_dir(root.join("manifests")).unwrap();
+    assert!(
+        intent
+            .quarantine()
+            .unwrap_err()
+            .contains("conflicting data locations")
+    );
+    assert!(root.join("objects/body").exists());
+    assert!(root.join("authority.fsqlite-wal").exists());
+    assert!(!q.join("objects").exists());
+    assert!(!q.join("authority.fsqlite-wal").exists());
 }
 
 #[test]

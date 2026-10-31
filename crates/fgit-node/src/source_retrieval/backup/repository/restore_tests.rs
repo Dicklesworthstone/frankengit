@@ -18,7 +18,13 @@ impl Scratch {
         let stage = target.join(".restore-quarantine");
         create_private(&stage).unwrap();
         fs::create_dir(stage.join("objects")).unwrap();
+        fs::create_dir(stage.join("manifests")).unwrap();
         fs::write(stage.join("objects/body"), b"already-verified-body").unwrap();
+        fs::write(
+            stage.join("manifests/selected"),
+            b"original-retained-manifest",
+        )
+        .unwrap();
         fs::write(stage.join("authority.fsqlite"), b"already-closed-image").unwrap();
         (stage, target)
     }
@@ -73,6 +79,10 @@ fn interruption_after_data_preparation_leaves_no_public_authority() {
     fs::write(stage.join("authority.fsqlite-shm"), b"discardable-cache").unwrap();
     let ready = PreparedPublication::prepare(&stage, &target).unwrap();
     assert!(!target.join("authority.fsqlite").exists());
+    assert_eq!(
+        fs::read(target.join("manifests/selected")).unwrap(),
+        b"original-retained-manifest"
+    );
     assert_eq!(
         fs::read(target.join("objects/body")).unwrap(),
         b"already-verified-body"
@@ -134,6 +144,7 @@ fn file_publication_keeps_data_and_retains_quarantine_until_final_verification()
         b"closed-WAL"
     );
     assert!(target.join("objects/body").exists());
+    assert!(target.join("manifests/selected").exists());
 }
 #[test]
 fn unresolved_rollback_journal_refuses_before_any_data_or_head_is_moved() {

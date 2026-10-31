@@ -5,7 +5,9 @@
 //! before publication, after losing CAS, or after an uncertain store response
 //! is recovery, not ownership. Recovery reloads the marker and probes instead.
 
-use fgit_authority::{AsyncAuthorityStore, AuthorityVersionToken, OutcomeLookup, TerminalOutcome};
+use fgit_authority::{
+    AsyncAuthorityStore, AuthorityVersionToken, CumulativeOutcomes, OutcomeLookup, TerminalOutcome,
+};
 use fgit_chronicle::{PublicationVerdict, VerifiedPublication};
 use fgit_types::{DecisionOutcome, RefusalCode, TxId};
 
@@ -30,14 +32,16 @@ pub(in crate::merge::native) async fn publish_owned<S: AsyncAuthorityStore + ?Si
     expected: AuthorityVersionToken,
     publication: &VerifiedPublication,
     tx_id: TxId,
+    cumulative: &CumulativeOutcomes,
 ) -> Result<Option<bool>, AdmissionError> {
-    let verdict = fgit_chronicle::publish_async(
+    let verdict = fgit_chronicle::publish_with_cumulative_async(
         store,
         cx,
         &context.head_key,
         expected,
         publication,
         context.tenant_id,
+        cumulative,
     )
     .await?;
     let published_here = matches!(verdict, PublicationVerdict::Published(_));

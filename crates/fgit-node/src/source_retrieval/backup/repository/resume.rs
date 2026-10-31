@@ -127,24 +127,29 @@ impl Intent {
     /// Return a partially moved, still-unpublished image to quarantine before
     /// ANY database reopen. In particular, never open a database without its
     /// moved WAL. All path/type/collision checks precede the first rename.
-    /// Only two fixed data paths may move; no archive-controlled path is used.
+    /// Only three fixed data paths may move; no archive-controlled path is used.
     pub(super) fn quarantine(&self) -> Result<PathBuf, String> {
         require_absent(&self.root.join("authority.fsqlite"))?;
         let quarantine = self.root.join(".restore-quarantine");
         let exists = has_kind(&quarantine, true)?;
         let objects_at_root = has_kind(&self.root.join("objects"), true)?;
+        let manifests_at_root = has_kind(&self.root.join("manifests"), true)?;
         let wal_at_root = has_kind(&self.root.join("authority.fsqlite-wal"), false)?;
         require_absent(&self.root.join("authority.fsqlite-journal"))?;
         require_absent(&self.root.join("authority.fsqlite-shm"))?;
-        if !exists && (objects_at_root || wal_at_root) {
+        if !exists && (objects_at_root || manifests_at_root || wal_at_root) {
             return Err("resume found moved data without its quarantine; no paths changed".into());
         }
         let objects_in_quarantine = has_kind(&quarantine.join("objects"), true)?;
+        let manifests_in_quarantine = has_kind(&quarantine.join("manifests"), true)?;
         let wal_in_quarantine = has_kind(&quarantine.join("authority.fsqlite-wal"), false)?;
         let database = has_kind(&quarantine.join("authority.fsqlite"), false)?;
         has_kind(&quarantine.join("authority.fsqlite-journal"), false)?;
         has_kind(&quarantine.join("authority.fsqlite-shm"), false)?;
-        if (objects_at_root && objects_in_quarantine) || (wal_at_root && wal_in_quarantine) {
+        if (objects_at_root && objects_in_quarantine)
+            || (manifests_at_root && manifests_in_quarantine)
+            || (wal_at_root && wal_in_quarantine)
+        {
             return Err("resume found conflicting data locations; no paths changed".into());
         }
         if (wal_at_root || wal_in_quarantine) && !database {
@@ -157,6 +162,7 @@ impl Intent {
         // has exactly one location per path, and normalization is repeatable.
         for (name, moved) in [
             ("objects", objects_at_root),
+            ("manifests", manifests_at_root),
             ("authority.fsqlite-wal", wal_at_root),
         ] {
             if moved {

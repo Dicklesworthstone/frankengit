@@ -95,16 +95,10 @@ impl OneNode {
         let admission_error =
             |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
         let (tx_id, _) = attempt.derive().map_err(|e| admission_error(e.into()))?;
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            self.tenant_id,
-            self.repository_id,
-            tx_id,
-        )
-        .await
-        .map_err(|e| admission_error(e.into()))?
+        if let OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx_id)
+            .await
+            .map_err(|e| admission_error(e.into()))?
         {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await

@@ -93,16 +93,10 @@ impl OneNode {
             .0;
         // A canonical historical result precedes new-publication intake/quota.
         // Recheck the complete immutable seal/key, never just a key's presence.
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            self.tenant_id,
-            self.repository_id,
-            tx,
-        )
-        .await
-        .map_err(|source| error(source.into()))?
+        if let OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx)
+            .await
+            .map_err(|source| error(source.into()))?
         {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await

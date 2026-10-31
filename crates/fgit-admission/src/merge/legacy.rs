@@ -830,41 +830,50 @@ where
     let attempt = legacy_seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
     let tx_id = admission.tx_id();
-    if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-        store,
-        cx,
-        &context.head_key,
-        context.tenant_id,
-        context.repository_id,
-        tx_id,
-    )
-    .await?
-    {
-        return Ok(terminal);
-    }
-
-    for replan in 0..limits.max_cas_replans {
-        if replan != 0
-            && let fgit_authority::OutcomeLookup::Decided(terminal) =
-                fgit_authority::resolve_outcome_async(
-                    store,
-                    cx,
-                    &context.head_key,
-                    context.tenant_id,
-                    context.repository_id,
-                    tx_id,
-                )
-                .await?
-        {
-            return Ok(terminal);
-        }
+    for _ in 0..limits.max_cas_replans {
         let (basis, receipt, authenticated) =
             crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative = projection
+        let cumulative = match projection
             .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
-            .await?;
+            .await
+        {
+            Ok(cumulative) => cumulative,
+            Err(error) => {
+                if crate::collect_terminal_retryable(&error)
+                    && let fgit_authority::OutcomeLookup::Decided(terminal) =
+                        fgit_authority::resolve_outcome_async(
+                            store,
+                            cx,
+                            &context.head_key,
+                            context.tenant_id,
+                            context.repository_id,
+                            tx_id,
+                        )
+                        .await?
+                {
+                    return Ok(terminal);
+                }
+                return Err(error.into());
+            }
+        };
         if !outcomes_match_basis(&cumulative, &receipt) {
             continue;
+        }
+        match fgit_authority::resolve_outcome_with_cumulative_async(
+            store,
+            cx,
+            &context.head_key,
+            receipt.token(),
+            context.tenant_id,
+            context.repository_id,
+            tx_id,
+            &cumulative,
+        )
+        .await?
+        {
+            Some(fgit_authority::OutcomeLookup::Decided(terminal)) => return Ok(terminal),
+            Some(fgit_authority::OutcomeLookup::Undecided) => {}
+            None => continue,
         }
         // The async projection distinguishes two failures and they are NOT
         // interchangeable. Refuse is an evaluated terminal decision for this
@@ -975,6 +984,19 @@ where
         if let Some(terminal) = terminal {
             return Ok(terminal);
         }
+    }
+    // A continuously moving witness must not hide an already durable terminal.
+    if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .await?
+    {
+        return Ok(terminal);
     }
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,

@@ -1,4 +1,6 @@
 //! Explicit, exact-old offline fetch. No automatic ref selection or force.
+mod file_backed;
+
 use super::{
     Key, MAX_BUNDLE_BYTES, describe, key_bytes, quote, read_bundle, set_once,
     write_terminal_receipt,
@@ -14,7 +16,7 @@ use std::{collections::BTreeSet, io::Write, path::PathBuf};
 pub(super) const USAGE: &str =
     "usage: fg bundle fetch <storage-root> <tenant-id> <repository-id> <bundle-file>
   --trusted-local --principal <id> (--key-stdin | --idempotency-key <key>)
-  [--object-format sha1|sha256]
+  [--object-format sha1|sha256] [--file-backed]
   --map <advertised-source-ref> <destination-ref> <absent|exact-old-oid> ...
   --map-hex <source-ref-bytes-hex> <destination-ref-bytes-hex> <absent|exact-old-oid> ...
 
@@ -23,7 +25,7 @@ refs/remotes/, or refs/tags/. All selected updates publish atomically. Existing
 branches and remote-tracking refs must fast-forward through verified native commit
 parents. Tags may be created or reasserted, never overwritten. No wildcard, force,
 prune, implicit current-tip lookup, remote authentication, or HEAD/metadata rewrite.
-Input is a bounded self-contained Git bundle, not an incremental prerequisite bundle.
+Input is a self-contained Git bundle. --file-backed supports chunked large-blob\nintake with independent limits; use fg bundle fetch --file-backed --help for details.\nPrerequisite bundles require sync-import.
 The retry key binds the exact canonical destination/old/new commands; identical
 requests recover their terminal outcome. Reordered maps retain that identity.
 Stdin keys preserve every byte, including newlines, and keys are never printed.
@@ -184,6 +186,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if file_backed::requested(args) || file_backed::help_requested(args) {
+        return file_backed::run(args);
+    }
     if args == ["--help"] {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
         return Ok(0);

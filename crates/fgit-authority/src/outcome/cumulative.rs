@@ -1,4 +1,4 @@
-//! Reuse of an exact, authority-derived outcome prefix during publication.
+//! Reuse of an exact authority-derived outcome set for resolution and publication.
 //!
 //! This is disposable process state. It neither changes the outcome commitment
 //! nor permits a cache to authorize a different head. The ordinary replay APIs
@@ -7,9 +7,10 @@
 use super::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityStore, AuthorityVersionToken,
     CumulativeOutcomes, DuplicateAbsenceWitness, DuplicateScan, HeadKey, HeadRead, HeadReadReceipt,
-    OutcomeFailure, PublicationOutcome, RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody,
-    TenantId, TerminalOutcome, TxId, authority_head_identity, decision_batch_identity,
-    fold_outcome_index, publish_decisions_impl, publish_decisions_impl_async,
+    OutcomeFailure, OutcomeLookup, PublicationOutcome, RepositoryAuthorityHeadBody,
+    RepositoryDecisionBatchBody, RepositoryId, TenantId, TerminalOutcome, TxId,
+    authority_head_identity, decision_batch_identity, fold_outcome_index, indexed_outcome,
+    indexed_outcome_async, publish_decisions_impl, publish_decisions_impl_async, reconcile_outcome,
 };
 
 /// Publish using a complete outcome set already collected at `expected`.
@@ -66,6 +67,117 @@ where
         Some(cumulative),
     )
     .await
+}
+
+/// Resolve one terminal outcome from a complete set collected at `expected`.
+///
+/// A retained checkpoint or a prior authoritative collection can supply this
+/// set; an accelerator alone cannot. Read the accelerator before selecting and
+/// authenticating the current head, then require that head's exact token,
+/// repository and outcome root to agree with the retained set. A concurrent
+/// publication therefore cannot make a newer hint look like corruption of an
+/// older witness. The ordinary [`super::reconcile_outcome`] rule still refuses
+/// genuine conflicts and still resolves a missing hint from authority.
+///
+/// `None` means the head is absent or no longer matches `expected`: the caller
+/// must collect a new witness and replan. It never establishes that the
+/// transaction is undecided. Only `Some(OutcomeLookup::Undecided)` proves
+/// absence at the authenticated head checked here. Later head movement remains
+/// possible, so a publication must still condition on the same exact token.
+///
+/// This performs no decision-history reads or writes. It recomputes the root
+/// over the already retained set and preserves the original empty-genesis
+/// compatibility rule. A mismatched witness token, repository or root, invalid
+/// head authentication, accelerator conflict, and store failures remain typed
+/// errors rather than being treated as a cache miss.
+pub fn resolve_outcome_with_cumulative<S>(
+    store: &S,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    tenant_id: TenantId,
+    repository_id: RepositoryId,
+    tx_id: TxId,
+    cumulative: &CumulativeOutcomes,
+) -> Result<Option<OutcomeLookup>, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    check_token(cumulative, expected)?;
+    let indexed = indexed_outcome(store, tenant_id, repository_id, tx_id)?;
+    let HeadRead::Present(receipt) = store.read_head(head_key)? else {
+        return Ok(None);
+    };
+    let authenticated = store.authenticate_head_receipt(&receipt)?;
+    resolve_authenticated(
+        cumulative,
+        head_key,
+        expected,
+        repository_id,
+        tx_id,
+        indexed,
+        &authenticated,
+    )
+}
+
+/// Asynchronous twin of [`resolve_outcome_with_cumulative`].
+///
+/// Every accelerator, head and authentication operation uses the caller's
+/// original context. Cancellation and ambiguous reads propagate without
+/// creating a replacement context or manufacturing an undecided answer.
+pub async fn resolve_outcome_with_cumulative_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    tenant_id: TenantId,
+    repository_id: RepositoryId,
+    tx_id: TxId,
+    cumulative: &CumulativeOutcomes,
+) -> Result<Option<OutcomeLookup>, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    check_token(cumulative, expected)?;
+    let indexed = indexed_outcome_async(store, cx, tenant_id, repository_id, tx_id).await?;
+    let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
+        return Ok(None);
+    };
+    let authenticated = store.authenticate_head_receipt(cx, &receipt).await?;
+    resolve_authenticated(
+        cumulative,
+        head_key,
+        expected,
+        repository_id,
+        tx_id,
+        indexed,
+        &authenticated,
+    )
+}
+
+fn resolve_authenticated(
+    cumulative: &CumulativeOutcomes,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    repository_id: RepositoryId,
+    tx_id: TxId,
+    indexed: OutcomeLookup,
+    authenticated: &AuthenticatedHead,
+) -> Result<Option<OutcomeLookup>, OutcomeFailure> {
+    if authenticated.receipt().key() != head_key {
+        return Err(mismatch("head slot"));
+    }
+    if authenticated.receipt().token() != expected {
+        return Ok(None);
+    }
+    let head = authenticated.body()?;
+    if head.repository_id != repository_id {
+        return Err(mismatch("repository"));
+    }
+    check_root(cumulative, &head)?;
+    let replayed = cumulative
+        .decision_for(tx_id)
+        .map_or(OutcomeLookup::Undecided, OutcomeLookup::Decided);
+    reconcile_outcome(indexed, replayed).map(Some)
 }
 
 const fn mismatch(field: &'static str) -> OutcomeFailure {

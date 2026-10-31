@@ -2,6 +2,8 @@
 //! authoritative head. These interleavings perform real atomic publications in
 //! the reference store; they do not manufacture terminal results for the race.
 
+#[path = "outcome_resolution_races/cumulative.rs"]
+mod cumulative;
 #[path = "outcome_resolution_races/plural.rs"]
 mod plural;
 

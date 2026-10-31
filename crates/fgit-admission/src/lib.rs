@@ -4230,12 +4230,23 @@ where
     Ok(assemble_result(plan, terminals))
 }
 
+/// A recent terminal may be recoverable before an unavailable or bounded older
+/// history is reached. Only these collection failures permit that narrower
+/// replay; authentication, cancellation, conflicts and root failures remain
+/// faults. An undecided replay never substitutes for the missing full witness.
+pub(crate) fn collect_terminal_retryable(error: &OutcomeFailure) -> bool {
+    matches!(
+        error,
+        OutcomeFailure::ReplayBoundExceeded { .. } | OutcomeFailure::StreamBodyMissing { .. }
+    )
+}
+
 /// Admit one sealed transaction against a fresh basis, asynchronously.
 ///
-/// The asynchronous sibling of [`admit_one`], and structurally the same loop:
-/// a pre-loop terminal check makes an idempotent retry cheap, and each replan
-/// re-reads the basis rather than reusing a stale one. §5.2's rule that a CAS
-/// loser reuses and revalidates *without changing the sealed request* is
+/// The asynchronous sibling of [`admit_one`]. Each replan resolves terminal
+/// membership from the same authenticated cumulative witness used to prepare
+/// publication, allowing retained checkpoints to avoid a separate genesis
+/// replay. §5.2's rule that a CAS loser reuses and revalidates *without changing the sealed request* is
 /// preserved by sealing once, before the loop, exactly as the blocking sibling
 /// does.
 async fn admit_one_async<S, Projection>(
@@ -4255,43 +4266,49 @@ where
     let attempt = seal_attempt(context, lowered);
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
     let tx_id = admission.tx_id();
-    if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-        store,
-        cx,
-        &context.head_key,
-        context.tenant_id,
-        context.repository_id,
-        tx_id,
-    )
-    .await?
-    {
-        return Ok(terminal);
-    }
-
-    for replan in 0..limits.max_cas_replans {
-        // Keep the asynchronous retry surface equivalent to the blocking
-        // sibling: the pre-loop probe owns attempt zero, later replans probe
-        // only after a predecessor CAS could have won.
-        if replan != 0
-            && let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-                store,
-                cx,
-                &context.head_key,
-                context.tenant_id,
-                context.repository_id,
-                tx_id,
-            )
-            .await?
-        {
-            return Ok(terminal);
-        }
+    for _ in 0..limits.max_cas_replans {
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative_outcomes = projection
+        let cumulative_outcomes = match projection
             .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
-            .await?;
+            .await
+        {
+            Ok(cumulative) => cumulative,
+            Err(error) => {
+                if collect_terminal_retryable(&error)
+                    && let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+                        store,
+                        cx,
+                        &context.head_key,
+                        context.tenant_id,
+                        context.repository_id,
+                        tx_id,
+                    )
+                    .await?
+                {
+                    return Ok(terminal);
+                }
+                return Err(error.into());
+            }
+        };
         if cumulative_outcomes.observed() != receipt.token() {
             continue;
+        }
+        match fgit_authority::resolve_outcome_with_cumulative_async(
+            store,
+            cx,
+            &context.head_key,
+            receipt.token(),
+            context.tenant_id,
+            context.repository_id,
+            tx_id,
+            &cumulative_outcomes,
+        )
+        .await?
+        {
+            Some(OutcomeLookup::Decided(terminal)) => return Ok(terminal),
+            Some(OutcomeLookup::Undecided) => {}
+            None => continue,
         }
         let preparation = prepare_publication_async(
             projection,
@@ -4356,6 +4373,18 @@ where
         if let Some(terminal) = terminal {
             return Ok(terminal);
         }
+    }
+    if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .await?
+    {
+        return Ok(terminal);
     }
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,

@@ -134,10 +134,10 @@ fn retained_bytes(
     })
 }
 
-struct Predecessor {
+pub(crate) struct Predecessor {
     pointer: Option<CapsulePointer>,
     current_root: Option<Digest>,
-    retained: Option<(Digest, OutcomeIndexCheckpointBody)>,
+    pub(crate) retained: Option<(Digest, OutcomeIndexCheckpointBody)>,
     outcomes: Option<CumulativeOutcomes>,
 }
 
@@ -186,7 +186,13 @@ impl OneNode {
                 "terminal decisions",
             ));
         }
-        let mut predecessor = self.checkpoint_predecessor_in(request, &selected).await?;
+        let guarded = crate::outcome_collection::RequestFabric::new(
+            &self.outcome_checkpoint_fabric,
+            request.authority(),
+        );
+        let mut predecessor = self
+            .checkpoint_predecessor_in(request, &selected, &guarded)
+            .await?;
         live(request)?;
         let outcomes = match predecessor.outcomes.take() {
             Some(outcomes) => outcomes,
@@ -444,10 +450,14 @@ impl OneNode {
         Ok(())
     }
 
-    async fn checkpoint_predecessor_in(
+    /// Select and certify the nearest retained root in the authenticated capsule
+    /// chain. Maintenance and backup share this strict path: no genesis fallback
+    /// can turn missing checkpoint artifacts into a verified retained root.
+    pub(crate) async fn checkpoint_predecessor_in<F: ImmutableObjectFabric + Sync>(
         &self,
         request: &NodeRequestContext,
         selected: &MaterializedAdmission,
+        fabric: &F,
     ) -> Result<Predecessor, OutcomeCheckpointRefusal> {
         let mut id = selected.basis().body().last_checkpoint_id;
         let mut pointer = None;
@@ -490,15 +500,11 @@ impl OneNode {
                 current_root = capsule.outcome_index_checkpoint_root;
             }
             if let Some(root) = capsule.outcome_index_checkpoint_root {
-                let guarded = crate::outcome_collection::RequestFabric::new(
-                    &self.outcome_checkpoint_fabric,
-                    request.authority(),
-                );
                 let (retained, leaves) = load_verified_outcome_index_checkpoint_async(
                     &self.authority,
                     request.authority(),
                     &CryptoBodyIdentity,
-                    &guarded,
+                    fabric,
                     root,
                 )
                 .await

@@ -191,6 +191,232 @@ impl Fixture {
         );
     }
 
+    fn fetch(
+        &self,
+        bundle: &str,
+        key: &str,
+        file_backed: bool,
+        mappings: &[&str],
+        extra: &[&str],
+    ) -> Output {
+        let mut values = args(&[
+            "bundle",
+            "fetch",
+            "fetcher",
+            TENANT,
+            REPOSITORY,
+            bundle,
+            "--trusted-local",
+            "--object-format",
+            self.format.as_str(),
+            "--principal",
+            PRINCIPAL,
+            "--idempotency-key",
+            key,
+        ]);
+        if file_backed {
+            values.push("--file-backed".to_owned());
+        }
+        values.extend(args(mappings));
+        values.extend(args(extra));
+        self.run(&values)
+    }
+
+    fn assert_file_fetch(&self, bundle: &str) {
+        success(self.run(&args(&[
+            "init",
+            "fetcher",
+            TENANT,
+            REPOSITORY,
+            self.format.as_str(),
+        ])));
+        let empty = self.refs_at("fetcher");
+        let raw = fs::read(self.root.join(bundle)).unwrap();
+        let at = raw.windows(2).position(|pair| pair == b"\n\n").unwrap() + 2;
+        let signature = match self.format {
+            GitHashAlgorithm::Sha1 => "# v2 git bundle\n",
+            GitHashAlgorithm::Sha256 => "# v3 git bundle\n@object-format=sha256\n",
+        };
+        let header = format!("{signature}{} refs/heads/main\n\n", self.base);
+        let seed = "mapped-base.bundle";
+        // Narrow the advertisement, retaining the complete valid native pack.
+        // Intake must verify even its unselected large payload without placing it.
+        fs::write(
+            self.root.join(seed),
+            [header.as_bytes(), &raw[at..]].concat(),
+        )
+        .unwrap();
+        let policy = [
+            "--max-object-mib",
+            "1",
+            "--max-blob-mib",
+            "40",
+            "--timeout-secs",
+            "600",
+        ];
+        let initial = [
+            "--map",
+            "refs/heads/main",
+            "refs/remotes/upstream/main",
+            "absent",
+        ];
+        let seeded = success(self.fetch(seed, "mapped-seed", true, &initial, &policy));
+        assert!(seeded.contains("\"type\":\"git_bundle_fetch\""), "{seeded}");
+        assert!(seeded.contains("\"reference_count\":1"), "{seeded}");
+        let before = self.refs_at("fetcher");
+        assert_ne!(before, empty);
+        let source_hex = lowercase_hex(b"refs/heads/main");
+        let tracking_hex = lowercase_hex(b"refs/remotes/upstream/main");
+        let raw_ref = RefName::try_new(b"refs/remotes/upstream/\xff").unwrap();
+        let raw_hex = lowercase_hex(raw_ref.as_bytes());
+        assert!(
+            before.contains(&format!(
+                "{{\"reference_hex\":\"{tracking_hex}\",\"tip\":\"{}\"}}",
+                self.base,
+            )),
+            "{before}"
+        );
+        let node = OneNode::open_existing(
+            NodeConfig::new(
+                self.root.join("fetcher"),
+                TenantId::from_bytes([0x11; 16]),
+                RepositoryId::from_bytes([0x22; 16]),
+            )
+            .with_object_format(self.format)
+            .with_max_object_bytes(MIB as u64)
+            .with_bundle_import_blob_limit(40 * MIB)
+            .with_worker_threads(2),
+        )
+        .unwrap();
+        let request = node.import_request_context(None);
+        let selected = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(selected.selected_closure().closure().objects().len(), 2);
+        for id in [self.tip, self.blob] {
+            assert!(matches!(node.git_object_header(id),
+                Err(fgit_node::NodeRefusal::Fabric(error))
+                    if matches!(*error, fgit_object_fabric::fabric::StoreRefusal::ObjectAbsent)));
+        }
+        node.shutdown().unwrap();
+        let base = self.base.to_string();
+        let mappings = [
+            "--map",
+            "refs/heads/main",
+            "refs/remotes/upstream/main",
+            base.as_str(),
+            "--map-hex",
+            source_hex.as_str(),
+            raw_hex.as_str(),
+            "absent",
+        ];
+        refused(self.fetch(bundle, "mapped-update", true, &mappings, &[]));
+        assert_eq!(self.refs_at("fetcher"), before);
+        assert_eq!(
+            fs::read_dir(self.root.join("fetcher/staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let updated = success(self.fetch(bundle, "mapped-update", true, &mappings, &policy));
+        for required in [
+            "\"type\":\"git_bundle_fetch\"",
+            "\"outcome\":\"committed\"",
+            "\"command_committed\":true",
+            "\"atomic\":true",
+            "\"reference_count\":2",
+            "\"node_closed\":true",
+            "\"cleanup_error\":null",
+        ] {
+            assert!(updated.contains(required), "{updated}");
+        }
+        let assert_mapped = |report: &str| {
+            for name in [&tracking_hex, &raw_hex] {
+                assert!(
+                    report.contains(&format!(
+                        "{{\"reference_hex\":\"{name}\",\"tip\":\"{}\"}}",
+                        self.tip,
+                    )),
+                    "{report}"
+                );
+            }
+            assert_eq!(report.matches("\"reference_hex\":").count(), 2, "{report}");
+        };
+        let committed = self.refs_at("fetcher");
+        assert_mapped(&committed);
+        self.assert_native_objects_at(
+            "fetcher",
+            &[
+                (
+                    RefName::try_new(b"refs/remotes/upstream/main").unwrap(),
+                    self.tip,
+                ),
+                (raw_ref, self.tip),
+            ],
+        );
+        // The one sealed mapped update survives the smaller default blob limit
+        // and a retry through the buffered transport profile.
+        assert_eq!(
+            success(self.fetch(bundle, "mapped-update", true, &mappings, &[])),
+            updated
+        );
+        assert_eq!(
+            success(self.fetch(bundle, "mapped-update", false, &mappings, &[])),
+            updated
+        );
+        assert_eq!(self.refs_at("fetcher"), committed);
+
+        let stale = [
+            "--map",
+            "refs/heads/main",
+            "refs/remotes/upstream/main",
+            base.as_str(),
+            "--map",
+            "refs/heads/main",
+            "refs/heads/partial",
+            "absent",
+        ];
+        let output = self.fetch(bundle, "mapped-stale", true, &stale, &policy);
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let refusal = String::from_utf8(output.stdout).unwrap();
+        assert!(refusal.contains("\"outcome\":\"refused\""), "{refusal}");
+        assert!(
+            refusal.contains("\"refusal_code\":\"ExpectedOldRefMismatch\""),
+            "{refusal}"
+        );
+        let after_refusal = self.refs_at("fetcher");
+        assert_mapped(&after_refusal);
+        assert!(!after_refusal.contains(&lowercase_hex(b"refs/heads/partial")));
+        let replay = self.fetch(bundle, "mapped-stale", false, &stale, &[]);
+        assert_eq!(replay.status.code(), Some(3));
+        assert_eq!(String::from_utf8(replay.stdout).unwrap(), refusal);
+        assert_eq!(self.refs_at("fetcher"), after_refusal);
+
+        let tip = self.tip.to_string();
+        let rewind = [
+            "--map",
+            "refs/heads/main",
+            "refs/remotes/upstream/main",
+            tip.as_str(),
+        ];
+        refused(self.fetch(seed, "mapped-rewind", true, &rewind, &policy));
+        assert_eq!(self.refs_at("fetcher"), after_refusal);
+        assert_eq!(
+            fs::read_dir(self.root.join("fetcher/staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        self.assert_clean();
+    }
+
     fn assert_full_import(&self, bundle: &str) {
         success(self.run(&args(&[
             "init",
@@ -250,9 +476,16 @@ impl Fixture {
     }
 
     fn assert_received_native_objects(&self) {
+        self.assert_native_objects_at(
+            "receiver",
+            &[(RefName::try_new(b"refs/heads/main").unwrap(), self.tip)],
+        );
+    }
+
+    fn assert_native_objects_at(&self, storage: &str, expected_refs: &[(RefName, GitOid)]) {
         let node = OneNode::open_existing(
             NodeConfig::new(
-                self.root.join("receiver"),
+                self.root.join(storage),
                 TenantId::from_bytes([0x11; 16]),
                 RepositoryId::from_bytes([0x22; 16]),
             )
@@ -268,11 +501,8 @@ impl Fixture {
             .block_on(node.materialize_admission_in(&request))
             .unwrap();
         assert_eq!(
-            materialized
-                .snapshot()
-                .refs
-                .get(&RefName::try_new(b"refs/heads/main").unwrap()),
-            Some(&self.tip)
+            materialized.snapshot().refs,
+            expected_refs.iter().cloned().collect::<BTreeMap<_, _>>(),
         );
         assert_eq!(
             materialized.selected_closure().closure().objects(),
@@ -572,6 +802,7 @@ fn both_domains_export_a_33_mib_blob_without_widening_metadata_and_recover_exact
                 continue;
             }
             fixture.assert_full_import(name);
+            fixture.assert_file_fetch(name);
             let pins = args(&[
                 "--file-backed",
                 "--scratch-dir",

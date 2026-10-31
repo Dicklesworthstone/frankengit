@@ -1,6 +1,7 @@
 //! Hold one opened archive across all passes. Path replacement never switches
 //! the input, and in-place changes are detected by rechecking the trusted pin.
-//! Only bounded metadata survives a pass; blob bodies pass through bounded readers.
+//! Only bounded metadata and retained-checkpoint evidence survive a pass;
+//! source Git blob bodies pass through bounded readers.
 use super::super::regular;
 #[cfg(test)]
 use super::archive::Record;

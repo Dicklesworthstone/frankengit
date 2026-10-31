@@ -7,7 +7,7 @@ use crate::{
     PermittedObjectClosure, PublicationPreparation, ValidatedClosure,
 };
 use fgit_authority::{
-    AsyncAuthorityStore, OutcomeLookup, ScopedEntry, SealAttempt, SemanticRequest,
+    AsyncAuthorityStore, OutcomeLookup, ScopedEntry, SealAttempt, SemanticRequest, TerminalOutcome,
 };
 use fgit_chronicle::{HistoryStep, PublicationBasis, PublicationPlan, read_history_step_async};
 use fgit_codec::{
@@ -332,22 +332,49 @@ where
         checkpoint().map_err(unavailable)?;
         let (basis, receipt, authenticated) =
             crate::read_basis_async(store, cx, &context.head_key).await?;
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        let cumulative = match projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await
+        {
+            Ok(cumulative) => cumulative,
+            Err(error) => {
+                // Complete publication history is stronger than the recent
+                // terminal evidence needed to recover a created replay.
+                if crate::collect_terminal_retryable(&error)
+                    && let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+                        store,
+                        cx,
+                        &context.head_key,
+                        context.tenant_id,
+                        context.repository_id,
+                        tx,
+                    )
+                    .await?
+                {
+                    return recover_created_key(store, cx, context, tx, terminal, checkpoint).await;
+                }
+                return Err(error.into());
+            }
+        };
+        if cumulative.observed() != receipt.token() {
+            continue;
+        }
+        let Some(outcome) = fgit_authority::resolve_outcome_with_cumulative_async(
             store,
             cx,
             &context.head_key,
+            receipt.token(),
             context.tenant_id,
             context.repository_id,
             tx,
+            &cumulative,
         )
         .await?
-        {
-            if let fgit_types::DecisionOutcome::Refused { code, .. } = terminal.outcome {
-                return Err(unavailable(code));
-            }
-            let (decided_basis, _, _) =
-                crate::read_basis_async(store, cx, &context.head_key).await?;
-            return created_key(store, cx, &decided_basis, tx, &|| checkpoint().is_err()).await;
+        else {
+            continue;
+        };
+        if let OutcomeLookup::Decided(terminal) = outcome {
+            return recover_created_key(store, cx, context, tx, terminal, checkpoint).await;
         }
         let source = source_for_route(store, cx, &basis, intent, &|| checkpoint().is_err()).await?;
         if source.payload_root() != intent.payload
@@ -361,12 +388,6 @@ where
         }
         let events = storage::read_events(store, cx, context.repository_id, intent.payload).await?;
         delivery::validate_payload_positions(&state.forge, &events)?;
-        let cumulative = projection
-            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
-            .await?;
-        if cumulative.observed() != receipt.token() {
-            continue;
-        }
         let snapshot = projection
             .snapshot_async(store, cx, &basis, &authenticated)
             .await
@@ -486,6 +507,7 @@ where
             receipt.token(),
             &publication,
             tx,
+            &cumulative,
         )
         .await?;
         if published.is_some() {
@@ -495,9 +517,44 @@ where
             return created_key(store, cx, &basis, tx, &|| checkpoint().is_err()).await;
         }
     }
+    // Terminal decisions survive unrelated head movement even when no exact
+    // retained witness stayed current for a complete planning iteration.
+    if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx,
+    )
+    .await?
+    {
+        return recover_created_key(store, cx, context, tx, terminal, checkpoint).await;
+    }
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,
     })
+}
+
+/// Terminal recovery still verifies the replay's selected creation history;
+/// an outcome alone cannot supply a delivery key or authorize another send.
+async fn recover_created_key<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    tx: TxId,
+    terminal: TerminalOutcome,
+    checkpoint: &C,
+) -> Result<AsciiSlug, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
+    if let fgit_types::DecisionOutcome::Refused { code, .. } = terminal.outcome {
+        return Err(unavailable(code));
+    }
+    let (basis, _, _) = crate::read_basis_async(store, cx, &context.head_key).await?;
+    created_key(store, cx, &basis, tx, &|| checkpoint().is_err()).await
 }
 
 /// A replay's class requires its retained sealed route intent. A different

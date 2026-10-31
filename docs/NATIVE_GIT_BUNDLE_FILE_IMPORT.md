@@ -1,10 +1,12 @@
-# Native file-backed full-bundle import
+# Native file-backed full-bundle import and fetch
 
 `fg bundle import --file-backed` imports a self-contained Git bundle into an
 initialized FrankenGit node while keeping large blob bodies in private files.
 It uses the native bundle, pack, delta and typed graph validators, followed by
 the same atomic source-import admission and authority publication as other
-native imports. No external Git executable participates.
+native imports. `fg bundle fetch --file-backed` uses the same bounded custody to
+select and update existing refs with explicit exact-old mappings. No external
+Git executable participates.
 
 ## Import a full bundle
 
@@ -32,8 +34,8 @@ there is no caller-supplied scratch path or reuse of a previous process's files.
 Every advertised direct reference is an expected-absent creation. All updates
 belong to one atomic transaction. Any existing destination name refuses the
 whole update, even if it already points at the same object. A HEAD advertisement
-does not change destination HEAD configuration. Current policy and exact-basis
-authority checks still decide admission.
+does not change destination HEAD configuration. Current policy, exact leases
+and authenticated authority checks still decide admission.
 
 This profile accepts full V2/SHA-1 and V3 native bundles, internal OFS and REF
 deltas, and forward REF bases. Large blob bases/results use chunked scratch
@@ -44,8 +46,67 @@ Every supplied object is verified; only the selected reference closure and its
 required transport delta bases are staged for admission. Gitlinks remain external
 repository dependencies.
 
-`sync-import` and mapped `bundle fetch` retain their existing buffered profiles.
-This option does not turn an incremental or mapped transfer into a full import.
+Incremental `sync-import` retains its buffered profile. File-backed import and
+fetch both require all native dependencies in the supplied full bundle.
+
+## Fetch into selected destinations
+
+Use `fetch --file-backed` for repeatable offline updates, including repositories
+with blobs larger than the buffered intake limit. Supply each advertised source,
+destination, and exact expected old tip explicitly:
+
+```bash
+printf '%s' 'mapped-update-002' | fg bundle fetch \
+  "$DESTINATION_ROOT" "$TENANT" "$REPOSITORY" updated.bundle \
+  --file-backed --trusted-local --object-format sha256 \
+  --principal "$PRINCIPAL" --key-stdin \
+  --map refs/heads/main refs/remotes/upstream/main "$EXPECTED_OLD" \
+  --map refs/heads/main refs/heads/review absent \
+  --max-input-mib 512 --max-expanded-mib 1024 \
+  --max-object-mib 1 --max-blob-mib 256 --timeout-secs 600
+```
+
+For a first fetch into an absent destination, use `absent` instead of an object
+ID. For an existing destination, use its exact native-format tip, such as the
+`tip` returned by `fg refs`. One source can feed multiple destinations. Duplicate
+destinations are refused. `--map-hex` accepts complete hexadecimal byte pairs for
+source and destination names, preserving non-UTF-8 refs.
+
+All mappings belong to one atomic transaction. Branches and remote-tracking refs
+must target commits, including absent and already-equal destinations. Existing
+tips must be ancestors through authenticated native commit-parent edges; every
+parent of a merge can participate. Presence in a tree or in the pack is not
+ancestry. Tags may be created or reasserted at the same ID, but never overwritten.
+There is no force, wildcard, prune, implicit old-tip lookup, or HEAD rewrite.
+
+The full artifact is verified, including unselected objects. Only the mapped
+native closures and transport delta bases needed to reconstruct them are staged.
+Unselected advertisements do not become updates, and exclusive unselected
+objects are not placed in the destination. Missing dependencies cannot be
+borrowed from existing destination objects. Hidden destinations are checked
+before payload intake; current hidden-ref policy, authenticated principal facts,
+protection and exact-old leases are checked again during ordinary admission.
+
+Header-record limits and destination-command limits are independent: one header
+record can feed several destinations, and a single mapping can select from a
+larger advertisement. Mapping count remains bounded by ordinary atomic admission
+and receive-command limits. The additional commit-ancestry walk shares one finite
+work allowance across the entire batch; it reads authenticated metadata without
+buffering blob bodies.
+
+The output uses the existing `git_bundle_fetch` receipt. Buffered and file-backed
+fetch share the canonical destination/expected-old/new identity, including
+reordered mappings. An exact retry can recover the same committed or refused
+terminal decision across profiles before fresh payload, serving, and quota
+checks. A bounded semantic header still has to identify the operation; recovery
+does not verify its body anew.
+
+Embedding callers use `OneNode::fetch_full_git_bundle_reader_durable_in` or
+`fetch_full_git_bundle_reader_controlled_in`, passing `BundleRefMapping` values
+and the same `StreamBundleImportQuery` described below. The full source supplies
+all candidate and ancestry bytes. The source-import admission path therefore
+does not borrow a previous head's object evidence; it can replan after an
+unrelated head advance while rechecking current leases and policy.
 
 ## Independent limits
 
@@ -58,7 +119,12 @@ This option does not turn an incremental or mapped transfer into a full import.
 | `--max-objects` | 100000 | 1..1000000 included objects and bounded inventory entries |
 | `--max-refs` | 4096 | 1..4096 header records, including optional HEAD |
 | `--max-edges` | 1000000 | 1..8000000 typed graph edges |
-| `--timeout-secs` | 300 | 1..3600 seconds across this invocation; an explicit global timeout can narrow it |
+| `--timeout-secs` | 300 | 1..3600 seconds of native processing; an explicit global timeout can narrow it |
+
+Exact stdin credentials are collected before installing cooperative cancellation
+handlers and starting the native-processing timeout. The preliminary stdin read
+retains ordinary process signal behavior. The timeout then covers source opening,
+node opening, verification, staging and admission.
 
 Raising the blob limit does not raise metadata, aggregate bytes, graph work or
 delta resolution work. Existing finite native decoder and resolution budgets
@@ -115,10 +181,13 @@ a particular checkout has run them successfully. Use the pinned repository
 toolchain and the repository's normal build runner:
 
 ```bash
+cargo test --locked -p fgit-pack --test full_bundle
 cargo test --locked -p fgit-object-fabric --lib local::synced_blob
 cargo test --locked -p fgit-node --lib source_retrieval::integrity::bundle_verify::file::tests::import_tests
 cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle::tests::file_import_tests
+cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle::tests::file_fetch_tests
 cargo test --locked -p fgit-cli --bin fg bundle::stream_import
+cargo test --locked -p fgit-cli --bin fg bundle::fetch::file_backed::tests
 cargo test --locked -p fgit-cli --test bundle_stream_export_large_blobs -- --test-threads=1
 ```
 
@@ -128,3 +197,8 @@ limits, source or scratch substitution, cancellation during private staging,
 same-key retry, atomic name collisions and cleanup. The process fixture uses a
 real 33 MiB blob with an empty `PATH`, verifies the actual imported node's exact
 closure and streamed body, and compares receipts across both import profiles.
+Mapped-fetch cases add selective placement, a real large-blob branch update,
+raw-byte fanout, exact-old atomic refusal, native fast-forward refusal, and
+cross-profile terminal recovery. Node tests also cover a second-parent ancestor,
+independent header/command limits, authenticated policy evidence, source changes,
+and cancellation after private staging has begun.

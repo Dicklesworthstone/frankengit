@@ -1,6 +1,6 @@
 //! Exact ref selection for offline fetch. This is a request, not an admission proof.
-use super::{FullBundleError, FullBundleInput, FullBundleLimits};
-use crate::{Deadline, ObjectId, checkpoint};
+use super::{FullBundleError, FullBundleHeader, FullBundleInput, FullBundleLimits};
+use crate::{BundleReference, Deadline, ObjectFormat, ObjectId, checkpoint};
 use fgit_types::RefName;
 use std::collections::BTreeMap;
 
@@ -34,50 +34,73 @@ impl FullBundleInput<'_> {
         limits: FullBundleLimits,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<BundleRefUpdate>, FullBundleError> {
-        checkpoint(deadline)?;
-        if mappings.is_empty() || mappings.len() > limits.max_references {
-            return Err(FullBundleError::Limit("fetch mappings"));
-        }
-        let mut updates = BTreeMap::new();
-        let mut bytes = 0usize;
-        for mapping in mappings {
-            checkpoint(deadline)?;
-            bytes = bytes
-                .checked_add(mapping.source.as_bytes().len())
-                .and_then(|n| n.checked_add(mapping.destination.as_bytes().len()))
-                .filter(|n| *n <= limits.max_header_bytes)
-                .ok_or(FullBundleError::Limit("fetch mapping bytes"))?;
-            let name = mapping.destination.as_bytes();
-            if ![b"refs/heads/".as_slice(), b"refs/remotes/", b"refs/tags/"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-            {
-                return Err(FullBundleError::Unsupported("fetch destination namespace"));
-            }
-            if mapping
-                .expected_old
-                .is_some_and(|old| old.is_zero() || old.algorithm() != self.format())
-            {
-                return Err(FullBundleError::FormatMismatch);
-            }
-            let index = self
-                .references()
-                .binary_search_by(|reference| reference.name().cmp(&mapping.source))
-                .map_err(|_| FullBundleError::Invalid("unadvertised fetch source"))?;
-            let update = BundleRefUpdate {
-                source: mapping.source.clone(),
-                destination: mapping.destination.clone(),
-                expected_old: mapping.expected_old,
-                target: *self.references()[index].target(),
-            };
-            if updates
-                .insert(mapping.destination.clone(), update)
-                .is_some()
-            {
-                return Err(FullBundleError::Invalid("duplicate fetch destination"));
-            }
-        }
-        checkpoint(deadline)?;
-        Ok(updates.into_values().collect())
+        select_updates(self.format(), self.references(), mappings, limits, deadline)
     }
+}
+
+impl FullBundleHeader {
+    /// Resolve the same exact mappings as the buffered bundle profile without
+    /// reading a pack body. The returned updates are semantic requests only;
+    /// native object verification and authority admission remain separate.
+    pub fn select_updates(
+        &self,
+        mappings: &[BundleRefMapping],
+        limits: FullBundleLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<BundleRefUpdate>, FullBundleError> {
+        select_updates(self.format(), self.references(), mappings, limits, deadline)
+    }
+}
+
+fn select_updates(
+    format: ObjectFormat,
+    references: &[BundleReference],
+    mappings: &[BundleRefMapping],
+    limits: FullBundleLimits,
+    deadline: &mut impl Deadline,
+) -> Result<Vec<BundleRefUpdate>, FullBundleError> {
+    checkpoint(deadline)?;
+    if mappings.is_empty() || mappings.len() > limits.max_references {
+        return Err(FullBundleError::Limit("fetch mappings"));
+    }
+    let mut updates = BTreeMap::new();
+    let mut bytes = 0usize;
+    for mapping in mappings {
+        checkpoint(deadline)?;
+        bytes = bytes
+            .checked_add(mapping.source.as_bytes().len())
+            .and_then(|n| n.checked_add(mapping.destination.as_bytes().len()))
+            .filter(|n| *n <= limits.max_header_bytes)
+            .ok_or(FullBundleError::Limit("fetch mapping bytes"))?;
+        let name = mapping.destination.as_bytes();
+        if ![b"refs/heads/".as_slice(), b"refs/remotes/", b"refs/tags/"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            return Err(FullBundleError::Unsupported("fetch destination namespace"));
+        }
+        if mapping
+            .expected_old
+            .is_some_and(|old| old.is_zero() || old.algorithm() != format)
+        {
+            return Err(FullBundleError::FormatMismatch);
+        }
+        let index = references
+            .binary_search_by(|reference| reference.name().cmp(&mapping.source))
+            .map_err(|_| FullBundleError::Invalid("unadvertised fetch source"))?;
+        let update = BundleRefUpdate {
+            source: mapping.source.clone(),
+            destination: mapping.destination.clone(),
+            expected_old: mapping.expected_old,
+            target: *references[index].target(),
+        };
+        if updates
+            .insert(mapping.destination.clone(), update)
+            .is_some()
+        {
+            return Err(FullBundleError::Invalid("duplicate fetch destination"));
+        }
+    }
+    checkpoint(deadline)?;
+    Ok(updates.into_values().collect())
 }

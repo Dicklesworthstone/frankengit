@@ -11,6 +11,8 @@ use fgit_types::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+#[path = "checkpoint_restore_tests.rs"]
+mod checkpoint_restore_tests;
 #[path = "signed_tests.rs"]
 mod signed_tests;
 const TENANT: &str = "11111111111111111111111111111111";
@@ -63,6 +65,32 @@ fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, body: &[u8]
     oid
 }
 fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> (PathBuf, [u8; 32], GitOid) {
+    let (input, pin, commit, _) = checkpoint_fixture(scratch, format, false);
+    (input, pin, commit)
+}
+fn checkpoint_fixture(
+    scratch: &Scratch,
+    format: GitHashAlgorithm,
+    retained: bool,
+) -> (
+    PathBuf,
+    [u8; 32],
+    GitOid,
+    Option<crate::outcome_checkpoint::OutcomeCheckpointReceipt>,
+) {
+    checkpoint_fixture_with(scratch, format, retained, |_, _| {})
+}
+fn checkpoint_fixture_with(
+    scratch: &Scratch,
+    format: GitHashAlgorithm,
+    retained: bool,
+    after: impl FnOnce(&OneNode, Option<&crate::outcome_checkpoint::OutcomeCheckpointReceipt>),
+) -> (
+    PathBuf,
+    [u8; 32],
+    GitOid,
+    Option<crate::outcome_checkpoint::OutcomeCheckpointReceipt>,
+) {
     let root = scratch.0.join("source-node");
     let git = scratch.0.join("source.git");
     let blob = loose(&git, format, GitObjectKind::Blob, PAYLOAD);
@@ -100,6 +128,12 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> (PathBuf, [u8; 32], G
         imported.commands[0].terminal.outcome,
         DecisionOutcome::Committed { .. }
     ));
+    let checkpoint = retained.then(|| {
+        node.runtime()
+            .block_on(node.checkpoint_outcomes_in(&request, Default::default()))
+            .unwrap()
+    });
+    after(&node, checkpoint.as_ref());
     node.shutdown().unwrap();
     let backup = scratch.0.join("source.fg");
     let args = vec![
@@ -117,7 +151,7 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> (PathBuf, [u8; 32], G
     // The backup is the only source for every recovery attempt below.
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(git).unwrap();
-    (backup, pin, commit)
+    (backup, pin, commit, checkpoint)
 }
 fn options(input: &Path, output: PathBuf, expected: [u8; 32]) -> Options {
     Options {
