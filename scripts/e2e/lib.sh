@@ -1927,7 +1927,7 @@ fge_artifact() {
 # rejected separately because "." alone names the work directory itself and
 # contains no ".." to catch.
 fge_tempdir() {
-  local name=${1:-work} d n=0
+  local name=${1:-work} d claim n=0 suffix=.
   case $name in
     *[!A-Za-z0-9._-]*)
       fge_die "fge_tempdir: NAME must match [A-Za-z0-9._-]+, refusing: $name"
@@ -1940,12 +1940,30 @@ fge_tempdir() {
     fge_die "fge_tempdir: NAME must not be all dots, refusing: $name"
   fi
   [ ! -L "$FGE_ARTIFACT_DIR/work" ] || fge_die 'fge_tempdir: work parent is a symlink'
+  mkdir -p "$FGE_ARTIFACT_DIR/work" || fge_die 'fge_tempdir: cannot create work parent'
+  # A legal trailing dot must not become a forbidden ".." in retry names.
+  case $name in *.) suffix='' ;; esac
   d="$FGE_ARTIFACT_DIR/work/$name"
-  while [ -e "$d" ]; do
+  # Reserve each candidate with Bash's exclusive noclobber creation. A check
+  # followed by mkdir -p races; mkdir alone also cannot establish ownership on
+  # coreutils implementations observed returning success after raced EEXIST.
+  # Claims stay in private run state so a child crash cannot reissue a name.
+  # Keep collision diagnostics in run state; surface unexpected failures.
+  while :; do
+    claim="$FGE_STATE_DIR/tempdir-claim-${d##*/}"
+    if (set -o noclobber; : >"$claim") 2>>"$FGE_STATE_DIR/tempdir-allocation.stderr"; then
+      if [ ! -e "$d" ] && [ ! -L "$d" ]; then
+        mkdir "$d" 2>>"$FGE_STATE_DIR/tempdir-allocation.stderr" &&
+          [ -d "$d" ] && [ ! -L "$d" ] ||
+          fge_die 'fge_tempdir: cannot allocate directory; see .state/tempdir-allocation.stderr'
+        break
+      fi
+    elif [ ! -f "$claim" ] || [ -L "$claim" ]; then
+      fge_die 'fge_tempdir: cannot reserve directory; see .state/tempdir-allocation.stderr'
+    fi
     n=$((n + 1))
-    d="$FGE_ARTIFACT_DIR/work/$name.$n"
+    d="$FGE_ARTIFACT_DIR/work/$name$suffix$n"
   done
-  mkdir -p "$d"
   # The documented command-substitution caller runs this function in a
   # subshell. Persist only the validated basename in private run state, so the
   # parent can recover ownership without trusting arbitrary deletion paths.
