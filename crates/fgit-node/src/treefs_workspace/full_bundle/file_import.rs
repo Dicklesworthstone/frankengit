@@ -19,18 +19,22 @@ use fgit_authority::{
 use fgit_crypto::{DigestHasher, IdentityDomain, Sha256Hasher};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::VerifiedObject;
+use fgit_pack::full_bundle::fetch::BundleRefMapping;
 use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 
 use crate::receive_staging::ReceiveStaging;
 use crate::source_retrieval::integrity::bundle_verify::{
-    BundleVerifyError, BundleVerifyLimits, FullBundleImportPlan, prepare_full_bundle_import_reader,
+    BundleVerifyError, BundleVerifyLimits, FullBundleImportPlan, prepare_full_bundle_fetch_reader,
+    prepare_full_bundle_import_reader,
 };
 use crate::{LoopbackReceiveSession, NodeRefusal, NodeRequestContext, OneNode};
 
 use super::{
     NodeReceiveTransportRefusal, NodeWorkspaceRefusal, receive_error, workspace_request_live,
 };
+
+mod fetch;
 
 const MAX_BYTES: u64 = 16_384 * 1024 * 1024;
 const METADATA_BATCH_BYTES: usize = 4 * 1024 * 1024;
@@ -164,6 +168,80 @@ impl OneNode {
         limits: AdmissionLimits,
         caller_live: &mut impl FnMut() -> bool,
     ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+        self.intake_full_git_bundle_reader_controlled_in(
+            request,
+            session,
+            input,
+            None,
+            query,
+            limits,
+            caller_live,
+        )
+        .await
+    }
+
+    /// Fetch explicit full-bundle mappings through bounded file custody.
+    /// Every mapping carries an absent or exact-old lease, and the entire set
+    /// publishes atomically. Branches and remote refs require commits and native
+    /// parent-edge fast-forwards; tags may only be created or reasserted.
+    /// Only mapped closures and their transport bases enter candidate storage.
+    /// Historical outcomes share the buffered fetch transaction identity.
+    pub async fn fetch_full_git_bundle_reader_durable_in<R: Read + Seek>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &mut R,
+        mappings: &[BundleRefMapping],
+        query: StreamBundleImportQuery,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+        self.fetch_full_git_bundle_reader_controlled_in(
+            request,
+            session,
+            input,
+            mappings,
+            query,
+            limits,
+            &mut || true,
+        )
+        .await
+    }
+
+    /// Mapped fetch with a caller-owned sticky stop probe. Pending admission
+    /// keeps its original context and drains before private custody is released.
+    /// A terminal decision remains valid when stop arrives after publication.
+    pub async fn fetch_full_git_bundle_reader_controlled_in<R: Read + Seek>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &mut R,
+        mappings: &[BundleRefMapping],
+        query: StreamBundleImportQuery,
+        limits: AdmissionLimits,
+        caller_live: &mut impl FnMut() -> bool,
+    ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+        self.intake_full_git_bundle_reader_controlled_in(
+            request,
+            session,
+            input,
+            Some(mappings),
+            query,
+            limits,
+            caller_live,
+        )
+        .await
+    }
+
+    async fn intake_full_git_bundle_reader_controlled_in<R: Read + Seek>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &mut R,
+        mappings: Option<&[BundleRefMapping]>,
+        query: StreamBundleImportQuery,
+        limits: AdmissionLimits,
+        caller_live: &mut impl FnMut() -> bool,
+    ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
         if query.timeout.is_zero() || query.timeout > Duration::from_secs(3600) {
             return Err(StreamBundleImportRefusal::InvalidQuery(
                 "timeout must be in (0,3600 seconds]",
@@ -190,6 +268,7 @@ impl OneNode {
             request,
             session,
             input,
+            mappings,
             query,
             limits,
             &mut worker_live,
@@ -206,6 +285,7 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         input: &mut R,
+        mappings: Option<&[BundleRefMapping]>,
         mut query: StreamBundleImportQuery,
         limits: AdmissionLimits,
         live: &mut impl FnMut() -> bool,
@@ -246,8 +326,16 @@ impl OneNode {
             .limits
             .envelope
             .max_references
-            .min(limits.command_limit(true).saturating_add(1))
             .min(fgit_wire::receive::ReceiveLimits::default().max_commands);
+        // An explicit fetch can select one destination from a larger header.
+        // Advertisement capacity and atomic command capacity are independent.
+        if mappings.is_none() {
+            query.limits.envelope.max_references = query
+                .limits
+                .envelope
+                .max_references
+                .min(limits.command_limit(true).saturating_add(1));
+        }
         query.limits.graph.max_references = query
             .limits
             .graph
@@ -268,22 +356,50 @@ impl OneNode {
         if header.format() != self.object_format {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch.into());
         }
-        if header.references().is_empty() || header.references().len() > limits.command_limit(true)
-        {
-            return Err(StreamBundleImportRefusal::InvalidQuery(
-                "reference command count",
-            ));
-        }
-        let commands: Vec<_> = header
-            .references()
-            .iter()
-            .map(|reference| RefCommand {
-                name: reference.name().clone(),
-                expected_old: ExpectedOld::Absent,
-                proposed_new: ProposedNew::Update(*reference.target()),
-                force: false,
-            })
-            .collect();
+        let commands: Vec<_> = if let Some(mappings) = mappings {
+            if mappings.is_empty() || mappings.len() > limits.command_limit(true) {
+                return Err(StreamBundleImportRefusal::InvalidQuery(
+                    "reference command count",
+                ));
+            }
+            let mapping_limits = fgit_pack::full_bundle::FullBundleLimits {
+                max_references: limits
+                    .command_limit(true)
+                    .min(fgit_wire::receive::ReceiveLimits::default().max_commands),
+                ..query.limits.envelope
+            };
+            header
+                .select_updates(mappings, mapping_limits, live)
+                .map_err(BundleVerifyError::Envelope)?
+                .into_iter()
+                .map(|update| RefCommand {
+                    name: update.destination,
+                    expected_old: update
+                        .expected_old
+                        .map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
+                    proposed_new: ProposedNew::Update(update.target),
+                    force: false,
+                })
+                .collect()
+        } else {
+            if header.references().is_empty()
+                || header.references().len() > limits.command_limit(true)
+            {
+                return Err(StreamBundleImportRefusal::InvalidQuery(
+                    "reference command count",
+                ));
+            }
+            header
+                .references()
+                .iter()
+                .map(|reference| RefCommand {
+                    name: reference.name().clone(),
+                    expected_old: ExpectedOld::Absent,
+                    proposed_new: ProposedNew::Update(*reference.target()),
+                    force: false,
+                })
+                .collect()
+        };
         let semantic = SemanticRequest::build(
             RECEIVE_ADMISSION_SCHEMA,
             self.object_format,
@@ -326,6 +442,21 @@ impl OneNode {
         self.push_quota
             .evaluate(&authenticated.principal_id())
             .map_err(receive_error)?;
+        if mappings.is_some() {
+            let materialized = self
+                .materialize_admission_in(request)
+                .await
+                .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
+            if commands.iter().any(|command| {
+                materialized
+                    .snapshot()
+                    .hidden_refs
+                    .hides(command.name.as_bytes())
+            }) {
+                return Err(NodeWorkspaceRefusal::RefUnavailable.into());
+            }
+        }
+        checkpoint(live)?;
         rewind(input, live)?;
         // This new name is never inferred from a previous process or reused.
         // It is ordinary private scratch, never a fabric/authority object key.
@@ -333,13 +464,28 @@ impl OneNode {
             ".fg-bundle-import-{:032x}",
             std::random::random::<u128>(..),
         ));
-        let mut plan = prepare_full_bundle_import_reader(
-            input,
-            self.object_format,
-            &scratch,
-            &query.limits,
-            live,
-        )?;
+        let mut plan = if let Some(mappings) = mappings {
+            let sources: Vec<_> = mappings
+                .iter()
+                .map(|mapping| mapping.source.clone())
+                .collect();
+            prepare_full_bundle_fetch_reader(
+                input,
+                self.object_format,
+                &scratch,
+                &sources,
+                &query.limits,
+                live,
+            )?
+        } else {
+            prepare_full_bundle_import_reader(
+                input,
+                self.object_format,
+                &scratch,
+                &query.limits,
+                live,
+            )?
+        };
         let staging = ReceiveStaging::default();
         let prepared = (|| {
             checkpoint(live)?;
@@ -358,10 +504,24 @@ impl OneNode {
                     "selected payload byte limit",
                 ));
             }
+            let destinations = commands
+                .iter()
+                .map(|command| {
+                    let ProposedNew::Update(target) = command.proposed_new else {
+                        return Err(StreamBundleImportRefusal::InvalidQuery(
+                            "full bundle update required",
+                        ));
+                    };
+                    Ok((command.name.clone(), target))
+                })
+                .collect::<Result<_, StreamBundleImportRefusal>>()?;
+            if mappings.is_some() {
+                fetch::require_fast_forwards(&commands, &mut plan, &query.limits, live)?;
+            }
             crate::loose_import::preflight_import_metadata(
                 self.object_format,
                 plan.selected_ids().len(),
-                &CanonicalRefState::new(expected),
+                &CanonicalRefState::new(destinations),
                 self.authority.limits().body_bytes,
                 live,
             )
@@ -380,15 +540,30 @@ impl OneNode {
                 GitHashAlgorithm::Sha1 => GitOid::Sha1(GitOidSha1::ZERO),
                 GitHashAlgorithm::Sha256 => GitOid::Sha256(GitOidSha256::ZERO),
             };
-            let updates: Vec<_> = header
-                .references()
+            let updates: Vec<_> = commands
                 .iter()
-                .map(|reference| SourceRefUpdate {
-                    old: absent,
-                    new: *reference.target(),
-                    ref_name: reference.name().as_bytes().to_vec(),
+                .map(|command| {
+                    let ProposedNew::Update(new) = command.proposed_new else {
+                        return Err(StreamBundleImportRefusal::InvalidQuery(
+                            "full bundle update required",
+                        ));
+                    };
+                    let old = match command.expected_old {
+                        ExpectedOld::Absent => absent,
+                        ExpectedOld::Exactly(old) => old,
+                        ExpectedOld::Unspecified => {
+                            return Err(StreamBundleImportRefusal::InvalidQuery(
+                                "exact lease required",
+                            ));
+                        }
+                    };
+                    Ok(SourceRefUpdate {
+                        old,
+                        new,
+                        ref_name: command.name.as_bytes().to_vec(),
+                    })
                 })
-                .collect();
+                .collect::<Result<_, StreamBundleImportRefusal>>()?;
             let receipt = SourceImportReceipt {
                 object_format: self.object_format,
                 object_count: u32::try_from(closure.objects().len()).map_err(|_| {
@@ -434,6 +609,10 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
+        // The full source supplies every candidate and ancestry byte. It borrows
+        // no object from the earlier visibility snapshot. Ordinary admission
+        // rechecks current hidden refs, exact leases and authenticated policy at
+        // each publication attempt, including after an unrelated head change.
         self.admit_validated_source_import_with_authentication_publishing_in(
             request,
             &context,

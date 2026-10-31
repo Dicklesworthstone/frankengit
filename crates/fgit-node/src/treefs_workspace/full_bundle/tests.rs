@@ -520,3 +520,6 @@ fn assert_native_transfer(source: &OneNode, destination: &OneNode, id: GitOid) {
         "native identity, bytes and all non-placement fields must survive transfer"
     );
 }
+
+#[path = "file_fetch_tests.rs"]
+mod file_fetch_tests;

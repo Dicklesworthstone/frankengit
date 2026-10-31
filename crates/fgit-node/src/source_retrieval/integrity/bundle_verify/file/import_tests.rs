@@ -522,3 +522,285 @@ fn cancellation_cleanup_preserves_a_replacement_created_by_the_source() {
     assert!(original.is_file());
     fs::remove_file(original).unwrap();
 }
+
+fn named_fetch_bundle(
+    format: GitHashAlgorithm,
+    records: &[Vec<u8>],
+    references: &[(&[u8], GitOid)],
+    head: Option<GitOid>,
+) -> Vec<u8> {
+    let original = bundle(format, records, references[0].1);
+    let input =
+        fgit_pack::full_bundle::FullBundleInput::parse(&original, Default::default(), &mut || true)
+            .unwrap();
+    let mut output = match format {
+        GitHashAlgorithm::Sha1 => b"# v2 git bundle\n".to_vec(),
+        GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
+    };
+    if let Some(head) = head {
+        output.extend_from_slice(format!("{} HEAD\n", lowercase_hex(head.as_bytes())).as_bytes());
+    }
+    for &(name, target) in references {
+        output.extend_from_slice(lowercase_hex(target.as_bytes()).as_bytes());
+        output.push(b' ');
+        output.extend_from_slice(name);
+        output.push(b'\n');
+    }
+    output.push(b'\n');
+    output.extend_from_slice(input.pack_bytes());
+    output
+}
+
+fn fetch_commit(tree: GitOid, parent: Option<GitOid>, message: &str) -> Vec<u8> {
+    let mut body = format!("tree {}\n", lowercase_hex(tree.as_bytes()));
+    if let Some(parent) = parent {
+        body.push_str(&format!("parent {}\n", lowercase_hex(parent.as_bytes())));
+    }
+    body.push_str("author A <a@example.test> 0 +0000\ncommitter A <a@example.test> 0 +0000\n\n");
+    body.push_str(message);
+    body.push('\n');
+    body.into_bytes()
+}
+
+fn prepare_fetch(
+    bytes: &[u8],
+    format: GitHashAlgorithm,
+    scratch: &ScratchPath,
+    sources: &[fgit_types::RefName],
+    limits: &BundleVerifyLimits,
+) -> Result<FullBundleImportPlan, BundleVerifyError> {
+    prepare_full_bundle_fetch_reader(
+        &mut Cursor::new(bytes),
+        format,
+        scratch.path(),
+        sources,
+        limits,
+        &mut || true,
+    )
+}
+
+#[test]
+fn mapped_sources_select_only_their_native_closure_and_keep_full_original_evidence() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let empty_tree = git_object_id(format, ObjectKind::Tree, b"");
+        let base_body = fetch_commit(empty_tree, None, "base");
+        let base = git_object_id(format, ObjectKind::Commit, &base_body);
+        let body = b"selected payload";
+        let payload = git_object_id(format, ObjectKind::Blob, body);
+        let mut tree_body = b"100644 kept\0".to_vec();
+        tree_body.extend_from_slice(payload.as_bytes());
+        let tree = git_object_id(format, ObjectKind::Tree, &tree_body);
+        let tip_body = fetch_commit(tree, Some(base), "selected");
+        let tip = git_object_id(format, ObjectKind::Commit, &tip_body);
+        let other_body = b"unselected payload";
+        let other_payload = git_object_id(format, ObjectKind::Blob, other_body);
+        let mut other_tree_body = b"100644 other\0".to_vec();
+        other_tree_body.extend_from_slice(other_payload.as_bytes());
+        let other_tree = git_object_id(format, ObjectKind::Tree, &other_tree_body);
+        let other_commit_body = fetch_commit(other_tree, None, "unselected");
+        let other_commit = git_object_id(format, ObjectKind::Commit, &other_commit_body);
+        let input = named_fetch_bundle(
+            format,
+            &[
+                record(1, &other_commit_body, &[]),
+                record(2, b"", &[]),
+                record(1, &tip_body, &[]),
+                record(3, other_body, &[]),
+                record(2, &tree_body, &[]),
+                record(1, &base_body, &[]),
+                record(2, &other_tree_body, &[]),
+                record(3, body, &[]),
+            ],
+            &[
+                (b"refs/heads/unselected", other_commit),
+                (b"refs/heads/\xff", tip),
+            ],
+            Some(other_commit),
+        );
+        let full = verify(&input).unwrap();
+        let selected = fgit_types::RefName::try_new(b"refs/heads/\xff").unwrap();
+        // More mapping sources than distinct advertisements is ordinary fanout,
+        // not an invitation to stage the other advertised branch or HEAD.
+        for sources in [
+            vec![selected.clone()],
+            vec![selected.clone(), selected.clone(), selected.clone()],
+        ] {
+            let scratch = ScratchPath::new();
+            let mut plan = prepare_fetch(
+                &input,
+                format,
+                &scratch,
+                &sources,
+                &BundleVerifyLimits::default(),
+            )
+            .unwrap();
+            assert_same(plan.verified(), full.verified());
+            assert_eq!(plan.verified().advertised_head(), Some(other_commit));
+            assert_eq!(plan.verified().graph().objects, 8);
+            assert_eq!(plan.receipt().header().object_count, 8);
+            assert_eq!(plan.receipt().pack_sha256(), *full.pack_sha256());
+            assert_eq!(plan.receipt().trailer(), full.verified().pack_checksum());
+            assert_eq!(
+                plan.selected_ids(),
+                &BTreeSet::from([empty_tree, base, payload, tree, tip])
+            );
+            for unselected in [other_payload, other_tree, other_commit] {
+                assert!(plan.object(unselected).is_none());
+            }
+            // A true ancestor's metadata is present for the caller's native
+            // fast-forward walk, even though only the tip ref was mapped.
+            assert_eq!(plan.read_metadata(base, &mut || true).unwrap(), base_body);
+            assert_eq!(plan.read_metadata(tip, &mut || true).unwrap(), tip_body);
+            assert_eq!(plan.read_metadata(tree, &mut || true).unwrap(), tree_body);
+            assert_eq!(blob(&mut plan, payload), body);
+            assert_eq!(
+                plan.total_selected_bytes(),
+                (base_body.len() + body.len() + tree_body.len() + tip_body.len()) as u64
+            );
+            plan.finish().unwrap();
+            assert!(!scratch.path().exists());
+        }
+    }
+}
+
+#[test]
+fn mapped_delta_results_retain_unselected_transport_bases_in_both_native_layouts() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let base = vec![b'x'; 4096];
+        let mut result = base.clone();
+        result.push(b'!');
+        let base_id = git_object_id(format, ObjectKind::Blob, &base);
+        let result_id = git_object_id(format, ObjectKind::Blob, &result);
+        let unrelated_id = git_object_id(format, ObjectKind::Blob, b"unselected");
+        let program = [0x80, 0x20, 0x81, 0x20, 0xa0, 0x10, 1, b'!'];
+        let base_row = record(3, &base, &[]);
+        let layouts = [
+            vec![
+                base_row.clone(),
+                record(6, &program, &ofs(base_row.len() as u64)),
+                record(3, b"unselected", &[]),
+            ],
+            vec![
+                record(7, &program, base_id.as_bytes()),
+                record(3, b"unselected", &[]),
+                base_row,
+            ],
+        ];
+        let limits = BundleVerifyLimits {
+            max_streamed_blob_bytes: 8192,
+            pack: fgit_pack::PackLimits {
+                max_object_bytes: 512,
+                ..BundleVerifyLimits::default().pack
+            },
+            graph: fgit_treefs::integrity::GraphLimits {
+                max_object_bytes: 512,
+                ..BundleVerifyLimits::default().graph
+            },
+            ..BundleVerifyLimits::default()
+        };
+        let source = fgit_types::RefName::try_new(b"refs/tags/result").unwrap();
+        for records in layouts {
+            let input = named_fetch_bundle(
+                format,
+                &records,
+                &[
+                    (b"refs/tags/base", base_id),
+                    (b"refs/tags/unrelated", unrelated_id),
+                    (b"refs/tags/result", result_id),
+                ],
+                None,
+            );
+            let scratch = ScratchPath::new();
+            let mut plan = prepare_fetch(
+                &input,
+                format,
+                &scratch,
+                std::slice::from_ref(&source),
+                &limits,
+            )
+            .unwrap();
+            assert_eq!(plan.verified().graph().objects, 3);
+            assert_eq!(plan.verified().delta_objects(), 1);
+            assert_eq!(plan.selected_ids(), &BTreeSet::from([base_id, result_id]));
+            assert!(plan.object(unrelated_id).is_none());
+            assert_eq!(blob(&mut plan, base_id), base);
+            assert_eq!(blob(&mut plan, result_id), result);
+            plan.finish().unwrap();
+            assert!(!scratch.path().exists());
+        }
+    }
+}
+
+#[test]
+fn mapped_selection_refuses_absent_sources_and_still_audits_unselected_uploads() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let body = b"selected payload";
+        let target = git_object_id(format, ObjectKind::Blob, body);
+        let source = fgit_types::RefName::try_new(b"refs/tags/result").unwrap();
+        let absent = fgit_types::RefName::try_new(b"refs/tags/absent").unwrap();
+        let complete = bundle(format, &[record(3, body, &[])], target);
+        let scratch = ScratchPath::new();
+        for sources in [
+            vec![],
+            vec![absent],
+            vec![
+                source.clone(),
+                fgit_types::RefName::try_new(b"refs/tags/missing").unwrap(),
+            ],
+        ] {
+            assert!(
+                prepare_fetch(
+                    &complete,
+                    format,
+                    &scratch,
+                    &sources,
+                    &BundleVerifyLimits::default(),
+                )
+                .is_err()
+            );
+            assert!(!scratch.path().exists());
+        }
+        let missing = git_object_id(format, ObjectKind::Tree, b"missing local tree");
+        let disconnected_commit = fetch_commit(missing, None, "unselected missing dependency");
+        let external = git_object_id(format, ObjectKind::Blob, b"external base");
+        for records in [
+            vec![
+                record(3, body, &[]),
+                record(1, b"malformed unselected commit", &[]),
+            ],
+            vec![record(3, body, &[]), record(1, &disconnected_commit, &[])],
+            vec![
+                record(3, body, &[]),
+                record(
+                    7,
+                    &delta(b"external base", b"external result"),
+                    external.as_bytes(),
+                ),
+            ],
+        ] {
+            let input = bundle(format, &records, target);
+            assert!(
+                prepare_fetch(
+                    &input,
+                    format,
+                    &scratch,
+                    std::slice::from_ref(&source),
+                    &BundleVerifyLimits::default(),
+                )
+                .is_err()
+            );
+            assert!(!scratch.path().exists());
+        }
+        let mut valid = prepare_fetch(
+            &complete,
+            format,
+            &scratch,
+            &[source],
+            &BundleVerifyLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(blob(&mut valid, target), body);
+        valid.finish().unwrap();
+        assert!(!scratch.path().exists());
+    }
+}

@@ -5,7 +5,9 @@ mod import;
 mod resolve;
 mod storage;
 
-pub(crate) use import::{FullBundleImportPlan, prepare_full_bundle_import_reader};
+pub(crate) use import::{
+    FullBundleImportPlan, prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
+};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
