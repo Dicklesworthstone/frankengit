@@ -434,25 +434,50 @@ where
     };
     for _ in 0..limits.max_cas_replans {
         checkpoint().map_err(unavailable)?;
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        let (basis, head_receipt, authenticated) =
+            crate::read_basis_async(store, cx, &context.head_key).await?;
+        let cumulative = match projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await
+        {
+            Ok(cumulative) => cumulative,
+            Err(error) => {
+                // A recent terminal can remain recoverable even when an older
+                // prefix cannot supply a complete publication witness.
+                if crate::collect_terminal_retryable(&error)
+                    && let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+                        store,
+                        cx,
+                        &context.head_key,
+                        context.tenant_id,
+                        context.repository_id,
+                        admission.tx_id(),
+                    )
+                    .await?
+                {
+                    return publication::recovered(terminal);
+                }
+                return Err(error.into());
+            }
+        };
+        if cumulative.observed() != head_receipt.token() {
+            continue;
+        }
+        match fgit_authority::resolve_outcome_with_cumulative_async(
             store,
             cx,
             &context.head_key,
+            head_receipt.token(),
             context.tenant_id,
             context.repository_id,
             admission.tx_id(),
+            &cumulative,
         )
         .await?
         {
-            return publication::recovered(terminal);
-        }
-        let (basis, head_receipt, authenticated) =
-            crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative = projection
-            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
-            .await?;
-        if cumulative.observed() != head_receipt.token() {
-            continue;
+            Some(OutcomeLookup::Decided(terminal)) => return publication::recovered(terminal),
+            Some(OutcomeLookup::Undecided) => {}
+            None => continue,
         }
         let state = delivery::read_in(store, cx, &basis, &|| checkpoint().is_err()).await?;
         let Some(entry) = state.outbox.entry(original.delivery_key()) else {
@@ -760,11 +785,26 @@ where
             head_receipt.token(),
             &publication,
             admission.tx_id(),
+            &cumulative,
         )
         .await?
         {
             return Ok(owned);
         }
+    }
+    // Unrelated writers can invalidate every retained witness without
+    // invalidating a standing terminal. Recovery never acquires a new send.
+    if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        admission.tx_id(),
+    )
+    .await?
+    {
+        return publication::recovered(terminal);
     }
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,

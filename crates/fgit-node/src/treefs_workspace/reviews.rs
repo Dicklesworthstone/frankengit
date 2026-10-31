@@ -72,16 +72,10 @@ impl OneNode {
             .0;
         // A historical result survives stopped service, exhausted quota and
         // missing local bundle files. Confirm the same seal/key before return.
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            self.tenant_id,
-            self.repository_id,
-            tx_id,
-        )
-        .await
-        .map_err(|error| map_error(error.into()))?
+        if let OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx_id)
+            .await
+            .map_err(|error| map_error(error.into()))?
         {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await
@@ -306,16 +300,10 @@ impl OneNode {
                 NodeWorkspaceRefusal::InvalidWorkspaceCandidate("reviewed merge seal refused")
             })?
             .0;
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            self.tenant_id,
-            self.repository_id,
-            tx_id,
-        )
-        .await
-        .map_err(|error| map_error(error.into()))?
+        if let OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx_id)
+            .await
+            .map_err(|error| map_error(error.into()))?
         {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await

@@ -3,6 +3,7 @@
 //! tests do not establish filesystem crash behavior or a real remote service.
 
 mod dispatch;
+mod recovery;
 mod retirement;
 
 use std::collections::VecDeque;

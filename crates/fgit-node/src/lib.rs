@@ -104,7 +104,7 @@ use fgit_authority::{
     HeadRead, IdempotencyKey, ImmutableKey, ImmutableRead, KeyError, OutcomeLookup, PutOutcome,
     StoreInstanceId, initialize_repository_async, outcome_index_root, read_hidden_ref_policy_async,
     read_repository_incarnation_configuration_async, record_creation_attempt_async,
-    resolve_outcome_async, stage_latest_repository_incarnation_configuration_async,
+    stage_latest_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async};
@@ -11126,24 +11126,18 @@ impl OneNode {
     /// Resolves one sealed transaction outcome through authoritative durable state.
     ///
     /// This reconciles the authenticated decision stream with its derived
-    /// outcome accelerator. In particular, an absent accelerator row is not
-    /// treated as an undecided transaction without replaying the current
-    /// authority-selected history first.
+    /// outcome accelerator. Retained outcome checkpoints bound historical
+    /// reads; missing or damaged checkpoint evidence falls back to replay.
+    /// An absent accelerator row is never treated as an undecided transaction
+    /// without verifying the current authority-selected history first.
     pub async fn resolve_outcome_in(
         &self,
         request: &NodeRequestContext,
         transaction_id: fgit_types::TxId,
     ) -> Result<OutcomeLookup, NodeRefusal> {
-        resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            self.tenant_id,
-            self.repository_id,
-            transaction_id,
-        )
-        .await
-        .map_err(NodeRefusal::from)
+        self.resolve_outcome_checkpointed_in(request, transaction_id)
+            .await
+            .map_err(NodeRefusal::from)
     }
 
     /// Resolves one sealed transaction outcome with a fresh bounded context.

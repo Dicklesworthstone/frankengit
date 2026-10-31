@@ -75,25 +75,49 @@ where
     let tx_id = admission.tx_id();
     for _ in 0..limits.max_cas_replans {
         projection.merge_checkpoint(cx).map_err(unavailable)?;
-        if let OutcomeLookup::Decided(outcome) = fgit_authority::resolve_outcome_async(
+        let (basis, receipt, authenticated) =
+            crate::read_basis_async(store, cx, &context.head_key).await?;
+        let cumulative = match projection
+            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
+            .await
+        {
+            Ok(cumulative) => cumulative,
+            Err(error) => {
+                if crate::collect_terminal_retryable(&error)
+                    && let fgit_authority::OutcomeLookup::Decided(terminal) =
+                        fgit_authority::resolve_outcome_async(
+                            store,
+                            cx,
+                            &context.head_key,
+                            context.tenant_id,
+                            context.repository_id,
+                            tx_id,
+                        )
+                        .await?
+                {
+                    return Ok(terminal);
+                }
+                return Err(error.into());
+            }
+        };
+        if cumulative.observed() != receipt.token() {
+            continue;
+        }
+        match fgit_authority::resolve_outcome_with_cumulative_async(
             store,
             cx,
             &context.head_key,
+            receipt.token(),
             context.tenant_id,
             context.repository_id,
             tx_id,
+            &cumulative,
         )
         .await?
         {
-            return Ok(outcome);
-        }
-        let (basis, receipt, authenticated) =
-            crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative = projection
-            .collect_cumulative_outcomes_async(store, cx, &context.head_key, &authenticated)
-            .await?;
-        if cumulative.observed() != receipt.token() {
-            continue;
+            Some(OutcomeLookup::Decided(outcome)) => return Ok(outcome),
+            Some(OutcomeLookup::Undecided) => {}
+            None => continue,
         }
         let prepared: Result<_, PreparationFailure> = async {
             let snapshot = projection
@@ -230,6 +254,19 @@ where
         {
             return Ok(outcome);
         }
+    }
+    // A continuously moving witness must not hide an already durable terminal.
+    if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .await?
+    {
+        return Ok(terminal);
     }
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,

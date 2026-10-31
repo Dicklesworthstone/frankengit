@@ -363,15 +363,8 @@ impl OneNode {
         // Resolve an exact prior decision before quarantine or current policy
         // checks. A changed policy cannot rewrite a historical merge/refusal,
         // and a successful retry need not reconstruct the old candidate inputs.
-        if let fgit_authority::OutcomeLookup::Decided(terminal) =
-            fgit_authority::resolve_outcome_async(
-                &self.authority,
-                request.authority(),
-                &self.head_key,
-                self.tenant_id,
-                self.repository_id,
-                tx_id,
-            )
+        if let fgit_authority::OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx_id)
             .await
             .map_err(|error| map_admission(error.into()))?
         {
@@ -485,15 +478,8 @@ impl OneNode {
                 ))
             })?
             .0;
-        if let fgit_authority::OutcomeLookup::Decided(terminal) =
-            fgit_authority::resolve_outcome_async(
-                &self.authority,
-                request.authority(),
-                &self.head_key,
-                self.tenant_id,
-                self.repository_id,
-                tx_id,
-            )
+        if let fgit_authority::OutcomeLookup::Decided(terminal) = self
+            .resolve_outcome_checkpointed_in(request, tx_id)
             .await
             .map_err(|error| map_admission(error.into()))?
         {

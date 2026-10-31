@@ -66,7 +66,10 @@ use crate::vocabulary::{
 };
 
 mod cumulative;
-pub use cumulative::{publish_decisions_with_cumulative, publish_decisions_with_cumulative_async};
+pub use cumulative::{
+    publish_decisions_with_cumulative, publish_decisions_with_cumulative_async,
+    resolve_outcome_with_cumulative, resolve_outcome_with_cumulative_async,
+};
 mod plural;
 pub use plural::{resolve_outcomes, resolve_outcomes_async};
 

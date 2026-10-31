@@ -232,7 +232,16 @@ does not establish non-publication.
 Maintenance refuses missing or corrupt newest capsule/checkpoint evidence;
 it never silently replaces that evidence with an older checkpoint. Admission
 independently retains its bounded genesis fallback when outcome checkpoint
-leaves are unusable. This `DecisionHistoryOnly` profile maintains the outcome
+leaves are unusable. Native terminal lookup and asynchronous admission reuse
+the authenticated cumulative witness to resolve both historical decisions and
+absence before preparing a publication. Accelerator hints are reconciled only
+after rechecking the exact head, repository and outcome root. If concurrent
+writes keep moving that head, terminal recovery can still use bounded replay
+under the original request context. A recent terminal can also be recovered
+before unavailable or over-budget older history; an undecided result cannot
+replace a missing complete witness.
+
+This `DecisionHistoryOnly` profile maintains the outcome
 index; it is not a complete repository backup, restore drill, history pruning
 or garbage collection. Cold object-closure and other independent history limits
 remain. See the [native implementation](crates/fgit-node/src/outcome_checkpoint.rs)

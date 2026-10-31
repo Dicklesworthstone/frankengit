@@ -2,20 +2,33 @@
 
 use super::*;
 
+use crate::outcome_checkpoint::{OutcomeCheckpointLimits, OutcomeCheckpointReceipt};
+use fgit_admission::CommandOutcome;
 use fgit_authority::{
-    AuthenticatedHead, CumulativeOutcomes, OutcomeFailure, collect_cumulative_outcomes_async,
+    AmbiguityReason, AuthenticatedHead, AuthorityFailure, CumulativeOutcomes, OutcomeFailure,
+    collect_cumulative_outcomes_async,
 };
 use fgit_chronicle::{
     BackupProfile, CapsuleClosure, OutcomeIndexCheckpointBody, OutcomeIndexLeafArchive,
     activate_frozen_capsule_async, freeze_capsule_with_outcome_index_checkpoint_async,
-    outcome_index_leaf_archive_namespace, stage_outcome_index_checkpoint_async,
+    load_verified_outcome_index_checkpoint_async, outcome_index_leaf_archive_namespace,
+    stage_outcome_index_checkpoint_async,
 };
 use fgit_codec::RepositoryDecision;
 use fgit_object_fabric::fabric::{ImmutableObjectFabric, PlacementAdmission, PutIfAbsent};
 use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
 use fgit_types::{DecisionSequence, Digest, RepositoryDecisionBatchId};
 
-fn add_outcome(node: &OneNode, index: usize) {
+fn add_outcome(node: &OneNode, index: usize) -> CommandOutcome {
+    let outcome = import_outcome(node, index, &format!("outcome-{index}"));
+    assert!(matches!(
+        outcome.terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    outcome
+}
+
+fn import_outcome(node: &OneNode, index: usize, key: &str) -> CommandOutcome {
     let object = put_object(
         node,
         ObjectType::Blob,
@@ -25,7 +38,14 @@ fn add_outcome(node: &OneNode, index: usize) {
     let closure = PermittedObjectClosure::new(objects.clone());
     let validated = validate_source_import(
         &[SourceRefUpdate {
-            old: GitOid::from_hex(node.object_format(), &"00".repeat(20)).unwrap(),
+            old: GitOid::from_hex(
+                node.object_format(),
+                &"00".repeat(match node.object_format() {
+                    GitHashAlgorithm::Sha1 => 20,
+                    GitHashAlgorithm::Sha256 => 32,
+                }),
+            )
+            .unwrap(),
             new: object,
             ref_name: format!("refs/tags/outcome-{index}").into_bytes(),
         }],
@@ -42,8 +62,7 @@ fn add_outcome(node: &OneNode, index: usize) {
     )
     .unwrap();
     let (mut context, _, _) = evidence_request(node);
-    context.idempotency_key =
-        fgit_authority::IdempotencyKey::new(format!("outcome-{index}").into_bytes()).unwrap();
+    context.idempotency_key = fgit_authority::IdempotencyKey::new(key.as_bytes().to_vec()).unwrap();
     let request = node.request_context();
     let result = node
         .runtime()
@@ -54,10 +73,54 @@ fn add_outcome(node: &OneNode, index: usize) {
             AdmissionLimits::default(),
         ))
         .unwrap();
-    assert!(matches!(
-        result.commands[0].terminal.outcome,
-        DecisionOutcome::Committed { .. }
-    ));
+    assert_eq!(result.commands.len(), 1);
+    result.commands[0]
+}
+
+fn maintain_checkpoint(node: &OneNode) -> OutcomeCheckpointReceipt {
+    let request = node.request_context();
+    node.runtime()
+        .block_on(node.checkpoint_outcomes_in(&request, OutcomeCheckpointLimits::default()))
+        .unwrap()
+}
+
+fn maintained_leaf_paths(node: &OneNode, root: Digest) -> Vec<PathBuf> {
+    let request = node.request_context();
+    let (checkpoint, _) = node
+        .runtime()
+        .block_on(load_verified_outcome_index_checkpoint_async(
+            &node.authority,
+            request.authority(),
+            &CryptoBodyIdentity,
+            &node.outcome_checkpoint_fabric,
+            root,
+        ))
+        .unwrap();
+    let manifest = node
+        .outcome_checkpoint_fabric
+        .read_manifest(checkpoint.leaf_archive_manifest)
+        .unwrap();
+    assert!(!manifest.entries().is_empty());
+    let hex = fgit_crypto::lowercase_hex;
+    manifest
+        .entries()
+        .iter()
+        .map(|entry| {
+            let identity = entry.object_identity();
+            node.storage_root
+                .join("objects")
+                .join(hex(manifest.namespace()))
+                .join(hex(&identity.algorithm().code_point().to_be_bytes()))
+                .join(hex(identity.as_bytes()))
+        })
+        .collect()
+}
+
+fn public_lookup(node: &OneNode, tx: TxId) -> OutcomeLookup {
+    let request = node.request_context();
+    node.runtime()
+        .block_on(node.resolve_outcome_in(&request, tx))
+        .unwrap()
 }
 
 fn stage_checkpoint(
@@ -361,4 +424,247 @@ fn cancelled_outcome_collection_never_returns_a_checkpoint_or_fallback_witness()
     assert_eq!(reads(&node), before);
     assert_eq!(authenticated(&node).receipt(), head.receipt());
     node.shutdown().unwrap();
+}
+
+#[test]
+fn public_terminal_lookup_uses_retained_history_after_restart_in_both_formats() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf())
+            .with_object_format(format)
+            .with_worker_threads(2);
+        let (node, _) = OneNode::init(config.clone()).unwrap();
+        let committed = add_outcome(&node, 0);
+        let refused = import_outcome(&node, 0, "outcome-0-stale-create");
+        assert!(matches!(
+            refused.terminal.outcome,
+            DecisionOutcome::Refused { .. }
+        ));
+        for index in 1..16 {
+            add_outcome(&node, index);
+        }
+        assert!(maintain_checkpoint(&node).published);
+        node.shutdown().unwrap();
+        let node = OneNode::open_existing(config).unwrap();
+        let head = authenticated(&node);
+        let cases = [
+            (committed.tx_id, OutcomeLookup::Decided(committed.terminal)),
+            (refused.tx_id, OutcomeLookup::Decided(refused.terminal)),
+            (distinct_tx_id(), OutcomeLookup::Undecided),
+        ];
+
+        // The independent full-replay oracle also exercises an absent hint.
+        // Count body accesses, including cache hits, so warm caches cannot hide
+        // a regression back to walking the complete decision stream.
+        let before = reads(&node);
+        for (tx, expected) in cases {
+            let request = node.request_context();
+            assert_eq!(
+                node.runtime()
+                    .block_on(fgit_authority::resolve_outcome_async(
+                        &node.authority,
+                        request.authority(),
+                        &node.head_key,
+                        node.tenant_id(),
+                        node.repository_id(),
+                        tx,
+                    ))
+                    .unwrap(),
+                expected
+            );
+        }
+        let replay_reads = reads(&node) - before;
+        let before = reads(&node);
+        for (tx, expected) in cases {
+            assert_eq!(public_lookup(&node, tx), expected);
+        }
+        let checkpoint_reads = reads(&node) - before;
+        assert!(
+            checkpoint_reads < replay_reads,
+            "public terminal lookup must use retained history: {checkpoint_reads} versus {replay_reads} body reads"
+        );
+        assert_eq!(authenticated(&node).receipt(), head.receipt());
+
+        // The retained prefix and subsequent live suffix must agree, including
+        // a refusal whose key remains terminal after a newer publication.
+        let newest = add_outcome(&node, 16);
+        for (tx, expected) in cases {
+            assert_eq!(public_lookup(&node, tx), expected);
+        }
+        assert_eq!(
+            public_lookup(&node, newest.tx_id),
+            OutcomeLookup::Decided(newest.terminal)
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn public_terminal_lookup_replays_when_retained_chunks_are_missing_or_corrupt() {
+    for missing in [false, true] {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf()).with_worker_threads(2);
+        let (node, _) = OneNode::init(config.clone()).unwrap();
+        let committed = add_outcome(&node, 0);
+        let refused = import_outcome(&node, 0, "outcome-0-stale-create");
+        assert!(matches!(
+            refused.terminal.outcome,
+            DecisionOutcome::Refused { .. }
+        ));
+        for index in 1..4 {
+            add_outcome(&node, index);
+        }
+        let checkpoint = maintain_checkpoint(&node);
+        for path in maintained_leaf_paths(&node, checkpoint.checkpoint_root) {
+            if missing {
+                fs::remove_file(path).unwrap();
+            } else {
+                fs::write(path, b"corrupt retained terminal history").unwrap();
+            }
+        }
+        node.shutdown().unwrap();
+        let node = OneNode::open_existing(config).unwrap();
+        let head = authenticated(&node);
+        assert_eq!(
+            public_lookup(&node, committed.tx_id),
+            OutcomeLookup::Decided(committed.terminal)
+        );
+        assert_eq!(
+            public_lookup(&node, refused.tx_id),
+            OutcomeLookup::Decided(refused.terminal)
+        );
+        assert_eq!(
+            public_lookup(&node, distinct_tx_id()),
+            OutcomeLookup::Undecided
+        );
+        assert_eq!(authenticated(&node).receipt(), head.receipt());
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn cancelled_public_terminal_lookup_cannot_return_checkpoint_or_replay_answers() {
+    let scratch = ScratchDirectory::new();
+    let (node, _) =
+        OneNode::init(test_config(scratch.path().to_path_buf()).with_worker_threads(2)).unwrap();
+    let committed = add_outcome(&node, 0);
+    maintain_checkpoint(&node);
+    let head = authenticated(&node);
+    let request = node.request_context();
+    request.cancel();
+    let before = reads(&node);
+    for tx in [committed.tx_id, distinct_tx_id()] {
+        assert!(matches!(
+            node.runtime().block_on(node.resolve_outcome_in(&request, tx)),
+            Err(NodeRefusal::Authority(error))
+                if *error == OutcomeFailure::from(AuthorityFailure::Ambiguous(
+                    AmbiguityReason::Cancelled
+                ))
+        ));
+    }
+    assert_eq!(reads(&node), before);
+    assert_eq!(authenticated(&node).receipt(), head.receipt());
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn public_terminal_lookup_recovers_recent_decisions_when_older_history_is_missing() {
+    for refused in [false, true] {
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf()).with_worker_threads(2))
+                .unwrap();
+        add_outcome(&node, 0);
+        let recent = if refused {
+            let outcome = import_outcome(&node, 0, "recent-stale-create");
+            assert!(matches!(
+                outcome.terminal.outcome,
+                DecisionOutcome::Refused { .. }
+            ));
+            outcome
+        } else {
+            add_outcome(&node, 1)
+        };
+        let request = node.request_context();
+        let before = authenticated(&node);
+        let mut head = before.body().unwrap();
+        let mut batch = node
+            .runtime()
+            .block_on(read_decision_batch_body_async(
+                &node.authority,
+                request.authority(),
+                head.decision_tail_id.unwrap(),
+            ))
+            .unwrap();
+
+        // Fault injection models acknowledged history whose older link has
+        // become unavailable. Keep the newest terminal and its accelerator
+        // intact, but select a correctly identified batch pointing at a
+        // missing predecessor. Ordinary publication cannot construct this.
+        let missing = fgit_codec::harness::head_id();
+        assert_eq!(
+            node.runtime()
+                .block_on(AsyncAuthorityStore::read_immutable(
+                    &node.authority,
+                    request.authority(),
+                    &fgit_authority::body_key_for_id(missing.as_internal_object_id()).unwrap(),
+                ))
+                .unwrap(),
+            ImmutableRead::Absent
+        );
+        batch.predecessor_head_id = missing;
+        let batch_id = fgit_authority::decision_batch_identity(&batch).unwrap();
+        node.runtime()
+            .block_on(AsyncAuthorityStore::put_if_absent(
+                &node.authority,
+                request.authority(),
+                &fgit_authority::body_key_for_id(batch_id.as_internal_object_id()).unwrap(),
+                &fgit_codec::encode_body(&batch).unwrap(),
+            ))
+            .unwrap();
+        head.predecessor_head_id = Some(fgit_authority::authority_head_identity(&head).unwrap());
+        head.generation = head.generation.next().unwrap();
+        head.decision_tail_id = Some(batch_id);
+        let head_bytes = fgit_codec::encode_body(&head).unwrap();
+        let head_id = fgit_authority::authority_head_identity(&head).unwrap();
+        node.runtime()
+            .block_on(AsyncAuthorityStore::put_if_absent(
+                &node.authority,
+                request.authority(),
+                &fgit_authority::body_key_for_id(head_id.as_internal_object_id()).unwrap(),
+                &head_bytes,
+            ))
+            .unwrap();
+        assert!(matches!(
+            node.runtime()
+                .block_on(AsyncAuthorityStore::compare_exchange_head(
+                    &node.authority,
+                    request.authority(),
+                    &node.head_key,
+                    before.receipt().token(),
+                    head.generation,
+                    &head_bytes,
+                ))
+                .unwrap(),
+            fgit_authority::CasOutcome::Committed(_)
+        ));
+
+        let selected = authenticated(&node);
+        assert!(matches!(
+            collected(&node, &selected),
+            Err(OutcomeFailure::StreamBodyMissing { link: "head body" })
+        ));
+        assert_eq!(
+            public_lookup(&node, recent.tx_id),
+            OutcomeLookup::Decided(recent.terminal)
+        );
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.resolve_outcome_in(&request, distinct_tx_id())),
+            Err(NodeRefusal::Authority(error))
+                if *error == OutcomeFailure::StreamBodyMissing { link: "head body" }
+        ));
+        assert_eq!(authenticated(&node).receipt(), selected.receipt());
+        node.shutdown().unwrap();
+    }
 }

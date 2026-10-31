@@ -39,16 +39,10 @@ impl OneNode {
             .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e.into())))?
             .0;
         checkpoint(request)?;
-        if let OutcomeLookup::Decided(outcome) = fgit_authority::resolve_outcome_async(
-            &self.authority,
-            request.authority(),
-            &context.head_key,
-            context.tenant_id,
-            context.repository_id,
-            tx,
-        )
-        .await
-        .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e.into())))?
+        if let OutcomeLookup::Decided(outcome) = self
+            .resolve_outcome_checkpointed_in(request, tx)
+            .await
+            .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e.into())))?
         {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await

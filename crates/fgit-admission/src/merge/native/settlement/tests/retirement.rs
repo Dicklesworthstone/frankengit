@@ -261,7 +261,8 @@ fn publish_terminal_record(
             &context,
             head.token(),
             &publication,
-            sealed.tx_id()
+            sealed.tx_id(),
+            &cumulative,
         ))
         .unwrap(),
         Some(true)
