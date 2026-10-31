@@ -316,7 +316,6 @@ fn cancellation_after_a_deferred_batch_drains_every_private_batch_without_linkin
             ));
         }
         drop(placement);
-        drop(control);
         drop(staging);
         assert_eq!(std::fs::read_dir(root.join("staging")).unwrap().count(), 0);
 

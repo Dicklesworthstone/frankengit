@@ -156,8 +156,6 @@ fn frontier_headers_never_shadow_a_supplied_overlap_with_a_healthy_permanent_cop
         assert_eq!(headers.load_header(&id).unwrap(), None);
         assert!(candidate.read_object(&id).is_err());
         assert_eq!(node.read_git_object(id).unwrap().payload(), body);
-        drop(candidate);
-        drop(headers);
         drop(staging);
         assert_eq!(
             fs::read_dir(node.storage_root().join("staging"))

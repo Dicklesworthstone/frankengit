@@ -35,7 +35,7 @@ impl Temp {
             ));
             match fs::DirBuilder::new().mode(0o700).create(&path) {
                 Ok(()) => return Self(path),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => panic!("create private test directory: {error}"),
             }
         }

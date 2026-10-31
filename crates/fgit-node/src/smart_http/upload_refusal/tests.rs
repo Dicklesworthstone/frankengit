@@ -77,7 +77,7 @@ fn work_timeout_has_a_bounded_operator_actionable_git_diagnostic() {
         assert!(text.contains(option));
     }
     assert!(bytes.len() <= 517);
-    assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+    assert_eq!(bytes.split(|byte| *byte == b'\n').count(), 2);
 }
 
 #[test]

@@ -797,12 +797,12 @@ mod tests {
         for length in 1..=MAX_BASIC_BYTES {
             let original: Vec<u8> = (0..length).map(|index| index.to_le_bytes()[0]).collect();
             let encoded = basic(&original);
-            let size = decode_basic(encoded[6..].as_bytes(), &mut output).unwrap();
+            let size = decode_basic(&encoded.as_bytes()[6..], &mut output).unwrap();
             assert_eq!(&output[..size], original);
         }
         assert!(
             decode_basic(
-                basic(&vec![b'x'; MAX_BASIC_BYTES + 1])[6..].as_bytes(),
+                &basic(&vec![b'x'; MAX_BASIC_BYTES + 1]).as_bytes()[6..],
                 &mut output
             )
             .is_none()
