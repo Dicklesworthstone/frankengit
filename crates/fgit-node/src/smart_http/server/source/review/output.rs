@@ -91,8 +91,7 @@ fn count(total: &mut usize, amount: usize, maximum: usize) -> Result<(), ApiErro
     Ok(())
 }
 fn validate_span(span: ReviewSpan, bytes: &[u8], total: usize) -> Result<(), ApiError> {
-    let lines = bytes.iter().filter(|byte| **byte == b'\n').count()
-        + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'));
+    let lines = super::super::super::byte_line_count(bytes);
     if span.byte_start > span.byte_end
         || span.byte_end > total
         || span.byte_end.checked_sub(span.byte_start) != Some(bytes.len())

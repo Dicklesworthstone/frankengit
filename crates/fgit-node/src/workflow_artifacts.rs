@@ -77,7 +77,10 @@ pub fn parse_artifact_id(value: &str) -> Result<Digest, WorkflowArtifactReadRefu
         _ => Err(WorkflowArtifactReadRefusal::InvalidId),
     };
     let mut bytes = [0u8; 32];
-    for (output, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (output, pair) in bytes
+        .iter_mut()
+        .zip(value.as_bytes().as_chunks::<2>().0.iter())
+    {
         *output = nibble(pair[0])? * 16 + nibble(pair[1])?;
     }
     Ok(Digest::new(

@@ -69,6 +69,16 @@ const MAX_IN_FLIGHT: usize = 16;
 const MAX_SESSIONS: usize = 1_000_000;
 const FRAMING_ALLOWANCE: u64 = 4 * 1024 * 1024;
 
+// Review spans count byte records, including a nonempty final fragment.
+// They do not normalize CRLF or require the selected bytes to be UTF-8.
+fn byte_line_count(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        0
+    } else {
+        bytes.split_inclusive(|byte| *byte == b'\n').count()
+    }
+}
+
 /// Local owners are configured before serving and never from request data.
 #[cfg(target_os = "linux")]
 type WorkflowDrainObserver<'a> =
@@ -1706,6 +1716,24 @@ fn log_cleanup(error: &NodeRefusal) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_byte_line_counts_preserve_empty_final_and_binary_fragments() {
+        let cases: &[(&[u8], usize)] = &[
+            (b"", 0),
+            (b"line", 1),
+            (b"\n", 1),
+            (b"\n\n", 2),
+            (b"first\nlast", 2),
+            (b"first\nlast\n", 2),
+            (b"\r\n", 1),
+            (b"bare\r", 1),
+            (b"\0\xff\nmore", 2),
+        ];
+        for &(bytes, expected) in cases {
+            assert_eq!(super::byte_line_count(bytes), expected, "{bytes:?}");
+        }
+    }
+
     use super::super::ingress::BodyInput;
     use super::*;
     use crate::HttpTrustedOriginRefusal;

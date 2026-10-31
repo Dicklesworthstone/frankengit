@@ -311,7 +311,7 @@ fn read_source(
         match result {
             Ok(count) if count <= output.len() => return Ok(count),
             Ok(_) => return Err("repository backup source returned an invalid byte count".into()),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(format!("repository backup source read failed: {error}")),
         }
     }
@@ -388,7 +388,7 @@ impl<R: Read> Input<R> {
             match self.reader.read(&mut [0; 1]) {
                 Ok(0) => break,
                 Ok(_) => return Err("trailing repository backup bytes".into()),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(format!("repository backup EOF check failed: {error}")),
             }
         }

@@ -95,9 +95,7 @@ fn span(value: ReviewSpan, bytes: &[u8], total: usize) -> Result<String, ApiErro
     if value.byte_end > total
         || value.byte_end.checked_sub(value.byte_start) != Some(bytes.len())
         || value.line_start.checked_add(value.line_count).is_none()
-        || value.line_count
-            != bytes.iter().filter(|&&b| b == b'\n').count()
-                + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
+        || value.line_count != super::super::super::byte_line_count(bytes)
     {
         return Err(ApiError::unavailable());
     }

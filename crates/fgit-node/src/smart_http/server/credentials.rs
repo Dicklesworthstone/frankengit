@@ -422,7 +422,10 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
     }
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     let mut result = [0; N];
-    for (out, pair) in result.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (out, pair) in result
+        .iter_mut()
+        .zip(text.as_bytes().as_chunks::<2>().0.iter())
+    {
         *out = (digit(pair[0]) << 4) | digit(pair[1]);
     }
     Ok(result)
