@@ -49,6 +49,7 @@ if case == "build_sleep":
             out.write(json.dumps({"kind": "build_drained", "signal": signum}) + "\n")
         sys.exit(0)
     signal.signal(signal.SIGTERM, cancelled)
+    signal.signal(signal.SIGINT, cancelled)
     with log.open("a") as out:
         out.write(json.dumps({"kind": "build_waiting"}) + "\n")
     time.sleep(20)
@@ -216,6 +217,8 @@ class HostTestContract(unittest.TestCase):
                 self.assertEqual(process.wait(timeout=10), 128 + signal.SIGTERM)
                 rows = [json.loads(l) for l in self.log.read_text().splitlines()]
                 self.assertTrue(any(r["kind"] == "build_drained" for r in rows))
+                self.assertEqual(next(r["signal"] for r in rows if r["kind"] == "build_drained"),
+                                 signal.SIGINT)
                 self.assertFalse(any(r["kind"] == "native" for r in rows))
                 self.assertEqual(list(temporary.iterdir()), [])
             finally:

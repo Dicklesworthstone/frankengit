@@ -33,7 +33,9 @@ def request_stop(signum, _frame):
         STOP_SIGNAL = signum
     if ACTIVE_CHILD is not None:
         try:
-            ACTIVE_CHILD.send_signal(signum)
+            # Cargo/RCH's interrupt path requests cancellation and drains the
+            # build. Keep the original caller signal for our eventual status.
+            ACTIVE_CHILD.send_signal(signal.SIGINT)
         except ProcessLookupError:
             pass
 
