@@ -35,6 +35,9 @@ use crate::{ForgeRefusal, MergeSide, StaleTips};
 
 mod validation;
 use validation::invalid_queue;
+mod command;
+mod replay;
+pub use command::{QueueCommand, QueueCommandAction};
 
 /// Synthetic queue reference namespace root.
 pub const QUEUE_REF_PREFIX: &[u8] = b"refs/queue/";
@@ -630,6 +633,8 @@ pub struct MergeQueueSnapshot {
     pub version: AggregateVersion,
     pub entries: Vec<QueueEntry>,
     pub active_batch: Option<QueueBatchId>,
+    initialized: bool,
+    active_batch_entries: Vec<PullRequestNumber>,
 }
 
 impl MergeQueueSnapshot {
@@ -642,6 +647,8 @@ impl MergeQueueSnapshot {
             version: AggregateVersion::FIRST,
             entries: Vec::new(),
             active_batch: None,
+            initialized: false,
+            active_batch_entries: Vec::new(),
         }
     }
 
@@ -668,103 +675,23 @@ impl MergeQueueSnapshot {
         self.entries.iter().find(|e| e.pull_request == pr)
     }
 
-    /// Returns pull request numbers sorted in deterministic execution order.
-    ///
-    /// Tie-breaking rules:
-    /// 1. Higher priority first
-    /// 2. Earlier enqueued aggregate version first (FIFO)
-    /// 3. Lower pull request number first (total order)
+    /// Returns the execution order derived from canonical events. Enqueues use
+    /// priority, FIFO and PR number; an explicit reorder changes the order
+    /// without rewriting priorities or being undone by this read method.
     #[must_use]
     pub fn deterministic_order(&self) -> Vec<PullRequestNumber> {
-        let mut sorted = self.entries.clone();
-        sorted.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.enqueued_version.cmp(&b.enqueued_version))
-                .then_with(|| a.pull_request.cmp(&b.pull_request))
-        });
-        sorted.into_iter().map(|e| e.pull_request).collect()
+        self.entries
+            .iter()
+            .map(|entry| entry.pull_request)
+            .collect()
     }
 
     /// Applies a canonical queue event, verifying version progression.
     pub fn apply_event(&mut self, event: &ForgeEvent) -> Result<(), ForgeRefusal> {
-        if event.aggregate != AggregateId::MergeQueue(self.queue_number) {
-            return Err(ForgeRefusal::BodyUnrepresentable {
-                cause: Box::new(CodecRefusal::ValueUnrepresentable {
-                    field: "queue.aggregate",
-                    observed: 0,
-                    limit: 1,
-                }),
-            });
-        }
-        let ForgeEventPayload::MergeQueueChangedNative(change) = &event.payload else {
-            return Err(ForgeRefusal::BodyUnrepresentable {
-                cause: Box::new(CodecRefusal::VariantUnknown {
-                    field: "queue.payload",
-                    observed: event.payload.kind(),
-                    offset: 0,
-                }),
-            });
-        };
-
-        match &change.action {
-            QueueAction::Enqueue {
-                pull_request,
-                source_ref,
-                head_tip,
-                enqueued_by,
-                priority,
-            } => {
-                // If entry already exists, update head_tip and priority
-                if let Some(pos) = self
-                    .entries
-                    .iter()
-                    .position(|e| e.pull_request == *pull_request)
-                {
-                    self.entries[pos].head_tip = *head_tip;
-                    self.entries[pos].priority = *priority;
-                } else {
-                    self.entries.push(QueueEntry {
-                        pull_request: *pull_request,
-                        source_ref: source_ref.clone(),
-                        head_tip: *head_tip,
-                        enqueued_by: *enqueued_by,
-                        priority: *priority,
-                        enqueued_version: event.version,
-                    });
-                }
-            }
-            QueueAction::Dequeue { pull_request, .. } => {
-                self.entries.retain(|e| e.pull_request != *pull_request);
-            }
-            QueueAction::Reorder { order, .. } => {
-                let mut reordered = Vec::with_capacity(self.entries.len());
-                for pr in order {
-                    if let Some(pos) = self.entries.iter().position(|e| e.pull_request == *pr) {
-                        reordered.push(self.entries[pos].clone());
-                    }
-                }
-                // Retain remaining entries not in explicit order
-                for entry in &self.entries {
-                    if !order.contains(&entry.pull_request) {
-                        reordered.push(entry.clone());
-                    }
-                }
-                self.entries = reordered;
-            }
-            QueueAction::BatchFormed { batch_id, .. } => {
-                self.active_batch = Some(QueueBatchId::from_digest(*batch_id));
-            }
-            QueueAction::BatchLanded { entries, .. } => {
-                self.entries.retain(|e| !entries.contains(&e.pull_request));
-                self.active_batch = None;
-            }
-            QueueAction::BatchRejected { .. } => {
-                self.active_batch = None;
-            }
-        }
-
-        self.version = event.version;
+        // Refused replay cannot leave a partially applied derived state.
+        let mut next = self.clone();
+        next.apply_checked_event(event)?;
+        *self = next;
         Ok(())
     }
 }
