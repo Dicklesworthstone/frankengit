@@ -53,6 +53,30 @@ const fn valid_prototype() -> McpToolEntry {
 }
 
 #[test]
+fn protection_registry_describes_optional_queue_requirement_without_new_authority() {
+    let tool = find_tool("frankengit_protection_set").unwrap();
+    let branches = tool
+        .input_fields
+        .iter()
+        .find(|field| field.name == "branches")
+        .unwrap();
+    assert!(
+        branches
+            .description
+            .contains("boolean require_merge_queue (default false)")
+    );
+    assert!(branches.description.contains("queue-only"));
+    assert!(
+        branches
+            .description
+            .contains("ordinary merges and direct writes do not qualify")
+    );
+    assert_eq!(tool.principal, PrincipalRequirement::OperatorBound);
+    assert_eq!(tool.capability, CapabilityRequirement::MUTATE_FORGE_ENTITY);
+    assert_eq!(tool.idempotency, IdempotencyRequirement::RequiredDurableKey);
+}
+
+#[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
     assert_eq!(REGISTRY.len(), 59);

@@ -629,7 +629,7 @@
       "kind": "tool",
       "owner_subsystem": "forge",
       "support_profile": "active",
-      "description": "Replace complete review and workflow-check protection at an exact version and policy epoch. Version zero is first installation by the trusted local operator; current canonical administrators authorize later changes. No Git refs move.",
+      "description": "Replace complete review, workflow-check and merge-queue protection at an exact version and policy epoch. Version zero is first installation by the trusted local operator; current canonical administrators authorize later changes. No Git refs move.",
       "read_mutation": "mutation",
       "capability": "mutate_forge_entity",
       "principal": "operator_bound",

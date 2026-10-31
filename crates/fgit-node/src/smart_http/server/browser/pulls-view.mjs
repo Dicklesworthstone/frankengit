@@ -678,7 +678,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     nodes.load.disabled = !ordinary || busy || Boolean(pending);
     for (const input of [administrators, clear, nodes['add-branch'], nodes.preview]) input.disabled = !editable;
     for (const row of rows) {
-      for (const input of [row.reference, row.reviewers, row.approvals, row.remove, row.addCheck]) input.disabled = !editable;
+      for (const input of [row.reference, row.reviewers, row.approvals, row.requireQueue, row.remove, row.addCheck]) input.disabled = !editable;
       row.addCheck.disabled ||= row.checks.length >= 32;
       for (const check of row.checks) for (const input of [...Object.values(check.fields), check.remove]) input.disabled = !editable;
     }
@@ -722,12 +722,16 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       quorum.textContent = `${needed} of ${count} listed reviewers must approve the exact candidate. The PR opener and merge submitter cannot contribute votes. Other reviewers do not veto a satisfied quorum.`;
     };
     describeQuorum();
+    const queueLabel = item(doc, group, 'label', 'Require an authenticated canonical merge queue landing targeting this branch');
+    const requireQueue = item(doc, queueLabel, 'input'); requireQueue.type = 'checkbox';
+    requireQueue.setAttribute('data-require-merge-queue', 'true'); requireQueue.checked = data.require_merge_queue === true;
+    item(doc, group, 'p', 'When a merge queue is required, direct ref writes and ordinary PR merges cannot update this branch. Every review and workflow check requirement still applies.');
     const remove = item(doc, group, 'button', 'Remove this branch rule'); remove.type = 'button';
     item(doc, group, 'h4', 'Required workflow checks');
     item(doc, group, 'p', 'Every listed check must succeed for the exact candidate commit. Choose the source branch, publisher, workflow graph and job to require. Review requirements continue to apply alongside these checks.');
     const checks = item(doc, group, 'div');
     const addCheck = item(doc, group, 'button', 'Add required workflow check'); addCheck.type = 'button';
-    const row = { reference, reviewers, approvals, remove, checks: [], addCheck }; rows.push(row);
+    const row = { reference, reviewers, approvals, requireQueue, remove, checks: [], addCheck }; rows.push(row);
     let checkNumber = 0;
     function appendCheck(selected = { source_ref_hex: '', publisher: '', graph_root: '', job: '' }) {
       if (row.checks.length >= 32) fail('At most 32 workflow checks can be required per branch.');
@@ -766,6 +770,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     });
     reviewers.addEventListener('input', () => { describeQuorum(); changed(); });
     approvals.addEventListener('input', () => { describeQuorum(); changed(); });
+    requireQueue.addEventListener('change', changed);
     remove.addEventListener('click', event => {
       event.preventDefault();
       if (operation || client.busy || client.pending || !client.connected || client.recoveryOnly || !client.observed?.policy) return;
@@ -790,7 +795,8 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers),
         ...(row.checks.length ? { required_checks: row.checks.map(check => Object.fromEntries(
           Object.entries(check.fields).map(([name, input]) => [name, input.value]))) } : {}),
-        ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}) })),
+        ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}),
+        ...(row.requireQueue.checked ? { require_merge_queue: true } : {}) })),
       ...(!clear.checked && client.observed?.policy?.ref_policy ? { ref_policy: client.observed.policy.ref_policy } : {}) }), clear: clear.checked };
   }
   function requireDraftAccess() {

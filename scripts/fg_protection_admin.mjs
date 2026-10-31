@@ -22,7 +22,11 @@ HTTPS is required except literal 127.0.0.1 or [::1]. Tokens never appear in argv
 or saved intents. Preparation reads the complete native policy and writes only
 an immutable local intent; it sends no mutation. Remote bootstrap is refused.
 A complete replacement preserves ONLY its explicitly listed administrators and
-branches, including required_checks selectors and any numeric required_approvals quorum.\nOmitted required_approvals requires all eligible reviewers; choose 1 through their count\nfor N-of-M approval, or 0 for a check-only branch. --clear is mandatory
+branches, including required_checks selectors, any numeric required_approvals quorum,
+and the optional boolean require_merge_queue. Omitted or false means no queue requirement;
+true requires an authenticated canonical landing for that target, with all reviews and checks.
+Omitted required_approvals requires all eligible reviewers; choose 1 through their count
+for N-of-M approval, or 0 for a check-only or queue-only branch. --clear is mandatory
 for removing all branch rules when no repository ref policy remains. Preserve an
 active DSL policy by retaining its complete ref_policy descriptor from inspect,
 including its canonical frame_hex. Omitting it removes that DSL component.
@@ -89,10 +93,12 @@ export function intentSummary(intent) {
       const afterApprovals = after?.required_approvals ?? after?.required_reviewers.length ?? null;
       const quorumChanged = beforeApprovals !== afterApprovals &&
         (Object.hasOwn(before ?? {}, 'required_approvals') || Object.hasOwn(after ?? {}, 'required_approvals'));
+      const beforeQueue = before?.require_merge_queue ?? false, afterQueue = after?.require_merge_queue ?? false;
       return { reference_hex, ...changes(before?.required_reviewers ?? [], after?.required_reviewers ?? []),
         ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}),
-        ...(quorumChanged ? { required_approvals_before: beforeApprovals, required_approvals_after: afterApprovals } : {}) };
-    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || Object.hasOwn(row, 'required_approvals_after')),
+        ...(quorumChanged ? { required_approvals_before: beforeApprovals, required_approvals_after: afterApprovals } : {}),
+        ...(beforeQueue !== afterQueue ? { require_merge_queue_before: beforeQueue, require_merge_queue_after: afterQueue } : {}) };
+    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || Object.hasOwn(row, 'required_approvals_after') || Object.hasOwn(row, 'require_merge_queue_after')),
     ...(before.ref_policy || after.ref_policy ? { ref_policy: {
       before: before.ref_policy?.snapshot_id ?? null, after: after.ref_policy?.snapshot_id ?? null,
       changed: JSON.stringify(before.ref_policy ?? null) !== JSON.stringify(after.ref_policy ?? null),

@@ -27,8 +27,8 @@ policy change; native credentials and policy administrators retain that role.
 
 ## Configure required workflow checks
 
-The editor manages the complete administrator set, branch review rules and
-required CI checks. Add a branch rule using exact reference hex, its eligible
+The editor manages the complete administrator set, branch review rules, merge
+queue requirements and required CI checks. Add a branch rule using exact reference hex, its eligible
 reviewers and approval count. For check-only protection, use `-` as the reviewer
 list and `all` or `0` as the count, then add at least one check for that target.
 Reviewer quorums and required checks can also protect the same branch together.
@@ -44,7 +44,7 @@ duplicates and refuses malformed or oversized fields before staging a request.
 
 A check's protected target must appear in the branch-rule list. If a rule is
 removed or renamed, explicitly remove or retarget its check rows as well.
-Removing the last check from a branch with no reviewers is refused. To remove
+Removing the last check from a branch with no reviewers or required merge queue is refused. To remove
 that branch's protection, remove the branch rule and its checks together.
 Removing all checks from a branch that retains reviewers keeps review protection
 and the historical review-only request representation. Validation errors leave
@@ -55,6 +55,30 @@ administrator, branch, reviewer and check additions/removals. Review this frozen
 preview before confirming the explicit send. Every selector control freezes
 with the pending request. Later field edits cannot change its saved body or
 original key, including when a reply is lost and the administrator retries.
+
+## Require queue landing
+
+The optional fourth branch-rule column is `true` to require an authenticated
+canonical merge queue landing targeting that exact branch, or `false` to remove
+that requirement. For example, a queue-only main branch is:
+
+```text
+726566732f68656164732f6d61696e - 0 true
+```
+
+Existing true values are displayed and preserved when the fourth column is
+omitted during editing. New branches default to false. A queue-only rule may
+have no reviewers or checks; every review and check that remains configured
+still applies. The requirement does not choose a queue number. An ordinary PR
+merge or direct ref write cannot satisfy it.
+
+The protection panel on the PR page offers the same rule as a per-branch
+checkbox. Both editors include queue additions and removals in the frozen
+preview, retain the exact flag in saved requests and recovery receipts, and
+disable its controls while a request is pending. Removing the final requirement
+from a branch refuses; remove the branch rule explicitly instead. Omitted and
+explicit false booleans normalize to the historical receipt representation,
+so previously saved bytes and retry keys remain usable.
 
 ## Guarded complete replacement and uncertain-write recovery
 
@@ -95,7 +119,7 @@ exactly the same origin and repository route. No credentials move with them.
 Run both focused targets:
 
 ```sh
-node --test tests/browser/protection-standalone.test.mjs tests/browser/protection-standalone-client.test.mjs
+node --test tests/browser/protection-standalone.test.mjs tests/browser/protection-standalone-client.test.mjs tests/browser/protection-queue.test.mjs tests/browser/protection-view.test.mjs
 ```
 
 The first executes the production view with an explicit native-client peer and

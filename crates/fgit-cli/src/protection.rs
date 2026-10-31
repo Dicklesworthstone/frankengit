@@ -25,6 +25,7 @@ usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-lo
   --admin <id> [--admin <id> ...]\n\
   [--require-reviewer <refs/heads/branch>:<id> ...]\n\
   [--require-approvals <refs/heads/branch>:<count> ...]\n\
+  [--require-merge-queue <refs/heads/branch> ...]\n\
   [--require-check <target-ref>:<source-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
   [--policy-source <UTF-8-policy-file> | --policy-frame <canonical-policy-frame>]\n\
   [--clear]\n\
@@ -34,7 +35,9 @@ Set replaces the COMPLETE policy, including its optional DSL component. Omission
 The DSL may constrain reference names, creation/deletion and the request's actor.id; other actor attributes, ancestry, time and evidence facts refuse.\n\
 Listed reviewers are eligible approvers; the default requires all.\n\
 --require-approvals selects N approvals from that branch's eligible reviewers (1 through their count).\n\
-A check-only branch has zero required approvals. Opener and submitter cannot contribute votes.\n\
+A check-only or queue-only branch has zero required approvals. Opener and submitter cannot contribute votes.\n\
+--require-merge-queue requires an authenticated canonical queue landing targeting that branch.\n\
+Direct ref writes and ordinary PR merges cannot satisfy this requirement; existing reviews and checks still apply.\n\
 Every check requires the latest trusted publisher result for the exact NEW commit.\n\
 Its source ref must still name that commit; the workflow graph and UTF-8 job name must match exactly.\n\
 --clear disables branch and DSL protection but retains explicit administrators and immutable history.\n\
@@ -66,7 +69,7 @@ fn number(s: &str) -> Result<u64, String> {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 5
-        || args.len() > 8448
+        || args.len() > 8576
         || args.iter().any(|s| s.len() > 4096)
         || args.iter().map(String::len).sum::<usize>() > 256 * 1024
     {
@@ -85,7 +88,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut singleton = BTreeMap::new();
     let (mut trusted, mut clear) = (false, false);
     let mut admins = Vec::new();
-    let mut branches = BTreeMap::<RefName, (Vec<PrincipalId>, Vec<RequiredWorkflowCheck>)>::new();
+    let mut branches =
+        BTreeMap::<RefName, (Vec<PrincipalId>, Vec<RequiredWorkflowCheck>, bool)>::new();
     let mut quorums = BTreeMap::<RefName, u16>::new();
     let mut i = 4;
     while i < args.len() {
@@ -116,6 +120,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "--admin"
                         | "--require-reviewer"
                         | "--require-approvals"
+                        | "--require-merge-queue"
                         | "--require-check"
                         | "--policy-source"
                         | "--policy-frame"
@@ -174,6 +179,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if quorums.len() > MAX_PROTECTED_BRANCHES {
                     return Err("too many branch approval counts".into());
                 }
+            }
+            "--require-merge-queue" => {
+                let name = RefName::try_new(value.as_bytes())
+                    .map_err(|_| "invalid queue-protected branch reference")?;
+                if !name.as_bytes().starts_with(b"refs/heads/") {
+                    return Err("only full branch names may be protected".into());
+                }
+                if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
+                    return Err("too many protected branches".into());
+                }
+                let required = &mut branches.entry(name).or_default().2;
+                if *required {
+                    return Err("duplicate branch merge queue requirement".into());
+                }
+                *required = true;
             }
             "--require-check" => {
                 let parts: Vec<_> = value.splitn(5, ':').collect();
@@ -266,30 +286,32 @@ fn parse(args: &[String]) -> Result<Options, String> {
         };
         if clear == (!branches.is_empty() || ref_policy.is_some()) {
             return Err(
-                "supply review/check/DSL requirements OR explicit --clear, never both/neither"
+                "supply review/check/queue/DSL requirements OR explicit --clear, never both/neither"
                     .into(),
             );
         }
         if quorums.keys().any(|name| !branches.contains_key(name)) {
-            return Err("approval count requires reviewers or checks for the same branch".into());
+            return Err("approval count requires a protection rule for the same branch".into());
         }
         admins.sort();
         let branches = branches
             .into_iter()
-            .map(|(name, (mut reviewers, mut required_checks))| {
-                reviewers.sort();
-                required_checks.sort();
-                ProtectedBranch {
-                    require_merge_queue: false,
-                    required_approvals: quorums
-                        .get(&name)
-                        .copied()
-                        .unwrap_or(reviewers.len() as u16),
-                    required_checks,
-                    name,
-                    reviewers,
-                }
-            })
+            .map(
+                |(name, (mut reviewers, mut required_checks, require_merge_queue))| {
+                    reviewers.sort();
+                    required_checks.sort();
+                    ProtectedBranch {
+                        require_merge_queue,
+                        required_approvals: quorums
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(reviewers.len() as u16),
+                        required_checks,
+                        name,
+                        reviewers,
+                    }
+                },
+            )
             .collect();
         let command = ProtectionCommand {
             expected_version,
@@ -394,11 +416,12 @@ fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
                 format!(
-                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"required_checks\":[{}]}}",
+                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}]}}",
                     name,
                     quote(&hex),
                     ids(&branch.reviewers),
                     branch.required_approvals,
+                    branch.require_merge_queue,
                     branch.required_checks.iter().map(|check| format!(
                         "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                         quote(&bytes_hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),

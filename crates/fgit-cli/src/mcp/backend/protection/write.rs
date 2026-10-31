@@ -83,7 +83,15 @@ pub(super) fn tool() -> Tool {
             ("type", text("integer")),
             ("minimum", json::number(0)),
             ("maximum", json::number(MAX_BRANCH_REVIEWERS as u64)),
-            ("description", text("Number of distinct eligible reviewers who must approve the exact candidate. Omitted means all listed reviewers. Use 1 through the reviewer count, or 0 only with no reviewers and at least one required check. The PR opener and merge submitter never contribute votes.")),
+            ("description", text("Number of distinct eligible reviewers who must approve the exact candidate. Omitted means all listed reviewers. Use 1 through the reviewer count, or 0 only with no reviewers and a required check or merge queue. The PR opener and merge submitter never contribute votes.")),
+        ]),
+    );
+    branch.insert(
+        "require_merge_queue".into(),
+        object([
+            ("type", text("boolean")),
+            ("default", Value::Bool(false)),
+            ("description", text("Require an authenticated canonical queue landing targeting this branch. Any validated queue for that target qualifies; direct ref writes and ordinary PR merges do not. Reviews and checks remain required. Omitted means false, including historical policies.")),
         ]),
     );
     let mut check = Object::new();
@@ -119,7 +127,7 @@ pub(super) fn tool() -> Tool {
         ("type", text("array")), ("maxItems", json::number(MAX_BRANCH_REQUIRED_CHECKS as u64)),
         ("uniqueItems", Value::Bool(true)),
         ("items", mutations::input_schema(check, &["source_ref_hex", "publisher", "graph_root", "job"])),
-        ("description", text("Explicit trusted publishers, strictly sorted by source reference bytes, publisher, graph bytes, then UTF-8 job bytes. Empty grants no check authority. Each branch needs reviewers or checks.")),
+        ("description", text("Explicit trusted publishers, strictly sorted by source reference bytes, publisher, graph bytes, then UTF-8 job bytes. Empty grants no check authority. Each branch needs reviewers, checks, or require_merge_queue true.")),
     ]));
     let mut properties = Object::new();
     properties.insert("idempotency_key".into(), mutations::key_schema());
@@ -160,7 +168,7 @@ pub(super) fn tool() -> Tool {
     ]));
     Tool {
         name: NAME,
-        description: "Replace complete required-review, trusted-workflow and optional reference DSL protection at an exact version and policy epoch. Omitted DSL source/frame removes that component. Version zero requests first installation by the explicitly trusted local operator. Current canonical administrators authorize subsequent changes; the new list never authorizes itself. Original key and complete command must remain identical on retry. No Git refs move. Source/frame requests have a bounded 256 KiB envelope; the other fields retain ordinary MCP limits.",
+        description: "Replace complete required-review, trusted-workflow, merge-queue and optional reference DSL protection at an exact version and policy epoch. Omitted branch require_merge_queue means false; omitted DSL source/frame removes that component. Version zero requests first installation by the explicitly trusted local operator. Current canonical administrators authorize subsequent changes; the new list never authorizes itself. Original key and complete command must remain identical on retry. No Git refs move. Source/frame requests have a bounded 256 KiB envelope; the other fields retain ordinary MCP limits.",
         schema: mutations::input_schema(properties, REQUIRED_FIELDS),
     }
 }
@@ -257,6 +265,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
                 "required_reviewers",
                 "required_checks",
                 "required_approvals",
+                "require_merge_queue",
             ],
         )?;
         let raw = unhex(mutations::required(fields, "reference_hex")?, MAX_REF_BYTES)?;
@@ -300,11 +309,16 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             }
             required_checks.push(check);
         }
+        let require_merge_queue = match fields.get("require_merge_queue") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err(ToolError::invalid("invalid_merge_queue_requirement")),
+        };
         let reviewers = principals(
             fields,
             "required_reviewers",
             MAX_BRANCH_REVIEWERS,
-            !required_checks.is_empty(),
+            !required_checks.is_empty() || require_merge_queue,
         )?;
         let required_approvals = match fields.get("required_approvals") {
             Some(value) => u16::try_from(
@@ -316,7 +330,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             None => reviewers.len() as u16,
         };
         branches.push(ProtectedBranch {
-            require_merge_queue: false,
+            require_merge_queue,
             required_approvals,
             required_checks,
             name,

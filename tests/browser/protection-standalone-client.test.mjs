@@ -261,7 +261,7 @@ test('standalone removes one check and all checks explicitly, preserving the leg
 test('last-check removal refuses an empty check-only branch and keeps the draft available for correction', async () => {
   const h = nativeHarness({ read: () => response(checkedSnapshot({ reviewers: [] })) }); await h.connect();
   const rules = h.get('rules').value; await checkControls(h).remove.fire('click'); await h.mounted.prepare();
-  assert.equal(h.client.pending, null); assert.match(h.get('status').textContent, /reviewers or configured checks/);
+  assert.equal(h.client.pending, null); assert.match(h.get('status').textContent, /reviewers, configured checks or a required merge queue/);
   assert.equal(h.get('rules').value, rules); assert.equal(h.get('administrators').value, actor);
   assert.ok(h.get('snapshot').textContent.includes(snapshot().head));
   await addCheck(h, workflowCheck({ job: 'replacement' })); await h.mounted.prepare();

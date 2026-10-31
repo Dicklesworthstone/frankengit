@@ -14,6 +14,9 @@ policy administrators, replacement, disabling, and ownership rotation. The
 [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md) also
 lets these administrators require exact-candidate results from explicitly named
 publishers, source branches, workflow graphs and jobs. Administrators may also
+require an authenticated canonical merge queue landing for an exact protected
+branch. Queue requirements combine with every configured review, check and DSL
+gate; they do not authorize a landing by themselves. Administrators may also
 activate a bounded compiled DSL over reference names, scopes and
 creation/deletion/update shape. The separate `reference_actor_id_v1` profile
 also permits `actor.id` selectors over the exact sealed admission principal.
@@ -59,9 +62,43 @@ an uncertain retry. Add `--object-format sha256` for a SHA-256 node.
 and workflow check selectors are sorted before sealing; duplicates refuse rather
 than silently disappearing. At most 32 administrators, 64 exact branches, 32
 reviewers and 32 workflow checks per branch are accepted. Each protected branch
-requires at least one reviewer or check. The first administrator set must contain the installing principal.
+requires at least one reviewer, check or merge queue requirement. The first administrator set must contain the installing principal.
 Subsequent changes are authorized by the **old** administrator set. Supplying a
 new administrator list cannot authorize its own installation.
+
+### Require queue landing
+
+Add `--require-merge-queue refs/heads/main` to the complete policy replacement
+to prohibit ordinary PR merges and direct updates to that branch. The option
+can repeat for distinct branches; duplicate requirements refuse. A queue-only
+branch needs no reviewers or workflow checks and has zero required approvals.
+For example, after inspecting the actual current version and epoch:
+
+```sh
+fg protection set "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
+  --trusted-local --principal "$ADMIN_ID" \
+  --idempotency-key require-queue-main-1 \
+  --expected-version "$POLICY_VERSION" --expected-epoch "$POLICY_EPOCH" \
+  --admin "$ADMIN_ID" --require-merge-queue refs/heads/main
+```
+
+This example replaces every previous branch, review, check and DSL requirement.
+Include all requirements and administrators that should remain. Inspection
+returns a `require_merge_queue` boolean for every branch. Omission in a new
+replacement means false; it does not inherit an earlier true value. Removing
+the requirement still requires current administrator authorization and advances
+the policy epoch.
+
+Any authenticated native queue targeting that exact branch can satisfy the
+requirement. The policy does not select a queue number. Enqueuing a PR, naming a
+queue, supplying a forged event or calling an ordinary merge with the same
+candidate does not satisfy it: the native landing must validate the exact queue
+head and atomically publish its formed/merged/landed transition with the target
+ref change. Fast-forward and validated two-parent candidate landings retain their
+own guards and must satisfy all current reviews and checks. See
+[NATIVE_MERGE_QUEUE.md](NATIVE_MERGE_QUEUE.md) for those commands and exact retry
+semantics. Re-read the current epoch when preparing new work after a policy change;
+retain the original command and key when recovering an earlier outcome.
 
 ### Activate a compiled reference policy
 
@@ -93,7 +130,7 @@ fg protection set "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
 ```
 
 This is a complete replacement, including branch requirements and the optional
-DSL. Omitted components are removed; supply every review/check selector you
+DSL. Omitted components are removed; supply every review/check/queue selector you
 intend to retain. Inspection includes the selected DSL identity and canonical
 frame as `ref_policy.frame_hex`. Source spelling and rule order do not replace
 canonical snapshot identity. Unsupported facts, malformed source, noncanonical
@@ -140,7 +177,8 @@ is no mutable side database, on-disk policy toggle, special branch, or reuse of
 the hidden-ref configuration's `policy_root`.
 
 The canonical event binds actor, expected policy epoch, administrators, the
-entire required-reviewer map and every workflow check selector. Its aggregate version binds the exact predecessor.
+entire required-reviewer map, every workflow check selector and each branch's
+merge queue requirement. Its aggregate version binds the exact predecessor.
 The request's existing stable transaction identity therefore distinguishes every
 material change without including a mutable current-head value.
 
@@ -170,6 +208,10 @@ Creation of a named unborn protected branch is protected too. An unprotected
 branch remains available; a no-ref metadata operation does not become a code
 change. A legacy merge materializer cannot bypass the direct-update guard.
 A branch with required reviewers still refuses direct updates. A branch protected
+by a required merge queue also refuses direct updates, including branch creation
+and deletion, regardless of whether checks or reviews would otherwise pass.
+Ordinary PR merges refuse a queue-required target; only the authenticated native
+queue landing context can satisfy that requirement. A branch protected
 only by workflow checks permits a direct set only after all exact-candidate
 checks pass; deletion remains refused. The check profile also guards an atomic
 update from moving its configured CI source away from the checked candidate.
@@ -193,6 +235,16 @@ existing canonical refusal path. Request cancellation and resource failures
 remain distinct from evidence that a transaction did not commit.
 
 ## Encoding compatibility
+
+Policies with `require_merge_queue: true` use required branch-policy kind 19,
+including the boolean, approval threshold and checks for every branch. Existing
+DSL wrappers retain their factual profiles and carry that new base kind. A kind-19
+policy with no true queue requirement refuses as a noncanonical encoding.
+Historical policy kinds decode the missing boolean as false. Policies with no
+queue requirement retain their exact historical event, seal and retry bytes.
+Older readers reject the new required kind rather than silently dropping it.
+Browser and remote operator receipts likewise omit false when normalizing policy
+objects, preserving previously saved request bytes and keys.
 
 Ref-only DSL policies retain required event kind 16 and policy evidence 1.2.
 Policies containing `actor.id` require kind 17 and evidence 1.3; older readers

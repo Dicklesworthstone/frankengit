@@ -70,7 +70,15 @@ encoded command. Each check is `{source_ref_hex, publisher, graph_root, job}`;
 source refs are canonical branches, graph roots are 64 lowercase hex characters,
 and jobs are exact nonempty UTF-8 without controls, at most 1,024 bytes. Preserve
 the complete check array when editing a policy file. A check-only branch may
-have an empty reviewer list. Long refs or jobs may exhaust the byte budget
+have an empty reviewer list. A branch may also set the strict JSON boolean
+`require_merge_queue: true` to require an authenticated canonical queue landing
+for its exact target. Queue-only branches use empty reviewer/check arrays and
+zero or omitted approvals. Ordinary PR merges and direct writes do not qualify;
+all configured checks and reviews continue to apply. Preserve the boolean when
+editing other fields: omission in a complete replacement means false. The
+operator includes queue requirements in its change summary, exact HTTP form,
+saved intent and retry validation. Omitted and explicit false retain historical
+intent bytes and keys. Long refs or jobs may exhaust the byte budget
 before the count limits. Empty branch lists require explicit `--clear` and still
 retain administrators. Empty check arrays retain legacy intent bytes and keys.
 

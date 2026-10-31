@@ -1,5 +1,84 @@
 use super::*;
 
+#[test]
+fn queue_requirement_accepts_queue_only_or_combined_rules_and_is_explicit_in_reads() {
+    let mut args = input();
+    let Operation::Set {
+        command: historical,
+        ..
+    } = parse(&args).unwrap().operation
+    else {
+        panic!()
+    };
+    assert!(!historical.protection.branches[0].require_merge_queue);
+    assert!(
+        policy_json(&historical.protection)
+            .unwrap()
+            .contains("\"require_merge_queue\":false")
+    );
+    args.extend(["--require-merge-queue".into(), "refs/heads/main".into()]);
+    let Operation::Set {
+        command: combined, ..
+    } = parse(&args).unwrap().operation
+    else {
+        panic!()
+    };
+    assert!(combined.protection.branches[0].require_merge_queue);
+    assert_eq!(
+        combined.protection.branches[0].reviewers,
+        historical.protection.branches[0].reviewers
+    );
+    args.drain(15..17);
+    args.extend(["--require-approvals".into(), "refs/heads/main:0".into()]);
+    let Operation::Set { command, .. } = parse(&args).unwrap().operation else {
+        panic!()
+    };
+    let branch = &command.protection.branches[0];
+    assert!(branch.require_merge_queue);
+    assert!(branch.reviewers.is_empty() && branch.required_checks.is_empty());
+    assert_eq!(branch.required_approvals, 0);
+    assert!(
+        policy_json(&command.protection)
+            .unwrap()
+            .contains("\"require_merge_queue\":true")
+    );
+    *args.last_mut().unwrap() = "refs/heads/main:1".into();
+    assert!(parse(&args).is_err());
+}
+
+#[test]
+fn queue_requirement_rejects_duplicate_nonbranch_clear_and_excess_rules() {
+    let mut args = input();
+    args.extend(["--require-merge-queue".into(), "refs/heads/main".into()]);
+    let mut duplicate = args.clone();
+    duplicate.extend(["--require-merge-queue".into(), "refs/heads/main".into()]);
+    assert!(parse(&duplicate).is_err());
+    args.push("--clear".into());
+    assert!(parse(&args).is_err());
+    for name in [
+        "",
+        "main",
+        "refs/tags/main",
+        "refs/heads/../main",
+        "refs/heads/main:true",
+    ] {
+        let mut args = input();
+        args.extend(["--require-merge-queue".into(), name.into()]);
+        assert!(parse(&args).is_err(), "{name}");
+    }
+    let mut args = input();
+    args.truncate(15);
+    for index in 0..MAX_PROTECTED_BRANCHES {
+        args.extend([
+            "--require-merge-queue".into(),
+            format!("refs/heads/queue-{index:02}"),
+        ]);
+    }
+    assert!(parse(&args).is_ok());
+    args.extend(["--require-merge-queue".into(), "refs/heads/overflow".into()]);
+    assert!(parse(&args).is_err());
+}
+
 const REF_POLICY: &str = r#"policy retained_tags {
     rule keep { when ref.name matches "refs/tags/release-*" and ref.update == delete then deny "retained tag" }
     default allow

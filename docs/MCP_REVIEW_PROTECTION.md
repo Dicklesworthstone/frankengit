@@ -5,6 +5,7 @@ inspect, replace and recover canonical required-review protection over the
 existing MCP stdio server. It calls the same native authority reader and durable
 admission used by `fg protection`. It also carries the explicit
 [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md).
+It can require native merge queue landing for an exact protected branch.
 It can also activate the bounded ref-fact/actor-ID DSL through the same canonical
 administrator transition and policy epoch.
 The existing code-agent profile gains no policy-administration capability.
@@ -119,11 +120,22 @@ admission evidence; knowledge of a snapshot ID is not an activation grant.
 Principal IDs are canonical 32-character lowercase hexadecimal strings.
 Administrator and reviewer lists must be strictly sorted and unique; the
 administrator list must be nonempty. A protected branch may have no reviewers
-only when it has at least one required workflow check. The policy accepts at
+only when it has at least one required workflow check or `require_merge_queue: true`. The policy accepts at
 most 32 administrators, 64 exact branches, 32 reviewers and 32 checks per branch. Branches are strictly sorted by raw reference bytes and must name
 `refs/heads/*`; the `reference_hex` encoding preserves non-UTF-8 names and uses
 the native 1,024-byte reference limit. The adapter rejects duplicate entries
 instead of deduplicating or reordering a changed retry.
+
+Each branch accepts an optional JSON boolean `require_merge_queue`; omission
+and explicit false have the same historical canonical identity. Strings,
+numbers and null refuse. True requires an authenticated canonical queue landing
+targeting that exact branch, with every configured review/check/DSL gate still
+enforced. It does not select a queue number or authorize any queue operation.
+Ordinary PR merges and direct ref writes cannot satisfy this requirement.
+A queue-only branch uses `required_reviewers: []`, `required_checks: []` and
+zero or omitted `required_approvals`. `protection_show` returns the boolean
+explicitly for every branch. Preserve true when replacing other policy fields;
+omission in a complete replacement removes it.
 
 Each branch must explicitly include `required_checks`, even when it is empty.
 This prevents a client unaware of checks from silently dropping them while
@@ -140,8 +152,8 @@ enlarge unrelated arguments or metadata. A policy whose complete representation
 exceeds those limits must be managed through another admitted surface. Individual
 native collection limits do not waive the transport budget.
 
-An explicit empty `branches` array disables required reviews and workflow
-checks while retaining administrator ownership and immutable history. A DSL
+An explicit empty `branches` array disables required reviews, workflow
+checks and queue requirements while retaining administrator ownership and immutable history. A DSL
 component may remain active independently. Omitting `branches` never disables
 protection. Required approval counts default to all listed reviewers, and all
 configured workflow checks must pass for the exact candidate. DSL name patterns

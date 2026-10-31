@@ -263,6 +263,10 @@ fn policy_value(policy: &ReviewProtection) -> Result<Value, ToolError> {
                                 json::number(u64::from(branch.required_approvals)),
                             ),
                             (
+                                "require_merge_queue",
+                                Value::Bool(branch.require_merge_queue),
+                            ),
+                            (
                                 "required_checks",
                                 Value::Array(
                                     branch

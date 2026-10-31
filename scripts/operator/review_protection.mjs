@@ -111,17 +111,21 @@ export function policy(value) {
   if (!Array.isArray(value.branches) || value.branches.length > LIMITS.branches) fail('invalid_branch_count');
   const branches = value.branches.map(row => {
     fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
-      ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : [])]);
+      ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : []),
+      ...(Object.hasOwn(row, 'require_merge_queue') ? ['require_merge_queue'] : [])]);
+    const requireQueue = Object.hasOwn(row, 'require_merge_queue') ? row.require_merge_queue : false;
+    if (typeof requireQueue !== 'boolean') fail('invalid_merge_queue_requirement');
     const checks = requiredChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
-    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0);
+    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0 || requireQueue);
     const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
     if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
         approvals > reviewers.length) fail('invalid_required_approval_count');
-    // Default unanimity and empty checks preserve saved v1 intent bytes, hashes,
+    // Default unanimity, optional queues and empty checks preserve saved v1 intent bytes, hashes,
     // request bodies and retry identities. An explicit smaller quorum survives.
     return { reference_hex: branchHex(row.reference_hex), required_reviewers: reviewers,
       ...(checks.length ? { required_checks: checks } : {}),
-      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
+      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
+      ...(requireQueue ? { require_merge_queue: true } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('duplicate_branch');
   return { administrators: people(value.administrators, LIMITS.administrators), branches,
@@ -154,6 +158,9 @@ function command(source, replacement, clear) {
   }
   for (const row of replacement.branches) if (Object.hasOwn(row, 'required_approvals')) {
     form.append('required_approvals', `${row.reference_hex}:${row.required_approvals}`);
+  }
+  for (const row of replacement.branches) if (row.require_merge_queue === true) {
+    form.append('require_merge_queue', row.reference_hex);
   }
   if (replacement.ref_policy) form.set('ref_policy_frame_hex', replacement.ref_policy.frame_hex);
   if (clear) form.set('clear', 'true');

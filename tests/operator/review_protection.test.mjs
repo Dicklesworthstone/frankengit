@@ -9,6 +9,32 @@ import { run, parseArgs, intentSummary } from '../../scripts/fg_protection_admin
 import { TOKEN, ACTOR, REVIEWER, SCOPE, HEAD, POLICY, NEXT, ref, state, json, peer, files } from './protection_fixtures.mjs';
 const plan = extra => prepareIntent({ endpoint: 'https://forge.example/team/repo.git', token: TOKEN, principal_id: ACTOR,
   expectedScope: SCOPE, snapshot: state(), replacement: NEXT, nonce: 'e'.repeat(32), ...extra });
+
+test('queue policy uses strict booleans and preserves old intent bytes when false', () => {
+  const historical = plan(), before = structuredClone(POLICY), after = structuredClone(NEXT);
+  before.branches[0].require_merge_queue = false; after.branches[0].require_merge_queue = false;
+  assert.deepEqual(plan({ snapshot: state({ policy: before }), replacement: after }), historical);
+  for (const value of ['true', 'false', null, 0, 1, [], {}]) {
+    after.branches[0].require_merge_queue = value;
+    assert.throws(() => policy(after), /invalid_merge_queue_requirement/);
+  }
+});
+
+test('queue-only intents bind the exact form, survive recovery and report requirement changes', () => {
+  const replacement = { administrators: [ACTOR], branches: [{
+    reference_hex: ref('refs/heads/main'), required_reviewers: [], require_merge_queue: true,
+  }] };
+  const intent = plan({ replacement });
+  assert.deepEqual(new URLSearchParams(intent.request.body).getAll('require_merge_queue'), [ref('refs/heads/main')]);
+  assert.deepEqual(validateIntent(JSON.parse(canonical(intent))), intent);
+  const change = intentSummary(intent).branches[0];
+  assert.equal(change.require_merge_queue_before, false); assert.equal(change.require_merge_queue_after, true);
+  const tampered = structuredClone(intent); tampered.replacement.branches[0].require_merge_queue = false;
+  assert.throws(() => validateIntent(tampered));
+  const clear = plan({ snapshot: state({ policy: replacement }), replacement: { administrators: [ACTOR], branches: [] }, clear: true });
+  assert.equal(intentSummary(clear).branches[0].require_merge_queue_after, false);
+  assert.throws(() => policy({ ...replacement, branches: [{ ...replacement.branches[0], require_merge_queue: false }] }));
+});
 // Opaque native-schema transport fixture; policy compilation remains Rust-owned.
 const refPolicy = (profile = 'reference_facts_v1') => ({ snapshot_id: `frankengit/policy-snapshot/v1/v1.0/alg:2/${'d'.repeat(64)}`,
   profile, mode: 'enforce', frame_hex: '000102ff' });

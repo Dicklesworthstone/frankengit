@@ -6,6 +6,85 @@ use super::*;
 use fgit_wire::smart_http::head;
 use std::fmt::Write as _;
 
+#[test]
+fn queue_requirements_preserve_full_rules_and_allow_a_queue_only_branch() {
+    let main = hex(b"refs/heads/main");
+    let historical = parse_command(form().as_bytes()).unwrap();
+    assert!(!historical.protection.branches[0].require_merge_queue);
+    assert!(
+        policy_json(&historical.protection)
+            .unwrap()
+            .contains("\"require_merge_queue\":false")
+    );
+    let combined =
+        parse_command(format!("{}&require_merge_queue={main}", form()).as_bytes()).unwrap();
+    assert!(combined.protection.branches[0].require_merge_queue);
+    assert_eq!(
+        combined.protection.branches[0].reviewers,
+        historical.protection.branches[0].reviewers
+    );
+    let reordered = format!("require_merge_queue={main}&{}", form());
+    assert_eq!(parse_command(reordered.as_bytes()).unwrap(), combined);
+    let body = format!(
+        "expected_version=1&expected_epoch=2&administrator={}&require_merge_queue={main}&required_approvals={main}:0",
+        person(1)
+    );
+    let command = parse_command(body.as_bytes()).unwrap();
+    let branch = &command.protection.branches[0];
+    assert!(
+        branch.require_merge_queue
+            && branch.reviewers.is_empty()
+            && branch.required_checks.is_empty()
+    );
+    assert_eq!(branch.required_approvals, 0);
+    assert!(
+        policy_json(&command.protection)
+            .unwrap()
+            .contains("\"require_merge_queue\":true")
+    );
+    for invalid in [
+        format!("{body}&require_merge_queue={main}"),
+        format!("{body}&clear=true"),
+        body.replace(":0", ":1"),
+    ] {
+        assert!(parse_command(invalid.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn queue_form_field_is_exact_branch_hex_and_keeps_the_branch_count_bound() {
+    for name in [
+        String::new(),
+        "true".into(),
+        "false".into(),
+        "refs/heads/main".into(),
+        hex(b"refs/tags/main"),
+        hex(b"refs/heads/main") + ":true",
+    ] {
+        assert!(
+            parse_command(format!("{}&require_merge_queue={name}", form()).as_bytes()).is_err()
+        );
+    }
+    let mut body = format!(
+        "expected_version=1&expected_epoch=2&administrator={}",
+        person(1)
+    );
+    for index in 0..MAX_PROTECTED_BRANCHES {
+        write!(
+            body,
+            "&require_merge_queue={}",
+            hex(format!("refs/heads/queue-{index:02}").as_bytes())
+        )
+        .unwrap();
+    }
+    assert!(parse_command(body.as_bytes()).is_ok());
+    write!(body, "&require_merge_queue={}", hex(b"refs/heads/overflow")).unwrap();
+    assert_eq!(
+        parse_command(body.as_bytes()).unwrap_err().code,
+        "resource_limit"
+    );
+}
+
 fn encoded_policy(source: &str) -> String {
     source
         .as_bytes()

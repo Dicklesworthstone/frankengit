@@ -301,6 +301,40 @@ test('quorum edits invalidate a preview and invalid counts never submit a replac
 function requiredCheck(extra = {}) {
   return { source_ref_hex: hex('refs/heads/ci-main'), publisher: OTHER, graph_root: '7'.repeat(64), job: 'build', ...extra };
 }
+
+test('PR panel preserves queue-only rules and freezes an explicit queue checkbox', async () => {
+  const selected = { administrators: [ADMIN], branches: [{
+    reference_hex: hex('refs/heads/main'), required_reviewers: [], require_merge_queue: true,
+  }] };
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready();
+  const queue = h.rows()[0].group.all('input').find(input => input.attributes.has('data-require-merge-queue'));
+  assert.ok(queue); assert.equal(queue.checked, true); assert.equal(queue.disabled, false);
+  await h.stage();
+  assert.deepEqual(h.client.pending.intent.replacement, selected);
+  assert.deepEqual(new URLSearchParams(h.client.pending.intent.body).getAll('require_merge_queue'), [hex('refs/heads/main')]);
+  assert.equal(queue.disabled, true);
+  queue.checked = false;
+  await h.send();
+  const sent = h.calls.find(call => call.method === 'POST');
+  assert.deepEqual(new URLSearchParams(sent.body).getAll('require_merge_queue'), [hex('refs/heads/main')]);
+});
+
+test('PR panel previews an explicit queue removal and rejects an empty rule', async () => {
+  const selected = policy(); selected.branches[0].require_merge_queue = true;
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: selected })) : null });
+  await h.ready();
+  const row = h.rows()[0], queue = row.group.all('input').find(input => input.attributes.has('data-require-merge-queue'));
+  queue.checked = false; await queue.emit('change');
+  row.reviewers.value = ''; await row.reviewers.emit('input');
+  await h.fire('editor', 'submit');
+  assert.equal(h.node('stage').disabled, true); assert.equal(h.client.pending, null);
+  row.reviewers.value = REVIEWER; await row.reviewers.emit('input');
+  await h.stage();
+  assert.equal(Object.hasOwn(h.client.pending.intent.replacement.branches[0], 'require_merge_queue'), false);
+  assert.match(h.node('changes').textContent, /require_merge_queue_after/);
+  assert.equal(new URLSearchParams(h.client.pending.intent.body).has('require_merge_queue'), false);
+});
 function checkRows(h, branch = h.rows()[0]) {
   return branch.group.all('div').filter(node => node.attributes.get('data-required-check-row') === 'true').map(group => ({
     group, fields: Object.fromEntries(group.all('input').map(input => [input.attributes.get('data-required-check-field'), input])),

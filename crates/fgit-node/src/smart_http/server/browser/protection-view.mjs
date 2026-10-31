@@ -52,21 +52,25 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
   }
   const replacement = { administrators: lines(administrators, 2048, 32), branches: lines(rules, 256 * 1024, 64).map(line => {
     const fields = line.split(/\s+/u);
-    if (fields.length < 2 || fields.length > 3) throw new Error('Each rule needs reference hex, comma-separated eligible reviewer IDs, and an optional approval count or “all”.');
+    if (fields.length < 2 || fields.length > 4) throw new Error('Each rule needs reference hex, comma-separated eligible reviewer IDs, an optional approval count or “all”, and an optional merge queue boolean.');
     const reviewers = fields[1] === '-' ? [] : fields[1].split(',');
     if (reviewers.length > 32 || reviewers.some(person => person === '')) throw new Error('Choose 1 through 32 reviewers for each rule.');
     const previous = observedBranches.find(branch => branch.reference_hex === fields[0]);
+    if (fields[3] !== undefined && !['true', 'false'].includes(fields[3])) throw new Error('Merge queue requirement must be true or false.');
+    const requireQueue = fields[3] === undefined ? previous?.require_merge_queue ?? false : fields[3] === 'true';
+    if (typeof requireQueue !== 'boolean') throw new Error('Invalid observed merge queue requirement.');
     const checks = checkRows === undefined ? previous?.required_checks ?? [] : checksByBranch.get(fields[0]) ?? [];
     const selected = fields[2];
     if (selected !== undefined && selected !== 'all' && !/^(0|[1-9][0-9]?)$/.test(selected)) throw new Error('Approval count must be a whole number or “all”.');
     const approvals = selected === 'all' ? reviewers.length : selected !== undefined ? Number(selected)
       : previous?.required_approvals ?? reviewers.length;
     if (!Number.isSafeInteger(approvals) || approvals < (reviewers.length ? 1 : 0) || approvals > reviewers.length) {
-      throw new Error('Approval count must be 1 through the reviewer count, or 0 for a check-only branch.');
+      throw new Error('Approval count must be 1 through the reviewer count, or 0 for a check-only or queue-only branch.');
     }
-    if (!reviewers.length && !checks.length) throw new Error('A protected branch needs reviewers or configured checks.');
+    if (!reviewers.length && !checks.length && !requireQueue) throw new Error('A protected branch needs reviewers, configured checks or a required merge queue.');
     return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}),
-      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
+      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
+      ...(requireQueue ? { require_merge_queue: true } : {}) };
   }), ...(observedRefPolicy ? { ref_policy: structuredClone(observedRefPolicy) } : {}) };
   const targets = new Set(replacement.branches.map(branch => branch.reference_hex));
   if ([...checksByBranch.keys()].some(target => !targets.has(target))) {
@@ -182,12 +186,13 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       section.append(node('h3', referenceLabel(branch.reference_hex)), node('p', `Exact reference bytes: ${branch.reference_hex}`),
         node('p', `${branch.required_approvals ?? branch.required_reviewers.length} of ${branch.required_reviewers.length} listed reviewers must approve the exact candidate. The PR opener and merge submitter cannot contribute votes. Other reviewers do not veto a satisfied quorum.`));
       for (const person of branch.required_reviewers) section.append(node('p', person));
+      if (branch.require_merge_queue) section.append(node('p', 'Merge queue required. Only an authenticated canonical queue landing targeting this branch may update it; reviews and checks still apply.'));
       for (const check of branch.required_checks ?? []) section.append(node('p',
         `Required check: ${check.job}; publisher ${check.publisher}; workflow ${check.graph_root}; source ${referenceLabel(check.source_ref_hex)}. The latest result must succeed for the exact proposed commit.`));
       ui.policy.append(section);
     }
     ui.administrators.value = policy.administrators.join('\n');
-    ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'} ${branch.required_approvals ?? 'all'}`).join('\n');
+    ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'} ${branch.required_approvals ?? 'all'}${branch.require_merge_queue ? ' true' : ''}`).join('\n');
     clearChecks();
     for (const branch of policy.branches) for (const check of branch.required_checks ?? []) appendCheck(branch.reference_hex, check);
     ui.clear.checked = false;

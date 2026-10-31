@@ -254,17 +254,21 @@ export function protectionPolicy(value) {
   if (!Array.isArray(value.branches) || value.branches.length > 64) fail('Select at most 64 protected branches.');
   const branches = value.branches.map(row => {
     protectionFields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
-      ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : [])]);
+      ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : []),
+      ...(Object.hasOwn(row, 'require_merge_queue') ? ['require_merge_queue'] : [])]);
+    const requireQueue = Object.hasOwn(row, 'require_merge_queue') ? row.require_merge_queue : false;
+    if (typeof requireQueue !== 'boolean') fail('Merge queue requirement must be a boolean.');
     const checks = protectionChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
-    const reviewers = protectionPeople(row.required_reviewers, checks.length > 0);
+    const reviewers = protectionPeople(row.required_reviewers, checks.length > 0 || requireQueue);
     const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
     if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
-        approvals > reviewers.length) fail('Required approvals must be 1 through the number of eligible reviewers, or 0 for a check-only branch.');
-    // Preserve the historical spelling of default unanimity and empty checks
+        approvals > reviewers.length) fail('Required approvals must be 1 through the number of eligible reviewers, or 0 for a check-only or queue-only branch.');
+    // Preserve the historical spelling of default unanimity, optional queues and empty checks
     // so saved v1 receipts retain their original digest and retry identity.
     return { reference_hex: protectionBranch(row.reference_hex), required_reviewers: reviewers,
       ...(checks.length ? { required_checks: checks } : {}),
-      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}) };
+      ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
+      ...(requireQueue ? { require_merge_queue: true } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('Duplicate protected branch.');
   return { administrators: protectionPeople(value.administrators), branches,
@@ -304,10 +308,13 @@ export function protectionChanges(before, after) {
     const nextApprovals = next.get(name)?.required_approvals ?? next.get(name)?.required_reviewers.length ?? null;
     const quorumChanged = oldApprovals !== nextApprovals &&
       (Object.hasOwn(old.get(name) ?? {}, 'required_approvals') || Object.hasOwn(next.get(name) ?? {}, 'required_approvals'));
-    if (added.length || removed.length || checksAdded.length || checksRemoved.length || quorumChanged) branches.push({ reference_hex: name,
+    const oldQueue = old.get(name)?.require_merge_queue ?? false, nextQueue = next.get(name)?.require_merge_queue ?? false;
+    const queueChanged = oldQueue !== nextQueue;
+    if (added.length || removed.length || checksAdded.length || checksRemoved.length || quorumChanged || queueChanged) branches.push({ reference_hex: name,
       change: !old.has(name) ? 'added' : !next.has(name) ? 'removed' : 'updated', added, removed,
       ...(checksAdded.length || checksRemoved.length ? { checks_added: checksAdded, checks_removed: checksRemoved } : {}),
-      ...(quorumChanged ? { required_approvals_before: oldApprovals, required_approvals_after: nextApprovals } : {}) });
+      ...(quorumChanged ? { required_approvals_before: oldApprovals, required_approvals_after: nextApprovals } : {}),
+      ...(queueChanged ? { require_merge_queue_before: oldQueue, require_merge_queue_after: nextQueue } : {}) });
   }
   return { administrators_added: difference(after.administrators, before.administrators),
     administrators_removed: difference(before.administrators, after.administrators), branches,
@@ -325,6 +332,7 @@ function protectionBody(source, replacement, clear) {
       `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(utf8.encode(check.job))}`)),
     required_approvals: replacement.branches.filter(row => Object.hasOwn(row, 'required_approvals'))
       .map(row => `${row.reference_hex}:${row.required_approvals}`),
+    require_merge_queue: replacement.branches.filter(row => row.require_merge_queue === true).map(row => row.reference_hex),
     ...(replacement.ref_policy ? { ref_policy_frame_hex: replacement.ref_policy.frame_hex } : {}),
     ...(clear ? { clear: 'true' } : {}) });
 }

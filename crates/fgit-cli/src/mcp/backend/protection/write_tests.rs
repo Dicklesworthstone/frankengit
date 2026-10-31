@@ -1,6 +1,66 @@
 use super::*;
 use fgit_forge::{ExpectedVersion, event::protection::MAX_POLICY_ADMINISTRATORS};
 
+#[test]
+fn queue_requirement_is_a_strict_optional_bool_and_false_retains_old_command() {
+    let mut args = arguments();
+    let historical = write::parse(&args).unwrap();
+    assert!(!historical.protection.branches[0].require_merge_queue);
+    fields(&mut args).insert("require_merge_queue".into(), Value::Bool(false));
+    assert_eq!(write::parse(&args).unwrap(), historical);
+    for value in [
+        text("true"),
+        text("false"),
+        json::number(1),
+        json::number(0),
+        Value::Null,
+        Value::Array(Vec::new()),
+    ] {
+        fields(&mut args).insert("require_merge_queue".into(), value);
+        assert_eq!(
+            write::parse(&args).unwrap_err().code,
+            "invalid_merge_queue_requirement"
+        );
+    }
+    fields(&mut args).insert("require_merge_queue".into(), Value::Bool(true));
+    let command = write::parse(&args).unwrap();
+    assert!(command.protection.branches[0].require_merge_queue);
+    assert_eq!(
+        command.protection.branches[0].reviewers,
+        historical.protection.branches[0].reviewers
+    );
+    let rendered = policy_value(&command.protection).unwrap();
+    let Value::Array(branches) = &rendered.object().unwrap()["branches"] else {
+        panic!()
+    };
+    assert_eq!(
+        branches[0].object().unwrap()["require_merge_queue"],
+        Value::Bool(true)
+    );
+    assert_eq!(
+        branches[1].object().unwrap()["require_merge_queue"],
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn queue_only_policy_keeps_zero_approval_and_complete_check_guards() {
+    let mut args = arguments();
+    fields(&mut args).insert("required_reviewers".into(), people(&[]));
+    assert!(write::parse(&args).is_err());
+    fields(&mut args).insert("require_merge_queue".into(), Value::Bool(true));
+    let command = write::parse(&args).unwrap();
+    let branch = &command.protection.branches[0];
+    assert!(branch.require_merge_queue && branch.required_checks.is_empty());
+    assert_eq!(branch.required_approvals, 0);
+    fields(&mut args).insert("required_approvals".into(), json::number(1));
+    assert!(write::parse(&args).is_err());
+    fields(&mut args).insert("required_approvals".into(), json::number(0));
+    assert_eq!(write::parse(&args).unwrap(), command);
+    fields(&mut args).remove("required_checks");
+    assert!(write::parse(&args).is_err());
+}
+
 fn branch(reference: &[u8], reviewers: &[u8]) -> Value {
     object([
         ("reference_hex", text(hex(reference))),

@@ -35,7 +35,7 @@ const MAX_COMMAND_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_FIELDS: usize = 5
     + MAX_POLICY_ADMINISTRATORS
-    + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS + 1);
+    + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS + 2);
 
 /// Recognize the API family before a malformed suffix can fall through to Git.
 pub(super) fn is_route(target: &str) -> bool {
@@ -274,8 +274,8 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
     let mut ref_policy = None;
     let mut administrators = BTreeSet::new();
     let mut quorums = BTreeMap::<RefName, u16>::new();
-    let mut branches: BTreeMap<RefName, (BTreeSet<PrincipalId>, BTreeSet<RequiredWorkflowCheck>)> =
-        BTreeMap::new();
+    let mut branches =
+        BTreeMap::<RefName, (BTreeSet<PrincipalId>, BTreeSet<RequiredWorkflowCheck>, bool)>::new();
     for (name, value) in parse_form_with_field_limit(
         bytes,
         MAX_COMMAND_FIELDS,
@@ -327,6 +327,17 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
                     return Err(ApiError::bad("duplicate_required_approvals"));
                 }
                 if quorums.len() > MAX_PROTECTED_BRANCHES {
+                    return Err(ApiError::too_large());
+                }
+            }
+            "require_merge_queue" => {
+                let name = reference(&value)?;
+                let required = &mut branches.entry(name).or_default().2;
+                if *required {
+                    return Err(ApiError::bad("duplicate_merge_queue_requirement"));
+                }
+                *required = true;
+                if branches.len() > MAX_PROTECTED_BRANCHES {
                     return Err(ApiError::too_large());
                 }
             }
@@ -409,16 +420,18 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
         administrators: administrators.into_iter().collect(),
         branches: branches
             .into_iter()
-            .map(|(name, (reviewers, required_checks))| ProtectedBranch {
-                require_merge_queue: false,
-                required_approvals: quorums
-                    .get(&name)
-                    .copied()
-                    .unwrap_or(reviewers.len() as u16),
-                required_checks: required_checks.into_iter().collect(),
-                name,
-                reviewers: reviewers.into_iter().collect(),
-            })
+            .map(
+                |(name, (reviewers, required_checks, require_merge_queue))| ProtectedBranch {
+                    require_merge_queue,
+                    required_approvals: quorums
+                        .get(&name)
+                        .copied()
+                        .unwrap_or(reviewers.len() as u16),
+                    required_checks: required_checks.into_iter().collect(),
+                    name,
+                    reviewers: reviewers.into_iter().collect(),
+                },
+            )
             .collect(),
     };
     protection
@@ -530,7 +543,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
             .iter()
             .map(|branch| {
                 format!(
-                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"required_checks\":[{}]}}",
+                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}]}}",
                 quote(&hex(branch.name.as_bytes())),
                 branch
                     .reviewers
@@ -539,6 +552,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
                     .collect::<Vec<_>>()
                     .join(","),
                 branch.required_approvals,
+                branch.require_merge_queue,
                 branch.required_checks.iter().map(|check| format!(
                     "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                     quote(&hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),
