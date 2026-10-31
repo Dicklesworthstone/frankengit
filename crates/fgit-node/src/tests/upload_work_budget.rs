@@ -66,63 +66,50 @@ fn terminal_upload_report_never_revives_work_and_is_only_armed_once() {
 }
 
 #[test]
-fn raw_upload_timeout_writes_an_actionable_fatal_after_its_work_clock_expires() {
-    for version in [
-        fgit_wire::UploadPackVersion::V0,
-        fgit_wire::UploadPackVersion::V2,
-    ] {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut deadline = session_deadline();
-        deadline.started = Instant::now()
-            .checked_sub(Duration::from_secs(11))
-            .expect("test clock supports a past deadline");
-        let request = fgit_wire::PackRequest {
-            version,
-            wants: Vec::new(),
-            haves: Vec::new(),
-            shallows: Vec::new(),
-            deepen: None,
-            deepen_since: None,
-            deepen_not: Vec::new(),
-            filter: None,
-            options: fgit_wire::PackOptions::SIDE_BAND_64K,
-        };
-        {
-            let mut writer = crate::DeadlineTcpStream::new(&mut stream, deadline.clone());
-            assert!(matches!(
-                crate::check_selected_pack_deadline(
-                    &mut writer,
-                    &request,
-                    &WireLimits::default(),
-                    Some(&deadline),
-                ),
-                Err(GitDaemonTransportRefusal::SessionDeadlineExceeded { .. })
-            ));
-            assert!(writer.prepare_read().is_err(), "Git input remains expired");
-        }
-        stream.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        peer.read_to_end(&mut response).unwrap();
-        let packet_len =
-            usize::from_str_radix(std::str::from_utf8(&response[..4]).unwrap(), 16).unwrap();
-        assert_eq!(
-            response[4], 3,
-            "terminal diagnostics use Fatal, never progress"
-        );
-        let text = std::str::from_utf8(&response[5..packet_len]).unwrap();
-        for flag in [
-            "--session-timeout-secs",
-            "--session-secs-per-mib",
-            "--session-max-extension-secs",
-        ] {
-            assert!(text.contains(flag), "{text}");
-        }
-        assert_eq!(&response[packet_len..], b"0000");
-        assert!(deadline.expired());
+fn raw_upload_timeout_writes_an_actionable_err_after_its_work_clock_expires() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    let mut deadline = session_deadline();
+    deadline.started = Instant::now()
+        .checked_sub(Duration::from_secs(11))
+        .expect("test clock supports a past deadline");
+    {
+        let mut writer = crate::DeadlineTcpStream::new(&mut stream, deadline.clone());
+        assert!(matches!(
+            crate::check_selected_pack_deadline(
+                &mut writer,
+                &WireLimits::default(),
+                Some(&deadline),
+            ),
+            Err(GitDaemonTransportRefusal::SessionDeadlineExceeded { .. })
+        ));
+        assert!(writer.prepare_read().is_err(), "Git input remains expired");
     }
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    peer.read_to_end(&mut response).unwrap();
+    let packet_len =
+        usize::from_str_radix(std::str::from_utf8(&response[..4]).unwrap(), 16).unwrap();
+    let text = std::str::from_utf8(&response[4..packet_len]).unwrap();
+    assert!(
+        text.starts_with("ERR "),
+        "terminal diagnostics precede pack negotiation"
+    );
+    for flag in [
+        "--session-timeout-secs",
+        "--session-secs-per-mib",
+        "--session-max-extension-secs",
+    ] {
+        assert!(text.contains(flag), "{text}");
+    }
+    assert_eq!(
+        response.len(),
+        packet_len,
+        "one error packet, no pack prefix or flush"
+    );
+    assert!(deadline.expired());
 }
 
 #[test]

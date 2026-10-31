@@ -868,6 +868,7 @@ impl OneNode {
             capabilities,
             limits,
             Some(deadline),
+            crate::upload_refusal::pack_line,
             |_request, pack_request| {
                 let pack_context = self.session_pack_materialization_context(deadline);
                 let database_exhaustion = std::cell::Cell::new(None);
@@ -1010,6 +1011,8 @@ mod authorization_tests;
 mod service_tests;
 #[cfg(test)]
 mod upload_deadline_tests;
+#[cfg(test)]
+mod upload_pack_refusal_tests;
 
 #[cfg(test)]
 mod tests {

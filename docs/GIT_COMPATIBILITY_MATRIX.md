@@ -32,7 +32,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Pack delta chains | required-v1 | Compatible bounded validation; depth/fan-out/expanded-byte limits; thin-pack completion |
 | Receive session envelope | required-v1 profile | Deliberate, operator-selected size/time bounds for one pushed pack; typed refusals, never a silent hangup after the pack trailer — see the envelope section below |
 | Hidden refs | required-v1 | Authorization and advertisement separation; no side-channel disclosure |
-| Selected-pack write envelope | required-v1 profile | Deliberate, operator-selected bound on one emitted pack's expanded bytes; Fatal-sideband/typed refusal when exceeded — see the envelope section below |
+| Selected-pack write envelope | required-v1 profile | Deliberate, operator-selected bound on one emitted pack's expanded bytes; bounded Git ERR/typed refusal when exceeded — see the envelope section below |
 | Namespaces | planned | Tenant/repository isolation; no accidental cross-namespace advertisement |
 | Annotated and lightweight tags | required-v1 | Peeling, protection, deletion, signature evidence, deterministic ordering |
 | Git notes | required-v1 | Ordinary refs with explicit policy controls |
@@ -391,11 +391,14 @@ are loaded, decided and written one at a time to unlinked scratch, so the
 envelope bounds work and scratch disk, while memory is the delta candidates,
 bounded by the profile and enforced as `max_cached_bytes` (128 MiB). Every
 serving command and `fg export` set it with `--pack-max-expanded-mib`. An
-over-envelope selected pack is refused before any pack byte is emitted: a
-client that negotiated sideband-64k receives one Fatal sideband message
-naming the limit (diagnosable, not an unexplained early EOF); without
-sideband the connection ends as in upstream mid-service failure. `fg export`
-prints the typed refusal directly.
+over-envelope selected pack is refused before any pack byte is emitted. Native
+Git and SSH withhold the final negotiation/packfile prefix until preparation
+succeeds, so public resource failures use a bounded plain Git ERR packet even
+without sideband. Intermediate negotiation replies remain immediate. The
+aggregate refusal names `--pack-max-expanded-mib`; an expired selected-pack
+session deadline names the finite session and work-scaling controls. Runtime
+budget exhaustion reports its class and exhausted dimension. `fg export`
+prints its typed refusal directly.
 
 For network upload-pack, the verified visible graph now supplies an exact
 preflight after wants, haves, shallow boundaries, filters and tag inclusion.
@@ -429,6 +432,24 @@ quiet refused clones, an unchanged authority head, and successful native pack
 verification after raising only the upload envelope in both object formats.
 These are authored integration regressions, not a new stock-client performance
 or compatibility measurement.
+
+The authored Git/SSH adapter tests in
+`fgit-node/src/ssh/upload_pack_refusal_tests.rs` exercise the same persisted
+repository through native TCP and the production SSH command adapter, in both
+object formats and protocol v0/v1/v2. Aggregate and per-object refusals have
+successful native-pack twins and assert unchanged authority state. Separate
+authored tests cover interactive negotiation, failed error writes, and work
+expiry without reviving work. SSH encrypted-window tests check bounded
+control-packet drain. These native node and SSH cases have not been executed
+for this change.
+
+Eleven existing generic transport and clock tests passed in an isolated harness
+using byte-identical production functions and test bodies with the real
+`fgit-wire`, `fgit-pack` and `fgit-types` dependencies. These include loopback TCP
+deadline/success cases, an actionable timeout ERR, generic builder failure
+framing for v0/v1/v2, and bounded, shared, non-revivable work clocks. This
+supplementary result does not execute native resource classification, OneNode
+or SSH and is not a full-node, stock-client or large-history performance result.
 
 The per-object body ceiling does not reject unselected blobs reached through
 verified tree or tag edges during the pre-advertisement metadata walk. Their

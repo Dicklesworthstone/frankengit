@@ -253,14 +253,23 @@ fn connected(timeout: Duration) -> Connection {
 }
 
 #[test]
-fn terminal_fatal_waits_for_encrypted_window_adjust_without_admitting_git_input() {
+fn terminal_err_waits_for_encrypted_window_adjust_without_admitting_git_input() {
     let mut connection = connected(Duration::from_secs(5));
     let mut writer = SshWriter(&connection.state);
     assert_eq!(
         writer.write(REPORT).unwrap_err().kind(),
         io::ErrorKind::TimedOut
     );
-    connection.work.begin_terminal_response();
+    let error = GitDaemonTransportRefusal::SessionDeadlineExceeded {
+        operation: "build selected git pack",
+    };
+    let report = fgit_wire::encode_packets(
+        &[fgit_wire::Packet::Data(
+            crate::upload_refusal::transport_line(&error).unwrap(),
+        )],
+        &WireLimits::default(),
+    )
+    .unwrap();
     let pending_git = b"unconsumed git input";
     let mut input = channel_packet(msg::CHANNEL_DATA);
     input.write_string(pending_git);
@@ -268,17 +277,23 @@ fn terminal_fatal_waits_for_encrypted_window_adjust_without_admitting_git_input(
         .peer
         .send(&mut connection.client, &input.into_bytes());
     let mut adjust = channel_packet(msg::CHANNEL_WINDOW_ADJUST);
-    adjust.write_u32(u32::try_from(REPORT.len()).unwrap());
+    adjust.write_u32(u32::try_from(report.len()).unwrap());
     connection
         .peer
         .send(&mut connection.client, &adjust.into_bytes());
-    writer.write_all(REPORT).unwrap();
-    writer.flush().unwrap();
+    assert!(matches!(
+        crate::check_selected_pack_deadline(
+            &mut writer,
+            &WireLimits::default(),
+            Some(&connection.work),
+        ),
+        Err(GitDaemonTransportRefusal::SessionDeadlineExceeded { .. })
+    ));
     let packet = connection.peer.receive(&mut connection.client);
     let mut packet = WireReader::new(&packet);
     assert_eq!(packet.read_u8().unwrap(), msg::CHANNEL_DATA);
     assert_eq!(packet.read_u32().unwrap(), PEER_CHANNEL);
-    assert_eq!(packet.read_string().unwrap(), REPORT);
+    assert_eq!(packet.read_string().unwrap(), report);
     assert_eq!(packet.remaining(), 0);
     assert_eq!(
         SshReader(&connection.state)

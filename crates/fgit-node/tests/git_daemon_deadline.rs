@@ -607,7 +607,15 @@ fn one_node_reports_database_budget_expiry_while_the_session_is_live() {
         ),
         "the expired database budget must retain its exact native dimension: {refusal:?}"
     );
-    assert_eq!(response, b"0008NAK\n");
+    let expected = encode_packets(
+        &[Packet::Data(format!("ERR {refusal}\n").into_bytes())],
+        &WireLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        response, expected,
+        "the known budget refusal precedes NAK even without sideband"
+    );
 }
 
 #[test]

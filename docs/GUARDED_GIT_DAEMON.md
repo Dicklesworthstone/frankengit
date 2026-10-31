@@ -144,18 +144,19 @@ Blob bodies still require complete native and fabric verification before any
 completed pack is sent.
 
 A request whose pack exceeds the envelope is refused after the advertisement.
-Git and SSH report it on the negotiated Fatal side band, even for quiet clients.
-git prints it and then stops, for example under
-`--pack-max-expanded-mib 128`:
+Native Git and SSH hold the final negotiation/packfile prefix until preparation
+succeeds. A public resource failure is one plain Git `ERR` packet before that
+prefix, without depending on progress output or sideband negotiation. The
+aggregate diagnostic retains this form under `--pack-max-expanded-mib 128`:
 
 ```text
-remote: pack needs 134217845 bytes of objects, over this server's upload envelope (128 MiB of objects); the operator can raise it with fg serve --pack-max-expanded-mib
-fatal: early EOF
+ERR pack needs 134217845 bytes of objects, over this server's upload envelope (128 MiB of objects); the operator can raise it with fg serve --pack-max-expanded-mib
 ```
 
-This historical example reported the running total where the writer crossed
-the limit. Network preflight now reports the complete selected expanded total;
-it does not need to read the selected blob bodies to discover that refusal.
+The byte count above is illustrative. Network preflight reports the complete
+selected expanded total; it does not need to read the selected blob bodies to
+discover that refusal. Intermediate negotiation responses remain immediate,
+including when the client waits for one before sending the next round.
 
 An admitted selection also earns a finite work allowance from its expanded
 bytes. The work clock is the original base plus
@@ -189,6 +190,18 @@ even if the peer has gone away or the bounded response write fails.
 Storage errors, object identifiers and authority details do not cross this
 diagnostic boundary. Cancellation and the configured response-size limit still
 apply.
+
+Git and SSH use that same public resource allowlist and bounded text, before
+the final prefix. Their existing terminal-write allowance also covers an ERR
+after work expires. Unclassified failures keep the transport's existing
+behavior; arbitrary generic pack-builder text is not promoted to this ERR
+path. Authored native regressions cover both hash formats, every supported protocol,
+raw/sideband clients, exact successful pack bodies, unchanged authority,
+intermediate negotiation and failed diagnostic writes. The native node and SSH
+cases have not been executed for this change. Eleven existing generic transport
+and clock tests passed in isolated byte-identical-source validation, including
+loopback TCP tests. That result does not execute native resource classification,
+OneNode or SSH, or establish a pinned-client or large-history performance result.
 
 HTTP upload work also uses the same bounded, sticky peer-reset probe as raw Git.
 It checks at most once per 100 ms without consuming queued input. An observed

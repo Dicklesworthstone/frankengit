@@ -64,6 +64,7 @@ pub mod outcome_checkpoint;
 mod outcome_collection;
 pub mod source_retrieval;
 mod treefs_workspace;
+mod upload_refusal;
 #[cfg(target_os = "linux")]
 pub mod workflow_artifacts;
 pub use treefs_workspace::IssueReadRefusal;
@@ -237,9 +238,9 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // empty repository on Git's `capabilities^{}` advertisement form rather than
 // degenerating to a bare pkt-line flush. `side-band-64k` is offered for the
 // same reason every upstream server offers it: it gives the pack phase a
-// progress channel and gives a refused selected-pack build the Fatal band —
-// the difference between a diagnosable client error and an early EOF
-// (frankengit-e6jj). Clients that do not request it keep the raw-pack flow.
+// progress and Fatal channel. Public selected-pack resource failures are
+// reported before that phase with ERR, independently of this capability.
+// Clients that do not request it keep the raw-pack flow on success.
 const GIT_DAEMON_CAPABILITIES: &[u8] = b"allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node";
 
 /// The git-daemon capability advertisement for one repository object format.
@@ -1174,8 +1175,8 @@ impl Display for NodePackMaterializationRefusal {
             // The selected-pack envelope bounds both the planned object bytes and
             // the emitted pack, and an operator sets it. Since the disclosure
             // walk reads blob headers rather than bodies, a clone or fetch over
-            // it is refused here, after the advertisement, and the client sees
-            // this text on the side band (frankengit-8xyq).
+            // it is refused here, after the advertisement, and the native
+            // transports carry this public cause in a bounded Git ERR packet.
             Self::Pack(error) => match error.as_ref() {
                 PackWriteError::Pack(PackError::TotalExpandedLimit { actual, limit }) => {
                     write_envelope_refusal(formatter, "objects", *actual, *limit)
@@ -6559,6 +6560,7 @@ where
         capabilities,
         limits,
         None,
+        |_| None,
         |request, pack_request| {
             build_pack(request, pack_request).map_err(GitDaemonServeError::Pack)
         },
@@ -6579,6 +6581,7 @@ pub(crate) fn serve_git_daemon_upload_pack_after_greeting<R, W, BuildPack, Paylo
     capabilities: Capabilities,
     limits: WireLimits,
     session_deadline: Option<&GitDaemonSessionDeadline>,
+    public_pack_refusal: fn(&PackError) -> Option<Vec<u8>>,
     mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
@@ -6603,6 +6606,7 @@ where
             capabilities.contains(b"filter"),
             limits,
             session_deadline,
+            public_pack_refusal,
             build_pack,
         );
     }
@@ -6675,8 +6679,18 @@ where
         if let Some(refusal) = refuse_unserved_filter(writer, &transition.events, &limits) {
             return Err(GitDaemonServeError::Transport(refusal));
         }
-        write_packet_group(writer, &transition.output, &limits)
-            .map_err(GitDaemonServeError::Transport)?;
+        // Preserve interactive negotiation, but do not announce the final
+        // ACK/NAK or packfile section until its selected pack is prepared.
+        // A public resource refusal can then be a normal ERR packet, even
+        // for a quiet client or one that did not negotiate sideband.
+        if !transition
+            .events
+            .iter()
+            .any(|event| matches!(event, WireEvent::PackRequested(_)))
+        {
+            write_packet_group(writer, &transition.output, &limits)
+                .map_err(GitDaemonServeError::Transport)?;
+        }
 
         if machine.has_ended() {
             // The client ended the session with a flush before any want, as
@@ -6694,24 +6708,26 @@ where
                     GitDaemonTransportRefusal::IncompleteNegotiation,
                 ));
             }
-            check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
+            check_selected_pack_deadline(writer, &limits, session_deadline)
                 .map_err(GitDaemonServeError::Transport)?;
             let mut payload = match build_pack(&request, &pack_request) {
                 Ok(payload) => payload,
                 Err(error) => {
-                    // A pack-build refusal is reported to a sideband-
-                    // negotiated client before the session ends (e6jj).
-                    let _ = emit_terminal_pack_refusal(
+                    report_selected_pack_refusal(
                         writer,
                         &pack_request,
-                        &error.to_string(),
+                        &error,
+                        &transition.output,
+                        public_pack_refusal,
                         &limits,
                         session_deadline,
                     );
                     return Err(error);
                 }
             };
-            check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
+            check_selected_pack_deadline(writer, &limits, session_deadline)
+                .map_err(GitDaemonServeError::Transport)?;
+            write_packet_group(writer, &transition.output, &limits)
                 .map_err(GitDaemonServeError::Transport)?;
             emit_pack_payload(
                 writer,
@@ -6747,6 +6763,7 @@ fn serve_v2_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
     supports_filter: bool,
     limits: WireLimits,
     session_deadline: Option<&GitDaemonSessionDeadline>,
+    public_pack_refusal: fn(&PackError) -> Option<Vec<u8>>,
     mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
@@ -6826,8 +6843,14 @@ where
         if let Some(refusal) = refuse_unserved_filter(writer, &transition.events, &limits) {
             return Err(GitDaemonServeError::Transport(refusal));
         }
-        write_packet_group(writer, &transition.output, &limits)
-            .map_err(GitDaemonServeError::Transport)?;
+        if !transition
+            .events
+            .iter()
+            .any(|event| matches!(event, WireEvent::PackRequested(_)))
+        {
+            write_packet_group(writer, &transition.output, &limits)
+                .map_err(GitDaemonServeError::Transport)?;
+        }
 
         for event in transition.events {
             match event {
@@ -6835,23 +6858,26 @@ where
                     ls_refs_completed = true;
                 }
                 WireEvent::PackRequested(pack_request) => {
-                    check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
+                    check_selected_pack_deadline(writer, &limits, session_deadline)
                         .map_err(GitDaemonServeError::Transport)?;
                     let mut payload = match build_pack(&request, &pack_request) {
                         Ok(payload) => payload,
                         Err(error) => {
-                            // Same sideband Fatal surfacing as the v1 lane.
-                            let _ = emit_terminal_pack_refusal(
+                            report_selected_pack_refusal(
                                 writer,
                                 &pack_request,
-                                &error.to_string(),
+                                &error,
+                                &transition.output,
+                                public_pack_refusal,
                                 &limits,
                                 session_deadline,
                             );
                             return Err(error);
                         }
                     };
-                    check_selected_pack_deadline(writer, &pack_request, &limits, session_deadline)
+                    check_selected_pack_deadline(writer, &limits, session_deadline)
+                        .map_err(GitDaemonServeError::Transport)?;
+                    write_packet_group(writer, &transition.output, &limits)
                         .map_err(GitDaemonServeError::Transport)?;
                     emit_pack_payload(
                         writer,
@@ -6925,6 +6951,7 @@ where
         capabilities,
         limits,
         Some(&deadline),
+        |_| None,
         |request, pack_request| {
             build_pack(request, pack_request).map_err(GitDaemonServeError::Pack)
         },
@@ -7380,15 +7407,57 @@ fn refuse_unserved_filter(
 
 fn check_selected_pack_deadline(
     writer: &mut impl Write,
-    request: &PackRequest,
     limits: &WireLimits,
     deadline: Option<&GitDaemonSessionDeadline>,
 ) -> Result<(), GitDaemonTransportRefusal> {
     if let Err(error) = check_session_deadline(deadline, "build selected git pack") {
-        let _ = emit_terminal_pack_refusal(writer, request, &error.to_string(), limits, deadline);
+        if let Some(line) = upload_refusal::transport_line(&error) {
+            let _ = emit_terminal_upload_error(writer, line, limits, deadline);
+        }
         return Err(error);
     }
     Ok(())
+}
+
+/// Reports only an allowlisted failure as ERR before the deferred negotiation
+/// prefix. Other errors preserve the generic adapter's previous prefix and
+/// sideband behavior; a classifier must never expose arbitrary Display text.
+fn report_selected_pack_refusal<PackError: Display>(
+    writer: &mut impl Write,
+    request: &PackRequest,
+    error: &GitDaemonServeError<PackError>,
+    deferred_output: &[Packet],
+    public_pack_refusal: fn(&PackError) -> Option<Vec<u8>>,
+    limits: &WireLimits,
+    deadline: Option<&GitDaemonSessionDeadline>,
+) {
+    let line = match error {
+        GitDaemonServeError::Transport(error) => upload_refusal::transport_line(error),
+        GitDaemonServeError::Pack(error) => public_pack_refusal(error),
+    };
+    if let Some(line) = line {
+        let _ = emit_terminal_upload_error(writer, line, limits, deadline);
+    } else {
+        if let Some(deadline) = deadline {
+            deadline.begin_terminal_response();
+        }
+        if write_packet_group(writer, deferred_output, limits).is_ok() {
+            let _ =
+                emit_terminal_pack_refusal(writer, request, &error.to_string(), limits, deadline);
+        }
+    }
+}
+
+fn emit_terminal_upload_error(
+    writer: &mut impl Write,
+    line: Vec<u8>,
+    limits: &WireLimits,
+    deadline: Option<&GitDaemonSessionDeadline>,
+) -> Result<(), GitDaemonTransportRefusal> {
+    if let Some(deadline) = deadline {
+        deadline.begin_terminal_response();
+    }
+    write_packet_group(writer, &[Packet::Data(line)], limits)
 }
 
 /// A terminal error gets its own finite write attempt even when work timed
@@ -10559,6 +10628,7 @@ impl OneNode {
             capabilities,
             limits,
             Some(&deadline),
+            upload_refusal::pack_line,
             |_request, pack_request| {
                 let pack_context = self.session_pack_materialization_context(&deadline);
                 let database_exhaustion = Cell::new(None);

@@ -126,9 +126,10 @@ metadata binding, retention limits, SHA-1/SHA-256, corrupted input, cancellation
 and complete HTTP body framing. At the source subtree published in
 [`4399d1c5`](https://github.com/Dicklesworthstone/frankengit/commit/4399d1c5f828a9223a22a39bd47e21939e4ba7b7),
 the focused pack/wire run completed with **659 passed, 0 failed, and 15 existing
-ignored tests across 74 targets**. That result covers the parser/wire foundation.
+ignored tests across 74 targets**. That historical result covers the parser/wire
+foundation; it predates composition and does not verify its node integration.
 
-The node cache tests cover exact membership, metadata integrity, internal and
+The authored node cache tests cover exact membership, metadata integrity, internal and
 external delta bases, resource ceilings, pending activation, eviction, active
 readers, and cancellation. Integration tests exercise durable receive admission
 and prepared upload selection. The first-clone case temporarily removes access
@@ -143,12 +144,12 @@ and disabled, while disabling the independent computation cache in both arms.
 It pushes a delta-bearing history, immediately makes the first mirror clone in
 the same serving process, then performs an incremental push/fetch and a fresh
 full mirror clone. Exact refs, exact reachable object IDs, strict Git fsck, and
-graceful server drain are its oracles. Native tests establish cache-hit behavior;
+graceful server drain are its oracles. Native tests assert cache-hit behavior;
 the transport suite by itself establishes neither a cache hit nor a speedup.
 It records the actual Git/OpenSSH versions and does not claim pinned
 differential evidence.
 
-The composition regressions additionally resolve forward REF chains and shifted
+The authored composition regressions additionally resolve forward REF chains and shifted
 OFS runs without an external-base oracle, exercise global depth/fanout and
 aggregate limits, and reject corrupt parent associations. A native-node test
 receives a full pack and a thin incremental push, removes access to all object
@@ -158,13 +159,22 @@ closure. Reduced, private, deleted and missing-base selections exercise the
 ordinary writer fallback. These tests do not establish a whole-clone speedup
 or persistence across service restarts.
 
-The node and CLI tests and stock-client campaign **were not executed** in the
-development session. Repeated node builds and a metadata check stopped while
-compiling unchanged Asupersync under the shared 8 GiB memory limit. The shared
-filesystem then filled and the execution environment disconnected. Remaining
-sources were recovered through GitHub and reviewed, with some test/CLI source
-reconstructed from the prior implementation. No final-tree node/CLI compilation,
-runtime, formatting, or performance gate is asserted.
+During the original single-pack implementation session, the node and CLI tests
+and stock-client campaign **were not executed**. That session's repeated node
+builds and metadata check stopped while compiling unchanged Asupersync under
+the shared 8 GiB memory limit. Its filesystem subsequently filled and the
+environment disconnected; remaining sources were recovered through GitHub and
+reviewed, with some test/CLI source reconstructed. Those historical circumstances
+do not describe a completed validation of the current composition changes.
+
+For the composition source published in
+[`ad72bae0`](https://github.com/Dicklesworthstone/frankengit/commit/ad72bae04a74f59f01d12ed4a3e8336158836697),
+an isolated harness passed **29 received-pack component tests** using unchanged
+production source and the real native pack dependencies. This result covers the
+cache, composition graph, framing and reconstruction behavior. It does not
+execute native OneNode integration, the CLI, SSH, the stock-client campaign, or
+whole-clone performance measurements; those lanes require separate results at
+the tested revision.
 
 Run the focused lanes with the pinned toolchain and sufficient build capacity:
 

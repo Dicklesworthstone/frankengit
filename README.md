@@ -107,8 +107,10 @@ with exact-length, native-identity and strong-payload verification before
 promotion. They are not buffered as delta candidates or cached compressed
 entries. Defaults stay at 32 MiB; receive/import and buffered metadata limits
 remain separate. Embedded callers use `NodeConfig::with_selected_pack_blob_limit`. A pack over the total envelope is refused
-on the side band with a message naming the limit and that flag, which git
-prints as `remote: pack needs ...`. A repository whose commit, tree and tag bytes
+with a bounded Git `ERR` packet naming the limit and that flag before the final
+negotiation or pack-section prefix. Raw Git, SSH and HTTP clients therefore
+receive the cause even without sideband or with quiet progress. An expired
+selected-pack session deadline names the session timeout and work-scaling controls. A repository whose commit, tree and tag bytes
 alone exceed it is refused before the advertisement with one `ERR` packet
 (git:// and SSH, frankengit-e6jj).
 
