@@ -151,3 +151,180 @@ fn selection_checks_count_bytes_and_cancellation() {
             .is_ok()
     );
 }
+
+fn streamed_header(bytes: &[u8]) -> fgit_pack::full_bundle::FullBundleHeader {
+    let input = FullBundleInput::parse(bytes, Default::default(), &mut || true).unwrap();
+    // Only the semantic header is available, as on a terminal-outcome retry.
+    let mut reader = std::io::Cursor::new(&bytes[..input.header_bytes()]);
+    let header = fgit_pack::full_bundle::FullBundleHeader::read(
+        &mut reader,
+        Default::default(),
+        &mut || true,
+    )
+    .unwrap();
+    assert_eq!(reader.position() as usize, input.header_bytes());
+    header
+}
+
+#[test]
+fn streamed_header_preserves_exact_byte_names_fanout_and_destination_order() {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let bytes = bundle(format);
+        let input = FullBundleInput::parse(&bytes, Default::default(), &mut || true).unwrap();
+        let header = streamed_header(&bytes);
+        let target = *input.references()[0].target();
+        let mappings = [
+            mapping(b"refs/heads/main", b"refs/remotes/upstream/z", Some(target)),
+            mapping(b"refs/heads/\xff", b"refs/heads/\xfe", None),
+            mapping(b"refs/heads/main", b"refs/tags/copied", None),
+        ];
+        let expected = vec![
+            fgit_pack::full_bundle::fetch::BundleRefUpdate {
+                source: name(b"refs/heads/\xff"),
+                destination: name(b"refs/heads/\xfe"),
+                expected_old: None,
+                target,
+            },
+            fgit_pack::full_bundle::fetch::BundleRefUpdate {
+                source: name(b"refs/heads/main"),
+                destination: name(b"refs/remotes/upstream/z"),
+                expected_old: Some(target),
+                target,
+            },
+            fgit_pack::full_bundle::fetch::BundleRefUpdate {
+                source: name(b"refs/heads/main"),
+                destination: name(b"refs/tags/copied"),
+                expected_old: None,
+                target,
+            },
+        ];
+        let limits = FullBundleLimits {
+            max_references: mappings.len(),
+            max_header_bytes: mappings
+                .iter()
+                .map(|mapping| {
+                    mapping.source.as_bytes().len() + mapping.destination.as_bytes().len()
+                })
+                .sum(),
+            ..Default::default()
+        };
+        assert_eq!(
+            header
+                .select_updates(&mappings, limits, &mut || true)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            input
+                .select_updates(&mappings, limits, &mut || true)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            header
+                .select_updates(
+                    &[
+                        mappings[2].clone(),
+                        mappings[0].clone(),
+                        mappings[1].clone()
+                    ],
+                    limits,
+                    &mut || true,
+                )
+                .unwrap(),
+            expected
+        );
+        assert_eq!(header.references(), input.references());
+        assert_eq!(header.head(), input.head());
+    }
+}
+
+#[test]
+fn streamed_and_buffered_mapping_refusals_share_exact_limits_and_domains() {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let bytes = bundle(format);
+        let input = FullBundleInput::parse(&bytes, Default::default(), &mut || true).unwrap();
+        let header = streamed_header(&bytes);
+        let valid = mapping(b"refs/heads/main", b"refs/remotes/upstream/main", None);
+        let other = if format == ObjectFormat::Sha1 {
+            ObjectFormat::Sha256
+        } else {
+            ObjectFormat::Sha1
+        };
+        let zero = ObjectId::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
+        let foreign = ObjectId::from_hex(other, &"a".repeat(other.digest_len() * 2)).unwrap();
+        for mappings in [
+            vec![],
+            vec![valid.clone(), valid.clone()],
+            vec![mapping(b"refs/heads/missing", b"refs/heads/main", None)],
+            vec![mapping(b"refs/heads/main", b"refs/internal/policy", None)],
+            vec![mapping(b"refs/heads/main", b"refs/heads/main", Some(zero))],
+            vec![mapping(
+                b"refs/heads/main",
+                b"refs/heads/main",
+                Some(foreign),
+            )],
+        ] {
+            let buffered = input.select_updates(&mappings, Default::default(), &mut || true);
+            assert!(buffered.is_err());
+            assert_eq!(
+                header.select_updates(&mappings, Default::default(), &mut || true),
+                buffered
+            );
+        }
+        for limits in [
+            FullBundleLimits {
+                max_references: 0,
+                ..Default::default()
+            },
+            FullBundleLimits {
+                max_header_bytes: valid.source.as_bytes().len()
+                    + valid.destination.as_bytes().len()
+                    - 1,
+                ..Default::default()
+            },
+        ] {
+            let buffered = input.select_updates(std::slice::from_ref(&valid), limits, &mut || true);
+            assert!(buffered.is_err());
+            assert_eq!(
+                header.select_updates(std::slice::from_ref(&valid), limits, &mut || true),
+                buffered
+            );
+        }
+        assert!(
+            header
+                .select_updates(&[valid], Default::default(), &mut || true)
+                .is_ok()
+        );
+    }
+}
+
+#[test]
+fn streamed_mapping_cancellation_keeps_buffered_checkpoint_behavior() {
+    let bytes = bundle(ObjectFormat::Sha256);
+    let input = FullBundleInput::parse(&bytes, Default::default(), &mut || true).unwrap();
+    let header = streamed_header(&bytes);
+    let mappings = [
+        mapping(b"refs/heads/main", b"refs/remotes/a/main", None),
+        mapping(b"refs/heads/main", b"refs/remotes/b/main", None),
+    ];
+    for stop in 1..=4 {
+        let mut buffered_calls = 0;
+        let buffered = input.select_updates(&mappings, Default::default(), &mut || {
+            buffered_calls += 1;
+            buffered_calls != stop
+        });
+        let mut streamed_calls = 0;
+        let streamed = header.select_updates(&mappings, Default::default(), &mut || {
+            streamed_calls += 1;
+            streamed_calls != stop
+        });
+        assert!(buffered.is_err());
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed_calls, buffered_calls);
+    }
+    assert_eq!(
+        header.select_updates(&mappings, Default::default(), &mut || true),
+        input.select_updates(&mappings, Default::default(), &mut || true)
+    );
+}
