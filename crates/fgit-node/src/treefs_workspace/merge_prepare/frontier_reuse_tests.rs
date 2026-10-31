@@ -236,7 +236,7 @@ fn end_to_end(format: GitHashAlgorithm, style: MergeCommitStyle, blob_bytes: usi
     let mut stream = node
         .open_git_blob_stream(inherited, blob_bytes as u64)
         .unwrap();
-    let mut chunk = [0; 64 * 1024];
+    let mut chunk = vec![0; 64 * 1024];
     let mut total = 0;
     loop {
         let read = stream.read_tentative(&mut chunk).unwrap();

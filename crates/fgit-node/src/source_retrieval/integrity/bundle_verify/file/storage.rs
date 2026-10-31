@@ -81,7 +81,14 @@ pub(super) fn read_source_hash(
         live,
     )?;
     let mut reader = HashingReader::new(input);
-    let mut buffer = [0_u8; CHUNK_BYTES];
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(CHUNK_BYTES).map_err(|_| {
+        io_error(
+            "allocate bundle checksum buffer",
+            io::ErrorKind::OutOfMemory.into(),
+        )
+    })?;
+    buffer.resize(CHUNK_BYTES, 0);
     loop {
         checkpoint(live)?;
         let result = reader.read(&mut buffer);

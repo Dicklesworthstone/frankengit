@@ -702,7 +702,14 @@ fn blob_commitment(
     ));
     strong.update(header.as_bytes());
     let mut reader = plan.open_blob(id, live)?;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(64 * 1024).map_err(|_| {
+        io_error(
+            "allocate original blob commitment buffer",
+            std::io::ErrorKind::OutOfMemory.into(),
+        )
+    })?;
+    buffer.resize(64 * 1024, 0);
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(count) => count,

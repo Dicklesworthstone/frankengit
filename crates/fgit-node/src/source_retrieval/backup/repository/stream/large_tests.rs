@@ -110,7 +110,7 @@ fn repeated_identity(format: GitHashAlgorithm, length: u64, byte: u8) -> (GitOid
         length + git_header.len() as u64,
     ));
     strong.update(git_header.as_bytes());
-    let buffer = [byte; CHUNK_BYTES];
+    let buffer = vec![byte; CHUNK_BYTES];
     let mut remaining = length;
     while remaining != 0 {
         let count = remaining.min(buffer.len() as u64) as usize;
@@ -176,7 +176,7 @@ fn blobs_larger_than_32_mib_roundtrip_with_bounded_generated_sources_and_visitor
                 .visit_record(&mut live, |header, input| {
                     assert_eq!(header.oid, oid);
                     assert_eq!(header.length, LENGTH);
-                    let mut chunk = [0; 2 * CHUNK_BYTES];
+                    let mut chunk = vec![0; 2 * CHUNK_BYTES];
                     loop {
                         let count = input.read(&mut chunk).map_err(|error| error.to_string())?;
                         if count == 0 {

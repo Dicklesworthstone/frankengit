@@ -67,7 +67,14 @@ fn is_receive(
         .set_nonblocking(true)
         .map_err(|e| io_error("configure greeting peek", e))?;
     let result = (|| {
-        let mut bytes = [0_u8; 65_520];
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(65_520).map_err(|_| {
+            io_error(
+                "allocate daemon greeting buffer",
+                io::ErrorKind::OutOfMemory.into(),
+            )
+        })?;
+        bytes.resize(65_520, 0);
         loop {
             checkpoint(deadline)?;
             let read = match stream.peek(&mut bytes) {

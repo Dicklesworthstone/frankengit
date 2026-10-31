@@ -54,7 +54,11 @@ impl<R: Read + Seek> PinnedArchive<R> {
         let mut live = || deadline.check();
         let mut decoded = StreamDecoder::new(&mut input, limits, &mut live)?;
         while decoded.visit_record(&mut live, |_, body| {
-            let mut buffer = [0; 64 * 1024];
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(64 * 1024)
+                .map_err(|_| "repository backup validation buffer allocation failed")?;
+            buffer.resize(64 * 1024, 0);
             loop {
                 deadline.check()?;
                 if body.read(&mut buffer).map_err(|e| e.to_string())? == 0 {
@@ -137,7 +141,11 @@ fn check_checksum(
     limits: TransferLimits,
     deadline: Deadline,
 ) -> Result<Seal, String> {
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(64 * 1024)
+        .map_err(|_| "repository backup checksum buffer allocation failed")?;
+    buffer.resize(64 * 1024, 0);
     let mut hash = Sha256Hasher::new();
     let mut bytes = 0_u64;
     loop {
