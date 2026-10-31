@@ -791,7 +791,7 @@ fn log_finalization_stop_cleans_only_its_new_stages_and_never_publishes_a_receip
             .detail
             .contains("request stopped during artifact staging")
     );
-    assert_eq!(stages, [previous.clone()]);
+    assert_eq!(stages.as_slice(), std::slice::from_ref(&previous));
     assert_eq!(fs::read(&previous).unwrap(), b"owned by caller");
     assert!(!staged.exists());
     assert!(!fixture.directory.join("job-000-logs.json").exists());
@@ -833,7 +833,7 @@ fn log_stage_cleanup_failure_keeps_responsibility_and_the_original_refusal() {
             .contains("request stopped during artifact staging")
     );
     assert!(error.detail.contains("log stage cleanup"));
-    assert_eq!(stages, [staged.clone()]);
+    assert_eq!(stages.as_slice(), std::slice::from_ref(&staged));
     assert!(!fixture.directory.join("job-000-logs.json").exists());
     assert!(collector.logs.is_empty());
     fs::remove_dir(&staged).unwrap();

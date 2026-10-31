@@ -820,10 +820,7 @@ impl OneNode {
             response.abort();
             return Err(error);
         }
-        loop {
-            let Some(body) = response.next_chunk(cancellation)? else {
-                break;
-            };
+        while let Some(body) = response.next_chunk(cancellation)? {
             let framed = encoder.push(&body)?;
             if let Err(error) =
                 write_response_part(writer, framed.prefix.as_bytes(), "write HTTP chunk prefix")

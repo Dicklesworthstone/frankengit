@@ -7,8 +7,8 @@ fn review_walk_retains_votes_and_historical_branch_tips_after_coupled_merge() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let f = fixture(&scratch, format);
-        committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "peer-three").unwrap());
-        committed(vote(&f.node, &f.command, Some(&f.bundle), 4, "peer-four").unwrap());
+        committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "peer-three").unwrap());
+        committed(&vote(&f.node, &f.command, Some(&f.bundle), 4, "peer-four").unwrap());
         let reference = page(&f.node, None, 100, None).unwrap();
         let first = page(&f.node, None, 1, Some(reference.source_head)).unwrap();
         assert_eq!(first.next_after, Some(actor(3)));
@@ -17,7 +17,7 @@ fn review_walk_retains_votes_and_historical_branch_tips_after_coupled_merge() {
         withdrawn.review.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
         withdrawn.review.decision = ReviewDecision::Withdraw;
         withdrawn.review.reason = "Withdraw after the reader pinned its view".into();
-        committed(vote(&f.node, &withdrawn, None, 4, "withdraw-four").unwrap());
+        committed(&vote(&f.node, &withdrawn, None, 4, "withdraw-four").unwrap());
         let second = page(&f.node, first.next_after, 1, Some(first.source_head)).unwrap();
         assert_eq!(second.reviews, reference.reviews[1..]);
         assert_eq!(second.reviews[0].freshness, ReviewFreshness::Current);
@@ -51,9 +51,9 @@ fn review_walk_retains_votes_and_historical_branch_tips_after_coupled_merge() {
         let mut renewed = f.command.clone();
         renewed.review.expected_version =
             ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap());
-        committed(vote(&f.node, &renewed, Some(&f.bundle), 4, "renew-four").unwrap());
+        committed(&vote(&f.node, &renewed, Some(&f.bundle), 4, "renew-four").unwrap());
         committed(
-            publish(
+            &publish(
                 &f.node,
                 &f.command,
                 &f.bundle,
@@ -101,9 +101,9 @@ fn review_walk_retains_votes_and_historical_branch_tips_after_coupled_merge() {
 fn retained_review_reads_preserve_current_visibility_and_cancellation_gates() {
     let scratch = Scratch::new();
     let f = fixture(&scratch, GitHashAlgorithm::Sha256);
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "peer-three").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "peer-three").unwrap());
     let pinned = page(&f.node, None, 100, None).unwrap();
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 4, "later-peer").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 4, "later-peer").unwrap());
     let before = snapshot(&f.node);
     for reference in [target(), incoming()] {
         let mut visibility = RefVisibility::new();

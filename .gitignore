@@ -12,6 +12,9 @@ Desktop.ini
 target/
 coverage/
 artifacts/
+# Authored artifact modules belong to the source tree.
+!/crates/*/src/**/artifacts/
+!/crates/*/src/**/artifacts/**
 evidence/
 *.bundle
 *.tar.gz

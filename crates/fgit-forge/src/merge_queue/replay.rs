@@ -129,7 +129,7 @@ impl MergeQueueSnapshot {
                     return Err(invalid_queue("queue.batch.entries"));
                 }
                 self.active_batch = Some(QueueBatchId::from_digest(*batch_id));
-                self.active_batch_entries = entries.clone();
+                self.active_batch_entries.clone_from(entries);
             }
             QueueAction::BatchLanded {
                 batch_id,

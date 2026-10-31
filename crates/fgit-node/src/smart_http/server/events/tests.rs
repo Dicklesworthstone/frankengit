@@ -1,4 +1,5 @@
 use super::super::credentials::{Binding, CredentialSource};
+use super::super::{RepositoryHttpService, RepositoryHttpServices};
 use super::*;
 use crate::node_lanes::NodeLanes;
 use crate::{GitDaemonSessionTimeout, MAX_CONCURRENT_WRITERS, NodeConfig, PushQuota, WriterGate};
@@ -130,11 +131,12 @@ impl Scratch {
             config: config.clone(),
             route: b"/repo.git".to_vec(),
             credentials: CredentialSource::File { path, binding },
-            allow_receive: false,
-            allow_issues: true,
-            allow_outcomes: false,
-            allow_pulls: true,
-            allow_source: false,
+            services: RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, false)
+                .with(RepositoryHttpService::Issues, true)
+                .with(RepositoryHttpService::Outcomes, false)
+                .with(RepositoryHttpService::Pulls, true)
+                .with(RepositoryHttpService::Source, false),
             #[cfg(target_os = "linux")]
             lfs: None,
             http: HttpLimits::default(),
@@ -202,18 +204,18 @@ fn credentials_and_endpoint_ceilings_cannot_be_widened_by_other_grants_or_reques
     let query = Request::parse(&envelope).unwrap();
     let grant = authenticate(&profile, &envelope, &query).unwrap();
     assert!(grant.issues && grant.pulls);
-    profile.allow_issues = false;
+    profile.services = profile.services.with(RepositoryHttpService::Issues, false);
     let grant = authenticate(&profile, &envelope, &query).unwrap();
     assert!(!grant.issues && grant.pulls);
-    profile.allow_pulls = false;
+    profile.services = profile.services.with(RepositoryHttpService::Pulls, false);
     assert_eq!(
         authenticate(&profile, &envelope, &query)
             .unwrap_err()
             .status,
         Status::Forbidden
     );
-    profile.allow_issues = true;
-    profile.allow_pulls = true;
+    profile.services = profile.services.with(RepositoryHttpService::Issues, true);
+    profile.services = profile.services.with(RepositoryHttpService::Pulls, true);
     for scopes in [
         "read,receive",
         "issues-write,pulls-write",
@@ -351,6 +353,44 @@ fn real_node_http_reads_exact_frames_and_closes_failed_output_before_retry() {
         assert_eq!(serve(&profile, &envelope, &[], &mut response), Ok(()));
         let response = String::from_utf8(response).unwrap();
         assert_eq!(response.split_once("\r\n\r\n").unwrap().1, expected);
+        // Endpoint deployment switches are independent ceilings. Exercise the
+        // real credential reader and canonical event response for every profile,
+        // including profiles that expose unrelated Git/recovery/source services.
+        for switches in 0_u8..32 {
+            let mut selected = profile.clone();
+            selected.services = selected
+                .services
+                .with(RepositoryHttpService::Receive, switches & 1 != 0);
+            selected.services = selected
+                .services
+                .with(RepositoryHttpService::Issues, switches & 2 != 0);
+            selected.services = selected
+                .services
+                .with(RepositoryHttpService::Outcomes, switches & 4 != 0);
+            selected.services = selected
+                .services
+                .with(RepositoryHttpService::Pulls, switches & 8 != 0);
+            selected.services = selected
+                .services
+                .with(RepositoryHttpService::Source, switches & 16 != 0);
+            let mut selected_response = Vec::new();
+            let outcome = serve(&selected, &envelope, &[], &mut selected_response);
+            let selected_response = String::from_utf8(selected_response).unwrap();
+            if switches & 2 != 0 {
+                assert_eq!(outcome, Ok(()), "profile {switches}");
+                assert_eq!(
+                    selected_response.split_once("\r\n\r\n").unwrap().1,
+                    expected,
+                    "profile {switches}"
+                );
+            } else {
+                assert_eq!(outcome, Err(Status::Forbidden), "profile {switches}");
+                assert!(
+                    !selected_response.contains("Exact event body"),
+                    "profile {switches} disclosed a disabled issue event"
+                );
+            }
+        }
         struct LostOutput(usize);
         impl Write for LostOutput {
             fn write(&mut self, _: &[u8]) -> io::Result<usize> {

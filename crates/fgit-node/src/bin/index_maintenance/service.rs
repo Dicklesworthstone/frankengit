@@ -485,15 +485,14 @@ fn finish(
             preceding: result.err().map(Box::new),
         });
     }
-    if result.is_ok() || release_after_error {
-        if let Some(progress) = progress {
-            if let Err(error) = progress.release() {
-                return Err(MaintenanceError::Release {
-                    error,
-                    preceding: result.err().map(Box::new),
-                });
-            }
-        }
+    if (result.is_ok() || release_after_error)
+        && let Some(progress) = progress
+        && let Err(error) = progress.release()
+    {
+        return Err(MaintenanceError::Release {
+            error,
+            preceding: result.err().map(Box::new),
+        });
     }
     result
 }

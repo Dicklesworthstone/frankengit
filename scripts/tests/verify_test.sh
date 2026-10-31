@@ -3,7 +3,7 @@
 # establish a Rust checker pass, remote execution, or a product capability.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-exec "${PYTHON_BIN:-python3}" - "$ROOT" <<'PY'
+"${PYTHON_BIN:-python3}" - "$ROOT" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -208,3 +208,4 @@ test -x "$FG_BIN" && test -x "$FG_MCP_BIN"
 
 unittest.main()
 PY
+"${PYTHON_BIN:-python3}" "${ROOT}/scripts/tests/test_host_integration_test.py"

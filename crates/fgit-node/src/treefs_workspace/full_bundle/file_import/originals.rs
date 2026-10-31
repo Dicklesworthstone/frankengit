@@ -166,11 +166,12 @@ impl<'a> SelectedBundleOriginals<'a> {
                     .ok_or_else(|| limit("original closure edges"))?;
                 let target = graph.get(&child).ok_or_else(|| missing(Some(id), child))?;
                 require_kind(child, expected, target.metadata.kind)?;
-                if !seen.contains(&child) {
-                    if seen.len() >= maximum_objects {
-                        return Err(limit("original objects").into());
-                    }
-                    seen.insert(child);
+                // New identities must fit before insertion can allocate;
+                // already-seen shared edges remain valid at the exact ceiling.
+                if seen.len() >= maximum_objects && !seen.contains(&child) {
+                    return Err(limit("original objects").into());
+                }
+                if seen.insert(child) {
                     pending.insert(child);
                 }
             }
@@ -467,15 +468,15 @@ impl BundleOriginalSource for SelectedBundleOriginals<'_> {
     }
 }
 
-fn limit(name: &'static str) -> BundleVerifyError {
+const fn limit(name: &'static str) -> BundleVerifyError {
     BundleVerifyError::Graph(GraphRefusal::Limit(name))
 }
 
-fn missing(source: Option<GitOid>, target: GitOid) -> BundleVerifyError {
+const fn missing(source: Option<GitOid>, target: GitOid) -> BundleVerifyError {
     BundleVerifyError::Graph(GraphRefusal::MissingTarget { source, target })
 }
 
-fn native_kind(kind: ObjectKind) -> Result<ObjectType, BundleVerifyError> {
+const fn native_kind(kind: ObjectKind) -> Result<ObjectType, BundleVerifyError> {
     match kind {
         ObjectKind::Commit => Ok(ObjectType::Commit),
         ObjectKind::Tree => Ok(ObjectType::Tree),

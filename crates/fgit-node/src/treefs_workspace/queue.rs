@@ -116,14 +116,14 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = queue::admit_queue_async(
+        let terminal = Box::pin(queue::admit_queue_async(
             &self.authority,
             request.authority(),
             &context,
             command,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(error)?;
         Ok((tx, terminal))

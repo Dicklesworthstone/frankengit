@@ -220,7 +220,7 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    if !profile.allow_issues || !grant.permits_issues(request.is_mutation()) {
+    if !profile.allow_issues() || !grant.permits_issues(request.is_mutation()) {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;

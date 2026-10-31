@@ -22,7 +22,7 @@ impl Files {
             ));
             match fs::create_dir(&path) {
                 Ok(()) => return Self(path),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => panic!("private fixture directory: {error}"),
             }
         }

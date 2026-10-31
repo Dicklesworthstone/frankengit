@@ -356,24 +356,22 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Ok(stopped_poll());
         }
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&event_directory)
-            .map_err(io)?;
+        let mut reserved = false;
+        // Merge publication is itself an effect and must retain its candidate
+        // before publication. Ordinary dispatch can first verify its source pin.
+        if let Some(prepared) = &prepared {
+            reserve_event(
+                &root,
+                &event_directory,
+                &event,
+                Some(&prepared.bundle),
+                &mut reserved,
+            )?;
+        }
         let retained = |error: String| TrustedWorkflowFailure::Journal {
             directory: event_directory.clone(),
             detail: error,
         };
-        write_new(&event_directory.join("event.json"), event.as_bytes())
-            .and_then(|()| {
-                if let Some(prepared) = &prepared {
-                    write_new(&event_directory.join("candidate.bundle"), &prepared.bundle)?;
-                }
-                Ok(())
-            })
-            .and_then(|()| File::open(&event_directory)?.sync_all())
-            .and_then(|()| File::open(&root)?.sync_all())
-            .map_err(|e| retained(e.to_string()))?;
         let (execution_ref, execution_head, execution_commit) = if let (
             Some(config),
             Some(prepared),
@@ -385,7 +383,7 @@ impl OneNode {
         } else {
             (reference, selected.head, selected.commit)
         };
-        let dispatch = self
+        let dispatch_result = self
             .dispatch_trusted_workflows_with_trigger_branch_in(
                 request,
                 execution_ref,
@@ -416,13 +414,47 @@ impl OneNode {
                         )
                     },
                 )),
+                prepared.is_none().then_some(|| {
+                    reserve_event(&root, &event_directory, &event, None, &mut reserved)
+                }),
             )
-            .await
-            .map_err(|e| {
-                retained(format!(
-                    "{e}; original event retained; never replay automatically"
-                ))
-            })?;
+            .await;
+        let dispatch = match dispatch_result {
+            Ok(dispatch) => dispatch,
+            Err(error) if reserved => {
+                return Err(retained(format!(
+                    "{error}; original event retained; never replay automatically"
+                )));
+            }
+            Err(TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::SourceBrowse(error)))
+                if matches!(
+                    error.as_ref(),
+                    fgit_forge::source_browse::SourceBrowseError::SnapshotMoved
+                        | fgit_forge::source_browse::SourceBrowseError::CommitMoved
+                ) =>
+            {
+                return Ok(TrustedRefWorkflowPoll {
+                    state: "source_moved",
+                    event: "null".into(),
+                    dispatch: None,
+                    execution_settled: false,
+                });
+            }
+            Err(TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Cancelled { .. })) => {
+                return Ok(stopped_poll());
+            }
+            Err(TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Authority(error)))
+                if cancellation::materialization(&error) =>
+            {
+                return Ok(stopped_poll());
+            }
+            Err(TrustedWorkflowFailure::InvalidInput("dispatch stopped before discovery"))
+                if !workspace_request_live(request) =>
+            {
+                return Ok(stopped_poll());
+            }
+            Err(error) => return Err(error),
+        };
         let execution_settled = if closed(&dispatch) && workspace_request_live(request) {
             reporting::capture(
                 &event_directory,
@@ -527,6 +559,35 @@ impl OneNode {
             pull: None,
         }))
     }
+}
+
+// A successful directory creation acquires permanent event custody, even if
+// writing or syncing later fails. Callers must never retry such an event.
+fn reserve_event(
+    root: &Path,
+    directory: &Path,
+    event: &str,
+    candidate: Option<&[u8]>,
+    reserved: &mut bool,
+) -> Result<(), TrustedWorkflowFailure> {
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(directory)
+        .map_err(io)?;
+    *reserved = true;
+    write_new(&directory.join("event.json"), event.as_bytes())
+        .and_then(|()| {
+            if let Some(candidate) = candidate {
+                write_new(&directory.join("candidate.bundle"), candidate)?;
+            }
+            Ok(())
+        })
+        .and_then(|()| File::open(directory)?.sync_all())
+        .and_then(|()| File::open(root)?.sync_all())
+        .map_err(|error| TrustedWorkflowFailure::Journal {
+            directory: directory.to_path_buf(),
+            detail: error.to_string(),
+        })
 }
 
 fn closed(dispatch: &TrustedWorkflowDispatch) -> bool {

@@ -275,11 +275,7 @@ fn sideband_preserves_ordered_atomic_and_non_atomic_refusals() {
         );
         assert_eq!(
             decoded[2],
-            Packet::Data(if atomic {
-                b"ng refs/heads/b atomic push failed\n".to_vec()
-            } else {
-                b"ng refs/heads/b protected branch\n".to_vec()
-            })
+            Packet::Data(b"ng refs/heads/b protected branch\n".to_vec())
         );
     }
 }
@@ -336,5 +332,44 @@ fn malformed_messages_and_status_count_still_fail_before_a_report_is_returned() 
             ),
             Err(ReceiveError::InvalidStatusMessage)
         );
+    }
+}
+
+#[test]
+fn atomic_abort_retains_each_original_refusal_in_command_order() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        for mode in ["report-status atomic", "report-status-v2 atomic"] {
+            let request = request(
+                format,
+                mode,
+                &["refs/heads/a", "refs/heads/b", "refs/heads/c"],
+            );
+            let statuses = [
+                ReceiveCommandStatus::Rejected {
+                    message: b"stale info".to_vec(),
+                },
+                ReceiveCommandStatus::Ok,
+                ReceiveCommandStatus::Rejected {
+                    message: b"hidden ref".to_vec(),
+                },
+            ];
+            let packets = report_status(
+                &request,
+                UnpackStatus::Ok,
+                &statuses,
+                &ReceiveLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                packets,
+                vec![
+                    Packet::Data(b"unpack ok\n".to_vec()),
+                    Packet::Data(b"ng refs/heads/a stale info\n".to_vec()),
+                    Packet::Data(b"ng refs/heads/b atomic push failed\n".to_vec()),
+                    Packet::Data(b"ng refs/heads/c hidden ref\n".to_vec()),
+                    Packet::Flush,
+                ]
+            );
+        }
     }
 }

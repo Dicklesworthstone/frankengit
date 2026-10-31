@@ -34,7 +34,7 @@ pub(super) struct SelectedObject {
 /// Shared upload custody for staging consumers. Implementations expose only
 /// selected uploaded objects; borrowed prerequisite objects never enter object
 /// placement through this interface.
-pub(crate) trait BundleImportObjectPlan {
+pub trait BundleImportObjectPlan {
     fn uploaded_ids(&self) -> &BTreeSet<GitOid>;
     fn object(&self, identity: GitOid) -> Option<FullBundleImportObject>;
     fn read_metadata(
@@ -87,14 +87,6 @@ impl FullBundleImportPlan {
         live: &mut impl FnMut() -> bool,
     ) -> Result<Vec<u8>, BundleVerifyError> {
         self.objects.read_metadata(identity, live)
-    }
-
-    pub(crate) fn open_blob<'a>(
-        &'a mut self,
-        identity: GitOid,
-        live: &'a mut dyn FnMut() -> bool,
-    ) -> Result<FullBundleImportBlobReader<'a>, BundleVerifyError> {
-        self.objects.open_blob(identity, live)
     }
 
     pub(crate) fn finish(self) -> Result<(), BundleVerifyError> {

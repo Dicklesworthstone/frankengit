@@ -1,6 +1,7 @@
 //! An operator-configured workflow controller is a sibling of HTTP sessions.
 //! It owns no route and receives no request data or credentials from a session.
 
+use super::{RepositoryHttpService, RepositoryHttpServices};
 use std::io;
 use std::net::TcpListener;
 use std::path::Path;
@@ -271,11 +272,12 @@ impl OneNode {
             listener,
             limits.max_in_flight(),
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            allow_source,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, allow_pulls)
+                .with(RepositoryHttpService::Source, allow_source),
             Acceptance::Bounded {
                 max_sessions: limits.max_sessions(),
                 idle_timeout,
@@ -348,11 +350,12 @@ impl OneNode {
             listener,
             max_in_flight,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            allow_source,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, allow_pulls)
+                .with(RepositoryHttpService::Source, allow_source),
             Acceptance::UntilStopped(should_stop),
             Controllers {
                 maintenance,

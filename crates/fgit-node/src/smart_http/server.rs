@@ -121,16 +121,43 @@ fn controller_capacity_reserves_a_request_slot_and_rejects_exhaustion() {
     assert!(validate_controller_capacity(usize::MAX, usize::MAX).is_err());
 }
 
+// Deployment ceilings only; credentials and canonical policy remain separate.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum RepositoryHttpService {
+    Receive = 1,
+    Issues = 2,
+    Outcomes = 4,
+    Pulls = 8,
+    Source = 16,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RepositoryHttpServices(u8);
+
+impl RepositoryHttpServices {
+    const NONE: Self = Self(0);
+
+    const fn with(self, service: RepositoryHttpService, enabled: bool) -> Self {
+        let mask = service as u8;
+        Self(if enabled {
+            self.0 | mask
+        } else {
+            self.0 & !mask
+        })
+    }
+
+    const fn contains(self, service: RepositoryHttpService) -> bool {
+        self.0 & service as u8 != 0
+    }
+}
+
 #[derive(Clone)]
 struct Profile {
     config: NodeConfig,
     route: Vec<u8>,
     credentials: CredentialSource,
-    allow_receive: bool,
-    allow_issues: bool,
-    allow_outcomes: bool,
-    allow_pulls: bool,
-    allow_source: bool,
+    services: RepositoryHttpServices,
     #[cfg(target_os = "linux")]
     lfs: Option<lfs::Service>,
     http: HttpLimits,
@@ -142,6 +169,28 @@ struct Profile {
     writers: Arc<WriterGate>,
     /// Opened nodes reused across this service's connections.
     nodes: Arc<NodeLanes>,
+}
+
+impl Profile {
+    const fn allow_receive(&self) -> bool {
+        self.services.contains(RepositoryHttpService::Receive)
+    }
+
+    const fn allow_issues(&self) -> bool {
+        self.services.contains(RepositoryHttpService::Issues)
+    }
+
+    const fn allow_outcomes(&self) -> bool {
+        self.services.contains(RepositoryHttpService::Outcomes)
+    }
+
+    const fn allow_pulls(&self) -> bool {
+        self.services.contains(RepositoryHttpService::Pulls)
+    }
+
+    const fn allow_source(&self) -> bool {
+        self.services.contains(RepositoryHttpService::Source)
+    }
 }
 
 struct PendingSession {
@@ -216,11 +265,12 @@ impl OneNode {
                 digest: credential_digest,
                 principal,
             },
-            allow_receive,
-            false,
-            false,
-            false,
-            false,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, false)
+                .with(RepositoryHttpService::Outcomes, false)
+                .with(RepositoryHttpService::Pulls, false)
+                .with(RepositoryHttpService::Source, false),
             idle_timeout,
         )
     }
@@ -301,11 +351,12 @@ impl OneNode {
             listener,
             server_limits,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            false,
-            false,
-            false,
-            false,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, false)
+                .with(RepositoryHttpService::Outcomes, false)
+                .with(RepositoryHttpService::Pulls, false)
+                .with(RepositoryHttpService::Source, false),
             idle_timeout,
         )
     }
@@ -336,11 +387,12 @@ impl OneNode {
             listener,
             server_limits,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            true,
-            false,
-            false,
-            false,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, true)
+                .with(RepositoryHttpService::Outcomes, false)
+                .with(RepositoryHttpService::Pulls, false)
+                .with(RepositoryHttpService::Source, false),
             idle_timeout,
         )
     }
@@ -372,11 +424,12 @@ impl OneNode {
             listener,
             server_limits,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            false,
-            false,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, false)
+                .with(RepositoryHttpService::Source, false),
             idle_timeout,
         )
     }
@@ -404,11 +457,12 @@ impl OneNode {
             listener,
             server_limits,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            true,
-            false,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, true)
+                .with(RepositoryHttpService::Source, false),
             idle_timeout,
         )
     }
@@ -435,11 +489,12 @@ impl OneNode {
             listener,
             server_limits,
             self.smart_http_credentials_source(credentials_file),
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            true,
+            RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, allow_receive)
+                .with(RepositoryHttpService::Issues, allow_issues)
+                .with(RepositoryHttpService::Outcomes, allow_outcomes)
+                .with(RepositoryHttpService::Pulls, allow_pulls)
+                .with(RepositoryHttpService::Source, true),
             idle_timeout,
         )
     }
@@ -460,22 +515,14 @@ impl OneNode {
         listener: &TcpListener,
         server_limits: GitDaemonServerLimits,
         credentials: CredentialSource,
-        allow_receive: bool,
-        allow_issues: bool,
-        allow_outcomes: bool,
-        allow_pulls: bool,
-        allow_source: bool,
+        services: RepositoryHttpServices,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_lifetime(
             listener,
             server_limits.max_in_flight(),
             credentials,
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            allow_source,
+            services,
             lifetime::Acceptance::Bounded {
                 max_sessions: server_limits.max_sessions(),
                 idle_timeout,
@@ -489,11 +536,7 @@ impl OneNode {
         listener: &TcpListener,
         max_in_flight: usize,
         credentials: CredentialSource,
-        allow_receive: bool,
-        allow_issues: bool,
-        allow_outcomes: bool,
-        allow_pulls: bool,
-        allow_source: bool,
+        services: RepositoryHttpServices,
         acceptance: lifetime::Acceptance<'_>,
         controllers: Controllers<'_>,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
@@ -581,11 +624,7 @@ impl OneNode {
             config,
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
-            allow_receive,
-            allow_issues,
-            allow_outcomes,
-            allow_pulls,
-            allow_source,
+            services,
             #[cfg(target_os = "linux")]
             lfs,
             http,
@@ -666,16 +705,18 @@ impl OneNode {
                 Err(error) => failure = Some(io_error("poll HTTP stop before activation", error)),
             }
         }
-        if failure.is_none() && !startup_stopped {
-            if let Some(worker) = &mut maintenance {
-                failure = worker.activate().err();
-            }
+        if failure.is_none()
+            && !startup_stopped
+            && let Some(worker) = &mut maintenance
+        {
+            failure = worker.activate().err();
         }
         #[cfg(target_os = "linux")]
-        if failure.is_none() && !startup_stopped {
-            if let Some(worker) = &mut workflow {
-                failure = worker.activate().err();
-            }
+        if failure.is_none()
+            && !startup_stopped
+            && let Some(worker) = &mut workflow
+        {
+            failure = worker.activate().err();
         }
         while failure.is_none() && !startup_stopped {
             let mut index = 0;
@@ -777,27 +818,27 @@ impl OneNode {
             (child.join)();
         }
         #[cfg(target_os = "linux")]
-        if let (Some(worker), Some(observe)) = (workflow, on_workflow_drained) {
-            if let Err(error) = worker.finish(observe) {
-                failure = Some(match failure {
-                    Some(service) => io_error(
-                        "drain workflow service after HTTP service failure",
-                        io::Error::other(format!("{service}; {error}")),
-                    ),
-                    None => error,
-                });
-            }
+        if let (Some(worker), Some(observe)) = (workflow, on_workflow_drained)
+            && let Err(error) = worker.finish(observe)
+        {
+            failure = Some(match failure {
+                Some(service) => io_error(
+                    "drain workflow service after HTTP service failure",
+                    io::Error::other(format!("{service}; {error}")),
+                ),
+                None => error,
+            });
         }
-        if let Some(worker) = maintenance {
-            if let Err(error) = worker.finish() {
-                failure = Some(match failure {
-                    Some(service) => io_error(
-                        "drain source index maintenance after HTTP service failure",
-                        io::Error::other(format!("{service}; {error}")),
-                    ),
-                    None => error,
-                });
-            }
+        if let Some(worker) = maintenance
+            && let Err(error) = worker.finish()
+        {
+            failure = Some(match failure {
+                Some(service) => io_error(
+                    "drain source index maintenance after HTTP service failure",
+                    io::Error::other(format!("{service}; {error}")),
+                ),
+                None => error,
+            });
         }
         if let Err(error) = profile.nodes.close() {
             log_cleanup(&error);
@@ -977,7 +1018,7 @@ fn authorized_grant(
         return Err(Status::NotFound);
     }
     if !grant.permits(request.operation.service())
-        || (request.operation.service() == Service::ReceivePack && !profile.allow_receive)
+        || (request.operation.service() == Service::ReceivePack && !profile.allow_receive())
     {
         return Err(Status::Forbidden);
     }
@@ -1790,11 +1831,12 @@ mod tests {
                 digest: sha256_digest(&[b'a'; 64]),
                 principal: PrincipalId::from_bytes([3; 16]),
             },
-            allow_receive: true,
-            allow_issues: false,
-            allow_outcomes: false,
-            allow_pulls: false,
-            allow_source: false,
+            services: RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, true)
+                .with(RepositoryHttpService::Issues, false)
+                .with(RepositoryHttpService::Outcomes, false)
+                .with(RepositoryHttpService::Pulls, false)
+                .with(RepositoryHttpService::Source, false),
             #[cfg(target_os = "linux")]
             lfs: None,
             http: HttpLimits::default(),
@@ -1849,7 +1891,9 @@ mod tests {
         let request = parse_head(&bytes, profile.http).unwrap().unwrap();
         assert!(authenticated_session(&request, &bytes, &profile).is_ok());
         let mut readonly = profile;
-        readonly.allow_receive = false;
+        readonly.services = readonly
+            .services
+            .with(RepositoryHttpService::Receive, false);
         assert_eq!(
             authenticated_session(&request, &bytes, &readonly),
             Err(Status::Forbidden)
@@ -1886,7 +1930,9 @@ mod tests {
             Err(Status::BadRequest)
         );
         let mut readonly = profile.clone();
-        readonly.allow_receive = false;
+        readonly.services = readonly
+            .services
+            .with(RepositoryHttpService::Receive, false);
         assert_eq!(
             authenticated_session(&basic_request, &basic, &readonly),
             Err(Status::Forbidden)
@@ -1902,7 +1948,7 @@ mod tests {
     #[test]
     fn credential_helper_discovery_needs_no_publication_key_or_write_permission() {
         let mut profile = profile();
-        profile.allow_receive = false;
+        profile.services = profile.services.with(RepositoryHttpService::Receive, false);
         let bytes = format!("GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\nAuthorization: {BASIC}\r\n\r\n").into_bytes();
         let request = parse_head(&bytes, profile.http).unwrap().unwrap();
         let selected = authenticated_session(&request, &bytes, &profile).unwrap();

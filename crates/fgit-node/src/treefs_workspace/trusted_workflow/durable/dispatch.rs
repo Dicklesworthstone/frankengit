@@ -183,6 +183,7 @@ impl OneNode {
             artifacts,
             None,
             None,
+            None::<fn() -> Result<(), TrustedWorkflowFailure>>,
         )
         .await
     }
@@ -203,6 +204,7 @@ impl OneNode {
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         pull_target: Option<&RefName>,
         path_basis: Option<PathBasis>,
+        reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         if !event_supported(event) {
             return Err(TrustedWorkflowFailure::InvalidInput(
@@ -235,6 +237,7 @@ impl OneNode {
                     artifacts,
                     trigger_reference,
                     path_basis,
+                    reserve,
                 )
                 .await
             }
@@ -253,6 +256,7 @@ impl OneNode {
                     artifacts,
                     trigger_reference,
                     path_basis,
+                    reserve,
                 )
                 .await
             }
@@ -274,6 +278,7 @@ impl OneNode {
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         trigger_reference: Option<&RefName>,
         path_basis: Option<PathBasis>,
+        reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -308,6 +313,12 @@ impl OneNode {
                             return Err(TrustedWorkflowFailure::InvalidInput(
                                 "dispatch stopped before discovery",
                             ));
+                        }
+                        // Exact source pins are checked before this consumer.
+                        // Reserve watcher custody only once that snapshot exists,
+                        // and before any workflow discovery or execution effects.
+                        if let Some(reserve) = reserve {
+                            reserve()?;
                         }
                         let manifest = Arc::new(
                             SparseManifest::build(base, source, capability, 0, SOURCE_LIMITS)

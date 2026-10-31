@@ -159,8 +159,12 @@ mod tests {
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {
+            Self::under(&std::env::temp_dir())
+        }
+
+        fn under(parent: &Path) -> Self {
             for _ in 0..128 {
-                let path = std::env::temp_dir().join(format!(
+                let path = parent.join(format!(
                     "fg-http-stop-{}-{}",
                     std::process::id(),
                     SEQUENCE.fetch_add(1, Ordering::Relaxed),
@@ -274,7 +278,11 @@ mod tests {
     fn symlinks_and_socket_stop_entries_fail_closed_without_touching_targets() {
         use std::os::unix::fs::symlink;
         use std::os::unix::net::UnixListener;
-        let dir = Directory::new();
+        // Unix socket names have a small kernel byte limit. A worker's TMPDIR
+        // can exceed it before our fixture name is appended. Keep the actual
+        // filesystem socket case under a short owned path without changing
+        // process-wide temporary-directory or working-directory state.
+        let dir = Directory::under(Path::new("/tmp"));
         let path = dir.0.join("stop");
         let target = dir.0.join("target");
         let control = StopFile::arm(&path).unwrap();

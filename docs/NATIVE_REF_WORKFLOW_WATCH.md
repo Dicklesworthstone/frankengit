@@ -39,6 +39,14 @@ marker, per-job process ownership, artifact handoff, evidence journals and repor
 remain the execution implementation; no subprocess invocation of fg or Git and
 no JavaScript supervisor is involved.
 
+For ordinary branch and PR-head dispatch, the dispatcher verifies the exact
+observed authority head and source commit before creating permanent event
+custody. A source move at that boundary returns `source_moved` with no event or
+execution; a later bounded poll may select again. The same immutable snapshot
+then supplies discovery and execution. Merge candidates retain custody before
+their publication effect. Every failure after custody creation remains subject
+to the unresolved-event fence below; source movement never authorizes replay.
+
 A settled marker is written only after the dispatch returned and all observed
 workspace/process ownership settled without interruption. It is not a passing
 check: an ordinary failed build can settle safely, and zero selected workflows

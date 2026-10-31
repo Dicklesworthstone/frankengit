@@ -1,3 +1,4 @@
+use super::super::{RepositoryHttpService, RepositoryHttpServices};
 use super::*;
 use std::fmt::Write as _;
 
@@ -72,11 +73,12 @@ impl Fixture {
                 },
             },
             lfs: Some(Service::open(&root, TENANT, REPO, INCARNATION).unwrap()),
-            allow_receive: false,
-            allow_issues: false,
-            allow_outcomes: false,
-            allow_pulls: false,
-            allow_source: false,
+            services: RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Receive, false)
+                .with(RepositoryHttpService::Issues, false)
+                .with(RepositoryHttpService::Outcomes, false)
+                .with(RepositoryHttpService::Pulls, false)
+                .with(RepositoryHttpService::Source, false),
             http: HttpLimits::default(),
             maximum_response_bytes: 128 * 1024 * 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,

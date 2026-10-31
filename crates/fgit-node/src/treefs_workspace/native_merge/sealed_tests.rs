@@ -156,8 +156,6 @@ fn frontier_headers_never_shadow_a_supplied_overlap_with_a_healthy_permanent_cop
         assert_eq!(headers.load_header(&id).unwrap(), None);
         assert!(candidate.read_object(&id).is_err());
         assert_eq!(node.read_git_object(id).unwrap().payload(), body);
-        drop(candidate);
-        drop(headers);
         drop(staging);
         assert_eq!(
             fs::read_dir(node.storage_root().join("staging"))
@@ -544,7 +542,7 @@ fn unprepared_offer(
     };
     let before = snapshot(node);
     let (entry, _) = expected_entry(node, &before, &offer, key);
-    let evidence = complete_evidence(node, &before, &offer, key, entry);
+    let evidence = complete_evidence(node, &before, &offer, key, &entry);
     offer.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(evidence.principal_snapshot()).unwrap(),
         forge_event_batch_root: entry.payload_root(),
@@ -963,7 +961,7 @@ fn complete_evidence(
     before: &MaterializedAdmission,
     offer: &OfferedPackage,
     key: &[u8],
-    entry: CanonicalOutboxStateEntry,
+    entry: &CanonicalOutboxStateEntry,
 ) -> DecisionEvidenceBodies {
     complete_evidence_for_authentication(
         node,
@@ -980,7 +978,7 @@ fn complete_evidence_for_authentication(
     before: &MaterializedAdmission,
     offer: &OfferedPackage,
     key: &[u8],
-    entry: CanonicalOutboxStateEntry,
+    entry: &CanonicalOutboxStateEntry,
     authentication: Option<AdmissionAuthentication>,
 ) -> DecisionEvidenceBodies {
     let context = context(node, key);
@@ -1107,7 +1105,7 @@ fn legacy_unsubmitted_evidence_must_be_refreshed_without_changing_the_request_se
 fn legacy_offer(node: &OneNode, offer: &OfferedPackage, key: &[u8]) -> OfferedPackage {
     let before = snapshot(node);
     let (entry, _) = expected_entry(node, &before, offer, key);
-    let bodies = complete_evidence_for_authentication(node, &before, offer, key, entry, None);
+    let bodies = complete_evidence_for_authentication(node, &before, offer, key, &entry, None);
     let mut legacy = offer.clone();
     legacy.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
@@ -1199,7 +1197,7 @@ fn original_node_api_publishes_the_full_transaction_under_its_original_seal() {
         let offer = offered(&node, &f, 1, 7, b"original-seal");
         let before = snapshot(&node);
         let (entry, expected_effect) = expected_entry(&node, &before, &offer, b"original-seal");
-        let expected = complete_evidence(&node, &before, &offer, b"original-seal", entry);
+        let expected = complete_evidence(&node, &before, &offer, b"original-seal", &entry);
         let new_style_tx = intent(&f, 1, f.target, f.candidate)
             .seal_attempt(&context(&node, b"original-seal"))
             .unwrap()

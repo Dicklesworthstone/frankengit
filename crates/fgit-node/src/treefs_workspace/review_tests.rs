@@ -98,12 +98,12 @@ fn snapshot(node: &OneNode) -> MaterializedAdmission {
         .block_on(node.materialize_admission_in(&request))
         .unwrap()
 }
-fn committed(value: (TxId, TerminalOutcome)) -> (TxId, TerminalOutcome) {
+fn committed(value: &(TxId, TerminalOutcome)) -> (TxId, TerminalOutcome) {
     assert!(
         matches!(value.1.outcome, DecisionOutcome::Committed { .. }),
         "{value:?}"
     );
-    value
+    *value
 }
 struct Fixture {
     node: OneNode,
@@ -189,7 +189,8 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> Fixture {
         data: data.clone(),
     };
     committed(
-        node.runtime()
+        &node
+            .runtime()
             .block_on(node.admit_pull_request_durable_in(
                 &request,
                 &session(1, "open"),
@@ -321,7 +322,8 @@ fn review_then_publish_both_formats_preserves_code_until_the_coupled_merge() {
         let f = fixture(&scratch, format);
         let before = snapshot(&f.node);
         assert!(f.node.read_git_object(f.command.candidate.commit).is_err());
-        let accepted = committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "approve").unwrap());
+        let accepted =
+            committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "approve").unwrap());
         let reviewed = snapshot(&f.node);
         code_unchanged(&before, &reviewed);
         assert_ne!(
@@ -360,7 +362,7 @@ fn review_then_publish_both_formats_preserves_code_until_the_coupled_merge() {
         );
         reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
         let terminal =
-            committed(publish(&reopened, &f.command, &f.bundle, &[actor(3)], "publish").unwrap());
+            committed(&publish(&reopened, &f.command, &f.bundle, &[actor(3)], "publish").unwrap());
         let after = snapshot(&reopened);
         assert_eq!(after.snapshot().refs[&target()], f.command.candidate.commit);
         assert_ne!(
@@ -413,7 +415,7 @@ fn later_approval_cannot_rewrite_an_earlier_canonical_refusal() {
             .count(),
         0
     );
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "approve-later").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "approve-later").unwrap());
     let after_vote = snapshot(&f.node);
     assert_eq!(
         publish(&f.node, &f.command, &[], &[actor(3)], "missing-vote").unwrap(),
@@ -421,7 +423,7 @@ fn later_approval_cannot_rewrite_an_earlier_canonical_refusal() {
     );
     assert_eq!(snapshot(&f.node).basis(), after_vote.basis());
     committed(
-        publish(
+        &publish(
             &f.node,
             &f.command,
             &f.bundle,
@@ -444,12 +446,12 @@ fn later_approval_cannot_rewrite_an_earlier_canonical_refusal() {
 fn withdrawal_and_changed_candidate_cannot_satisfy_required_reviewers() {
     let scratch = Scratch::new();
     let f = fixture(&scratch, GitHashAlgorithm::Sha1);
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "approve").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "approve").unwrap());
     let mut withdrawn = f.command.clone();
     withdrawn.review.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
     withdrawn.review.decision = ReviewDecision::Withdraw;
     withdrawn.review.reason = "Candidate needs another pass".into();
-    committed(vote(&f.node, &withdrawn, None, 3, "withdraw").unwrap());
+    committed(&vote(&f.node, &withdrawn, None, 3, "withdraw").unwrap());
     assert_eq!(
         page(&f.node, None, 100, None).unwrap().reviews[0].freshness,
         ReviewFreshness::Withdrawn
@@ -474,7 +476,7 @@ fn withdrawal_and_changed_candidate_cannot_satisfy_required_reviewers() {
     let mut renewed = f.command.clone();
     renewed.review.expected_version =
         ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap());
-    committed(vote(&f.node, &renewed, Some(&f.bundle), 3, "renew").unwrap());
+    committed(&vote(&f.node, &renewed, Some(&f.bundle), 3, "renew").unwrap());
     let request = f.node.request_context();
     let other = f
         .node
@@ -514,7 +516,7 @@ fn withdrawal_and_changed_candidate_cannot_satisfy_required_reviewers() {
         }
     ));
     committed(
-        publish(
+        &publish(
             &f.node,
             &f.command,
             &f.bundle,
@@ -530,8 +532,8 @@ fn withdrawal_and_changed_candidate_cannot_satisfy_required_reviewers() {
 fn reviewer_keys_competing_versions_and_snapshot_pages_do_not_alias() {
     let scratch = Scratch::new();
     let f = fixture(&scratch, GitHashAlgorithm::Sha1);
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "first-reviewer").unwrap());
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 4, "second-reviewer").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "first-reviewer").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 4, "second-reviewer").unwrap());
     let first = page(&f.node, None, 1, None).unwrap();
     assert_eq!(first.reviews.len(), 1);
     assert_eq!(first.next_after, Some(actor(3)));
@@ -557,7 +559,7 @@ fn reviewer_keys_competing_versions_and_snapshot_pages_do_not_alias() {
     update.review.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
     update.review.decision = ReviewDecision::RequestChanges;
     update.review.reason = "Blocking problem".into();
-    committed(vote(&f.node, &update, Some(&f.bundle), 3, "block").unwrap());
+    committed(&vote(&f.node, &update, Some(&f.bundle), 3, "block").unwrap());
     let stale = vote(&f.node, &update, Some(&f.bundle), 3, "competing-review").unwrap();
     assert!(matches!(
         stale.1.outcome,
@@ -620,7 +622,7 @@ fn reviewer_keys_competing_versions_and_snapshot_pages_do_not_alias() {
 fn opener_votes_and_stale_pr_metadata_do_not_authorize_publication() {
     let scratch = Scratch::new();
     let f = fixture(&scratch, GitHashAlgorithm::Sha256);
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 1, "opener-vote").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 1, "opener-vote").unwrap());
     let refused = publish(&f.node, &f.command, &f.bundle, &[actor(1)], "self-approved").unwrap();
     assert!(matches!(
         refused.1.outcome,
@@ -639,7 +641,7 @@ fn opener_votes_and_stale_pr_metadata_do_not_authorize_publication() {
         )
         .is_err()
     );
-    committed(vote(&f.node, &f.command, Some(&f.bundle), 3, "peer-vote").unwrap());
+    committed(&vote(&f.node, &f.command, Some(&f.bundle), 3, "peer-vote").unwrap());
     let mut data = f.data.clone();
     data.title = "New metadata version".into();
     let command = PullRequestCommand {
@@ -650,7 +652,7 @@ fn opener_votes_and_stale_pr_metadata_do_not_authorize_publication() {
     };
     let request = f.node.request_context();
     committed(
-        f.node
+        &f.node
             .runtime()
             .block_on(f.node.admit_pull_request_durable_in(
                 &request,

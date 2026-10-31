@@ -1,3 +1,4 @@
+use super::super::RepositoryHttpServices;
 use super::super::credentials::{Binding, CredentialSource};
 use super::*;
 use crate::node_lanes::NodeLanes;
@@ -153,11 +154,7 @@ impl Scratch {
                 path: self.0.join("credentials"),
                 binding,
             },
-            allow_receive: false,
-            allow_issues: false,
-            allow_outcomes: false,
-            allow_pulls: false,
-            allow_source: false,
+            services: RepositoryHttpServices::NONE,
             lfs: None,
             http: HttpLimits::default(),
             maximum_response_bytes: 2 * 1024 * 1024,
