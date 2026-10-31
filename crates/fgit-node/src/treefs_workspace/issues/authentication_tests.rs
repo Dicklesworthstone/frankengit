@@ -2,7 +2,7 @@
 //! Reuse the existing native-object fixture and TCP client, with no substitute
 //! projection, authority, HTTP parser, or public evidence-access test hook.
 
-#[path = "../../../tests/pull_request_http/support.rs"]
+#[path = "../../../tests/pull_request_http/shared.rs"]
 mod http;
 
 use crate::{GitDaemonServerLimits, LoopbackReceiveSession, OneNode};

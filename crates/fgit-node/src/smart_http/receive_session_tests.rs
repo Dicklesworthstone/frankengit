@@ -172,14 +172,14 @@ async fn publish_unrelated_refusal(
         validate_receive_at_basis(&request, None, &receipt, basis, &DeleteOnly, &mut || true)
             .unwrap();
     let projection = DurableAsyncAdmissionProjection::new(materializer, foreign.clone());
-    let result = receive_session::admit(
+    let result = Box::pin(receive_session::admit(
         authority,
         cx,
         &foreign,
         &validated,
         AdmissionLimits::default(),
         &projection,
-    )
+    ))
     .await
     .unwrap();
     assert!(matches!(
@@ -254,8 +254,14 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for Probe<'_> {
             if matches!(self.mode, Mode::RaceSecondCommit) && index == 1 {
                 // The second candidate is staged but has not attempted CAS.
                 // Advance the real head now, forcing its next CAS to lose.
-                publish_unrelated_refusal(authority, cx, self.materializer, &self.context, basis)
-                    .await;
+                Box::pin(publish_unrelated_refusal(
+                    authority,
+                    cx,
+                    self.materializer,
+                    &self.context,
+                    basis,
+                ))
+                .await;
             }
             Ok(prepared)
         }
