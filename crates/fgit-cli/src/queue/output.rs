@@ -1,7 +1,7 @@
 //! Complete bounded JSON snapshots and historical terminal decisions.
 use super::options::{Operation, Options, head_token, hex, version};
 use crate::publication_support::quote;
-use fgit_admission::merge::native::queue::QueueLandingCommand;
+use fgit_admission::merge::native::queue::{QueueCandidateLandingCommand, QueueLandingCommand};
 use fgit_authority::TerminalOutcome;
 use fgit_forge::QueueNumber;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
 
-fn scope(options: &Options, incarnation: RepositoryIncarnationId) -> String {
+pub(super) fn scope(options: &Options, incarnation: RepositoryIncarnationId) -> String {
     format!(
         "\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},\"object_format\":{}",
         quote(&options.tenant.to_string()),
@@ -29,7 +29,7 @@ fn reference(name: &RefName) -> String {
         .unwrap_or_else(|_| "null".into())
 }
 
-fn bounded(report: String) -> Result<String, String> {
+pub(super) fn bounded(report: String) -> Result<String, String> {
     if report.len() > MAX_REPORT_BYTES {
         Err("queue response exceeds the 8 MiB complete-document limit".into())
     } else {
@@ -249,6 +249,26 @@ fn landing_action(command: &QueueLandingCommand) -> String {
     )
 }
 
+fn candidate_landing_action(command: &QueueCandidateLandingCommand) -> String {
+    format!(
+        concat!(
+            "{{\"name\":\"land-candidate\",\"method\":\"merge-commit\",\"pull_request\":{},",
+            "\"expected_pull_request_version\":{},\"expected_policy_epoch\":{},",
+            "\"source_ref\":{},\"source_ref_hex\":{},\"head_tip\":{},\"expected_target_tip\":{},",
+            "\"merge_base\":{},\"candidate_commit\":{}}}"
+        ),
+        command.pull_request.get(),
+        command.expected_pull_request_version.get(),
+        command.expected_policy_epoch.get(),
+        reference(&command.merge.source_ref),
+        quote(&hex(command.merge.source_ref.as_bytes())),
+        quote(&command.merge.source_tip.to_string()),
+        quote(&command.merge.target_tip_before.to_string()),
+        quote(&command.merge.base_tip.to_string()),
+        quote(&command.merge.merge_commit.to_string()),
+    )
+}
+
 pub(super) fn publication(
     options: &Options,
     incarnation: RepositoryIncarnationId,
@@ -277,6 +297,16 @@ pub(super) fn publication(
                 command.expected_version.get(),
                 landing_action(command),
                 command.head_tip != command.expected_target_tip,
+            ),
+            Operation::LandCandidate {
+                principal, command, ..
+            } => (
+                principal,
+                command.number,
+                &command.merge.target_ref,
+                command.expected_version.get(),
+                candidate_landing_action(command),
+                command.merge.merge_commit != command.merge.target_tip_before,
             ),
             _ => return Err("queue terminal result does not match its request".into()),
         };

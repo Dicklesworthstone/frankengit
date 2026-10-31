@@ -7,19 +7,23 @@ recoverable terminal transaction outcome. `fg queue land` executes an exact
 queue-head PR through native fast-forward admission and atomically publishes the
 target move, PR merge and queue completion.
 
-The landing profile handles one existing fast-forward candidate. Speculative
-merge trains, synthetic merge objects and autonomous required-check execution
-remain separate work under `frankengit-fg083a-merge-queue-impl-95fm`. Queue
-membership commands do not grant approval; landing enforces the existing review,
-check, authentication and protected-ref rules.
+`fg queue prepare` constructs a real two-parent merge candidate for a divergent
+queue head. `fg queue land-candidate` validates its bundle and publishes the
+candidate with the same atomic queue/PR/ref transition. Both landing profiles
+handle one exact queue head. Speculative multi-PR trains, synthetic queue refs,
+autonomous landing and native queue-required branch protection remain separate
+work under `frankengit-fg083a-merge-queue-impl-95fm`. Queue membership and
+preparation do not grant approval; landing enforces current review, check,
+authentication and protected-ref rules.
 
 ## Operator boundary
 
 Every command requires `--trusted-local`. The operator supplies the principal
 for writes; this is the existing explicit operator-asserted authentication
 profile, not a remote credential or an agent capability. Authenticated remote
-membership management is available through the separately scoped
-[HTTP queue API](NATIVE_HTTP_QUEUES.md). That API does not expose landing.
+membership management and fast-forward landing are available through the
+separately scoped [HTTP queue API](NATIVE_HTTP_QUEUES.md). Candidate bundle
+landing is currently a local CLI/native API operation.
 
 Writes also require the repository's exact incarnation, an original client
 idempotency key, the queue number, its target branch and expected queue version.
@@ -205,6 +209,93 @@ receipts and canonical refusals report `false`. Receipt output failure preserves
 the known terminal transaction identity in the diagnostic; recover it with the
 original key instead of interpreting the failure as rollback.
 
+## Prepare and land a divergent head
+
+Independent PRs commonly diverge after an earlier queue entry moves the target.
+First update the surviving PR's recorded target to the observed live target,
+and re-enqueue it with the exact current queue and PR versions. This is a new
+intended operation; never refresh guards merely to recover an earlier request.
+The queue's first entry then supplies the exact preparation subject:
+
+```bash
+fg queue prepare "$STORAGE" "$TENANT" "$REPOSITORY" 1 \
+  --trusted-local --expected-incarnation "$INCARNATION" \
+  --expected-version "$QUEUE_VERSION" --expected-policy-epoch "$POLICY_EPOCH" \
+  --pull-request 43 --expected-pull-version "$PR_VERSION" \
+  --source-ref refs/heads/next-feature --target-ref refs/heads/main \
+  --expected-source-tip "$SOURCE_COMMIT" --expected-target-tip "$TARGET_COMMIT" \
+  --profile path-v1 --author 'Integrator <integrator@example.invalid>' \
+  --timestamp 1700000000 --message 'Integrate the reviewed queue head' \
+  --output-bundle queue-head.bundle
+```
+
+Preparation reads the idle queue, exact first entry, open PR, policy and native
+objects from the same authenticated authority head. A concurrent publication
+between these selections refuses instead of combining observations. The
+operation leaves repository authority unchanged. It never reserves a canonical
+batch, updates a ref, writes a check or seals a landing request.
+
+Both supported profiles are explicit: `path-v1` uses the existing bounded path
+merge; `exact-renames-v1` additionally handles unique content-identical regular
+file moves. Neither implies Git `ort` equivalence or ambient merge drivers.
+Author, timestamp and message are required; the committer defaults to the author
+unless `--committer` is supplied. Identical object inputs and metadata produce
+the same native candidate identity. Commit style is always two-parent.
+
+A clean result returns `candidate_commit`, `merge_base`, `root_tree`, exact queue
+and PR guards, source/target tips and the selected snapshot token. The complete
+bundle is created atomically as a new regular file; an existing destination is
+never replaced. Local bundles are bounded to 128 MiB and complete JSON to 8 MiB.
+Conflicts return structured path/conflict information and exit `5`, with no
+bundle. An already-integrated source returns `already_up_to_date` with no bundle.
+
+Review the actual candidate using the existing
+[exact candidate review workflow](EXACT_CANDIDATE_REVIEW_WORKFLOW.md). When policy
+requires CI, the existing [merge-candidate workflow watcher](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md)
+can prepare, admit to a fixed CI branch, execute and canonically publish checks
+for that same commit. Use identical source/target observations, merge profile,
+author, committer, timestamp and message. A source-head check or a successful
+local journal without its canonical check publication cannot satisfy the exact
+candidate's required checks. The CI branch must still select that candidate.
+
+Submit the reviewed bundle with the candidate coordinates from preparation:
+
+```bash
+fg queue land-candidate "$STORAGE" "$TENANT" "$REPOSITORY" 1 \
+  --trusted-local --principal "$PRINCIPAL" \
+  --expected-incarnation "$INCARNATION" --idempotency-key land-queue-1-pr-43-candidate-1 \
+  --expected-version "$QUEUE_VERSION" --expected-policy-epoch "$POLICY_EPOCH" \
+  --pull-request 43 --expected-pull-version "$PR_VERSION" \
+  --source-ref refs/heads/next-feature --target-ref refs/heads/main \
+  --expected-source-tip "$SOURCE_COMMIT" --expected-target-tip "$TARGET_COMMIT" \
+  --merge-base "$MERGE_BASE" --expected-commit "$CANDIDATE_COMMIT" \
+  --bundle queue-head.bundle
+```
+
+The node privately quarantines the bundle, verifies the actual commit and
+closure, proves ordered parents `[target-before, source]` and common ancestry,
+and applies current native review/check/authentication policy. A received
+ref-only proof is never admitted separately. The exact queue head, PR, live
+refs and policy are independently checked again against each publication basis.
+Candidate bytes and earlier preparation do not waive those guards.
+
+Success produces the same three-event batch as fast-forward landing, with
+`MergeCommittedNative` and `BatchLanded` naming the actual two-parent candidate.
+One RCR and one decision advance the target, queue by two versions and PR by one.
+The source ref and other queued entries remain intact. The seal binds the full
+event batch, policy and `two-parent-head/v1` profile; it cannot alias the existing
+`fast-forward-head/v1` request. Batch identity alone is not candidate evidence:
+different commit metadata may produce a different candidate for the same entry.
+
+The native `land_queue_head_bundle_durable_in` API retains the publication
+session's authentication provenance and resolves an exact decided request before
+quarantine, new-work quota or current policy checks. A known decision therefore
+does not require retained bundle bytes. The CLI reads the bounded bundle first;
+if it is unavailable, recover with `fg outcome` and the original principal/key.
+Different candidate coordinates under an already used key refuse. A prior
+canonical refusal remains that refusal after a later approval or check; use a
+deliberate new key only after resolving the original outcome.
+
 ## Retry and recovery
 
 A response describes the original terminal decision, not necessarily today's
@@ -220,10 +311,11 @@ a new key and freshly observed versions.
 
 | Exit code | Meaning |
 |---|---|
-| `0` | Complete read or committed queue command |
+| `0` | Complete read, prepared/no-op candidate, or committed queue command |
 | `2` | Input, infrastructure, cleanup or output error; not evidence of rollback |
 | `3` | Canonical terminal refusal |
 | `4` | Single requested queue unavailable or absent |
+| `5` | Candidate preparation conflicts; no bundle was created |
 
 Both SHA-1 and SHA-256 repositories use this interface. Pass
 `--object-format sha256` for SHA-256 repositories; mixed or zero object IDs are
@@ -244,6 +336,9 @@ lifecycle, hash formats, conflicting observations, visibility and restart.
 Landing tests also cover atomic coupled stream advancement, real ancestry,
 review withdrawal and reapproval, missing required checks, competing attempts,
 and activated authentication policies with recorded evidence.
+Candidate tests exercise real divergent histories, two-parent object validation,
+exact subject selection, malformed bundles, stale guards and original outcomes.
 `scripts/e2e/suites/product/merge_queue.sh` drives the prebuilt `FG_BIN` across
-fresh CLI processes. It reports its own results; presence of the suite is not a
+fresh CLI processes, including a fast-forward head followed by preparation and
+two-parent landing of its divergent successor. It reports its own results; presence of the suite is not a
 claim that the full speculative merge-queue acceptance has passed.

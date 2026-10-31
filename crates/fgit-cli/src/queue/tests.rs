@@ -1,4 +1,5 @@
 use super::*;
+mod candidate;
 use fgit_forge::merge_queue::{MergeQueueSnapshot, QueueCommand, QueueCommandAction, QueueEntry};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{
