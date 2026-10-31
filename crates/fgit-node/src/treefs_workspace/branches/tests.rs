@@ -521,7 +521,10 @@ fn linear_fixture(
         format!("{}\n", chain[commits - 1]),
     )
     .unwrap();
-    let request = node.request_context();
+    // Prepare the history under the same bounded import profile as `fg import`.
+    // Branch updates below retain their ordinary request contexts; their exact
+    // ancestry checks must not inherit this setup-only import reservation.
+    let request = node.import_request_context(None);
     let imported = node
         .runtime()
         .block_on(node.import_loose_git_directory_durable_in(
