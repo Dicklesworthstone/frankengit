@@ -5,7 +5,8 @@
 use super::super::super::validate_inputs;
 pub use super::pull_request_merge::PullRequestMergeWatchConfig;
 use super::{
-    Owner, check_directory, hex, lower_hash, pull_request, pull_request_merge, reporting, settled,
+    Owner, check_directory, hex, lower_hash, merge_queue, pull_request, pull_request_merge,
+    reporting, settled,
 };
 use crate::treefs_workspace::TrustedWorkflowArtifactConfig;
 use crate::{GitDaemonSessionTimeout, NodeConfig, NodeRequestContext, OneNode};
@@ -39,6 +40,7 @@ pub struct WorkflowWatchConfig {
     attempt_timeout: GitDaemonSessionTimeout,
     publisher: Option<PrincipalId>,
     pull_request: Option<u64>,
+    merge_queue: Option<u64>,
     merge_candidate: Option<PullRequestMergeWatchConfig>,
     limits: WorkflowLimits,
     artifacts: Option<TrustedWorkflowArtifactConfig>,
@@ -77,6 +79,7 @@ impl WorkflowWatchConfig {
             attempt_timeout: GitDaemonSessionTimeout::DEFAULT,
             publisher: None,
             pull_request: None,
+            merge_queue: None,
             merge_candidate: None,
             limits: WorkflowLimits::default(),
             artifacts: None,
@@ -105,10 +108,33 @@ impl WorkflowWatchConfig {
     }
 
     pub fn with_pull_request(mut self, number: u64) -> io::Result<Self> {
-        if number == 0 {
-            return Err(invalid("workflow service requires a positive PR number"));
+        if number == 0 || self.merge_queue.is_some() {
+            return Err(invalid(
+                "workflow service requires a positive PR number and excludes a queue selector",
+            ));
         }
         self.pull_request = Some(number);
+        Ok(self)
+    }
+
+    /// Follow the current head of one canonical queue bound to `reference`,
+    /// which is the fixed target branch in this mode. A two-parent candidate
+    /// configuration is mandatory before this service can start. Queue changes
+    /// do not change its permanent custody scope or grant target publication.
+    pub fn with_merge_queue(mut self, number: u64) -> io::Result<Self> {
+        if number == 0 || self.pull_request.is_some() {
+            return Err(invalid(
+                "workflow service requires a positive queue number and excludes a PR selector",
+            ));
+        }
+        if self.merge_candidate.as_ref().is_some_and(|merge| {
+            merge.style() != fgit_forge::preparation::MergeCommitStyle::TwoParent
+        }) {
+            return Err(invalid(
+                "queue workflow service requires two-parent candidates",
+            ));
+        }
+        self.merge_queue = Some(number);
         Ok(self)
     }
 
@@ -116,11 +142,20 @@ impl WorkflowWatchConfig {
     /// The fixed CI ref must differ from the source; its target is checked when
     /// the current PR is selected. This authorizes ordinary exact-old rewrites.
     pub fn with_merge_candidate(mut self, config: PullRequestMergeWatchConfig) -> io::Result<Self> {
-        if self.pull_request.is_none() || config.reference() == &self.reference {
+        if (self.pull_request.is_none() && self.merge_queue.is_none())
+            || config.reference() == &self.reference
+        {
             return Err(invalid(
                 "merge candidate requires a PR and a distinct CI branch",
             ));
         }
+        merge_queue::validate_selection(
+            &self.reference,
+            self.pull_request,
+            self.merge_queue,
+            Some(&config),
+        )
+        .map_err(|error| invalid(error.to_string()))?;
         self.merge_candidate = Some(config);
         Ok(self)
     }
@@ -174,6 +209,10 @@ impl WorkflowWatchConfig {
     #[must_use]
     pub const fn pull_request(&self) -> Option<u64> {
         self.pull_request
+    }
+    #[must_use]
+    pub const fn merge_queue(&self) -> Option<u64> {
+        self.merge_queue
     }
     #[must_use]
     pub const fn merge_candidate(&self) -> Option<&PullRequestMergeWatchConfig> {
@@ -458,8 +497,29 @@ fn attempt(
     let poll = node
         .runtime()
         .block_on(async {
-            match (config.pull_request, config.merge_candidate.as_ref()) {
-                (Some(number), Some(merge)) => {
+            match (
+                config.pull_request,
+                config.merge_queue,
+                config.merge_candidate.as_ref(),
+            ) {
+                (_, Some(number), Some(merge)) => {
+                    node.poll_trusted_queue_head_merge_workflows_in(
+                        request,
+                        &config.reference,
+                        number,
+                        &config.directory,
+                        &config.run_parent,
+                        &config.inputs,
+                        config.limits,
+                        config.artifacts.as_ref(),
+                        merge,
+                    )
+                    .await
+                }
+                (_, Some(_), None) => Err(super::invalid(
+                    "queue service requires merge candidate configuration",
+                )),
+                (Some(number), None, Some(merge)) => {
                     node.poll_trusted_pull_request_merge_workflows_in(
                         request,
                         &config.reference,
@@ -473,7 +533,7 @@ fn attempt(
                     )
                     .await
                 }
-                (Some(number), None) => {
+                (Some(number), None, None) => {
                     node.poll_trusted_pull_request_workflows_in(
                         request,
                         &config.reference,
@@ -486,7 +546,7 @@ fn attempt(
                     )
                     .await
                 }
-                (None, _) => {
+                (None, None, _) => {
                     node.poll_trusted_ref_workflows_in(
                         request,
                         &config.reference,
@@ -571,8 +631,29 @@ fn publish(
         return Ok(false);
     };
     let result = node.runtime().block_on(async {
-        match (config.pull_request, config.merge_candidate.as_ref()) {
-            (Some(number), Some(merge)) => {
+        match (
+            config.pull_request,
+            config.merge_queue,
+            config.merge_candidate.as_ref(),
+        ) {
+            (_, Some(number), Some(merge)) => {
+                node.publish_trusted_queue_head_merge_workflow_checks_in(
+                    request,
+                    &config.reference,
+                    number,
+                    &config.directory,
+                    &config.run_parent,
+                    publisher,
+                    merge,
+                    |_| Ok(()),
+                )
+                .await
+            }
+            (_, Some(_), None) => reporting::TrustedRefCheckPublication {
+                error: Some("queue service requires merge candidate configuration".into()),
+                ..Default::default()
+            },
+            (Some(number), None, Some(merge)) => {
                 node.publish_trusted_pull_request_merge_workflow_checks_in(
                     request,
                     &config.reference,
@@ -585,7 +666,7 @@ fn publish(
                 )
                 .await
             }
-            (Some(number), None) => {
+            (Some(number), None, None) => {
                 node.publish_trusted_pull_request_workflow_checks_in(
                     request,
                     &config.reference,
@@ -597,7 +678,7 @@ fn publish(
                 )
                 .await
             }
-            (None, _) => {
+            (None, None, _) => {
                 node.publish_trusted_ref_workflow_checks_in(
                     request,
                     &config.reference,
@@ -654,17 +735,31 @@ impl Custody {
     fn open(node: &OneNode, config: &WorkflowWatchConfig) -> Result<Self, WorkflowWatchError> {
         let custody =
             |error: super::TrustedWorkflowFailure| WorkflowWatchError::Custody(error.to_string());
+        merge_queue::validate_selection(
+            &config.reference,
+            config.pull_request,
+            config.merge_queue,
+            config.merge_candidate.as_ref(),
+        )
+        .map_err(custody)?;
         check_directory(&config.run_parent).map_err(custody)?;
         let parent_metadata = fs::symlink_metadata(&config.run_parent)
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
-        let scope = match (config.pull_request, config.merge_candidate.as_ref()) {
-            (Some(number), Some(_)) => {
+        let scope = match (
+            config.pull_request,
+            config.merge_queue,
+            config.merge_candidate.as_ref(),
+        ) {
+            (_, Some(number), _) => {
+                merge_queue::scope(node, &config.reference, &config.directory, number)
+            }
+            (Some(number), None, Some(_)) => {
                 pull_request_merge::scope(node, &config.reference, &config.directory, number)
             }
-            (Some(number), None) => {
+            (Some(number), None, None) => {
                 pull_request::scope(node, &config.reference, &config.directory, number)
             }
-            (None, _) => reporting::scope(node, &config.reference, &config.directory),
+            (None, None, _) => reporting::scope(node, &config.reference, &config.directory),
         };
         let root = config.run_parent.join(format!("service-{}", hex(&scope)));
         let owner = Owner::open(&root).map_err(custody)?;

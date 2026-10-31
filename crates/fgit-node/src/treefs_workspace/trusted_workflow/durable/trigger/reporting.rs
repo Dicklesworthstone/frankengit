@@ -2,7 +2,7 @@
 use super::{
     File, Format, GitOid, MAX_EVENTS, MetadataExt, NodeRequestContext, OneNode, Owner, Path, Read,
     RefName, TrustedWorkflowDispatch, TrustedWorkflowFailure, check_directory, commitment, fs, hex,
-    invalid, io, lower_hash, pull_request_merge, settled, sha256_digest, write_new,
+    invalid, io, lower_hash, merge_queue, pull_request_merge, settled, sha256_digest, write_new,
 };
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{DecisionOutcome, PrincipalId};
@@ -56,7 +56,7 @@ impl OneNode {
         observe: impl FnMut(&str) -> Result<(), String>,
     ) -> TrustedRefCheckPublication {
         self.publish_selected_workflow_checks_in(
-            request, reference, directory, parent, publisher, None, None, observe,
+            request, reference, directory, parent, publisher, None, None, None, observe,
         )
         .await
     }
@@ -80,6 +80,7 @@ impl OneNode {
             parent,
             publisher,
             Some(number),
+            None,
             None,
             observe,
         )
@@ -106,6 +107,36 @@ impl OneNode {
             parent,
             publisher,
             Some(number),
+            None,
+            Some(merge),
+            observe,
+        )
+        .await
+    }
+
+    /// Report original settled queue-candidate executions without selecting a
+    /// new queue head. Empty/closed/hidden current state cannot erase historical
+    /// check publication responsibility. Original verified execution journals
+    /// and ordinary canonical check admission remain the source of evidence.
+    pub async fn publish_trusted_queue_head_merge_workflow_checks_in(
+        &self,
+        request: &NodeRequestContext,
+        target: &RefName,
+        number: u64,
+        directory: &[u8],
+        parent: &Path,
+        publisher: PrincipalId,
+        merge: &pull_request_merge::PullRequestMergeWatchConfig,
+        observe: impl FnMut(&str) -> Result<(), String>,
+    ) -> TrustedRefCheckPublication {
+        self.publish_selected_workflow_checks_in(
+            request,
+            target,
+            directory,
+            parent,
+            publisher,
+            None,
+            Some(number),
             Some(merge),
             observe,
         )
@@ -120,12 +151,14 @@ impl OneNode {
         parent: &Path,
         publisher: PrincipalId,
         pull_number: Option<u64>,
+        queue_number: Option<u64>,
         merge_config: Option<&pull_request_merge::PullRequestMergeWatchConfig>,
         mut observe: impl FnMut(&str) -> Result<(), String>,
     ) -> TrustedRefCheckPublication {
         let mut result = TrustedRefCheckPublication::default();
         let work: Result<(), TrustedWorkflowFailure> = async {
             if pull_number == Some(0) { return Err(invalid("pull-request number must be positive")); }
+            merge_queue::validate_selection(reference, pull_number, queue_number, merge_config)?;
             if !reference.as_bytes().starts_with(b"refs/heads/") || reference.as_bytes().len() > 4096
                 || directory.is_empty() || directory.len() > 4096 || !parent.is_absolute()
                 || fgit_treefs::TreePath::parse_default(directory).is_err() {
@@ -136,10 +169,11 @@ impl OneNode {
                 return Ok(());
             }
             check_directory(parent)?;
-            let scope = match (pull_number, merge_config) {
-                (Some(number), Some(_)) => pull_request_merge::scope(self, reference, directory, number),
-                (Some(number), None) => super::pull_request::scope(self, reference, directory, number),
-                (None, _) => scope(self, reference, directory),
+            let scope = match (pull_number, queue_number, merge_config) {
+                (_, Some(number), _) => merge_queue::scope(self, reference, directory, number),
+                (Some(number), None, Some(_)) => pull_request_merge::scope(self, reference, directory, number),
+                (Some(number), None, None) => super::pull_request::scope(self, reference, directory, number),
+                (None, None, _) => scope(self, reference, directory),
             };
             let root = parent.join(format!("watch-{}", hex(&scope)));
             let _owner = Owner::open(&root)?;

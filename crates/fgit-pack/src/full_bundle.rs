@@ -7,6 +7,7 @@
 //! through native quarantine with borrowing disabled.
 
 pub mod fetch;
+pub mod retarget;
 pub mod stream;
 
 use crate::{

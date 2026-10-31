@@ -20,7 +20,7 @@ fn outcome(error: &OutcomeFailure) -> bool {
     matches!(error, OutcomeFailure::Seal(error) if matches!(error.as_ref(), SealFailure::Store(error) if authority(error)))
 }
 
-fn admission(error: &AdmissionError) -> bool {
+pub(super) fn admission(error: &AdmissionError) -> bool {
     match error {
         AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress) => true,
         AdmissionError::Authority(error) => authority(error),

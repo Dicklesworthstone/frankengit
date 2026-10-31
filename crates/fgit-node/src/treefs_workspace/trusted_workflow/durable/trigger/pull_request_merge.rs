@@ -1,10 +1,11 @@
 //! Exact PR candidates admitted on an operator-owned CI branch before execution.
 //! Local custody suppresses retries; ordinary sealed ref admission owns truth.
 use super::{
-    File, Format, GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode, Path, RefName,
-    RepositoryAuthorityHeadId, Selected, TrustedRefWorkflowPoll, TrustedWorkflowArtifactConfig,
-    TrustedWorkflowFailure, WorkflowLimits, cancellation, commitment, hex, invalid, invalid_owned,
-    io, pull_request, reporting, sha256_digest, workspace_request_live, write_new,
+    File, GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode, OpenOptions, OpenOptionsExt,
+    Path, RefName, RepositoryAuthorityHeadId, Selected, TrustedRefWorkflowPoll,
+    TrustedWorkflowArtifactConfig, TrustedWorkflowFailure, WorkflowLimits, cancellation,
+    commitment, hex, invalid, invalid_owned, io, merge_queue, pull_request, reporting,
+    sha256_digest, workspace_request_live, write_new,
 };
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::review::ReviewSubject;
@@ -12,7 +13,8 @@ use fgit_forge::preparation::{
     MergeCommitStyle, MergeMetadata, MergePreparation, MergeProfile, PreparationLimits,
 };
 use fgit_forge::{AggregateVersion, PullRequestNumber};
-use fgit_pack::full_bundle::{FullBundleInput, FullBundleLimits};
+use fgit_pack::full_bundle::FullBundleLimits;
+use fgit_pack::full_bundle::retarget::RetargetedBundle;
 use fgit_types::{DecisionOutcome, PrincipalId};
 use fgit_wire::visibility::RefVisibility;
 
@@ -131,9 +133,14 @@ pub(super) struct Prepared {
     tree: GitOid,
     expected_old: Option<GitOid>,
     publication_key: [u8; 32],
+    queue: Option<merge_queue::QueueSelection>,
 }
 impl Prepared {
-    pub(super) fn to_json(&self, config: &PullRequestMergeWatchConfig) -> String {
+    pub(super) fn to_json(
+        &self,
+        config: &PullRequestMergeWatchConfig,
+        request: &NodeRequestContext,
+    ) -> Result<String, TrustedWorkflowFailure> {
         let parents = match config.style {
             MergeCommitStyle::TwoParent => format!(
                 "\"{}\",\"{}\"",
@@ -144,7 +151,7 @@ impl Prepared {
         let expected = self
             .expected_old
             .map_or_else(|| "null".into(), |id| format!("\"{id}\""));
-        format!(
+        let mut json = format!(
             concat!(
                 "{{\"ref_hex\":\"{}\",\"commit\":\"{}\",\"tree\":\"{}\",\"base\":\"{}\",",
                 "\"expected_old\":{},\"principal\":\"{}\",\"publication_key\":\"{}\",",
@@ -168,7 +175,64 @@ impl Prepared {
             hex(&config.metadata.message),
             self.subject.policy_epoch.get(),
             parents,
+        );
+        if self.queue.is_some() {
+            let mut live = || workspace_request_live(request);
+            let landing = self.landing_bundle(config, &mut live)?;
+            let digest = landing
+                .sha256(&mut live)
+                .map_err(|error| invalid_owned(error.to_string()))?;
+            json.pop();
+            json.push_str(&format!(
+                ",\"landing_bundle\":\"landing.bundle\",\"landing_bundle_sha256\":\"{}\"}}",
+                hex(&digest),
+            ));
+        }
+        Ok(json)
+    }
+
+    fn landing_bundle(
+        &self,
+        config: &PullRequestMergeWatchConfig,
+        live: &mut impl fgit_pack::Deadline,
+    ) -> Result<RetargetedBundle<'_>, TrustedWorkflowFailure> {
+        RetargetedBundle::parse(
+            &self.bundle,
+            config.reference(),
+            &self.subject.target_ref,
+            self.commit,
+            FullBundleLimits::default(),
+            live,
         )
+        .map_err(|error| invalid_owned(error.to_string()))
+    }
+
+    /// Retain a target-advertised copy of the exact tested pack as a ready
+    /// landing artifact. Only its bounded header changes; streaming borrows
+    /// the candidate pack instead of allocating another full bundle buffer.
+    pub(super) fn retain_landing_bundle(
+        &self,
+        config: &PullRequestMergeWatchConfig,
+        request: &NodeRequestContext,
+        directory: &Path,
+    ) -> Result<(), TrustedWorkflowFailure> {
+        if self.queue.is_none() {
+            return Ok(());
+        }
+        let mut live = || workspace_request_live(request);
+        let landing = self.landing_bundle(config, &mut live)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join("landing.bundle"))
+            .map_err(io)?;
+        landing
+            .write_to(&mut file, &mut live)
+            .map_err(|error| invalid_owned(error.to_string()))?;
+        file.sync_all()
+            .and_then(|()| File::open(directory)?.sync_all())
+            .map_err(io)
     }
 }
 
@@ -211,6 +275,7 @@ impl OneNode {
             limits,
             artifacts,
             Some(number),
+            None,
             Some(merge),
         )
         .await
@@ -267,8 +332,21 @@ impl OneNode {
             target_tip: pull.target_commit,
             policy_epoch: pull.policy_epoch,
         };
-        let artifact = match self
-            .prepare_pull_request_bundle_with_options_in(
+        let artifact = if let Some(queue) = &selected.queue {
+            self.prepare_queue_head_bundle_with_profile_in(
+                request,
+                queue.number,
+                queue.version,
+                &subject,
+                &RefVisibility::new(),
+                &config.metadata,
+                PreparationLimits::default(),
+                config.profile,
+            )
+            .await
+            .map(|artifact| (artifact.source_head, artifact.outcome, artifact.bundle))
+        } else {
+            self.prepare_pull_request_bundle_with_options_in(
                 request,
                 &subject,
                 &RefVisibility::new(),
@@ -278,22 +356,28 @@ impl OneNode {
                 config.style,
             )
             .await
-        {
+            .map(|artifact| (artifact.source_head, artifact.outcome, artifact.bundle))
+        };
+        let (source_head, outcome, candidate_bundle) = match artifact {
             Ok(artifact) => artifact,
             Err(
                 NodeWorkspaceRefusal::StaleWorkspaceBase | NodeWorkspaceRefusal::RefUnavailable,
             ) => {
-                return Ok(Preparation::Idle("pull_request_stale"));
+                return Ok(Preparation::Idle(if selected.queue.is_some() {
+                    "queue_head_stale"
+                } else {
+                    "pull_request_stale"
+                }));
             }
             Err(NodeWorkspaceRefusal::Cancelled { .. }) => {
                 return Ok(Preparation::Idle("stopped_before_reservation"));
             }
             Err(error) => return Err(TrustedWorkflowFailure::Source(error)),
         };
-        if artifact.source_head != selected.head {
+        if source_head != selected.head {
             return Ok(Preparation::Idle("source_moved"));
         }
-        let plan = match artifact.outcome {
+        let plan = match outcome {
             MergePreparation::Clean(plan) => plan,
             MergePreparation::Conflicted { .. } => {
                 return Ok(Preparation::Idle("merge_conflicted"));
@@ -303,8 +387,7 @@ impl OneNode {
             }
         };
         let bundle = rebind_bundle(
-            artifact
-                .bundle
+            candidate_bundle
                 .as_deref()
                 .ok_or_else(|| invalid("clean candidate has no bundle"))?,
             &pull.target,
@@ -325,6 +408,7 @@ impl OneNode {
                 &event,
                 &config.identity(),
             ]),
+            queue: selected.queue.clone(),
         }))
     }
 
@@ -335,6 +419,15 @@ impl OneNode {
         config: &PullRequestMergeWatchConfig,
         directory: &Path,
     ) -> Result<RepositoryAuthorityHeadId, TrustedWorkflowFailure> {
+        if let Some(queue) = &prepared.queue {
+            self.validate_queue_workflow_candidate_in(
+                request,
+                queue,
+                &prepared.subject,
+                Some(prepared.source_head),
+            )
+            .await?;
+        }
         // This lease is the one persisted BEFORE admission. Never refresh it
         // on a CAS refusal or derive a new key to escape a terminal decision.
         let key = IdempotencyKey::new(prepared.publication_key.to_vec())
@@ -378,9 +471,18 @@ impl OneNode {
         }
         // Publication advanced authority. Recheck the SAME original PR subject;
         // a changed PR, branch, or policy cannot silently select another run.
-        self.validate_pull_request_preparation_in(request, &prepared.subject, &RefVisibility::new())
+        if let Some(queue) = &prepared.queue {
+            self.validate_queue_workflow_candidate_in(request, queue, &prepared.subject, None)
+                .await
+        } else {
+            self.validate_pull_request_preparation_in(
+                request,
+                &prepared.subject,
+                &RefVisibility::new(),
+            )
             .await
             .map_err(TrustedWorkflowFailure::Source)
+        }
     }
 }
 
@@ -391,42 +493,14 @@ fn rebind_bundle(
     commit: GitOid,
     live: &mut impl fgit_pack::Deadline,
 ) -> Result<Vec<u8>, TrustedWorkflowFailure> {
-    let limits = FullBundleLimits::default();
-    let input = FullBundleInput::parse_incremental(bytes, limits, live)
-        .map_err(|error| invalid_owned(error.to_string()))?;
-    if input.format() != commit.algorithm()
-        || input.head().is_some()
-        || input.references().len() != 1
-        || input.references()[0].name() != original
-        || *input.references()[0].target() != commit
-    {
-        return Err(invalid(
-            "prepared merge bundle coordinates differ from selected PR",
-        ));
-    }
-    let mut header = match input.format() {
-        Format::Sha1 => b"# v2 git bundle\n".to_vec(),
-        Format::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
-    };
-    for prerequisite in input.prerequisites() {
-        header.extend_from_slice(format!("-{prerequisite} canonical parent\n").as_bytes());
-    }
-    header.extend_from_slice(format!("{commit} ").as_bytes());
-    header.extend_from_slice(destination.as_bytes());
-    header.extend_from_slice(b"\n\n");
-    if header.len() > limits.max_header_bytes
-        || header
-            .len()
-            .checked_add(input.pack_bytes().len())
-            .is_none_or(|len| len > limits.max_bundle_bytes)
-    {
-        return Err(invalid(
-            "candidate CI bundle exceeds bounded transport profile",
-        ));
-    }
-    header
-        .try_reserve_exact(input.pack_bytes().len())
-        .map_err(|_| invalid("candidate bundle allocation refused"))?;
-    header.extend_from_slice(input.pack_bytes());
-    Ok(header)
+    RetargetedBundle::parse(
+        bytes,
+        original,
+        destination,
+        commit,
+        FullBundleLimits::default(),
+        live,
+    )
+    .and_then(|bundle| bundle.into_vec(live))
+    .map_err(|error| invalid_owned(error.to_string()))
 }

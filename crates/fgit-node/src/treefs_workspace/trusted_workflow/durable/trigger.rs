@@ -14,6 +14,7 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
 mod cancellation;
+mod merge_queue;
 mod pull_request;
 mod pull_request_merge;
 mod reporting;
@@ -49,11 +50,17 @@ impl TrustedRefWorkflowPoll {
     }
     /// A conflict or stale exact PR has no successful candidate execution.
     pub fn non_green(&self) -> bool {
-        matches!(self.state, "merge_conflicted" | "pull_request_stale")
-            || self
-                .dispatch
-                .as_ref()
-                .is_some_and(|dispatch| !dispatch.succeeded())
+        matches!(
+            self.state,
+            "merge_conflicted"
+                | "pull_request_stale"
+                | "queue_head_stale"
+                | "queue_head_unavailable"
+                | "queue_busy"
+        ) || self
+            .dispatch
+            .as_ref()
+            .is_some_and(|dispatch| !dispatch.succeeded())
     }
     pub fn requires_reconciliation(&self) -> bool {
         self.state == "blocked_unresolved"
@@ -84,10 +91,12 @@ struct Selected {
     batch: RepositoryDecisionBatchId,
     event_head: RepositoryAuthorityHeadId,
     pull: Option<pull_request::PullSelection>,
+    queue: Option<merge_queue::QueueSelection>,
 }
 
 enum Selection {
     Absent,
+    Idle(&'static str),
     ChangedBeforeReservation,
     StoppedBeforeReservation,
     Ready(Selected),
@@ -137,6 +146,7 @@ impl OneNode {
             artifacts,
             None,
             None,
+            None,
         )
         .await
     }
@@ -151,14 +161,16 @@ impl OneNode {
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         pull_number: Option<u64>,
+        queue_number: Option<u64>,
         merge_config: Option<&pull_request_merge::PullRequestMergeWatchConfig>,
     ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
-        if pull_number == Some(0) {
-            return Err(invalid("pull-request number must be positive"));
+        if pull_number == Some(0) || queue_number == Some(0) {
+            return Err(invalid("pull-request and queue numbers must be positive"));
         }
-        if merge_config
-            .is_some_and(|config| pull_number.is_none() || config.reference() == reference)
-        {
+        merge_queue::validate_selection(reference, pull_number, queue_number, merge_config)?;
+        if merge_config.is_some_and(|config| {
+            (pull_number.is_none() && queue_number.is_none()) || config.reference() == reference
+        }) {
             return Err(invalid(
                 "merge candidate requires a PR and a distinct CI branch",
             ));
@@ -173,15 +185,24 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Ok(stopped_poll());
         }
-        let selection = match pull_number {
-            Some(number) => {
+        let selection = match (pull_number, queue_number) {
+            (_, Some(number)) => {
+                self.select_queue_workflow_event(request, reference, number)
+                    .await?
+            }
+            (Some(number), None) => {
                 self.select_pull_request_workflow_event(request, reference, number)
                     .await?
             }
-            None => self.select_ref_workflow_event(request, reference).await?,
+            (None, None) => self.select_ref_workflow_event(request, reference).await?,
         };
+        let mut idle_state = None;
         let selected = match selection {
             Selection::Absent => None,
+            Selection::Idle(state) => {
+                idle_state = Some(state);
+                None
+            }
             Selection::Ready(selected) => Some(selected),
             Selection::StoppedBeforeReservation => return Ok(stopped_poll()),
             Selection::ChangedBeforeReservation => {
@@ -195,12 +216,13 @@ impl OneNode {
                 });
             }
         };
-        let scope = match (pull_number, merge_config) {
-            (Some(number), Some(_)) => {
+        let scope = match (pull_number, queue_number, merge_config) {
+            (_, Some(number), _) => merge_queue::scope(self, reference, directory, number),
+            (Some(number), None, Some(_)) => {
                 pull_request_merge::scope(self, reference, directory, number)
             }
-            (Some(number), None) => pull_request::scope(self, reference, directory, number),
-            (None, _) => reporting::scope(self, reference, directory),
+            (Some(number), None, None) => pull_request::scope(self, reference, directory, number),
+            (None, None, _) => reporting::scope(self, reference, directory),
         };
         check_directory(parent)?;
         let root = parent.join(format!("watch-{}", hex(&scope)));
@@ -236,7 +258,11 @@ impl OneNode {
         }
         let Some(selected) = selected else {
             return Ok(TrustedRefWorkflowPoll {
-                state: if pull_number.is_some() {
+                state: if let Some(state) = idle_state {
+                    state
+                } else if queue_number.is_some() {
+                    "queue_unavailable"
+                } else if pull_number.is_some() {
                     "pull_request_unavailable"
                 } else {
                     "ref_unavailable"
@@ -246,6 +272,13 @@ impl OneNode {
                 execution_settled: false,
             });
         };
+        // A queue's immutable scope follows its target, while execution follows
+        // the source of the exact selected head. Changing heads cannot escape
+        // unresolved custody belonging to an earlier PR in this same queue.
+        let reference = selected
+            .queue
+            .as_ref()
+            .map_or(reference, |queue| &queue.source);
         let batch = selected.batch.as_internal_object_id();
         let push_id = commitment(&[
             b"frankengit/ref-workflow-event/v1",
@@ -253,10 +286,14 @@ impl OneNode {
             &batch.algorithm().code_point().to_be_bytes(),
             batch.digest().as_bytes(),
         ]);
-        let event_id = selected
-            .pull
-            .as_ref()
-            .map_or(push_id, |pull| pull.event_id(&scope, &selected));
+        let event_id = if let Some(queue) = &selected.queue {
+            queue.event_id(&scope, &selected)?
+        } else {
+            selected
+                .pull
+                .as_ref()
+                .map_or(push_id, |pull| pull.event_id(&scope, &selected))
+        };
         let key = hex(&event_id);
         let event_directory = root.join(format!("event-{key}"));
         let mut run_id = [0; 16];
@@ -264,7 +301,9 @@ impl OneNode {
         if run_id == [0; 16] {
             return Err(invalid("ref workflow execution identity refused"));
         }
-        let profile = if merge_config.is_some() {
+        let profile = if selected.queue.is_some() {
+            "latest-canonical-queue-head-merge-v1"
+        } else if merge_config.is_some() {
             "latest-canonical-pull-request-merge-v1"
         } else if selected.pull.is_some() {
             "latest-canonical-pull-request-head-v1"
@@ -309,6 +348,11 @@ impl OneNode {
             write!(event, ",\"previous_commit\":{before}}}")
                 .expect("writing to a String cannot fail");
         }
+        if let Some(queue) = &selected.queue {
+            event.pop();
+            write!(event, ",\"merge_queue\":{}}}", queue.to_json(&selected)?)
+                .expect("writing to a String cannot fail");
+        }
         match fs::symlink_metadata(&event_directory) {
             Ok(_) => {
                 if merge_config.is_some() {
@@ -337,8 +381,12 @@ impl OneNode {
             {
                 pull_request_merge::Preparation::Ready(prepared) => {
                     event.pop();
-                    write!(event, ",\"merge_candidate\":{}}}", prepared.to_json(config))
-                        .expect("writing to a String cannot fail");
+                    write!(
+                        event,
+                        ",\"merge_candidate\":{}}}",
+                        prepared.to_json(config, request)?
+                    )
+                    .expect("writing to a String cannot fail");
                     Some(prepared)
                 }
                 pull_request_merge::Preparation::Idle(state) => {
@@ -367,6 +415,14 @@ impl OneNode {
                 Some(&prepared.bundle),
                 &mut reserved,
             )?;
+            if let Some(config) = merge_config {
+                prepared
+                    .retain_landing_bundle(config, request, &event_directory)
+                    .map_err(|error| TrustedWorkflowFailure::Journal {
+                        directory: event_directory.clone(),
+                        detail: format!("{error}; original queue candidate custody retained"),
+                    })?;
+            }
         }
         let retained = |error: String| TrustedWorkflowFailure::Journal {
             directory: event_directory.clone(),
@@ -557,6 +613,7 @@ impl OneNode {
             batch: event.batch_id,
             event_head: event.resulting_head_id,
             pull: None,
+            queue: None,
         }))
     }
 }
