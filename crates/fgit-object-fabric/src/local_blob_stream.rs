@@ -126,7 +126,7 @@ impl LocalFilesystemFabric {
         let opened = self.open_native_stream_bounded(identity, maximum_payload_bytes, None);
         integrity_checkpoint(live)?;
         let mut stream = opened?;
-        let mut buffer = [0; CHUNK_BYTES];
+        let mut buffer = super::blob_write::chunk_buffer(StorageOperation::ReadBody)?;
         loop {
             integrity_checkpoint(live)?;
             let read = stream.read_tentative(&mut buffer);
@@ -322,7 +322,7 @@ fn strong_hasher_for_kind(kind: GitObjectKind, length: u64) -> Result<Sha256Hash
     Ok(strong)
 }
 
-fn native_kind(kind: ObjectKind) -> Result<GitObjectKind, StoreRefusal> {
+const fn native_kind(kind: ObjectKind) -> Result<GitObjectKind, StoreRefusal> {
     match kind {
         ObjectKind::Commit => Ok(GitObjectKind::Commit),
         ObjectKind::Tree => Ok(GitObjectKind::Tree),
