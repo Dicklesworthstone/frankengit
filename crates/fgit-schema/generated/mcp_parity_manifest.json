@@ -413,7 +413,7 @@
       "read_mutation": "mutation",
       "capability": "prepare_publication",
       "cli_command": "fg queue land",
-      "rest_api_path": "local-only: fg queue land"
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/land"
     },
     {
       "tool": "frankengit_queue_list",

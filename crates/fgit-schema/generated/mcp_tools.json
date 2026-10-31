@@ -1133,7 +1133,7 @@
       "kind": "tool",
       "owner_subsystem": "forge",
       "support_profile": "active",
-      "description": "Land exactly the current queue-head PR using native FastForwardOnly admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source and ordinary merge grants do not imply it. Exact queue/PR/policy versions and both live branch tips remain immutable guards. Existing ancestry, review, required-check and protected-ref rules apply on every attempt. One decision atomically moves the target, merges the PR and advances the queue twice; no checks run or merge objects are synthesized. Trusted-local CLI/MCP operation only; no HTTP landing route is exposed.",
+      "description": "Land exactly the current queue-head PR using native FastForwardOnly admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source and ordinary merge grants do not imply it. Exact queue/PR/policy versions and both live branch tips remain immutable guards. Existing ancestry, review, required-check and protected-ref rules apply on every attempt. One decision atomically moves the target, merges the PR and advances the queue twice; no checks run or merge objects are synthesized. The MCP adapter remains trusted-local. The authenticated HTTP counterpart independently requires --allow-queue-landings, queues-land, and a target-permitting reference-write ceiling; remote requests cannot assert an actor.",
       "read_mutation": "mutation",
       "capability": "prepare_publication",
       "principal": "operator_bound",
@@ -1153,7 +1153,7 @@
       "cancellation": "non_preemptive_terminal_commit",
       "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "queue_mutation_outcome_unknown"],
       "cli_command": "fg queue land",
-      "rest_api_path": "local-only: fg queue land"
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/land"
     },
     {
       "name": "frankengit_queue_list",

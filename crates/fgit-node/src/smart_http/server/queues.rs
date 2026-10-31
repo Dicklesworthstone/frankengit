@@ -1,5 +1,5 @@
-//! Independently granted queue management through native metadata admission.
-//! Queue intent neither moves Git refs nor authorizes a later merge.
+//! Independently granted queue management and exact fast-forward head landing.
+//! Membership grants never authorize the separate protected code publication.
 mod output;
 mod request;
 #[cfg(test)]
@@ -45,9 +45,13 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    if !profile.config.http_queue_management_enabled()
-        || !grant.permits_queues(request.is_mutation())
-    {
+    let permitted = if request.is_landing() {
+        profile.config.http_queue_landings_enabled() && grant.permits_queue_landing()
+    } else {
+        profile.config.http_queue_management_enabled()
+            && grant.permits_queues(request.is_mutation())
+    };
+    if !permitted {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
@@ -73,10 +77,10 @@ pub(super) fn execute(
     limits: HttpLimits,
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
-    let principal = session
+    let authenticated = session
         .authenticated_session()
-        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?
-        .principal_id();
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    let principal = authenticated.principal_id();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
@@ -135,7 +139,7 @@ pub(super) fn execute(
                 terminal: None,
             })
         }
-        Operation::Mutate { .. } => {
+        Operation::Mutate { .. } | Operation::Land { .. } => {
             let limits = HttpLimits {
                 max_body_bytes: limits.max_body_bytes.min(MAX_COMMAND_BYTES as u64),
                 max_body_wire_bytes: limits
@@ -145,21 +149,57 @@ pub(super) fn execute(
                 ..limits
             };
             let bytes = read_form(reader, framing, limits)?;
-            let command =
-                request.command(&bytes, node.object_format, node.repository_incarnation_id())?;
-            command
-                .proposed_event(principal, node.object_format)
-                .map_err(|_| ApiError::bad("invalid_queue_command"))?;
-            let (tx, terminal) = drive_request_while(
-                node,
-                &context,
-                node.admit_queue_durable_in(&context, session, &command, Default::default()),
-                &mut live,
-            )
-            .map_err(admission_error)?;
+            let (tx, terminal, body) = if request.is_landing() {
+                let command = request.landing_command(
+                    &bytes,
+                    node.object_format,
+                    node.repository_incarnation_id(),
+                )?;
+                // Match every HTTP code publisher: a narrowed credential may
+                // recover through outcomes-read, but may not resubmit a target
+                // write it no longer permits, even with a previously used key.
+                super::require_ref_writes(authenticated, [&command.target_ref])?;
+                let (tx, terminal) = drive_request_while(
+                    node,
+                    &context,
+                    node.land_queue_head_durable_in(
+                        &context,
+                        session,
+                        &command,
+                        Default::default(),
+                    ),
+                    &mut live,
+                )
+                .map_err(admission_error)?;
+                (
+                    tx,
+                    terminal,
+                    output::landing(node, principal, &command, tx, terminal),
+                )
+            } else {
+                let command = request.command(
+                    &bytes,
+                    node.object_format,
+                    node.repository_incarnation_id(),
+                )?;
+                command
+                    .proposed_event(principal, node.object_format)
+                    .map_err(|_| ApiError::bad("invalid_queue_command"))?;
+                let (tx, terminal) = drive_request_while(
+                    node,
+                    &context,
+                    node.admit_queue_durable_in(&context, session, &command, Default::default()),
+                    &mut live,
+                )
+                .map_err(admission_error)?;
+                (
+                    tx,
+                    terminal,
+                    output::mutation(node, principal, &command, tx, terminal),
+                )
+            };
             // Return the original terminal, without a latest-state read that
             // could change an identical retry's result or its disclosure.
-            let body = output::mutation(node, principal, &command, tx, terminal);
             if body.len() > maximum {
                 eprintln!(
                     "Queue HTTP response limit after canonical outcome for transaction {tx}; recover the original key"

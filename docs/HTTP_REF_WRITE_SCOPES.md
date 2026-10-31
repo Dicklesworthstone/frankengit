@@ -91,6 +91,7 @@ must be permitted before publication starts.
 | Bundle fetch | Every explicit destination mapping; an allowed source does not authorize a different destination. |
 | Reviewed merge or squash | The target branch. |
 | Pull-request fast-forward | The target branch. |
+| Merge queue head fast-forward | The target branch; queue membership authority alone cannot publish it. |
 
 A mixed request containing one denied reference is refused as a whole. In
 particular, a non-atomic Git push cannot publish an allowed first command before
@@ -115,6 +116,11 @@ The ceiling also does not grant a service. For example, selecting a branch witho
 merge it. Issue/PR metadata, reviews, check reads, protection administration, LFS,
 and workflow-artifact reads retain their existing independent service grants.
 Deployment enablement switches remain additional ceilings.
+
+Queue head landing requires `queues-land` and `--allow-queue-landings` as well
+as a permitted target. The separate `queues-read` / `queues-write` scopes and
+`--allow-queues` manage intent without moving refs and can use a `none` ceiling.
+See [the HTTP queue API](NATIVE_HTTP_QUEUES.md) for exact landing guards.
 
 A permitted reference still must pass canonical admission, branch protection,
 expected-old checks, candidate validation, and object-format checks. The selected
@@ -141,3 +147,6 @@ The tests in `crates/fgit-node/tests/ref_write_scope_http.rs` exercise real TCP,
 native quarantine, both Git object formats, atomic and non-atomic Git pushes,
 full native reference transactions, deletes, raw-byte tags, narrowing, revocation,
 and read/outcome independence.
+`crates/fgit-node/tests/queue_landing_http.rs` adds actual queue-head publication,
+an unconsumed denied key later admitted with the target grant, and original
+outcome recovery after the landing credential is narrowed.

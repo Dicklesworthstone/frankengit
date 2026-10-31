@@ -1,11 +1,13 @@
 //! Closed queue grammar: every write coordinate is supplied by the client.
 use std::collections::{BTreeMap, BTreeSet};
 
+use fgit_admission::merge::native::{NativeMergeIntent, queue::QueueLandingCommand};
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
 use fgit_forge::merge_queue::{DequeueReason, QueueCommand, QueueCommandAction};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{
-    GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryIncarnationId,
+    GitHashAlgorithm, GitOid, PolicyEpoch, RefName, RepositoryAuthorityHeadId,
+    RepositoryIncarnationId,
 };
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
@@ -29,6 +31,9 @@ pub(super) enum Operation {
     Mutate {
         number: QueueNumber,
         action: Action,
+    },
+    Land {
+        number: QueueNumber,
     },
 }
 
@@ -119,6 +124,14 @@ impl<'a> Request<'a> {
                     "enqueue" => Action::Enqueue,
                     "dequeue" => Action::Dequeue,
                     "reorder" => Action::Reorder,
+                    "land" => {
+                        return Ok(Self {
+                            repository_route,
+                            operation: Operation::Land {
+                                number: number(number_text)?,
+                            },
+                        });
+                    }
                     _ => return Err(ApiError::not_found()),
                 };
                 Operation::Mutate {
@@ -135,7 +148,94 @@ impl<'a> Request<'a> {
     }
 
     pub(in crate::smart_http::server) const fn is_mutation(&self) -> bool {
-        matches!(self.operation, Operation::Mutate { .. })
+        matches!(
+            self.operation,
+            Operation::Mutate { .. } | Operation::Land { .. }
+        )
+    }
+
+    pub(super) const fn is_landing(&self) -> bool {
+        matches!(self.operation, Operation::Land { .. })
+    }
+
+    pub(super) fn landing_command(
+        &self,
+        bytes: &[u8],
+        format: GitHashAlgorithm,
+        incarnation: RepositoryIncarnationId,
+    ) -> Result<QueueLandingCommand, ApiError> {
+        if bytes.len() > MAX_COMMAND_BYTES {
+            return Err(ApiError::too_large());
+        }
+        let Operation::Land { number } = self.operation else {
+            return Err(ApiError::bad("not_a_landing"));
+        };
+        let mut fields = BTreeMap::new();
+        for (key, value) in parse_form(bytes, 13)? {
+            if !matches!(
+                key.as_str(),
+                "expected_incarnation"
+                    | "object_format"
+                    | "expected_version"
+                    | "expected_policy_epoch"
+                    | "pull_request"
+                    | "expected_pull_request_version"
+                    | "source_ref"
+                    | "source_ref_hex"
+                    | "target_ref"
+                    | "target_ref_hex"
+                    | "expected_source_tip"
+                    | "expected_target_tip"
+            ) {
+                return Err(ApiError::bad("unknown_or_inapplicable_field"));
+            }
+            if fields.insert(key, value).is_some() {
+                return Err(ApiError::bad("duplicate_field"));
+            }
+        }
+        binding(&mut fields, format, incarnation)?;
+        let expected_version =
+            AggregateVersion::try_new(parse_decimal(&take(&mut fields, "expected_version")?)?)
+                .ok_or_else(|| ApiError::bad("invalid_expected_version"))?;
+        expected_version
+            .next()
+            .and_then(AggregateVersion::next)
+            .map_err(|_| ApiError::bad("version_exhausted"))?;
+        let expected_pull_request_version = AggregateVersion::try_new(parse_decimal(&take(
+            &mut fields,
+            "expected_pull_request_version",
+        )?)?)
+        .ok_or_else(|| ApiError::bad("positive_pull_version_required"))?;
+        expected_pull_request_version
+            .next()
+            .map_err(|_| ApiError::bad("version_exhausted"))?;
+        let command = QueueLandingCommand {
+            number,
+            expected_version,
+            expected_policy_epoch: PolicyEpoch::try_new(parse_decimal(&take(
+                &mut fields,
+                "expected_policy_epoch",
+            )?)?)
+            .map_err(|_| ApiError::bad("positive_policy_epoch_required"))?,
+            pull_request: pull_number(&take(&mut fields, "pull_request")?)?,
+            expected_pull_request_version,
+            source_ref: branch(&mut fields, "source_ref", "source_ref_hex")?,
+            head_tip: oid(&take(&mut fields, "expected_source_tip")?, format)?,
+            target_ref: branch(&mut fields, "target_ref", "target_ref_hex")?,
+            expected_target_tip: oid(&take(&mut fields, "expected_target_tip")?, format)?,
+        };
+        // Refuse deterministic malformed intent before entering admission; in
+        // particular, an equal-tip candidate cannot look like a lost outcome.
+        NativeMergeIntent::fast_forward_only(
+            command.pull_request,
+            command.expected_pull_request_version,
+            command.source_ref.clone(),
+            command.head_tip,
+            command.target_ref.clone(),
+            command.expected_target_tip,
+        )
+        .map_err(|_| ApiError::bad("invalid_queue_command"))?;
+        Ok(command)
     }
 
     pub(super) fn command(
@@ -191,21 +291,7 @@ impl<'a> Request<'a> {
                 return Err(ApiError::bad("duplicate_field"));
             }
         }
-        let pinned = take(&mut fields, "expected_incarnation")?;
-        let pinned_id = RepositoryIncarnationId::from_hex(&pinned)
-            .map_err(|_| ApiError::bad("invalid_repository_incarnation"))?;
-        if pinned_id.to_string() != pinned {
-            return Err(ApiError::bad("invalid_repository_incarnation"));
-        }
-        if pinned_id != incarnation {
-            return Err(ApiError::new(
-                Status::Conflict,
-                "repository_incarnation_mismatch",
-            ));
-        }
-        if take(&mut fields, "object_format")? != format.as_str() {
-            return Err(ApiError::bad("object_format_mismatch"));
-        }
+        binding(&mut fields, format, incarnation)?;
         let version = parse_decimal(&take(&mut fields, "expected_version")?)?;
         let expected_version = if version == 0 {
             if action != Action::Enqueue {
@@ -263,6 +349,29 @@ impl<'a> Request<'a> {
             action,
         })
     }
+}
+
+fn binding(
+    fields: &mut BTreeMap<String, String>,
+    format: GitHashAlgorithm,
+    incarnation: RepositoryIncarnationId,
+) -> Result<(), ApiError> {
+    let pinned = take(fields, "expected_incarnation")?;
+    let pinned_id = RepositoryIncarnationId::from_hex(&pinned)
+        .map_err(|_| ApiError::bad("invalid_repository_incarnation"))?;
+    if pinned_id.to_string() != pinned {
+        return Err(ApiError::bad("invalid_repository_incarnation"));
+    }
+    if pinned_id != incarnation {
+        return Err(ApiError::new(
+            Status::Conflict,
+            "repository_incarnation_mismatch",
+        ));
+    }
+    if take(fields, "object_format")? != format.as_str() {
+        return Err(ApiError::bad("object_format_mismatch"));
+    }
+    Ok(())
 }
 
 fn take(fields: &mut BTreeMap<String, String>, key: &str) -> Result<String, ApiError> {

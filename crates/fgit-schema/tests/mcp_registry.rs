@@ -588,14 +588,45 @@ fn queue_schemas_preserve_exact_versions_reference_aliases_and_complete_bounded_
 }
 
 #[test]
-fn queue_landing_catalog_explicitly_declares_no_http_endpoint() {
+fn queue_landing_catalog_names_the_authenticated_http_counterpart_without_changing_mcp_authority() {
     let landing = find_tool("frankengit_queue_land").unwrap();
     assert_eq!(landing.cli_command, "fg queue land");
-    assert_eq!(landing.rest_api_path, "local-only: fg queue land");
-    assert!(landing.description.contains("no HTTP landing route"));
-    assert!(!landing.rest_api_path.starts_with("POST "));
-    assert!(!landing.rest_api_path.contains("/api/"));
+    assert_eq!(
+        landing.rest_api_path,
+        "POST /{repository}/api/v1/queues/{number}/land"
+    );
+    assert_eq!(landing.principal, PrincipalRequirement::OperatorBound);
+    assert_eq!(
+        landing.capability,
+        CapabilityRequirement::PREPARE_PUBLICATION
+    );
+    assert_eq!(
+        landing.idempotency,
+        IdempotencyRequirement::RequiredDurableKey
+    );
+    assert!(
+        landing
+            .description
+            .contains("MCP adapter remains trusted-local")
+    );
+    assert!(
+        landing
+            .description
+            .contains("--allow-queue-landings, queues-land")
+    );
+    assert!(
+        landing
+            .description
+            .contains("target-permitting reference-write ceiling")
+    );
+    assert!(
+        landing
+            .description
+            .contains("remote requests cannot assert an actor")
+    );
     let manifest = fgit_schema::emit::mcp_parity_manifest();
-    assert!(manifest.contains("\"rest_api_path\": \"local-only: fg queue land\""));
-    assert!(!manifest.contains("/queues/{number}/land"));
+    assert!(
+        manifest.contains("\"rest_api_path\": \"POST /{repository}/api/v1/queues/{number}/land\"")
+    );
+    assert!(!manifest.contains("local-only: fg queue land"));
 }

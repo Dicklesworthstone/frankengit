@@ -1764,7 +1764,7 @@
     },
     "frankengit_queue_land": {
       "title": "frankengit_queue_land",
-      "description": "Land exactly the current queue-head PR using native FastForwardOnly admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source and ordinary merge grants do not imply it. Exact queue/PR/policy versions and both live branch tips remain immutable guards. Existing ancestry, review, required-check and protected-ref rules apply on every attempt. One decision atomically moves the target, merges the PR and advances the queue twice; no checks run or merge objects are synthesized. Trusted-local CLI/MCP operation only; no HTTP landing route is exposed.",
+      "description": "Land exactly the current queue-head PR using native FastForwardOnly admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source and ordinary merge grants do not imply it. Exact queue/PR/policy versions and both live branch tips remain immutable guards. Existing ancestry, review, required-check and protected-ref rules apply on every attempt. One decision atomically moves the target, merges the PR and advances the queue twice; no checks run or merge objects are synthesized. The MCP adapter remains trusted-local. The authenticated HTTP counterpart independently requires --allow-queue-landings, queues-land, and a target-permitting reference-write ceiling; remote requests cannot assert an actor.",
       "type": "object",
       "properties": {
         "parameters": {

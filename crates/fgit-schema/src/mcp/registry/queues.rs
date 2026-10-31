@@ -703,7 +703,7 @@ pub(super) const LAND: McpToolEntry = McpToolEntry {
     capability: CapabilityRequirement::PREPARE_PUBLICATION,
     ..write_entry(
         "frankengit_queue_land",
-        "Land exactly the current queue-head PR using native FastForwardOnly admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source and ordinary merge grants do not imply it. Exact queue/PR/policy versions and both live branch tips remain immutable guards. Existing ancestry, review, required-check and protected-ref rules apply on every attempt. One decision atomically moves the target, merges the PR and advances the queue twice; no checks run or merge objects are synthesized. Trusted-local CLI/MCP operation only; no HTTP landing route is exposed.",
+        "Land exactly the current queue-head PR using native FastForwardOnly admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source and ordinary merge grants do not imply it. Exact queue/PR/policy versions and both live branch tips remain immutable guards. Existing ancestry, review, required-check and protected-ref rules apply on every attempt. One decision atomically moves the target, merges the PR and advances the queue twice; no checks run or merge objects are synthesized. The MCP adapter remains trusted-local. The authenticated HTTP counterpart independently requires --allow-queue-landings, queues-land, and a target-permitting reference-write ceiling; remote requests cannot assert an actor.",
         &[
             NUMBER,
             VERSION,
@@ -721,6 +721,6 @@ pub(super) const LAND: McpToolEntry = McpToolEntry {
             POLICY_EPOCH,
         ],
         "fg queue land",
-        "local-only: fg queue land",
+        "POST /{repository}/api/v1/queues/{number}/land",
     )
 };
