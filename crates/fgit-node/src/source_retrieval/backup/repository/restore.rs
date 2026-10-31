@@ -99,7 +99,10 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
     }
     let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     let mut result = [0; 32];
-    for (out, pair) in result.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (out, pair) in result
+        .iter_mut()
+        .zip(value.as_bytes().as_chunks::<2>().0.iter())
+    {
         *out = 16 * nibble(pair[0]) + nibble(pair[1]);
     }
     Ok(result)
@@ -218,7 +221,7 @@ fn verify_stored(
             match body.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.to_string()),
             }
         }

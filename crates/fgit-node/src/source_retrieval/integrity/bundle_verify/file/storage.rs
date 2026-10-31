@@ -99,7 +99,7 @@ pub(super) fn read_source_hash(
                 return Err(BundleVerifyError::SourceChanged);
             }
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(io_error("hash bundle input", error)),
         }
     }
@@ -186,7 +186,7 @@ impl<W: Read> SpanReader<'_, W> {
                     return Ok(count);
                 }
                 Ok(_) => return Err(BundleVerifyError::ScratchChanged),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(io_error("read scratch", error)),
             }
         }
@@ -296,7 +296,7 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
                     pending = &pending[count..];
                 }
                 Ok(_) => return Err(BundleVerifyError::ScratchChanged),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(io_error("write scratch", error)),
             }
         }
@@ -442,7 +442,7 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
                     offset += count;
                 }
                 Ok(_) => return Err(BundleVerifyError::ScratchChanged),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(io_error("read scratch", error)),
             }
         }
@@ -550,7 +550,7 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
                     Ok(0) => return Err(BundleVerifyError::ScratchChanged),
                     Ok(count) if count <= length - filled => filled += count,
                     Ok(_) => return Err(BundleVerifyError::ScratchChanged),
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) => return Err(io_error("read indexed scratch base", error)),
                 }
             }

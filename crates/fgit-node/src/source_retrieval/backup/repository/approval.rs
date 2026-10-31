@@ -572,7 +572,10 @@ fn unhex<const N: usize>(text: &str) -> Result<[u8; N], String> {
         }
     };
     let mut out = [0; N];
-    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (slot, pair) in out
+        .iter_mut()
+        .zip(text.as_bytes().as_chunks::<2>().0.iter())
+    {
         *slot = 16 * nibble(pair[0]) + nibble(pair[1]);
     }
     Ok(out)

@@ -31,7 +31,7 @@ fn stream_visitors_preserve_every_record_kind_and_the_original_wire_bytes() {
             &authority(),
             rows.len(),
             Default::default(),
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         for (id, kind, body) in &rows {
@@ -43,18 +43,25 @@ fn stream_visitors_preserve_every_record_kind_and_the_original_wire_bytes() {
                 largest: 0,
             };
             streamed
-                .object_stream(*id, *kind, body.len() as u64, &proof, &mut input, &mut live)
+                .object_stream(
+                    *id,
+                    *kind,
+                    body.len() as u64,
+                    &proof,
+                    &mut input,
+                    &mut || Ok(()),
+                )
                 .unwrap();
             assert!(input.largest <= CHUNK_BYTES);
         }
-        let seal = streamed.finish(&mut live).unwrap();
+        let seal = streamed.finish(&mut || Ok(())).unwrap();
         assert_eq!(actual, old.finish().unwrap());
         let mut decoder =
-            StreamDecoder::new(actual.as_slice(), Default::default(), &mut live).unwrap();
+            StreamDecoder::new(actual.as_slice(), Default::default(), &mut || Ok(())).unwrap();
         for (id, kind, body) in &rows {
             assert!(
                 decoder
-                    .visit_record(&mut live, |header, input| {
+                    .visit_record(&mut || Ok(()), |header, input| {
                         assert_eq!(
                             (header.oid, header.kind, header.length),
                             (*id, *kind, body.len() as u64)
@@ -73,11 +80,11 @@ fn stream_visitors_preserve_every_record_kind_and_the_original_wire_bytes() {
         }
         assert!(
             !decoder
-                .visit_record(&mut live, |_, _| panic!("no further record"))
+                .visit_record(&mut || Ok(()), |_, _| panic!("no further record"))
                 .unwrap()
         );
         assert_eq!(decoder.payload.capacity(), 0);
-        assert_eq!(decoder.finish(seal.digest, &mut live).unwrap().1, seal);
+        assert_eq!(decoder.finish(seal.digest, &mut || Ok(())).unwrap().1, seal);
     }
 }
 
@@ -151,7 +158,7 @@ fn blobs_larger_than_32_mib_roundtrip_with_bounded_generated_sources_and_visitor
             &authority,
             1,
             limits,
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         encoder
@@ -161,19 +168,19 @@ fn blobs_larger_than_32_mib_roundtrip_with_bounded_generated_sources_and_visitor
                 LENGTH,
                 &proof,
                 &mut io::repeat(173).take(LENGTH),
-                &mut live,
+                &mut || Ok(()),
             )
             .unwrap();
-        let seal = encoder.finish(&mut live).unwrap();
+        let seal = encoder.finish(&mut || Ok(())).unwrap();
         assert_eq!(sink.written, header_size as u64 + LENGTH);
         assert_eq!(sink.prefix.len(), header_size);
         assert!(sink.largest <= CHUNK_BYTES);
         let input = Cursor::new(&sink.prefix).chain(io::repeat(173).take(LENGTH));
-        let mut decoder = StreamDecoder::new(input, limits, &mut live).unwrap();
+        let mut decoder = StreamDecoder::new(input, limits, &mut || Ok(())).unwrap();
         let mut total = 0;
         assert!(
             decoder
-                .visit_record(&mut live, |header, input| {
+                .visit_record(&mut || Ok(()), |header, input| {
                     assert_eq!(header.oid, oid);
                     assert_eq!(header.length, LENGTH);
                     let mut chunk = vec![0; 2 * CHUNK_BYTES];
@@ -196,22 +203,23 @@ fn blobs_larger_than_32_mib_roundtrip_with_bounded_generated_sources_and_visitor
             0,
             "streaming never touches the retained payload buffer"
         );
-        assert_eq!(decoder.finish(seal.digest, &mut live).unwrap().1, seal);
+        assert_eq!(decoder.finish(seal.digest, &mut || Ok(())).unwrap().1, seal);
         // The near-identical default profile refuses before any payload read.
         let mut default =
-            StreamDecoder::new(sink.prefix.as_slice(), Default::default(), &mut live).unwrap();
+            StreamDecoder::new(sink.prefix.as_slice(), Default::default(), &mut || Ok(())).unwrap();
         assert!(
             default
-                .visit_record(&mut live, |_, _| panic!(
+                .visit_record(&mut || Ok(()), |_, _| panic!(
                     "default bound must precede visitor"
                 ))
                 .is_err()
         );
         // Merely raising the blob allowance cannot widen the buffered method.
-        let mut buffered = StreamDecoder::new(sink.prefix.as_slice(), limits, &mut live).unwrap();
+        let mut buffered =
+            StreamDecoder::new(sink.prefix.as_slice(), limits, &mut || Ok(())).unwrap();
         assert!(
             buffered
-                .record(&mut live)
+                .record(&mut || Ok(()))
                 .unwrap_err()
                 .contains("buffered object-byte limit")
         );
@@ -232,10 +240,12 @@ fn streaming_limits_precede_payload_reads_and_do_not_widen_metadata_or_archive_b
         max_blob_bytes: 1 << 40,
         ..Default::default()
     };
-    let mut decoder = StreamDecoder::new(metadata.as_slice(), limits, &mut live).unwrap();
+    let mut decoder = StreamDecoder::new(metadata.as_slice(), limits, &mut || Ok(())).unwrap();
     assert!(
         decoder
-            .visit_record(&mut live, |_, _| panic!("metadata bound before visitor"))
+            .visit_record(&mut || Ok(()), |_, _| panic!(
+                "metadata bound before visitor"
+            ))
             .is_err()
     );
     let payload = b"binary\0payload\xff\n";
@@ -256,7 +266,7 @@ fn streaming_limits_precede_payload_reads_and_do_not_widen_metadata_or_archive_b
             &authority(),
             1,
             denied,
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         let mut unread = Cursor::new(payload);
@@ -268,16 +278,16 @@ fn streaming_limits_precede_payload_reads_and_do_not_widen_metadata_or_archive_b
                     payload.len() as u64,
                     &proof(payload),
                     &mut unread,
-                    &mut live
+                    &mut || Ok(())
                 )
                 .is_err()
         );
         assert_eq!(unread.position(), 0);
-        assert!(encoder.finish(&mut live).is_err());
-        let mut decoder = StreamDecoder::new(bytes.as_slice(), denied, &mut live).unwrap();
+        assert!(encoder.finish(&mut || Ok(())).is_err());
+        let mut decoder = StreamDecoder::new(bytes.as_slice(), denied, &mut || Ok(())).unwrap();
         assert!(
             decoder
-                .visit_record(&mut live, |_, _| panic!("limit before visitor"))
+                .visit_record(&mut || Ok(()), |_, _| panic!("limit before visitor"))
                 .is_err()
         );
     }
@@ -304,10 +314,10 @@ fn incomplete_or_failed_visitors_and_swallowed_verification_errors_poison_the_pa
             bytes[65 + authority().len() + 8 + 20 + 1 + 8] ^= 1;
         }
         let mut decoder =
-            StreamDecoder::new(bytes.as_slice(), Default::default(), &mut live).unwrap();
+            StreamDecoder::new(bytes.as_slice(), Default::default(), &mut || Ok(())).unwrap();
         assert!(
             decoder
-                .visit_record(&mut live, |_, input| {
+                .visit_record(&mut || Ok(()), |_, input| {
                     match scenario {
                         0 => Ok(()),
                         1 => {
@@ -327,19 +337,20 @@ fn incomplete_or_failed_visitors_and_swallowed_verification_errors_poison_the_pa
                 .is_err(),
             "scenario {scenario}"
         );
-        assert!(decoder.visit_record(&mut live, |_, _| Ok(())).is_err());
-        assert!(decoder.finish(hash(&bytes), &mut live).is_err());
+        assert!(decoder.visit_record(&mut || Ok(()), |_, _| Ok(())).is_err());
+        assert!(decoder.finish(hash(&bytes), &mut || Ok(())).is_err());
     }
-    let mut decoder = StreamDecoder::new(valid.as_slice(), Default::default(), &mut live).unwrap();
+    let mut decoder =
+        StreamDecoder::new(valid.as_slice(), Default::default(), &mut || Ok(())).unwrap();
     assert!(
         decoder
-            .visit_record(&mut live, |_, input| {
+            .visit_record(&mut || Ok(()), |_, input| {
                 io::copy(input, &mut io::sink()).map_err(|error| error.to_string())?;
                 Ok(())
             })
             .unwrap()
     );
-    assert!(decoder.finish(hash(&valid), &mut live).is_ok());
+    assert!(decoder.finish(hash(&valid), &mut || Ok(())).is_ok());
 }
 
 struct LateFailure<'a> {
@@ -367,7 +378,7 @@ fn streamed_encoder_rejects_wrong_hash_short_extra_and_late_failed_sources() {
             &authority(),
             1,
             Default::default(),
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         let mut expected = proof(body);
@@ -388,7 +399,7 @@ fn streamed_encoder_rejects_wrong_hash_short_extra_and_late_failed_sources() {
                 body.len() as u64,
                 &expected,
                 &mut LateFailure { bytes: body },
-                &mut live,
+                &mut || Ok(()),
             )
         } else {
             encoder.object_stream(
@@ -397,11 +408,11 @@ fn streamed_encoder_rejects_wrong_hash_short_extra_and_late_failed_sources() {
                 body.len() as u64,
                 &expected,
                 &mut supplied.as_slice(),
-                &mut live,
+                &mut || Ok(()),
             )
         };
         assert!(result.is_err(), "scenario {scenario}");
-        assert!(encoder.finish(&mut live).is_err());
+        assert!(encoder.finish(&mut || Ok(())).is_err());
     }
     let mut encoder = StreamEncoder::new(
         io::sink(),
@@ -409,7 +420,7 @@ fn streamed_encoder_rejects_wrong_hash_short_extra_and_late_failed_sources() {
         &authority(),
         1,
         Default::default(),
-        &mut live,
+        &mut || Ok(()),
     )
     .unwrap();
     encoder
@@ -419,10 +430,10 @@ fn streamed_encoder_rejects_wrong_hash_short_extra_and_late_failed_sources() {
             body.len() as u64,
             &proof(body),
             &mut body.as_slice(),
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
-    assert!(encoder.finish(&mut live).is_ok());
+    assert!(encoder.finish(&mut || Ok(())).is_ok());
 }
 
 #[test]
@@ -448,7 +459,7 @@ fn cancellation_after_last_payload_read_and_after_source_eof_cannot_complete() {
             })
             .is_err()
     );
-    assert!(decoder.finish(hash(&bytes), &mut live).is_err());
+    assert!(decoder.finish(hash(&bytes), &mut || Ok(())).is_err());
     struct CancelAtEof<'a> {
         input: &'a [u8],
         cancelled: &'a Cell<bool>,
@@ -490,7 +501,7 @@ fn cancellation_after_last_payload_read_and_after_source_eof_cannot_complete() {
             )
             .is_err()
     );
-    assert!(encoder.finish(&mut live).is_err());
+    assert!(encoder.finish(&mut || Ok(())).is_err());
 }
 
 #[test]
@@ -506,7 +517,7 @@ fn empty_blob_reader_eof_is_verified_without_consuming_the_following_record() {
             &authority(),
             2,
             Default::default(),
-            &mut live,
+            &mut || Ok(()),
         )
         .unwrap();
         for (oid, body) in rows {
@@ -517,17 +528,17 @@ fn empty_blob_reader_eof_is_verified_without_consuming_the_following_record() {
                     body.len() as u64,
                     &proof(body),
                     &mut &*body,
-                    &mut live,
+                    &mut || Ok(()),
                 )
                 .unwrap();
         }
-        let seal = encoder.finish(&mut live).unwrap();
+        let seal = encoder.finish(&mut || Ok(())).unwrap();
         let mut decoder =
-            StreamDecoder::new(bytes.as_slice(), Default::default(), &mut live).unwrap();
+            StreamDecoder::new(bytes.as_slice(), Default::default(), &mut || Ok(())).unwrap();
         for (oid, body) in rows {
             assert!(
                 decoder
-                    .visit_record(&mut live, |header, input| {
+                    .visit_record(&mut || Ok(()), |header, input| {
                         assert_eq!(header.oid, oid);
                         let mut restored = Vec::new();
                         input.read_to_end(&mut restored).unwrap();
@@ -537,6 +548,6 @@ fn empty_blob_reader_eof_is_verified_without_consuming_the_following_record() {
                     .unwrap()
             );
         }
-        assert_eq!(decoder.finish(seal.digest, &mut live).unwrap().1, seal);
+        assert_eq!(decoder.finish(seal.digest, &mut || Ok(())).unwrap().1, seal);
     }
 }

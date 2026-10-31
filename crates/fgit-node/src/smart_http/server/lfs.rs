@@ -94,19 +94,14 @@ impl Failure {
                 Status::Unavailable,
                 "lfs_upload_outcome_unknown_retry_identical_object",
             ),
-            ArtifactStorageError::Io { kind, .. }
-                if matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) =>
-            {
-                Self::new(Status::Timeout, "lfs_request_expired")
-            }
-            ArtifactStorageError::Io { kind, .. }
-                if matches!(
-                    kind,
-                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
-                ) =>
-            {
-                Self::bad("incomplete_lfs_body")
-            }
+            ArtifactStorageError::Io {
+                kind: io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock,
+                ..
+            } => Self::new(Status::Timeout, "lfs_request_expired"),
+            ArtifactStorageError::Io {
+                kind: io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof,
+                ..
+            } => Self::bad("incomplete_lfs_body"),
             _ => Self::unavailable(),
         }
     }
@@ -118,11 +113,10 @@ impl Failure {
             ArtifactStorageError::Cancelled | ArtifactStorageError::Deadline => {
                 Self::new(Status::Timeout, "lfs_request_expired")
             }
-            ArtifactStorageError::Io { kind, .. }
-                if matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) =>
-            {
-                Self::new(Status::Timeout, "lfs_request_expired")
-            }
+            ArtifactStorageError::Io {
+                kind: io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock,
+                ..
+            } => Self::new(Status::Timeout, "lfs_request_expired"),
             _ => Self::unavailable(),
         }
     }

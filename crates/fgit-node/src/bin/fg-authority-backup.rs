@@ -193,7 +193,10 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
     }
     let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     let mut result = [0; 32];
-    for (out, pair) in result.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (out, pair) in result
+        .iter_mut()
+        .zip(value.as_bytes().as_chunks::<2>().0.iter())
+    {
         *out = 16 * nibble(pair[0]) + nibble(pair[1]);
     }
     Ok(result)
@@ -494,7 +497,7 @@ fn publish_new(destination: &Path, bytes: &[u8]) -> Result<(), String> {
                 staged = Some((path, file));
                 break;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(format!("cannot stage backup: {error}")),
         }
     }

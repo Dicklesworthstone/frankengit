@@ -3957,7 +3957,7 @@ impl CanonicalBlobReader for VerifiedFabricBlobReader<'_, '_> {
                 Err(StoreRefusal::StorageIo {
                     kind: io::ErrorKind::Interrupted,
                     ..
-                }) => continue,
+                }) => {}
                 Err(_) => {
                     return Err(PackWriteError::MissingCanonicalObject(
                         self.stream.identity(),

@@ -210,7 +210,7 @@ fn publish_streamed<T>(
                 staged = Some((path, file));
                 break;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(format!("cannot stage repository backup: {error}")),
         }
     }

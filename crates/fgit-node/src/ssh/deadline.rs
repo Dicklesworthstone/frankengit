@@ -50,7 +50,7 @@ fn read_with_idle_limit(
         let allowance = remaining()?;
         stream.set_read_timeout(Some(idle.map_or(allowance, |limit| allowance.min(limit))))?;
         match stream.read(buf) {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             result => {
                 remaining()?;
                 return result;
@@ -92,7 +92,7 @@ fn write_all_with_idle_limit(
                 ));
             }
             Ok(written) => bytes = &bytes[written..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
     }
