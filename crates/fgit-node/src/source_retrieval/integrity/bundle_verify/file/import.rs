@@ -26,23 +26,36 @@ pub struct FullBundleImportObject {
 }
 
 #[derive(Clone, Copy)]
-struct SelectedObject {
-    facts: FullBundleImportObject,
-    span: Span,
+pub(super) struct SelectedObject {
+    pub(super) facts: FullBundleImportObject,
+    pub(super) span: Span,
+}
+
+/// Shared upload custody for staging consumers. Implementations expose only
+/// selected uploaded objects; borrowed prerequisite objects never enter object
+/// placement through this interface.
+pub(crate) trait BundleImportObjectPlan {
+    fn uploaded_ids(&self) -> &BTreeSet<GitOid>;
+    fn object(&self, identity: GitOid) -> Option<FullBundleImportObject>;
+    fn read_metadata(
+        &mut self,
+        identity: GitOid,
+        live: &mut dyn FnMut() -> bool,
+    ) -> Result<Vec<u8>, BundleVerifyError>;
+    fn open_blob<'a>(
+        &'a mut self,
+        identity: GitOid,
+        live: &'a mut dyn FnMut() -> bool,
+    ) -> Result<FullBundleImportBlobReader<'a>, BundleVerifyError>;
 }
 
 /// Complete native content evidence plus exclusive scratch custody. Only the
 /// advertised-ref closure and its transport delta bases may be read for import.
 /// All supplied objects, including unselected ones, were nevertheless verified.
 pub struct FullBundleImportPlan {
-    scratch: OwnedScratch,
     verification: FileBundleVerification,
     receipt: StreamPackReceipt,
-    selected: BTreeSet<GitOid>,
-    objects: BTreeMap<GitOid, SelectedObject>,
-    total_selected_bytes: u64,
-    limits: BundleVerifyLimits,
-    failed: bool,
+    objects: RetainedBundleObjects,
 }
 
 impl FullBundleImportPlan {
@@ -56,6 +69,79 @@ impl FullBundleImportPlan {
         &self.receipt
     }
 
+    pub(crate) const fn selected_ids(&self) -> &BTreeSet<GitOid> {
+        self.objects.selected_ids()
+    }
+
+    pub(crate) fn object(&self, identity: GitOid) -> Option<FullBundleImportObject> {
+        self.objects.object(identity)
+    }
+
+    pub(crate) const fn total_selected_bytes(&self) -> u64 {
+        self.objects.total_selected_bytes()
+    }
+
+    pub(crate) fn read_metadata(
+        &mut self,
+        identity: GitOid,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<u8>, BundleVerifyError> {
+        self.objects.read_metadata(identity, live)
+    }
+
+    pub(crate) fn open_blob<'a>(
+        &'a mut self,
+        identity: GitOid,
+        live: &'a mut dyn FnMut() -> bool,
+    ) -> Result<FullBundleImportBlobReader<'a>, BundleVerifyError> {
+        self.objects.open_blob(identity, live)
+    }
+
+    pub(crate) fn finish(self) -> Result<(), BundleVerifyError> {
+        self.objects.finish()
+    }
+}
+
+impl BundleImportObjectPlan for FullBundleImportPlan {
+    fn uploaded_ids(&self) -> &BTreeSet<GitOid> {
+        self.selected_ids()
+    }
+
+    fn object(&self, identity: GitOid) -> Option<FullBundleImportObject> {
+        self.objects.object(identity)
+    }
+
+    fn read_metadata(
+        &mut self,
+        identity: GitOid,
+        live: &mut dyn FnMut() -> bool,
+    ) -> Result<Vec<u8>, BundleVerifyError> {
+        self.objects.read_metadata(identity, &mut || live())
+    }
+
+    fn open_blob<'a>(
+        &'a mut self,
+        identity: GitOid,
+        live: &'a mut dyn FnMut() -> bool,
+    ) -> Result<FullBundleImportBlobReader<'a>, BundleVerifyError> {
+        self.objects.open_blob(identity, live)
+    }
+}
+
+/// Descriptor ownership and poisoned-reader state are shared by full and
+/// incremental imports, without giving incremental input full-bundle evidence.
+pub(super) struct RetainedBundleObjects {
+    pub(super) scratch: OwnedScratch,
+    pub(super) scratch_bytes: u64,
+    pub(super) original_bytes: u64,
+    pub(super) selected: BTreeSet<GitOid>,
+    pub(super) objects: BTreeMap<GitOid, SelectedObject>,
+    pub(super) total_selected_bytes: u64,
+    pub(super) limits: BundleVerifyLimits,
+    pub(super) failed: bool,
+}
+
+impl RetainedBundleObjects {
     pub(crate) const fn selected_ids(&self) -> &BTreeSet<GitOid> {
         &self.selected
     }
@@ -83,10 +169,11 @@ impl FullBundleImportPlan {
                     "metadata-only import read",
                 )));
             }
-            let mut scratch = Scratch::reopen(
+            let mut scratch = Scratch::reopen_with_originals(
                 self.scratch.file_mut()?,
-                self.verification.scratch_bytes(),
+                self.scratch_bytes,
                 &self.limits,
+                self.original_bytes,
                 live,
             )?;
             scratch.read(object.span, self.limits.graph.max_object_bytes, live)
@@ -132,10 +219,11 @@ impl FullBundleImportPlan {
                 return Err(error);
             }
         };
-        let scratch = match Scratch::reopen(
+        let scratch = match Scratch::reopen_with_originals(
             file,
-            self.verification.scratch_bytes(),
+            self.scratch_bytes,
             &self.limits,
+            self.original_bytes,
             &mut || live(),
         ) {
             Ok(scratch) => scratch,
@@ -311,7 +399,8 @@ fn prepare_reader_profile<R: Read + Seek>(
         let selection = select_closure(
             &mut verified.inventory,
             &mut workspace,
-            verified.file.verified(),
+            verified.file.verified().format(),
+            verified.file.verified().references(),
             sources,
             limits,
             &mut live,
@@ -327,30 +416,36 @@ fn prepare_reader_profile<R: Read + Seek>(
             return Err(error);
         }
     };
-    Ok(FullBundleImportPlan {
+    let retained = RetainedBundleObjects {
         scratch,
-        verification: verified.file,
-        receipt: verified.receipt,
+        scratch_bytes: verified.file.scratch_bytes(),
+        original_bytes: 0,
         selected,
         objects,
         total_selected_bytes,
         limits: limits.clone(),
         failed: false,
+    };
+    Ok(FullBundleImportPlan {
+        verification: verified.file,
+        receipt: verified.receipt,
+        objects: retained,
     })
 }
 
-type Selection = (BTreeSet<GitOid>, BTreeMap<GitOid, SelectedObject>, u64);
+pub(super) type Selection = (BTreeSet<GitOid>, BTreeMap<GitOid, SelectedObject>, u64);
 
-fn select_closure<W: Read + io::Write + Seek>(
+pub(super) fn select_closure<W: Read + io::Write + Seek>(
     inventory: &mut Inventory,
     scratch: &mut Scratch<'_, W>,
-    verified: &VerifiedGitBundle,
+    format: GitHashAlgorithm,
+    references: &BTreeMap<RefName, GitOid>,
     sources: Option<&[RefName]>,
     limits: &BundleVerifyLimits,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Selection, BundleVerifyError> {
-    let mut pending = match sources {
-        None => verified.references().values().copied().collect(),
+    let pending = match sources {
+        None => references.values().copied().collect(),
         Some(sources) => {
             if sources.is_empty() {
                 return Err(BundleVerifyError::Envelope(FullBundleError::Limit(
@@ -364,18 +459,28 @@ fn select_closure<W: Read + io::Write + Seek>(
                 // Fanout is charged but does not create duplicate object roots
                 // or confuse the header-reference and command-count limits.
                 inventory.charge_selection_work(source.as_bytes().len(), limits)?;
-                let target =
-                    verified
-                        .references()
-                        .get(source)
-                        .ok_or(BundleVerifyError::Envelope(FullBundleError::Invalid(
-                            "unadvertised fetch source",
-                        )))?;
+                let target = references.get(source).ok_or(BundleVerifyError::Envelope(
+                    FullBundleError::Invalid("unadvertised fetch source"),
+                ))?;
                 roots.insert(*target);
             }
             roots
         }
     };
+    select_objects(inventory, scratch, format, pending, false, limits, live)
+}
+
+/// Restrict prerequisite health traversal to captured original spans. Incoming
+/// pack objects cannot fill a missing prerequisite edge or authorize a base.
+pub(super) fn select_objects<W: Read + io::Write + Seek>(
+    inventory: &mut Inventory,
+    scratch: &mut Scratch<'_, W>,
+    format: GitHashAlgorithm,
+    mut pending: BTreeSet<GitOid>,
+    originals_only: bool,
+    limits: &BundleVerifyLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<Selection, BundleVerifyError> {
     let mut selected = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut total = 0_u64;
@@ -386,7 +491,14 @@ fn select_closure<W: Read + io::Write + Seek>(
         if !selected.insert(identity) {
             continue;
         }
-        let object = inventory.object(identity)?;
+        if selected.len() > limits.graph.max_objects {
+            return Err(BundleVerifyError::Graph(GraphRefusal::Limit("objects")));
+        }
+        let object = if originals_only {
+            inventory.original(identity)?
+        } else {
+            inventory.object(identity)?
+        };
         total = total
             .checked_add(object.span.length() as u64)
             .filter(|total| *total <= limits.graph.max_payload_bytes)
@@ -403,7 +515,12 @@ fn select_closure<W: Read + io::Write + Seek>(
                 span: object.span,
             },
         );
-        if let Some(base) = inventory.delta_base(identity)? {
+        let base = if originals_only {
+            None
+        } else {
+            inventory.delta_base(identity)?
+        };
+        if let Some(base) = base {
             edges_left =
                 edges_left
                     .checked_sub(1)
@@ -421,7 +538,7 @@ fn select_closure<W: Read + io::Write + Seek>(
         let body = scratch.read(object.span, limits.graph.max_object_bytes, live)?;
         let parse_limits = ParseLimits {
             max_object_bytes: limits.graph.max_object_bytes,
-            tree_reference_bytes: verified.format().digest_len(),
+            tree_reference_bytes: format.digest_len(),
             max_tree_entries: edges_left.min(ParseLimits::default().max_tree_entries),
             ..ParseLimits::default()
         };
@@ -445,7 +562,7 @@ fn select_closure<W: Read + io::Write + Seek>(
         })?;
         checkpoint(live)?;
         let edges = crate::loose_import::graph::references(
-            verified.format(),
+            format,
             &parsed,
             &body,
             &parse_limits,
@@ -462,7 +579,11 @@ fn select_closure<W: Read + io::Write + Seek>(
         inventory.charge_selection_work(edges.len(), limits)?;
         for (target, expected) in edges {
             checkpoint(live)?;
-            let target_object = inventory.object(target)?;
+            let target_object = if originals_only {
+                inventory.original(target)?
+            } else {
+                inventory.object(target)?
+            };
             if target_object.kind != expected {
                 return Err(BundleVerifyError::Graph(GraphRefusal::TargetKind {
                     target,
@@ -479,14 +600,14 @@ fn select_closure<W: Read + io::Write + Seek>(
     Ok((selected, objects, total))
 }
 
-struct OwnedScratch {
+pub(super) struct OwnedScratch {
     file: Option<File>,
     path: Option<PathBuf>,
     identity: ScratchIdentity,
 }
 
 impl OwnedScratch {
-    fn create(path: &Path) -> Result<Self, BundleVerifyError> {
+    pub(super) fn create(path: &Path) -> Result<Self, BundleVerifyError> {
         if !cfg!(unix) {
             return Err(unsupported_scratch_identity());
         }
@@ -514,11 +635,11 @@ impl OwnedScratch {
         })
     }
 
-    fn file_mut(&mut self) -> Result<&mut File, BundleVerifyError> {
+    pub(super) fn file_mut(&mut self) -> Result<&mut File, BundleVerifyError> {
         self.file.as_mut().ok_or(BundleVerifyError::ScratchChanged)
     }
 
-    fn cleanup(&mut self) -> Result<(), BundleVerifyError> {
+    pub(super) fn cleanup(&mut self) -> Result<(), BundleVerifyError> {
         // Disarm both fields even on refusal. Drop must never retry a saved
         // pathname after ownership was lost or a cleanup operation failed.
         let file = self.file.take();

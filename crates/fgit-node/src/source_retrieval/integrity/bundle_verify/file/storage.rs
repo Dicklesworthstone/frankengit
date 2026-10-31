@@ -121,6 +121,12 @@ impl Span {
     pub(super) const fn length(self) -> usize {
         self.length
     }
+
+    /// A matching native ID is insufficient when separately sourced bodies
+    /// overlap: retain the stronger original payload commitment too.
+    pub(super) fn same_content(self, other: Self) -> bool {
+        self.length == other.length && self.sha256 == other.sha256
+    }
 }
 
 /// One bounded append, still private and uncommitted until its exact length
@@ -207,8 +213,22 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         limits: &BundleVerifyLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Self, BundleVerifyError> {
+        Self::reopen_with_originals(file, end, limits, 0, live)
+    }
+
+    /// Original bodies have their own bounded physical-read allowance. Their
+    /// retained spans add scratch capacity without granting incoming objects
+    /// any additional input, inflated or reconstructed payload capacity.
+    pub(super) fn reopen_with_originals(
+        file: &'a mut W,
+        end: u64,
+        limits: &BundleVerifyLimits,
+        original_bytes: u64,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Self, BundleVerifyError> {
         let maximum = (limits.pack.max_total_expanded_bytes as u64)
             .checked_add(limits.graph.max_payload_bytes)
+            .and_then(|bytes| bytes.checked_add(original_bytes))
             .ok_or(BundleVerifyError::ScratchChanged)?;
         if end > maximum || seek(file, SeekFrom::End(0), "recheck scratch length", live)? != end {
             return Err(BundleVerifyError::ScratchChanged);
@@ -221,6 +241,15 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         limits: &BundleVerifyLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Self, BundleVerifyError> {
+        Self::new_with_originals(file, limits, 0, live)
+    }
+
+    pub(super) fn new_with_originals(
+        file: &'a mut W,
+        limits: &BundleVerifyLimits,
+        original_bytes: u64,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Self, BundleVerifyError> {
         let position = seek(file, SeekFrom::Current(0), "inspect scratch position", live)?;
         let end = seek(file, SeekFrom::End(0), "inspect scratch length", live)?;
         if position != 0 || end != 0 {
@@ -228,6 +257,7 @@ impl<'a, W: Read + Write + Seek> Scratch<'a, W> {
         }
         let maximum = (limits.pack.max_total_expanded_bytes as u64)
             .checked_add(limits.graph.max_payload_bytes)
+            .and_then(|bytes| bytes.checked_add(original_bytes))
             .ok_or(BundleVerifyError::Graph(super::super::GraphRefusal::Limit(
                 "scratch bytes",
             )))?;

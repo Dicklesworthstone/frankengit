@@ -2,11 +2,16 @@
 //! the in-memory inventory and graph remain explicitly count/edge bounded.
 
 mod import;
+mod incremental;
 mod resolve;
 mod storage;
 
+pub(crate) use import::BundleImportObjectPlan;
 pub use import::{
     FullBundleImportPlan, prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
+};
+pub(crate) use incremental::{
+    BundleOriginalObject, BundleOriginalSource, prepare_incremental_bundle_import_reader,
 };
 
 use std::cell::RefCell;
@@ -18,7 +23,7 @@ use fgit_pack::{
     StreamPackError, StreamPackIndexEntry, StreamPackReceipt, build_streamed_pack_index_v2,
     read_streamed_pack_chunks,
 };
-use fgit_treefs::integrity::{BlobGraphError, ObjectKind};
+use fgit_treefs::integrity::{BlobGraphError, GraphReport, ObjectKind};
 use fgit_types::{GitHashAlgorithm, RefName};
 
 use super::recovery::{RecoveryMetadata, prepare_metadata};
@@ -220,13 +225,103 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     expected_format: Option<GitHashAlgorithm>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<VerifiedReaderInventory, BundleVerifyError> {
+    let verified = verify_reader_contents(
+        input,
+        workspace,
+        limits,
+        expectations,
+        expected_format,
+        None,
+        0,
+        live,
+    )?;
+    let references = verified
+        .header
+        .references()
+        .iter()
+        .map(|row| (row.name().clone(), *row.target()))
+        .collect();
+    let report = VerifiedGitBundle {
+        format: verified.header.format(),
+        bytes: verified.bytes,
+        sha256: verified.sha256,
+        pack_bytes: usize::try_from(verified.pack_length)
+            .map_err(|_| BundleVerifyError::SourceChanged)?,
+        pack_checksum: verified.receipt.trailer(),
+        advertised_head: verified.header.head(),
+        references,
+        graph: verified.graph,
+        delta_objects: verified.inventory.delta_objects,
+        resolution_passes: verified.resolution_passes,
+    };
+    Ok(VerifiedReaderInventory {
+        file: FileBundleVerification {
+            verified: report,
+            pack_offset: verified.pack_offset,
+            pack_len: verified.pack_length,
+            pack_sha256: verified.receipt.pack_sha256(),
+            index: verified.index,
+            scratch_bytes: verified.scratch_bytes,
+        },
+        inventory: verified.inventory,
+        receipt: verified.receipt,
+    })
+}
+
+/// Shared native framing, resolved inventory and union-graph facts. This is
+/// deliberately distinct from public full-bundle content/recovery evidence:
+/// incremental input may depend on separately authenticated original bodies.
+struct VerifiedReaderContents {
+    header: FullBundleHeader,
+    inventory: Inventory,
+    receipt: StreamPackReceipt,
+    bytes: usize,
+    sha256: [u8; 32],
+    pack_offset: u64,
+    pack_length: u64,
+    index: Vec<u8>,
+    scratch_bytes: u64,
+    graph: GraphReport,
+    resolution_passes: usize,
+}
+
+fn read_header(
+    reader: &mut impl std::io::BufRead,
+    limits: &BundleVerifyLimits,
+    incremental: bool,
+    live: &mut impl FnMut() -> bool,
+) -> Result<FullBundleHeader, BundleVerifyError> {
+    let result = if incremental {
+        FullBundleHeader::read_incremental(reader, limits.envelope, live)
+    } else {
+        FullBundleHeader::read(reader, limits.envelope, live)
+    };
+    checkpoint(live)?;
+    result.map_err(header_error)
+}
+
+fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
+    input: &mut R,
+    workspace: &mut W,
+    limits: &BundleVerifyLimits,
+    expectations: Option<&BundleExpectations>,
+    expected_format: Option<GitHashAlgorithm>,
+    originals: Option<&mut dyn BundleOriginalSource>,
+    max_original_bytes: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<VerifiedReaderContents, BundleVerifyError> {
     checkpoint(live)?;
     if let Some(expected) = expectations {
         expected
             .validate_limits(limits)
             .map_err(BundleVerifyError::Expectation)?;
     }
-    let mut scratch = Scratch::new(workspace, limits, live)?;
+    let incremental = originals.is_some();
+    let mut scratch = if incremental {
+        Scratch::new_with_originals(workspace, limits, max_original_bytes as u64, live)?
+    } else {
+        Scratch::new(workspace, limits, live)?
+    };
     let length = seek(input, SeekFrom::End(0), "inspect bundle length", live)?;
     let bytes = usize::try_from(length)
         .ok()
@@ -237,9 +332,7 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     seek(input, SeekFrom::Start(0), "rewind bundle", live)?;
     let first = {
         let mut reader = BufReader::with_capacity(CHUNK_BYTES, &mut *input);
-        let result = FullBundleHeader::read(&mut reader, limits.envelope, live);
-        checkpoint(live)?;
-        result.map_err(header_error)?
+        read_header(&mut reader, limits, incremental, live)?
     };
     if let Some(expected) = expected_format.filter(|expected| *expected != first.format()) {
         return Err(BundleVerifyError::Pack(
@@ -288,9 +381,7 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     let mut inventory = Inventory::new(limits);
     let receipt = {
         let mut reader = BufReader::with_capacity(CHUNK_BYTES, &mut hashing);
-        let result = FullBundleHeader::read(&mut reader, limits.envelope, live);
-        checkpoint(live)?;
-        let selected = result.map_err(header_error)?;
+        let selected = read_header(&mut reader, limits, incremental, live)?;
         if selected.raw_bytes() != first.raw_bytes() {
             return Err(BundleVerifyError::SourceChanged);
         }
@@ -325,9 +416,49 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     if consumed != length || sha256 != preflight || receipt.pack_bytes() != pack_length {
         return Err(BundleVerifyError::SourceChanged);
     }
+    if let Some(source) = originals {
+        incremental::capture_originals(
+            source,
+            &first,
+            &mut inventory,
+            &mut scratch,
+            max_original_bytes,
+            limits,
+            live,
+        )?;
+    }
+    let mut union_limits = limits.clone();
+    union_limits.graph.max_payload_bytes = union_limits
+        .graph
+        .max_payload_bytes
+        .checked_add(inventory.original_bytes() as u64)
+        .ok_or(BundleVerifyError::Graph(super::GraphRefusal::Limit(
+            "payload bytes",
+        )))?;
+    if incremental {
+        incremental::validate_original_closure(
+            &first,
+            &mut inventory,
+            &mut scratch,
+            &union_limits,
+            live,
+        )?;
+    }
     let resolution_passes = inventory.resolve(first.format(), &mut scratch, limits, live)?;
-    let ids: BTreeSet<_> = inventory.by_id.keys().copied().collect();
-    let result = ObjectGraphAudit::new(&ids, first.format(), limits.graph, live);
+    let mut ids = BTreeSet::new();
+    for &identity in inventory.by_id.keys().chain(inventory.originals.keys()) {
+        checkpoint(live)?;
+        if ids.contains(&identity) {
+            continue;
+        }
+        if ids.len() >= limits.graph.max_objects {
+            return Err(BundleVerifyError::Graph(super::GraphRefusal::Limit(
+                "objects",
+            )));
+        }
+        ids.insert(identity);
+    }
+    let result = ObjectGraphAudit::new(&ids, first.format(), union_limits.graph, live);
     checkpoint(live)?;
     let mut graph = result.map_err(BundleVerifyError::Graph)?;
     let references: BTreeMap<_, _> = first
@@ -338,13 +469,9 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     let mut rows = Vec::new();
     rows.try_reserve_exact(inventory.entries.len())
         .map_err(|_| BundleVerifyError::Allocation)?;
-    for (&id, &at) in &inventory.by_id {
+    for &id in &ids {
         checkpoint(live)?;
-        let entry = &inventory.entries[at];
-        let resolved = entry
-            .resolved
-            .as_ref()
-            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+        let resolved = inventory.object(id)?;
         if resolved.kind == ObjectKind::Blob {
             if resolved.span.length() > limits.max_streamed_blob_bytes {
                 return Err(BundleVerifyError::Graph(super::GraphRefusal::Limit(
@@ -375,12 +502,15 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
             checkpoint(live)?;
             result.map_err(BundleVerifyError::Graph)?;
         }
-        rows.push(StreamPackIndexEntry {
-            oid: id,
-            pack_offset: entry.offset,
-            end_offset: entry.end_offset,
-            crc32: entry.crc32,
-        });
+        if let Some(&at) = inventory.by_id.get(&id) {
+            let entry = &inventory.entries[at];
+            rows.push(StreamPackIndexEntry {
+                oid: id,
+                pack_offset: entry.offset,
+                end_offset: entry.end_offset,
+                crc32: entry.crc32,
+            });
+        }
     }
     let result = graph.finish(&references, live);
     checkpoint(live)?;
@@ -389,30 +519,19 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     checkpoint(live)?;
     let index = result.map_err(BundleVerifyError::Pack)?;
     scratch.finish(live)?;
-    let verified = VerifiedGitBundle {
-        format: first.format(),
-        bytes,
-        sha256,
-        pack_bytes: usize::try_from(pack_length).map_err(|_| BundleVerifyError::SourceChanged)?,
-        pack_checksum: receipt.trailer(),
-        advertised_head: first.head(),
-        references,
-        graph,
-        delta_objects: inventory.delta_objects,
-        resolution_passes,
-    };
     checkpoint(live)?;
-    Ok(VerifiedReaderInventory {
-        file: FileBundleVerification {
-            verified,
-            pack_offset,
-            pack_len: pack_length,
-            pack_sha256: receipt.pack_sha256(),
-            index,
-            scratch_bytes: scratch.bytes(),
-        },
+    Ok(VerifiedReaderContents {
+        header: first,
         inventory,
         receipt,
+        bytes,
+        sha256,
+        pack_offset,
+        pack_length,
+        index,
+        scratch_bytes: scratch.bytes(),
+        graph,
+        resolution_passes,
     })
 }
 

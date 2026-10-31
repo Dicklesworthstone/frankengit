@@ -11,6 +11,10 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 #[path = "import_tests.rs"]
 mod import_tests;
 
+#[cfg(unix)]
+#[path = "incremental_tests.rs"]
+mod incremental_tests;
+
 #[cfg(not(unix))]
 #[test]
 fn retained_import_refuses_before_reading_or_creating_on_unsupported_platforms() {

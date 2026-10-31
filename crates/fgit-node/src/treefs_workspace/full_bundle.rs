@@ -37,7 +37,9 @@ use std::cell::Cell;
 mod file_import;
 mod incremental;
 mod streaming;
-pub use file_import::{StreamBundleImportQuery, StreamBundleImportRefusal};
+pub use file_import::{
+    StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
+};
 pub use streaming::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
 };

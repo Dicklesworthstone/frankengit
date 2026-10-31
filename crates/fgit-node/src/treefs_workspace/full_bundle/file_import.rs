@@ -25,8 +25,8 @@ use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 
 use crate::receive_staging::ReceiveStaging;
 use crate::source_retrieval::integrity::bundle_verify::{
-    BundleVerifyError, BundleVerifyLimits, FullBundleImportPlan, prepare_full_bundle_fetch_reader,
-    prepare_full_bundle_import_reader,
+    BundleImportObjectPlan, BundleVerifyError, BundleVerifyLimits, FullBundleImportPlan,
+    prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
 };
 use crate::{LoopbackReceiveSession, NodeRefusal, NodeRequestContext, OneNode};
 
@@ -35,6 +35,9 @@ use super::{
 };
 
 mod fetch;
+mod incremental;
+pub(super) mod originals;
+pub use incremental::StreamIncrementalBundleImportQuery;
 
 const MAX_BYTES: u64 = 16_384 * 1024 * 1024;
 const METADATA_BATCH_BYTES: usize = 4 * 1024 * 1024;
@@ -125,6 +128,62 @@ fn rewind(
         .seek(SeekFrom::Start(0))
         .map_err(|error| io_error("rewind bundle import", error))?;
     checkpoint(live)
+}
+
+fn bounded_query(
+    node: &OneNode,
+    mut query: StreamBundleImportQuery,
+    limits: &AdmissionLimits,
+    all_refs: bool,
+) -> Result<StreamBundleImportQuery, StreamBundleImportRefusal> {
+    for allowance in [
+        query.limits.envelope.max_bundle_bytes,
+        query.limits.pack.max_input_bytes,
+        query.limits.pack.max_total_expanded_bytes,
+        query.limits.max_streamed_blob_bytes,
+    ] {
+        if allowance == 0 || allowance as u64 > MAX_BYTES {
+            return Err(StreamBundleImportRefusal::InvalidQuery(
+                "byte allowances must be in 1..=16 GiB",
+            ));
+        }
+    }
+    query.limits.pack.max_object_bytes = query
+        .limits
+        .pack
+        .max_object_bytes
+        .min(usize::try_from(node.max_object_bytes).unwrap_or(usize::MAX))
+        .min(crate::DEFAULT_MAX_OBJECT_BYTES as usize);
+    query.limits.graph.max_object_bytes = query
+        .limits
+        .graph
+        .max_object_bytes
+        .min(query.limits.pack.max_object_bytes);
+    query.limits.max_streamed_blob_bytes = query.limits.max_streamed_blob_bytes.min(
+        node.service_config
+            .bundle_import_blob_limit
+            .unwrap_or_else(|| usize::try_from(node.max_object_bytes).unwrap_or(usize::MAX)),
+    );
+    query.limits.envelope.max_references = query
+        .limits
+        .envelope
+        .max_references
+        .min(fgit_wire::receive::ReceiveLimits::default().max_commands);
+    // An explicit fetch can select one destination from a larger header.
+    // Advertisement capacity and atomic command capacity are independent.
+    if all_refs {
+        query.limits.envelope.max_references = query
+            .limits
+            .envelope
+            .max_references
+            .min(limits.command_limit(true).saturating_add(1));
+    }
+    query.limits.graph.max_references = query
+        .limits
+        .graph
+        .max_references
+        .min(query.limits.envelope.max_references);
+    Ok(query)
 }
 
 impl OneNode {
@@ -286,7 +345,7 @@ impl OneNode {
         session: &LoopbackReceiveSession,
         input: &mut R,
         mappings: Option<&[BundleRefMapping]>,
-        mut query: StreamBundleImportQuery,
+        query: StreamBundleImportQuery,
         limits: AdmissionLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
@@ -294,53 +353,7 @@ impl OneNode {
         let authenticated = session
             .authenticated_session()
             .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
-        for allowance in [
-            query.limits.envelope.max_bundle_bytes,
-            query.limits.pack.max_input_bytes,
-            query.limits.pack.max_total_expanded_bytes,
-            query.limits.max_streamed_blob_bytes,
-        ] {
-            if allowance == 0 || allowance as u64 > MAX_BYTES {
-                return Err(StreamBundleImportRefusal::InvalidQuery(
-                    "byte allowances must be in 1..=16 GiB",
-                ));
-            }
-        }
-        query.limits.pack.max_object_bytes = query
-            .limits
-            .pack
-            .max_object_bytes
-            .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX))
-            .min(crate::DEFAULT_MAX_OBJECT_BYTES as usize);
-        query.limits.graph.max_object_bytes = query
-            .limits
-            .graph
-            .max_object_bytes
-            .min(query.limits.pack.max_object_bytes);
-        query.limits.max_streamed_blob_bytes = query.limits.max_streamed_blob_bytes.min(
-            self.service_config
-                .bundle_import_blob_limit
-                .unwrap_or_else(|| usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)),
-        );
-        query.limits.envelope.max_references = query
-            .limits
-            .envelope
-            .max_references
-            .min(fgit_wire::receive::ReceiveLimits::default().max_commands);
-        // An explicit fetch can select one destination from a larger header.
-        // Advertisement capacity and atomic command capacity are independent.
-        if mappings.is_none() {
-            query.limits.envelope.max_references = query
-                .limits
-                .envelope
-                .max_references
-                .min(limits.command_limit(true).saturating_add(1));
-        }
-        query.limits.graph.max_references = query
-            .limits
-            .graph
-            .max_references
-            .min(query.limits.envelope.max_references);
+        let query = bounded_query(self, query, &limits, mappings.is_none())?;
 
         rewind(input, live)?;
         let parsed = FullBundleHeader::read(
@@ -627,14 +640,14 @@ impl OneNode {
     }
 }
 
-fn stage_selected(
+fn stage_selected<P: BundleImportObjectPlan>(
     node: &OneNode,
-    plan: &mut FullBundleImportPlan,
+    plan: &mut P,
     staging: &ReceiveStaging,
     maximum_blob_bytes: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), StreamBundleImportRefusal> {
-    let ids = plan.selected_ids().clone();
+    let ids = plan.uploaded_ids().clone();
     let mut pending = Vec::<VerifiedObject>::new();
     let mut pending_bytes = 0_usize;
     for id in ids {
@@ -683,8 +696,8 @@ fn stage_selected(
     checkpoint(live)
 }
 
-fn blob_commitment(
-    plan: &mut FullBundleImportPlan,
+fn blob_commitment<P: BundleImportObjectPlan>(
+    plan: &mut P,
     id: GitOid,
     length: usize,
     live: &mut impl FnMut() -> bool,

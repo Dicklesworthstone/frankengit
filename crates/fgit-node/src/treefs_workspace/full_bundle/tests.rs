@@ -523,3 +523,8 @@ fn assert_native_transfer(source: &OneNode, destination: &OneNode, id: GitOid) {
 
 #[path = "file_fetch_tests.rs"]
 mod file_fetch_tests;
+
+#[path = "file_import/incremental_tests.rs"]
+mod file_incremental_tests;
+#[path = "file_import/originals_tests.rs"]
+mod file_originals_tests;

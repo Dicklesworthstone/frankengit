@@ -1,6 +1,7 @@
 //! Metadata-only discovery over scratch-backed native objects. REF_DELTA bases
-//! are learned exclusively from locally reconstructed bytes, never an index or
-//! an external object source. Cycles and missing bases cannot make progress.
+//! come from native-verified pack entries or the separately captured, complete
+//! declared prerequisite closure. Neither caller offsets nor an index can
+//! manufacture a base. Cycles and missing bases cannot make progress.
 
 mod stream;
 
@@ -41,25 +42,25 @@ pub(super) struct Entry {
     pub(super) resolved: Option<Resolved>,
 }
 
-enum NativeEntryHash {
+pub(super) enum NativeEntryHash {
     Sha1(GitObjectHasher<Sha1>),
     Sha256(GitObjectHasher<Sha256>),
 }
 impl NativeEntryHash {
-    fn new(format: GitHashAlgorithm, kind: ObjectKind, length: usize) -> Self {
+    pub(super) fn new(format: GitHashAlgorithm, kind: ObjectKind, length: usize) -> Self {
         match format {
             GitHashAlgorithm::Sha1 => Self::Sha1(GitObjectHasher::new(kind, length as u64)),
             GitHashAlgorithm::Sha256 => Self::Sha256(GitObjectHasher::new(kind, length as u64)),
         }
     }
-    fn update(&mut self, bytes: &[u8]) -> Result<(), BundleVerifyError> {
+    pub(super) fn update(&mut self, bytes: &[u8]) -> Result<(), BundleVerifyError> {
         match self {
             Self::Sha1(hash) => hash.update(bytes),
             Self::Sha256(hash) => hash.update(bytes),
         }
         .map_err(|_| BundleVerifyError::Pack(PackError::NativeObjectIdMismatch))
     }
-    fn finish(self) -> Result<GitOid, BundleVerifyError> {
+    pub(super) fn finish(self) -> Result<GitOid, BundleVerifyError> {
         match self {
             Self::Sha1(hash) => hash.finish().map(|id| id.erase()),
             Self::Sha256(hash) => hash.finish().map(|id| id.erase()),
@@ -78,6 +79,9 @@ struct Pending {
 pub(super) struct Inventory {
     pub(super) entries: Vec<Entry>,
     pub(super) by_id: BTreeMap<GitOid, usize>,
+    /// External spans never acquire pack offsets, entries or index rows.
+    pub(super) originals: BTreeMap<GitOid, Resolved>,
+    original_expanded_bytes: usize,
     by_offset: BTreeMap<u64, usize>,
     fanout: BTreeMap<Base, usize>,
     payload_bytes: u64,
@@ -86,38 +90,122 @@ pub(super) struct Inventory {
     pending: Option<Pending>,
 }
 impl Inventory {
-    /// A resolved identity and its original authenticated scratch span.
+    /// Prefer a supplied object when it also occurs in the original closure.
+    /// Such overlaps must match both native identity and SHA-256 commitment.
     pub(super) fn object(&self, id: GitOid) -> Result<Resolved, BundleVerifyError> {
         self.by_id
             .get(&id)
             .and_then(|at| self.entries.get(*at))
             .and_then(|entry| entry.resolved)
+            .or_else(|| self.originals.get(&id).copied())
             .ok_or(BundleVerifyError::ResolutionIncomplete)
     }
 
-    /// Retain the transport dependency of a selected delta result as well as
-    /// its native graph dependencies. Only completed in-pack resolution is
-    /// consulted; no destination object source exists here.
+    pub(super) fn original(&self, id: GitOid) -> Result<Resolved, BundleVerifyError> {
+        self.originals.get(&id).copied().ok_or_else(|| {
+            BundleVerifyError::Graph(GraphRefusal::MissingTarget {
+                source: None,
+                target: id,
+            })
+        })
+    }
+
+    fn base_object(&self, base: Base) -> Option<Resolved> {
+        match base {
+            Base::Offset(offset) => self
+                .by_offset
+                .get(&offset)
+                .and_then(|at| self.entries.get(*at))
+                .and_then(|entry| entry.resolved),
+            Base::Identity(id) => self.object(id).ok(),
+        }
+    }
+
+    /// Retain real transport dependencies alongside native graph edges. An
+    /// external original has no pack transport dependency of its own.
     pub(super) fn delta_base(&self, id: GitOid) -> Result<Option<GitOid>, BundleVerifyError> {
+        let Some(at) = self.by_id.get(&id) else {
+            return self.original(id).map(|_| None);
+        };
         let entry = self
+            .entries
+            .get(*at)
+            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
+        entry
+            .base
+            .map(|base| {
+                self.base_object(base)
+                    .map(|resolved| resolved.id)
+                    .ok_or(BundleVerifyError::ResolutionIncomplete)
+            })
+            .transpose()
+    }
+
+    /// Called only after actual source EOF, exact length and native hashing.
+    /// Prepay originals in the same count-once resolution ledger used by the
+    /// native delta engine. The ceiling gains EXACTLY this prepaid amount:
+    /// remaining uploaded expansion capacity is unchanged, even for a reused
+    /// original base or an original that is never used by a delta.
+    pub(super) fn retain_original(
+        &mut self,
+        id: GitOid,
+        kind: ObjectKind,
+        span: Span,
+        limits: &BundleVerifyLimits,
+    ) -> Result<(), BundleVerifyError> {
+        if self.originals.contains_key(&id) {
+            return Err(BundleVerifyError::DuplicateObject(id));
+        }
+        if let Some(uploaded) = self
             .by_id
             .get(&id)
             .and_then(|at| self.entries.get(*at))
-            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
-        let Some(base) = entry.base else {
-            return Ok(None);
-        };
-        let at = match base {
-            Base::Offset(offset) => self.by_offset.get(&offset),
-            Base::Identity(identity) => self.by_id.get(&identity),
-        }
-        .ok_or(BundleVerifyError::ResolutionIncomplete)?;
-        let resolved = self
-            .entries
-            .get(*at)
             .and_then(|entry| entry.resolved)
-            .ok_or(BundleVerifyError::ResolutionIncomplete)?;
-        Ok(Some(resolved.id))
+        {
+            if uploaded.kind != kind || !uploaded.span.same_content(span) {
+                return Err(BundleVerifyError::DuplicateObject(id));
+            }
+        }
+        let total = self
+            .original_expanded_bytes
+            .checked_add(span.length())
+            .ok_or(BundleVerifyError::Graph(GraphRefusal::Limit(
+                "original bytes",
+            )))?;
+        let mut accounting = limits.pack.clone();
+        accounting.max_total_expanded_bytes = accounting
+            .max_total_expanded_bytes
+            .checked_add(total)
+            .ok_or(BundleVerifyError::Graph(GraphRefusal::Limit(
+                "expanded bytes",
+            )))?;
+        self.budget
+            .charge_expanded(span.length(), &accounting)
+            .map_err(BundleVerifyError::Pack)?;
+        self.original_expanded_bytes = total;
+        self.originals.insert(
+            id,
+            Resolved {
+                id,
+                kind,
+                span,
+                depth: 0,
+            },
+        );
+        Ok(())
+    }
+
+    pub(super) const fn original_bytes(&self) -> usize {
+        self.original_expanded_bytes
+    }
+
+    fn check_original_overlap(&self, resolved: Resolved) -> Result<(), BundleVerifyError> {
+        if let Some(original) = self.originals.get(&resolved.id) {
+            if original.kind != resolved.kind || !original.span.same_content(resolved.span) {
+                return Err(BundleVerifyError::DuplicateObject(resolved.id));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn charge_selection_work(
@@ -134,6 +222,8 @@ impl Inventory {
         Self {
             entries: Vec::new(),
             by_id: BTreeMap::new(),
+            originals: BTreeMap::new(),
+            original_expanded_bytes: 0,
             by_offset: BTreeMap::new(),
             fanout: BTreeMap::new(),
             payload_bytes: 0,
@@ -324,6 +414,17 @@ impl Inventory {
         if self.delta_objects == 0 {
             return Ok(1);
         }
+        // Incoming framing and payload accounting keep the original limits.
+        // Only the native count-once expansion ledger has this prepaid credit;
+        // every original byte was already charged by `retain_original`.
+        let mut resolution_limits = limits.clone();
+        resolution_limits.pack.max_total_expanded_bytes = limits
+            .pack
+            .max_total_expanded_bytes
+            .checked_add(self.original_expanded_bytes)
+            .ok_or(BundleVerifyError::Graph(GraphRefusal::Limit(
+                "expanded bytes",
+            )))?;
         // Base discovery is the first pass. Subsequent bounded passes learn
         // forward REF_DELTA identities. Each successful entry is expanded once;
         // a scan with no progress refuses rather than retrying or fetching.
@@ -341,15 +442,7 @@ impl Inventory {
                 let base = self.entries[at]
                     .base
                     .ok_or(BundleVerifyError::ResolutionIncomplete)?;
-                let base_at = match base {
-                    Base::Offset(offset) => self.by_offset.get(&offset),
-                    Base::Identity(id) => self.by_id.get(&id),
-                }
-                .copied();
-                let Some(base_at) = base_at else {
-                    continue;
-                };
-                let Some(base) = self.entries[base_at].resolved else {
+                let Some(base) = self.base_object(base) else {
                     continue;
                 };
                 let depth = base.depth.checked_add(1).ok_or(BundleVerifyError::Pack(
@@ -389,7 +482,7 @@ impl Inventory {
                         &program,
                         format,
                         depth,
-                        limits,
+                        &resolution_limits,
                         &mut self.budget,
                         live,
                     )?
@@ -411,7 +504,7 @@ impl Inventory {
                     if actual != base.id {
                         return Err(BundleVerifyError::ScratchChanged);
                     }
-                    let mut delta_limits = limits.pack.clone();
+                    let mut delta_limits = resolution_limits.pack.clone();
                     delta_limits.max_object_bytes = maximum;
                     // Retain the buffered oracle and its exact work accounting
                     // for objects that already fit the ordinary memory bound.
@@ -439,6 +532,7 @@ impl Inventory {
                 if self.by_id.contains_key(&resolved.id) {
                     return Err(BundleVerifyError::DuplicateObject(resolved.id));
                 }
+                self.check_original_overlap(resolved)?;
                 self.by_id.insert(resolved.id, at);
                 self.entries[at].resolved = Some(resolved);
                 progress = true;

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 //! Offline full-bundle verification using the existing native pack and graph engines.
 //!
-//! No node is opened, no external base is consulted and nothing is published.
+//! Offline public verification opens no node and consults no external base.
+//! The crate-private incremental import path accepts only a basis-selected
+//! prerequisite source, captures every original body, and publishes nothing.
 //! The report covers every included object's typed local dependencies, not only
 //! objects reachable from current refs. Gitlinks remain external dependencies.
 
@@ -12,12 +14,14 @@ pub use expectations::{
     BundleExpectationError, BundleExpectations, MAX_EXPECTED_REFS, MatchedGitBundle,
     verify_git_bundle_against,
 };
+pub(crate) use file::{
+    BundleImportObjectPlan, BundleOriginalObject, BundleOriginalSource, FullBundleImportPlan,
+    prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
+    prepare_incremental_bundle_import_reader,
+};
 pub use file::{
     FileBundleVerification, FileGitBundleRecovery, prepare_git_bundle_recovery_reader,
     verify_git_bundle_reader,
-};
-pub(crate) use file::{
-    FullBundleImportPlan, prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
 };
 pub use recovery::{BundleRecoveryError, GitBundleRecovery, prepare_git_bundle_recovery};
 

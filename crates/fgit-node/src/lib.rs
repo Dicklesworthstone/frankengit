@@ -96,7 +96,7 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
-    StreamBundleImportQuery, StreamBundleImportRefusal,
+    StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
 };
 
 use fgit_authority::{
