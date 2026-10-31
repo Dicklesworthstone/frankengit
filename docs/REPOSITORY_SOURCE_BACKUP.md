@@ -204,7 +204,7 @@ compilation and execution were unavailable in the editing environment. No Rust
 pass, conformance, crash-matrix, or production-readiness claim is made here.
 
 ```sh
-cargo test --locked -p fgit-node --bin fg-repository-backup
+cargo test --locked -p fgit-node --lib source_retrieval::backup::
 cargo test --locked -p fgit-node --test repository_backup_command
 cargo test --locked -p fgit-node --test repository_backup_large
 ```

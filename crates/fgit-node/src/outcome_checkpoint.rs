@@ -349,11 +349,12 @@ impl OneNode {
             object_root,
         )
         .map_err(|error| selection(AdmissionMaterializationRefusal::Key(error)))?;
-        let closure_read = self
-            .authority
-            .read_immutable(request.authority(), &closure_key)
-            .await
-            .map_err(OutcomeCheckpointRefusal::Authority)?;
+        // Select the authority protocol adapter, including its bounded retry
+        // and failure classification, rather than the inherent engine read.
+        let closure_read =
+            AsyncAuthorityStore::read_immutable(&self.authority, request.authority(), &closure_key)
+                .await
+                .map_err(OutcomeCheckpointRefusal::Authority)?;
         live(request)?;
         let ImmutableRead::Present(closure_bytes) = closure_read else {
             return Err(selection(AdmissionMaterializationRefusal::ImmutableAbsent(
@@ -437,11 +438,10 @@ impl OneNode {
         selected: &MaterializedAdmission,
     ) -> Result<(), OutcomeCheckpointRefusal> {
         live(request)?;
-        let head = self
-            .authority
-            .read_head(request.authority(), &self.head_key)
-            .await
-            .map_err(OutcomeCheckpointRefusal::Authority)?;
+        let head =
+            AsyncAuthorityStore::read_head(&self.authority, request.authority(), &self.head_key)
+                .await
+                .map_err(OutcomeCheckpointRefusal::Authority)?;
         live(request)?;
         if !matches!(head, HeadRead::Present(receipt) if receipt == *selected.authenticated().receipt())
         {
@@ -472,11 +472,10 @@ impl OneNode {
             let key = body_key_for_id(capsule_id.as_internal_object_id())
                 .map_err(OutcomeFailure::from)
                 .map_err(OutcomeCheckpointRefusal::Outcomes)?;
-            let read = self
-                .authority
-                .read_immutable(request.authority(), &key)
-                .await
-                .map_err(OutcomeCheckpointRefusal::Authority)?;
+            let read =
+                AsyncAuthorityStore::read_immutable(&self.authority, request.authority(), &key)
+                    .await
+                    .map_err(OutcomeCheckpointRefusal::Authority)?;
             live(request)?;
             let ImmutableRead::Present(bytes) = read else {
                 return Err(OutcomeCheckpointRefusal::CapsuleUnavailable);

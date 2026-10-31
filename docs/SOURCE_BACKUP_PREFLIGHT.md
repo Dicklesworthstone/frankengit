@@ -88,13 +88,14 @@ Only explicit `restore` can publish a new destination. `verify` has no resume
 mode, and no successful preflight grants permission to skip restore validation.
 
 The implementation and its tests live under
-`crates/fgit-node/src/source_retrieval/backup/`. The legacy binary test target
-retains its original `repository::` test paths by compiling those same sources;
-this is compatibility coverage, not an independent second oracle. Run either:
+`crates/fgit-node/src/source_retrieval/backup/`. Unit tests compile once in the
+owning library, where they can exercise private checkpoint helpers without
+exposing authority internals. The compatibility executable delegates to that
+same library and is exercised by the process-based command tests. Run:
 
 ```sh
 cargo test -p fgit-node --lib source_retrieval::backup::
-cargo test -p fgit-node --bin fg-repository-backup
+cargo test -p fgit-node --test repository_backup_command
 ```
 
 The native primary-command campaign uses a prebuilt `fg` only (stock Git builds

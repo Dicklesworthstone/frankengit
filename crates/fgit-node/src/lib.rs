@@ -11833,9 +11833,9 @@ mod tests {
     use std::time::Duration;
 
     use fgit_admission::evidence::{
-        DURABLE_REFUSAL_EVIDENCE_DETAIL, EvaluatedPolicyDecisionEvidence, ForgeEventBatch,
-        InvariantEvidence, OutboxEffectBatch, RefusalEvidence, RefusalEvidenceBodies,
-        RetentionDelta, evidence_root,
+        AdmissionAuthentication, DURABLE_REFUSAL_EVIDENCE_DETAIL, EvaluatedPolicyDecisionEvidence,
+        ForgeEventBatch, InvariantEvidence, OutboxEffectBatch, RefusalEvidence,
+        RefusalEvidenceBodies, RetentionDelta, evidence_root,
     };
     use fgit_admission::{
         AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionSnapshot,
@@ -11879,16 +11879,16 @@ mod tests {
     use super::{
         ADMISSION_CLOSURE_KEY_PREFIX, ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
         ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX, ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
-        ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-        ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
-        AdmissionMaterializationRefusal, AdmissionUploadPackRefusal, AdmissionUploadPackRepository,
-        BudgetClass, BudgetPolicy, ClosureSelectionSource, Exhaustion, FsqliteCx,
-        GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
-        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
-        NodeRefusal, NodeRequestContext, OneNode, PackContextCheckpoint, RuntimeProfile,
-        admission_immutable_key, authority_head_id, checkpoint_pack_context, genesis_head,
-        genesis_root, git_daemon_capabilities, initialize_embedded_repository, object_namespace,
-        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+        ADMISSION_RETENTION_DELTA_KEY_PREFIX, AdmissionMaterializationRefusal,
+        AdmissionUploadPackRefusal, AdmissionUploadPackRepository, BudgetClass, BudgetPolicy,
+        ClosureSelectionSource, Exhaustion, FsqliteCx, GitDaemonServeError,
+        GitDaemonSessionOutcome, GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig,
+        NodeGitDaemonServeRefusal, NodeInitialization, NodeRefusal, NodeRequestContext, OneNode,
+        PackContextCheckpoint, RuntimeProfile, admission_immutable_key, authority_head_id,
+        checkpoint_pack_context, genesis_head, genesis_root, git_daemon_capabilities,
+        initialize_embedded_repository, object_namespace, parse_git_daemon_request,
+        read_principal_snapshot_in, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);

@@ -17,6 +17,7 @@ use fgit_chronicle::{
 use fgit_codec::RepositoryDecision;
 use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
+use fgit_resource::{Grade, LeakDisposition, ObligationLedger, RegionId, ResourceVector};
 use fgit_types::{HeadGeneration, RepositoryCapsuleId};
 use fgit_wire::visibility::RefVisibility;
 

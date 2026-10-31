@@ -1,6 +1,6 @@
-// Shared host adapter included by the library and the legacy binary test target.
-// Keeping the latter at its original repository:: test paths prevents existing
-// focused commands from silently selecting zero tests after library promotion.
+// Library-owned adapter shared by the primary and compatibility commands.
+// Unit tests compile here so private checkpoint helpers remain private.
+// repository_backup_command covers the compatibility executable itself.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
