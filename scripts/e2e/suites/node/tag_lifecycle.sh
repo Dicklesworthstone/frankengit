@@ -2,8 +2,8 @@
 # FG-097: live annotated and lightweight tag advertisement through `fg serve`.
 #
 # This is a compatibility lane, not a production dependency on Git.  The
-# ordinary client checks the live node's v1 service; the pinned oracle below
-# supplies the hostile dangling-tag control.  It is deliberately separate from
+# pinned clients check the live node's v1 service; the same oracle below
+# supplies the hostile dangling-tag control. It is deliberately separate from
 # first_clone.sh so its tag advertisement assertions cannot be hidden by a
 # branch-only clone success.
 set -euo pipefail
@@ -31,35 +31,48 @@ fge_assert_cmd FG-097-TAGS-001 'a prebuilt fg binary is supplied for the live no
 fge_assert_cmd FG-097-TAGS-002 'the supplied fg binary is executable' test -x "${FG_BIN}"
 
 WORK="$(fge_tempdir fg097-tags)"
-SRC="${WORK}/source"
+CLIENT_RUN="$(env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" create-run "${ORACLE_PIN}" fg097-client)"
+SRC="${CLIENT_RUN}/work/source"
 STORAGE="${WORK}/storage"
-CLONE="${WORK}/clone"
+fge_context oracle_client_run "${CLIENT_RUN}"
+fge_context oracle_client_protocol v1
 TENANT=11111111111111111111111111111111
 REPOSITORY=22222222222222222222222222222222
 PRINCIPAL=44444444444444444444444444444444
 
-mkdir -p "${SRC}"
-git -C "${SRC}" init -q -b main
-git -C "${SRC}" config user.email fg097@invalid.example
-git -C "${SRC}" config user.name 'FrankenGit FG-097 E2E'
+# Fixture construction, observations and the live client all use the same pin.
+tag_client_git() {
+  local label="$1" directory="$2"
+  shift 2
+  env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" capture "${ORACLE_PIN}" \
+    "${CLIENT_RUN}" "${directory}" "${label}" -- "$@"
+}
+tag_client_oid() {
+  local label="$1" directory="$2" reference="$3"
+  tag_client_git "${label}" "${directory}" rev-parse "${reference}" || return
+  tr -d '\r\n' < "${CLIENT_RUN}/transcripts/${label}/stdout.bin"
+}
+tag_client_git client-init . init -q -b main source
+tag_client_git client-email source config user.email fg097@invalid.example
+tag_client_git client-name source config user.name 'FrankenGit FG-097 E2E'
 printf 'tag lifecycle\n' > "${SRC}/README"
-git -C "${SRC}" add README
-git -C "${SRC}" commit -qm 'tag lifecycle fixture'
-git -C "${SRC}" tag light main
-git -C "${SRC}" tag -a annotated -m 'annotated fixture' main
+tag_client_git client-add source add README
+tag_client_git client-commit source commit -qm 'tag lifecycle fixture'
+tag_client_git client-light source tag light main
+tag_client_git client-annotated source tag -a annotated -m 'annotated fixture' main
 
-ANNOTATED_OID="$(git -C "${SRC}" rev-parse refs/tags/annotated)"
-ANNOTATED_PEELED_OID="$(git -C "${SRC}" rev-parse 'refs/tags/annotated^{}')"
-LIGHT_OID="$(git -C "${SRC}" rev-parse refs/tags/light)"
+ANNOTATED_OID="$(tag_client_oid source-annotated source refs/tags/annotated)"
+ANNOTATED_PEELED_OID="$(tag_client_oid source-peeled source 'refs/tags/annotated^{}')"
+LIGHT_OID="$(tag_client_oid source-light source refs/tags/light)"
 
 fge_phase action
 init_exit=0
-"${FG_BIN}" init "${STORAGE}" "${TENANT}" "${REPOSITORY}" >/dev/null 2>&1 || init_exit=$?
+fge_capture fg097-init "${FG_BIN}" init "${STORAGE}" "${TENANT}" "${REPOSITORY}" || init_exit=$?
 fge_assert_exit FG-097-TAGS-003 0 "${init_exit}" 'fg initializes the repository'
 
 import_exit=0
-"${FG_BIN}" import "${STORAGE}" "${TENANT}" "${REPOSITORY}" "${PRINCIPAL}" \
-  fg097-tag-import "${SRC}" >/dev/null 2>&1 || import_exit=$?
+fge_capture fg097-import "${FG_BIN}" import "${STORAGE}" "${TENANT}" "${REPOSITORY}" "${PRINCIPAL}" \
+  fg097-tag-import "${SRC}" || import_exit=$?
 fge_assert_exit FG-097-TAGS-004 0 "${import_exit}" \
   'fg import publishes both lightweight and annotated tag refs'
 
@@ -83,13 +96,18 @@ for offset in 0 1 2 3 4 5 6 7; do
 done
 fge_assert_cmd FG-097-TAGS-005 'fg serve accepts one loopback listener' test -n "${SERVE_PORT}"
 
-remote="git://127.0.0.1:${SERVE_PORT}/${REPOSITORY}.git"
+endpoint="127.0.0.1:${SERVE_PORT}"
+repository_path="/${REPOSITORY}.git"
 ls_remote_exit=0
-git -c protocol.version=1 ls-remote --tags "${remote}" > "${WORK}/ls-remote.out" 2>&1 || ls_remote_exit=$?
+env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" ls-remote-tags-loopback \
+  "${ORACLE_PIN}" "${CLIENT_RUN}" client-ls-remote "${endpoint}" "${repository_path}" || ls_remote_exit=$?
 fge_assert_exit FG-097-TAGS-006 0 "${ls_remote_exit}" \
   'a real git ls-remote accepts the live fg tag advertisement'
 
-ls_remote="$(<"${WORK}/ls-remote.out")"
+ls_remote=''
+if [[ -f "${CLIENT_RUN}/transcripts/client-ls-remote/stdout.bin" ]]; then
+  ls_remote="$(<"${CLIENT_RUN}/transcripts/client-ls-remote/stdout.bin")"
+fi
 fge_assert_contains FG-097-TAGS-007 "${ls_remote}" \
   "${ANNOTATED_OID}"$'\t'"refs/tags/annotated" \
   'annotated tag object is advertised at its native object OID'
@@ -103,16 +121,29 @@ fge_assert_not_contains FG-097-TAGS-010 "${ls_remote}" 'refs/tags/light^{}' \
   'lightweight tags never synthesize an annotated-tag peeled line'
 
 clone_exit=0
-git -c protocol.version=1 clone -q "${remote}" "${CLONE}" > "${WORK}/clone.out" 2>&1 || clone_exit=$?
+env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" clone-v1-loopback \
+  "${ORACLE_PIN}" "${CLIENT_RUN}" client-clone "${endpoint}" "${repository_path}" clone || clone_exit=$?
 fge_reap "${SERVE_NAME}"
 fge_assert_exit FG-097-TAGS-011 0 "${clone_exit}" \
   'a real git clone completes through fg serve with both tag kinds'
 fge_assert_cmd FG-097-TAGS-012 'clone retains the annotated tag object' \
-  test "$(git -C "${CLONE}" rev-parse refs/tags/annotated)" = "${ANNOTATED_OID}"
+  test "$(tag_client_oid clone-annotated clone refs/tags/annotated)" = "${ANNOTATED_OID}"
 fge_assert_cmd FG-097-TAGS-013 'clone resolves the annotated tag through the advertised peel' \
-  test "$(git -C "${CLONE}" rev-parse 'refs/tags/annotated^{}')" = "${ANNOTATED_PEELED_OID}"
+  test "$(tag_client_oid clone-peeled clone 'refs/tags/annotated^{}')" = "${ANNOTATED_PEELED_OID}"
 fge_assert_cmd FG-097-TAGS-014 'clone retains the lightweight tag without a synthetic object' \
-  test "$(git -C "${CLONE}" rev-parse refs/tags/light)" = "${LIGHT_OID}"
+  test "$(tag_client_oid clone-light clone refs/tags/light)" = "${LIGHT_OID}"
+
+# Retain live-client transcripts beside native init/import capture files.
+for label in client-ls-remote client-clone; do
+  for stream in stdout.bin stderr.bin receipt.tsv; do
+    transcript="${CLIENT_RUN}/transcripts/${label}/${stream}"
+    if [[ -f "${transcript}" ]]; then
+      retained="$(fge_artifact_path "oracle-client/${label}/${stream}")"
+      cp -- "${transcript}" "${retained}"
+      fge_artifact "${retained}" pinned-git-client
+    fi
+  done
+done
 
 # The hostile control is constructed and observed exclusively through the
 # pinned Bubblewrap oracle.  The tag object exists, but its declared target
