@@ -69,6 +69,11 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
             headers.push(trimmed.to_string());
         }
 
+        assert_eq!(
+            headers.first().map(String::as_str),
+            Some("POST /hook HTTP/1.1")
+        );
+
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body).unwrap();
 

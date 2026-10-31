@@ -81,7 +81,7 @@ impl Default for ScrubQuery {
     }
 }
 impl ScrubQuery {
-    fn validate(self) -> Result<(), ScrubRefusal> {
+    fn validate(&self) -> Result<(), ScrubRefusal> {
         if self.max_selected_objects == 0 || self.max_selected_objects > MAX_SELECTED_OBJECTS {
             return Err(ScrubRefusal::InvalidLimit("max-selected-objects"));
         }
@@ -299,16 +299,16 @@ impl OneNode {
     ) -> Result<SelectedObjectScrub, ScrubRefusal> {
         let started = Instant::now();
         let selected = self
-            .prepare_scrub_selection_in(request, query, started)
+            .prepare_scrub_selection_in(request, &query, started)
             .await?;
-        self.scrub_selected_page_in(request, &selected, query, started)
+        self.scrub_selected_page_in(request, &selected, &query, started)
             .await
     }
 
     async fn prepare_scrub_selection_in(
         &self,
         request: &NodeRequestContext,
-        query: ScrubQuery,
+        query: &ScrubQuery,
         started: Instant,
     ) -> Result<MaterializedAdmission, ScrubRefusal> {
         query.validate()?;
@@ -359,7 +359,7 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         selected: &MaterializedAdmission,
-        query: ScrubQuery,
+        query: &ScrubQuery,
         started: Instant,
     ) -> Result<SelectedObjectScrub, ScrubRefusal> {
         let head = selected.basis().id();

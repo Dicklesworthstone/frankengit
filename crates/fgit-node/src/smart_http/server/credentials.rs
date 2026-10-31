@@ -334,7 +334,7 @@ fn decode_basic(input: &[u8], output: &mut [u8; MAX_BASIC_BYTES]) -> Option<usiz
         let b = sextet(quartet[1])?;
         let last = index + 1 == input.len() / 4;
         let (c, d, count) = match (quartet[2], quartet[3]) {
-            (b'=', b'=') if last && b & 15 == 0 => (0, 0, 1),
+            (b'=', b'=') if last && b.is_multiple_of(16) => (0, 0, 1),
             (c, b'=') if last => {
                 let c = sextet(c)?;
                 if c & 3 != 0 {

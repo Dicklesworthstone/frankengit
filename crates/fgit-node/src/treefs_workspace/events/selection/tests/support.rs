@@ -98,7 +98,8 @@ impl AsyncAuthorityStore for Store {
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.head_reads.fetch_add(1, Ordering::Relaxed);
-        let result = if let Some(receipt) = self.head_override.lock().unwrap().clone() {
+        let head_override = self.head_override.lock().unwrap().clone();
+        let result = if let Some(receipt) = head_override {
             Ok(HeadRead::Present(receipt))
         } else {
             self.backend.read_head(key)

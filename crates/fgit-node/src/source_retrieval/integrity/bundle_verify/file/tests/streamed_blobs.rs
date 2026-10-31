@@ -218,7 +218,7 @@ fn native_large_blob_verifies_from_real_files_with_exact_chunk_and_payload_bound
     assert_eq!(scratch.write_bytes, LARGE);
     assert_eq!(scratch.read_bytes, LARGE);
     assert_eq!(actual.verified().sha256(), &sha256_digest(&input));
-    assert!(actual.verified().delta_objects() == 0);
+    assert_eq!(actual.verified().delta_objects(), 0);
     // The same input still refuses under the unchanged default and byte-slice
     // profile. A large aggregate allowance alone grants no larger blob.
     for (index, mut denied) in [

@@ -95,14 +95,14 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
-        selected: (
+        selected: &(
             RepositoryAuthorityHeadId,
             RepositoryCommitId,
             Digest,
             GitOid,
         ),
     ) -> Result<data::Source, Failure> {
-        let (head, rcr, forge, commit) = selected;
+        let &(head, rcr, forge, commit) = selected;
         let query = SourceBrowseQuery {
             path: None,
             expected_head: Some(head),

@@ -37,9 +37,6 @@ impl Drop for Scratch {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn live() -> Result<(), fgit_types::RefusalCode> {
-    Ok(())
-}
 fn frame(allow: bool) -> PolicyFrame {
     PolicyFrame::compile(
         if allow {
@@ -48,7 +45,7 @@ fn frame(allow: bool) -> PolicyFrame {
             "policy durable { default deny \"review required\" }"
         },
         PolicyStoreLimits::default(),
-        &live,
+        &|| Ok(()),
     )
     .unwrap()
 }
@@ -72,7 +69,7 @@ fn compiled_policies_survive_node_reopen_without_publishing_repository_state() {
                     &node.authority,
                     request.authority(),
                     &frame,
-                    &live,
+                    &|| Ok(()),
                 ))
                 .unwrap();
             assert_eq!(first.id, frame.id());
@@ -83,7 +80,7 @@ fn compiled_policies_survive_node_reopen_without_publishing_repository_state() {
                     &node.authority,
                     request.authority(),
                     &frame,
-                    &live,
+                    &|| Ok(()),
                 ))
                 .unwrap();
             assert_eq!(repeat.disposition, PolicyStageDisposition::IdenticalRetry);
@@ -94,7 +91,7 @@ fn compiled_policies_survive_node_reopen_without_publishing_repository_state() {
                     request.authority(),
                     frame.id(),
                     PolicyStoreLimits::default(),
-                    &live,
+                    &|| Ok(()),
                 ))
                 .unwrap();
             assert_eq!(loaded.encode().unwrap(), frame.bytes());
@@ -121,7 +118,7 @@ fn compiled_policies_survive_node_reopen_without_publishing_repository_state() {
                     request.authority(),
                     frame.id(),
                     PolicyStoreLimits::default(),
-                    &live,
+                    &|| Ok(()),
                 ))
                 .unwrap();
             assert_eq!(loaded.id(), frame.id());
@@ -162,7 +159,7 @@ fn file_backed_wrong_slots_and_cancelled_reads_cannot_return_a_policy() {
                 request.authority(),
                 deny.id(),
                 PolicyStoreLimits::default(),
-                &live
+                &|| Ok(())
             )),
             Err(PolicyStoreError::IdentityMismatch { .. })
         ));
@@ -171,7 +168,7 @@ fn file_backed_wrong_slots_and_cancelled_reads_cannot_return_a_policy() {
                 &node.authority,
                 request.authority(),
                 &deny,
-                &live
+                &|| Ok(())
             )),
             Err(PolicyStoreError::ConflictingSlot { .. })
         ));
@@ -180,7 +177,7 @@ fn file_backed_wrong_slots_and_cancelled_reads_cannot_return_a_policy() {
                 &node.authority,
                 request.authority(),
                 &allow,
-                &live,
+                &|| Ok(()),
             ))
             .unwrap();
         let count = AtomicUsize::new(0);

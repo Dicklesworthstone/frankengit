@@ -569,9 +569,9 @@ impl CandidateSource<'_, '_> {
         self.original
             .checkpoint()
             .map_err(|_| PackError::DeadlineExceeded)?;
-        let header = result.map_err(|error| {
+        let header = result.inspect_err(|error| {
             if matches!(
-                &error,
+                error,
                 PackWriteError::Pack(
                     PackError::ObjectSizeLimit { .. } | PackError::AllocationFailed { .. }
                 )
@@ -581,7 +581,6 @@ impl CandidateSource<'_, '_> {
                 // this exhaustion from an unavailable object dependency.
                 self.original.budget_failed.set(true);
             }
-            error
         })?;
         Ok(Some(header))
     }
