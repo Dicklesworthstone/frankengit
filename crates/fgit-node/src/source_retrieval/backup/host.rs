@@ -258,11 +258,11 @@ mod adapter_tests {
     use super::*;
 
     #[test]
-    fn shared_dispatch_exposes_all_three_operations_without_opening_a_repository() {
+    fn shared_dispatch_exposes_all_operations_without_opening_a_repository() {
         let mut output = Vec::new();
         run(&["--help".into()], &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        for operation in ["export", "verify", "restore"] {
+        for operation in ["export", "verify", "restore", "attest"] {
             assert!(text.contains(&format!("usage: fg backup {operation}")));
             let mut output = Vec::new();
             run(&[operation.into(), "--help".into()], &mut output).unwrap();

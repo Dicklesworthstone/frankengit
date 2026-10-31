@@ -2,6 +2,7 @@
 //! the same head. Payload bytes stream through a private, unpublished file.
 mod approval;
 mod archive;
+mod attest;
 mod blob_io;
 mod checkpoint;
 mod input;
@@ -370,7 +371,11 @@ pub(super) fn run_with_timeout(
     if args == ["--help"] {
         emit(output, USAGE)?;
         emit(output, restore::USAGE)?;
-        return emit(output, restore::verify::USAGE);
+        emit(output, restore::verify::USAGE)?;
+        return emit(output, attest::USAGE);
+    }
+    if args.first().is_some_and(|arg| arg == "attest") {
+        return attest::run(args, output, timeout);
     }
     if args.first().is_some_and(|arg| arg == "verify") {
         return restore::verify::run(args, output, timeout);

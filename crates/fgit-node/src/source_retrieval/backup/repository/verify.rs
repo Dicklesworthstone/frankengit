@@ -1,17 +1,19 @@
 //! Recovery preflight through the real metadata backend and canonical graph.
 //! Only bounded authority metadata is imported; Git payloads stay in the archive.
 use super::super::approval::ApprovalFlags;
+use super::super::archive::stream::{Seal, StreamHeader};
 use super::super::input::PinnedArchive;
-use super::super::profile::ProfileFlags;
+use super::super::profile::{Deadline, Profile, ProfileFlags};
 use super::{
     ArchiveGraphMode, Options, approval_receipt_fields, authenticate_approval, authority_image,
     check_approval_current, config, create_private, digest, emit, generation, graph_from_archive,
     hex, match_approval, quote, require_absent, sync_directory, with_node,
 };
 use fgit_authority::StoreInstanceId;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use fgit_treefs::integrity::GraphReport;
+use std::fs::{self, File};
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
 
 pub(in super::super) const USAGE: &str =
     "usage: fg backup verify <backup-file> <new-scratch-root> --trusted-local
@@ -133,7 +135,7 @@ fn execute(options: &Options) -> Result<String, String> {
 }
 fn execute_with_checkpoints(
     options: &Options,
-    mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
+    checkpoint: impl FnMut(Stage) -> Result<(), String>,
 ) -> Result<String, String> {
     if options.resume {
         return Err("verification cannot resume or reuse existing scratch state".into());
@@ -143,66 +145,16 @@ fn execute_with_checkpoints(
     require_absent(&options.output)?;
     // No directory exists until the original checksum, framing, native IDs and
     // independent payload commitments have all passed against one opened input.
-    let mut archive = PinnedArchive::open(
+    let archive = PinnedArchive::open(
         &options.input,
         options.expected,
         options.profile.transfer,
         deadline,
     )?;
-    match_approval(approval.as_ref(), &archive, deadline)?;
-    if archive.header().authority.instance == options.instance.raw() {
-        return Err("verification instance must differ from source; no scratch created".into());
-    }
-    deadline.check()?;
-    create_private(&options.output)?;
-    let quarantine = options.output.join(".verify-quarantine");
-    let verified = (|| {
-        create_private(&quarantine)?;
-        let expected = authority_image(
-            &quarantine,
-            &archive.header().authority,
-            options,
-            false,
-            deadline,
-        )?;
-        checkpoint(Stage::AuthorityClosed)?;
-        let graph = with_node(
-            config(&quarantine, archive.header(), options.profile)?,
-            |node| {
-                graph_from_archive(
-                    node,
-                    &mut archive,
-                    &expected,
-                    ArchiveGraphMode::Preflight,
-                    options.profile,
-                    deadline,
-                )
-            },
-        )?;
-        checkpoint(Stage::GraphCheckedAndNodeClosed)?;
-        check_approval_current(approval.as_ref(), deadline)?;
-        // There is deliberately no PreparedPublication and no restore intent.
-        // This command cannot publish a root or authorize a later resume.
-        require_absent(&options.output.join("authority.fsqlite"))?;
-        Ok(graph)
-    })();
-    let graph = verified.map_err(|error: String| {
-        format!(
-            "{error}; no destination authority published; retained verification scratch at {}",
-            options.output.display(),
-        )
-    })?;
-    // Both store and node have explicitly closed. Remove only the fresh private
-    // tree this invocation created, never a caller's pre-existing directory.
-    fs::remove_dir_all(&options.output).map_err(|error| {
-        format!(
-            "archive verified but scratch cleanup failed at {}: {error}",
-            options.output.display(),
-        )
-    })?;
-    sync_directory(super::parent(&options.output)).map_err(|error| {
-        format!("archive verified and scratch removed; parent sync failed: {error}")
-    })?;
+    let verified =
+        verify_pinned_with_checkpoints(archive, options, approval.as_ref(), deadline, checkpoint)?;
+    let archive = &verified.archive;
+    let graph = verified.graph;
     let header = archive.header();
     Ok(format!(
         concat!(
@@ -235,6 +187,134 @@ fn execute_with_checkpoints(
         approval_receipt_fields(approval.as_ref()),
         super::super::checkpoint::receipt(header.checkpoint.as_ref()),
     ))
+}
+
+/// Only complete native authority/selection/graph verification constructs this
+/// result. It retains the original descriptor, pin and limits for later rechecks.
+/// It is content evidence, never canonical authorization or a signed capsule.
+pub(in super::super) struct VerifiedSourceArchive<R = File> {
+    archive: PinnedArchive<R>,
+    graph: GraphReport,
+}
+
+impl<R: Read + Seek> VerifiedSourceArchive<R> {
+    pub(in super::super) fn header(&self) -> &StreamHeader {
+        self.archive.header()
+    }
+
+    pub(in super::super) fn seal(&self) -> Seal {
+        self.archive.seal()
+    }
+
+    pub(in super::super) const fn graph(&self) -> GraphReport {
+        self.graph
+    }
+
+    /// Reverify the original bytes through exact EOF without renewing the
+    /// invocation's deadline or reopening the caller's input pathname.
+    pub(in super::super) fn recheck(&mut self, deadline: Deadline) -> Result<(), String> {
+        self.archive.scan_stream(deadline, |header, input| {
+            let buffer_bytes = (header.length.min(64 * 1024) as usize).max(1);
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(buffer_bytes)
+                .map_err(|_| "backup recheck buffer allocation refused")?;
+            buffer.resize(buffer_bytes, 0);
+            loop {
+                deadline.check()?;
+                if input.read(&mut buffer).map_err(|error| error.to_string())? == 0 {
+                    return deadline.check();
+                }
+            }
+        })
+    }
+}
+
+/// The same real preflight used by `verify`, available to native composition
+/// without parsing a receipt or spawning another command. No input is reopened.
+pub(in super::super) fn verify_pinned_in<R: Read + Seek>(
+    archive: PinnedArchive<R>,
+    scratch: &Path,
+    instance: StoreInstanceId,
+    profile: Profile,
+    deadline: Deadline,
+) -> Result<VerifiedSourceArchive<R>, String> {
+    let options = Options {
+        input: PathBuf::new(),
+        output: scratch.to_path_buf(),
+        expected: archive.seal().digest,
+        instance,
+        profile,
+        resume: false,
+        approval: None,
+    };
+    verify_pinned_with_checkpoints(archive, &options, None, deadline, |_| Ok(()))
+}
+
+fn verify_pinned_with_checkpoints<R: Read + Seek>(
+    mut archive: PinnedArchive<R>,
+    options: &Options,
+    approval: Option<&super::VerifiedApproval>,
+    deadline: Deadline,
+    mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
+) -> Result<VerifiedSourceArchive<R>, String> {
+    deadline.check()?;
+    require_absent(&options.output)?;
+    match_approval(approval, &archive, deadline)?;
+    if archive.header().authority.instance == options.instance.raw() {
+        return Err("verification instance must differ from source; no scratch created".into());
+    }
+    deadline.check()?;
+    create_private(&options.output)?;
+    let quarantine = options.output.join(".verify-quarantine");
+    let verified = (|| {
+        create_private(&quarantine)?;
+        let expected = authority_image(
+            &quarantine,
+            &archive.header().authority,
+            options,
+            false,
+            deadline,
+        )?;
+        checkpoint(Stage::AuthorityClosed)?;
+        let graph = with_node(
+            config(&quarantine, archive.header(), options.profile)?,
+            |node| {
+                graph_from_archive(
+                    node,
+                    &mut archive,
+                    &expected,
+                    ArchiveGraphMode::Preflight,
+                    options.profile,
+                    deadline,
+                )
+            },
+        )?;
+        checkpoint(Stage::GraphCheckedAndNodeClosed)?;
+        check_approval_current(approval, deadline)?;
+        // There is deliberately no PreparedPublication and no restore intent.
+        // This command cannot publish a root or authorize a later resume.
+        require_absent(&options.output.join("authority.fsqlite"))?;
+        Ok(graph)
+    })();
+    let graph = verified.map_err(|error: String| {
+        format!(
+            "{error}; no destination authority published; retained verification scratch at {}",
+            options.output.display(),
+        )
+    })?;
+    // Both store and node have explicitly closed. Remove only the fresh private
+    // tree this invocation created, never a caller's pre-existing directory.
+    fs::remove_dir_all(&options.output).map_err(|error| {
+        format!(
+            "archive verified but scratch cleanup failed at {}: {error}",
+            options.output.display(),
+        )
+    })?;
+    sync_directory(super::parent(&options.output)).map_err(|error| {
+        format!("archive verified and scratch removed; parent sync failed: {error}")
+    })?;
+    Ok(VerifiedSourceArchive { archive, graph })
 }
 
 pub(in super::super) fn run(
