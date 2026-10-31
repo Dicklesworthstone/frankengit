@@ -502,15 +502,30 @@ fn actual_node_jobs_reopen_exact_evidence_without_publishing_or_reexecution() {
             .unwrap()
             .basis()
             .id();
-        fs::write(source.join("refs/heads/unrelated"), format!("{tip}\n")).unwrap();
-        node.runtime()
-            .block_on(node.import_loose_git_directory_durable_in(
+        let session = crate::LoopbackReceiveSession::authenticated(
+            PrincipalId::from_bytes([0x43; 16]),
+            fgit_authority::IdempotencyKey::new(b"workflow-unrelated-transition".to_vec()).unwrap(),
+        );
+        let advanced = node
+            .runtime()
+            .block_on(node.admit_branch_updates_durable_in(
                 &node.request_context(),
-                &source,
-                PrincipalId::from_bytes([0x43; 16]),
-                b"workflow-unrelated-transition",
+                &session,
+                &[fgit_authority::RefCommand {
+                    name: RefName::try_new(b"refs/heads/unrelated").unwrap(),
+                    expected_old: fgit_authority::ExpectedOld::Absent,
+                    proposed_new: fgit_authority::ProposedNew::Update(tip),
+                    force: false,
+                }],
+                Default::default(),
             ))
             .unwrap();
+        assert!(
+            advanced.commands.iter().all(|command| matches!(
+                command.terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ))
+        );
         let before = generation(&node);
         let reference = RefName::try_new(b"refs/heads/main").unwrap();
         assert_dispatch_reservation_after_source_pin(&node, &temp, &reference, tip, stale_head);
