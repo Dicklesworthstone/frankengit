@@ -114,14 +114,14 @@ impl Worker {
 
     pub(super) fn activate(&mut self) -> Result<(), NodeSmartHttpRefusal> {
         for child in &mut self.children {
-            if let Some(launch) = child.launch.take() {
-                if launch.send(()).is_err() {
-                    self.request_stop();
-                    return Err(io_error(
-                        "activate source index maintenance",
-                        io::Error::other("maintenance child left before HTTP readiness"),
-                    ));
-                }
+            if let Some(launch) = child.launch.take()
+                && launch.send(()).is_err()
+            {
+                self.request_stop();
+                return Err(io_error(
+                    "activate source index maintenance",
+                    io::Error::other("maintenance child left before HTTP readiness"),
+                ));
             }
         }
         Ok(())

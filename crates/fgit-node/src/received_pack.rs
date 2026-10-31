@@ -419,11 +419,11 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if self.charge != 0 {
-            if let Ok(mut state) = self.state.lock() {
-                state.reserved_bytes -= self.charge;
-                state.reservations -= 1;
-            }
+        if self.charge != 0
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.reserved_bytes -= self.charge;
+            state.reservations -= 1;
         }
     }
 }

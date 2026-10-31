@@ -666,16 +666,18 @@ impl OneNode {
                 Err(error) => failure = Some(io_error("poll HTTP stop before activation", error)),
             }
         }
-        if failure.is_none() && !startup_stopped {
-            if let Some(worker) = &mut maintenance {
-                failure = worker.activate().err();
-            }
+        if failure.is_none()
+            && !startup_stopped
+            && let Some(worker) = &mut maintenance
+        {
+            failure = worker.activate().err();
         }
         #[cfg(target_os = "linux")]
-        if failure.is_none() && !startup_stopped {
-            if let Some(worker) = &mut workflow {
-                failure = worker.activate().err();
-            }
+        if failure.is_none()
+            && !startup_stopped
+            && let Some(worker) = &mut workflow
+        {
+            failure = worker.activate().err();
         }
         while failure.is_none() && !startup_stopped {
             let mut index = 0;
@@ -777,27 +779,27 @@ impl OneNode {
             (child.join)();
         }
         #[cfg(target_os = "linux")]
-        if let (Some(worker), Some(observe)) = (workflow, on_workflow_drained) {
-            if let Err(error) = worker.finish(observe) {
-                failure = Some(match failure {
-                    Some(service) => io_error(
-                        "drain workflow service after HTTP service failure",
-                        io::Error::other(format!("{service}; {error}")),
-                    ),
-                    None => error,
-                });
-            }
+        if let (Some(worker), Some(observe)) = (workflow, on_workflow_drained)
+            && let Err(error) = worker.finish(observe)
+        {
+            failure = Some(match failure {
+                Some(service) => io_error(
+                    "drain workflow service after HTTP service failure",
+                    io::Error::other(format!("{service}; {error}")),
+                ),
+                None => error,
+            });
         }
-        if let Some(worker) = maintenance {
-            if let Err(error) = worker.finish() {
-                failure = Some(match failure {
-                    Some(service) => io_error(
-                        "drain source index maintenance after HTTP service failure",
-                        io::Error::other(format!("{service}; {error}")),
-                    ),
-                    None => error,
-                });
-            }
+        if let Some(worker) = maintenance
+            && let Err(error) = worker.finish()
+        {
+            failure = Some(match failure {
+                Some(service) => io_error(
+                    "drain source index maintenance after HTTP service failure",
+                    io::Error::other(format!("{service}; {error}")),
+                ),
+                None => error,
+            });
         }
         if let Err(error) = profile.nodes.close() {
             log_cleanup(&error);
