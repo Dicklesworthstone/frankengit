@@ -1,5 +1,7 @@
 //! Explicit ref leases and prerequisite-scoped offline synchronization.
 use super::*;
+
+mod file_backed;
 use fgit_types::{GitOid, RefName};
 use std::collections::BTreeSet;
 
@@ -18,7 +20,8 @@ ref deletion, stale-tip refresh or policy bypass is performed. Protection rules
 still apply. Prerequisites must be complete currently visible native commit history.
 Maximum 64 refs and 64 prerequisites. Output is create-only.
 For bounded-memory export with larger aggregate limits, use sync-export --streaming;
-see fg bundle sync-export --streaming --help. Import remains bounded to 128 MiB.
+see fg bundle sync-export --streaming --help. For file-backed incremental import,
+use sync-import --file-backed; see fg bundle sync-import --file-backed --help.
 This is Git transfer,
 not an authority/forge backup. Import receipts use the existing git_bundle_import
 schema and retain historical terminal outcomes; input failures do not prove non-commit.";
@@ -144,6 +147,9 @@ fn parse_sync(args: &[String]) -> Result<SyncOptions, String> {
     })
 }
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if file_backed::help_requested(args) || file_backed::requested(args) {
+        return file_backed::run(args);
+    }
     if args.len() == 2 && args[1] == "--help" {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
         return Ok(0);

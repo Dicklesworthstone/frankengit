@@ -475,6 +475,284 @@ impl Fixture {
         self.assert_clean();
     }
 
+    fn sync_import(
+        &self,
+        bundle: &str,
+        key: &str,
+        file_backed: bool,
+        expectation: &str,
+        extra: &[&str],
+    ) -> Output {
+        let mut values = args(&[
+            "bundle",
+            "sync-import",
+            "syncer",
+            TENANT,
+            REPOSITORY,
+            bundle,
+            "--trusted-local",
+            "--object-format",
+            self.format.as_str(),
+            "--principal",
+            PRINCIPAL,
+            "--idempotency-key",
+            key,
+            "--allow-ref-updates",
+            "--expect",
+            expectation,
+        ]);
+        if file_backed {
+            values.push("--file-backed".into());
+        }
+        values.extend(args(extra));
+        self.run(&values)
+    }
+
+    fn assert_sync_staging_empty(&self) {
+        assert_eq!(
+            fs::read_dir(self.root.join("syncer/staging"))
+                .unwrap()
+                .count(),
+            0,
+            "incremental import must settle original and uploaded custody",
+        );
+    }
+
+    fn assert_incremental_import(&self, bundle: &str) {
+        // Seed only the real prerequisite history through native durable import.
+        // The receiving node initially has neither the large blob nor its tip.
+        let source = self.root.join("sync-base.git");
+        fs::create_dir_all(source.join("refs/heads")).unwrap();
+        fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::copy(self.root.join("source.git/config"), source.join("config")).unwrap();
+        let tree = loose(&source, self.format, GitObjectKind::Tree, b"");
+        assert!(self.full.contains_key(&tree));
+        let base = loose(
+            &source,
+            self.format,
+            GitObjectKind::Commit,
+            self.full[&self.base].as_ref().unwrap(),
+        );
+        assert_eq!(base, self.base);
+        fs::write(source.join("refs/heads/main"), format!("{base}\n")).unwrap();
+        let (mut node, _) = OneNode::init(
+            NodeConfig::new(
+                self.root.join("syncer"),
+                TenantId::from_bytes([0x11; 16]),
+                RepositoryId::from_bytes([0x22; 16]),
+            )
+            .with_object_format(self.format)
+            .with_worker_threads(2),
+        )
+        .unwrap();
+        let current = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
+        node.bring_into_service(current.receipt().generation())
+            .unwrap();
+        let request = node.import_request_context(None);
+        let seeded = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &request,
+                &source,
+                PrincipalId::from_bytes([0x33; 16]),
+                b"incremental-large-original-seed",
+            ))
+            .unwrap();
+        assert!(matches!(
+            seeded.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        assert!(node.read_git_object(self.blob).is_err());
+        node.shutdown().unwrap();
+
+        let before = self.refs_at("syncer");
+        let expected = format!("refs/heads/main={}", self.base);
+        for limits in [
+            vec![],
+            vec![
+                "--max-object-mib",
+                "1",
+                "--max-blob-mib",
+                "40",
+                "--max-expanded-mib",
+                "32",
+            ],
+        ] {
+            refused(self.sync_import(bundle, "large-incremental-upload", true, &expected, &limits));
+            assert_eq!(self.refs_at("syncer"), before);
+            self.assert_sync_staging_empty();
+        }
+        let accepted = success(self.sync_import(
+            bundle,
+            "large-incremental-upload",
+            true,
+            &expected,
+            &[
+                "--max-object-mib",
+                "1",
+                "--max-blob-mib",
+                "40",
+                "--max-expanded-mib",
+                "40",
+                "--max-original-mib",
+                "1",
+                "--timeout-secs",
+                "600",
+            ],
+        ));
+        for required in [
+            "\"type\":\"git_bundle_import\"",
+            "\"outcome\":\"committed\"",
+            "\"atomic\":true",
+            "\"reference_count\":1",
+            "\"node_closed\":true",
+            "\"cleanup_error\":null",
+        ] {
+            assert!(accepted.contains(required), "{accepted}");
+        }
+        self.assert_native_objects_at(
+            "syncer",
+            &[(RefName::try_new(b"refs/heads/main").unwrap(), self.tip)],
+        );
+        self.assert_sync_staging_empty();
+        let committed = self.refs_at("syncer");
+        assert_ne!(committed, before);
+        // Cross-profile terminal recovery precedes fresh blob and original limits.
+        assert_eq!(
+            success(self.sync_import(bundle, "large-incremental-upload", true, &expected, &[])),
+            accepted,
+        );
+        assert_eq!(
+            success(self.sync_import(bundle, "large-incremental-upload", false, &expected, &[])),
+            accepted,
+        );
+
+        // A zero-entry incremental pack must still authenticate all 33 MiB of
+        // original blob data before a fresh operation may reuse the history.
+        let zero_name = "large-original-only.bundle";
+        let report = success(self.run(&args(&[
+            "bundle",
+            "sync-export",
+            "node",
+            TENANT,
+            REPOSITORY,
+            zero_name,
+            "--streaming",
+            "--trusted-local",
+            "--object-format",
+            self.format.as_str(),
+            "--ref",
+            "refs/heads/main",
+            "--prerequisite",
+            &self.tip.to_string(),
+            "--max-object-mib",
+            "1",
+            "--max-blob-mib",
+            "40",
+            "--max-expanded-mib",
+            "1",
+            "--max-output-mib",
+            "1",
+            "--timeout-secs",
+            "600",
+        ])));
+        assert!(report.contains("\"object_count\":0,"), "{report}");
+        let mut raw = fs::read(self.root.join(zero_name)).unwrap();
+        let boundary = raw.windows(2).position(|pair| pair == b"\n\n").unwrap() + 2;
+        let header = std::str::from_utf8(&raw[..boundary])
+            .unwrap()
+            .replace(" refs/heads/main\n", " refs/heads/copied\n");
+        assert!(header.contains(" refs/heads/copied\n"));
+        let pack = raw.split_off(boundary);
+        raw = header.into_bytes();
+        raw.extend_from_slice(&pack);
+        fs::write(self.root.join(zero_name), raw).unwrap();
+
+        for limits in [
+            vec![
+                "--max-object-mib",
+                "1",
+                "--max-blob-mib",
+                "40",
+                "--max-original-mib",
+                "32",
+                "--max-expanded-mib",
+                "1",
+            ],
+            vec![
+                "--max-object-mib",
+                "1",
+                "--max-blob-mib",
+                "32",
+                "--max-original-mib",
+                "40",
+                "--max-expanded-mib",
+                "1",
+            ],
+        ] {
+            refused(self.sync_import(
+                zero_name,
+                "borrow-large-original",
+                true,
+                "refs/heads/copied=absent",
+                &limits,
+            ));
+            assert_eq!(self.refs_at("syncer"), committed);
+            self.assert_sync_staging_empty();
+        }
+        let borrowed = success(self.sync_import(
+            zero_name,
+            "borrow-large-original",
+            true,
+            "refs/heads/copied=absent",
+            &[
+                "--max-object-mib",
+                "1",
+                "--max-blob-mib",
+                "40",
+                "--max-original-mib",
+                "40",
+                "--max-expanded-mib",
+                "1",
+                "--timeout-secs",
+                "600",
+            ],
+        ));
+        assert!(borrowed.contains("\"outcome\":\"committed\""), "{borrowed}");
+        self.assert_native_objects_at(
+            "syncer",
+            &[
+                (RefName::try_new(b"refs/heads/main").unwrap(), self.tip),
+                (RefName::try_new(b"refs/heads/copied").unwrap(), self.tip),
+            ],
+        );
+        assert_eq!(
+            success(self.sync_import(
+                zero_name,
+                "borrow-large-original",
+                true,
+                "refs/heads/copied=absent",
+                &["--max-original-mib", "1", "--max-blob-mib", "1"],
+            )),
+            borrowed
+        );
+        assert_eq!(
+            success(self.sync_import(
+                zero_name,
+                "borrow-large-original",
+                false,
+                "refs/heads/copied=absent",
+                &[],
+            )),
+            borrowed
+        );
+        self.assert_sync_staging_empty();
+        self.assert_clean();
+    }
+
     fn assert_received_native_objects(&self) {
         self.assert_native_objects_at(
             "receiver",
@@ -799,6 +1077,7 @@ fn both_domains_export_a_33_mib_blob_without_widening_metadata_and_recover_exact
             assert_eq!(fixture.refs(), before);
 
             if incremental {
+                fixture.assert_incremental_import(name);
                 continue;
             }
             fixture.assert_full_import(name);

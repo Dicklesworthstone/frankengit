@@ -39,7 +39,8 @@ Cancellation is cooperative and cannot interrupt an operating-system call.
 An error after publication reports the visible file; preserve that artifact.
 The receipt includes reference_count, prerequisite_count, external_object_count,
 native pack checksum and bundle SHA-256. This transfers Git source, not authority
-or forge state. Existing sync-import retains its 128 MiB input limit.
+or forge state. Buffered sync-import retains its 128 MiB input limit. Use
+sync-import --file-backed for independently bounded input and original-history reads.
 Exit 0: complete locally durable export; 2: input/source/output/cleanup failure.";
 
 #[derive(Debug)]

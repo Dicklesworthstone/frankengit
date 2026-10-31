@@ -46,8 +46,10 @@ Every supplied object is verified; only the selected reference closure and its
 required transport delta bases are staged for admission. Gitlinks remain external
 repository dependencies.
 
-Incremental `sync-import` retains its buffered profile. File-backed import and
-fetch both require all native dependencies in the supplied full bundle.
+For prerequisite-aware reception, use [`sync-import --file-backed`](INCREMENTAL_GIT_BUNDLES.md#file-backed-incremental-import).
+It authenticates the complete declared original closure under a separate byte
+allowance and binds that evidence to the selecting authority head. Full import
+and mapped fetch continue to require their native dependencies in the input.
 
 ## Fetch into selected destinations
 

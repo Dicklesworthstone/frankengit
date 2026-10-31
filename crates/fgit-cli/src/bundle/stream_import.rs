@@ -26,7 +26,7 @@ Every advertised direct ref is created in one atomic transaction; an existing
 destination name refuses all updates. HEAD remains an advertisement. Native
 SHA-1 and SHA-256, internal OFS/REF deltas and forward REF bases are supported.
 Prerequisites, external bases, filtered bundles and implicit force are refused.
-Mapped fetch also accepts --file-backed. Incremental sync-import remains buffered.
+Mapped fetch and incremental sync-import also accept --file-backed.
 
 Input and expanded-byte defaults are 128 MiB; each accepts 1..16384 MiB.
 The independent blob allowance defaults to 32 MiB and accepts 1..16384 MiB.
@@ -88,15 +88,15 @@ fn number(flag: &str, value: &str, maximum: u64) -> Result<u64, String> {
         .ok_or_else(|| format!("{flag} must be in 1..={maximum}"))
 }
 
-fn mib(flag: &str, value: &str, maximum: u64) -> Result<usize, String> {
+pub(super) fn mib(flag: &str, value: &str, maximum: u64) -> Result<usize, String> {
     let bytes = number(flag, value, maximum)?
         .checked_mul(MIB)
         .ok_or_else(|| format!("{flag} byte limit overflow"))?;
     usize::try_from(bytes).map_err(|_| format!("{flag} exceeds this platform"))
 }
 
-/// Resource parsing shared by full import and mapped fetch. Payload, metadata
-/// and graph allowances stay independent across both file-backed profiles.
+/// Resource parsing shared by full import, mapped fetch and incremental sync.
+/// Payload, metadata and graph allowances stay independent across profiles.
 pub(super) fn apply_limit(
     flag: &str,
     value: &str,

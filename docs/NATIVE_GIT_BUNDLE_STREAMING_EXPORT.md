@@ -101,8 +101,9 @@ are zero for a full stream.
 The full writer's byte profile and public signature are unchanged. Incremental
 streams use a distinct profile and retain the same independent resource bounds.
 They are not self-contained inputs for the existing full-bundle verify/recover
-commands, and exporting a larger artifact does not widen sync-import's
-128 MiB input limit.
+commands. The default buffered sync-import remains limited to 128 MiB;
+[`sync-import --file-backed`](INCREMENTAL_GIT_BUNDLES.md#file-backed-incremental-import)
+provides independent input, uploaded expansion, original-body, and blob limits.
 ## Focused validation
 
 ```sh
@@ -311,7 +312,10 @@ node with a 1 MiB metadata cap, checks the exact selected closure and streamed
 buffered retries. Mapped-fetch cases update a selected branch through the real
 33 MiB blob, fan out to a raw-byte ref, exclude unselected object placement,
 and check atomic stale leases, non-fast-forward refusal and cross-profile
-terminal recovery. Its source objects enter through the public durable
-loose-object importer. The codec's `bundle_stream_blobs` target also checks short
+terminal recovery. Incremental-receive cases seed only the small prerequisite
+history, receive the actual 33 MiB upload, and then reuse that complete large-blob
+history through a zero-entry pack. Independent original-byte and blob limits
+refuse before publication; cross-profile retries recover the same receipt.
+Its source objects enter through the public durable loose-object importer. The codec's `bundle_stream_blobs` target also checks short
 reads, exact EOF, source identity, cancellation, and buffered/streamed byte
 compatibility in both bundle profiles.

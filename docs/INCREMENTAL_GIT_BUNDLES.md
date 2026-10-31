@@ -110,8 +110,91 @@ Unix parent-directory ownership rules and cooperative cancellation limits apply.
 An incremental bundle remains dependent on its declared originals.
 `bundle verify` and `bundle recover` retain their self-contained full-bundle
 contracts. Use a prerequisite-aware receiver for this transfer.
-**The existing `sync-import` input limit remains 128 MiB**: raising the export
-ceiling does not make this node's buffered import accept a larger artifact.
+The default buffered `sync-import` input limit remains 128 MiB. Select the
+file-backed receive profile below and set its independent limits explicitly
+when receiving a larger artifact.
+
+
+## File-backed incremental import
+
+Add `--file-backed` to receive an incremental bundle without buffering the whole
+input or its prerequisite blob bodies:
+
+```sh
+fg bundle sync-import "$DESTINATION" "$TENANT" "$REPOSITORY" change.bundle \
+  --file-backed --trusted-local --object-format sha256 \
+  --principal "$PRINCIPAL" --key-stdin --allow-ref-updates \
+  --expect "refs/heads/main=$DESTINATION_OLD_TIP" \
+  --max-input-mib 512 --max-expanded-mib 512 --max-original-mib 1024 \
+  --max-object-mib 1 --max-blob-mib 256 --timeout-secs 600
+```
+
+The public node entry points are
+`OneNode::import_incremental_git_bundle_reader_durable_in` and its controlled
+variant. They take `StreamIncrementalBundleImportQuery`: an ordinary file-backed
+bundle query plus an independent `max_original_bytes` allowance.
+
+The input and uploaded expansion defaults remain 128 MiB and may each be raised
+through 16384 MiB. `--max-original-mib` independently defaults to 128 MiB and
+accepts 1 through 16384 MiB. It counts successful body reads while discovering
+visible native metadata and capturing every object in the declared prerequisite
+closure. Discovery reads and later capture share one ledger; revisiting a body
+does not reset it. A larger original allowance does not increase uploaded pack
+expansion, input, metadata allocation, or blob size limits.
+
+Blob bodies default to 32 MiB and can independently be raised through
+16384 MiB with `--max-blob-mib`. Metadata and delta programs default to 32 MiB
+and remain capped there; `--max-object-mib` can narrow that allocation limit.
+The object, ref-header, graph-edge, and timeout controls are shared with
+[file-backed full import](NATIVE_GIT_BUNDLE_FILE_IMPORT.md). The CLI still
+requires explicit update consent and at most 64 exact destination expectations.
+Existing visible roots use a separate finite discovery bound; a small incoming
+ref set does not make otherwise visible prerequisites unavailable.
+
+The receiver first selects current visible history at one authenticated
+authority basis. It checks typed metadata dependencies and requires every
+declared prerequisite to be a visible commit. It then authenticates every
+original body into private file spans. Large original blobs use bounded chunks
+and must pass stored commitments, exact native identity, length, and
+authenticated EOF before they become eligible dependencies or delta bases.
+A merely readable header does not establish original-body health.
+
+An independent original-only graph audit requires each declared prerequisite's
+complete closure. Incoming objects cannot repair missing original history.
+Original spans are separate from uploaded pack entries, offsets, indexes, and
+receipt counts. Native internal OFS/REF deltas, forward REF bases, and
+prerequisite-scoped external REF_DELTA bases are supported. Supplied objects
+still pass native verification and graph checks even when their IDs overlap
+original history. Duplicate pack identities refuse; a verified uploaded/original
+overlap must agree in kind, length, and strong body commitment.
+
+Only the selected uploaded closure and required uploaded transport bases enter
+synced publication staging. The final permitted closure includes selected
+originals, but their private verification spans are not represented as uploaded
+pack objects. A full bundle with no prerequisites uses an empty original source
+and cannot borrow from destination storage.
+
+Admission consumes a basis-bound source-import proof. Its receipt records the
+actual native pack checksum, strong pack digest, pack length, and prerequisite
+closure commitment. Both initial planning and authority-CAS replanning reject a
+changed selecting head; stale borrowed evidence cannot silently move onto a new
+snapshot. The existing canonical driver still owns authentication, current
+policy, exact old-tip leases, atomic refusal, and terminal publication.
+
+Verification scratch is owned under the node and removed before admission.
+Selected uploads use the existing synced private staging until normal admission
+prepares object publication. Allow disk space for original verification spans,
+uploaded verification spans, and selected staged uploads. The Unix input must
+be a non-symlink ordinary file with stable components under the local operator's
+control. The command does not accept an arbitrary scratch directory.
+
+One sticky cancellation/deadline state covers discovery, source capture, pack
+work, staging, and authority work. Pending admission drains with the original
+request. Stdin credentials are collected before cooperative signal handling and
+the native-work timer begin. Known terminal recovery precedes fresh original
+health and payload validation, so the same canonical commands, principal, and
+exact key recover the existing receipt across buffered and file-backed profiles.
+A returned error still does not establish non-commit.
 
 ## Atomic incremental import
 Import validates prerequisite reachability against the exact current visible
@@ -120,9 +203,10 @@ Only that declared history can supply omitted graph edges or external REF_DELTA
 bases. Merely stored, previously admitted, hidden-only, disconnected, or visible
 but undeclared objects cannot repair an incomplete transfer. Submodule gitlinks
 remain foreign-repository data. A valid prerequisite is not a shallow boundary.
-Native parsing, reconstruction, graph checking and staging share the existing
-quarantine implementation; original-byte accounting continues across prerequisite
-verification and external-base loading. Repeated phase-specific graph walks
+The buffered profile shares native quarantine validation. The file-backed profile
+uses separate authenticated original and uploaded custody with the same native
+parsers, delta engine, and graph rules; original-byte accounting continues across
+prerequisite verification and external-base loading. Repeated phase-specific graph walks
 remain separately bounded; no unlimited graph or fresh byte budget is introduced.
 
 No upload is staged until its requested graph has passed. An interruption during
@@ -155,6 +239,12 @@ campaign independently decodes the exact emitted native objects for both hash
 domains and both buffered and streaming export profiles. Its native commands run
 with an empty executable search path. Streaming cases add source-limit refusals,
 invalid outbound prerequisites, private-stage cleanup, deterministic repeats and
-zero-object transfer checks. Test presence is not execution evidence; results must name a tested
+zero-object transfer checks. The large-blob process target also exercises actual
+file-backed incremental reception of a 33 MiB upload with 1 MiB metadata and
+original allowances, then reuse of that blob through a zero-entry incremental
+pack. It checks independent original/blob/expansion refusals, exact native bytes
+and closures, private-stage cleanup, and buffered/file-backed terminal replay.
+Focused admission tests cover stale basis, terminal recovery, and a real competing
+publication during CAS retry. Test presence is not execution evidence; results must name a tested
 revision. Full workspace, lint, release, external-Git conformance, and remote
 transport authentication are not implied by this document.

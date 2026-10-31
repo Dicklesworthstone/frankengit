@@ -84,6 +84,9 @@ These are the buffered profile's bounds. For larger independently bounded
 inputs or blobs, select the [file-backed full import and mapped fetch](NATIVE_GIT_BUNDLE_FILE_IMPORT.md)
 and [streaming export](NATIVE_GIT_BUNDLE_STREAMING_EXPORT.md) profiles explicitly.
 Their byte allowances remain separate from metadata, graph and work limits.
+For declared-prerequisite transfers, [incremental synchronization](INCREMENTAL_GIT_BUNDLES.md)
+also provides `sync-import --file-backed` with an independent original-body
+allowance and authority-bound reuse of complete existing history.
 
 ## Implementation and verification
 
