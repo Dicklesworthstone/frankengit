@@ -69,6 +69,8 @@ enum Scope {
     LfsRead,
     LfsWrite,
     ArtifactRead,
+    QueuesRead,
+    QueuesWrite,
 }
 
 impl Scope {
@@ -89,17 +91,19 @@ impl Scope {
             "lfs-read" => Ok(Self::LfsRead),
             "lfs-write" => Ok(Self::LfsWrite),
             "artifact-read" => Ok(Self::ArtifactRead),
+            "queues-read" => Ok(Self::QueuesRead),
+            "queues-write" => Ok(Self::QueuesWrite),
             _ => Err(CredentialFailure::InvalidFile),
         }
     }
 
-    const fn mask(self) -> u16 {
+    const fn mask(self) -> u32 {
         1 << self as u8
     }
 }
 
 #[derive(Clone, Copy, Default)]
-struct Scopes(u16);
+struct Scopes(u32);
 
 impl Scopes {
     const fn git_transport() -> Self {
@@ -141,6 +145,14 @@ impl Grant {
             self.scopes.contains(Scope::PullsWrite)
         } else {
             self.scopes.contains(Scope::PullsRead)
+        }
+    }
+    /// Queue intent is independent of PR, review and code publication authority.
+    pub const fn permits_queues(&self, mutation: bool) -> bool {
+        if mutation {
+            self.scopes.contains(Scope::QueuesWrite)
+        } else {
+            self.scopes.contains(Scope::QueuesRead)
         }
     }
     /// A vote always uses this credential's principal, not a form field.
@@ -710,6 +722,62 @@ mod tests {
             });
         }
         encoded
+    }
+
+    #[test]
+    fn queue_scopes_are_independent_and_preserve_all_existing_scope_meanings() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let old = "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read";
+        let legacy = grant(principal, old).unwrap();
+        assert!(!legacy.permits_queues(false) && !legacy.permits_queues(true));
+        for (scope, read, write) in [
+            ("queues-read", true, false),
+            ("queues-write", false, true),
+            ("queues-read,queues-write", true, true),
+        ] {
+            let selected = grant(principal, scope).unwrap();
+            assert_eq!(selected.permits_queues(false), read);
+            assert_eq!(selected.permits_queues(true), write);
+            assert_eq!(
+                selected_session(&selected).authentication(),
+                AdmissionAuthentication::HttpToken
+            );
+            assert!(
+                !selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack)
+            );
+            assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
+            assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
+            assert!(!selected.permits_reviews(false) && !selected.permits_reviews(true));
+            assert!(!selected.permits_protection(false) && !selected.permits_protection(true));
+            assert!(!selected.permits_lfs(false) && !selected.permits_lfs(true));
+            assert!(!selected.permits_outcomes() && !selected.permits_reviewed_merge());
+            assert!(!selected.permits_artifact_read());
+        }
+        let all = grant(principal, &format!("{old},queues-read,queues-write")).unwrap();
+        assert!(all.permits_queues(false) && all.permits_queues(true));
+        assert!(all.permits(Service::UploadPack) && all.permits(Service::ReceivePack));
+        assert!(all.permits_artifact_read());
+        for invalid in [
+            "queues-write,queues-read",
+            "queues-read,queues-read",
+            "queues-write,read",
+            "queue-write",
+            "queues-land",
+        ] {
+            assert!(matches!(
+                grant(principal, invalid),
+                Err(CredentialFailure::InvalidFile)
+            ));
+        }
+        let token = "a".repeat(64);
+        let source = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        };
+        let static_grant = source
+            .authenticate(Some(&format!("Bearer {token}")))
+            .unwrap();
+        assert!(!static_grant.permits_queues(false) && !static_grant.permits_queues(true));
     }
 
     #[test]

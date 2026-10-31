@@ -7571,6 +7571,8 @@ pub struct NodeConfig {
     /// Explicit runtime-only ceiling for the scoped HTTP review-protection API.
     /// Disabled by default; token scopes and current administrators still apply.
     http_protection_admin: bool,
+    /// Independent HTTP queue-management ceiling; token scopes remain required.
+    http_queue_management: bool,
     /// Explicit local artifact-fabric custody for the HTTP Git LFS basic
     /// transfer profile. Disabled unless an operator selects a private root;
     /// per-request LFS credentials remain independently required.
@@ -7643,6 +7645,7 @@ impl NodeConfig {
             git_daemon_receive_principal: None,
             http_trusted_origin: None,
             http_protection_admin: false,
+            http_queue_management: false,
             http_lfs_root: None,
             workflow_artifact_root: None,
         }
@@ -7821,6 +7824,20 @@ impl NodeConfig {
     #[must_use]
     pub const fn http_protection_admin_enabled(&self) -> bool {
         self.http_protection_admin
+    }
+
+    /// Enables independently scoped HTTP queue reads and membership management.
+    /// This grants no credential scope, Git ref write, review, or merge authority.
+    #[must_use]
+    pub const fn with_http_queue_management(mut self) -> Self {
+        self.http_queue_management = true;
+        self
+    }
+
+    /// Whether the HTTP queue-management API was explicitly enabled.
+    #[must_use]
+    pub const fn http_queue_management_enabled(&self) -> bool {
+        self.http_queue_management
     }
 
     /// Enables Git LFS basic transfers in the authenticated HTTP service.

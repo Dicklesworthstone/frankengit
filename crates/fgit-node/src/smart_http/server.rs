@@ -22,6 +22,7 @@ mod maintenance;
 mod outcomes;
 mod protection;
 mod pulls;
+mod queues;
 mod source;
 #[cfg(target_os = "linux")]
 mod workflow;
@@ -1299,6 +1300,7 @@ fn serve_connection(
     let mut native_mutation = false;
     let mut protection_api = false;
     let mut pull_api = false;
+    let mut queue_api = false;
     let mut source_api = false;
     let mut api_error = None;
     let mut recovery = false;
@@ -1365,6 +1367,7 @@ fn serve_connection(
             });
         }
         protection_api = protection::is_route(envelope.target);
+        queue_api = queues::is_route(envelope.target);
         source_api = envelope
             .target
             .split('?')
@@ -1376,6 +1379,7 @@ fn serve_connection(
             .next()
             .is_some_and(|path| path.contains("/api/v1/pulls"));
         native = protection_api
+            || queue_api
             || source_api
             || pull_api
             || envelope
@@ -1395,18 +1399,33 @@ fn serve_connection(
         if let Some(request) = &protection_request {
             native_mutation = request.is_mutation();
         }
-        let source_request = if protection_request.is_none() && source_api {
-            Some(source::Request::parse(&envelope).map_err(|error| {
+        let queue_request = if protection_request.is_none() && queue_api {
+            Some(queues::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
                 error.status
             })?)
         } else {
             None
         };
+        if let Some(request) = &queue_request {
+            native_mutation = request.is_mutation();
+        }
+        let source_request =
+            if protection_request.is_none() && queue_request.is_none() && source_api {
+                Some(source::Request::parse(&envelope).map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?)
+            } else {
+                None
+            };
         if let Some(request) = &source_request {
             native_mutation = request.is_mutation();
         }
-        let pull_request = if protection_request.is_none() && source_request.is_none() {
+        let pull_request = if protection_request.is_none()
+            && queue_request.is_none()
+            && source_request.is_none()
+        {
             pulls::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
                 error.status
@@ -1417,16 +1436,20 @@ fn serve_connection(
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
         }
-        let issue_request =
-            if protection_request.is_none() && source_request.is_none() && pull_request.is_none() {
-                issues::Request::parse(&envelope).map_err(|error| {
-                    api_error = Some(error);
-                    error.status
-                })?
-            } else {
-                None
-            };
+        let issue_request = if protection_request.is_none()
+            && queue_request.is_none()
+            && source_request.is_none()
+            && pull_request.is_none()
+        {
+            issues::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?
+        } else {
+            None
+        };
         let git_request = if protection_request.is_none()
+            && queue_request.is_none()
             && source_request.is_none()
             && issue_request.is_none()
             && pull_request.is_none()
@@ -1443,6 +1466,12 @@ fn serve_connection(
                     api_error = Some(error);
                     error.status
                 })?
+            } else if let Some(request) = &queue_request {
+                queues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?
             } else if let Some(request) = &source_request {
                 source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
                     .map(|(session, read)| {
@@ -1476,7 +1505,9 @@ fn serve_connection(
             || git_request
                 .as_ref()
                 .is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        if (protection_request.is_some() || source_request.is_some()) && !mutation {
+        if (protection_request.is_some() || queue_request.is_some() || source_request.is_some())
+            && !mutation
+        {
             let principal = session
                 .authenticated_session()
                 .ok_or(Status::Unauthorized)?
@@ -1526,6 +1557,9 @@ fn serve_connection(
         let body_not_allowed = protection_request
             .as_ref()
             .is_some_and(|request| !request.is_mutation())
+            || queue_request
+                .as_ref()
+                .is_some_and(|request| !request.is_mutation())
             || pull_request
                 .as_ref()
                 .is_some_and(|request| !request.accepts_body())
@@ -1549,6 +1583,23 @@ fn serve_connection(
             let mut body = io::Cursor::new(initial).chain(&mut reader);
             if let Some(request) = &protection_request {
                 let reply = protection::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
+            } else if let Some(request) = &queue_request {
+                let reply = queues::execute(
                     &node,
                     request,
                     &session,
@@ -1720,6 +1771,8 @@ fn serve_connection(
                     .unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
                 if protection_api {
                     let _ = error.send_named(&mut writer, version, "protection_error");
+                } else if queue_api {
+                    let _ = error.send_named(&mut writer, version, "merge_queue_error");
                 } else if source_api {
                     let _ = error.send_named(&mut writer, version, "source_error");
                 } else if pull_api {

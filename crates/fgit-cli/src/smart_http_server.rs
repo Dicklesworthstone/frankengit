@@ -28,7 +28,7 @@ mod workflow;
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
-  [--allow-protection] [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
+  [--allow-protection] [--allow-queues] [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
@@ -102,7 +102,7 @@ Provisioning (reads/authenticates the repository, opens no listener):
 Requires an existing repository. Git pushes, issue APIs, PR APIs, source APIs,
 protection APIs and outcome queries are disabled by default. --allow-receive enables
 Git pushes for receive-scoped tokens. --allow-issues, --allow-outcomes, --allow-pulls,
---allow-source and --allow-protection require --credentials-file and the token's
+--allow-source, --allow-protection and --allow-queues require --credentials-file and the token's
 appropriate scopes. No switch enables another service. --allow-source exposes
 read-only source queries to read-scoped tokens; it grants no mutation permission.
 
@@ -118,7 +118,7 @@ At most 64 selectors / 4096 decoded bytes per row restrict every Git and native
 source/merge ref write, including deletes and both ends of renames. They do not
 filter reads or grant a service. See docs/HTTP_REF_WRITE_SCOPES.md.
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -203,6 +203,18 @@ Use fg verify-read with a separately trusted head to check the complete response
 Original tree witnesses include sibling entries within the authorized ref.
 See docs/VERIFIED_BLOB_READS.md for byte limits and the complete client flow.
 
+The independently enabled queue API uses queues-read/queues-write:
+  GET /api/v1/queues[?limit=50&after=N&expected_head=TOKEN]
+  GET /api/v1/queues/N[?expected_head=TOKEN]
+  POST /api/v1/queues/N/<enqueue|dequeue|reorder>
+Writes require Idempotency-Key, expected_incarnation, object_format,
+expected_version and target_ref (or target_ref_hex). Enqueue also requires
+pull_request, expected_pull_request_version, source_ref (or source_ref_hex),
+expected_source_tip and expected_target_tip; priority defaults to zero.
+Dequeue requires pull_request and reason. Reorder repeats entry=N for every
+queued PR in its exact desired order. Queue management moves no refs and grants
+no review or merge authority. Outcome recovery retains its separate grant.
+
 The independently enabled protection API uses protection-read/protection-write:
   GET /api/v1/protection
   POST /api/v1/protection
@@ -256,6 +268,7 @@ struct Options {
     allow_pulls: bool,
     allow_source: bool,
     allow_protection: bool,
+    allow_queues: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
     stop_file: Option<PathBuf>,
@@ -325,6 +338,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--allow-pulls"
                 | "--allow-source"
                 | "--allow-protection"
+                | "--allow-queues"
                 | "--print-credentials-header"
                 | "--continuous"
                 | "--workflow-trusted-local"
@@ -466,6 +480,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let allow_pulls = flags.contains_key("--allow-pulls");
     let allow_source = flags.contains_key("--allow-source");
     let allow_protection = flags.contains_key("--allow-protection");
+    let allow_queues = flags.contains_key("--allow-queues");
     if flags.contains_key("--lfs-root") {
         if !matches!(&credentials, CredentialInput::Reloadable(_)) {
             return Err("Git LFS requires explicit scopes in --credentials-file".into());
@@ -485,11 +500,16 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         #[cfg(not(target_os = "linux"))]
         return Err("workflow artifact custody requires Linux".into());
     }
-    if (allow_issues || allow_outcomes || allow_pulls || allow_source || allow_protection)
+    if (allow_issues
+        || allow_outcomes
+        || allow_pulls
+        || allow_source
+        || allow_protection
+        || allow_queues)
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
         return Err(
-            "issue/PR/source/protection/outcome endpoints require explicit scopes in --credentials-file"
+            "issue/PR/source/protection/queue/outcome endpoints require explicit scopes in --credentials-file"
                 .into(),
         );
     }
@@ -614,6 +634,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if allow_protection {
         config = config.with_http_protection_admin();
     }
+    if allow_queues {
+        config = config.with_http_queue_management();
+    }
     if let Some(root) = flags.get("--lfs-root") {
         config = config.with_http_lfs_root(PathBuf::from(*root));
     }
@@ -643,6 +666,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         allow_pulls,
         allow_source,
         allow_protection,
+        allow_queues,
         limits,
         idle_timeout,
         stop_file,
@@ -776,9 +800,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            options.allow_source, options.allow_protection, lfs_enabled, artifacts_enabled, workflow_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
+            options.allow_source, options.allow_protection, options.allow_queues, lfs_enabled, artifacts_enabled, workflow_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
         };
         #[cfg(target_os = "linux")]
@@ -983,6 +1007,8 @@ mod tests {
         assert!(!options.allow_pulls);
         assert!(!options.allow_source);
         assert!(!options.allow_protection);
+        assert!(!options.allow_queues);
+        assert!(!options.config.http_queue_management_enabled());
         assert!(options.index_maintenance.is_none());
         #[cfg(target_os = "linux")]
         assert!(options.workflow_service.is_none());
@@ -1689,6 +1715,29 @@ mod tests {
         assert!(parse(&provisioning).is_err());
     }
     #[test]
+    fn queue_management_requires_its_own_ceiling_and_reloadable_credentials() {
+        let mut static_args = arguments();
+        static_args.push("--allow-queues".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        let defaults = parse(&args).unwrap();
+        assert!(!defaults.allow_queues && !defaults.config.http_queue_management_enabled());
+        args.push("--allow-queues".into());
+        let options = parse(&args).unwrap();
+        assert!(options.allow_queues && options.config.http_queue_management_enabled());
+        assert!(
+            !options.allow_receive
+                && !options.allow_issues
+                && !options.allow_outcomes
+                && !options.allow_pulls
+                && !options.allow_source
+                && !options.allow_protection
+        );
+        args.push("--allow-queues".into());
+        assert!(parse(&args).is_err());
+    }
+    #[test]
     fn header_provisioning_is_a_separate_read_only_operation() {
         let mut args = arguments()[..5].to_vec();
         args.push("--print-credentials-header".into());
@@ -1769,6 +1818,7 @@ mod tests {
             "--allow-pulls",
             "--allow-source",
             "--allow-protection",
+            "--allow-queues",
         ] {
             let mut selected = args.clone();
             selected.push(flag.into());
@@ -1779,6 +1829,11 @@ mod tests {
             assert_eq!(options.allow_pulls, flag == "--allow-pulls");
             assert_eq!(options.allow_source, flag == "--allow-source");
             assert_eq!(options.allow_protection, flag == "--allow-protection");
+            assert_eq!(options.allow_queues, flag == "--allow-queues");
+            assert_eq!(
+                options.config.http_queue_management_enabled(),
+                flag == "--allow-queues"
+            );
             assert_eq!(
                 options.config.http_protection_admin_enabled(),
                 flag == "--allow-protection"
