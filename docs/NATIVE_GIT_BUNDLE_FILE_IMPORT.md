@@ -46,10 +46,12 @@ Every supplied object is verified; only the selected reference closure and its
 required transport delta bases are staged for admission. Gitlinks remain external
 repository dependencies.
 
-For prerequisite-aware reception, use [`sync-import --file-backed`](INCREMENTAL_GIT_BUNDLES.md#file-backed-incremental-import).
-It authenticates the complete declared original closure under a separate byte
-allowance and binds that evidence to the selecting authority head. Full import
-and mapped fetch continue to require their native dependencies in the input.
+For prerequisite-aware reception, use [`sync-import --file-backed`](INCREMENTAL_GIT_BUNDLES.md#file-backed-incremental-import)
+or [`fetch --file-backed --incremental`](INCREMENTAL_GIT_BUNDLES.md#fetch-selected-refs-from-an-incremental-bundle).
+Both authenticate the complete declared original closure under a separate byte
+allowance and bind that evidence to the selecting authority head. Full import
+and the default mapped-fetch profile continue to require their native dependencies
+in the input.
 
 ## Fetch into selected destinations
 
@@ -109,6 +111,13 @@ and the same `StreamBundleImportQuery` described below. The full source supplies
 all candidate and ancestry bytes. The source-import admission path therefore
 does not borrow a previous head's object evidence; it can replan after an
 unrelated head advance while rechecking current leases and policy.
+
+For an incremental artifact, add `--incremental` and its independent
+`--max-original-mib` allowance. The [incremental mapped-fetch profile](INCREMENTAL_GIT_BUNDLES.md#fetch-selected-refs-from-an-incremental-bundle)
+uses the same mappings, receipt, fast-forward rules and tag protections, while
+borrowing only physically verified declared prerequisite history. Its evidence
+is bound to the selecting authority head and refuses a stale basis. The ordinary
+profile above continues to refuse prerequisites and external delta bases.
 
 ## Independent limits
 
@@ -189,7 +198,7 @@ cargo test --locked -p fgit-node --lib source_retrieval::integrity::bundle_verif
 cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle::tests::file_import_tests
 cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle::tests::file_fetch_tests
 cargo test --locked -p fgit-cli --bin fg bundle::stream_import
-cargo test --locked -p fgit-cli --bin fg bundle::fetch::file_backed::tests
+cargo test --locked -p fgit-cli --bin fg bundle::fetch::file_backed
 cargo test --locked -p fgit-cli --test bundle_stream_export_large_blobs -- --test-threads=1
 ```
 

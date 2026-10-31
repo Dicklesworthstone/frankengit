@@ -7,31 +7,41 @@ use std::time::Instant;
 use fgit_authority::IdempotencyKey;
 use fgit_node::{
     GitDaemonSessionTimeout, LoopbackReceiveSession, NodeConfig, OneNode, StreamBundleImportQuery,
-    TerminationSignals,
+    StreamIncrementalBundleImportQuery, TerminationSignals,
 };
 
-use super::super::stream_import::apply_limit;
+use super::super::stream_import::{apply_limit, mib};
 use super::super::verify::local_files::StableInput;
 
 const USAGE: &str =
     "usage: fg bundle fetch <storage-root> <tenant-id> <repository-id> <bundle-file>
-  --file-backed --trusted-local --principal <id>
+  --file-backed [--incremental] --trusted-local --principal <id>
   (--idempotency-key <key> | --key-stdin) [--object-format sha1|sha256]
   --map <advertised-source-ref> <destination-ref> <absent|exact-old-oid> ...
   --map-hex <source-ref-bytes-hex> <destination-ref-bytes-hex> <absent|exact-old-oid> ...
   [--max-input-mib N] [--max-expanded-mib N] [--max-blob-mib N]
+  [--max-original-mib N (requires --incremental)]
   [--max-object-mib N] [--max-objects N] [--max-refs N] [--max-edges N]
   [--timeout-secs N]
 
-Fetches only explicitly mapped references from a self-contained native bundle.
+Fetches only explicitly mapped references from a native bundle. The default
+requires self-contained input; --incremental also permits declared prerequisites.
 All updates publish atomically under absent or exact-old leases. Branches and
 remote-tracking refs require commit targets and native commit-parent fast-forwards.
 Tags may be created or reasserted. One source may feed several unique destinations.
 There is no force, wildcard, prune, implicit current-tip lookup, or HEAD rewrite.
-Prerequisites, external delta bases and filtered bundles are refused. Internal
+Incremental input borrows only the complete, physically authenticated closure of
+declared visible prerequisite commits at one authority snapshot. Only those
+originals may supply omitted objects or external REF_DELTA bases. Internal
 OFS/REF deltas and forward REF bases are supported in both native hash domains.
+Filtered bundles are refused. The ordinary profile refuses prerequisites and
+external delta bases.
 
 Input and expanded-byte defaults are 128 MiB; each accepts 1..16384 MiB.
+Incremental original reads independently default to 128 MiB and accept
+1..16384 MiB via --max-original-mib; visible metadata discovery and complete
+original capture share that allowance. Raising it does not raise uploaded
+expansion, metadata allocation, or per-blob limits.
 The independent blob allowance defaults to 32 MiB and accepts 1..16384 MiB.
 Metadata and delta programs default to 32 MiB and accept 1..32 MiB; raising the
 blob allowance does not raise their allocation limit. Object count defaults to
@@ -46,7 +56,10 @@ The Unix input must be an ordinary non-symlink regular file with stable componen
 under the local operator's control. Every supplied object is verified; only mapped
 closures and required transport bases enter private synced staging. Large blobs
 are authenticated in chunks, with metadata buffered within its separate limit.
-Allow disk space for raw verification scratch and private staged objects.
+Allow disk space for raw verification scratch, authenticated original spans
+when incremental, and private staged uploads. Originals are never staged as
+uploaded entries. Incremental admission refuses a changed selecting authority
+head; borrowed history cannot silently move onto a different snapshot.
 Scratch is removed before admission. Permanent names are linked only when
 ordinary admission prepares a commit, before authority-head publication.
 
@@ -60,6 +73,22 @@ Exit 0: committed; 3: canonical refusal; 2: input/infrastructure/cleanup error."
 struct Options {
     common: super::Options,
     query: StreamBundleImportQuery,
+    profile: SourceProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceProfile {
+    Full,
+    Incremental { max_original_bytes: usize },
+}
+
+impl SourceProfile {
+    fn original_byte_limit(self) -> usize {
+        match self {
+            Self::Full => 0,
+            Self::Incremental { max_original_bytes } => max_original_bytes,
+        }
+    }
 }
 
 /// Inspect only option positions. A retry key or any of a mapping's three
@@ -70,7 +99,7 @@ pub(super) fn requested(args: &[String]) -> bool {
         match flag.as_str() {
             "--file-backed" => return true,
             "--map" | "--map-hex" => at += 4,
-            "--trusted-local" | "--key-stdin" => at += 1,
+            "--trusted-local" | "--key-stdin" | "--incremental" => at += 1,
             _ => at += 2,
         }
     }
@@ -78,14 +107,15 @@ pub(super) fn requested(args: &[String]) -> bool {
 }
 
 pub(super) fn help_requested(args: &[String]) -> bool {
-    args.len() == 2
-        && ((args[0] == "--file-backed" && args[1] == "--help")
-            || (args[0] == "--help" && args[1] == "--file-backed"))
+    (args.len() == 2 || args.len() == 3)
+        && args.iter().filter(|arg| *arg == "--file-backed").count() == 1
+        && args.iter().filter(|arg| *arg == "--help").count() == 1
+        && args.iter().filter(|arg| *arg == "--incremental").count() == args.len() - 2
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 16_404 + 18
+        || args.len() > 16_404 + 21
         || args
             .iter()
             .any(|arg| arg.len() > 64 * 1024 || arg.contains('\0'))
@@ -99,13 +129,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut common = args[..4].to_vec();
     let mut query = StreamBundleImportQuery::default();
     query.limits.pack.max_index_entries = query.limits.pack.max_entries as usize;
+    let mut max_original_bytes = StreamIncrementalBundleImportQuery::default().max_original_bytes;
     let mut seen = BTreeSet::new();
     let mut at = 4;
     while at < args.len() {
         let flag = args[at].as_str();
         at += 1;
         match flag {
-            "--file-backed" => {
+            "--file-backed" | "--incremental" => {
                 if !seen.insert(flag) {
                     return Err(format!("duplicate file-backed fetch option {flag}"));
                 }
@@ -135,7 +166,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if !seen.insert(flag) {
                     return Err(format!("duplicate file-backed fetch option {flag}"));
                 }
-                if !apply_limit(flag, value, &mut query)? {
+                if flag == "--max-original-mib" {
+                    max_original_bytes = mib(flag, value, 16_384)?;
+                } else if !apply_limit(flag, value, &mut query)? {
                     return Err(format!("unsupported file-backed fetch option {flag}"));
                 }
             }
@@ -144,9 +177,18 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if !seen.contains("--file-backed") {
         return Err("file-backed fetch requires --file-backed".into());
     }
+    let profile = if seen.contains("--incremental") {
+        SourceProfile::Incremental { max_original_bytes }
+    } else {
+        if seen.contains("--max-original-mib") {
+            return Err("--max-original-mib requires --incremental".into());
+        }
+        SourceProfile::Full
+    };
     Ok(Options {
         common: super::parse(&common)?,
         query,
+        profile,
     })
 }
 
@@ -221,7 +263,8 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
                     .limits
                     .envelope
                     .max_bundle_bytes
-                    .max(options.query.limits.pack.max_total_expanded_bytes) as u64,
+                    .max(options.query.limits.pack.max_total_expanded_bytes)
+                    .max(options.profile.original_byte_limit()) as u64,
             )
             .map_err(|error| error.to_string())?;
         let current = node
@@ -243,18 +286,36 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
         };
         // Keep the original pending admission future until it drains; a stop
         // after its CAS cannot erase the completed terminal decision.
-        let result = node
-            .runtime()
-            .block_on(node.fetch_full_git_bundle_reader_controlled_in(
-                &request,
-                &session,
-                &mut input,
-                &options.common.mappings,
-                options.query,
-                Default::default(),
-                &mut allow_work,
-            ))
-            .map_err(|error| error.to_string())?;
+        let result = match options.profile {
+            SourceProfile::Full => {
+                node.runtime()
+                    .block_on(node.fetch_full_git_bundle_reader_controlled_in(
+                        &request,
+                        &session,
+                        &mut input,
+                        &options.common.mappings,
+                        options.query,
+                        Default::default(),
+                        &mut allow_work,
+                    ))
+            }
+            SourceProfile::Incremental { max_original_bytes } => {
+                node.runtime()
+                    .block_on(node.fetch_incremental_git_bundle_reader_controlled_in(
+                        &request,
+                        &session,
+                        &mut input,
+                        &options.common.mappings,
+                        StreamIncrementalBundleImportQuery {
+                            bundle: options.query,
+                            max_original_bytes,
+                        },
+                        Default::default(),
+                        &mut allow_work,
+                    ))
+            }
+        }
+        .map_err(|error| error.to_string())?;
         let first = result
             .commands
             .first()
@@ -286,6 +347,9 @@ fn run_with_output(args: &[String], output: &mut impl Write) -> Result<u8, Strin
         }
     }
 }
+
+#[cfg(test)]
+mod incremental_tests;
 
 #[cfg(test)]
 mod tests {

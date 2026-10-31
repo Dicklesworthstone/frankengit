@@ -5,6 +5,9 @@
 //! the destination receives the actual exported bundle through file custody.
 //! No foreign executable is available to fg.
 
+#[path = "bundle_stream_export_large_blobs/incremental_fetch.rs"]
+mod incremental_fetch;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
@@ -199,10 +202,22 @@ impl Fixture {
         mappings: &[&str],
         extra: &[&str],
     ) -> Output {
+        self.fetch_at("fetcher", bundle, key, file_backed, mappings, extra)
+    }
+
+    fn fetch_at(
+        &self,
+        storage: &str,
+        bundle: &str,
+        key: &str,
+        file_backed: bool,
+        mappings: &[&str],
+        extra: &[&str],
+    ) -> Output {
         let mut values = args(&[
             "bundle",
             "fetch",
-            "fetcher",
+            storage,
             TENANT,
             REPOSITORY,
             bundle,
@@ -1078,6 +1093,9 @@ fn both_domains_export_a_33_mib_blob_without_widening_metadata_and_recover_exact
 
             if incremental {
                 fixture.assert_incremental_import(name);
+                // The explicit full-first loop above supplies both the complete
+                // recovery artifact and its base-only mapped advertisement.
+                fixture.assert_incremental_fetch(name, "full.bundle", "mapped-base.bundle");
                 continue;
             }
             fixture.assert_full_import(name);

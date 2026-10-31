@@ -20,8 +20,8 @@ zero, or cross-domain expectations refuse. No implicit refresh, deletion,
 ref mapping, pruning, or remote identity system is supplied by these commands.
 The expected tip need not be a prerequisite; it is a destination lease, not an
 assertion about the transfer's contents. An exact lease plus explicit update
-consent permits history rewrites subject to repository policy. The separately
-existing mapped-ref full-bundle fetch API retains its fast-forward and tag rules.
+consent permits history rewrites subject to repository policy. Mapped-ref fetch
+retains its fast-forward and tag rules, including the incremental profile below.
 
 The original `bundle import` remains self-contained and create-only. The
 original `bundle export` remains a full export. Their existing bytes and
@@ -225,6 +225,81 @@ pack was admitted. A changed expected-old field is a changed request. Shutdown
 and output errors preserve known transaction outcomes in the existing receipt
 path. `fg outcome` remains the artifact-free recovery mechanism.
 
+## Fetch selected refs from an incremental bundle
+
+Use `fetch --file-backed --incremental` when a bundle advertises several refs
+but only selected updates should enter local branches, tags, or remote-tracking
+refs. This profile supports the same native prerequisites and chunked original
+verification as file-backed sync-import, with the stricter mapped-fetch policy:
+
+```sh
+fg bundle fetch "$DESTINATION" "$TENANT" "$REPOSITORY" change.bundle \
+  --file-backed --incremental --trusted-local --object-format sha256 \
+  --principal "$PRINCIPAL" --key-stdin \
+  --map refs/heads/main refs/remotes/upstream/main "$DESTINATION_OLD_TIP" \
+  --map refs/heads/topic refs/heads/review absent \
+  --max-input-mib 512 --max-expanded-mib 512 --max-original-mib 1024 \
+  --max-object-mib 1 --max-blob-mib 256 --timeout-secs 600
+```
+
+Each mapping specifies an advertised source name, a destination name, and its
+exact expected old native ID or `absent`. One source may feed several unique
+destinations. `--map-hex` preserves raw source and destination name bytes,
+including non-UTF-8 names. At most 4,096 destinations are accepted, subject to
+the node's atomic command limit; header record and destination counts remain
+independent. No source ref is automatically created under its advertised name.
+There is no wildcard, pruning, force, or implicit lookup of a destination tip.
+
+All mapped commands form one atomic transaction. Branch and remote-tracking
+destinations must point to commits. An existing tip must be an ancestor of the
+new tip through native commit-parent edges, including non-first parents of a
+merge. An object merely present in the selected closure is not an ancestor.
+Tags support creation or exact reassertion only. A stale lease or policy refusal
+prevents every destination update. Current hidden-ref, protection, and
+authenticated-principal rules still pass through ordinary admission.
+
+The verifier authenticates the complete input and every declared prerequisite
+closure before selecting mapped uploads for staging. An unselected advertisement
+cannot conceal a malformed supplied object or repair incomplete original
+history. The selected private inspection view includes original commit metadata
+so fast-forward checks can traverse borrowed history without buffering blob
+bodies. Only selected uploaded objects and their required uploaded delta bases
+enter publication staging. Original spans retain their separate provenance and
+are never counted as uploaded pack entries.
+
+`--max-original-mib` requires `--incremental`; it independently defaults to
+128 MiB and accepts 1 through 16384 MiB. The other file-backed limits are
+unchanged. A zero-entry pack may reuse a large original blob with a small
+uploaded-expansion allowance, but the complete original body must still pass
+the independent original-read and per-blob limits. Ancestry work is bounded
+across the whole mapped batch and includes finite captured-original bytes rather
+than treating those bytes as uploaded expansion. All discovery, capture,
+verification, selection, staging, and admission share the original sticky
+cancellation/deadline state.
+
+Embedding callers use `OneNode::fetch_incremental_git_bundle_reader_durable_in`
+or `fetch_incremental_git_bundle_reader_controlled_in` with `BundleRefMapping`
+values and `StreamIncrementalBundleImportQuery`. The selecting authority basis
+is part of the admission evidence, including for ancestry inside prerequisite
+history. Initial admission and a later CAS replan both reject stale borrowed
+evidence. A fresh attempt can revalidate the same semantic request at the new
+basis; it must preserve its exact key and old/new commands.
+
+The output remains `git_bundle_fetch`. Transaction identity binds the canonical
+destination/old/new commands, principal, and exact key. It does not bind mapping
+order, original spans, pack encoding, prerequisites, or this intake profile.
+A known terminal result is recovered before fresh original-health, payload,
+quota, or serving checks. The same operation can also recover through ordinary
+buffered or file-backed fetch using an equivalent self-contained bundle.
+The bounded semantic header must still parse and identify those commands.
+Recovery does not certify a replacement artifact's body.
+
+Without `--incremental`, file-backed fetch retains its self-contained contract.
+This extension is a trusted local operator command; the HTTP transfer API and
+remote authentication profiles are unchanged.
+
+## Focused validation
+
 The repository-owned verification command is:
 
 ```sh
@@ -242,8 +317,11 @@ invalid outbound prerequisites, private-stage cleanup, deterministic repeats and
 zero-object transfer checks. The large-blob process target also exercises actual
 file-backed incremental reception of a 33 MiB upload with 1 MiB metadata and
 original allowances, then reuse of that blob through a zero-entry incremental
-pack. It checks independent original/blob/expansion refusals, exact native bytes
-and closures, private-stage cleanup, and buffered/file-backed terminal replay.
+pack. Mapped incremental cases add explicit namespace selection, raw-byte
+fanout, original commit ancestry, selective staging, and recovery using an
+equivalent full artifact. The cases check independent original/blob/expansion
+refusals, exact native bytes and closures, private-stage cleanup, and
+buffered/file-backed terminal replay.
 Focused admission tests cover stale basis, terminal recovery, and a real competing
 publication during CAS retry. Test presence is not execution evidence; results must name a tested
 revision. Full workspace, lint, release, external-Git conformance, and remote

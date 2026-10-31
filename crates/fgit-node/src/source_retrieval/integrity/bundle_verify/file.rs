@@ -7,11 +7,10 @@ mod resolve;
 mod storage;
 
 pub use import::BundleImportObjectPlan;
-pub use import::{
-    FullBundleImportPlan, prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
-};
+pub use import::{prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader};
 pub use incremental::{
-    BundleOriginalObject, BundleOriginalSource, prepare_incremental_bundle_import_reader,
+    BundleOriginalObject, BundleOriginalSource, prepare_incremental_bundle_fetch_reader,
+    prepare_incremental_bundle_import_reader,
 };
 
 use std::cell::RefCell;

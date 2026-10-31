@@ -1,6 +1,7 @@
 //! Real private files and the production retained verifier; no manufactured
 //! verification receipts, scratch spans or authority evidence.
 
+use super::super::import::FullBundleImportPlan;
 use super::*;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};

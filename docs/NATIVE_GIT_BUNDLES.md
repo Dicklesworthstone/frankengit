@@ -149,12 +149,10 @@ is additional to, not a replacement for, current authority policy and exact
 expected-old admission. A mandatory review policy still blocks direct changes
 to its protected branches.
 
-The input remains self-contained, even when the destination already stores
-its ancestry. This is repeatable offline synchronization, not prerequisite-
-bundle negotiation, network fetch, a remote-authentication endpoint, or
-bandwidth-efficient incremental transfer. Existing pack byte, object, graph,
-and cancellation bounds remain in force. An additional finite ancestry-work
-budget is shared across every update and parent edge in the batch.
+The default input profile remains self-contained, even when the destination
+already stores its ancestry. Existing pack byte, object, graph, and cancellation
+bounds remain in force. An additional finite ancestry-work budget is shared
+across every update and parent edge in the batch.
 
 Add `--file-backed` for chunked large-blob intake with independent input,
 expanded-byte, metadata, blob, inventory and graph limits. For example,
@@ -163,6 +161,16 @@ expanded-byte, metadata, blob, inventory and graph limits. For example,
 Every supplied object is verified, but only mapped closures and their required
 transport bases are staged. See the [file-backed fetch guide](NATIVE_GIT_BUNDLE_FILE_IMPORT.md#fetch-into-selected-destinations)
 for complete options, source custody, cancellation, and retry behavior.
+
+Add `--incremental` to the file-backed profile to receive only changed objects
+and reuse declared prerequisite history. This explicit profile authenticates
+the complete visible original closure with an independent `--max-original-mib`
+budget, proves fast-forwards through uploaded and original commit metadata,
+and binds borrowed evidence to the selecting authority head. It preserves the
+same mappings, exact-old leases, tag rules, and atomic receipt. See
+[mapped incremental fetch](INCREMENTAL_GIT_BUNDLES.md#fetch-selected-refs-from-an-incremental-bundle)
+for its limits and retry contract. These commands remain offline local-operator
+surfaces; they do not add network fetch or remote authentication.
 
 The receipt type is `git_bundle_fetch`; it includes tenant, repository,
 principal, native format, canonical transaction/decision identity, sorted

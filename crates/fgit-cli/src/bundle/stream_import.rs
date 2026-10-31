@@ -27,6 +27,7 @@ destination name refuses all updates. HEAD remains an advertisement. Native
 SHA-1 and SHA-256, internal OFS/REF deltas and forward REF bases are supported.
 Prerequisites, external bases, filtered bundles and implicit force are refused.
 Mapped fetch and incremental sync-import also accept --file-backed.
+Mapped incremental fetch additionally requires --incremental.
 
 Input and expanded-byte defaults are 128 MiB; each accepts 1..16384 MiB.
 The independent blob allowance defaults to 32 MiB and accepts 1..16384 MiB.
