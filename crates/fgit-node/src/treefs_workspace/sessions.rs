@@ -581,7 +581,7 @@ impl OneNode {
             staging: None,
         };
         state.begin_publication(attempt).map_err(state_error)?;
-        let outcome = admit_workspace_sealed_native_merge_async(
+        let outcome = Box::pin(admit_workspace_sealed_native_merge_async(
             &self.authority,
             request.authority(),
             context,
@@ -589,7 +589,7 @@ impl OneNode {
             expected.snapshot_digest,
             limits,
             &projection,
-        )
+        ))
         .await;
         match outcome {
             Ok(outcome) => {

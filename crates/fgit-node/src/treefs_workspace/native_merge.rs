@@ -229,9 +229,9 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: None,
         };
-        fgit_admission::merge::native::policy_preparation::prepare_sealed_native_merge_evidence_async(
+        Box::pin(fgit_admission::merge::native::policy_preparation::prepare_sealed_native_merge_evidence_async(
             &self.authority, request.authority(), context, sealed, workspace_snapshot, &projection,
-        ).await
+        )).await
     }
 
     /// Native continuation of the original sealed-package node API. Preserve
@@ -260,14 +260,14 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: None,
         };
-        admit_sealed_native_merge_async(
+        Box::pin(admit_sealed_native_merge_async(
             &self.authority,
             request.authority(),
             context,
             sealed,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -410,14 +410,14 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: Some(&staging),
         };
-        let terminal = admit_native_merge_async(
+        let terminal = Box::pin(admit_native_merge_async(
             &self.authority,
             request.authority(),
             &context,
             &intent,
             AdmissionLimits::default(),
             &projection,
-        )
+        ))
         .await
         .map_err(map_admission)?;
         // Preserve known terminal results even if cancellation arrives now.
@@ -505,14 +505,14 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: None,
         };
-        admit_native_merge_async(
+        Box::pin(admit_native_merge_async(
             &self.authority,
             request.authority(),
             &context,
             intent,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }

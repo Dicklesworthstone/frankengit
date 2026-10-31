@@ -177,12 +177,14 @@ impl OneNode {
         .await
         .map_err(|e| R::Admission(Box::new(e)))?;
         let entry = state.outbox.entry(key).ok_or(R::MissingDelivery)?;
-        let progress = fgit_admission::merge::native::dispatch::read_dispatch_progress(
-            &self.authority,
-            request.authority(),
-            selected.basis(),
-            entry,
-            &|| checkpoint(request).is_err(),
+        let progress = Box::pin(
+            fgit_admission::merge::native::dispatch::read_dispatch_progress(
+                &self.authority,
+                request.authority(),
+                selected.basis(),
+                entry,
+                &|| checkpoint(request).is_err(),
+            ),
         )
         .await
         .map_err(|e| R::Admission(Box::new(e)))?;
@@ -216,13 +218,15 @@ impl OneNode {
         if expected_head.is_some_and(|h| h != selected.basis().id()) {
             return Err(R::SnapshotMoved);
         }
-        let source = fgit_admission::merge::native::dispatch::replay::read_source(
-            &self.authority,
-            request.authority(),
-            selected.basis(),
-            key,
-            destination,
-            &|| checkpoint(request).is_err(),
+        let source = Box::pin(
+            fgit_admission::merge::native::dispatch::replay::read_source(
+                &self.authority,
+                request.authority(),
+                selected.basis(),
+                key,
+                destination,
+                &|| checkpoint(request).is_err(),
+            ),
         )
         .await
         .map_err(|e| R::Admission(Box::new(e)))?;
@@ -275,14 +279,16 @@ impl OneNode {
                 budget_exhaustion: None,
             } => Err(RefusalCode::CancellationInProgress),
         };
-        fgit_admission::merge::native::dispatch::replay::enqueue_replay_async(
-            &self.authority,
-            request.authority(),
-            &context,
-            intent,
-            &projection,
-            limits,
-            &checkpoint,
+        Box::pin(
+            fgit_admission::merge::native::dispatch::replay::enqueue_replay_async(
+                &self.authority,
+                request.authority(),
+                &context,
+                intent,
+                &projection,
+                limits,
+                &checkpoint,
+            ),
         )
         .await
         .map_err(|e| NodeReceiveTransportRefusal::Admission(Box::new(e)))
@@ -310,14 +316,14 @@ impl OneNode {
         if expected_head.is_some_and(|h| h != selected.basis().id()) {
             return Err(R::SnapshotMoved);
         }
-        let plan = fgit_admission::merge::native::dispatch::read_dispatch_plan(
+        let plan = Box::pin(fgit_admission::merge::native::dispatch::read_dispatch_plan(
             &self.authority,
             request.authority(),
             selected.basis(),
             key,
             destination,
             &|| checkpoint(request).is_err(),
-        )
+        ))
         .await
         .map_err(|e| R::Admission(Box::new(e)))?;
         checkpoint(request)?;

@@ -242,14 +242,17 @@ impl OneNode {
         let projection = self
             .durable_admission_projection_publishing(context, staging)?
             .with_authentication(authentication);
-        admit_basis_bound_validated_receive_async(
+        // Keep the measured admission state on one bounded heap frame instead
+        // of embedding it in every caller. It remains awaited by this request;
+        // cancellation and responsibility finalization keep the same owner.
+        Box::pin(admit_basis_bound_validated_receive_async(
             &self.authority,
             request.authority(),
             context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
     }
 }

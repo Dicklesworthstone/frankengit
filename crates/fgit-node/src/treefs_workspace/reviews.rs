@@ -344,7 +344,7 @@ impl OneNode {
             workspace_clock_floor: 0,
             staging: Some(&staging),
         };
-        let terminal = gate::admit_reviewed_merge_async(
+        let terminal = Box::pin(gate::admit_reviewed_merge_async(
             &self.authority,
             request.authority(),
             &context,
@@ -352,7 +352,7 @@ impl OneNode {
             &required,
             AdmissionLimits::default(),
             &projection,
-        )
+        ))
         .await
         .map_err(map_error)?;
         Ok((tx_id, terminal))

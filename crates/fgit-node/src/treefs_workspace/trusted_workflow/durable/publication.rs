@@ -131,14 +131,14 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = workflow_checks::admit_async(
+        let terminal = Box::pin(workflow_checks::admit_async(
             &self.authority,
             request.authority(),
             &context,
             record,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(map)?;
         Ok((tx, terminal))

@@ -119,14 +119,14 @@ impl OneNode {
         };
         let terminal = match submission {
             IssueSubmission::Exact(command) => {
-                issues::admit_issue_async(
+                Box::pin(issues::admit_issue_async(
                     &self.authority,
                     request.authority(),
                     &context,
                     command,
                     limits,
                     &projection,
-                )
+                ))
                 .await
             }
             IssueSubmission::AppendComment(intent) => {

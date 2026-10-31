@@ -9470,7 +9470,7 @@ impl OneNode {
                 .await;
         }
         let projection = self.durable_admission_projection(context)?;
-        fgit_admission::merge::admit_merge_async(
+        Box::pin(fgit_admission::merge::admit_merge_async(
             &self.authority,
             request.authority(),
             context,
@@ -9478,7 +9478,7 @@ impl OneNode {
             limits,
             &projection,
             &projection,
-        )
+        ))
         .await
     }
 
@@ -9563,14 +9563,14 @@ impl OneNode {
             .durable_admission_projection(&context)
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?
             .with_authentication(authenticated.authentication());
-        admit_validated_receive_async(
+        Box::pin(admit_validated_receive_async(
             &self.authority,
             request.authority(),
             &context,
             validated,
             limits,
             &projection,
-        )
+        ))
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
