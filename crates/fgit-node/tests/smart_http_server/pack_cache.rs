@@ -61,7 +61,12 @@ fn reopen(config: NodeConfig) -> OneNode {
 fn separate_http_children_share_pack_cache_and_disabled_siblings_keep_identical_bytes() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
-        let config = config(&scratch, format).with_pack_cache_bytes(1 << 20);
+        // Exact received-pack reuse deliberately bypasses recompression. This
+        // test isolates computation-cache sharing across reopened HTTP children;
+        // received-pack reuse has its own native selection/refusal coverage.
+        let config = config(&scratch, format)
+            .with_pack_cache_bytes(1 << 20)
+            .with_received_pack_cache_bytes(0);
         let server = Server::start(initialized(config.clone()), 3, true, 1);
         let observer = OneNode::open_existing(config.clone()).unwrap();
         assert_eq!(observer.pack_cache_stats().entries, 0);
