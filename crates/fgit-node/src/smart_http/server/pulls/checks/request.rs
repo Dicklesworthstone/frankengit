@@ -77,7 +77,7 @@ impl<'a> Request<'a> {
                     );
                 }
                 "limit" if !evidence_route && limit.is_none() => {
-                    limit = Some(parse_decimal(&value)?)
+                    limit = Some(parse_decimal(&value)?);
                 }
                 "check" if evidence_route && evidence.is_none() => {
                     evidence = Some(

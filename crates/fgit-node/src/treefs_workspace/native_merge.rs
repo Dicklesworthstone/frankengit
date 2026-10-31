@@ -796,7 +796,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             let staging = self.staging.unwrap_or(&existing_only);
             let objects = selected.selected_closure().closure().objects();
             let headers = NativeFrontierHeaders {
-                source: VerifiedFabricPackSource { ..source },
+                source,
                 selected: objects,
                 staging,
                 maximum_blob_bytes: object_limits.max_reused_blob_bytes,

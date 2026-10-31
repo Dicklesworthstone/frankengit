@@ -774,7 +774,7 @@ impl OneNode {
                 false
             });
 
-        let exit_code = if served { 0 } else { 1 };
+        let exit_code = u32::from(!served);
         let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut final_state = state_cell.into_inner();
             final_state.session.send_channel_eof();

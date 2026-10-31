@@ -60,11 +60,7 @@ mod tests {
                                 } else {
                                     StepOutcome::Failed
                                 },
-                                exit_code: Some(if *outcome == JobOutcome::Succeeded {
-                                    0
-                                } else {
-                                    1
-                                }),
+                                exit_code: Some(i32::from(*outcome != JobOutcome::Succeeded)),
                                 stdout: Vec::new(),
                                 stderr: Vec::new(),
                                 elapsed_millis: 0,

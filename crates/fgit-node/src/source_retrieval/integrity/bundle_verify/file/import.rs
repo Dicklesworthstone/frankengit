@@ -174,12 +174,13 @@ impl FullBundleImportPlan {
     }
 
     fn selected_object(&self, identity: GitOid) -> Result<SelectedObject, BundleVerifyError> {
-        self.objects.get(&identity).copied().ok_or_else(|| {
-            BundleVerifyError::Graph(GraphRefusal::MissingTarget {
+        self.objects
+            .get(&identity)
+            .copied()
+            .ok_or(BundleVerifyError::Graph(GraphRefusal::MissingTarget {
                 source: None,
                 target: identity,
-            })
-        })
+            }))
     }
 
     fn check_live(&self, live: &mut impl FnMut() -> bool) -> Result<(), BundleVerifyError> {

@@ -23,9 +23,8 @@ impl Acceptance<'_> {
         match self {
             Self::Bounded(maximum) => Ok(accepted < *maximum),
             Self::UntilStopped(stop) => {
-                let stopped =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()))
-                        .map_err(|_| io::Error::other("guarded daemon stop control panicked"))??;
+                let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop))
+                    .map_err(|_| io::Error::other("guarded daemon stop control panicked"))??;
                 if stopped {
                     return Ok(false);
                 }

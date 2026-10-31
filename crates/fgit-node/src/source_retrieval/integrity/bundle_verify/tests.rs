@@ -6,7 +6,7 @@ use fgit_pack::{DeltaBase, EntryKind};
 use std::fmt::Write as _;
 
 fn zlib(body: &[u8]) -> Vec<u8> {
-    assert!(body.len() <= u16::MAX as usize);
+    assert!(u16::try_from(body.len()).is_ok());
     let length = body.len() as u16;
     let mut bytes = vec![0x78, 0x01, 0x01];
     bytes.extend_from_slice(&length.to_le_bytes());

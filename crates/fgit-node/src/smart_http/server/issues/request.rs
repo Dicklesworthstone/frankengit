@@ -154,7 +154,7 @@ impl<'a> Request<'a> {
         for (key, value) in fields {
             match key.as_str() {
                 "expected_version" if action != "append-comment" => {
-                    set_once(&mut version, decimal(&value)?)?
+                    set_once(&mut version, decimal(&value)?)?;
                 }
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
                 "body" if matches!(action, "open" | "edit" | "comment" | "append-comment") => {

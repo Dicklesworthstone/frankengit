@@ -21,7 +21,7 @@ fn id(format: GitHashAlgorithm, length: usize, suffix: &[u8]) -> GitOid {
     }
 }
 fn copy(program: &mut Vec<u8>, offset: usize, length: usize) {
-    assert!(length > 0 && length <= 0xff_ffff && offset <= u32::MAX as usize);
+    assert!(length > 0 && length <= 0xff_ffff && u32::try_from(offset).is_ok());
     let mut opcode = 0x80;
     let mut operands = Vec::new();
     for i in 0..4 {
@@ -102,7 +102,7 @@ fn large_ref_and_ofs_delta_chains_match_the_buffered_oracle_in_both_domains() {
             ordinary.graph.max_object_bytes = length + 2;
             let expected = verify_git_bundle(&input, &ordinary, &mut || true).unwrap();
             let mut scratch = BoundedScratch::new(
-                files.file(&format!("chain-{}-{forward_ref}", format.as_str(),)),
+                files.file(&format!("chain-{}-{forward_ref}", format.as_str())),
             );
             let actual = verify_git_bundle_reader(
                 &mut Cursor::new(&input),

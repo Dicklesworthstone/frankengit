@@ -220,7 +220,7 @@ pub(super) fn read_pack(
                         GitOid::from_hex(format, &fgit_crypto::lowercase_hex(&child.object_id))
                             .map_err(|_| invalid("invalid initial tree child"))?;
                     children.push(Child {
-                        name: child.name.to_vec(),
+                        name: child.name.clone(),
                         mode,
                         id,
                     });

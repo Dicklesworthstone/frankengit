@@ -173,7 +173,7 @@ impl Fixture {
             .block_on(node.search_source_initial_revalidated_local_in(
                 &node.request_context(),
                 &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(
-                    &node,
+                    node,
                 ),
                 &self.reference,
                 None,
@@ -317,7 +317,7 @@ fn differently_dated_indexes_join_to_current_source_without_relabelling_or_publi
         assert!(
             node.runtime()
                 .block_on(node.search_source_initial_local_in(
-                    &node.request_context(), &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(&node),
+                    &node.request_context(), &crate::source_retrieval::authorization::SourceReadContext::trusted_local_native(node),
                     &f.reference,
                     None,
                     None,

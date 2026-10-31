@@ -117,7 +117,7 @@ fn every_claimed_coordinate_and_scope_is_checked_against_the_retained_frame() {
             3 => bad.job.push('x'),
             4 => {
                 bad.source_commit =
-                    GitOid::from_hex(GitHashAlgorithm::Sha1, &"ff".repeat(20)).unwrap()
+                    GitOid::from_hex(GitHashAlgorithm::Sha1, &"ff".repeat(20)).unwrap();
             }
             5 => bad.conclusion = WorkflowCheckConclusion::Failure,
             _ => bad.evidence.push(0),

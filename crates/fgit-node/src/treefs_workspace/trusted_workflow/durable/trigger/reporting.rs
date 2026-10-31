@@ -272,7 +272,7 @@ pub(super) fn bind_identity(
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            write_new(&path, expected).map_err(io)?
+            write_new(&path, expected).map_err(io)?;
         }
         Err(error) => return Err(io(error)),
     }

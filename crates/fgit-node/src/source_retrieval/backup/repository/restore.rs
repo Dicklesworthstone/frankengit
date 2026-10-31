@@ -149,7 +149,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 instance = Some(StoreInstanceId::from_raw(number));
             }
             "--max-archive-bytes" | "--max-blob-bytes" | "--timeout-secs" => {
-                profile.set(flag, value)?
+                profile.set(flag, value)?;
             }
             _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
             _ => return Err(format!("unknown or duplicate restore option: {flag}")),

@@ -83,7 +83,7 @@ fn execute(
             let result =
                 node.runtime()
                     .block_on(node.refresh_scoped_source_index_guarded_local_in(
-                        &request,
+                        request,
                         &options.reference,
                         &options.scope,
                         options.head,

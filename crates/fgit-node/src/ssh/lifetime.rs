@@ -12,7 +12,7 @@ impl Acceptance<'_> {
         match self {
             Self::Bounded(max) => Ok(accepted < *max),
             Self::UntilStopped(should_stop) => {
-                let stop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| should_stop()))
+                let stop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(should_stop))
                     .map_err(|_| {
                         NodeSshRefusal::StopControl(io::Error::other("SSH stop control panicked"))
                     })?
