@@ -21,7 +21,6 @@ use fgit_pack::full_bundle::{
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefName};
 use fgit_wire::smart_http::{BodyFraming, HttpLimits};
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::io::Read;
 
 // Match the sealed native transaction ceiling; form/MIME bytes remain independently bounded.
@@ -356,6 +355,7 @@ fn receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     fn form(payload: &[u8], format: GitHashAlgorithm) -> String {
         format!(
             "object_format={}&artifact_sha256={}",

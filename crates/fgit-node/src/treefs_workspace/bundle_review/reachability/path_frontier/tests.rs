@@ -1,6 +1,8 @@
 //! Real native bytes and the production proof; this source records graph reads.
 //! It is not a durable-node or pack-inflation substitute.
 use super::*;
+use fgit_admission::merge::native::objects::MergeObjectLimits;
+use fgit_types::GitHashAlgorithm;
 use std::cell::RefCell;
 use std::fmt::Write as _;
 

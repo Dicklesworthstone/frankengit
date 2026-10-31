@@ -7,7 +7,6 @@ use crate::OneNode;
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_types::{GitHashAlgorithm, RefName};
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 pub(super) fn parse(bytes: &[u8], format: GitHashAlgorithm) -> Result<Vec<RefCommand>, ApiError> {
     let fields = parse_form(bytes, OneNode::MAX_BRANCH_TRANSACTION_COMMANDS + 1)?;
@@ -107,6 +106,7 @@ fn reference(text: &str) -> Result<RefName, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }

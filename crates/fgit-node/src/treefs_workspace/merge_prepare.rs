@@ -1,7 +1,6 @@
 //! Native merge preparation over one authenticated source snapshot. Unlike
 //! merge admission, this path performs NO object staging, seal or head write.
 
-use std::fmt::Write as _;
 #[path = "comment_anchor.rs"]
 mod comment_anchor;
 #[path = "commit_replay.rs"]
@@ -616,6 +615,7 @@ mod tests {
     use fgit_forge::{ExpectedVersion, PullRequestNumber};
     use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId, RepositoryId, TenantId};
     use std::collections::BTreeSet;
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);

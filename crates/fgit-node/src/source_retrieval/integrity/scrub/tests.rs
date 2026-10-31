@@ -170,7 +170,7 @@ pub(super) fn body_path(root: &Path, oid: GitOid) -> PathBuf {
 #[test]
 fn fresh_complete_inventory_is_deterministic_in_both_domains_and_does_not_publish() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let (_scratch, mut node) = setup(format);
+        let (_scratch, node) = setup(format);
         let (objects, _) = publish(&node);
         let before = node.runtime().block_on(node.read_authority_head()).unwrap();
         let report = run(&node, ScrubQuery::default()).unwrap();
@@ -297,7 +297,7 @@ fn cursor_pages_resume_across_real_reopen_without_skips_duplicates_or_health_inf
 
 #[test]
 fn a_finding_limit_continues_after_the_observed_failure_not_after_an_unread_object() {
-    let (scratch, mut node) = setup(GitHashAlgorithm::Sha256);
+    let (scratch, node) = setup(GitHashAlgorithm::Sha256);
     let (objects, extra) = publish(&node);
     for oid in &extra[..2] {
         fs::remove_file(body_path(&scratch.0, *oid)).unwrap();

@@ -1,5 +1,8 @@
 use super::*;
 use fgit_forge::history::first_parent::FirstParentCursor;
+use fgit_forge::history::{HistoryLimits, LogOptions};
+use fgit_git_object::ObjectType;
+use fgit_types::GitOid;
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm};
 use std::fmt::Write as _;
 

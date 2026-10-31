@@ -9,7 +9,6 @@ use fgit_forge::event::issue::{
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
-use std::fmt::Write as _;
 
 use super::ApiError;
 
@@ -422,6 +421,7 @@ pub(super) fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     use fgit_wire::smart_http::{HttpLimits, head};
 

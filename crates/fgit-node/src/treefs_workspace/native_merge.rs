@@ -783,7 +783,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     .min(self.node.reused_merge_blob_limit()),
                 ..self.object_limits
             };
-            let source = VerifiedFabricPackSource {
+            let make_source = || VerifiedFabricPackSource {
                 fabric: &self.node.fabric,
                 object_format: self.node.object_format,
                 maximum_object_bytes: object_limits.max_object_bytes,
@@ -791,12 +791,13 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
             };
+            let source = make_source();
             let parse_limits = source.parse_limits();
             let existing_only = ReceiveStaging::default();
             let staging = self.staging.unwrap_or(&existing_only);
             let objects = selected.selected_closure().closure().objects();
             let headers = NativeFrontierHeaders {
-                source,
+                source: make_source(),
                 selected: objects,
                 staging,
                 maximum_blob_bytes: object_limits.max_reused_blob_bytes,

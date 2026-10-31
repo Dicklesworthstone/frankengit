@@ -14,7 +14,6 @@ use fgit_types::{
 };
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Page {
@@ -329,6 +328,7 @@ fn page(query: Option<&str>) -> Result<Page, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     fn fields() -> String {
         format!(
             "object_format=sha1&pull_request_version=1&policy_epoch=1&source_ref=refs%2Fheads%2Ftopic&target_ref=refs%2Fheads%2Fmain&source_tip={}&target_tip={}&merge_base={}&candidate_commit={}",
