@@ -55,7 +55,10 @@ if case == "build_sleep":
     time.sleep(20)
 directory = target / "x86_64-unknown-linux-gnu/debug/deps"
 if case.startswith("wrapped"):
-    directory = target / "x86_64-unknown-linux-gnu/debug/build/fgit-diff/0123456789abcdef/out"
+    wrapper = "rchw-11111111-1111-4111-8111-111111111111"
+    delivered = target / (".rch-delivered-" + wrapper + "-22222222-2222-4222-8222-222222222222")
+    delivered.mkdir(parents=True, mode=0o700)
+    directory = delivered / "x86_64-unknown-linux-gnu/debug/build/fgit-diff/0123456789abcdef/out"
 if case == "foreign":
     directory = target / "wasm32-unknown-unknown/debug/deps"
 if case == "outside":
@@ -91,9 +94,17 @@ artifact = {"reason": "compiler-artifact", "package_id": "worker-path-package",
             "profile": {"test": case != "wrong_mode"}, "executable": str(executable),
             "filenames": [str(executable)]}
 if case.startswith("wrapped") and case != "wrapped_no_binding":
-    artifact["rch"] = {"receipt": {"wrapper_id": "explicit-fake-contract"},
+    artifact["rch"] = {"receipt": {"wrapper_id": wrapper, "build_id": 7,
+                                  "published_output_root": str(target),
+                                  "caller_output_root": str(delivered)},
                        "worker_record": {"target": artifact["target"]},
                        "executable_blake3": "a" * 64}
+    if case == "wrapped_wrong_wrapper":
+        artifact["rch"]["receipt"]["wrapper_id"] = "rchw-33333333-3333-4333-8333-333333333333"
+    if case == "wrapped_wrong_output_root":
+        artifact["rch"]["receipt"]["published_output_root"] = str(root)
+    if case == "wrapped_shared_directory":
+        delivered.chmod(0o755)
     if case == "wrapped_bad_fingerprint":
         artifact["rch"]["executable_blake3"] = "not-a-fingerprint"
     if case == "wrapped_wrong_target":
@@ -164,7 +175,8 @@ class HostTestContract(unittest.TestCase):
 
     def test_wrapped_output_requires_exact_delivered_rch_binding(self):
         self.invoke("wrapped")
-        for case in ("wrapped_no_binding", "wrapped_bad_fingerprint", "wrapped_wrong_target"):
+        for case in ("wrapped_no_binding", "wrapped_bad_fingerprint", "wrapped_wrong_target",
+                     "wrapped_wrong_wrapper", "wrapped_wrong_output_root", "wrapped_shared_directory"):
             with self.subTest(case=case):
                 # Each fake build needs a fresh output tree, as in separate invocations.
                 if self.target.exists():

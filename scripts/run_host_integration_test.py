@@ -77,6 +77,32 @@ def capture(argv, output, env=None):
         raise subprocess.CalledProcessError(status, argv)
 
 
+def delivered_output_root(artifact, target_root):
+    binding = artifact.get("rch")
+    if binding is None:
+        return target_root
+    require(isinstance(binding, dict) and isinstance(binding.get("receipt"), dict),
+            "invalid RCH delivery binding")
+    receipt = binding["receipt"]
+    wrapper = receipt.get("wrapper_id")
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    require(isinstance(wrapper, str) and re.fullmatch("rchw-" + uuid, wrapper),
+            "invalid RCH wrapper identity")
+    require(type(receipt.get("build_id")) is int and receipt["build_id"] > 0,
+            "invalid RCH build identity")
+    published = absolute_path(receipt["published_output_root"]).resolve(strict=True)
+    require(published == target_root, "RCH publication belongs to another private target")
+    caller = absolute_path(receipt["caller_output_root"])
+    require(not caller.is_symlink(), "RCH delivery root is a symlink")
+    caller = caller.resolve(strict=True)
+    require(caller.parent == target_root
+            and re.fullmatch(re.escape(".rch-delivered-" + wrapper + "-") + uuid, caller.name),
+            "RCH delivery namespace does not match its receipt")
+    require(caller.is_dir() and caller.stat().st_mode & 0o077 == 0,
+            "RCH delivery root is not private")
+    return caller
+
+
 def select_executable(metadata, records, package, target, host, private_target):
     target_root = absolute_path(metadata["target_directory"]).resolve()
     require(target_root == private_target.resolve(), "Cargo changed the private target directory")
@@ -109,7 +135,7 @@ def select_executable(metadata, records, package, target, host, private_target):
     require(str(executable) in artifact["filenames"], "executable is absent from Cargo filenames")
     require(not executable.is_symlink(), "test executable is a symlink")
     executable = executable.resolve(strict=True)
-    native = target_root / host / "debug"
+    native = delivered_output_root(artifact, target_root) / host / "debug"
     standard = executable.parent == native / "deps"
     # The approved RCH rustc wrapper isolates each executable in a build slot.
     # Accept that exact layout only with its delivered Cargo/RCH binding.
