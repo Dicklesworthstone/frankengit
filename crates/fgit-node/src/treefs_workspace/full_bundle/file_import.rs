@@ -25,7 +25,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 
 use crate::receive_staging::ReceiveStaging;
 use crate::source_retrieval::integrity::bundle_verify::{
-    BundleImportObjectPlan, BundleVerifyError, BundleVerifyLimits, FullBundleImportPlan,
+    BundleImportObjectPlan, BundleVerifyError, BundleVerifyLimits,
     prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
 };
 use crate::{LoopbackReceiveSession, NodeRefusal, NodeRequestContext, OneNode};
@@ -370,30 +370,7 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch.into());
         }
         let commands: Vec<_> = if let Some(mappings) = mappings {
-            if mappings.is_empty() || mappings.len() > limits.command_limit(true) {
-                return Err(StreamBundleImportRefusal::InvalidQuery(
-                    "reference command count",
-                ));
-            }
-            let mapping_limits = fgit_pack::full_bundle::FullBundleLimits {
-                max_references: limits
-                    .command_limit(true)
-                    .min(fgit_wire::receive::ReceiveLimits::default().max_commands),
-                ..query.limits.envelope
-            };
-            header
-                .select_updates(mappings, mapping_limits, live)
-                .map_err(BundleVerifyError::Envelope)?
-                .into_iter()
-                .map(|update| RefCommand {
-                    name: update.destination,
-                    expected_old: update
-                        .expected_old
-                        .map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
-                    proposed_new: ProposedNew::Update(update.target),
-                    force: false,
-                })
-                .collect()
+            fetch::commands(&header, mappings, &query.limits, &limits, live)?
         } else {
             if header.references().is_empty()
                 || header.references().len() > limits.command_limit(true)
@@ -529,7 +506,7 @@ impl OneNode {
                 })
                 .collect::<Result<_, StreamBundleImportRefusal>>()?;
             if mappings.is_some() {
-                fetch::require_fast_forwards(&commands, &mut plan, &query.limits, live)?;
+                fetch::require_fast_forwards(&commands, &mut plan, &query.limits, 0, live)?;
             }
             crate::loose_import::preflight_import_metadata(
                 self.object_format,

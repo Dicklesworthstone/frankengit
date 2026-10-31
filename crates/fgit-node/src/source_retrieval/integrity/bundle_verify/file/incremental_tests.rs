@@ -314,7 +314,14 @@ fn thin_native_updates_borrow_only_declared_originals_and_stage_only_selected_up
             &BTreeSet::from([commit_id, tree_id, result_id])
         );
         assert_eq!(source.completed.len(), 3);
-        assert!(plan.object(source.blob).is_none());
+        assert_eq!(plan.object(source.blob).unwrap().kind, ObjectKind::Blob);
+        assert_eq!(
+            plan.read_metadata(source.root, &mut || true).unwrap(),
+            match &source.bodies[&source.root] {
+                Body::Bytes(bytes) => bytes.clone(),
+                Body::Repeated(_) => panic!("commit fixture must contain native metadata"),
+            }
+        );
         assert_eq!(blob(&mut plan, result_id), result);
         assert_eq!(plan.read_metadata(commit_id, &mut || true).unwrap(), commit);
         assert_eq!(plan.read_metadata(tree_id, &mut || true).unwrap(), tree);
@@ -350,10 +357,118 @@ fn empty_pack_reuse_and_identical_uploaded_overlap_keep_honest_native_counts() {
                 assert_eq!(blob(&mut plan, source.blob), b"original blob");
             } else {
                 assert_eq!(plan.total_selected_bytes(), 0);
-                assert!(plan.object(source.root).is_none());
+                assert_eq!(plan.object(source.root).unwrap().kind, ObjectKind::Commit);
             }
             plan.finish().unwrap();
         }
+    }
+}
+
+#[test]
+fn mapped_incremental_selection_audits_unselected_uploads_and_retains_original_metadata() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let originals = Originals::history(format, Body::Bytes(b"original blob".to_vec()));
+        let wanted = commit(originals.tree, Some(originals.root), "mapped child");
+        let wanted_id = git_object_id(format, ObjectKind::Commit, &wanted);
+        let missing = git_object_id(format, ObjectKind::Blob, b"not supplied");
+        let incomplete = [b"100644 missing\0".as_slice(), missing.as_bytes()].concat();
+        for (kind, body, permitted) in [
+            (ObjectKind::Blob, b"unselected valid blob".to_vec(), true),
+            (ObjectKind::Tree, b"100644 broken\0".to_vec(), false),
+            (ObjectKind::Tree, incomplete, false),
+        ] {
+            let unselected = git_object_id(format, kind, &body);
+            let record_kind = match kind {
+                ObjectKind::Blob => 3,
+                ObjectKind::Tree => 2,
+                _ => panic!("fixture requires blob or tree"),
+            };
+            let mut bytes = incremental(
+                format,
+                &[record(1, &wanted, &[]), record(record_kind, &body, &[])],
+                wanted_id,
+                &originals.prerequisites,
+            );
+            let header_end = bytes.windows(2).position(|pair| pair == b"\n\n").unwrap() + 1;
+            bytes.splice(
+                header_end..header_end,
+                format!("{unselected} refs/tags/unselected\n").bytes(),
+            );
+            let sources = [
+                RefName::try_new(b"refs/tags/result").unwrap(),
+                RefName::try_new(b"refs/tags/result").unwrap(),
+            ];
+            let scratch = ScratchPath::new();
+            let mut source = originals.clone();
+            let budget = source.budget();
+            let result = prepare_incremental_bundle_fetch_reader(
+                &mut Cursor::new(bytes),
+                format,
+                scratch.path(),
+                &mut source,
+                budget,
+                &sources,
+                &limits(),
+                &mut || true,
+            );
+            if permitted {
+                let mut plan = result.unwrap();
+                assert_eq!(plan.receipt().header().object_count, 2);
+                assert_eq!(plan.uploaded_ids(), &BTreeSet::from([wanted_id]));
+                assert_eq!(
+                    plan.selected_ids(),
+                    &BTreeSet::from([wanted_id, source.root, source.tree, source.blob]),
+                );
+                assert!(plan.object(unselected).is_none());
+                assert_eq!(plan.read_metadata(wanted_id, &mut || true).unwrap(), wanted);
+                assert_eq!(
+                    plan.read_metadata(source.root, &mut || true).unwrap(),
+                    commit(source.tree, None, "original"),
+                );
+                assert_eq!(plan.total_selected_bytes(), wanted.len() as u64);
+                assert_eq!(plan.original_bytes(), (budget - source.discovery) as u64);
+                assert_eq!(source.completed.len(), 3);
+                plan.finish().unwrap();
+            } else {
+                assert!(
+                    result.is_err(),
+                    "unselected graph must still be complete and valid"
+                );
+            }
+            assert!(!scratch.path().exists());
+        }
+    }
+}
+
+#[test]
+fn borrowed_blob_reader_refusal_is_sticky_and_cleans_owned_scratch() {
+    for allowed in [true, false] {
+        let format = GitHashAlgorithm::Sha256;
+        let mut source = Originals::history(format, Body::Bytes(b"original blob".to_vec()));
+        let bytes = incremental(format, &[], source.root, &source.prerequisites);
+        let budget = source.budget();
+        let scratch = ScratchPath::new();
+        let mut plan = prepare(&bytes, format, &scratch, &mut source, budget, &limits()).unwrap();
+        {
+            let mut live = || allowed;
+            let result = plan.open_blob(source.blob, &mut live);
+            if allowed {
+                assert!(
+                    matches!(result, Err(BundleVerifyError::Graph(GraphRefusal::MissingTarget { target, .. })) if target == source.blob)
+                );
+            } else {
+                assert!(matches!(result, Err(BundleVerifyError::Stopped)));
+            }
+        }
+        assert!(matches!(
+            plan.read_metadata(source.root, &mut || true),
+            Err(BundleVerifyError::Graph(GraphRefusal::Failed)),
+        ));
+        assert!(matches!(
+            plan.finish(),
+            Err(BundleVerifyError::Graph(GraphRefusal::Failed))
+        ));
+        assert!(!scratch.path().exists());
     }
 }
 

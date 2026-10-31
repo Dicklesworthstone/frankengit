@@ -2,6 +2,9 @@
 //! Source graphs enter through native directory import; no foreign Git is used.
 #![cfg(unix)]
 
+#[path = "file_import/incremental_fetch_tests.rs"]
+mod incremental_fetch_tests;
+
 use super::*;
 use crate::source_retrieval::integrity::bundle_verify::BundleVerifyError;
 use crate::{StreamBundleImportQuery, StreamBundleImportRefusal};

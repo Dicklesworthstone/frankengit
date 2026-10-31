@@ -16,19 +16,21 @@ use fgit_authority::{
     ExpectedOld, OutcomeLookup, ProposedNew, RECEIVE_ADMISSION_SCHEMA, RefCommand, SealAttempt,
     SemanticRequest,
 };
+use fgit_pack::full_bundle::fetch::BundleRefMapping;
 use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefName};
 
 use crate::receive_staging::ReceiveStaging;
 use crate::source_retrieval::integrity::bundle_verify::{
-    BundleOriginalSource, BundleVerifyError, prepare_incremental_bundle_import_reader,
+    BundleOriginalSource, BundleVerifyError, prepare_incremental_bundle_fetch_reader,
+    prepare_incremental_bundle_import_reader,
 };
 use crate::{LoopbackReceiveSession, NodeRequestContext, OneNode};
 
 use super::originals::SelectedBundleOriginals;
 use super::{
     MAX_BYTES, NodeReceiveTransportRefusal, NodeWorkspaceRefusal, StreamBundleImportQuery,
-    StreamBundleImportRefusal, bounded_query, checkpoint, io_error, receive_error, rewind,
+    StreamBundleImportRefusal, bounded_query, checkpoint, fetch, io_error, receive_error, rewind,
     stage_selected, workspace_request_live,
 };
 
@@ -50,6 +52,65 @@ impl Default for StreamIncrementalBundleImportQuery {
     }
 }
 
+#[derive(Clone, Copy)]
+enum IncrementalIntake<'a> {
+    Synchronize(&'a [(RefName, Option<GitOid>)]),
+    Fetch(&'a [BundleRefMapping]),
+}
+
+impl IncrementalIntake<'_> {
+    fn commands(
+        self,
+        header: &FullBundleHeader,
+        query: &super::BundleVerifyLimits,
+        limits: &AdmissionLimits,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<RefCommand>, StreamBundleImportRefusal> {
+        let expectations = match self {
+            Self::Synchronize(expectations) => expectations,
+            Self::Fetch(mappings) => {
+                return fetch::commands(header, mappings, query, limits, live);
+            }
+        };
+        if header.references().is_empty()
+            || expectations.len() != header.references().len()
+            || expectations.len() > limits.command_limit(true)
+        {
+            return Err(StreamBundleImportRefusal::InvalidQuery(
+                "one exact expectation per advertised reference is required",
+            ));
+        }
+        let mut expected = BTreeMap::new();
+        for (name, old) in expectations {
+            checkpoint(live)?;
+            if old.is_some_and(|id| id.is_zero() || id.algorithm() != header.format())
+                || expected.insert(name.clone(), *old).is_some()
+            {
+                return Err(StreamBundleImportRefusal::InvalidQuery(
+                    "invalid or duplicate expected reference",
+                ));
+            }
+        }
+        let mut commands = Vec::with_capacity(header.references().len());
+        for reference in header.references() {
+            checkpoint(live)?;
+            let old =
+                expected
+                    .get(reference.name())
+                    .ok_or(StreamBundleImportRefusal::InvalidQuery(
+                        "expectations differ from advertised reference set",
+                    ))?;
+            commands.push(RefCommand {
+                name: reference.name().clone(),
+                expected_old: old.map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
+                proposed_new: ProposedNew::Update(*reference.target()),
+                force: false,
+            });
+        }
+        Ok(commands)
+    }
+}
+
 impl OneNode {
     /// Synchronize all advertised refs with exact old-tip or absent leases.
     /// Complete declared prerequisite history is selected from current visible
@@ -58,7 +119,7 @@ impl OneNode {
     /// Only selected uploaded objects are staged for ordinary atomic admission.
     ///
     /// An exact lease permits rewrites subject to current repository policy,
-    /// matching buffered sync-import. The mapped full-fetch API has its own
+    /// matching buffered sync-import. The mapped fetch APIs have their own
     /// stricter fast-forward/tag profile. HEAD and forge state are not imported.
     pub async fn import_incremental_git_bundle_reader_durable_in<R: Read + Seek>(
         &self,
@@ -94,6 +155,80 @@ impl OneNode {
         limits: AdmissionLimits,
         caller_live: &mut impl FnMut() -> bool,
     ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+        self.intake_incremental_git_bundle_reader_controlled_in(
+            request,
+            session,
+            input,
+            IncrementalIntake::Synchronize(expectations),
+            query,
+            limits,
+            caller_live,
+        )
+        .await
+    }
+
+    /// Fetch explicitly mapped refs from a full or incremental native bundle.
+    /// Every declared prerequisite is authorized and captured at one current
+    /// basis. Only mapped upload closures and required transport bases enter
+    /// staging; original metadata proves branch/remotes commit-parent ancestry.
+    /// Tags can only be created or reasserted. Exact-old destination leases are
+    /// atomic, and the selecting basis remains bound through admission retries.
+    /// Terminal recovery shares the full mapped-fetch transaction identity.
+    pub async fn fetch_incremental_git_bundle_reader_durable_in<R: Read + Seek>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &mut R,
+        mappings: &[BundleRefMapping],
+        query: StreamIncrementalBundleImportQuery,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+        self.fetch_incremental_git_bundle_reader_controlled_in(
+            request,
+            session,
+            input,
+            mappings,
+            query,
+            limits,
+            &mut || true,
+        )
+        .await
+    }
+
+    /// Mapped incremental intake with the original request's sticky stop and
+    /// drain protocol. A terminal decision survives a stop after publication.
+    pub async fn fetch_incremental_git_bundle_reader_controlled_in<R: Read + Seek>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &mut R,
+        mappings: &[BundleRefMapping],
+        query: StreamIncrementalBundleImportQuery,
+        limits: AdmissionLimits,
+        caller_live: &mut impl FnMut() -> bool,
+    ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
+        self.intake_incremental_git_bundle_reader_controlled_in(
+            request,
+            session,
+            input,
+            IncrementalIntake::Fetch(mappings),
+            query,
+            limits,
+            caller_live,
+        )
+        .await
+    }
+
+    async fn intake_incremental_git_bundle_reader_controlled_in<R: Read + Seek>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        input: &mut R,
+        intake: IncrementalIntake<'_>,
+        query: StreamIncrementalBundleImportQuery,
+        limits: AdmissionLimits,
+        caller_live: &mut impl FnMut() -> bool,
+    ) -> Result<AdmissionResult, StreamBundleImportRefusal> {
         let timeout = query.bundle.timeout;
         if timeout.is_zero() || timeout > Duration::from_secs(3600) {
             return Err(StreamBundleImportRefusal::InvalidQuery(
@@ -120,7 +255,7 @@ impl OneNode {
             request,
             session,
             input,
-            expectations,
+            intake,
             query,
             limits,
             &mut worker_live,
@@ -136,7 +271,7 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         input: &mut R,
-        expectations: &[(RefName, Option<GitOid>)],
+        intake: IncrementalIntake<'_>,
         query: StreamIncrementalBundleImportQuery,
         limits: AdmissionLimits,
         live: &mut impl FnMut() -> bool,
@@ -151,7 +286,12 @@ impl OneNode {
             ));
         }
         let maximum_original_bytes = query.max_original_bytes;
-        let query = bounded_query(self, query.bundle, &limits, true)?;
+        let query = bounded_query(
+            self,
+            query.bundle,
+            &limits,
+            matches!(intake, IncrementalIntake::Synchronize(_)),
+        )?;
         rewind(input, live)?;
         let parsed = FullBundleHeader::read_incremental(
             &mut BufReader::new(&mut *input),
@@ -166,41 +306,7 @@ impl OneNode {
         if header.format() != self.object_format {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch.into());
         }
-        if header.references().is_empty()
-            || expectations.len() != header.references().len()
-            || expectations.len() > limits.command_limit(true)
-        {
-            return Err(StreamBundleImportRefusal::InvalidQuery(
-                "one exact expectation per advertised reference is required",
-            ));
-        }
-        let mut expected = BTreeMap::new();
-        for (name, old) in expectations {
-            checkpoint(live)?;
-            if old.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format)
-                || expected.insert(name.clone(), *old).is_some()
-            {
-                return Err(StreamBundleImportRefusal::InvalidQuery(
-                    "invalid or duplicate expected reference",
-                ));
-            }
-        }
-        let mut commands = Vec::with_capacity(header.references().len());
-        for reference in header.references() {
-            checkpoint(live)?;
-            let old =
-                expected
-                    .get(reference.name())
-                    .ok_or(StreamBundleImportRefusal::InvalidQuery(
-                        "expectations differ from advertised reference set",
-                    ))?;
-            commands.push(RefCommand {
-                name: reference.name().clone(),
-                expected_old: old.map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
-                proposed_new: ProposedNew::Update(*reference.target()),
-                force: false,
-            });
-        }
+        let commands = intake.commands(&header, &query.limits, &limits, live)?;
         let semantic = SemanticRequest::build(
             RECEIVE_ADMISSION_SCHEMA,
             self.object_format,
@@ -274,15 +380,33 @@ impl OneNode {
             ".fg-bundle-incremental-{:032x}",
             std::random::random::<u128>(..),
         ));
-        let mut plan = prepare_incremental_bundle_import_reader(
-            input,
-            self.object_format,
-            &scratch,
-            &mut originals,
-            maximum_original_bytes,
-            &query.limits,
-            live,
-        )?;
+        let mut plan = match intake {
+            IncrementalIntake::Synchronize(_) => prepare_incremental_bundle_import_reader(
+                input,
+                self.object_format,
+                &scratch,
+                &mut originals,
+                maximum_original_bytes,
+                &query.limits,
+                live,
+            )?,
+            IncrementalIntake::Fetch(mappings) => {
+                let sources: Vec<_> = mappings
+                    .iter()
+                    .map(|mapping| mapping.source.clone())
+                    .collect();
+                prepare_incremental_bundle_fetch_reader(
+                    input,
+                    self.object_format,
+                    &scratch,
+                    &mut originals,
+                    maximum_original_bytes,
+                    &sources,
+                    &query.limits,
+                    live,
+                )?
+            }
+        };
         let staging = ReceiveStaging::default();
         let prepared = (|| {
             checkpoint(live)?;
@@ -294,11 +418,27 @@ impl OneNode {
                     "selected uploaded byte limit",
                 ));
             }
-            let refs = header
-                .references()
+            let refs = commands
                 .iter()
-                .map(|reference| (reference.name().clone(), *reference.target()))
-                .collect();
+                .map(|command| {
+                    let ProposedNew::Update(target) = command.proposed_new else {
+                        return Err(StreamBundleImportRefusal::InvalidQuery(
+                            "incremental bundle update required",
+                        ));
+                    };
+                    Ok((command.name.clone(), target))
+                })
+                .collect::<Result<_, StreamBundleImportRefusal>>()?;
+            if matches!(intake, IncrementalIntake::Fetch(_)) {
+                let original_bytes = plan.original_bytes();
+                fetch::require_fast_forwards(
+                    &commands,
+                    &mut plan,
+                    &query.limits,
+                    original_bytes,
+                    live,
+                )?;
+            }
             crate::loose_import::preflight_import_metadata(
                 self.object_format,
                 plan.selected_ids().len(),
@@ -321,19 +461,30 @@ impl OneNode {
                 GitHashAlgorithm::Sha1 => GitOid::Sha1(GitOidSha1::ZERO),
                 GitHashAlgorithm::Sha256 => GitOid::Sha256(GitOidSha256::ZERO),
             };
-            let updates = header
-                .references()
+            let updates = commands
                 .iter()
-                .map(|reference| SourceRefUpdate {
-                    old: expected
-                        .get(reference.name())
-                        .copied()
-                        .flatten()
-                        .unwrap_or(absent),
-                    new: *reference.target(),
-                    ref_name: reference.name().as_bytes().to_vec(),
+                .map(|command| {
+                    let ProposedNew::Update(new) = command.proposed_new else {
+                        return Err(StreamBundleImportRefusal::InvalidQuery(
+                            "incremental bundle update required",
+                        ));
+                    };
+                    let old = match command.expected_old {
+                        ExpectedOld::Absent => absent,
+                        ExpectedOld::Exactly(old) => old,
+                        ExpectedOld::Unspecified => {
+                            return Err(StreamBundleImportRefusal::InvalidQuery(
+                                "exact lease required",
+                            ));
+                        }
+                    };
+                    Ok(SourceRefUpdate {
+                        old,
+                        new,
+                        ref_name: command.name.as_bytes().to_vec(),
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, StreamBundleImportRefusal>>()?;
             let receipt = SourceImportReceipt {
                 object_format: self.object_format,
                 object_count: u32::try_from(closure.objects().len()).map_err(|_| {

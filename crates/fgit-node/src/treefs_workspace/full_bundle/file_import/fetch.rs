@@ -5,12 +5,50 @@ use std::collections::BTreeSet;
 
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, parse_commit};
+use fgit_pack::full_bundle::fetch::BundleRefMapping;
+use fgit_pack::full_bundle::{FullBundleHeader, FullBundleLimits};
 use fgit_types::{GitOid, RefusalCode};
 use fgit_wire::receive::ReceiveError;
 
 use super::{
-    BundleVerifyLimits, FullBundleImportPlan, StreamBundleImportRefusal, checkpoint, receive_error,
+    AdmissionLimits, BundleImportObjectPlan, BundleVerifyError, BundleVerifyLimits,
+    StreamBundleImportRefusal, checkpoint, receive_error,
 };
+
+/// One semantic mapping path for full and incremental intake. Header capacity
+/// is independent of destination command capacity, including source fanout.
+pub(super) fn commands(
+    header: &FullBundleHeader,
+    mappings: &[BundleRefMapping],
+    query: &BundleVerifyLimits,
+    limits: &AdmissionLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<Vec<RefCommand>, StreamBundleImportRefusal> {
+    if mappings.is_empty() || mappings.len() > limits.command_limit(true) {
+        return Err(StreamBundleImportRefusal::InvalidQuery(
+            "reference command count",
+        ));
+    }
+    let mapping_limits = FullBundleLimits {
+        max_references: limits
+            .command_limit(true)
+            .min(fgit_wire::receive::ReceiveLimits::default().max_commands),
+        ..query.envelope
+    };
+    Ok(header
+        .select_updates(mappings, mapping_limits, live)
+        .map_err(BundleVerifyError::Envelope)?
+        .into_iter()
+        .map(|update| RefCommand {
+            name: update.destination,
+            expected_old: update
+                .expected_old
+                .map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
+            proposed_new: ProposedNew::Update(update.target),
+            force: false,
+        })
+        .collect())
+}
 
 fn refuse(code: RefusalCode) -> StreamBundleImportRefusal {
     receive_error(ReceiveError::AuthoritativeRefusal(code)).into()
@@ -26,17 +64,20 @@ fn charge(work: &mut usize) -> Result<(), StreamBundleImportRefusal> {
 /// Only authenticated metadata spans are read. The work allowance is shared by
 /// every destination and every commit/parent edge, matching buffered fetch's
 /// finite additional ancestry walk. Blob bodies are never allocated here.
-pub(super) fn require_fast_forwards(
+/// Captured original bytes enlarge only that work ceiling for incremental
+/// history; no original source read or uploaded expansion budget is reset.
+pub(super) fn require_fast_forwards<P: BundleImportObjectPlan>(
     commands: &[RefCommand],
-    plan: &mut FullBundleImportPlan,
+    plan: &mut P,
     limits: &BundleVerifyLimits,
+    original_bytes: u64,
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), StreamBundleImportRefusal> {
-    let mut work = limits
-        .graph
-        .max_edges
-        .min(limits.pack.max_total_expanded_bytes)
-        .min(4_000_000);
+    let work_bytes = limits
+        .pack
+        .max_total_expanded_bytes
+        .saturating_add(usize::try_from(original_bytes).unwrap_or(usize::MAX));
+    let mut work = limits.graph.max_edges.min(work_bytes).min(4_000_000);
     for command in commands {
         checkpoint(live)?;
         let name = command.name.as_bytes();

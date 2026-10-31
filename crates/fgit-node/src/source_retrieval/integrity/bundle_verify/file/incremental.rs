@@ -10,7 +10,7 @@ use std::path::Path;
 use fgit_git_object::ObjectType;
 use fgit_pack::StreamPackReceipt;
 use fgit_pack::full_bundle::{FullBundleError, FullBundleHeader};
-use fgit_types::{GitHashAlgorithm, GitOid};
+use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 
 use super::super::{BundleVerifyError, BundleVerifyLimits, GraphRefusal};
 use super::import::{
@@ -51,9 +51,10 @@ pub trait BundleOriginalSource {
     ) -> Result<(), BundleVerifyError>;
 }
 
-/// Actual incremental input plus retained upload custody. The selected union
-/// contains borrowed native and transport dependencies; only uploaded members
-/// can be read for staging. This is not self-contained full-bundle evidence.
+/// Actual incremental input plus retained native custody. The selected union
+/// contains borrowed native and transport dependencies. Its metadata may be
+/// inspected for native ancestry, but only uploaded members can enter staging.
+/// This is not self-contained full-bundle evidence.
 pub struct IncrementalBundleImportPlan {
     header: FullBundleHeader,
     receipt: StreamPackReceipt,
@@ -83,6 +84,12 @@ impl IncrementalBundleImportPlan {
         self.objects.total_selected_bytes()
     }
 
+    /// Actual captured originals, independent of uploaded expansion. This
+    /// permits bounded ancestry work even when the incoming pack is empty.
+    pub(crate) const fn original_bytes(&self) -> u64 {
+        self.objects.original_bytes
+    }
+
     pub(crate) fn finish(self) -> Result<(), BundleVerifyError> {
         self.objects.finish()
     }
@@ -110,6 +117,15 @@ impl BundleImportObjectPlan for IncrementalBundleImportPlan {
         identity: GitOid,
         live: &'a mut dyn FnMut() -> bool,
     ) -> Result<FullBundleImportBlobReader<'a>, BundleVerifyError> {
+        if !self.uploaded.contains(&identity) {
+            let state = self.objects.check_live(&mut || live());
+            self.objects.failed = true;
+            state?;
+            return Err(BundleVerifyError::Graph(GraphRefusal::MissingTarget {
+                source: None,
+                target: identity,
+            }));
+        }
         self.objects.open_blob(identity, live)
     }
 }
@@ -125,6 +141,55 @@ pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
     scratch_path: &Path,
     originals: &mut impl BundleOriginalSource,
     max_original_bytes: usize,
+    limits: &BundleVerifyLimits,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<IncrementalBundleImportPlan, BundleVerifyError> {
+    prepare_reader_profile(
+        input,
+        expected_format,
+        scratch_path,
+        originals,
+        max_original_bytes,
+        None,
+        limits,
+        allow_work,
+    )
+}
+
+/// Verify the entire supplied incremental bundle and complete declared
+/// prerequisite history, then retain only the requested advertised-source
+/// closures and required transport bases. Fanout does not duplicate roots.
+/// Original metadata remains available for exact commit-parent inspection;
+/// uploaded IDs alone identify objects eligible for placement.
+pub fn prepare_incremental_bundle_fetch_reader<R: Read + Seek>(
+    input: &mut R,
+    expected_format: GitHashAlgorithm,
+    scratch_path: &Path,
+    originals: &mut impl BundleOriginalSource,
+    max_original_bytes: usize,
+    sources: &[RefName],
+    limits: &BundleVerifyLimits,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<IncrementalBundleImportPlan, BundleVerifyError> {
+    prepare_reader_profile(
+        input,
+        expected_format,
+        scratch_path,
+        originals,
+        max_original_bytes,
+        Some(sources),
+        limits,
+        allow_work,
+    )
+}
+
+fn prepare_reader_profile<R: Read + Seek>(
+    input: &mut R,
+    expected_format: GitHashAlgorithm,
+    scratch_path: &Path,
+    originals: &mut impl BundleOriginalSource,
+    max_original_bytes: usize,
+    sources: Option<&[RefName]>,
     limits: &BundleVerifyLimits,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<IncrementalBundleImportPlan, BundleVerifyError> {
@@ -170,12 +235,12 @@ pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
             .iter()
             .map(|row| (row.name().clone(), *row.target()))
             .collect();
-        let (selected, mut objects, _) = select_closure(
+        let (selected, objects, _) = select_closure(
             &mut verified.inventory,
             &mut workspace,
             verified.header.format(),
             &references,
-            None,
+            sources,
             &union_limits,
             &mut live,
         )?;
@@ -196,7 +261,6 @@ pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
                     )))?;
             }
         }
-        objects.retain(|id, _| uploaded.contains(id));
         workspace.finish(&mut live)?;
         checkpoint(&mut live)?;
         Ok((verified, original_bytes, selected, uploaded, objects, total))

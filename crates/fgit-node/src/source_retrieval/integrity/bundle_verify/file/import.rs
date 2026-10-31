@@ -31,9 +31,9 @@ pub(super) struct SelectedObject {
     pub(super) span: Span,
 }
 
-/// Shared upload custody for staging consumers. Implementations expose only
-/// selected uploaded objects; borrowed prerequisite objects never enter object
-/// placement through this interface.
+/// Shared native inspection and upload custody. Metadata inspection can include
+/// selected authenticated originals for ancestry checks. Placement must iterate
+/// only `uploaded_ids`; borrowed prerequisite objects are never uploads.
 pub trait BundleImportObjectPlan {
     fn uploaded_ids(&self) -> &BTreeSet<GitOid>;
     fn object(&self, identity: GitOid) -> Option<FullBundleImportObject>;
@@ -73,20 +73,8 @@ impl FullBundleImportPlan {
         self.objects.selected_ids()
     }
 
-    pub(crate) fn object(&self, identity: GitOid) -> Option<FullBundleImportObject> {
-        self.objects.object(identity)
-    }
-
     pub(crate) const fn total_selected_bytes(&self) -> u64 {
         self.objects.total_selected_bytes()
-    }
-
-    pub(crate) fn read_metadata(
-        &mut self,
-        identity: GitOid,
-        live: &mut impl FnMut() -> bool,
-    ) -> Result<Vec<u8>, BundleVerifyError> {
-        self.objects.read_metadata(identity, live)
     }
 
     pub(crate) fn finish(self) -> Result<(), BundleVerifyError> {
@@ -263,7 +251,10 @@ impl RetainedBundleObjects {
             }))
     }
 
-    fn check_live(&self, live: &mut impl FnMut() -> bool) -> Result<(), BundleVerifyError> {
+    pub(super) fn check_live(
+        &self,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<(), BundleVerifyError> {
         if self.failed {
             return Err(BundleVerifyError::Graph(GraphRefusal::Failed));
         }
