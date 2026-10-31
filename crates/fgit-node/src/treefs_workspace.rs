@@ -30,7 +30,7 @@ pub use pull_request::{
 pub use pull_request::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
-pub use queue::{QueueRead, QueueReadRefusal};
+pub use queue::{PreparedQueueHeadBundle, QueueRead, QueueReadRefusal};
 mod session_state;
 mod sessions;
 mod source_browse;

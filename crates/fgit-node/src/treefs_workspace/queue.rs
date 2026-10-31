@@ -3,6 +3,10 @@
 //! Management records queue intent; guarded landing moves an existing candidate
 //! through ordinary protected merge admission and one atomic queue/PR decision.
 
+mod candidate;
+mod preparation;
+pub use preparation::PreparedQueueHeadBundle;
+
 use super::issues::snapshots;
 use super::native_merge::NodeNativeMergeProjection;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};

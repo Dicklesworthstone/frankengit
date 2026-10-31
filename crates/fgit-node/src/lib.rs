@@ -87,6 +87,7 @@ pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
+pub use treefs_workspace::{PreparedQueueHeadBundle, QueueRead, QueueReadRefusal};
 pub use treefs_workspace::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,
@@ -94,7 +95,6 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
-pub use treefs_workspace::{QueueRead, QueueReadRefusal};
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
     StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,

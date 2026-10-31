@@ -11,6 +11,7 @@ use fgit_forge::event::protection::{
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 
+mod queue_candidate;
 mod queue_landing;
 
 fn branch(name: &str) -> RefName {
