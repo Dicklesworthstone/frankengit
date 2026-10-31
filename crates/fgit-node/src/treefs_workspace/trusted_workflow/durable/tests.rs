@@ -1,7 +1,7 @@
 //! Real private-file custody and actual OneNode/source/workspace execution.
 //! The injected executor cases test ordering/failure, not process isolation.
 use super::*;
-use crate::{NodeConfig, OneNode};
+use crate::{NodeConfig, NodeWorkspaceRefusal, OneNode};
 use fgit_crypto::{DigestAlgorithm, DigestBytes, GitObjectKind, git_object_id};
 use fgit_runner::coordinator::delivery::journal::attempt::WorkflowAttemptStatus;
 use fgit_runner::coordinator::delivery::{
