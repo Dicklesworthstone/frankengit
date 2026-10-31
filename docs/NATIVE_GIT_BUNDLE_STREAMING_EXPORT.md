@@ -270,12 +270,14 @@ The receipt identifies what was selected; it does not promise completion-time
 freshness. Its whole-file SHA-256 is an artifact fingerprint and does not itself
 authenticate an issuer. The resulting file is consumable by the native
 file-backed `fg bundle verify`, `fg bundle recover`, and
-[`fg bundle import --file-backed`](NATIVE_GIT_BUNDLE_FILE_IMPORT.md) commands.
-The import profile publishes the complete native source into an initialized
-node through ordinary atomic admission, with independent input, expanded-byte,
-metadata and blob allowances. This transfers
-Git objects, direct refs and HEAD; it does not restore forge metadata, authority
-policy, credentials, or a complete signed repository capsule.
+[`fg bundle import --file-backed` and `fg bundle fetch --file-backed`](NATIVE_GIT_BUNDLE_FILE_IMPORT.md)
+commands. Import creates all advertised direct refs; fetch publishes explicit
+mapped destinations with exact-old leases and native fast-forward checks.
+Both use ordinary atomic admission, with independent input, expanded-byte,
+metadata and blob allowances. The bundle carries Git objects, direct refs and
+a HEAD advertisement; these node intake commands leave destination HEAD
+configuration unchanged. They do not restore forge metadata, authority policy,
+credentials, or a complete signed repository capsule.
 
 ### CLI validation targets
 
@@ -306,7 +308,10 @@ bytes, exact native inventories and trailers, and file-backed full-bundle
 verification and recovery. It also imports the full bundle into an initialized
 node with a 1 MiB metadata cap, checks the exact selected closure and streamed
 33 MiB body, and compares exact terminal receipts across file-backed and
-buffered retries. Its source objects enter through the public durable
+buffered retries. Mapped-fetch cases update a selected branch through the real
+33 MiB blob, fan out to a raw-byte ref, exclude unselected object placement,
+and check atomic stale leases, non-fast-forward refusal and cross-profile
+terminal recovery. Its source objects enter through the public durable
 loose-object importer. The codec's `bundle_stream_blobs` target also checks short
 reads, exact EOF, source identity, cancellation, and buffered/streamed byte
 compatibility in both bundle profiles.
