@@ -50,85 +50,136 @@ pub(super) enum CredentialSource {
     },
 }
 
+// Declaration order is the existing credential grammar's canonical scope order.
+// These positions are private memory representation, never serialized evidence.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum Scope {
+    Read,
+    Receive,
+    IssuesRead,
+    IssuesWrite,
+    OutcomesRead,
+    PullsRead,
+    PullsWrite,
+    ReviewsRead,
+    ReviewsWrite,
+    MergesWrite,
+    ProtectionRead,
+    ProtectionWrite,
+    LfsRead,
+    LfsWrite,
+    ArtifactRead,
+}
+
+impl Scope {
+    fn parse(text: &str) -> Result<Self, CredentialFailure> {
+        match text {
+            "read" => Ok(Self::Read),
+            "receive" => Ok(Self::Receive),
+            "issues-read" => Ok(Self::IssuesRead),
+            "issues-write" => Ok(Self::IssuesWrite),
+            "outcomes-read" => Ok(Self::OutcomesRead),
+            "pulls-read" => Ok(Self::PullsRead),
+            "pulls-write" => Ok(Self::PullsWrite),
+            "reviews-read" => Ok(Self::ReviewsRead),
+            "reviews-write" => Ok(Self::ReviewsWrite),
+            "merges-write" => Ok(Self::MergesWrite),
+            "protection-read" => Ok(Self::ProtectionRead),
+            "protection-write" => Ok(Self::ProtectionWrite),
+            "lfs-read" => Ok(Self::LfsRead),
+            "lfs-write" => Ok(Self::LfsWrite),
+            "artifact-read" => Ok(Self::ArtifactRead),
+            _ => Err(CredentialFailure::InvalidFile),
+        }
+    }
+
+    const fn mask(self) -> u16 {
+        1 << self as u8
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Scopes(u16);
+
+impl Scopes {
+    const fn git_transport() -> Self {
+        Self(Scope::Read.mask() | Scope::Receive.mask())
+    }
+
+    const fn contains(self, scope: Scope) -> bool {
+        self.0 & scope.mask() != 0
+    }
+
+    const fn insert(&mut self, scope: Scope) {
+        self.0 |= scope.mask();
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Grant {
     pub principal: PrincipalId,
-    read: bool,
-    receive: bool,
-    issues_read: bool,
-    issues_write: bool,
-    outcomes_read: bool,
-    pulls_read: bool,
-    pulls_write: bool,
-    reviews_read: bool,
-    reviews_write: bool,
-    merges_write: bool,
-    protection_read: bool,
-    protection_write: bool,
-    lfs_read: bool,
-    lfs_write: bool,
-    artifact_read: bool,
+    scopes: Scopes,
     ref_write_scope: Option<Arc<RefWriteScope>>,
 }
 impl Grant {
     pub const fn permits(&self, service: Service) -> bool {
         match service {
-            Service::UploadPack => self.read,
-            Service::ReceivePack => self.receive,
+            Service::UploadPack => self.scopes.contains(Scope::Read),
+            Service::ReceivePack => self.scopes.contains(Scope::Receive),
         }
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
-            self.issues_write
+            self.scopes.contains(Scope::IssuesWrite)
         } else {
-            self.issues_read
+            self.scopes.contains(Scope::IssuesRead)
         }
     }
     /// PR metadata authority is separate from code publication and reviews.
     pub const fn permits_pulls(&self, mutation: bool) -> bool {
         if mutation {
-            self.pulls_write
+            self.scopes.contains(Scope::PullsWrite)
         } else {
-            self.pulls_read
+            self.scopes.contains(Scope::PullsRead)
         }
     }
     /// A vote always uses this credential's principal, not a form field.
     pub const fn permits_reviews(&self, mutation: bool) -> bool {
         if mutation {
-            self.reviews_write
+            self.scopes.contains(Scope::ReviewsWrite)
         } else {
-            self.reviews_read
+            self.scopes.contains(Scope::ReviewsRead)
         }
     }
     /// Allows reviewed code publication and selection of additional named
     /// reviewers. Mandatory repository protection remains enforced at CAS.
     pub const fn permits_reviewed_merge(&self) -> bool {
-        self.merges_write
+        self.scopes.contains(Scope::MergesWrite)
     }
     /// Policy inspection and administration require independent explicit grants.
     pub const fn permits_protection(&self, mutation: bool) -> bool {
         if mutation {
-            self.protection_write
+            self.scopes.contains(Scope::ProtectionWrite)
         } else {
-            self.protection_read
+            self.scopes.contains(Scope::ProtectionRead)
         }
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
     pub const fn permits_outcomes(&self) -> bool {
-        self.outcomes_read
+        self.scopes.contains(Scope::OutcomesRead)
     }
     /// Reads the complete explicitly selected workflow artifact custody namespace.
     /// This separate grant does not inherit Git visibility or grant a check.
     pub const fn permits_artifact_read(&self) -> bool {
-        self.artifact_read
+        self.scopes.contains(Scope::ArtifactRead)
     }
     /// Artifact custody is independent from Git ref publication and metadata.
     pub const fn permits_lfs(&self, mutation: bool) -> bool {
         if mutation {
-            self.lfs_write
+            self.scopes.contains(Scope::LfsWrite)
         } else {
-            self.lfs_read
+            self.scopes.contains(Scope::LfsRead)
         }
     }
 
@@ -190,21 +241,7 @@ impl CredentialSource {
                 // newly added metadata authority to an existing credential.
                 Ok(Grant {
                     principal: *principal,
-                    read: true,
-                    receive: true,
-                    issues_read: false,
-                    issues_write: false,
-                    outcomes_read: false,
-                    pulls_read: false,
-                    pulls_write: false,
-                    reviews_read: false,
-                    reviews_write: false,
-                    merges_write: false,
-                    protection_read: false,
-                    protection_write: false,
-                    lfs_read: false,
-                    lfs_write: false,
-                    artifact_read: false,
+                    scopes: Scopes::git_transport(),
                     ref_write_scope: None,
                 })
             }
@@ -394,50 +431,18 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
 fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailure> {
     let mut grant = Grant {
         principal,
-        read: false,
-        receive: false,
-        issues_read: false,
-        issues_write: false,
-        outcomes_read: false,
-        pulls_read: false,
-        pulls_write: false,
-        reviews_read: false,
-        reviews_write: false,
-        merges_write: false,
-        protection_read: false,
-        protection_write: false,
-        lfs_read: false,
-        lfs_write: false,
-        artifact_read: false,
+        scopes: Scopes::default(),
         ref_write_scope: None,
     };
-    let mut previous = 0;
-    for scope in scopes.split(',') {
-        // Canonical order extends the existing grammar. An old deployment
-        // rejecting a new explicit scope fails closed rather than widening it.
-        let (rank, flag) = match scope {
-            "read" => (1, &mut grant.read),
-            "receive" => (2, &mut grant.receive),
-            "issues-read" => (3, &mut grant.issues_read),
-            "issues-write" => (4, &mut grant.issues_write),
-            "outcomes-read" => (5, &mut grant.outcomes_read),
-            "pulls-read" => (6, &mut grant.pulls_read),
-            "pulls-write" => (7, &mut grant.pulls_write),
-            "reviews-read" => (8, &mut grant.reviews_read),
-            "reviews-write" => (9, &mut grant.reviews_write),
-            "merges-write" => (10, &mut grant.merges_write),
-            "protection-read" => (11, &mut grant.protection_read),
-            "protection-write" => (12, &mut grant.protection_write),
-            "lfs-read" => (13, &mut grant.lfs_read),
-            "lfs-write" => (14, &mut grant.lfs_write),
-            "artifact-read" => (15, &mut grant.artifact_read),
-            _ => return Err(CredentialFailure::InvalidFile),
-        };
-        if rank <= previous {
+    let mut previous = None;
+    for name in scopes.split(',') {
+        // Preserve strict canonical order and refusal of duplicate/unknown scopes.
+        let scope = Scope::parse(name)?;
+        if previous.is_some_and(|previous| scope <= previous) {
             return Err(CredentialFailure::InvalidFile);
         }
-        *flag = true;
-        previous = rank;
+        grant.scopes.insert(scope);
+        previous = Some(scope);
     }
     Ok(grant)
 }
@@ -957,6 +962,65 @@ mod tests {
             assert!(!entry.grant.permits_outcomes());
         }
     }
+    #[test]
+    fn every_named_scope_grants_only_its_own_service_operation() {
+        let names = [
+            "read",
+            "receive",
+            "issues-read",
+            "issues-write",
+            "outcomes-read",
+            "pulls-read",
+            "pulls-write",
+            "reviews-read",
+            "reviews-write",
+            "merges-write",
+            "protection-read",
+            "protection-write",
+            "lfs-read",
+            "lfs-write",
+            "artifact-read",
+        ];
+        let principal = PrincipalId::from_bytes([7; 16]);
+        for (index, name) in names.iter().enumerate() {
+            let selected = grant(principal, name).unwrap();
+            let observed = [
+                selected.permits(Service::UploadPack),
+                selected.permits(Service::ReceivePack),
+                selected.permits_issues(false),
+                selected.permits_issues(true),
+                selected.permits_outcomes(),
+                selected.permits_pulls(false),
+                selected.permits_pulls(true),
+                selected.permits_reviews(false),
+                selected.permits_reviews(true),
+                selected.permits_reviewed_merge(),
+                selected.permits_protection(false),
+                selected.permits_protection(true),
+                selected.permits_lfs(false),
+                selected.permits_lfs(true),
+                selected.permits_artifact_read(),
+            ];
+            let mut expected = [false; 15];
+            expected[index] = true;
+            assert_eq!(
+                observed, expected,
+                "scope {name} must not imply another grant"
+            );
+            assert!(matches!(
+                grant(principal, &format!("{name},{name}")),
+                Err(CredentialFailure::InvalidFile)
+            ));
+        }
+        assert!(grant(principal, &names.join(",")).is_ok());
+        let mut reversed = names;
+        reversed.reverse();
+        assert!(matches!(
+            grant(principal, &reversed.join(",")),
+            Err(CredentialFailure::InvalidFile)
+        ));
+    }
+
     #[test]
     fn lfs_grants_are_independent_and_never_implicit() {
         let principal = PrincipalId::from_bytes([7; 16]);
