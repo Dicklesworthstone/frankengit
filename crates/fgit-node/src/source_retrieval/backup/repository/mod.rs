@@ -10,6 +10,7 @@ mod payload;
 mod profile;
 mod reconstruct;
 mod restore;
+mod selection;
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -374,7 +375,14 @@ pub(super) fn run_with_timeout(
         emit(output, restore::USAGE)?;
         emit(output, restore::verify::USAGE)?;
         emit(output, attest::USAGE)?;
-        return emit(output, reconstruct::USAGE);
+        emit(output, reconstruct::USAGE)?;
+        return emit(output, selection::USAGE);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "verify-selected" | "recover"))
+    {
+        return selection::run(args, output, timeout);
     }
     if args
         .first()

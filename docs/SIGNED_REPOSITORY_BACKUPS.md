@@ -8,6 +8,13 @@ replacement for the native authority/graph/payload checks.
 
 ## Native verified attestation
 
+Native recovery can also authenticate a set of approvals before opening any
+archive: `fg backup verify-selected` checks the highest unambiguous supplied
+checkpoint, and `fg backup recover` restores it through the authority-last native
+engine. The independent digest/key/identity/floor remain required. See
+[native checkpoint recovery](NATIVE_CHECKPOINT_RECOVERY.md) for selection,
+no-fallback behavior and exact resume.
+
 `fg backup attest` verifies a repository-source archive and issues its detached
 Ed25519 approval in the native executable. It uses the same authority import,
 materialization, exact selected-object inventory, graph, native identity,

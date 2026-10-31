@@ -3,6 +3,11 @@
 //! The real archive reader and restore engine still verify every source input.
 
 pub(super) mod issuer;
+mod observation;
+
+pub(super) use observation::{
+    AuthenticatedApprovalObservation, SelectionTrustFlags, SelectionTrustOptions,
+};
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, Metadata};
@@ -32,6 +37,7 @@ const SCOPE: &str = "authority_and_selected_git_objects";
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 4096;
 const MAX_KEY_BYTES: usize = 8192;
+const MAX_SIGNED_ARCHIVE_BYTES: u64 = 1 << 40;
 const MAX_TIME_MILLIS: i64 = 253_402_300_799_999;
 // Canonical RFC 8410 Ed25519 SubjectPublicKeyInfo: absent algorithm parameters,
 // followed by a 32-byte key in a BIT STRING with zero unused bits.
@@ -173,48 +179,17 @@ impl ApprovalOptions {
         deadline: Deadline,
     ) -> Result<VerifiedApproval, String> {
         deadline.check()?;
-        if maximum_archive_bytes == 0 || maximum_archive_bytes > (1_u64 << 40) {
-            return Err("invalid backup approval archive-byte budget".into());
-        }
+        validate_archive_budget(maximum_archive_bytes)?;
         let (key, der) = public_key(key_pem)?;
         let trusted_key_id = format!("sha256:{}", hex(&sha256(&der)));
-        let envelope = parse_json(encoded, MAX_ENVELOPE_BYTES)?;
-        let envelope = exact_object(&envelope, &["payloadType", "payload", "signatures"])?;
-        if string_field(envelope, "payloadType")? != PAYLOAD_TYPE {
-            return Err("backup approval payload type is not repository-source approval".into());
-        }
-        let Some(Value::Array(signatures)) = envelope.get("signatures") else {
-            return Err("backup approval requires exactly one signature".into());
-        };
-        let [signature] = signatures.as_slice() else {
-            return Err("backup approval requires exactly one signature".into());
-        };
-        let signature = exact_object(signature, &["keyid", "sig"])?;
-        if string_field(signature, "keyid")? != trusted_key_id {
-            return Err("backup approval signer does not match independently trusted key".into());
-        }
-        let payload = base64(string_field(envelope, "payload")?, MAX_PAYLOAD_BYTES)?;
-        let signature: [u8; 64] = base64(string_field(signature, "sig")?, 64)?
-            .try_into()
-            .map_err(|_| "backup approval signature must have 64 bytes")?;
-        verify_dsse_ed25519(&key, PAYLOAD_TYPE, &payload, &signature)
-            .map_err(|error| format!("backup approval signature refused: {error}"))?;
-        deadline.check()?;
-        let statement = Statement::parse(&payload, maximum_archive_bytes)?;
-        if statement.identity != self.policy.identity {
-            return Err("backup approval identity does not match independent policy".into());
-        }
-        if statement.generation < self.policy.minimum_generation {
-            return Err(
-                "backup approval is below the independently retained generation floor".into(),
-            );
-        }
-        if statement.digest != expected {
-            return Err(
-                "backup approval digest disagrees with independently supplied --expected-sha256"
-                    .into(),
-            );
-        }
+        let (statement, _) = authenticated_statement(
+            encoded,
+            &key,
+            &trusted_key_id,
+            self.policy.identity,
+            maximum_archive_bytes,
+            deadline,
+        )?;
         let verified = VerifiedApproval {
             statement,
             policy: self.policy,
@@ -224,7 +199,7 @@ impl ApprovalOptions {
             #[cfg(test)]
             clock: self.clock.clone(),
         };
-        verified.check_current()?;
+        verified.check_selected(expected, maximum_archive_bytes)?;
         Ok(verified)
     }
 
@@ -234,6 +209,54 @@ impl ApprovalOptions {
     pub(super) fn set_test_clock(&mut self, clock: Arc<AtomicI64>) {
         self.clock = Some(clock);
     }
+}
+
+fn validate_archive_budget(maximum_archive_bytes: u64) -> Result<(), String> {
+    if maximum_archive_bytes == 0 || maximum_archive_bytes > MAX_SIGNED_ARCHIVE_BYTES {
+        return Err("invalid backup approval archive-byte budget".into());
+    }
+    Ok(())
+}
+
+/// Authenticate the original payload before applying its canonical schema and
+/// independent namespace. The caller selects a bounded signed-size profile;
+/// this helper deliberately makes no lifetime, generation-floor or digest choice.
+fn authenticated_statement(
+    encoded: &[u8],
+    key: &VerifyingKey,
+    trusted_key_id: &str,
+    identity: Identity,
+    maximum_archive_bytes: u64,
+    deadline: Deadline,
+) -> Result<(Statement, Vec<u8>), String> {
+    deadline.check()?;
+    let envelope = parse_json(encoded, MAX_ENVELOPE_BYTES)?;
+    let envelope = exact_object(&envelope, &["payloadType", "payload", "signatures"])?;
+    if string_field(envelope, "payloadType")? != PAYLOAD_TYPE {
+        return Err("backup approval payload type is not repository-source approval".into());
+    }
+    let Some(Value::Array(signatures)) = envelope.get("signatures") else {
+        return Err("backup approval requires exactly one signature".into());
+    };
+    let [signature] = signatures.as_slice() else {
+        return Err("backup approval requires exactly one signature".into());
+    };
+    let signature = exact_object(signature, &["keyid", "sig"])?;
+    if string_field(signature, "keyid")? != trusted_key_id {
+        return Err("backup approval signer does not match independently trusted key".into());
+    }
+    let payload = base64(string_field(envelope, "payload")?, MAX_PAYLOAD_BYTES)?;
+    let signature: [u8; 64] = base64(string_field(signature, "sig")?, 64)?
+        .try_into()
+        .map_err(|_| "backup approval signature must have 64 bytes")?;
+    verify_dsse_ed25519(key, PAYLOAD_TYPE, &payload, &signature)
+        .map_err(|error| format!("backup approval signature refused: {error}"))?;
+    deadline.check()?;
+    let statement = Statement::parse(&payload, maximum_archive_bytes)?;
+    if statement.identity != identity {
+        return Err("backup approval identity does not match independent policy".into());
+    }
+    Ok((statement, payload))
 }
 
 /// The only signed-mode value allowed to reach restore ownership/publication.
@@ -250,6 +273,28 @@ pub(super) struct VerifiedApproval {
 }
 
 impl VerifiedApproval {
+    /// Admission to the existing native recovery boundary, after cryptographic
+    /// inspection. Observations cannot bypass any selected-operation constraint.
+    fn check_selected(&self, expected: [u8; 32], maximum_archive_bytes: u64) -> Result<(), String> {
+        self.deadline.check()?;
+        validate_archive_budget(maximum_archive_bytes)?;
+        if self.statement.archive_bytes > maximum_archive_bytes {
+            return Err("backup approval decimal exceeds its permitted range".into());
+        }
+        if self.statement.generation < self.policy.minimum_generation {
+            return Err(
+                "backup approval is below the independently retained generation floor".into(),
+            );
+        }
+        if self.statement.digest != expected {
+            return Err(
+                "backup approval digest disagrees with independently supplied --expected-sha256"
+                    .into(),
+            );
+        }
+        self.check_current()
+    }
+
     pub(super) fn artifact_seal(&self) -> Seal {
         Seal {
             digest: self.statement.digest,

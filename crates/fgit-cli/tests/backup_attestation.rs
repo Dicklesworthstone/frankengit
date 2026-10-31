@@ -13,6 +13,8 @@ use fgit_schema::json::{self, Value};
 
 #[path = "backup_attestation/reconstruction.rs"]
 mod reconstruction;
+#[path = "backup_attestation/selection.rs"]
+mod selection;
 
 const TENANT: &str = "11111111111111111111111111111111";
 const REPOSITORY: &str = "22222222222222222222222222222222";

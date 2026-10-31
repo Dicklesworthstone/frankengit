@@ -153,40 +153,87 @@ fn execute_with_checkpoints(
     )?;
     let verified =
         verify_pinned_with_checkpoints(archive, options, approval.as_ref(), deadline, checkpoint)?;
+    Ok(verification_receipt(&verified, options.instance, approval.as_ref()).json)
+}
+
+/// A completed native preflight receipt. Native callers keep the typed result
+/// and embed its rendering without reconstructing evidence from JSON fields.
+pub(in super::super) struct VerificationReceipt {
+    json: String,
+}
+
+impl VerificationReceipt {
+    pub(in super::super) fn json(&self) -> &str {
+        &self.json
+    }
+}
+
+/// Verify a captured selected approval and archive under the selecting
+/// invocation's original deadline. No trust control or archive path is reopened.
+pub(in super::super) fn execute_selected_in(
+    archive: PinnedArchive<File>,
+    approval: super::VerifiedApproval,
+    scratch: &Path,
+    instance: StoreInstanceId,
+    profile: Profile,
+    deadline: Deadline,
+) -> Result<VerificationReceipt, String> {
+    let options = Options {
+        input: PathBuf::new(),
+        output: scratch.to_path_buf(),
+        expected: archive.seal().digest,
+        instance,
+        profile,
+        resume: false,
+        approval: None,
+    };
+    let verified =
+        verify_pinned_with_checkpoints(archive, &options, Some(&approval), deadline, |_| Ok(()))?;
+    check_approval_current(Some(&approval), deadline)?;
+    Ok(verification_receipt(&verified, instance, Some(&approval)))
+}
+
+fn verification_receipt<R: Read + Seek>(
+    verified: &VerifiedSourceArchive<R>,
+    instance: StoreInstanceId,
+    approval: Option<&super::VerifiedApproval>,
+) -> VerificationReceipt {
     let archive = &verified.archive;
     let graph = verified.graph;
     let header = archive.header();
-    Ok(format!(
-        concat!(
-            "{{\"type\":\"repository_source_backup_verify\",\"schema_version\":1,",
-            "\"sha256\":{},\"archive_bytes\":{},\"tenant_id\":{},\"repository_id\":{},",
-            "\"incarnation_id\":{},\"object_format\":{},\"head_generation\":{},",
-            "\"objects\":{},\"references\":{},\"payload_bytes\":{},\"local_edges\":{},",
-            "\"external_gitlinks\":{},\"verification_instance\":{},\"complete\":true,",
-            "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
-            "\"original_payload_commitments_verified\":true,\"authority_import_verified\":true,",
-            "\"git_payloads_written\":false,\"destination_authority_published\":false,",
-            "\"node_closed\":true,\"scratch_removed\":true,\"destination_readback_verified\":false,",
-            "\"newest_checkpoint_verified\":false,\"signature_verified\":{}{},",
-            "\"external_artifacts_verified\":false,\"routing_published\":false{}}}"
+    VerificationReceipt {
+        json: format!(
+            concat!(
+                "{{\"type\":\"repository_source_backup_verify\",\"schema_version\":1,",
+                "\"sha256\":{},\"archive_bytes\":{},\"tenant_id\":{},\"repository_id\":{},",
+                "\"incarnation_id\":{},\"object_format\":{},\"head_generation\":{},",
+                "\"objects\":{},\"references\":{},\"payload_bytes\":{},\"local_edges\":{},",
+                "\"external_gitlinks\":{},\"verification_instance\":{},\"complete\":true,",
+                "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
+                "\"original_payload_commitments_verified\":true,\"authority_import_verified\":true,",
+                "\"git_payloads_written\":false,\"destination_authority_published\":false,",
+                "\"node_closed\":true,\"scratch_removed\":true,\"destination_readback_verified\":false,",
+                "\"newest_checkpoint_verified\":false,\"signature_verified\":{}{},",
+                "\"external_artifacts_verified\":false,\"routing_published\":false{}}}"
+            ),
+            quote(&hex(&archive.seal().digest)),
+            archive.seal().bytes,
+            quote(&header.identity.tenant.to_string()),
+            quote(&header.identity.repository.to_string()),
+            quote(&header.identity.incarnation.to_string()),
+            quote(header.identity.format.as_str()),
+            generation(&header.authority),
+            graph.objects,
+            graph.references,
+            graph.payload_bytes,
+            graph.local_edges,
+            graph.external_gitlinks,
+            instance.raw(),
+            approval.is_some(),
+            approval_receipt_fields(approval),
+            super::super::checkpoint::receipt(header.checkpoint.as_ref()),
         ),
-        quote(&hex(&options.expected)),
-        archive.seal().bytes,
-        quote(&header.identity.tenant.to_string()),
-        quote(&header.identity.repository.to_string()),
-        quote(&header.identity.incarnation.to_string()),
-        quote(header.identity.format.as_str()),
-        generation(&header.authority),
-        graph.objects,
-        graph.references,
-        graph.payload_bytes,
-        graph.local_edges,
-        graph.external_gitlinks,
-        options.instance.raw(),
-        approval.is_some(),
-        approval_receipt_fields(approval.as_ref()),
-        super::super::checkpoint::receipt(header.checkpoint.as_ref()),
-    ))
+    }
 }
 
 /// Only complete native authority/selection/graph verification constructs this

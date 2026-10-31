@@ -42,6 +42,12 @@ preflight before create-only publication. See
 [native backup reconstruction](NATIVE_BACKUP_RECONSTRUCTION.md) for the commands,
 aggregate read allowance and replica failure rules.
 
+`fg backup verify-selected` and `fg backup recover` authenticate an explicit set
+of signed approvals before reading payloads and select the highest unambiguous
+generation. They refuse an unusable newer checkpoint instead of falling back to
+an older supplied one, and use the same native preflight/restore engine and exact
+resume binding. See [native checkpoint recovery](NATIVE_CHECKPOINT_RECOVERY.md).
+
 Export, verification, attestation and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
 `--max-objects` and `--timeout-secs`. For a 2 GiB archive containing up to
 250,000 objects and blobs up to 512 MiB, with a 30-minute cooperative operation

@@ -277,6 +277,19 @@ mod adapter_tests {
             assert!(help.contains("--expected-sha256"));
             assert!(help.contains("--max-read-bytes"));
         }
+        for operation in ["verify-selected", "recover"] {
+            assert!(text.contains(&format!("fg backup {operation}")));
+            let mut output = Vec::new();
+            run(&[operation.into(), "--help".into()], &mut output).unwrap();
+            let help = String::from_utf8(output).unwrap();
+            for required in [
+                "--candidate",
+                "--expected-sha256",
+                "--minimum-head-generation",
+            ] {
+                assert!(help.contains(required), "{operation}: {required}");
+            }
+        }
         assert!(run(&[], &mut Vec::new()).is_err());
         assert!(run(&["unknown".into()], &mut Vec::new()).is_err());
     }

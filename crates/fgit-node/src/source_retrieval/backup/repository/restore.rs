@@ -540,10 +540,10 @@ fn execute(options: &Options) -> Result<String, String> {
 }
 fn execute_with_checkpoints(
     options: &Options,
-    mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
+    checkpoint: impl FnMut(Stage) -> Result<(), String>,
 ) -> Result<String, String> {
     let deadline = options.profile.start();
-    let (mut archive, approval) = (|| {
+    let (archive, approval) = (|| {
         let approval = authenticate_approval(options, deadline)?;
         if !options.resume {
             require_absent(&options.output)?;
@@ -554,11 +554,70 @@ fn execute_with_checkpoints(
             options.profile.transfer,
             deadline,
         )?;
+        Ok((archive, approval))
+    })()
+    .map_err(|error| before_resume_inspection(options, error))?;
+    execute_prepared_in(options, archive, approval, deadline, checkpoint)
+        .map(|receipt| receipt.json)
+}
+
+/// Native restore completion, rendered only after final destination readback,
+/// owned-node shutdown and quarantine cleanup. It is not a publication promise
+/// for another operation and never needs to be parsed by native composition.
+pub(super) struct RestoreReceipt {
+    json: String,
+}
+
+impl RestoreReceipt {
+    pub(super) fn json(&self) -> &str {
+        &self.json
+    }
+}
+
+/// Restore the already selected, independently pinned archive without reopening
+/// approval/key paths or renewing the selecting invocation's deadline. The exact
+/// original signed binding remains the resume identity.
+pub(super) fn execute_selected_in(
+    archive: PinnedArchive<File>,
+    approval: VerifiedApproval,
+    destination: &Path,
+    instance: StoreInstanceId,
+    profile: Profile,
+    resume: bool,
+    deadline: Deadline,
+) -> Result<RestoreReceipt, String> {
+    let options = Options {
+        input: PathBuf::new(),
+        output: destination.to_path_buf(),
+        expected: archive.seal().digest,
+        instance,
+        profile,
+        resume,
+        approval: None,
+    };
+    execute_prepared_in(&options, archive, Some(approval), deadline, |_| Ok(()))
+}
+
+fn execute_prepared_in(
+    options: &Options,
+    mut archive: PinnedArchive<File>,
+    approval: Option<VerifiedApproval>,
+    deadline: Deadline,
+    mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
+) -> Result<RestoreReceipt, String> {
+    (|| {
+        deadline.check()?;
+        if !options.resume {
+            require_absent(&options.output)?;
+        }
+        if archive.seal().digest != options.expected {
+            return Err("prepared restore does not match the independent archive pin".into());
+        }
         match_approval(approval.as_ref(), &archive, deadline)?;
         if archive.header().authority.instance == options.instance.raw() {
             return Err("destination instance must differ from source".into());
         }
-        Ok((archive, approval))
+        Ok(())
     })()
     .map_err(|error| before_resume_inspection(options, error))?;
     let binding = approval.as_ref().map(VerifiedApproval::binding_digest);
@@ -679,35 +738,37 @@ fn execute_with_checkpoints(
     intent.cleanup()?;
     checkpoint(Stage::Cleaned).map_err(|e| format!("destination authority is visible; {e}"))?;
     let header = archive.header();
-    Ok(format!(
-        concat!(
-            "{{\"type\":\"repository_source_backup_restore\",\"schema_version\":1,",
-            "\"sha256\":{},\"tenant_id\":{},\"repository_id\":{},\"incarnation_id\":{},",
-            "\"object_format\":{},\"head_generation\":{},\"objects\":{},\"references\":{},",
-            "\"payload_bytes\":{},\"destination_instance\":{},\"complete\":true,",
-            "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
-            "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
-            "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
-            "\"external_artifacts_restored\":false,\"signature_verified\":{}{},",
-            "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}{}}}"
+    Ok(RestoreReceipt {
+        json: format!(
+            concat!(
+                "{{\"type\":\"repository_source_backup_restore\",\"schema_version\":1,",
+                "\"sha256\":{},\"tenant_id\":{},\"repository_id\":{},\"incarnation_id\":{},",
+                "\"object_format\":{},\"head_generation\":{},\"objects\":{},\"references\":{},",
+                "\"payload_bytes\":{},\"destination_instance\":{},\"complete\":true,",
+                "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
+                "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
+                "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
+                "\"external_artifacts_restored\":false,\"signature_verified\":{}{},",
+                "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}{}}}"
+            ),
+            quote(&hex(&options.expected)),
+            quote(&header.identity.tenant.to_string()),
+            quote(&header.identity.repository.to_string()),
+            quote(&header.identity.incarnation.to_string()),
+            quote(header.identity.format.as_str()),
+            generation(&header.authority),
+            graph.objects,
+            graph.references,
+            graph.payload_bytes,
+            options.instance.raw(),
+            approval.is_some(),
+            approval_receipt_fields(approval.as_ref()),
+            archive.seal().bytes,
+            options.resume,
+            already_published,
+            super::checkpoint::receipt(header.checkpoint.as_ref())
         ),
-        quote(&hex(&options.expected)),
-        quote(&header.identity.tenant.to_string()),
-        quote(&header.identity.repository.to_string()),
-        quote(&header.identity.incarnation.to_string()),
-        quote(header.identity.format.as_str()),
-        generation(&header.authority),
-        graph.objects,
-        graph.references,
-        graph.payload_bytes,
-        options.instance.raw(),
-        approval.is_some(),
-        approval_receipt_fields(approval.as_ref()),
-        archive.seal().bytes,
-        options.resume,
-        already_published,
-        super::checkpoint::receipt(header.checkpoint.as_ref())
-    ))
+    })
 }
 
 fn before_resume_inspection(options: &Options, error: String) -> String {
