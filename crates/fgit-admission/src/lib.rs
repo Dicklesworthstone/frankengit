@@ -461,6 +461,19 @@ pub enum SourceImportOrigin {
         pack_sha256: [u8; 32],
         pack_bytes: u64,
     },
+    /// A native incremental bundle verified against an authenticated, visible
+    /// prerequisite closure. Pack identities come from the completed native
+    /// reader; the closure root commits to the actual prerequisite objects
+    /// authorized and verified at the retained publication basis.
+    ///
+    /// This origin requires [`validate_source_import_at_basis`]. It cannot
+    /// enter the independent-source constructor and lose its basis guard.
+    IncrementalGitBundle {
+        pack_checksum: fgit_types::GitOid,
+        pack_sha256: [u8; 32],
+        pack_bytes: u64,
+        prerequisite_closure_root: Digest,
+    },
 }
 
 /// Evidence that an import path established a source's object closure by its
@@ -533,6 +546,40 @@ impl ValidatedSourceImport {
     }
 }
 
+/// A source-import proof retaining the exact authority basis that authorized
+/// its borrowed prerequisite objects.
+///
+/// All fields are private. There is deliberately no conversion or accessor
+/// exposing the inner unbound proof: incremental provenance must reach
+/// admission together with its basis. The import path remains responsible for
+/// verifying the original native bytes and prerequisite visibility at that
+/// authenticated [`PublicationBasis`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BasisBoundValidatedSourceImport {
+    validated: ValidatedSourceImport,
+    validation_basis: RepositoryAuthorityHeadId,
+}
+
+impl BasisBoundValidatedSourceImport {
+    /// The ref updates whose semantics were validated.
+    #[must_use]
+    pub fn updates(&self) -> &[SourceRefUpdate] {
+        self.validated.updates()
+    }
+
+    /// The actual source-import provenance from the validation handoff.
+    #[must_use]
+    pub const fn receipt(&self) -> &SourceImportReceipt {
+        self.validated.receipt()
+    }
+
+    /// The authenticated predecessor that authorized the prerequisite closure.
+    #[must_use]
+    pub const fn validation_basis(&self) -> RepositoryAuthorityHeadId {
+        self.validation_basis
+    }
+}
+
 /// Bind an already-verified closure and its ref updates into an admissible
 /// source import.
 ///
@@ -547,7 +594,48 @@ impl ValidatedSourceImport {
 /// This does not weaken receive-pack admission in any way:
 /// [`validate_receive`] still refuses a non-delete command with no
 /// [`QuarantinedPack`], and nothing here can produce a [`ValidatedReceive`].
+///
+/// An incremental-bundle receipt is refused here even when its targets are
+/// covered. Its prerequisite proof must retain the authority basis through
+/// [`validate_source_import_at_basis`] and the bound admission entrypoints.
 pub fn validate_source_import(
+    updates: &[SourceRefUpdate],
+    receipt: &SourceImportReceipt,
+    closure: ValidatedClosure,
+) -> Result<ValidatedSourceImport, RefusalCode> {
+    if matches!(
+        receipt.origin,
+        SourceImportOrigin::IncrementalGitBundle { .. }
+    ) {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    validate_source_import_closure(updates, receipt, closure)
+}
+
+/// Retain the authenticated authority basis alongside verified source evidence.
+///
+/// The importer must establish native closure integrity and the visibility of
+/// every borrowed object at `basis` before calling this constructor. Admission
+/// rechecks the exact head on every initial plan and CAS replan. An existing
+/// terminal outcome still resolves before that freshness check.
+///
+/// Independent sources may also opt into this conservative guard; incremental
+/// bundle provenance cannot be constructed through the unbound entrypoint.
+pub fn validate_source_import_at_basis(
+    updates: &[SourceRefUpdate],
+    receipt: &SourceImportReceipt,
+    closure: ValidatedClosure,
+    basis: &PublicationBasis,
+) -> Result<BasisBoundValidatedSourceImport, RefusalCode> {
+    Ok(BasisBoundValidatedSourceImport {
+        validated: validate_source_import_closure(updates, receipt, closure)?,
+        validation_basis: basis.id(),
+    })
+}
+
+/// Shared closure coverage check. Only the bound constructor may use this
+/// directly for source provenance that depends on an authority snapshot.
+fn validate_source_import_closure(
     updates: &[SourceRefUpdate],
     receipt: &SourceImportReceipt,
     closure: ValidatedClosure,
@@ -599,15 +687,15 @@ struct AdmissionInput<'a> {
     /// says which provenance made the claim.
     delete_only_label: &'static str,
     closure: &'a ValidatedClosure,
-    /// The authenticated predecessor head that authorized the receive
-    /// validator's external bases. Source imports and legacy generic receive
-    /// validation have no such witness; production raw receive uses the bound
-    /// input below and must match this on every CAS plan.
+    /// The authenticated predecessor head that authorized external objects
+    /// used during validation. Independent source imports and legacy generic
+    /// receive validation have no such witness. Production receive and
+    /// incremental source import retain a bound proof on every CAS plan.
     validation_basis: Option<ValidationBasis>,
 }
 
-/// The head a receive was validated at, with its validator's authority
-/// commitment when one was reported.
+/// The head that authorized original objects used during validation, with a
+/// receive validator's authority commitment when one was reported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValidationBasis {
     pub(crate) head: RepositoryAuthorityHeadId,
@@ -681,6 +769,20 @@ fn source_import_input(validated: &ValidatedSourceImport) -> AdmissionInput<'_> 
     }
 }
 
+/// View a source import without discarding the prerequisite authority basis.
+fn basis_bound_source_import_input(
+    validated: &BasisBoundValidatedSourceImport,
+) -> AdmissionInput<'_> {
+    let mut input = source_import_input(&validated.validated);
+    input.validation_basis = Some(ValidationBasis {
+        head: validated.validation_basis,
+        // No receive-validator commitment is synthesized for source custody.
+        // A different head requires fresh prerequisite verification.
+        authority: None,
+    });
+    input
+}
+
 /// Admit a verified source import against the authority.
 ///
 /// The source-import sibling of [`admit_validated_receive`], and it reaches the
@@ -731,6 +833,57 @@ where
         cx,
         context,
         &source_import_input(validated),
+        limits,
+        projection,
+    )
+    .await
+}
+
+/// Admit a verified source import whose prerequisite authority is bound to one
+/// exact predecessor head.
+///
+/// Both the initial plan and every CAS replan retain the original basis guard.
+/// A stale proof produces the ordinary canonical stale-authority refusal;
+/// terminal recovery retains the same transaction identity as other imports.
+pub fn admit_basis_bound_source_import<S, Projection>(
+    store: &S,
+    context: &AdmissionContext,
+    validated: &BasisBoundValidatedSourceImport,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    admit_input(
+        store,
+        context,
+        &basis_bound_source_import_input(validated),
+        limits,
+        projection,
+    )
+}
+
+/// Asynchronous sibling of [`admit_basis_bound_source_import`], retaining the
+/// caller's original authority context through the existing admission driver.
+pub async fn admit_basis_bound_source_import_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &BasisBoundValidatedSourceImport,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AsyncAdmissionProjection<S> + ?Sized,
+{
+    admit_input_async(
+        store,
+        cx,
+        context,
+        &basis_bound_source_import_input(validated),
         limits,
         projection,
     )
@@ -4576,6 +4729,7 @@ mod tests {
     mod absent_delete;
     mod option_work;
     mod receive_batch;
+    mod source_import_bound;
 
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet};
