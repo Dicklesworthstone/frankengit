@@ -24,7 +24,7 @@ use super::{checkpoint, verify_reader_contents};
 /// Metadata discovered within the authenticated visible prerequisite closure.
 /// These facts alone establish neither body health nor a usable delta base.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct BundleOriginalObject {
+pub struct BundleOriginalObject {
     pub(crate) kind: ObjectType,
     pub(crate) length: usize,
 }
@@ -39,7 +39,7 @@ pub(crate) struct BundleOriginalObject {
 /// The verifier independently binds the declared roots, hashes exact bodies,
 /// checks the original-only closure and retains its own private descriptor.
 /// No caller supplies scratch spans, pack offsets or completion receipts.
-pub(crate) trait BundleOriginalSource {
+pub trait BundleOriginalSource {
     fn prerequisites(&self) -> &[GitOid];
     fn objects(&self) -> &BTreeMap<GitOid, BundleOriginalObject>;
     fn discovery_read_bytes(&self) -> usize;
@@ -54,7 +54,7 @@ pub(crate) trait BundleOriginalSource {
 /// Actual incremental input plus retained upload custody. The selected union
 /// contains borrowed native and transport dependencies; only uploaded members
 /// can be read for staging. This is not self-contained full-bundle evidence.
-pub(crate) struct IncrementalBundleImportPlan {
+pub struct IncrementalBundleImportPlan {
     header: FullBundleHeader,
     receipt: StreamPackReceipt,
     uploaded: BTreeSet<GitOid>,
@@ -119,7 +119,7 @@ impl BundleImportObjectPlan for IncrementalBundleImportPlan {
 /// closure. `max_original_bytes` includes actual discovery and capture reads;
 /// incoming pack input/expansion limits remain independent. Original scratch
 /// has the same exclusive identity and poisoned-reader rules as full import.
-pub(crate) fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
+pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
     scratch_path: &Path,
@@ -285,12 +285,13 @@ pub(super) fn capture_originals<W: Read + Write + Seek>(
     }
     for &identity in header.prerequisites() {
         checkpoint(live)?;
-        let object = source.objects().get(&identity).ok_or_else(|| {
-            BundleVerifyError::Graph(GraphRefusal::MissingTarget {
+        let object = source
+            .objects()
+            .get(&identity)
+            .ok_or(BundleVerifyError::Graph(GraphRefusal::MissingTarget {
                 source: None,
                 target: identity,
-            })
-        })?;
+            }))?;
         if object.kind != ObjectType::Commit {
             return Err(BundleVerifyError::Graph(GraphRefusal::TargetKind {
                 target: identity,

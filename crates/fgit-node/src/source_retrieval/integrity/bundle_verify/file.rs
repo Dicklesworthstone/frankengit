@@ -6,11 +6,11 @@ mod incremental;
 mod resolve;
 mod storage;
 
-pub(crate) use import::BundleImportObjectPlan;
+pub use import::BundleImportObjectPlan;
 pub use import::{
     FullBundleImportPlan, prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
 };
-pub(crate) use incremental::{
+pub use incremental::{
     BundleOriginalObject, BundleOriginalSource, prepare_incremental_bundle_import_reader,
 };
 
