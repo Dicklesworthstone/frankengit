@@ -45,7 +45,7 @@ pub fn proposal(
         guards.push(ScopedEntry::new(
             AsciiSlug::from_static("forge"),
             AsciiSlug::from_static("queue.expected-pull-request-version"),
-            &expected_pull_request_version.get().to_be_bytes(),
+            expected_pull_request_version.get().to_be_bytes(),
         )?);
         guards.push(ScopedEntry::new(
             AsciiSlug::from_static("forge"),
@@ -255,15 +255,14 @@ where
         let previous = queues.remove(&command.number);
         // Selected coordinates, never spoofable command coordinates, govern
         // disclosure before state-specific lifecycle/version refusals.
-        if let Some(queue) = &previous {
-            if snapshot.hidden_refs.hides(queue.target_ref.as_bytes())
+        if let Some(queue) = &previous
+            && (snapshot.hidden_refs.hides(queue.target_ref.as_bytes())
                 || queue
                     .entries
                     .iter()
-                    .any(|entry| snapshot.hidden_refs.hides(entry.source_ref.as_bytes()))
-            {
-                return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
-            }
+                    .any(|entry| snapshot.hidden_refs.hides(entry.source_ref.as_bytes())))
+        {
+            return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
         }
         let observed = previous.as_ref().map(|queue| queue.version);
         if match command.expected_version {
@@ -334,16 +333,15 @@ where
                 command.target_ref.clone(),
             )
         });
-        if let QueueCommandAction::Reorder { order } = &command.action {
-            if order.len() != next.len()
+        if let QueueCommandAction::Reorder { order } = &command.action
+            && (order.len() != next.len()
                 || order
                     .iter()
-                    .any(|number| next.find_entry(*number).is_none())
-            {
-                return Err(
-                    ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied).into(),
-                );
-            }
+                    .any(|number| next.find_entry(*number).is_none()))
+        {
+            return Err(
+                ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied).into(),
+            );
         }
         if matches!(command.action, QueueCommandAction::Enqueue { pull_request, .. } if next.find_entry(pull_request).is_none() && next.len() >= fgit_forge::event::queue::MAX_QUEUE_ENTRIES)
         {

@@ -372,7 +372,10 @@ struct ReplayEvents<'a> {
 }
 
 impl<'a> ReplayEvents<'a> {
-    fn new(forge: &'a CanonicalForgePositionState, wanted: &'a BTreeSet<QueueNumber>) -> Self {
+    const fn new(
+        forge: &'a CanonicalForgePositionState,
+        wanted: &'a BTreeSet<QueueNumber>,
+    ) -> Self {
         Self {
             forge,
             wanted,
