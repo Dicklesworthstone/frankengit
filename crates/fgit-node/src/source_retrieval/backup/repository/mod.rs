@@ -3,6 +3,7 @@
 mod approval;
 mod archive;
 mod blob_io;
+mod checkpoint;
 mod input;
 mod payload;
 mod profile;
@@ -35,6 +36,9 @@ pub const USAGE: &str =
 Authority metadata plus every authority-selected Git object, including admitted
 history unreachable from current refs. Source head, complete local graph, native
 IDs and original independent payload commitments are verified before export.
+When authority selects retained outcome leaves, their exact manifest/envelopes
+travel in FGSRC002 and are verified without history fallback. Only the current
+or nearest selected root is included; original capsule/root identities survive.
 The head must remain unchanged across metadata capture, graph work and recheck.
 No implicit retry, live directory copying, external Git, or remote authorization.
 
@@ -45,6 +49,8 @@ Default archive budget: 1 GiB; default operation deadline: 300 seconds.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 Independent bounds: 100000 objects, 32 MiB per metadata object, 100000 refs and
 1000000 inspected edges. Authority metadata retains its separate 64 MiB bound.
+Retained checkpoint transport is separately bounded at 32 MiB; its existing
+16 MiB reconstructed segment and 8 MiB manifest limits cannot be widened here.
 Codec/runtime limits may refuse earlier. The deadline covers all passes, is
 cooperative, and cannot interrupt a blocking filesystem call.
 Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
@@ -196,6 +202,8 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
                     "repository head moved after authority capture; no backup published".into(),
                 );
             }
+            let retained =
+                checkpoint::CheckpointEvidence::capture(node, &request, &selected, deadline)?;
             let objects = selected.selected_closure().closure().objects();
             let identity = Identity {
                 tenant: options.tenant,
@@ -204,11 +212,12 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
                 format: options.format,
             };
             let mut io_live = || deadline.in_request(&request);
-            let mut output = StreamEncoder::new(
+            let mut output = StreamEncoder::with_checkpoint(
                 &mut *file,
                 identity,
                 &encoded,
                 objects.len(),
+                retained.as_ref(),
                 options.profile.transfer,
                 &mut io_live,
             )?;
@@ -270,6 +279,7 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
             if decoded.header().identity != identity
                 || decoded.header().authority != authority
                 || decoded.header().objects != objects.len()
+                || decoded.header().checkpoint != retained
             {
                 return Err("repository backup transport changed its source snapshot".into());
             }
@@ -298,6 +308,9 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
             let report = graph
                 .finish(&selected.snapshot().refs, &mut checkpoint)
                 .map_err(|error| error.to_string())?;
+            if let Some(evidence) = &header.checkpoint {
+                evidence.verify(node, &request, &selected, deadline, false)?;
+            }
             let current = node
                 .runtime()
                 .block_on(node.authenticate_authority_head_in(&request))
@@ -322,7 +335,7 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
             "\"complete\":true,\"scope\":\"authority_and_selected_git_objects\",",
             "\"object_graph_verified\":true,\"original_payload_commitments_verified\":true,",
             "\"source_head_revalidated\":true,\"node_closed\":true,\"signature_verified\":false,",
-            "\"external_artifacts_included\":false,\"physical_orphans_included\":false}}"
+            "\"external_artifacts_included\":false,\"physical_orphans_included\":false{}}}"
         ),
         quote(&hex(&seal.digest)),
         seal.bytes,
@@ -335,7 +348,8 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
         graph.references,
         graph.payload_bytes,
         graph.local_edges,
-        graph.external_gitlinks
+        graph.external_gitlinks,
+        checkpoint::receipt(archive.checkpoint.as_ref())
     )
 }
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {

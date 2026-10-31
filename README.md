@@ -247,6 +247,47 @@ or garbage collection. Cold object-closure and other independent history limits
 remain. See the [native implementation](crates/fgit-node/src/outcome_checkpoint.rs)
 and [capsule contract](docs/NORMATIVE_PROTOCOL_CONTRACTS.md#23-repository-capsules-backup-and-restore).
 
+### Recovering retained checkpoints with a repository backup
+
+The native source-recovery commands now carry the selected retained outcome
+checkpoint alongside the portable authority image and selected Git objects:
+
+```text
+fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
+  --trusted-local --object-format <sha1|sha256>
+fg backup verify <backup-file> <new-scratch-root> --trusted-local
+  --expected-sha256 <independently-saved-digest> --verification-instance <positive-integer>
+fg backup restore <backup-file> <new-storage-root> --trusted-local
+  --expected-sha256 <independently-saved-digest> --destination-instance <positive-integer>
+```
+
+When authority selects a retained checkpoint, export writes `FGSRC002` with
+the exact original manifest, object envelopes, payloads and historical read
+receipts. It preserves the current selected root, or the nearest retained root
+behind an intervening capsule. Missing or corrupt selected evidence refuses
+export. Exports without a selected checkpoint retain the `FGSRC001` layout;
+existing source-only archives remain readable.
+
+Verification checks the retained evidence directly against the authenticated
+selection through a read-only archive view. Restore stages the exact bytes in
+quarantine, obtains fresh destination readback evidence, and places objects,
+manifests and WAL before publishing authority. Final reopen verifies the same
+checkpoint again. The original capsule and checkpoint identities survive;
+destination CAS tokens follow the existing fresh-instance import rules.
+An interrupted restore can use `--resume` with the same trusted archive digest
+and destination instance. It normalizes partial data moves before opening the
+database and verifies an already published image without republishing it.
+
+The retained-evidence section is bounded at 32 MiB and counts toward the total
+archive budget. The manifest has an additional 8 MiB transport ceiling, and
+the reconstructed retained segment keeps its 16 MiB limit. Success receipts
+include `transport_version`, `retained_outcome_checkpoint_verified`, the root,
+object count and payload bytes. Legacy source-only archives report that this
+evidence was not verified, even if their authority metadata names a checkpoint.
+This extends scoped repository recovery; full signed-capsule qualification,
+external artifacts, keys, routing and historical checkpoint archives remain
+outside this transport.
+
 ### Canonical reference policy activation
 
 `fg protection set --policy-source <file>` now activates bounded repository DSL

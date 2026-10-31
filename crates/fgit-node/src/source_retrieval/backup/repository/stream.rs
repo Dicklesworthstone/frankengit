@@ -1,5 +1,5 @@
-//! Bounded streaming I/O for the existing FGSRC001 transport. The wire bytes do
-//! not change. Record visitors consume bounded authenticated streams without
+//! Bounded streaming I/O for FGSRC001 and its FGSRC002 retained-outcome section.
+//! Legacy wire bytes do not change. Record visitors consume authenticated streams without
 //! retaining their bodies. The buffered interface remains only as a test oracle.
 //! Only finish authenticates the complete archive.
 #[path = "stream/object.rs"]
@@ -17,9 +17,12 @@ use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId
 #[cfg(test)]
 use fgit_types::CANONICAL_CODEC_VERSION;
 
+use super::super::checkpoint::{CheckpointEvidence, MAX_EVIDENCE_BYTES};
 #[cfg(test)]
 use super::Record;
 use super::{Identity, MAGIC, MAX_OBJECT_BYTES, MAX_OBJECTS, kind, kind_byte};
+
+const CHECKPOINT_MAGIC: &[u8; 8] = b"FGSRC002";
 
 const CHUNK_BYTES: usize = 64 * 1024;
 // Authority portability has its own codec and row bounds. A larger source
@@ -69,6 +72,7 @@ pub struct StreamHeader {
     pub identity: Identity,
     pub authority: ExportBundle,
     pub objects: usize,
+    pub checkpoint: Option<CheckpointEvidence>,
 }
 
 /// Owns neither the destination path nor publication. A failed writer is
@@ -84,11 +88,24 @@ pub struct StreamEncoder<W> {
     failed: bool,
 }
 impl<W: Write> StreamEncoder<W> {
+    #[cfg(test)]
     pub fn new(
         output: W,
         identity: Identity,
         authority: &[u8],
         objects: usize,
+        limits: TransferLimits,
+        live: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        Self::with_checkpoint(output, identity, authority, objects, None, limits, live)
+    }
+
+    pub fn with_checkpoint(
+        output: W,
+        identity: Identity,
+        authority: &[u8],
+        objects: usize,
+        checkpoint: Option<&CheckpointEvidence>,
         limits: TransferLimits,
         live: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<Self, String> {
@@ -110,7 +127,14 @@ impl<W: Write> StreamEncoder<W> {
             previous: None,
             failed: false,
         };
-        encoder.push(MAGIC, live)?;
+        encoder.push(
+            if checkpoint.is_some() {
+                CHECKPOINT_MAGIC
+            } else {
+                MAGIC
+            },
+            live,
+        )?;
         encoder.push(identity.tenant.as_bytes(), live)?;
         encoder.push(identity.repository.as_bytes(), live)?;
         encoder.push(identity.incarnation.as_bytes(), live)?;
@@ -123,6 +147,11 @@ impl<W: Write> StreamEncoder<W> {
         )?;
         encoder.push(&(authority.len() as u64).to_be_bytes(), live)?;
         encoder.push(authority, live)?;
+        if let Some(checkpoint) = checkpoint {
+            let bytes = checkpoint.encode()?;
+            encoder.push(&(bytes.len() as u64).to_be_bytes(), live)?;
+            encoder.push(&bytes, live)?;
+        }
         encoder.push(&(objects as u64).to_be_bytes(), live)?;
         Ok(encoder)
     }
@@ -399,7 +428,8 @@ impl<R: Read> StreamDecoder<R> {
             bytes: 0,
             limits,
         };
-        if &input.array::<8>(live)? != MAGIC {
+        let magic = input.array::<8>(live)?;
+        if &magic != MAGIC && &magic != CHECKPOINT_MAGIC {
             return Err("unsupported repository backup transport".into());
         }
         let tenant = TenantId::from_bytes(input.array(live)?);
@@ -425,20 +455,37 @@ impl<R: Read> StreamDecoder<R> {
         if authority.head.is_none() {
             return Err("repository backup has no authority head".into());
         }
+        let identity = Identity {
+            tenant,
+            repository,
+            incarnation,
+            format,
+        };
+        let checkpoint = if &magic == CHECKPOINT_MAGIC {
+            let size = input.length(MAX_EVIDENCE_BYTES, live)?;
+            check_room(input.bytes, size as u64, limits)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(size)
+                .map_err(|_| "checkpoint evidence allocation refused")?;
+            bytes.resize(size, 0);
+            input.read_exact(&mut bytes, live)?;
+            let evidence = CheckpointEvidence::decode(&bytes, identity)?;
+            live()?;
+            Some(evidence)
+        } else {
+            None
+        };
         let objects = input.length(MAX_OBJECTS, live)?;
         let minimum = (format.digest_len() + 1 + 8 + 32) as u64;
         check_room(input.bytes, objects as u64 * minimum, limits)?;
         Ok(Self {
             input,
             header: StreamHeader {
-                identity: Identity {
-                    tenant,
-                    repository,
-                    incarnation,
-                    format,
-                },
+                identity,
                 authority,
                 objects,
+                checkpoint,
             },
             remaining: objects,
             previous: None,

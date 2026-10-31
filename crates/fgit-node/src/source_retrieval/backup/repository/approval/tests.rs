@@ -427,6 +427,7 @@ fn header_and_seal() -> (StreamHeader, Seal) {
                 issuance: Vec::new(),
             },
             objects: 0,
+            checkpoint: None,
         },
         Seal {
             digest: unhex(DIGEST).unwrap(),

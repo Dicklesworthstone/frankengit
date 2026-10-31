@@ -57,11 +57,14 @@ Commit, tree and tag bodies keep their independent 32 MiB metadata limit.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 An explicit resume gets a new bounded attempt, not an unbounded automatic retry.
 
-Metadata and objects are staged under .restore-quarantine. Graph/selection,
+Metadata, objects and manifests are staged under .restore-quarantine. Graph/selection,
 original commitments and disk readback verify before final authority publication.
-Moved object storage and WAL return to quarantine before an unpublished resume
+Moved object storage, manifests and WAL return to quarantine before an unpublished resume
 opens the database. Conflicting locations refuse. Authority is still installed
 last, and the final image is reopened and verified before success or cleanup.
+FGSRC002 restores and directly verifies the original selected retained outcome
+checkpoint before publication and on final reopen. Its section is bounded at
+32 MiB. FGSRC001 remains source-only and never claims missing leaves survived.
 
 The immutable .restore-intent and OS-locked .restore-lock remain for retries.
 The lock excludes other cooperating restore commands, not running node services.
@@ -263,6 +266,11 @@ fn graph_from_archive(
     if selected.authenticated().receipt() != expected {
         return Err("restored authority disagrees with its exact import receipt".into());
     }
+    if let Some(evidence) = &archive.header().checkpoint {
+        // Certify the original root from pinned input even in preflight. The
+        // ordinary admission fallback cannot establish checkpoint preservation.
+        evidence.verify(node, &request, &selected, deadline, false)?;
+    }
     let objects = selected.selected_closure().closure().objects();
     if objects.len() != archive.header().objects {
         return Err("archive inventory does not equal the authority-selected object set".into());
@@ -302,6 +310,9 @@ fn graph_from_archive(
         .finish(&selected.snapshot().refs, &mut checkpoint)
         .map_err(|e| e.to_string())?;
     if mode == ArchiveGraphMode::Install {
+        if let Some(evidence) = &archive.header().checkpoint {
+            evidence.install(node, &request, deadline)?;
+        }
         archive.scan_stream(deadline, |record, body| {
             deadline.in_request(&request)?;
             // Even a changed file cannot cause an out-of-selection placement
@@ -350,6 +361,11 @@ fn graph_from_archive(
             deadline.in_request(&request)
         })?;
     }
+    if mode != ArchiveGraphMode::Preflight
+        && let Some(evidence) = &archive.header().checkpoint
+    {
+        evidence.verify(node, &request, &selected, deadline, true)?;
+    }
     let current = node
         .runtime()
         .block_on(node.authenticate_authority_head_in(&request))
@@ -388,32 +404,39 @@ impl PreparedPublication {
         File::open(&database)
             .and_then(|file| file.sync_all())
             .map_err(|e| e.to_string())?;
-        let objects = quarantine.join("objects");
-        let target_objects = destination.join("objects");
-        require_absent(&target_objects)?;
-        let metadata = fs::symlink_metadata(&objects).map_err(|e| e.to_string())?;
-        if !metadata.is_dir() {
-            return Err("restore object fabric is not a directory".into());
+        // Validate every fixed destination and source kind before the first
+        // rename. Manifests and both object namespaces precede authority.
+        for name in ["objects", "manifests"] {
+            require_absent(&destination.join(name))?;
+            let metadata =
+                fs::symlink_metadata(quarantine.join(name)).map_err(|e| e.to_string())?;
+            if !metadata.is_dir() {
+                return Err(format!("restore {name} fabric is not a directory"));
+            }
         }
-        // Both directories are exclusively owned by this invocation under the
-        // newly reserved, trusted root. No archive pathname enters this rename.
-        fs::rename(&objects, &target_objects).map_err(|e| e.to_string())?;
-        sync_directory(&target_objects).map_err(|e| e.to_string())?;
         let wal = quarantine.join("authority.fsqlite-wal");
-        match fs::symlink_metadata(&wal) {
+        let has_wal = match fs::symlink_metadata(&wal) {
             Ok(metadata) if metadata.is_file() => {
                 File::open(&wal)
                     .and_then(|file| file.sync_all())
                     .map_err(|e| e.to_string())?;
-                let target_wal = destination.join("authority.fsqlite-wal");
-                require_absent(&target_wal)?;
-                // One location per closed WAL lets an interrupted resume put
-                // it back beside its database before asking the engine to open.
-                fs::rename(&wal, &target_wal).map_err(|e| e.to_string())?;
+                true
             }
             Ok(_) => return Err("restore WAL is not a regular file".into()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.to_string()),
+        };
+        require_absent(&destination.join("authority.fsqlite-wal"))?;
+        // One location per path makes every interrupted combination resumable.
+        // All names are fixed; archive contents never supply paths.
+        for name in ["objects", "manifests"] {
+            let target = destination.join(name);
+            fs::rename(quarantine.join(name), &target).map_err(|e| e.to_string())?;
+            sync_directory(&target).map_err(|e| e.to_string())?;
+        }
+        if has_wal {
+            fs::rename(&wal, destination.join("authority.fsqlite-wal"))
+                .map_err(|e| e.to_string())?;
         }
         sync_directory(quarantine).map_err(|e| e.to_string())?;
         sync_directory(destination).map_err(|e| e.to_string())?;
@@ -655,7 +678,7 @@ fn execute_with_checkpoints(
             "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
             "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
             "\"external_artifacts_restored\":false,\"signature_verified\":{}{},",
-            "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}}}"
+            "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}{}}}"
         ),
         quote(&hex(&options.expected)),
         quote(&header.identity.tenant.to_string()),
@@ -671,7 +694,8 @@ fn execute_with_checkpoints(
         approval_receipt_fields(approval.as_ref()),
         archive.seal().bytes,
         options.resume,
-        already_published
+        already_published,
+        super::checkpoint::receipt(header.checkpoint.as_ref())
     ))
 }
 

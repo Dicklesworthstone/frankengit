@@ -32,6 +32,9 @@ Git inventory, required-kind graph and original payload commitments BEFORE a
 restore. This uses the SAME backend/materializer/graph checks as restore, without
 copying Git payloads or publishing authority at the scratch root. No source node
 is needed. Metadata lives only in a private .verify-quarantine child.
+FGSRC002 also verifies its bounded retained outcome evidence against the exact
+authority-selected root through a read-only archive view; no leaves are placed.
+Legacy FGSRC001 does not claim retained checkpoint preservation.
 
 The scratch root must be absent under a stable trusted parent. Never serve or
 concurrently modify it. Success closes the node and removes this invocation's
@@ -44,7 +47,7 @@ Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance
 Commit, tree and tag bodies keep their independent 32 MiB metadata limit.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 This verifies SOURCE recovery inputs, not destination disk readback, the newest
-checkpoint, a complete signed capsule, external artifacts, routing or external-effect replay.
+full backup checkpoint, a complete signed capsule, external artifacts, routing or external-effect replay.
 Exit 0: complete scoped preflight and cleanup; 2: refusal, incomplete verification,
 cleanup failure or receipt-output failure.";
 
@@ -210,7 +213,7 @@ fn execute_with_checkpoints(
             "\"git_payloads_written\":false,\"destination_authority_published\":false,",
             "\"node_closed\":true,\"scratch_removed\":true,\"destination_readback_verified\":false,",
             "\"newest_checkpoint_verified\":false,\"signature_verified\":{}{},",
-            "\"external_artifacts_verified\":false,\"routing_published\":false}}"
+            "\"external_artifacts_verified\":false,\"routing_published\":false{}}}"
         ),
         quote(&hex(&options.expected)),
         archive.seal().bytes,
@@ -227,6 +230,7 @@ fn execute_with_checkpoints(
         options.instance.raw(),
         approval.is_some(),
         approval_receipt_fields(approval.as_ref()),
+        super::super::checkpoint::receipt(header.checkpoint.as_ref()),
     ))
 }
 
