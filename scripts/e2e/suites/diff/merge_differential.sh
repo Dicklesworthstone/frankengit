@@ -333,10 +333,11 @@ run_worker() {
   local receipt=''
 
   fge_capture fgit-diff-differential \
-    env RCH_CARGO_WRAPPER_BYPASS=1 \
+    env \
     "FGIT_DIFF_DIFFERENTIAL_CORPUS=${corpus_directory}" \
     "FGIT_DIFF_DIFFERENTIAL_ARTIFACT_DIR=${finding_directory}" \
-    cargo test --locked -p fgit-diff --test "${TEST_NAME}" -- --ignored || worker_exit=$?
+    "${PYTHON_BIN:-python3}" "${REPOSITORY_ROOT}/scripts/run_host_integration_test.py" \
+    fgit-diff "${TEST_NAME}" -- --ignored || worker_exit=$?
   fge_assert_exit FG-044C-WORKER-001 0 "${worker_exit}" \
     'the pure-Rust engine replays every declared diff, merge-base, merge, and refusal cell'
   record_findings "${finding_directory}"
