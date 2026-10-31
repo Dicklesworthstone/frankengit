@@ -15,6 +15,7 @@ use fgit_codec::{
     ForgePositionStateEntry, OutboxDeliveryIdentityInput, derive_outbox_delivery_key,
 };
 use fgit_types::{AsciiSlug, Digest, RepositoryCommitId, RepositoryId, TxId};
+use std::collections::BTreeSet;
 
 use crate::intent::{ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey};
 
@@ -187,6 +188,36 @@ pub fn apply_merge_delivery_transition(
     outbox_basis: &CanonicalOutboxState,
     input: MergeDeliveryInput,
 ) -> Result<MergeDeliveryTransition, MergeDeliveryTransitionRefusal> {
+    apply_batch_delivery_transition(forge_basis, outbox_basis, &[input])
+}
+
+/// Advance distinct forge streams belonging to one event batch and one
+/// delivery obligation. Every input must share the complete delivery binding;
+/// only stream, predecessor position and event count may differ.
+///
+/// # Errors
+///
+/// Refuses empty, oversized, duplicate-stream or mixed-binding batches, plus
+/// every predecessor, canonical-state and identity failure of the singleton
+/// transition. The singleton wrapper retains its existing canonical results.
+pub fn apply_batch_delivery_transition(
+    forge_basis: &CanonicalForgePositionState,
+    outbox_basis: &CanonicalOutboxState,
+    inputs: &[MergeDeliveryInput],
+) -> Result<MergeDeliveryTransition, MergeDeliveryTransitionRefusal> {
+    let invalid = |field| {
+        MergeDeliveryTransitionRefusal::Codec(CodecRefusal::ValueUnrepresentable {
+            field,
+            observed: inputs.len() as u64,
+            limit: fgit_codec::MAX_FORGE_POSITION_STATE_ENTRIES as u64,
+        })
+    };
+    let input = *inputs
+        .first()
+        .ok_or_else(|| invalid("merge_delivery.empty_batch"))?;
+    if inputs.len() > fgit_codec::MAX_FORGE_POSITION_STATE_ENTRIES {
+        return Err(invalid("merge_delivery.batch_limit"));
+    }
     if forge_basis.repository_id() != input.repository_id
         || outbox_basis.repository_id() != input.repository_id
     {
@@ -197,18 +228,32 @@ pub fn apply_merge_delivery_transition(
         });
     }
 
-    let stream = input.stream.label();
-    let observed_position = forge_basis
-        .entry(stream)
-        .map_or(ForgeStreamPosition::GENESIS, |entry| {
-            ForgeStreamPosition::new(entry.successor_position())
-        });
-    if observed_position != input.expected_position {
-        return Err(MergeDeliveryTransitionRefusal::ForgePositionMismatch {
+    let mut seen = BTreeSet::new();
+    for advance in inputs {
+        if (MergeDeliveryInput {
             stream: input.stream,
-            expected: input.expected_position,
-            observed: observed_position,
-        });
+            expected_position: input.expected_position,
+            event_count: input.event_count,
+            ..*advance
+        }) != input
+        {
+            return Err(invalid("merge_delivery.mixed_binding"));
+        }
+        if !seen.insert(advance.stream) {
+            return Err(invalid("merge_delivery.duplicate_stream"));
+        }
+        let observed_position = forge_basis
+            .entry(advance.stream.label())
+            .map_or(ForgeStreamPosition::GENESIS, |entry| {
+                ForgeStreamPosition::new(entry.successor_position())
+            });
+        if observed_position != advance.expected_position {
+            return Err(MergeDeliveryTransitionRefusal::ForgePositionMismatch {
+                stream: advance.stream,
+                expected: advance.expected_position,
+                observed: observed_position,
+            });
+        }
     }
 
     let identity_input = OutboxDeliveryIdentityInput::new(
@@ -225,20 +270,23 @@ pub fn apply_merge_delivery_transition(
         return Err(MergeDeliveryTransitionRefusal::DeliveryKeyAlreadyPresent { delivery_key });
     }
 
-    let next_forge_entry = ForgePositionStateEntry::try_new(
-        stream,
-        input.expected_position.get(),
-        input.event_count,
-        input.event_batch_root,
-    )?;
     let mut forge_entries = forge_basis.entries().to_vec();
-    if let Some(index) = forge_entries
-        .iter()
-        .position(|entry| entry.stream() == stream)
-    {
-        forge_entries[index] = next_forge_entry;
-    } else {
-        forge_entries.push(next_forge_entry);
+    for advance in inputs {
+        let stream = advance.stream.label();
+        let next_forge_entry = ForgePositionStateEntry::try_new(
+            stream,
+            advance.expected_position.get(),
+            advance.event_count,
+            input.event_batch_root,
+        )?;
+        if let Some(index) = forge_entries
+            .iter()
+            .position(|entry| entry.stream() == stream)
+        {
+            forge_entries[index] = next_forge_entry;
+        } else {
+            forge_entries.push(next_forge_entry);
+        }
     }
     let forge_positions = CanonicalForgePositionState::try_new(input.repository_id, forge_entries)?;
 

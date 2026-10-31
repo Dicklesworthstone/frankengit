@@ -3,6 +3,7 @@
 
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState};
 use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition};
+use fgit_reference::merge_delivery::apply_batch_delivery_transition;
 use fgit_reference::{
     MergeDeliveryInput, MergeDeliveryTransitionRefusal, apply_merge_delivery_transition,
 };
@@ -52,6 +53,97 @@ fn empty_basis(repository_id: RepositoryId) -> (CanonicalForgePositionState, Can
         CanonicalForgePositionState::try_new(repository_id, Vec::new()).expect("empty forge state"),
         CanonicalOutboxState::try_new(repository_id, Vec::new()).expect("empty outbox state"),
     )
+}
+
+fn another_stream(
+    original: MergeDeliveryInput,
+    stream: &'static str,
+    position: u64,
+    count: u32,
+) -> MergeDeliveryInput {
+    MergeDeliveryInput::new(
+        original.repository_id(),
+        ForgeStreamId::new(AsciiSlug::from_static(stream)),
+        ForgeStreamPosition::new(position),
+        count,
+        original.event_batch_root(),
+        original.effect_class(),
+        original.destination(),
+        original.payload_root(),
+        original.tx_id(),
+        original.predecessor_rcr_id(),
+        original.initial_effect_state_root(),
+    )
+}
+
+#[test]
+fn multi_stream_merge_delivery_uses_one_obligation_and_exact_independent_positions() {
+    let repository = RepositoryId::from_bytes([0x71; 16]);
+    let (forge, outbox) = empty_basis(repository);
+    let pull = input(repository, 0x61);
+    let queue = another_stream(pull, "queue/1", 0, 2);
+    let transition = apply_batch_delivery_transition(&forge, &outbox, &[queue, pull]).unwrap();
+    assert_eq!(transition.forge_positions().entries().len(), 2);
+    assert_eq!(transition.outbox().entries().len(), 1);
+    for (stream, count) in [(pull.stream(), 1), (queue.stream(), 2)] {
+        let advanced = transition.forge_positions().entry(stream.label()).unwrap();
+        assert_eq!(advanced.event_count(), count);
+        assert_eq!(advanced.successor_position(), u64::from(count));
+        assert_eq!(advanced.event_batch_root(), pull.event_batch_root());
+    }
+    assert_eq!(
+        transition,
+        apply_batch_delivery_transition(&forge, &outbox, &[pull, queue]).unwrap(),
+    );
+    assert_eq!(
+        apply_batch_delivery_transition(&forge, &outbox, &[pull]).unwrap(),
+        apply_merge_delivery_transition(&forge, &outbox, pull).unwrap(),
+    );
+    let next_pull = another_stream(input(repository, 0x62), "pull-requests", 1, 1);
+    let next_queue = another_stream(next_pull, "queue/1", 2, 2);
+    let next = apply_batch_delivery_transition(
+        transition.forge_positions(),
+        transition.outbox(),
+        &[next_pull, next_queue],
+    )
+    .unwrap();
+    assert_eq!(next.outbox().entries().len(), 2);
+    assert_eq!(
+        next.forge_positions()
+            .entry(queue.stream().label())
+            .unwrap()
+            .successor_position(),
+        4
+    );
+}
+
+#[test]
+fn multi_stream_merge_delivery_rejects_duplicates_mixed_bindings_and_stale_second_stream() {
+    let repository = RepositoryId::from_bytes([0x72; 16]);
+    let (forge, outbox) = empty_basis(repository);
+    let pull = input(repository, 0x61);
+    let queue = another_stream(pull, "queue/1", 0, 2);
+    for inputs in [
+        vec![],
+        vec![pull, pull],
+        vec![
+            pull,
+            another_stream(input(repository, 0x62), "queue/1", 0, 2),
+        ],
+        vec![pull, another_stream(pull, "queue/1", 1, 2)],
+        vec![pull, another_stream(pull, "queue/1", 0, 0)],
+    ] {
+        assert!(apply_batch_delivery_transition(&forge, &outbox, &inputs).is_err());
+    }
+    let first = apply_batch_delivery_transition(&forge, &outbox, &[pull, queue]).unwrap();
+    let updated_pull = another_stream(input(repository, 0x62), "pull-requests", 1, 1);
+    let stale_queue = another_stream(updated_pull, "queue/1", 0, 2);
+    assert!(matches!(
+        apply_batch_delivery_transition(first.forge_positions(), first.outbox(), &[updated_pull, stale_queue]),
+        Err(MergeDeliveryTransitionRefusal::ForgePositionMismatch { stream, .. }) if stream == queue.stream()
+    ));
+    assert_eq!(forge.entries().len(), 0);
+    assert_eq!(outbox.entries().len(), 0);
 }
 
 #[test]
