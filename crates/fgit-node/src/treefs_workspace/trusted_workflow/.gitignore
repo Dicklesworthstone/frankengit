@@ -1,0 +1,3 @@
+# This artifact module is authored source, not generated output.
+!artifacts/
+!artifacts/**
