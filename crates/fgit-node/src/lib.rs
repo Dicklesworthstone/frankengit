@@ -60,6 +60,7 @@ pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod bounded_receive_intake;
 mod capsule_history;
 mod closure_selection;
+pub mod outcome_checkpoint;
 mod outcome_collection;
 pub mod source_retrieval;
 mod treefs_workspace;
@@ -11804,6 +11805,7 @@ mod tests {
     mod capsule_history;
     mod closure_selection;
     mod fabric_read_budget;
+    mod outcome_checkpoint;
     mod outcome_collection;
     mod policy_evidence;
     mod upload_work_budget;

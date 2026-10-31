@@ -4,6 +4,7 @@ mod artifact_command;
 mod bisect_command;
 mod branches;
 mod bundle;
+mod checkpoint;
 mod commit_replay;
 mod events;
 mod fsck;
@@ -55,6 +56,21 @@ fn main() -> ExitCode {
 }
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "checkpoint")
+    {
+        return match checkpoint::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"outcome_checkpoint_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "agent")
@@ -712,6 +728,24 @@ mod operator_subcommand_dispatch_tests {
 
     fn vec_args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn checkpoint_dispatches_help_and_refuses_missing_scope() {
+        for items in [
+            vec!["checkpoint", "--help"],
+            vec!["checkpoint", "outcomes", "--help"],
+        ] {
+            assert_eq!(run_subcommand(&vec_args(&items)), ExitCode::SUCCESS);
+        }
+        assert_eq!(
+            run_subcommand(&vec_args(&["checkpoint"])),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            run_subcommand(&vec_args(&["checkpoint", "repository", "--help"])),
+            ExitCode::from(2)
+        );
     }
 
     #[test]

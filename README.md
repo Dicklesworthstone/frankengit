@@ -195,6 +195,49 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Retained outcome checkpoints
+
+`fg checkpoint outcomes` creates an authority-bound checkpoint of terminal
+transaction outcomes in an existing native repository:
+
+```text
+fg checkpoint outcomes <storage-root> <tenant-id> <repository-id> --trusted-local
+  [--expected-head <snapshot-token>] [--max-decisions <1..65536>]
+  [--max-bytes <1..16777216>] [--timeout-secs <1..3600>]
+```
+
+The command infers the repository's persisted SHA-1 or SHA-256 format.
+`--trusted-local` asserts the operator's authority over the entire repository;
+it does not authenticate a remote principal. The node derives the retained
+outcomes from authenticated history, stages and verifies their immutable
+leaves, then activates the capsule through an exact-predecessor authority-head
+replacement. Source refs, forge state and terminal outcomes stay unchanged.
+
+Defaults are 65,536 retained decisions, 16 MiB of retained leaf payload and a
+300-second maintenance deadline. The limits cover the cumulative retained set,
+including a checkpoint already selected at the current head. Each invocation
+uses one request deadline: the shorter of its local `--timeout-secs` and a
+leading global `fg --timeout-secs` override. Raising a limit cannot exceed the
+documented profile or raise another limit.
+
+`--expected-head` fences the exact current authority head; a stale token refuses
+instead of selecting newer state. After successful node shutdown, the JSON
+receipt names `source_head`, `published_head`, `capsule_id`, `checkpoint_root`
+and retained counts. Repeating at the already checkpointed current head verifies
+the evidence and returns `published: false` without another head replacement.
+Use `published_head` to fence subsequent maintenance; the original `source_head`
+becomes stale after publication. A timeout, missing receipt or output failure
+does not establish non-publication.
+
+Maintenance refuses missing or corrupt newest capsule/checkpoint evidence;
+it never silently replaces that evidence with an older checkpoint. Admission
+independently retains its bounded genesis fallback when outcome checkpoint
+leaves are unusable. This `DecisionHistoryOnly` profile maintains the outcome
+index; it is not a complete repository backup, restore drill, history pruning
+or garbage collection. Cold object-closure and other independent history limits
+remain. See the [native implementation](crates/fgit-node/src/outcome_checkpoint.rs)
+and [capsule contract](docs/NORMATIVE_PROTOCOL_CONTRACTS.md#23-repository-capsules-backup-and-restore).
+
 ### Canonical reference policy activation
 
 `fg protection set --policy-source <file>` now activates bounded repository DSL
