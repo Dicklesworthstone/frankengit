@@ -1,5 +1,8 @@
 //! Explicit ranked retrieval over a revalidated, immutable lexical generation.
-use super::*;
+use super::{
+    LexicalError, LexicalIndexStore, LexicalSource, NodeRequestContext, NodeWorkspaceRefusal,
+    OneNode, RankedLexicalReport, RevalidatedIndexRequest, index_error, live,
+};
 
 /// Current authority and original index provenance remain distinct. Statistics
 /// and scores cannot widen the caller's independently granted read authority.

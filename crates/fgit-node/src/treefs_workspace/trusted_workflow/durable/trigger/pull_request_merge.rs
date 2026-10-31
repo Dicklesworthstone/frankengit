@@ -1,6 +1,12 @@
 //! Exact PR candidates admitted on an operator-owned CI branch before execution.
 //! Local custody suppresses retries; ordinary sealed ref admission owns truth.
-use super::*;
+use super::{
+    File, Format, GitOid, NodeRequestContext, NodeWorkspaceRefusal, OneNode, OsStrExt, Path,
+    RefName, RepositoryAuthorityHeadId, Selected, TrustedRefWorkflowPoll,
+    TrustedWorkflowArtifactConfig, TrustedWorkflowFailure, WorkflowLimits, cancellation,
+    commitment, hex, invalid, invalid_owned, io, pull_request, reporting, sha256_digest,
+    workspace_request_live, write_new,
+};
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::{
@@ -48,7 +54,7 @@ impl PullRequestMergeWatchConfig {
         })
     }
     #[must_use]
-    pub fn reference(&self) -> &RefName {
+    pub const fn reference(&self) -> &RefName {
         &self.reference
     }
     #[must_use]
@@ -56,7 +62,7 @@ impl PullRequestMergeWatchConfig {
         self.principal
     }
     #[must_use]
-    pub fn metadata(&self) -> &MergeMetadata {
+    pub const fn metadata(&self) -> &MergeMetadata {
         &self.metadata
     }
     #[must_use]

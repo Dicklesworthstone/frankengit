@@ -500,7 +500,7 @@ impl InitialAuthorization {
     }
 }
 #[cfg(test)]
-pub(super) fn model_context(namespace: LexicalNamespace) -> SourceReadContext {
+pub(super) const fn model_context(namespace: LexicalNamespace) -> SourceReadContext {
     SourceReadContext {
         namespace,
         host: Host::TrustedLocalNative,

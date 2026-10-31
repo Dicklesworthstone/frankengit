@@ -452,7 +452,7 @@ pub struct StagedCandidatePackSource<'source, 'staging> {
 }
 
 impl<'source> VerifiedFabricPackSource<'source> {
-    pub(crate) fn with_staging<'staging>(
+    pub(crate) const fn with_staging<'staging>(
         self,
         staging: &'staging ReceiveStaging,
     ) -> StagedCandidatePackSource<'source, 'staging> {

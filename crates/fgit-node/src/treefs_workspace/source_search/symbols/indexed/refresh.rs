@@ -81,50 +81,53 @@ impl OneNode {
         }
         drop(selected);
 
-        let generation =
-            GenerationAuthority::new(&self.authority, self.symbol_head_key(reference)?)
-                .read_active_async(
-                    request.authority(),
-                    view()?,
-                    None,
-                    GenerationReadLimits::default(),
-                    &mut || workspace_request_live(request),
-                )
-                .await
-                .map_err(Failure::Generation)?
-                .ok_or(Failure::Uninitialized)?;
-        if generation.activation().generation_id != predecessor {
-            return Err(Failure::Stale);
-        }
-        let body = generation.body();
-        let root = symbol_manifest_root(body)?;
         let mut stats = data::RefreshStats::default();
-        let raw = self
-            .read_symbol_payload(
+        let cancelled = || !workspace_request_live(request);
+        let mut verifier = {
+            let generation =
+                GenerationAuthority::new(&self.authority, self.symbol_head_key(reference)?)
+                    .read_active_async(
+                        request.authority(),
+                        view()?,
+                        None,
+                        GenerationReadLimits::default(),
+                        &mut || workspace_request_live(request),
+                    )
+                    .await
+                    .map_err(Failure::Generation)?
+                    .ok_or(Failure::Uninitialized)?;
+            if generation.activation().generation_id != predecessor {
+                return Err(Failure::Stale);
+            }
+            let body = generation.body();
+            let root = symbol_manifest_root(body)?;
+            let raw = self
+                .read_symbol_payload(
+                    request,
+                    root,
+                    &mut stats.predecessor_payload_bytes,
+                    data::MAX_INDEX_BYTES,
+                )
+                .await?;
+            let manifest =
+                data::Manifest::decode(&raw, root, &cancelled).map_err(Failure::Index)?;
+            self.validate_symbol_source(&manifest, body, reference)?;
+            self.verify_symbol_directory_in(
                 request,
-                root,
+                body,
+                &manifest,
                 &mut stats.predecessor_payload_bytes,
                 data::MAX_INDEX_BYTES,
             )
             .await?;
-        let cancelled = || !workspace_request_live(request);
-        let manifest = data::Manifest::decode(&raw, root, &cancelled).map_err(Failure::Index)?;
-        self.validate_symbol_source(&manifest, body, reference)?;
-        self.verify_symbol_directory_in(
-            request,
-            body,
-            &manifest,
-            &mut stats.predecessor_payload_bytes,
-            data::MAX_INDEX_BYTES,
-        )
-        .await?;
-        // Older source head/RCR/forge/commit values are intentional here. Only
-        // its verified per-blob tables, not its old visibility, are reusable.
-        let mut verifier =
-            data::ReuseVerifier::new(&manifest, &cancelled).map_err(Failure::Index)?;
-        drop(raw);
-        drop(manifest);
-        drop(generation);
+            // Older source head/RCR/forge/commit values are intentional here. Only
+            // its verified per-blob tables, not its old visibility, are reusable.
+            let verifier =
+                data::ReuseVerifier::new(&manifest, &cancelled).map_err(Failure::Index)?;
+            drop(raw);
+            drop(manifest);
+            verifier
+        };
         while let Some(doc) = verifier.next_document().cloned() {
             live(request)?;
             if stats

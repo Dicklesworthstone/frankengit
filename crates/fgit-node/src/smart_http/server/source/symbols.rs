@@ -257,14 +257,14 @@ fn refusal(error: SymbolReadError<NodeWorkspaceRefusal>) -> ApiError {
 }
 pub(super) fn execute(
     node: &OneNode,
-    _request: &Request<'_>,
+    request: &Request<'_>,
     session: &LoopbackReceiveSession,
     framing: BodyFraming,
     reader: &mut impl Read,
     http: HttpLimits,
     maximum: u64,
 ) -> Result<JsonReply, ApiError> {
-    if _request.indexed {
+    if request.indexed {
         return indexed::execute(node, session, framing, reader, http, maximum);
     }
     if session.authenticated_session().is_none() {

@@ -185,7 +185,7 @@ fn lexical_omissions_share_the_initial_result_budget_with_hits_in_each_channel()
         lexical_result_bytes(&report, &mut short, channel_bytes - 1),
         Err(RetrievalError::Limit("retained result bytes"))
     ));
-    assert!(short <= channel_bytes - 1);
+    assert!(short < channel_bytes);
 
     // Initial keeps each channel's receipt, including duplicate omissions.
     lexical_result_bytes(&report, &mut total, 2 * channel_bytes).unwrap();

@@ -261,7 +261,7 @@ fn evidence_failure(error: RetrievalError) -> ApiError {
 }
 pub(super) fn execute(
     node: &OneNode,
-    _request: &Request<'_>,
+    request: &Request<'_>,
     session: &LoopbackReceiveSession,
     read: &SourceReadContext,
     framing: BodyFraming,
@@ -272,10 +272,10 @@ pub(super) fn execute(
     if session.authenticated_session().is_none() {
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
-    if _request.agent {
+    if request.agent {
         return agent::execute(node, read, framing, reader, http, maximum);
     }
-    if _request.hydrate {
+    if request.hydrate {
         return context::execute(node, session, read, framing, reader, http, maximum);
     }
     let command = command(&read_form(reader, framing, http)?, node.object_format)?;

@@ -298,8 +298,8 @@ fn run_controlled_with_budget(
     budget: OperatorDeadline,
 ) -> io::Result<bool> {
     let mut stop = Stop {
-        control,
         budget,
+        control,
         ..Stop::default()
     };
     let mut healthy = true;
