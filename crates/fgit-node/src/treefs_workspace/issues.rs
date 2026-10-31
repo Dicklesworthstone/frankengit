@@ -130,14 +130,14 @@ impl OneNode {
                 .await
             }
             IssueSubmission::AppendComment(intent) => {
-                issues::admit_issue_comment_async(
+                Box::pin(issues::admit_issue_comment_async(
                     &self.authority,
                     request.authority(),
                     &context,
                     intent,
                     limits,
                     &projection,
-                )
+                ))
                 .await
             }
         }

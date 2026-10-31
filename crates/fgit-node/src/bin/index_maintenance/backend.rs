@@ -148,27 +148,26 @@ impl IndexKind {
                     )
                 })
                 .map_err(AttemptFailure::from),
-            Self::Symbols => node
-                .reconcile_source_symbol_index_guarded_local_in(
-                    request,
-                    reference,
-                    None,
-                    minimum,
-                    Default::default(),
-                    Default::default(),
-                    barrier,
+            Self::Symbols => Box::pin(node.reconcile_source_symbol_index_guarded_local_in(
+                request,
+                reference,
+                None,
+                minimum,
+                Default::default(),
+                Default::default(),
+                barrier,
+            ))
+            .await
+            .map(|(source, activation)| {
+                (
+                    Source {
+                        source_head: source.head,
+                        commit: source.commit,
+                    },
+                    activation,
                 )
-                .await
-                .map(|(source, activation)| {
-                    (
-                        Source {
-                            source_head: source.head,
-                            commit: source.commit,
-                        },
-                        activation,
-                    )
-                })
-                .map_err(AttemptFailure::from),
+            })
+            .map_err(AttemptFailure::from),
         }
     }
 }
