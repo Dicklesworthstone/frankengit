@@ -8,6 +8,7 @@ mod checkpoint;
 mod input;
 mod payload;
 mod profile;
+mod reconstruct;
 mod restore;
 
 use std::fs::File;
@@ -372,7 +373,14 @@ pub(super) fn run_with_timeout(
         emit(output, USAGE)?;
         emit(output, restore::USAGE)?;
         emit(output, restore::verify::USAGE)?;
-        return emit(output, attest::USAGE);
+        emit(output, attest::USAGE)?;
+        return emit(output, reconstruct::USAGE);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "catalog" | "reconstruct"))
+    {
+        return reconstruct::run(args, output, timeout);
     }
     if args.first().is_some_and(|arg| arg == "attest") {
         return attest::run(args, output, timeout);

@@ -77,6 +77,22 @@ processes with no external programs on `PATH`. It checks native refs, terminal
 retry identity and subsequent admission. Its presence is a test implementation,
 not an execution result for an arbitrary revision.
 
+## Native catalogs and damaged-copy reconstruction
+
+The same detached approval also gates `fg backup catalog` and
+`fg backup reconstruct`. Catalog creation verifies an intact archive before
+writing the existing `FGCHNK01` range catalog. Reconstruction combines surviving
+ranges from explicit copies, then verifies the private output against the
+original signed size/digest and the full native recovery preflight before
+publishing it. Neither command issues a replacement signature or treats catalog
+hashes as authority. The recovered bytes use the original approval for later
+signed verification and restore.
+
+See [native backup reconstruction](NATIVE_BACKUP_RECONSTRUCTION.md) for complete
+examples, independently supplied trust inputs, aggregate read accounting and
+publication uncertainty. The JavaScript catalog/repair tooling below remains
+interoperable with the unchanged binary catalog format.
+
 ## JavaScript creation and independent checking
 
 Export with the native `fg backup export` command. Independently review its

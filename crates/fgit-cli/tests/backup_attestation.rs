@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_schema::json::{self, Value};
 
+#[path = "backup_attestation/reconstruction.rs"]
+mod reconstruction;
+
 const TENANT: &str = "11111111111111111111111111111111";
 const REPOSITORY: &str = "22222222222222222222222222222222";
 const PRINCIPAL: &str = "33333333333333333333333333333333";

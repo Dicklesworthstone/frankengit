@@ -268,6 +268,15 @@ mod adapter_tests {
             run(&[operation.into(), "--help".into()], &mut output).unwrap();
             assert!(String::from_utf8(output).unwrap().contains(operation));
         }
+        for operation in ["catalog", "reconstruct"] {
+            assert!(text.contains(&format!("fg backup {operation}")));
+            let mut output = Vec::new();
+            run(&[operation.into(), "--help".into()], &mut output).unwrap();
+            let help = String::from_utf8(output).unwrap();
+            assert!(help.contains(&format!("fg backup {operation}")));
+            assert!(help.contains("--expected-sha256"));
+            assert!(help.contains("--max-read-bytes"));
+        }
         assert!(run(&[], &mut Vec::new()).is_err());
         assert!(run(&["unknown".into()], &mut Vec::new()).is_err());
     }

@@ -1,4 +1,4 @@
-//! Private key input and create-only detached approval publication on Unix.
+//! Private key input and create-only verified backup output publication on Unix.
 //! Stable, trusted parent paths are required; this is not a hostile-UID sandbox.
 
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -258,7 +258,7 @@ impl Stage {
             &self.identity,
             &self.file.metadata().map_err(|error| error.to_string())?,
         ) {
-            return Err("backup approval changed after readback".into());
+            return Err("verified backup output changed after readback".into());
         }
         super::super::super::require_absent(&self.destination)?;
         live()?;
@@ -267,13 +267,15 @@ impl Stage {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 self.state = "staged";
             }
-            return Err(format!("backup approval publication: {error}"));
+            return Err(format!("verified backup output publication: {error}"));
         }
         self.state = "published";
         let published =
             fs::symlink_metadata(&self.destination).map_err(|error| error.to_string())?;
         if !same(&self.identity, &published) || !published.is_file() || published.nlink() != 2 {
-            return Err("published approval identity changed; preserve output and stage".into());
+            return Err(
+                "published backup output identity changed; preserve output and stage".into(),
+            );
         }
         self.check_parent()?;
         self.check_stage(2)?;
@@ -289,7 +291,8 @@ impl Stage {
     pub(in super::super) fn failure(&mut self, error: String) -> String {
         if self.state != "staged" {
             return format!(
-                "{error}; approval publication_state={}; preserve the approval output and inspect it before retrying",
+                "{error}; backup output {} publication_state={}; preserve this output and inspect it before retrying",
+                self.destination.display(),
                 self.state
             );
         }
@@ -298,9 +301,13 @@ impl Stage {
             .and_then(|()| self.check_stage(1))
             .and_then(|()| fs::remove_file(&self.temporary).map_err(|error| error.to_string()));
         match cleanup {
-            Ok(()) => format!("{error}; approval publication_state=not_created"),
+            Ok(()) => format!(
+                "{error}; backup output {} publication_state=not_created",
+                self.destination.display()
+            ),
             Err(cleanup) => format!(
-                "{error}; approval publication_state=not_created; owned staging cleanup refused at {}: {cleanup}",
+                "{error}; backup output {} publication_state=not_created; owned staging cleanup refused at {}: {cleanup}",
+                self.destination.display(),
                 self.temporary.display()
             ),
         }
