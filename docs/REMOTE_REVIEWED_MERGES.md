@@ -6,6 +6,15 @@ It calls the existing native Rust review/merge APIs. It does not compute a Git
 merge, interpret a pack, validate ancestry, or turn a transport hash into approval.
 Related beads: `frankengit-root-doctrine-x2mv.4.13` and `.4.20`; both remain partial.
 
+The discovered [native operator campaign](REMOTE_PULL_REQUESTS.md#live-native-campaign)
+also exercises these four commands through the real sender, native HTTP and
+canonical Rust review/PR/ref reads. It includes independent review grants,
+reviewer-stream stale/current twins, withdrawal, missing approval, wrong-method
+refusal, exact merge-commit publication and bundle-independent outcome recovery.
+It retains native read snapshots and inspected candidate packages before offline
+staging. Supplying an older `FG_BIN` gives diagnostic evidence for that binary;
+it does not qualify newer Rust code, native squash success or deployment.
+
 ## Select an exact existing candidate
 
 Obtain the candidate bundle, merge base, candidate commit and subject from the
