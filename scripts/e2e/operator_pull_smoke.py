@@ -208,7 +208,7 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         grants(full_grants)
         sent = send(slot, key, "ff-permitted", ff=True)
         require(sent["outcome"]["state"] == "committed" and readback(2)["state"] == "merged",
-                "native fast-forward did not atomically mark the PR merged")
+                "native fast-forward did not report commitment and a merged PR")
         after_refs = refs()
         require(after_refs == {**original_refs, FF_TARGET: objects["source"]},
                 "fast-forward changed a different ref, lost a ref or missed the exact source tip")

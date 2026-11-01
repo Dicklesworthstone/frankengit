@@ -249,6 +249,14 @@ locking/import work is outside frozen `9ace5197` evidence. Candidate review,
 reviewed merge, the complete operator matrix, current native/default-profile
 fast/full/release gates and independent acceptance remain open.
 
+The next combined node/CLI syntax preflight at `6e710383` admits **no job**:
+no fresh worker clears the unchanged growth reservations plus protected floor.
+Its orchestration stops before Cargo; no local fallback, guard waiver or stale
+artifact substitution follows. The current private worktree has the same
+declared source-preserving transfer configuration, ready for a later stable
+verification cut. The failed native build is fully retired, while the earlier
+uncertain source-holder observation and old custody obligations remain separate.
+
 ## 3. What has improved since October 21
 
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).
