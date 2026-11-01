@@ -714,6 +714,40 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
                         println!("  #{number} [{state}] {title} (into {branch})");
                     }
                 }
+                fgit_cli::AtReport::Checks {
+                    position,
+                    pull_request,
+                    page,
+                } => {
+                    if let Some(page) = page {
+                        println!(
+                            "checks for #{pull_request} at {position} (head {}, source {}, source current: {}, {} observations):",
+                            page.source_head,
+                            page.source_tip,
+                            page.source_current,
+                            page.checks.len()
+                        );
+                        for check in page.checks {
+                            let evidence = check
+                                .evidence_sha256
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>();
+                            println!(
+                                "  {} [{}] {} (publisher {}, evidence sha256:{evidence}, {} bytes)",
+                                check.id,
+                                format_args!("{:?}", check.conclusion),
+                                check.job,
+                                check.publisher,
+                                check.evidence_bytes
+                            );
+                        }
+                    } else {
+                        println!(
+                            "checks for #{pull_request} at {position}: no visible native pull request"
+                        );
+                    }
+                }
                 fgit_cli::AtReport::Diff {
                     older,
                     newer,

@@ -5,6 +5,8 @@
 pub mod agent_context;
 pub mod agent_tasks;
 
+mod at;
+
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
@@ -15,10 +17,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fgit_forge::snapshot::{
-    ForgeSnapshot, ForgeSnapshotDiff, PositionTarget, SnapshotDisclosurePolicy, SnapshotLimits,
-    SnapshotRefusal, project_snapshot_from_history, verify_continuous_consistency,
-};
+use fgit_forge::snapshot::{PositionTarget, SnapshotRefusal};
 use fgit_node::{
     DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionTimeout,
     GitDaemonSessionWorkScaling, NodeConfig, NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal,
@@ -285,7 +284,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg queue --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg verify-read --help; fg queue --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -472,6 +471,17 @@ pub enum AtReport {
         position: String,
         /// List of (`pr_number`, title, `state_desc`, `target_branch`).
         pull_requests: Vec<(u64, String, String, String)>,
+    },
+    /// Native workflow observations for one PR at the selected position.
+    /// A check is a publisher observation, never merge authorization.
+    Checks {
+        /// Formatted target position.
+        position: String,
+        /// Requested pull-request number.
+        pull_request: u64,
+        /// Exact selected PR/source coordinates and all bounded observations.
+        /// None means no currently disclosable native PR at that position.
+        page: Option<fgit_node::PullRequestChecksPage>,
     },
     /// Difference between two snapshot positions.
     Diff {
@@ -1712,6 +1722,7 @@ fn parse_and_run_at(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     let rest = &arguments[5..];
     let mut verb: Option<&str> = None;
     let mut diff_pos: Option<&str> = None;
+    let mut check_pr = None;
     let mut actor: Option<&str> = None;
     let mut incarnation: Option<RepositoryResolutionInput> = None;
 
@@ -1724,6 +1735,20 @@ fn parse_and_run_at(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 }
                 verb = Some(rest[i].as_str());
                 i += 1;
+            }
+            "checks" => {
+                if verb.is_some() || i + 1 >= rest.len() {
+                    return Err(CliRefusal::Usage);
+                }
+                check_pr = rest[i + 1]
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(fgit_forge::PullRequestNumber::try_new);
+                if check_pr.is_none() {
+                    return Err(CliRefusal::Usage);
+                }
+                verb = Some("checks");
+                i += 2;
             }
             "diff" => {
                 if verb.is_some() || i + 1 >= rest.len() {
@@ -1761,6 +1786,7 @@ fn parse_and_run_at(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
         position,
         subcommand: verb,
         diff_position: diff_pos,
+        check_pr,
         actor,
         resolution_input: incarnation,
     };
@@ -1774,6 +1800,7 @@ struct AtOptions<'a> {
     position: &'a str,
     subcommand: Option<&'a str>,
     diff_position: Option<&'a str>,
+    check_pr: Option<fgit_forge::PullRequestNumber>,
     actor: Option<&'a str>,
     resolution_input: Option<RepositoryResolutionInput>,
 }
@@ -1785,8 +1812,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
         .actor
         .map(|hex| PrincipalId::from_hex(hex).map_err(CliRefusal::Principal))
         .transpose()?;
-
-    let node = OneNode::open_existing(node_config(
+    let mut node = OneNode::open_existing(node_config(
         opts.storage_root,
         opts.tenant,
         opts.repository,
@@ -1794,217 +1820,26 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
         opts.resolution_input,
     )?)
     .map_err(CliRefusal::Node)?;
-
-    let result = node.runtime().block_on(async {
-        let request = command_request_context(&node);
-        let head_read = node
-            .read_authority_head_in(&request)
-            .await
+    // Every page, history walk, and final fence uses this original deadline.
+    let request = command_request_context(&node);
+    let result = (|| {
+        let initial = node
+            .runtime()
+            .block_on(node.authenticate_authority_head_in(&request))
             .map_err(CliRefusal::Node)?;
-        let receipt = match head_read {
-            fgit_authority::HeadRead::Present(receipt) => receipt,
-            fgit_authority::HeadRead::Absent => {
-                return Err(CliRefusal::Node(
-                    fgit_node::NodeRefusal::AuthorityHeadAbsent,
-                ));
-            }
-        };
-        let head_body: fgit_codec::schema::RepositoryAuthorityHeadBody =
-            fgit_codec::decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT).map_err(
-                |e| {
-                    CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
-                        fgit_node::AdmissionMaterializationRefusal::HeadBody(
-                            fgit_authority::HeadBodyRefusal::Codec(e),
-                        ),
-                    )))
-                },
-            )?;
-        let head_id = fgit_codec::body_id(&fgit_codec::CryptoBodyIdentity, &head_body)
-            .map_err(|e| {
-                CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
-                    fgit_node::AdmissionMaterializationRefusal::HeadIdentity(e),
-                )))
-            })
-            .and_then(|identity| {
-                fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(identity).map_err(
-                    |e| {
-                        CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(
-                            Box::new(
-                                fgit_node::AdmissionMaterializationRefusal::HeadIdentityDomain(e),
-                            ),
-                        ))
-                    },
-                )
-            })?;
-
-        let admission = node.materialize_admission_in(&request).await.map_err(|e| {
-            CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
-                e,
-            )))
-        })?;
-
-        let live_refs: std::collections::BTreeMap<Vec<u8>, GitOid> = admission
-            .snapshot()
-            .refs
-            .iter()
-            .map(|(k, v)| (k.as_bytes().to_vec(), *v))
-            .collect();
-
-        let live_snapshot = ForgeSnapshot {
-            target_position: PositionTarget::Latest,
-            repository_id: head_body.repository_id,
-            effective_decision_sequence: head_body.latest_decision_sequence,
-            effective_head_id: head_id,
-            effective_head_generation: head_body.generation,
-            effective_committed_rcr_id: head_body.latest_committed_rcr_id,
-            ref_root: head_body.ref_root,
-            forge_position_root: head_body.forge_position_root,
-            historical_policy_epoch: head_body.policy_epoch,
-            refs: live_refs.clone(),
-            pull_requests: Default::default(),
-            check_receipts: Default::default(),
-            replayed_batches_count: 0,
-            used_capsule_id: head_body.last_checkpoint_id,
-        };
-        let is_current = |target| match target {
-            PositionTarget::Latest => true,
-            PositionTarget::Decision(seq) => Some(seq) == head_body.latest_decision_sequence,
-            PositionTarget::Head(id) => id == head_id,
-            _ => false,
-        };
-        let historical_batches =
-            if is_current(position_target) && diff_target.is_none_or(is_current) {
-                Vec::new()
-            } else {
-                node.snapshot_history_in(&request).await.map_err(|error| {
-                    CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
-                        error,
-                    )))
-                })?
-            };
-        let genesis_refs = std::collections::BTreeMap::new();
-
-        let project = |target| match target {
-            PositionTarget::Latest => Ok(live_snapshot.clone()),
-            PositionTarget::Decision(seq) if Some(seq) == head_body.latest_decision_sequence => {
-                Ok(live_snapshot.clone())
-            }
-            PositionTarget::Head(id) if id == head_id => Ok(live_snapshot.clone()),
-            _ => project_snapshot_from_history(
-                target,
-                head_id,
-                &head_body,
-                &[],
-                &historical_batches,
-                &genesis_refs,
-                &SnapshotLimits::default(),
-            ),
-        };
-        let mut snapshot = project(position_target).map_err(CliRefusal::Snapshot)?;
-        if position_target == PositionTarget::Latest {
-            verify_continuous_consistency(
-                &snapshot,
-                head_id,
-                &head_body,
-                &live_refs,
-                &Default::default(),
-            )
-            .map_err(CliRefusal::Snapshot)?;
-        }
-
-        if let Some(_actor) = actor_id {
-            let policy = SnapshotDisclosurePolicy::Restricted {
-                allowed_refs: Some(live_refs.keys().cloned().collect()),
-                revoked_refs: std::collections::BTreeSet::new(),
-                allowed_prs: None,
-                revoked_prs: std::collections::BTreeSet::new(),
-                repository_access_revoked: false,
-            };
-            snapshot = policy
-                .filter_snapshot(snapshot)
-                .map_err(CliRefusal::Snapshot)?;
-        }
-
-        match opts.subcommand {
-            None => {
-                let summary = snapshot.summary();
-                Ok(CliOutcome::At(AtReport::Summary {
-                    snapshot_summary: summary,
-                    target: format!("{position_target}"),
-                    head_id: encode_derived_id(snapshot.effective_head_id.as_internal_object_id()),
-                    decision_sequence: snapshot.effective_decision_sequence.map(|s| s.get()),
-                    refs_count: snapshot.refs.len(),
-                    prs_count: snapshot.pull_requests.len(),
-                }))
-            }
-            Some("refs") => {
-                let refs = snapshot
-                    .refs
-                    .iter()
-                    .map(|(name, oid)| {
-                        (String::from_utf8_lossy(name).into_owned(), oid.to_string())
-                    })
-                    .collect();
-                Ok(CliOutcome::At(AtReport::Refs {
-                    position: format!("{position_target}"),
-                    refs,
-                }))
-            }
-            Some("prs") => {
-                let prs = snapshot
-                    .pull_requests
-                    .iter()
-                    .map(|(num, pr)| {
-                        (
-                            num.get(),
-                            String::from_utf8_lossy(&pr.source_ref).into_owned(),
-                            format!("{}", pr.state),
-                            String::from_utf8_lossy(&pr.target_ref).into_owned(),
-                        )
-                    })
-                    .collect();
-                Ok(CliOutcome::At(AtReport::PullRequests {
-                    position: format!("{position_target}"),
-                    pull_requests: prs,
-                }))
-            }
-            Some("diff") => {
-                let other_target = diff_target.ok_or(CliRefusal::Usage)?;
-                let mut newer_snapshot = project(other_target).map_err(CliRefusal::Snapshot)?;
-                if other_target == PositionTarget::Latest {
-                    verify_continuous_consistency(
-                        &newer_snapshot,
-                        head_id,
-                        &head_body,
-                        &live_refs,
-                        &Default::default(),
-                    )
-                    .map_err(CliRefusal::Snapshot)?;
-                }
-                if actor_id.is_some() {
-                    let policy = SnapshotDisclosurePolicy::Restricted {
-                        allowed_refs: Some(live_refs.keys().cloned().collect()),
-                        revoked_refs: std::collections::BTreeSet::new(),
-                        allowed_prs: None,
-                        revoked_prs: std::collections::BTreeSet::new(),
-                        repository_access_revoked: false,
-                    };
-                    newer_snapshot = policy
-                        .filter_snapshot(newer_snapshot)
-                        .map_err(CliRefusal::Snapshot)?;
-                }
-                let diff = ForgeSnapshotDiff::diff(&snapshot, &newer_snapshot);
-                Ok(CliOutcome::At(AtReport::Diff {
-                    older: format!("{position_target}"),
-                    newer: format!("{other_target}"),
-                    ref_changes_count: diff.ref_changes.len(),
-                    pr_changes_count: diff.pr_changes.len(),
-                }))
-            }
-            _ => Err(CliRefusal::Usage),
-        }
-    });
-
+        node.bring_into_service(initial.receipt().generation())
+            .map_err(CliRefusal::Node)?;
+        node.runtime().block_on(at::read_in(
+            &node,
+            &request,
+            &initial,
+            position_target,
+            diff_target,
+            opts.subcommand,
+            opts.check_pr,
+            actor_id.is_some(),
+        ))
+    })();
     let cleanup = node.shutdown();
     match (result, cleanup) {
         (Ok(outcome), Ok(())) => Ok(outcome),

@@ -205,3 +205,20 @@ fn fg_at_usage_refusal_when_insufficient_args() {
     let insufficient = words(&["at", &scratch.root(), TENANT]);
     assert!(matches!(run(&insufficient), Err(CliRefusal::Usage)));
 }
+
+#[path = "fg_at/native.rs"]
+mod native;
+
+#[test]
+fn checks_requires_one_positive_pull_request_number() {
+    for tail in [
+        vec!["checks"],
+        vec!["checks", "0"],
+        vec!["checks", "bad"],
+        vec!["checks", "1", "prs"],
+    ] {
+        let mut arguments = words(&["at", "not-opened", TENANT, REPOSITORY, "latest"]);
+        arguments.extend(words(&tail));
+        assert!(matches!(run(&arguments), Err(CliRefusal::Usage)));
+    }
+}
