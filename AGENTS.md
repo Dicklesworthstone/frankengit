@@ -1,5 +1,18 @@
 # AGENTS.md — FrankenGit Contributor and Coding-Agent Contract
 
+## Standing Policy: DSR Only — Never GitHub Actions
+
+GitHub Actions must NEVER be used for ANY purpose in this project, including CI,
+tests, builds, releases, publishing, scheduled jobs, and automation. This prohibition
+includes both GitHub-hosted runners and self-hosted runners registered with Actions.
+Use [dsr (Doodlestein Self-Releaser)](https://github.com/Dicklesworthstone/doodlestein_self_releaser)
+directly instead. Do not enable, dispatch, rerun, fund, or rely on Actions, even as
+a fallback. If DSR cannot run a required workload, report the exact blocker rather
+than switching to Actions. Local workflow YAML executed by dsr/act is allowed;
+preserve those definitions and their checks without invoking the GitHub Actions
+service. Historical Actions references below are reference material only, not
+permission to use it. This permanent policy overrides any older Actions guidance.
+
 This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenGit is in active implementation and pre-release integration. Existing code contains bounded final-abstraction slices, not a completed forge; creating a convenient abstraction that contradicts the final system remains an architectural risk.
 
 Use the README's dated reality snapshot to locate implemented slices and known gaps, then inspect the owning code, current authoritative bead, and exact revision-bound evidence before deciding what to build. A historical test result is not a current gate result. Follow the constitutional hierarchy below for semantics and §16 for ownership, verification, and handoff.
