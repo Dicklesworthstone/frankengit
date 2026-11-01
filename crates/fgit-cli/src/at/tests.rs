@@ -103,7 +103,7 @@ fn actual_head_movement_refuses_initial_materialization_and_final_disclosure() {
         matches!(closed,CliOutcome::At(AtReport::PullRequests {pull_requests,..}) if pull_requests.len()==1 && pull_requests[0].2=="closed")
     );
     let cancelled = node.request_context();
-    cancelled.authority().cancel();
+    cancelled.cancel();
     assert!(
         node.runtime()
             .block_on(read_in(

@@ -1828,7 +1828,11 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             .block_on(node.authenticate_authority_head_in(&request))
             .map_err(CliRefusal::Node)?;
         node.bring_into_service(initial.receipt().generation())
-            .map_err(CliRefusal::Node)?;
+            .map_err(|error| {
+                CliRefusal::Snapshot(SnapshotRefusal::ConsistencyMismatch {
+                    detail: format!("snapshot node cannot enter service: {error}"),
+                })
+            })?;
         node.runtime().block_on(at::read_in(
             &node,
             &request,
