@@ -1,11 +1,11 @@
 //! Versioned diagnostic JSON. SHA-256 binds the complete JSON payload before
 //! adding receipt_sha256, including predicate, incarnation, observed authority,
 //! full native identity domains, limits, publication domain and every probe.
-use super::{
-    BisectionTermination, GitHashAlgorithm, IssueState, PROFILE, Predicate, PullState, Report,
-    RepositoryAuthorityHeadId, fold,
-};
-use fgit_forge::bisection::{BisectionRefusal, PredicateOutcome};
+use super::{PROFILE, Predicate, PullState, Report, fold};
+use fgit_forge::bisection::{BisectionRefusal, BisectionTermination, PredicateOutcome};
+use fgit_forge::event::issue::IssueState;
+use fgit_forge::event::workflow_check::WorkflowCheckConclusion;
+use fgit_types::{GitHashAlgorithm, RepositoryAuthorityHeadId};
 use std::fmt::Write;
 
 #[must_use]
@@ -44,6 +44,15 @@ const fn state(state: PullState) -> &'static str {
         PullState::Merged => "merged",
     }
 }
+const fn conclusion(value: WorkflowCheckConclusion) -> &'static str {
+    match value {
+        WorkflowCheckConclusion::ActionRequired => "action_required",
+        WorkflowCheckConclusion::Success => "success",
+        WorkflowCheckConclusion::Failure => "failure",
+        WorkflowCheckConclusion::Cancelled => "cancelled",
+        WorkflowCheckConclusion::TimedOut => "timed_out",
+    }
+}
 fn predicate(value: &Predicate) -> String {
     match value {
         Predicate::RefEquals { name, target } => format!(
@@ -75,6 +84,22 @@ fn predicate(value: &Predicate) -> String {
             "{{\"kind\":\"pull_request_state\",\"number\":\"{}\",\"state\":\"{}\"}}",
             number.get(),
             state(*value)
+        ),
+        Predicate::WorkflowCheck {
+            source_ref,
+            source_commit,
+            publisher,
+            graph_root,
+            job,
+            conclusion: expected,
+        } => format!(
+            "{{\"kind\":\"workflow_check\",\"source_ref_hex\":{},\"source_commit\":{},\"publisher\":{},\"graph_root\":{},\"job\":{},\"conclusion\":{}}}",
+            quote(&hex(source_ref.as_bytes())),
+            quote(&source_commit.to_string()),
+            quote(&publisher.to_string()),
+            quote(&hex(graph_root)),
+            quote(job),
+            quote(conclusion(*expected))
         ),
     }
 }

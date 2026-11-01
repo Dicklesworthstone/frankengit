@@ -1,13 +1,14 @@
 //! Fold one queried native state; never create a mutable product database.
-use super::{
-    BisectionRange, DecisionSequence, Error, GitOid, IssueState, MAX_EVENTS, PolicyEpoch,
-    Predicate, PullState, Query, RepositoryAuthorityHeadBody, RepositoryAuthorityHeadId,
-};
+use super::{Error, MAX_EVENTS, Predicate, PullState, Query, checks::WorkflowChecks};
+use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_forge::aggregate::{AggregateId, AggregateVersion};
-use fgit_forge::bisection::PredicateOutcome;
+use fgit_forge::bisection::{BisectionRange, PredicateOutcome};
+use fgit_forge::event::issue::IssueState;
+use fgit_forge::event::workflow_check::WorkflowCheckConclusion;
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload};
 use fgit_forge::event::{issue, pull_request};
 use fgit_forge::snapshot::HistoricalBatch;
+use fgit_types::{DecisionSequence, GitOid, PolicyEpoch, RepositoryAuthorityHeadId};
 
 pub(super) struct Point {
     pub sequence: DecisionSequence,
@@ -17,6 +18,7 @@ pub(super) struct Point {
     reference: Option<GitOid>,
     issue: Option<IssueState>,
     pull: Option<PullState>,
+    workflow_check: Option<WorkflowCheckConclusion>,
 }
 impl Point {
     pub fn evaluate(&self, predicate: &Predicate) -> PredicateOutcome {
@@ -26,6 +28,7 @@ impl Point {
             Predicate::PolicyAtLeast(epoch) => self.epoch >= *epoch,
             Predicate::IssueState { state, .. } => self.issue == Some(*state),
             Predicate::PullRequestState { state, .. } => self.pull == Some(*state),
+            Predicate::WorkflowCheck { conclusion, .. } => self.workflow_check == Some(*conclusion),
         };
         if yes {
             PredicateOutcome::Satisfied
@@ -50,6 +53,7 @@ pub(super) fn points(
     let mut issue: Option<issue::IssueSnapshot> = None;
     let mut pull: Option<ForgeEvent> = None;
     let mut pull_state = None;
+    let mut workflow_checks = WorkflowChecks::default();
     for (index, historical) in history.iter().enumerate() {
         check()?;
         let batch = &historical.batch;
@@ -155,6 +159,9 @@ pub(super) fn points(
                     });
                     pull = Some(event.clone());
                 }
+                Predicate::WorkflowCheck { .. } => {
+                    workflow_checks.observe(&query.predicate, event)?
+                }
                 _ => {}
             }
         }
@@ -167,6 +174,7 @@ pub(super) fn points(
                 reference,
                 issue: issue.as_ref().map(|state| state.state),
                 pull: pull_state,
+                workflow_check: workflow_checks.latest(),
             });
         }
     }

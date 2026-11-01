@@ -2,10 +2,13 @@ use super::*;
 use crate::{LoopbackReceiveSession, NodeConfig};
 use fgit_admission::AdmissionLimits;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
-use fgit_forge::event::issue::{IssueAction, IssueCommand};
+use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueState};
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
-use fgit_forge::{AggregateVersion, ExpectedVersion};
-use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId};
+use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber, PullRequestNumber};
+use fgit_types::{
+    DecisionOutcome, DecisionSequence, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
+    PrincipalId, RefName, RepositoryId, RepositoryIncarnationId, TenantId,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

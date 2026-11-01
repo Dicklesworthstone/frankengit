@@ -9,12 +9,17 @@ const USAGE: &str = "usage: fg [--timeout-secs <seconds>] bisect <storage-root> 
   [--start <positive-decision>] [--end <positive-decision|latest>] [--max-probes <1..4096>]
   (--ref <full-ref> --equals <native-oid> | --ref <full-ref> --absent |
    --policy-at-least <epoch> | --issue <number> --state open|closed |
-   --pull <number> --state open|closed|merged)
+   --pull <number> --state open|closed|merged |
+   --check-job <job> --check-ref <refs/heads/branch> --check-commit <native-oid>
+     --check-publisher <32-lowercase-hex> --check-graph <64-lowercase-hex>
+     --check-conclusion action_required|success|failure|cancelled|timed_out)
   [--expected-head <source_head-token>] [--expected-incarnation <id>]
 
 Find the first matching PUBLISHED state in the inclusive range (default: 1..latest).
 Endpoints must be publication-batch ends. No imaginary state inside an atomic batch.
-Refs, issues and PRs use bounded exhaustive search; no monotonicity is assumed.
+Refs, issues, PRs and workflow checks use bounded exhaustive search; regressions
+and later recovery are allowed. Checks match the latest published observation
+with the exact branch, commit, publisher, workflow graph and job; absence is false.
 Policy-threshold search validates nondecreasing epochs before logarithmic probes.
 Loading/authenticating/folding history remains linear, not logarithmic I/O.
 This profile admits 4096 batches and 65536 events AFTER the existing bounded history

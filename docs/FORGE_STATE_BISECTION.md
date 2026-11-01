@@ -31,6 +31,9 @@ Choose exactly one selector, using the same storage/tenant/repository prefix:
 --pull 23 --state open
 --pull 23 --state closed
 --pull 23 --state merged
+--check-job build --check-ref refs/heads/main --check-commit <native-object-id> \
+  --check-publisher <32-lowercase-hex-principal> \
+  --check-graph <64-lowercase-hex-workflow-root> --check-conclusion failure
 ```
 
 Native object IDs use the opened repository's SHA-1 or SHA-256 domain. Zero IDs
@@ -39,8 +42,9 @@ exact version transitions. An issue or PR not yet created does not match any
 state. Legacy or unsupported PR events refuse rather than silently evaluating
 as false. Native fast-forward and merge events count as merged states.
 
-Refs and lifecycle states may change repeatedly. Their search is exhaustive and
-bounded, so a temporary match between two nonmatching states is not skipped.
+Refs, lifecycle states and workflow-check outcomes may change repeatedly. Their
+search is exhaustive and bounded, so a temporary match between two nonmatching
+states is not skipped.
 For example, open/closed/open/closed returns the first closed publication, even
 though the state was subsequently reopened. `--start` can select the later one.
 
@@ -50,6 +54,39 @@ authentication and folding remain linear work; the command does not claim
 logarithmic physical I/O. There is no CLI option to assume arbitrary monotonicity.
 The lower-level forge engine's legacy monotone contract remains explicitly
 conditional on the caller supplying a true shape guarantee.
+
+### Find a workflow-check regression
+
+The check selector requires the exact source branch, native commit, publisher
+principal, workflow graph root and job. These are the same identity coordinates
+used by required-check protection. The command examines the recorded terminal
+observations for that identity across workflow runs and attempts; it does not
+execute a job or infer the outcome from a log. Use the coordinates recorded by
+the workflow publication or required-check configuration, including the
+publisher's 32-character native principal ID and the graph root's 64-character
+hex encoding.
+
+At each published state, the **last canonical matching observation** supplies
+the conclusion. A newer failure supersedes an older success. A result for a
+different publisher, graph, commit, branch or job cannot replace it. Until a
+matching observation exists, every conclusion predicate is false. The supported
+conclusions are `action_required`, `success`, `failure`, `cancelled` and
+`timed_out`.
+
+For example, a success/failure/success history queried with
+`--check-conclusion failure` returns the publication containing the failure,
+even though the latest outcome is successful. Narrowing the range to start
+after that publication returns a complete no-match result if failure never
+recurs. An observation published before `--start` still seeds the state at the
+start of the range. Within an atomic publication, only the final resulting
+state is observable; event hashes are never used to sort observations into a
+different order.
+
+The selected commit is fixed for the query. A branch moving to another commit
+does not turn an observation for that new commit into an observation for the
+selected one. A matching historical success also does not establish that a
+current merge is authorized: current protection policy and candidate checks
+remain separate admission decisions.
 
 ## Pins, limits and failures
 
@@ -83,6 +120,9 @@ observed authority and policy epoch, publication-domain digest, resource limits,
 strategy, status and every evaluated probe. Decision sequences and other u64
 coordinates are decimal strings to avoid JavaScript numeric rounding.
 `first_match` is meaningful only when `complete` is true.
+Workflow-check receipts bind all five selector coordinates and the requested
+conclusion, so a receipt for one workflow identity cannot be relabeled as a
+result for another.
 
 `receipt_sha256` hashes the exact UTF-8 JSON object **before** that final field is
 added. To verify a preserved output line, remove the final
