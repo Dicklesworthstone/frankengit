@@ -244,6 +244,14 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - received-pack reuse requires a freshly authorized exact object set. Joining
   cached packs requires a disjoint complete cover, a verified combined delta
   graph, aggregate limits, and verification of bytes plus parent metadata.
+  Selective reuse may choose individual verified entries from overlapping
+  sources, but each selected identity is emitted exactly once. Original spans,
+  headers and delta prefixes are bound to the verified native associations;
+  an omitted entry remains inside its source's full integrity check. OFS-to-REF
+  conversion names only the already verified parent and preserves zlib data.
+  Selected parents must resolve in the output graph even if also held, and
+  root-first selection plus final graph validation refuses cycles. Scratch,
+  queue work, selected expansion and output bytes remain bounded.
   Only a negotiated full-history, unfiltered thin response may resolve external
   REF parents against identity-and-kind proofs of authorized client-held objects
   at that same basis. External fanout remains bounded. Cached presence never

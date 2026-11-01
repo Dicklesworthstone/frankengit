@@ -10,8 +10,7 @@
 //! proof; its bytes never enter the emitted selection or its resource totals.
 
 use super::{
-    Entry, MAX_ENTRIES, ReceivedPackCache, ReceivedPackPayload, ReceivedPackReceipt, check,
-    metadata_binding, strong_hash,
+    Entry, MAX_ENTRIES, ReceivedPackCache, ReceivedPackPayload, ReceivedPackReceipt, check, intact,
 };
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
 use fgit_git_object::ObjectType;
@@ -28,20 +27,18 @@ struct Candidate {
     positions: Vec<usize>,
 }
 
-pub(super) fn select(
-    cache: &ReceivedPackCache,
+pub(super) fn valid_request(
     keys: &[PackOrderKey],
-    limits: &PackLimits,
-    allow_ofs_delta: bool,
     held: &[(GitOid, ObjectType)],
+    limits: &PackLimits,
     live: &mut impl Deadline,
-) -> Result<Option<ReceivedPackPayload>, PackError> {
+) -> Result<bool, PackError> {
     check(live)?;
     let Some(first) = keys.first() else {
-        return Ok(None);
+        return Ok(false);
     };
     if keys.len() > limits.max_entries as usize {
-        return Ok(None);
+        return Ok(false);
     }
     let format = first.id.algorithm();
     for (index, key) in keys.iter().enumerate() {
@@ -50,18 +47,33 @@ pub(super) fn select(
             || key.id.is_zero()
             || (index != 0 && keys[index - 1].id >= key.id)
         {
-            return Ok(None);
+            return Ok(false);
         }
     }
     if held.len() > limits.max_entries as usize {
-        return Ok(None);
+        return Ok(false);
     }
     for (index, (id, _)) in held.iter().enumerate() {
         check(live)?;
         if id.algorithm() != format || id.is_zero() || (index != 0 && held[index - 1].0 >= *id) {
-            return Ok(None);
+            return Ok(false);
         }
     }
+    Ok(true)
+}
+
+pub(super) fn select(
+    cache: &ReceivedPackCache,
+    keys: &[PackOrderKey],
+    limits: &PackLimits,
+    allow_ofs_delta: bool,
+    held: &[(GitOid, ObjectType)],
+    live: &mut impl Deadline,
+) -> Result<Option<ReceivedPackPayload>, PackError> {
+    if !valid_request(keys, held, limits, live)? {
+        return Ok(None);
+    }
+    let format = keys[0].id.algorithm();
     // Pin custody under the lock, then release it before any large scan/hash.
     // A concurrent receive cannot evict bytes being inspected or served.
     let mut snapshot = Vec::new();
@@ -88,6 +100,8 @@ pub(super) fn select(
             || entry.objects.len() > keys.len()
             || entry.objects.len() != receipt.object_count as usize
             || entry.parents.len() != entry.objects.len()
+            || entry.wire.len() != entry.objects.len()
+            || receipt.selective
             || receipt.source_pack_count != 1
             || receipt.external_base_count > receipt.ref_delta_count
             || receipt.checksum.algorithm() != format
@@ -188,17 +202,7 @@ fn materialize_cover(
         let valid = if let Some(valid) = integrity[index] {
             valid
         } else {
-            let entry = &candidate.entry;
-            let valid = strong_hash(entry.bytes.bytes(), live)? == entry.receipt.sha256
-                && metadata_binding(
-                    &entry.objects,
-                    &entry.parents,
-                    &entry.receipt,
-                    entry.maximum_object_bytes,
-                    entry.total_entry_bytes,
-                    entry.maximum_delta_fanout,
-                    live,
-                )? == entry.binding;
+            let valid = intact(&candidate.entry, live)?;
             integrity[index] = Some(valid);
             valid
         };
@@ -234,6 +238,7 @@ fn materialize_cover(
         entries,
         receipt,
         header,
+        selected: None,
         part: 0,
         offset: 0,
     }))
@@ -257,6 +262,7 @@ fn totals(
         maximum_delta_depth: 0,
         source_pack_count: 0,
         external_base_count: 0,
+        selective: false,
     };
     let mut entry_bytes = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -302,16 +308,16 @@ fn totals(
     Ok(Some(receipt))
 }
 
-fn filled<T: Clone>(count: usize, value: T) -> Option<Vec<T>> {
+pub(super) fn filled<T: Clone>(count: usize, value: T) -> Option<Vec<T>> {
     let mut values = Vec::new();
     values.try_reserve_exact(count).ok()?;
     values.resize(count, value);
     Some(values)
 }
 
-struct GraphShape {
-    maximum_delta_depth: usize,
-    external_base_count: usize,
+pub(super) struct GraphShape {
+    pub(super) maximum_delta_depth: usize,
+    pub(super) external_base_count: usize,
 }
 
 /// Revalidate the complete output graph. An emitted base always takes
@@ -324,6 +330,30 @@ fn graph_shape(
     keys: &[PackOrderKey],
     held: &[(GitOid, ObjectType)],
     limits: &PackLimits,
+    live: &mut impl Deadline,
+) -> Result<Option<GraphShape>, PackError> {
+    let edges = candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| mask & (1u64 << index) != 0)
+        .flat_map(|(_, candidate)| {
+            candidate
+                .positions
+                .iter()
+                .copied()
+                .enumerate()
+                .map(move |(local, position)| (position, candidate.entry.parents[local]))
+        });
+    selected_graph(keys, held, limits, edges, live)
+}
+
+/// Verify exactly one parent association for every freshly authorized key.
+/// Complete-run and selective representations share this final graph check.
+pub(super) fn selected_graph(
+    keys: &[PackOrderKey],
+    held: &[(GitOid, ObjectType)],
+    limits: &PackLimits,
+    edges: impl IntoIterator<Item = (usize, Option<GitOid>)>,
     live: &mut impl Deadline,
 ) -> Result<Option<GraphShape>, PackError> {
     check(live)?;
@@ -353,43 +383,46 @@ fn graph_shape(
     {
         return Ok(None);
     }
-    for (index, candidate) in candidates.iter().enumerate() {
-        if mask & (1u64 << index) == 0 {
-            continue;
+    for (position, base) in edges {
+        check(live)?;
+        if position >= keys.len() || visits[position] != 0 {
+            return Ok(None);
         }
-        for (local, position) in candidate.positions.iter().copied().enumerate() {
-            check(live)?;
-            let Some(base) = candidate.entry.parents[local] else {
-                continue;
-            };
-            match keys.binary_search_by_key(&base, |key| key.id) {
-                Ok(parent) => {
-                    if keys[parent].object_type != keys[position].object_type {
-                        return Ok(None);
-                    }
-                    parents[position] = Some(parent);
-                    fanout[parent] += 1;
-                    if fanout[parent] > limits.max_delta_fanout {
-                        return Ok(None);
-                    }
+        visits[position] = 1;
+        let Some(base) = base else {
+            continue;
+        };
+        match keys.binary_search_by_key(&base, |key| key.id) {
+            Ok(parent) => {
+                if keys[parent].object_type != keys[position].object_type {
+                    return Ok(None);
                 }
-                Err(_) => {
-                    let Ok(parent) = held.binary_search_by_key(&base, |(id, _)| *id) else {
-                        return Ok(None);
-                    };
-                    if held[parent].1 != keys[position].object_type {
-                        return Ok(None);
-                    }
-                    external_roots[position] = true;
-                    let fanout = external_fanout.entry(base).or_default();
-                    *fanout += 1;
-                    if *fanout > limits.max_delta_fanout {
-                        return Ok(None);
-                    }
+                parents[position] = Some(parent);
+                fanout[parent] += 1;
+                if fanout[parent] > limits.max_delta_fanout {
+                    return Ok(None);
+                }
+            }
+            Err(_) => {
+                let Ok(parent) = held.binary_search_by_key(&base, |(id, _)| *id) else {
+                    return Ok(None);
+                };
+                if held[parent].1 != keys[position].object_type {
+                    return Ok(None);
+                }
+                external_roots[position] = true;
+                let fanout = external_fanout.entry(base).or_default();
+                *fanout += 1;
+                if *fanout > limits.max_delta_fanout {
+                    return Ok(None);
                 }
             }
         }
     }
+    if visits.iter().any(|seen| *seen != 1) {
+        return Ok(None);
+    }
+    visits.fill(0);
     let mut maximum = 0;
     for start in 0..keys.len() {
         check(live)?;
@@ -438,27 +471,27 @@ fn graph_shape(
     }))
 }
 
-enum NativeHasher {
+pub(super) enum NativeHasher {
     Sha1(Sha1Hasher),
     Sha256(Sha256Hasher),
 }
 
 impl NativeHasher {
-    fn new(format: GitHashAlgorithm) -> Self {
+    pub(super) fn new(format: GitHashAlgorithm) -> Self {
         match format {
             GitHashAlgorithm::Sha1 => Self::Sha1(Sha1Hasher::new()),
             GitHashAlgorithm::Sha256 => Self::Sha256(Sha256Hasher::new()),
         }
     }
 
-    fn update(&mut self, bytes: &[u8]) {
+    pub(super) fn update(&mut self, bytes: &[u8]) {
         match self {
             Self::Sha1(hash) => hash.update(bytes),
             Self::Sha256(hash) => hash.update(bytes),
         }
     }
 
-    fn finish(self) -> GitOid {
+    pub(super) fn finish(self) -> GitOid {
         match self {
             Self::Sha1(hash) => GitOid::Sha1(GitOidSha1::from_bytes(hash.finish())),
             Self::Sha256(hash) => GitOid::Sha256(GitOidSha256::from_bytes(hash.finish())),

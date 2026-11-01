@@ -196,14 +196,7 @@ fn exact_membership_kinds_and_formats_cannot_be_widened() {
         GitHashAlgorithm::Sha256,
         &[Input::Whole(b"a".to_vec()), Input::Whole(b"b".to_vec())],
     );
-    for keys in [
-        Vec::new(),
-        f.keys[..1].to_vec(),
-        wrong_kind,
-        duplicate,
-        reversed,
-        other.keys,
-    ] {
+    for keys in [Vec::new(), wrong_kind, duplicate, reversed, other.keys] {
         assert!(
             cache
                 .try_reuse(&keys, &PackLimits::default(), true, &mut || true)
@@ -211,6 +204,23 @@ fn exact_membership_kinds_and_formats_cannot_be_widened() {
                 .is_none()
         );
     }
+    let subset = cache
+        .try_reuse(&f.keys[..1], &PackLimits::default(), true, &mut || true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(subset.receipt().profile(), "received-pack-select-v1");
+    let expected: &[u8] =
+        if f.keys[0].id == git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"a") {
+            b"a"
+        } else {
+            b"b"
+        };
+    selective::assert_objects(
+        &subset.into_bytes().unwrap(),
+        GitHashAlgorithm::Sha1,
+        &[expected],
+        &[],
+    );
     let mut hints = f.keys;
     for key in &mut hints {
         key.path_hash = 42;
@@ -241,11 +251,18 @@ fn ofs_capability_depth_and_fanout_are_rechecked() {
     assert_eq!(received.receipt().ofs_delta_count(), 2);
     assert_eq!(received.receipt().ref_delta_count(), 0);
     assert_eq!(received.receipt().maximum_delta_depth(), 1);
-    assert!(
-        cache
-            .try_reuse(&f.keys, &PackLimits::default(), false, &mut || true)
-            .unwrap()
-            .is_none()
+    let converted = cache
+        .try_reuse(&f.keys, &PackLimits::default(), false, &mut || true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(converted.receipt().profile(), "received-pack-select-v1");
+    assert_eq!(converted.receipt().ofs_delta_count(), 0);
+    assert_eq!(converted.receipt().ref_delta_count(), 2);
+    selective::assert_objects(
+        &converted.into_bytes().unwrap(),
+        GitHashAlgorithm::Sha1,
+        &[base, b"first", b"second"],
+        &[],
     );
     for limits in [
         PackLimits {
@@ -685,4 +702,5 @@ fn every_lookup_checkpoint_cancels_without_losing_verified_custody() {
 
 mod composition;
 mod long_history;
+mod selective;
 mod thin;

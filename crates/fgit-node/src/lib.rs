@@ -993,14 +993,14 @@ pub struct AuthoritySelectedPackPayload {
 }
 
 /// Provenance of the exact bytes served for an authorized object selection.
-/// Received packs preserve verified sender entry runs; they do not claim
+/// Received packs preserve verified sender compressed data; they do not claim
 /// the deterministic writer's ordering, compression profile, or work receipts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackMaterializationReceipt {
     /// A new artifact produced by the frozen native pack writer.
     Written(PackWriteReceipt),
-    /// A fully native-verified sender pack or exact disjoint composition of
-    /// complete sender entry runs, identified by its representation profile.
+    /// A fully native-verified sender pack, exact disjoint composition, or
+    /// selective entry representation identified by its explicit profile.
     Received(ReceivedPackReceipt),
 }
 
@@ -1056,7 +1056,8 @@ struct PreparedUploadPack {
     /// Identity-sorted for the source's allocation-free ordering-hint lookup.
     keys: Vec<PackOrderKey>,
     held: BTreeSet<GitOid>,
-    /// Verified kinds only for retained external dependencies in `held`.
+    /// Verified kinds for selected entries' retained delta parents in `held`,
+    /// including parents omitted from an otherwise self-contained source pack.
     /// This private proof shares `basis` and never copies the whole have graph.
     held_bases: Vec<(GitOid, ObjectType)>,
     limits: PackLimits,
@@ -10160,13 +10161,13 @@ impl OneNode {
         self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
         let mut held_bases = Vec::new();
         if write_profile.thin && !keys.is_empty() {
-            // Only a retained external dependency can benefit from a held-kind
-            // proof. Avoid indexing the entire client history again. A cache
-            // change after preparation can only miss this optional proof; it
-            // cannot enlarge the authenticated have closure.
+            // Only parents of retained selected entries need a held-kind proof.
+            // A selective response may omit an original internal parent too.
+            // Avoid indexing the entire client history again. A cache change
+            // can only miss this optional proof, never enlarge the have closure.
             let candidates = self
                 .received_pack_cache()
-                .held_base_candidates(&held, live)?;
+                .held_base_candidates(&keys, &held, live)?;
             if held_bases.try_reserve_exact(candidates.len()).is_ok() {
                 for id in candidates {
                     if !live() {
@@ -10214,6 +10215,8 @@ impl OneNode {
         // Selection, current visibility, and work admission have already been
         // checked against this exact basis. Only an exact native-verified
         // representation may avoid reading and recompressing selected bodies.
+        // Selective reuse may reframe entries and replace OFS references with
+        // verified native base identities without changing their compressed data.
         // External REF bases additionally need this same private held-kind
         // proof and the existing thin/full-history negotiation gate.
         // Local exports retain their frozen writer profile.

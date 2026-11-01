@@ -7,6 +7,7 @@ use fgit_pack::{
 use fgit_wire::ObjectFilter;
 
 mod composition;
+mod selective;
 
 struct ReceivedSource(MemorySource);
 
@@ -301,15 +302,18 @@ fn unreachable_ingress_entries_cannot_be_disclosed_by_a_cache_hit() {
                 .collect::<BTreeSet<_>>(),
             fixture.public_objects
         );
-        let payload = materialize(&fixture.node, &head, &selection);
-        assert!(payload.receipt().received().is_none());
-        assert_eq!(payload.receipt().writer().unwrap().object_count, 6);
-        assert_ne!(payload.into_bytes().unwrap(), fixture.pack);
+        let payload = selective::without_fabric_objects(&fixture.node, &head, &selection);
+        let receipt = payload.receipt().received().unwrap();
+        assert_eq!(receipt.profile(), "received-pack-select-v1");
+        assert_eq!(receipt.object_count(), 6);
+        let bytes = payload.into_bytes().unwrap();
+        assert_ne!(bytes, fixture.pack);
+        selective::assert_exact_selected_bytes(&bytes, format, &selection, &BTreeMap::new());
     }
 }
 
 #[test]
-fn a_deleted_ref_removes_reuse_permission_even_while_its_pack_is_cached() {
+fn a_deleted_ref_removes_disclosure_permission_even_while_its_pack_is_cached() {
     let fixture = received_fixture(GitHashAlgorithm::Sha1, ExtraObject::PrivateBranch);
     let private = fixture.private.unwrap();
     let (before, both) = prepare(&fixture.node, fixture.tip, true, |request| {
@@ -333,12 +337,10 @@ fn a_deleted_ref_removes_reuse_permission_even_while_its_pack_is_cached() {
             .collect::<BTreeSet<_>>(),
         fixture.public_objects
     );
-    assert!(
-        materialize(&fixture.node, &after, &public)
-            .receipt()
-            .received()
-            .is_none()
-    );
+    // The original planner may have used an omitted private commit/tree as
+    // a delta base. Selection can reuse only a dependency-complete subset;
+    // either representation must exclude every private-only object.
+    selective::assert_exact_selected_subset(&fixture.node, &after, &public);
     expect_code(
         fixture.node.materialize_prepared_upload_pack(
             &after,
@@ -369,25 +371,22 @@ fn haves_filters_shallow_history_and_older_wants_use_the_exact_selected_subset()
         })
         .unwrap();
         assert!(selection.keys.len() < fixture.public_objects.len());
-        let payload = materialize(&fixture.node, &head, &selection);
-        assert!(
-            payload.receipt().received().is_none(),
-            "reduced fetch case {case}"
-        );
-        assert_eq!(
-            payload.receipt().writer().unwrap().object_count as usize,
-            selection.keys.len()
-        );
+        // The writer's original delta-base choice may make a particular
+        // subset independently reusable or require expansion. Both paths must
+        // reconstruct precisely this current selection without an external base.
+        selective::assert_exact_selected_subset(&fixture.node, &head, &selection);
     }
 }
 
 #[test]
-fn an_ofs_pack_requires_the_clients_negotiated_capability() {
+fn an_ofs_pack_is_rewritten_to_ref_deltas_without_the_clients_ofs_capability() {
     let fixture = received_fixture(GitHashAlgorithm::Sha1, ExtraObject::None);
     let (head, selection) = prepare(&fixture.node, fixture.tip, false, |_| {}).unwrap();
-    let payload = materialize(&fixture.node, &head, &selection);
-    assert!(payload.receipt().received().is_none());
-    assert_eq!(payload.receipt().writer().unwrap().delta_count, 0);
+    let payload = selective::without_fabric_objects(&fixture.node, &head, &selection);
+    let receipt = payload.receipt().received().unwrap();
+    assert_eq!(receipt.profile(), "received-pack-select-v1");
+    assert_eq!(receipt.ofs_delta_count(), 0);
+    assert!(receipt.ref_delta_count() > 0);
     let bytes = payload.into_bytes().unwrap();
     let parsed = read_verified_pack(
         &bytes,
@@ -397,11 +396,15 @@ fn an_ofs_pack_requires_the_clients_negotiated_capability() {
         &NativeChecksumVerifier,
     )
     .unwrap();
-    assert!(
-        parsed
-            .entries()
-            .iter()
-            .all(|entry| entry.delta_base.is_none())
+    assert!(parsed.entries().iter().all(|entry| !matches!(
+        entry.delta_base.as_ref(),
+        Some(fgit_pack::ParsedDeltaBase::Ofs { .. })
+    )));
+    selective::assert_exact_selected_bytes(
+        &bytes,
+        fixture.node.object_format,
+        &selection,
+        &BTreeMap::new(),
     );
     let (head, selection) = prepare(&fixture.node, fixture.tip, true, |_| {}).unwrap();
     assert!(

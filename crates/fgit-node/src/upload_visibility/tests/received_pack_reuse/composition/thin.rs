@@ -179,7 +179,27 @@ fn thin_reuse_preserves_capability_filter_and_shallow_gates() {
             );
             assert!(!selection.write_profile.thin, "gate {case}");
             assert!(!selected_ids(&selection).contains(&fixture.ancestor));
-            assert_written_subset(&fixture.node, &head, &selection);
+            if case == 2 {
+                // Blob filtering removes the external REF delta entirely;
+                // the remaining native commit/tree entries are self-contained.
+                let payload = super::super::selective::without_fabric_objects(
+                    &fixture.node,
+                    &head,
+                    &selection,
+                );
+                let receipt = payload.receipt().received().unwrap();
+                assert_eq!(receipt.profile(), "received-pack-select-v1");
+                assert_eq!(receipt.source_pack_count(), 1);
+                assert_eq!(receipt.external_base_count(), 0);
+                super::super::selective::assert_exact_selected_bytes(
+                    &payload.into_bytes().unwrap(),
+                    format,
+                    &selection,
+                    &BTreeMap::new(),
+                );
+            } else {
+                assert_written_subset(&fixture.node, &head, &selection);
+            }
         }
         // A preceding refused reuse must not poison custody for a subsequent
         // fully negotiated request at the same canonical basis.
@@ -199,23 +219,8 @@ fn thin_reuse_preserves_capability_filter_and_shallow_gates() {
     }
 }
 
-struct HeldAncestor(MemorySource);
-
-impl fgit_pack::ExternalBaseLookup for HeldAncestor {
-    fn lookup(&self, id: &GitOid) -> Option<&[u8]> {
-        self.0.objects.get(id).map(|(_, body)| body.as_slice())
-    }
-
-    fn lookup_typed(&self, id: &GitOid) -> Option<(ObjectType, &[u8])> {
-        self.0
-            .objects
-            .get(id)
-            .map(|(kind, body)| (*kind, body.as_slice()))
-    }
-}
-
 #[test]
-fn an_older_have_cannot_authorize_the_newer_cached_ref_delta_base() {
+fn an_older_have_requires_the_newer_cached_ref_delta_base_in_the_emitted_selection() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = received_fixture(format, ExtraObject::None);
         let increment = increment(format, fixture.tip);
@@ -235,34 +240,34 @@ fn an_older_have_cannot_authorize_the_newer_cached_ref_delta_base() {
         );
         assert!(selection.write_profile.thin);
         assert_eq!(selection.keys.len(), 6);
-        let payload = materialize(&fixture.node, &head, &selection);
-        assert!(payload.receipt().received().is_none());
-        assert_eq!(payload.receipt().writer().unwrap().object_count, 6);
+        let payload =
+            super::super::selective::without_fabric_objects(&fixture.node, &head, &selection);
+        let receipt = payload.receipt().received().unwrap();
+        assert_eq!(
+            receipt.profile(),
+            if receipt.external_base_count() == 0 {
+                "received-pack-select-v1"
+            } else {
+                "received-pack-select-thin-v1"
+            }
+        );
+        assert_eq!(receipt.source_pack_count(), 2);
+        assert_eq!(receipt.object_count(), 6);
+        assert_eq!(receipt.ofs_delta_count(), 0);
         let bytes = payload.into_bytes().unwrap();
-        let parsed = read_verified_pack(
+        // Only the old ancestor's closure is supplied externally. The newer
+        // base must be emitted and independently reconstructed from this pack.
+        super::super::selective::assert_exact_selected_bytes(
             &bytes,
             format,
-            &PackLimits::default(),
-            &mut || true,
-            &NativeChecksumVerifier,
-        )
-        .unwrap();
-        let offsets: Vec<_> = parsed.entries().iter().map(|entry| entry.offset).collect();
-        let objects = parsed.into_scalar_objects(|_| None).unwrap();
-        let limits = PackLimits::default();
-        let held = HeldAncestor(held);
-        let resolver =
-            fgit_pack::ScalarResolver::new(&objects, &held, &limits, &mut || true).unwrap();
-        let reconstructed: BTreeSet<_> = offsets
-            .into_iter()
-            .map(|offset| {
-                let (kind, body) = resolver.resolve_offset_typed(offset, &mut || true).unwrap();
-                git_object_id(format, crypto_object_kind(kind), &body)
-            })
-            .collect();
-        // Only the old ancestor's closure is supplied to this independent
-        // decoder. A delta against the newer, merely cached blob cannot decode.
-        assert_eq!(reconstructed, selected_ids(&selection));
+            &selection,
+            &held.objects,
+        );
+        let mut newer_base = vec![b'x'; 8192];
+        newer_base[4096] = b'y';
+        let newer_id = git_object_id(format, GitObjectKind::Blob, &newer_base);
+        assert!(!held.objects.contains_key(&newer_id));
+        assert!(selected_ids(&selection).contains(&newer_id));
     }
 }
 

@@ -310,7 +310,7 @@ fn sixty_four_source_ref_chains_reconstruct_at_the_exact_internal_and_external_d
 }
 
 #[test]
-fn forced_overlap_removal_propagates_to_new_owners_and_detects_impossible_coverage() {
+fn forced_overlap_removal_preserves_run_covers_and_selection_handles_odd_paths() {
     let format = GitHashAlgorithm::Sha1;
     for edge_count in [9, 10] {
         let universe = bodies("path", edge_count + 1);
@@ -321,7 +321,22 @@ fn forced_overlap_removal_propagates_to_new_owners_and_detects_impossible_covera
         let cache = cache_for(&sources);
         let result = reuse(&cache, &keys(&sources), &PackLimits::default());
         if edge_count == 10 {
-            assert!(result.is_none(), "an odd path has no disjoint edge cover");
+            assert!(
+                super::super::composition::select(
+                    &cache,
+                    &keys(&sources),
+                    &PackLimits::default(),
+                    true,
+                    &[],
+                    &mut || true
+                )
+                .unwrap()
+                .is_none(),
+                "an odd path has no disjoint complete-run cover"
+            );
+            let result = result.unwrap();
+            assert_eq!(result.receipt().profile(), "received-pack-select-v1");
+            assert_native_objects(&result.into_bytes().unwrap(), format, &universe, &[]);
         } else {
             let reused = result.unwrap();
             assert_eq!(reused.receipt().source_pack_count(), 5);
@@ -567,7 +582,10 @@ fn long_cover_membership_never_omits_unknown_keys_or_leaks_unselected_pack_entri
     );
     let mixed_cache = cache_for(&sources[1..]);
     retain(&mixed_cache, &extra);
-    assert!(reuse(&mixed_cache, &selected, &limits).is_none());
+    let filtered = reuse(&mixed_cache, &selected, &limits).unwrap();
+    assert_eq!(filtered.receipt().profile(), "received-pack-select-v1");
+    assert_eq!(filtered.receipt().object_count(), 9);
+    assert_native_objects(&filtered.into_bytes().unwrap(), format, &universe, &[]);
     let all = keys(sources[1..].iter().chain(std::iter::once(&extra)));
     let allowed = reuse(&mixed_cache, &all, &limits).unwrap();
     assert_eq!(allowed.receipt().object_count(), 10);
@@ -577,7 +595,7 @@ fn long_cover_membership_never_omits_unknown_keys_or_leaks_unselected_pack_entri
 }
 
 #[test]
-fn large_non_singleton_ambiguity_is_a_deterministic_bounded_miss() {
+fn large_run_cover_ambiguity_is_bounded_and_selected_entries_still_complete() {
     let format = GitHashAlgorithm::Sha1;
     let universe = bodies("ring", 64);
     // Two different 32-source covers exist, but every object has two owners
@@ -592,10 +610,11 @@ fn large_non_singleton_ambiguity_is_a_deterministic_bounded_miss() {
     let mut observed = None;
     for _ in 0..2 {
         let mut calls = 0;
-        let result = cache.try_reuse(&selected, &limits, true, &mut || {
-            calls += 1;
-            calls < 8192
-        });
+        let result =
+            super::super::composition::select(&cache, &selected, &limits, true, &[], &mut || {
+                calls += 1;
+                calls < 8192
+            });
         assert!(
             matches!(result, Ok(None)),
             "large ambiguity exceeded its bounded selection path"
@@ -606,6 +625,17 @@ fn large_non_singleton_ambiguity_is_a_deterministic_bounded_miss() {
         }
         observed = Some(calls);
     }
+    let selected_output = reuse(&cache, &selected, &limits).unwrap();
+    assert_eq!(
+        selected_output.receipt().profile(),
+        "received-pack-select-v1"
+    );
+    assert_native_objects(
+        &selected_output.into_bytes().unwrap(),
+        format,
+        &universe,
+        &[],
+    );
     let permitted = reuse(&cache, &sources[0].keys, &limits).unwrap();
     assert_eq!(permitted.receipt().source_pack_count(), 1);
     assert_eq!(permitted.into_bytes().unwrap(), sources[0].raw);
