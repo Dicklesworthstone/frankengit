@@ -79,7 +79,7 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 60);
+    assert_eq!(REGISTRY.len(), 62);
     assert!(find_tool("frankengit_pull_append_comment").is_some());
 
     // Verify strict alphabetical ASCII sort order
@@ -397,8 +397,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 60"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 56"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 62"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 58"));
     assert!(
         mcp_tools
             .contents
@@ -410,7 +410,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 60"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 62"));
 }
 
 #[test]
@@ -420,7 +420,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 56);
+    assert_eq!(active_names.len(), 58);
     assert!(active_names.contains(&"frankengit_pull_append_comment"));
 
     // 1. Consistent twin passes.

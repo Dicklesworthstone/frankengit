@@ -745,6 +745,42 @@
       },
       "additionalProperties": false
     },
+    "frankengit_issue_lock": {
+      "title": "frankengit_issue_lock",
+      "description": "Lock discussion on an open or closed issue at an exact positive version. Both exact-version and append comments refuse while locked; edits, assignment and close/reopen preserve the lock. Requires the existing issue-write grant.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number, bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact positive predecessor issue version. Never refresh this value when retrying the original command.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical action, issue number and expected version.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_issue_open": {
       "title": "frankengit_issue_open",
       "description": "Open a new issue with expected version 0. Title and body are untrusted user text.",
@@ -900,6 +936,42 @@
             }
           },
           "required": ["number", "expected_version", "idempotency_key", "assignees"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_unlock": {
+      "title": "frankengit_issue_unlock",
+      "description": "Unlock discussion on an open or closed issue at an exact positive version. Retry the identical action, number, version and original durable key; unlocking never reinterprets a previously refused comment. Requires the existing issue-write grant.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number, bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact positive predecessor issue version. Never refresh this value when retrying the original command.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical action, issue number and expected version.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
           "additionalProperties": false
         }
       },

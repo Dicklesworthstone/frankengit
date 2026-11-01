@@ -63,7 +63,7 @@ function checkedAssignees(values, canonical = false) {
 }
 export function issueAction(name, fields) {
   object(fields);
-  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign'].includes(name)) fail('Unsupported issue action.');
+  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock'].includes(name)) fail('Unsupported issue action.');
   const assignment = name === 'assign' || name === 'unassign';
   const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees'] : [];
   if (Object.keys(fields).some(key => !allowed.includes(key))) fail('Unknown or inapplicable issue field.');
@@ -112,6 +112,14 @@ function identity(reply, previous = null) {
   }
   return result;
 }
+// Older snapshots predate locking. Derive their unlocked state without adding
+// a field to raw API/archive records or changing their canonical bytes.
+export function issueLocked(row) {
+  object(row);
+  if (!own(row, 'locked')) return false;
+  if (typeof row.locked !== 'boolean') fail('Invalid issue lock state.');
+  return row.locked;
+}
 export function issueState(row) {
   object(row);
   natural(row.number, 'issue number', 1); natural(row.version, 'issue version', 1);
@@ -120,6 +128,7 @@ export function issueState(row) {
   // Older API replies predate assignment metadata. New replies always carry
   // the complete set; a present malformed field is never replaced with empty.
   if (own(row, 'assignees')) checkedAssignees(row.assignees, true);
+  issueLocked(row);
   if (!['open', 'closed'].includes(row.state)) fail('Invalid issue state.');
   opaque(row.opened_by, 'opening principal'); opaque(row.last_actor, 'last principal');
   natural(row.comments, 'comment count', 0, row.version - 1);
@@ -158,6 +167,7 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
     if (reply.events.length !== count || reply.next_after_version !== (remaining > count ? after + count : null)) {
       fail('Incomplete issue history or invalid continuation.');
     }
+    let locked = after === 0 ? false : null;
     reply.events.forEach((event, i) => {
       object(event); object(event.action);
       if (event.version !== after + i + 1) fail('History contains a version gap.');
@@ -173,7 +183,16 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
       issueAction(name, fields);
       if (own(fields, 'assignees')) checkedAssignees(fields.assignees, true);
       if ((event.version === 1) !== (name === 'open')) fail('Invalid opening event position.');
+      if (name === 'lock' || name === 'unlock') {
+        if (!own(reply.issue, 'locked')) fail('Lock history requires an explicit issue lock state.');
+        const next = name === 'lock';
+        if (locked === next) fail('Invalid issue lock transition.');
+        locked = next;
+      } else if (name === 'comment' && locked === true) fail('Issue history contains a comment while locked.');
     });
+    if (reply.next_after_version === null && locked !== null && locked !== issueLocked(reply.issue)) {
+      fail('Issue lock state disagrees with its history.');
+    }
   }
   return { reply, binding: observed, head: snapshot };
 }

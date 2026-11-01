@@ -511,10 +511,28 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 49);
+        assert_eq!(server_names.len(), 51);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
+        for name in ["frankengit_issue_lock", "frankengit_issue_unlock"] {
+            assert!(server_names.contains(&name));
+            let tool = issue_writes::tools()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .unwrap();
+            let contract = fgit_schema::mcp::find_tool(name).unwrap();
+            let declared: BTreeSet<_> = contract
+                .input_fields
+                .iter()
+                .map(|field| field.name)
+                .collect();
+            let schema = tool.schema.object().unwrap();
+            let properties = schema["properties"].object().unwrap();
+            let served: BTreeSet<_> = properties.keys().map(String::as_str).collect();
+            assert_eq!(declared, served);
+            assert_eq!(schema["additionalProperties"], Value::Bool(false));
+        }
         let append = issue_writes::tools()
             .into_iter()
             .find(|tool| tool.name == "frankengit_issue_append_comment")

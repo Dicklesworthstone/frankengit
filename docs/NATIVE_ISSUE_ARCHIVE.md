@@ -43,7 +43,12 @@ current grant. See [HTTP_ISSUE_API.md](HTTP_ISSUE_API.md) for source-side bounds
 List order and continuation, issue/history identity, contiguous event versions,
 complete histories and fixed source-head metadata are checked. Replaying the
 exported actions must reproduce the listed title, body, labels, open/closed state,
-assignment set, comment count, opening actor and last actor. Replay is an API
+assignment set, discussion lock, comment count, opening actor and last actor.
+Lock and unlock are payloadless timeline actions. Replay rejects repeated lock
+transitions and comments added while locked. Closing or reopening preserves the
+lock. Legacy snapshots without `locked` mean false; a supplied value must be a
+boolean. The compatibility default is used only in the checked projection and
+never inserted into retained raw page bytes or their commitments. Replay is an API
 consistency check, not an independent authority implementation or an access grant.
 Raw replies are retained as canonical JSON plus a newline; source text is data,
 not executable HTML. Rendering is not requested. Historical attribution does not

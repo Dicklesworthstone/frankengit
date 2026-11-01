@@ -58,6 +58,8 @@ fn action(value: &IssueAction) -> String {
         }
         IssueAction::Close => "{\"name\":\"close\"}".to_owned(),
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
+        IssueAction::Lock => "{\"name\":\"lock\"}".to_owned(),
+        IssueAction::Unlock => "{\"name\":\"unlock\"}".to_owned(),
         IssueAction::Assign { assignees: values } | IssueAction::Unassign { assignees: values } => {
             format!(
                 "{{\"name\":{},\"assignees\":{}}}",
@@ -187,7 +189,7 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, String> {
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{},\"labels\":{},",
-            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{}}}"
+            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{},\"locked\":{}}}"
         ),
         value.number.get(),
         value.version.get(),
@@ -201,7 +203,8 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, String> {
         quote(&value.opened_by.to_string()),
         quote(&value.last_actor.to_string()),
         value.comments,
-        assignees(&value.assignees)
+        assignees(&value.assignees),
+        value.locked
     ))
 }
 fn header(

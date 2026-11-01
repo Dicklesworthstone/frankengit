@@ -1,6 +1,6 @@
 // Current issue state and discussion from a completely verified native archive.
 // Source identities are attribution only; NEVER destination actor/assignee IDs.
-import { IssueClient, issueState, issueAction, mutationRequest, natural, snapshotToken }
+import { IssueClient, issueState, issueLocked, issueAction, mutationRequest, natural, snapshotToken }
   from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { recordDigest, operatorError } from './forge-operator-io.mjs';
 
@@ -114,8 +114,13 @@ export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
     group = []; captureBytes = overhead; planBytes = 3; comments = 0; count = 0;
   };
   for (const record of records) {
+    // Capture-v1 and its prepared retry plans have no lock coordinate. Never
+    // silently import a locked discussion as unlocked or rewrite old v1 bytes.
+    if (issueLocked(record.snapshot)) fail('locked_capture_requires_v2');
+    const snapshot = structuredClone(record.snapshot);
+    delete snapshot.locked;
     const row = { number: record.snapshot.number, id: String(record.snapshot.number),
-      snapshot: structuredClone(record.snapshot), comments: structuredClone(record.comments) };
+      snapshot, comments: structuredClone(record.comments) };
     natural(row.number, 'archive issue order', previous + 1); previous = row.number;
     const single = wrap([row]), steps = nativeIssueImportSteps(single, offset);
     const rowBytes = encode(row).length - 1, stepBytes = encode(steps).length - 3;

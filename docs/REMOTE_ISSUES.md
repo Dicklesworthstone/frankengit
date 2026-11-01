@@ -8,7 +8,7 @@ changes. The server must enable issues and outcomes and provision the caller
 with the independent issue-write and outcome-read grants.
 
 `scripts/operator/remote_issue.mjs` supports native `open`, `edit`, `comment`,
-`append-comment`, `close`, `reopen`, `assign` and `unassign`. Issue numbers and expected versions
+`append-comment`, `close`, `reopen`, `lock`, `unlock`, `assign` and `unassign`. Issue numbers and expected versions
 are canonical decimal **strings**, including values beyond JavaScript's safe
 integer range. Text and list limits follow the native form contract; unknown
 fields, duplicate labels/assignees and invalid versions refuse before I/O.
@@ -29,9 +29,17 @@ refreshes its version or falls back when a server lacks the append route.
 The native append profile binds the authenticated actor, issue and exact body
 while planning its position against the current canonical history. See
 [the native contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2021-native-issue-append-comment-intents).
-This permits comments on open or closed issues; it grants no other edit or
+This permits comments on unlocked open or closed issues; it grants no other edit or
 authority. Different request identities with identical text remain different
 comments. Keep the saved intent for recovery, including after a lost reply.
+
+`lock` and `unlock` require the existing issue-write grant, a positive exact
+`expected_version` and an empty `fields` object. The lock is independent of
+open/closed state. Both strict and append comments refuse new publication while
+locked; field edits, assignments, close and reopen remain available and preserve
+it. A duplicate lock state under a fresh key refuses
+`ProtectedRefTransitionDenied`, and a stale version refuses `EvidenceStale`.
+Neither response permits an automatic version refresh.
 
 ## Request and recovery contract
 
@@ -57,6 +65,10 @@ original request. `known` can retain a previous normalized native outcome to
 refuse seal, transaction or decision regression. No absent key, absent seal,
 HTTP error or cancellation is proof of non-commit. An uncertain invocation must
 keep the original intent and key, not prepare a fresh command.
+Changing the lock does not change an earlier terminal result. A previously
+committed comment still recovers its commit while locked; a previously refused
+comment still recovers its refusal after unlocking. The same original-key rule
+applies to lock and unlock themselves.
 
 Issue v1 publication replies omit repository incarnation. The preflight and
 confirmation observations do **not** create an atomic server-side incarnation
@@ -129,7 +141,7 @@ For contention-tolerant commenting instead, select `"action": "append-comment"`,
 `"expected_version": null` and a body-only `fields` object.
 `edit` can replace selected title,
 body or labels; `comment` takes a body; `assign`/`unassign` take an `assignees`
-array of principal IDs; `close`/`reopen` take an empty `fields` object.
+array of principal IDs; `close`/`reopen`/`lock`/`unlock` take an empty `fields` object.
 
 ```sh
 node scripts/remote_issue.mjs prepare \

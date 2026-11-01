@@ -99,7 +99,9 @@ fn terminal(committed: bool) -> (TxId, TerminalOutcome) {
 #[test]
 fn every_mutation_retains_its_exact_action_and_both_repository_hash_formats() {
     for format in ["sha1", "sha256"] {
-        for action in ["open", "edit", "close", "reopen", "comment"] {
+        for action in [
+            "open", "edit", "close", "reopen", "lock", "unlock", "comment",
+        ] {
             let mut args = input(action);
             args.extend(["--object-format", format].map(str::to_owned));
             let parsed = parse(&args).unwrap();
@@ -123,6 +125,49 @@ fn every_mutation_retains_its_exact_action_and_both_repository_hash_formats() {
                 assert_eq!(edit.labels, None);
             }
         }
+    }
+}
+#[test]
+fn lock_commands_require_an_exact_predecessor_and_reject_payload_or_authority_fields() {
+    for verb in ["lock", "unlock"] {
+        let parsed = parse(&input(verb)).unwrap();
+        assert_eq!(mutation(&parsed).command.action.name(), verb);
+        assert_eq!(
+            mutation(&parsed).command.expected_version,
+            ExpectedVersion::Exactly(AggregateVersion::FIRST)
+        );
+        for version in [
+            "0",
+            "01",
+            "-1",
+            "18446744073709551615",
+            "18446744073709551616",
+        ] {
+            let mut args = input(verb);
+            replace(&mut args, "--expected-version", version);
+            assert!(parse(&args).is_err(), "{verb}: version {version}");
+        }
+        for required in ["--principal", "--idempotency-key", "--expected-version"] {
+            let mut args = input(verb);
+            let at = args.iter().position(|arg| arg == required).unwrap();
+            args.drain(at..at + 2);
+            assert!(parse(&args).is_err(), "{verb}: missing {required}");
+        }
+        for forbidden in [
+            "--title",
+            "--body",
+            "--body-file",
+            "--label",
+            "--assignee",
+            "--expected-head",
+        ] {
+            let mut args = input(verb);
+            args.extend([forbidden, "untrusted"].map(str::to_owned));
+            assert!(parse(&args).is_err(), "{verb}: {forbidden}");
+        }
+        let mut args = input(verb);
+        args.push("--clear-labels".into());
+        assert!(parse(&args).is_err());
     }
 }
 #[test]
@@ -220,7 +265,9 @@ fn assignment_arguments_are_bounded_canonical_metadata_with_an_exact_version() {
 }
 #[test]
 fn trust_required_fields_and_inapplicable_or_duplicate_arguments_refuse() {
-    for action in ["open", "edit", "close", "reopen", "comment", "list", "show"] {
+    for action in [
+        "open", "edit", "close", "reopen", "lock", "unlock", "comment", "list", "show",
+    ] {
         let mut args = input(action);
         args.retain(|arg| arg != "--trusted-local");
         assert!(parse(&args).is_err());
@@ -363,6 +410,51 @@ fn read_responses_refuse_moved_heads_wrong_numbers_gaps_and_false_cursors() {
         )
         .is_err()
     );
+}
+#[test]
+fn lock_state_and_exact_actions_are_exposed_by_list_history_and_publication_receipts() {
+    let parsed = parse(&input("open")).unwrap();
+    let opened = mutation(&parsed);
+    let first = opened.command.proposed_event(opened.principal).unwrap();
+    let mut state = apply_event(None, &first).unwrap();
+    let mut events = vec![first];
+    let listed = parse(&input("list")).unwrap();
+    let shown = parse(&input("show")).unwrap();
+    let (before, _) =
+        output::list(&listed, read(&listed), head(1), &[state.clone()], None).unwrap();
+    assert!(before.contains("\"locked\":false"));
+    for (verb, locked) in [("lock", true), ("close", true), ("unlock", false)] {
+        let mut args = input(verb);
+        replace(
+            &mut args,
+            "--expected-version",
+            &state.version.get().to_string(),
+        );
+        let parsed = parse(&args).unwrap();
+        let change = mutation(&parsed);
+        let event = change.command.proposed_event(change.principal).unwrap();
+        state = apply_event(Some(&state), &event).unwrap();
+        events.push(event);
+        let (list, _) =
+            output::list(&listed, read(&listed), head(1), &[state.clone()], None).unwrap();
+        let (history, _) =
+            output::history(&shown, read(&shown), head(1), Some(&state), &events, None).unwrap();
+        for json in [list, history] {
+            assert!(json.contains(&format!("\"locked\":{locked}")));
+            assert!(!json.contains(&format!("\"locked\":\"{locked}\"")));
+        }
+        for committed in [true, false] {
+            let (tx, terminal) = terminal(committed);
+            let receipt = output::mutation(&parsed, change, tx, &terminal, None);
+            assert!(receipt.contains(&format!("\"action\":{{\"name\":\"{verb}\"}}")));
+            assert!(!receipt.contains("private-issue-key"));
+        }
+    }
+    let (json, _) =
+        output::history(&shown, read(&shown), head(1), Some(&state), &events, None).unwrap();
+    assert!(json.contains("\"state\":\"closed\""));
+    assert!(json.contains("\"action\":{\"name\":\"lock\"}"));
+    assert!(json.contains("\"action\":{\"name\":\"unlock\"}"));
 }
 #[test]
 fn history_keeps_comment_bytes_and_does_not_invent_unchanged_edit_fields() {

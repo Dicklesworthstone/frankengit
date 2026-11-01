@@ -14,7 +14,7 @@ List issues and page their canonical event history at one explicit snapshot.
 Open an issue with an explicit number and version zero. Select an existing issue
 to prepare a comment without an expected version; the browser uses the explicit
 `append-comment` intent so concurrent commenters can all publish. Field edits,
-assignment changes, close and reopen still require the exact displayed version.
+assignment changes, close, reopen, lock and unlock still require the exact displayed version.
 Title, body and labels can be replaced independently; an explicitly selected
 empty label replacement clears the set. Preparation makes no HTTP mutation.
 Inspect the prepared request, save its private recovery receipt, and send it
@@ -31,6 +31,15 @@ before preparation. Assignments confer no repository access or membership.
 As with comments, preparing, saving a receipt and explicitly sending are
 separate actions; editing the form later cannot change the prepared request.
 
+Lists and issue details show whether discussion is locked, independently of the
+open/closed state. **Lock discussion** and **Unlock discussion** prepare a
+payloadless action at the displayed positive version under the existing
+`issues-write` grant. The browser disables comment preparation for a selected
+locked issue. Native admission also refuses both strict and append comments
+while locked, including a comment prepared before another writer locks it.
+Edits, assignments, close and reopen remain available and preserve the lock.
+The UI never guesses a replacement predecessor after a stale-version refusal.
+
 ## Ambiguous outcomes
 
 Only a validated native terminal decision settles a request. Canonical issue
@@ -39,6 +48,9 @@ terminal decisions. Lost responses retain the original body and key. Retry is
 explicit and byte-identical; recovery sends only the original key to the
 read-only outcome service. Missing keys, missing seals and undecided results
 never establish non-commit. Neither terminal decision implies external delivery.
+Lock changes do not rewrite historical outcomes: an identical lock/unlock retry
+recovers its original decision, a comment committed before locking still recovers
+that commit, and a comment refused while locked remains refused after unlocking.
 
 Save the recovery receipt before sending: page memory is not durable. Receipts
 contain private draft text, route/origin, the exact request and a credential

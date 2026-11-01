@@ -20,6 +20,7 @@ fn issue(number: u64, matching: bool) -> IssueSnapshot {
         labels: Vec::new(),
         assignees: Vec::new(),
         state: IssueState::Open,
+        locked: false,
         opened_by: PrincipalId::from_bytes([1; 16]),
         last_actor: PrincipalId::from_bytes([1; 16]),
         comments: 0,

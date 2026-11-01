@@ -17,6 +17,13 @@ comment in source-version order, and final open/closed state into normal native
 offset selects destination numbers. Destination expected versions start at zero;
 source versions and principals are never used as destination authority.
 
+The frozen capture-v1 schema has no lock coordinate. This importer accepts
+unlocked snapshots, including legacy archives that omit `locked`, but explicitly
+refuses a currently locked discussion with
+`native_issue_source_locked_capture_requires_v2`. It does not silently drop the
+source lock. Existing capture-v1 bytes, saved plans and retry identities remain
+unchanged.
+
 The opening body and each comment retain clearly labelled provenance: archive
 pin, exact source endpoint/repository/snapshot, original issue number, source
 version and actors. Source assignees are retained in that metadata, NOT applied

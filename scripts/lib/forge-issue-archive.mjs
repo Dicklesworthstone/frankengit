@@ -3,7 +3,7 @@
 import { constants as F } from 'node:fs';
 import { mkdir, open, lstat, realpath, opendir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { IssueClient, issuePage, issueHistory, issueState, issueAction, natural, snapshotToken }
+import { IssueClient, issuePage, issueHistory, issueState, issueLocked, issueAction, natural, snapshotToken }
   from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { operatorError, operatorPath, privateRecordPath, readPrivateOperatorFile,
   saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
@@ -59,7 +59,7 @@ function stateView(row) {
   issueState(row);
   return { number: row.number, version: row.version, title: row.title, body: row.body, labels: row.labels,
     state: row.state, opened_by: row.opened_by, last_actor: row.last_actor,
-    comments: row.comments, assignees: row.assignees ?? [] };
+    comments: row.comments, assignees: row.assignees ?? [], locked: issueLocked(row) };
 }
 // One deterministic traversal is shared by live capture and offline inspection.
 // Replay only checks API self-consistency; it cannot authorize native state.
@@ -94,11 +94,19 @@ class Walk {
       const { name, body_rendered: _rendered, ...fields } = event.action;
       const action = issueAction(name, fields);
       if (name === 'open') this.folded = { number, version: 0, title: action.title, body: action.body,
-        labels: action.labels, state: 'open', opened_by: event.actor, last_actor: event.actor, comments: 0, assignees: [] };
+        labels: action.labels, state: 'open', opened_by: event.actor, last_actor: event.actor, comments: 0, assignees: [], locked: false };
       const s = this.folded;
       if (!s) fail('missing_open');
       if (name === 'edit') for (const key of ['title', 'body', 'labels']) if (Object.hasOwn(action, key)) s[key] = action[key];
-      if (name === 'comment') s.comments++;
+      if (name === 'comment') {
+        if (s.locked) fail('comment_while_locked');
+        s.comments++;
+      }
+      if (name === 'lock' || name === 'unlock') {
+        const locked = name === 'lock';
+        if (s.locked === locked) fail('invalid_lock_transition');
+        s.locked = locked;
+      }
       if (name === 'close' || name === 'reopen') s.state = name === 'close' ? 'closed' : 'open';
       if (name === 'assign') s.assignees = [...new Set([...s.assignees, ...action.assignees])].sort();
       if (name === 'unassign') s.assignees = s.assignees.filter(id => !action.assignees.includes(id));

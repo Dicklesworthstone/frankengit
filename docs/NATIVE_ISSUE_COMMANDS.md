@@ -117,6 +117,38 @@ Snapshots expose `assignees: []` for unassigned issues, including histories
 created before these actions were supported, and history retains each delta.
 The byte and upgrade contract is [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
 
+## Lock and unlock discussion
+
+```sh
+fg issue lock "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
+  --trusted-local --principal "$PRINCIPAL_ID" \
+  --idempotency-key issue-17-lock-1 --expected-version "$ISSUE_VERSION"
+
+fg issue unlock "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
+  --trusted-local --principal "$PRINCIPAL_ID" \
+  --idempotency-key issue-17-unlock-1 --expected-version "$LOCKED_ISSUE_VERSION"
+```
+
+Use the exact positive version returned by `show` for each new operation.
+Neither action accepts a title, body, label or assignee payload. Locking an
+already locked issue or unlocking an unlocked issue canonically refuses with
+`ProtectedRefTransitionDenied`; a stale predecessor refuses with `EvidenceStale`.
+An accepted action advances the issue version once.
+
+The lock is independent of the issue's open/closed state. Either state can be
+locked or unlocked. Both `comment` and `append-comment` refuse new publication
+while locked; edits, assignments, close and reopen remain available and preserve
+the lock. Closing an issue does not lock it, and reopening does not unlock it.
+List, show and search snapshots expose boolean `locked`, initially `false` for
+new issues and histories predating locking. History retains payloadless `lock`
+and `unlock` actions in the same canonical version sequence.
+
+Retry the original action, version, principal and key after an uncertain reply.
+Recovery returns its original terminal outcome even if a later operation has
+changed the lock. A comment committed before locking still recovers that commit;
+a comment refused while locked remains refused under its original key after
+unlocking. A new comment attempt needs a new key.
+
 ## Read current state and the exact discussion history
 
 ```sh
@@ -209,8 +241,8 @@ adapters must supply authenticated repository metadata access before exposing it
 
 Canonical issue replay currently retains the admission layer's finite 4,096-event
 and 32 MiB history envelope. This is not a claim of indexed large-forge scalability.
-Repository-wide mandatory Git protection, remote ACLs, issue attachments,
-milestones, and issue locking remain separate work. The assignment controls are
+Repository-wide mandatory Git protection, remote ACLs, issue attachments and
+milestones remain separate work. Assignment and discussion locking are
 also exposed by the [HTTP API](HTTP_ISSUE_API.md),
 [MCP metadata tools](MCP_METADATA_WRITES.md), and
 [native browser](BROWSER_ISSUE_WORKFLOW.md).

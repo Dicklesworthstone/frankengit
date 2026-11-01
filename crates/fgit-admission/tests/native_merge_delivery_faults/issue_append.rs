@@ -5,6 +5,9 @@ use fgit_admission::merge::native::issues;
 use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueCommentIntent, IssueEdit};
 use fgit_forge::{AggregateVersion, ForgeEventPayload, IssueNumber};
 
+#[path = "issue_append/locking.rs"]
+mod locking;
+
 #[derive(Clone)]
 enum Mutation {
     Append(IssueCommentIntent),

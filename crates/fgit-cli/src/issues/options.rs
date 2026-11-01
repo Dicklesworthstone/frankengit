@@ -58,7 +58,16 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     let action = arguments[0].as_str();
     let mutate = matches!(
         action,
-        "open" | "edit" | "close" | "reopen" | "comment" | "append-comment" | "assign" | "unassign"
+        "open"
+            | "edit"
+            | "close"
+            | "reopen"
+            | "lock"
+            | "unlock"
+            | "comment"
+            | "append-comment"
+            | "assign"
+            | "unassign"
     );
     if !mutate && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
@@ -237,6 +246,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 },
                 "close" => IssueAction::Close,
                 "reopen" => IssueAction::Reopen,
+                "lock" => IssueAction::Lock,
+                "unlock" => IssueAction::Unlock,
                 "assign" => IssueAction::Assign { assignees },
                 "unassign" => IssueAction::Unassign { assignees },
                 _ => unreachable!("action whitelist"),

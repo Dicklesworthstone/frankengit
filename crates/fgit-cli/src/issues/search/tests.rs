@@ -64,6 +64,7 @@ fn parses_filters_and_reuses_exact_read_identity_contract() {
                 labels: vec!["a".into(), "z".into()],
                 assignees: Vec::new(),
                 state: IssueState::Closed,
+                locked: false,
                 opened_by: PrincipalId::from_bytes([3; 16]),
                 last_actor: PrincipalId::from_bytes([4; 16]),
                 comments: 0,

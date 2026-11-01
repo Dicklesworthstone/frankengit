@@ -1,4 +1,4 @@
-import { IssueClient, MAX_RECEIPT_BYTES, decimal, issueSearchQuery } from './issues.mjs';
+import { IssueClient, MAX_RECEIPT_BYTES, decimal, issueSearchQuery, issueLocked } from './issues.mjs';
 import { markdownBody } from './markdown.mjs';
 
 function visible(value) {
@@ -12,11 +12,19 @@ export function mountIssues(document, location, options = {}) {
   const button = (label, action) => { const element = node('button', label); element.type = 'button'; element.addEventListener('click', action); return element; };
   const status = value => { byId('issue-status').textContent = value; };
   let session = 0, view = 0;
-  const clearView = () => ['issue-content', 'issue-paging', 'issue-snapshot'].forEach(id => byId(id).replaceChildren());
+  const visibleLocks = new Map();
+  const commentLocked = () => byId('change-action').value === 'append-comment' &&
+    visibleLocks.get(byId('change-number').value) === true;
+  const clearView = () => {
+    visibleLocks.clear();
+    ['issue-content', 'issue-paging', 'issue-snapshot'].forEach(id => byId(id).replaceChildren());
+    syncPending();
+  };
   function syncPending() {
     const pending = client.pending;
     byId('prepared-change').hidden = !pending;
-    byId('prepare-change').disabled = !client.connected || Boolean(pending) || client.busy;
+    byId('prepare-change').disabled = !client.connected || Boolean(pending) || client.busy || commentLocked();
+    byId('change-body').disabled = commentLocked();
     byId('send-change').disabled = !pending || !client.connected || client.busy;
     byId('check-outcome').disabled = !pending || !client.connected || client.busy;
     byId('save-receipt').disabled = !pending;
@@ -40,8 +48,12 @@ export function mountIssues(document, location, options = {}) {
     byId('body-field').hidden = !full && action !== 'append-comment';
     byId('assignees-field').hidden = !['assign', 'unassign'].includes(action);
     byId('replace-body-label').hidden = action !== 'edit';
+    syncPending();
   }
   function edit(issue, action) {
+    if (action === 'append-comment' && issueLocked(issue)) {
+      status(`Issue #${issue.number} is locked. Unlock it before adding a comment.`); return;
+    }
     byId('change-number').value = String(issue.number);
     byId('change-version').value = action === 'append-comment' ? '' : String(issue.version);
     byId('change-action').value = action;
@@ -56,15 +68,16 @@ export function mountIssues(document, location, options = {}) {
   }
   function issueTable(issues, head) {
     const table = node('table');
-    const header = node('tr'); header.append(node('th', 'Issue'), node('th', 'State / version')); table.append(header);
+    const header = node('tr'); header.append(node('th', 'Issue'), node('th', 'State / lock / version')); table.append(header);
     for (const issue of issues) {
+      const locked = issueLocked(issue); visibleLocks.set(String(issue.number), locked);
       const row = node('tr'), title = node('td');
-      title.append(button(`#${issue.number} ${issue.title}`, () => { void read(issue.number, 0, head); }));
-      row.append(title, node('td', `${issue.state} · version ${issue.version}`)); table.append(row);
+      title.append(button(`#${issue.number} ${issue.title}`, () => { void read(issue.number, 0, head, locked); }));
+      row.append(title, node('td', `${issue.state} · ${locked ? 'locked' : 'unlocked'} · version ${issue.version}`)); table.append(row);
     }
     return table;
   }
-  async function read(number, after = 0, head = null) {
+  async function read(number, after = 0, head = null, expectedLocked = null) {
     const currentSession = session, currentView = ++view;
     client.cancelReads(); clearView(); status('Reading one issue snapshot…');
     try {
@@ -73,6 +86,10 @@ export function mountIssues(document, location, options = {}) {
       const result = await client.read(number, { after, limit: 20, head, render: number !== null });
       if (session !== currentSession || view !== currentView) return;
       const reply = result.reply;
+      if (number !== null && head !== null && expectedLocked !== null &&
+          (!reply.found || issueLocked(reply.issue) !== expectedLocked)) {
+        throw new Error('Issue lock state changed within the same snapshot. Reload explicitly.');
+      }
       const content = node('div');
       const body = value => markdownBody(document, value.body, value.body_rendered, {
         cryptoImpl: options.cryptoImpl ?? globalThis.crypto,
@@ -86,17 +103,22 @@ export function mountIssues(document, location, options = {}) {
         content.append(node('p', `Issue #${number} was not found at this snapshot.`));
       } else {
         const issue = reply.issue;
+        const locked = issueLocked(issue); visibleLocks.set(String(issue.number), locked);
         byId('show-number').value = String(number);
         content.append(node('h2', `#${number} ${issue.title}`),
-          node('p', `${issue.state} · version ${issue.version} · ${issue.comments} comments`),
+          node('p', `${issue.state} · ${locked ? 'locked' : 'unlocked'} · version ${issue.version} · ${issue.comments} comments`),
           node('p', `Opened by ${issue.opened_by} · last changed by ${issue.last_actor}`),
           node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`),
           node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
         const actions = node('div'); actions.className = 'issue-actions';
         for (const [label, action] of [['Comment', 'append-comment'], ['Edit issue', 'edit'], ['Add assignees', 'assign'], ['Remove assignees', 'unassign'],
-          [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen']]) {
-          actions.append(button(label, () => edit(issue, action)));
+          [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen'],
+          [locked ? 'Unlock discussion' : 'Lock discussion', locked ? 'unlock' : 'lock']]) {
+          const control = button(label, () => edit(issue, action));
+          control.disabled = action === 'append-comment' && locked;
+          actions.append(control);
         }
+        if (locked) content.append(node('p', 'This discussion is locked. Unlock it before adding comments. Other issue changes remain available.'));
         content.append(actions, node('h3', 'Canonical event history'));
         for (const event of reply.events) {
           const entry = node('article');
@@ -107,10 +129,11 @@ export function mountIssues(document, location, options = {}) {
           if (Object.hasOwn(event.action, 'assignees')) entry.append(node('p', `Principals: ${event.action.assignees.join(', ')}`));
           content.append(entry);
         }
-        if (reply.next_after_version !== null) byId('issue-paging').append(button('Next history page', () => { void read(number, reply.next_after_version, result.head); }));
+        if (reply.next_after_version !== null) byId('issue-paging').append(button('Next history page', () => { void read(number, reply.next_after_version, result.head, locked); }));
       }
       byId('issue-content').append(content);
       byId('issue-snapshot').textContent = `Repository ${result.binding.repository}\nSnapshot ${result.head}`;
+      syncPending();
       status('Read complete. Continuations use this same snapshot; reload explicitly when it moves.');
     } catch (error) {
       if (session !== currentSession || view !== currentView) return;
@@ -142,6 +165,7 @@ export function mountIssues(document, location, options = {}) {
       }
       byId('issue-content').append(content);
       byId('issue-snapshot').textContent = `Repository ${result.binding.repository}\nSnapshot ${result.head}`;
+      syncPending();
       status(reply.complete ? 'Search complete for this snapshot suffix. No repository-wide total is implied.'
         : `Search paused at ${reply.stop_reason === 'scan_limit' ? 'the scan limit' : 'the result limit'}. More candidates remain; another match is not guaranteed.`);
     } catch (error) {
@@ -196,10 +220,12 @@ export function mountIssues(document, location, options = {}) {
   });
   byId('issue-search-cancel').addEventListener('click', cancelView);
   byId('change-action').addEventListener('change', configureEditor);
+  byId('change-number').addEventListener('input', syncPending);
   byId('issue-change').addEventListener('submit', async event => {
     event.preventDefault();
     const current = session;
     try {
+      if (commentLocked()) throw new Error('This discussion is locked. Unlock it before adding a comment.');
       const action = byId('change-action').value, fields = {};
       if (action === 'open' || action === 'edit') {
         if (action === 'open' || byId('replace-title').checked) fields.title = byId('change-title').value;

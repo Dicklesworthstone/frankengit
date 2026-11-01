@@ -9,7 +9,7 @@ import { lookupOutcome, outcomeEndpoint, outcomeScope, validateOutcomeReply, Out
 export const ISSUE_LIMITS = Object.freeze({ form: 256 * 1024, reply: 16 * 1024, intent: 512 * 1024,
   body: 64 * 1024, title: 256, labels: 32, assignees: 16 });
 const MAX_U64 = 18446744073709551615n;
-const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign'];
+const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock'];
 const INTENT = 'frankengit-remote-issue-intent-v1';
 const ID = /^[0-9a-f]{32}$/, HASH = /^[0-9a-f]{64}$/;
 export class IssueError extends Error {

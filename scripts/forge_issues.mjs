@@ -13,7 +13,7 @@ export const HELP = `Usage: node scripts/forge_issues.mjs OPERATION
 open: --number N --expected-version 0 --title TEXT [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ...]
 edit: --number N --expected-version N [--title TEXT] [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ... | --clear-labels]
 comment: --number N --expected-version N (--body TEXT | --body-file PRIVATE_FILE)
-close|reopen: --number N --expected-version N
+close|reopen|lock|unlock: --number N --expected-version N
 assign|unassign: --number N --expected-version N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...]
 status|retry: use only the connection options and the ORIGINAL --record.
 list|show|search: read only, no --record. show requires --number N.
