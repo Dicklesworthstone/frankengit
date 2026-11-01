@@ -7,6 +7,7 @@
 //! the exact closure witness for admission; staging itself never publishes a
 //! ref.
 
+mod received_pack_restore;
 mod reused_targets;
 mod typed_closure;
 
@@ -506,6 +507,25 @@ impl ProductionQuarantineValidator<'_> {
         bases: &ExternalBases,
         deadline: &mut impl Deadline,
     ) -> Result<VerifiedPackObjects, RefusalCode> {
+        self.verified_pack_objects_with_budget(
+            pack,
+            bases,
+            &mut ResolutionBudget::new(),
+            deadline,
+            map_pack_error,
+        )
+    }
+
+    /// A caller restoring several optional representations keeps one budget
+    /// across all candidates, including work spent on a failed candidate.
+    fn verified_pack_objects_with_budget(
+        &self,
+        pack: &QuarantinedPack,
+        bases: &ExternalBases,
+        budget: &mut ResolutionBudget,
+        deadline: &mut impl Deadline,
+        pack_refusal: fn(PackError) -> RefusalCode,
+    ) -> Result<VerifiedPackObjects, RefusalCode> {
         checkpoint(deadline)?;
         // An empty, checksum-verified pack is real wire evidence. It is not a
         // missing pack or an unresolved thin delta. Root reuse is established
@@ -519,10 +539,9 @@ impl ProductionQuarantineValidator<'_> {
         let mut objects = pack
             .clone()
             .into_scalar_objects(|_| None)
-            .map_err(map_pack_error)?;
+            .map_err(pack_refusal)?;
         let mut verified = BTreeMap::new();
         let mut ids_at_offset = BTreeMap::new();
-        let mut budget = ResolutionBudget::new();
         // Each resolved identity is written back by offset. Finding its object
         // by scanning made every pass quadratic in the pack (frankengit-eq4h);
         // the first object at an offset is the one the scan found.
@@ -545,7 +564,7 @@ impl ProductionQuarantineValidator<'_> {
                     self.resident.resolver,
                     deadline,
                 )
-                .map_err(map_pack_error)?;
+                .map_err(pack_refusal)?;
                 for entry in pack.entries() {
                     checkpoint(deadline)?;
                     if ids_at_offset.contains_key(&entry.offset) {
@@ -553,7 +572,7 @@ impl ProductionQuarantineValidator<'_> {
                     }
                     match pack_resolver.resolve_offset_typed_with_budget(
                         entry.offset,
-                        &mut budget,
+                        budget,
                         deadline,
                     ) {
                         Ok((object_type, body)) => {
@@ -572,7 +591,7 @@ impl ProductionQuarantineValidator<'_> {
                         // The base may be a pack-local entry whose native ID
                         // is established in this or a later bounded pass.
                         Err(PackError::MissingDeltaBase) => {}
-                        Err(error) => return Err(map_pack_error(error)),
+                        Err(error) => return Err(pack_refusal(error)),
                     }
                 }
             }
@@ -926,12 +945,15 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         // acquire that responsibility.
         self.stage_closure(&closure, &mut verified, &mut spool, deadline)?;
         if let Some(pending) = pending_pack {
+            let pending = pending.with_persistence(self.node.durable_received_pack_store());
             if let Some(staging) = self.staging {
                 staging.retain_received_pack(pending)?;
             } else {
                 // Direct validation completed durable placement. Raw receive
                 // staging activates only after successful batch publication.
-                pending.commit();
+                pending
+                    .commit_with_deadline(deadline)
+                    .map_err(map_pack_error)?;
             }
         }
         Ok(ValidatedClosure {

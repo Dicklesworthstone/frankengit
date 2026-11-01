@@ -7,6 +7,8 @@ use fgit_pack::{
 use fgit_wire::ObjectFilter;
 
 mod composition;
+#[cfg(unix)]
+mod restart;
 mod selective;
 
 struct ReceivedSource(MemorySource);

@@ -297,7 +297,11 @@ impl ReceiveStaging {
         }
         state.published = true;
         if let Some(pending) = state.received_pack.take() {
-            pending.commit();
+            // Only now has every raw entry passed final immutable placement's
+            // collision check. The optional disk record grants no authority.
+            pending.commit_with_deadline(live).map_err(|_| {
+                NodeRefusal::Fabric(Box::new(StoreRefusal::RuntimeCheckpointRejected))
+            })?;
         }
         Ok(())
     }

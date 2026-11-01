@@ -263,6 +263,15 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
   REF parents against identity-and-kind proofs of authorized client-held objects
   at that same basis. External fanout remains bounded. Cached presence never
   authorizes an extra object or an external thin base;
+- persisted received-pack custody is disposable, namespace-bound input, never
+  a serialized authority or integrity receipt. Cold reuse reconstructs every
+  native identity and compares its strong payload commitment against a
+  canonical descriptor verified at exact EOF. Missing or corrupt canonical
+  bytes cannot be repaired from this cache. External bases require current
+  selected/client-held membership before reads. Fixed slots, private regular
+  files, descriptor-relative no-symlink traversal, atomic records, nonblocking
+  writer ownership, and shared read/inflation/resolution limits bound both
+  successful and failed candidates; zero capacity performs no custody I/O;
 - protocol/service/capability matrix; no fictional protocol-v2 push assumption;
 - fuzz/source-derived/adversarial differential corpus;
 - no shell command/path construction from repository data.

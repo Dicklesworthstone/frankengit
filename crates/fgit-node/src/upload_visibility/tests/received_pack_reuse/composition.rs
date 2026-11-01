@@ -7,12 +7,12 @@ use fgit_crypto::{sha1_digest, sha256_digest};
 mod long_history;
 mod thin;
 
-struct Increment {
-    pack: Vec<u8>,
-    tip: GitOid,
+pub(super) struct Increment {
+    pub(super) pack: Vec<u8>,
+    pub(super) tip: GitOid,
     blob: GitOid,
     body: Vec<u8>,
-    objects: BTreeSet<GitOid>,
+    pub(super) objects: BTreeSet<GitOid>,
 }
 
 fn write_size(output: &mut Vec<u8>, mut size: usize) {
@@ -74,7 +74,7 @@ pub(super) fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
     output
 }
 
-fn increment(format: GitHashAlgorithm, parent: GitOid) -> Increment {
+pub(super) fn increment(format: GitHashAlgorithm, parent: GitOid) -> Increment {
     // This is the second blob in received_fixture's initial full pack. The
     // incremental pack transports only its REF-delta, tree and child commit.
     let mut base = vec![b'x'; 8192];
@@ -123,7 +123,7 @@ fn increment(format: GitHashAlgorithm, parent: GitOid) -> Increment {
     }
 }
 
-fn receive_increment(node: &OneNode, previous: GitOid, increment: &Increment) {
+pub(super) fn receive_increment(node: &OneNode, previous: GitOid, increment: &Increment) {
     let format = node.object_format;
     let limits = ReceiveLimits::default();
     let caps = format!("report-status object-format={}", format.as_str());
@@ -376,9 +376,12 @@ fn a_thin_pack_without_retained_base_history_falls_back_to_native_materializatio
             ..
         } = received_fixture(format, ExtraObject::None);
         node.shutdown().unwrap();
-        // A new process configuration has the durable selected objects but no
-        // custody of the original pack. Its subsequent thin push is real and
-        // valid; the cache must not pretend that its external base is present.
+        // Explicitly evict only disposable compressed custody. A cold service
+        // can now restore it, so a restart alone no longer removes the base.
+        #[cfg(unix)]
+        std::fs::remove_dir_all(scratch.0.join("received-pack-cache")).unwrap();
+        // Canonical objects remain available to validate the thin push. Its
+        // external base has no reusable representation in this cache.
         let config = NodeConfig::new(
             scratch.0.clone(),
             TenantId::from_bytes([0x62; 16]),

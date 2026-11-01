@@ -195,6 +195,7 @@ mod quarantine_validator;
 mod receive_refusal;
 mod receive_staging;
 mod received_pack;
+mod received_pack_restore;
 pub use received_pack::ReceivedPackReceipt;
 mod ssh;
 mod upload_visibility;
@@ -7606,7 +7607,8 @@ pub struct NodeConfig {
     /// grants disclosure; each request authenticates its own selected closure.
     pack_computation_cache: Arc<PackComputationCache>,
     /// Verified ingress representations. A hit never selects or authorizes
-    /// objects and survives only within this service's process lifetime.
+    /// objects. Optional disk custody must pass native and canonical integrity
+    /// verification before it can enter a new service's live cache.
     received_pack_cache: Arc<received_pack::ReceivedPackCache>,
     /// Bounded verified commit metadata reused by merge preparation. Every
     /// consumer still checks its current selected closure and logical budget.
@@ -8160,8 +8162,11 @@ impl NodeConfig {
     /// Bounds immutable received-pack retention shared by service children.
     ///
     /// The default is 128 MiB and each captured input is at most 64 MiB.
-    /// Zero disables capture and reuse. This disposable cache is independent
-    /// of deterministic pack computation memoization and stores no authority.
+    /// The same ceiling separately bounds disposable disk custody per
+    /// repository incarnation. Zero disables capture, reuse and custody I/O.
+    /// A new service revalidates persisted bytes against canonical storage
+    /// before reuse. This cache is independent of deterministic computation
+    /// memoization and stores no authority.
     #[must_use]
     pub fn with_received_pack_cache_bytes(mut self, max_bytes: usize) -> Self {
         self.received_pack_cache = Arc::new(received_pack::ReceivedPackCache::new(max_bytes));
@@ -10162,6 +10167,9 @@ impl OneNode {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
         self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
+        // Cold custody must be revalidated before the held-base proof is
+        // frozen; otherwise a restarted service could never reuse thin entries.
+        self.restore_received_pack_custody(materialized, &keys, &held, &limits, live)?;
         let mut held_bases = Vec::new();
         if write_profile.thin && !keys.is_empty() {
             // Only parents of retained selected entries need a held-kind proof.

@@ -1,6 +1,7 @@
-//! Bounded process-local custody of native-verified received packs.
+//! Bounded custody of native-verified received packs.
 //!
-//! This accelerator is not object authority and is never persisted. The receive
+//! This accelerator is not object authority. Optional durable records remain
+//! untrusted until cold native and canonical-fabric revalidation. The receive
 //! validator supplies every reconstructed native identity only after its normal
 //! graph validation succeeds. A serving caller must independently authorize an
 //! exact visible selection before asking for reuse. A hit contains precisely
@@ -16,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_git_object::ObjectType;
@@ -27,6 +28,7 @@ use fgit_pack::{
 use fgit_types::GitOid;
 
 mod composition;
+pub(crate) mod persistence;
 mod selective;
 mod spans;
 
@@ -164,6 +166,9 @@ struct State {
 pub struct ReceivedPackCache {
     max_bytes: usize,
     state: Arc<Mutex<State>>,
+    // A concurrent child can use the ordinary writer instead of duplicating
+    // one service's optional cold native reconstruction and canonical scans.
+    restoration: Mutex<()>,
 }
 
 impl ReceivedPackCache {
@@ -171,11 +176,31 @@ impl ReceivedPackCache {
         Self {
             max_bytes,
             state: Arc::new(Mutex::new(State::default())),
+            restoration: Mutex::new(()),
         }
     }
 
     pub(crate) const fn max_bytes(&self) -> usize {
         self.max_bytes
+    }
+
+    pub(crate) fn begin_restoration(&self) -> Option<MutexGuard<'_, ()>> {
+        self.restoration.try_lock().ok()
+    }
+
+    /// Miss-only disk filtering: only live, verified allocations suppress a
+    /// cold read. Eviction automatically makes that source eligible again.
+    pub(crate) fn source_fingerprints(&self) -> BTreeSet<[u8; 32]> {
+        self.state
+            .lock()
+            .map(|state| {
+                state
+                    .entries
+                    .iter()
+                    .map(|entry| entry.receipt.sha256)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn capture_limit(&self) -> usize {
@@ -331,7 +356,11 @@ impl ReceivedPackCache {
         };
         entry.binding = metadata_binding(&entry, deadline)?;
         check(deadline)?;
-        Ok(Some(PendingReceivedPack { entry, reservation }))
+        Ok(Some(PendingReceivedPack {
+            entry,
+            reservation,
+            persistence: None,
+        }))
     }
 
     #[cfg(test)]
@@ -510,11 +539,35 @@ impl Drop for Reservation {
 pub struct PendingReceivedPack {
     entry: Entry,
     reservation: Reservation,
+    persistence: Option<persistence::DurableStore>,
 }
 
 impl PendingReceivedPack {
+    pub(crate) fn with_persistence(mut self, store: persistence::DurableStore) -> Self {
+        self.persistence = Some(store);
+        self
+    }
+
+    /// Called only after final collision-checked immutable placement. Optional
+    /// cache I/O never changes placement success; an authoritative stop still
+    /// aborts the caller's remaining work and drops this unactivated receipt.
+    pub(crate) fn commit_with_deadline(
+        self,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), PackError> {
+        check(deadline)?;
+        if let Some(store) = &self.persistence {
+            store.persist(&self, deadline)?;
+        }
+        check(deadline)?;
+        self.commit();
+        Ok(())
+    }
+
     pub(crate) fn commit(self) {
-        let Self { entry, reservation } = self;
+        let Self {
+            entry, reservation, ..
+        } = self;
         reservation.commit(entry);
     }
 }

@@ -307,6 +307,10 @@ fn integrity_scan_matches_whole_object_verification_for_every_native_kind_and_fo
                 assert_eq!(receipt.identity(), original.identity());
                 assert_eq!(receipt.object_kind(), original.envelope().object_kind());
                 assert_eq!(receipt.payload_length(), original.payload().len() as u64);
+                assert_eq!(
+                    receipt.payload_commitment(),
+                    original.envelope().payload_commitment()
+                );
                 assert!(probes >= 4);
                 if !fixture.body.is_empty() {
                     assert!(

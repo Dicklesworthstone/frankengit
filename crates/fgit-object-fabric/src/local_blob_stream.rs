@@ -22,6 +22,7 @@ pub struct VerifiedObjectIntegrity {
     identity: GitOid,
     kind: ObjectKind,
     payload_length: u64,
+    payload_commitment: [u8; 32],
 }
 
 impl VerifiedObjectIntegrity {
@@ -38,6 +39,14 @@ impl VerifiedObjectIntegrity {
     #[must_use]
     pub const fn payload_length(self) -> u64 {
         self.payload_length
+    }
+
+    /// Strong commitment authenticated against every payload byte at exact EOF.
+    /// Unlike an unopened envelope's claim, this can be compared with another
+    /// independently verified representation of the same native object.
+    #[must_use]
+    pub const fn payload_commitment(self) -> [u8; 32] {
+        self.payload_commitment
     }
 }
 
@@ -137,6 +146,7 @@ impl LocalFilesystemFabric {
                         identity: stream.identity(),
                         kind: stream.envelope().object_kind(),
                         payload_length: stream.declared_length(),
+                        payload_commitment: stream.payload_commitment(),
                     });
                 }
                 Ok(_) => {}

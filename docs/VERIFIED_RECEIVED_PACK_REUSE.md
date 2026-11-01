@@ -1,7 +1,8 @@
 # Reuse verified received packs for full and incremental histories
 
 The network receive and upload paths share a bounded, immutable compressed
-representation inside one serving process (`frankengit-1tl9`). After pushes have
+representation and retain disposable compressed custody for later service
+restarts (`frankengit-1tl9`). After pushes have
 validated and placed their objects, a matching clone's pack-materialization
 step can reuse one original pack, join complete entry runs from several
 packs, or select individual verified entries without re-reading expanded blob
@@ -10,8 +11,9 @@ full push followed by compatible
 thin incremental pushes, and incremental fetches whose client already holds
 the verified external bases. Normal authorization and graph
 selection still run first; this is not a claim of an I/O-free whole fetch.
-The HTTP, SSH, and raw Git request children share this cache through their
-service configuration.
+The HTTP, SSH, and raw Git request children share the live cache through their
+service configuration. A newly created service configuration starts with an
+empty live cache and must revalidate persisted custody before using it.
 
 ## Selection and integrity
 
@@ -175,12 +177,75 @@ Selective search scratch is bounded by retained object membership, including
 alternative representations, under the same conservative metadata charge.
 Reader descriptors retain source allocations rather than duplicate zlib data.
 
-The cache is process-local and disposable. A newly started service rebuilds
-outgoing packs until it receives another eligible representation. Native
-imports still use the native construction path. A self-contained clone also
-needs a usable retained representation for every required base; a negotiated thin fetch can instead use its
-authorized client-held bases. This change does not claim restart-persistent
-reuse or completion of the large-history clone bead.
+Native imports still use the native construction path. A self-contained clone
+needs a usable retained representation for every required base; a negotiated
+thin fetch can instead use its authorized client-held bases. Persistence does
+not remove that dependency or the current selection and output limits.
+
+### Disposable custody across service restarts
+
+On Unix, validated received representations can be retained below
+`<storage-root>/received-pack-cache/v1`. The directory is separated by the
+repository's tenant, repository identity, incarnation, and native object format.
+Each scope uses 64 fixed slots and a single staging file; file contents carry
+the original pack and bounded identity/type/length hints. These files are
+derived cache data. They are not a canonical object source, authority root,
+retention root, or backup of missing objects. Removing them loses a reuse
+opportunity and leaves the native writer available.
+Other platforms retain the existing live-cache behavior and treat durable
+custody as unavailable.
+
+The writer applies the configured received-pack byte ceiling to the aggregate
+logical charge of the retained records and staging reservation. That charge
+includes raw bytes and conservative per-record and per-object metadata
+allowances; old slots are evicted before staging a replacement. The 64-slot
+bound does not multiply the configured allowance by 64. This is not a quota
+on filesystem allocation blocks or total repository storage.
+
+A cold fetch authenticates its repository basis and computes its permitted
+selection before considering these files. Stored hints first restrict which
+candidates are worth reading; they do not establish membership or native
+identity. Before promotion to the live cache, the node reparses the actual
+pack, verifies its native trailer, resolves and hashes its objects, and checks
+that the reconstructed identities, types and lengths exactly match the hints.
+It also verifies the corresponding canonical objects through the fabric,
+including their strong payload commitments. The selected objects and any
+permitted held bases must belong to the authenticated cumulative closure.
+Persisted bytes cannot supply a private or deleted-ref object merely because
+they once accompanied a public push.
+
+An external REF-delta base is read only when the same current selection or
+client-held proof permits it and the authenticated closure admits it. Its
+canonical bytes must pass full integrity verification before reconstruction.
+A restored thin representation still requires the negotiated thin profile and
+the current typed held-base proof before materialization; restoring its raw
+bytes alone cannot make it a self-contained response.
+
+An unavailable, truncated, corrupt, stale, out-of-scope, or over-budget cache
+candidate is a miss. It cannot repair a missing or corrupt canonical object;
+if that object is required by the fetch, ordinary materialization still refuses.
+Cancellation remains cancellation rather than turning into an optional miss.
+Zero received-pack budget disables both capture and cold reuse, including use
+of files already present. Re-enabling the budget allows intact eligible custody
+to be considered again.
+
+Cold revalidation performs real inflation and canonical integrity reads. It
+saves later representation planning, delta selection and recompression; it
+does not make the first fetch after restart free of object reads or establish
+a whole-clone speedup. The focused restart tests cover self-contained packs,
+composition after a thin push, and negotiated thin fetches in both native hash
+domains. This does not complete the large-history clone bead. The configured
+cache budget remains separate from total process RSS and whole-repository disk
+use.
+
+One cold pass shares its disk-inspection, inflated-program and native-resolution
+allowances across candidates, including unsuccessful candidates. The parser's
+resident inflation ceiling is the minimum of the cache allowance, receive
+expansion ceiling and selected upload ceiling. Raising only the upload limit
+cannot turn a small compressed cache into an unbounded resident parser. A
+parser failure spends the remaining optional allowance because the parser does
+not return a partial-work receipt. Exhausted optional work uses the ordinary
+writer; request cancellation still stops the request.
 
 ## Explicit representation receipt
 
@@ -233,6 +298,23 @@ Other cases cover unreachable extras, changed refs, stale preparation,
 filtered/shallow/incremental selections, client capabilities, independent readers,
 fresh-process-style reopening, and collision failures before and during
 immutable publication. Cache and transport cases also cover disabled retention.
+
+The cold-custody regressions in
+`crates/fgit-node/src/upload_visibility/tests/received_pack_reuse/restart.rs`
+close the receiving node and create a new `NodeConfig`, so the test cannot pass
+by retaining an `Arc` to the original live cache. They require both a
+`Received` receipt and byte-for-byte equality with the original delta-bearing
+ingress, then independently decode the selected native objects. They pair
+missing/corrupt custody with the permitted restored case, disable and re-enable
+the budget, remove or corrupt a canonical blob between graph selection and
+cold validation, and remove the only ref to private objects before reopening.
+Another case uses a relative node root without changing the process working
+directory. The external-base case independently cold-opens the complete and
+incremental fetches: the former must reconstruct the complete two-pack history,
+while the latter must reuse the original thin bytes against the client's
+authenticated held base. Native decoding checks both output object sets.
+These are authored behavioral regressions; the historical execution counts
+below predate this restart slice.
 
 The stock-client suite runs Git, HTTP, and SSH with received-pack reuse enabled
 and disabled, while disabling the independent computation cache in both arms.
@@ -322,6 +404,17 @@ bytes without that root, in both hash domains: **six cases**. Native IDs,
 bodies and complete inventories were checked. These source-bound results
 predate selective-entry reuse and do not execute native OneNode integration.
 
+During the durable-custody implementation, the actual received-pack component
+suite passed **86 tests**, including **12 new persistent-storage tests**, and
+the actual object-fabric stream/integrity suite passed **11 tests**. The latter
+checks the EOF-authenticated strong commitment for every native object kind in
+both hash domains. The complete current `fgit-node` production library and all
+**34 first-party dependencies** also passed pinned-compiler metadata checking
+against the real cached third-party closure and the published FrankenSQLite
+facade. Metadata checking is not linking or execution: the new native-node
+restart and cold-validator tests remain authored integration coverage, and no
+new whole-repository clone measurement is claimed here.
+
 Run the focused lanes with the pinned toolchain and sufficient build capacity:
 
 ```bash
@@ -332,6 +425,6 @@ cargo build --locked -p fgit-cli --bin fg
 FG_BIN="$PWD/target/debug/fg" bash scripts/e2e/suites/transport/received_pack_reuse.sh
 ```
 
-Full-history cold-clone measurements, native-import capture, and persistence
-across service restart remain separate work. Zero cache capacity is the runtime
-rollback and requires no canonical-state or storage migration.
+Full-history cold-clone measurements, native-import capture, and broader
+restart/transport qualification remain separate work. Zero cache capacity is
+the runtime rollback and requires no canonical-state migration.

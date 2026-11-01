@@ -19,6 +19,8 @@ use fgit_wire::{AnyGitOid, GitObjectFormat};
 use super::*;
 use crate::{ClosureSelectionSource, NodeConfig};
 
+mod received_pack_restore;
+
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct ScratchDirectory {
