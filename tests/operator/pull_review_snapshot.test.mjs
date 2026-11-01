@@ -20,11 +20,32 @@ for (const format of ['sha1', 'sha256']) test(`${format}: complete pinned review
   for (const [i, r] of p.requests.entries()) {
     assert.equal(r.method, 'GET'); assert.equal(r.body.length, 0); assert.equal(r.headers.authorization, `Bearer ${TOKEN}`);
     assert.equal(r.headers['idempotency-key'], undefined); assert.equal(r.headers.cookie, undefined);
+    assert.equal(r.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
     assert.equal(r.url.searchParams.get('render'), null);
     assert.equal(r.url.searchParams.get('expected_head'), i ? HEAD : null);
   }
   assert.equal(p.requests[2].url.searchParams.get('after'), person(11));
 });
+for (const format of ['sha1', 'sha256']) for (const state of ['open', 'merged']) {
+  test(`${format} ${state}: native raw wire OIDs become strictly qualified retained identities`, async t => {
+    const strip = value => JSON.parse(JSON.stringify(value), (key, item) =>
+      ['source_tip', 'target_tip', 'target_tip_before', 'base_tip', 'merge_commit', 'merge_base', 'candidate_commit'].includes(key)
+        && typeof item === 'string' ? item.slice(format.length + 1) : item);
+    const p = await peer(t, { format, state, handle(r, res, s) {
+      const native = r.url.pathname.endsWith('/reviews')
+        ? s.native.page(r.url.searchParams.get('after'), Number(r.url.searchParams.get('limit'))) : s.native.pull;
+      respond(res, strip(native)); return true;
+    } });
+    const captured = await capturePullReviews(p.selected, TOKEN, { pageLimit: 2 });
+    assert.equal(captured.pull.pull_request.data.source_tip, `${format}:${'a'.repeat(format === 'sha1' ? 40 : 64)}`);
+    assert.equal(captured.review_pages[0].reviews[0].candidate.candidate_commit,
+      `${format}:${'c'.repeat(format === 'sha1' ? 40 : 64)}`);
+    assert.deepEqual(validateReviewCapture(captured), captured);
+    const rawRetained = structuredClone(captured);
+    rawRetained.pull.pull_request.data.source_tip = rawRetained.pull.pull_request.data.source_tip.slice(format.length + 1);
+    assert.throws(() => validateReviewCapture(rawRetained), { code: 'invalid_review_oid' });
+  });
+}
 for (const state of ['open', 'closed', 'merged']) test(`inspect ${state} PR without inferring permission`, async t => {
   const p = await peer(t, { state }); const result = await capturePullReviews(p.selected, TOKEN);
   assert.equal(result.pull.pull_request.state, state); assert.equal(result.merge_authorized, false);

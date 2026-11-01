@@ -65,7 +65,7 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     credentials, incarnation = campaign.credentials(root, directory)
     header = credentials.read_text().splitlines()[0]
 
-    def grants(scopes: str, *, review_scopes: str = "outcomes-read,reviews-read,reviews-write") -> None:
+    def grants(scopes: str, *, review_scopes: str = "read,outcomes-read,pulls-read,reviews-read,reviews-write") -> None:
         pending = directory / "credentials.next"
         with pending.open("x", encoding="ascii") as out:
             out.write(header + "\n")
@@ -84,7 +84,7 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         token_paths[principal] = path
     token_path = token_paths[PRINCIPAL]
     server = HttpServer(campaign, root, credentials, "pull-" + fmt)
-    server.command.append("--allow-outcomes")
+    server.command.extend(["--allow-outcomes", "--allow-source"])
     script = ROOT / "scripts/remote_pull.mjs"
 
     def readback(number: int = 1) -> dict[str, Any]:
@@ -260,13 +260,8 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
                 *(["--confirm-merge-method", method] if action == "merge" else []),
                 *(["--known", str(known)] if known else [])], expected)
 
-        def candidate_submit(name: str, action: str, version: int = 0, *, expected: int = 0,
-                             method: str = "merge-commit", lose_bundle: bool = False) -> dict[str, Any]:
-            principal = MERGER if action == "merge" else REVIEWER
-            values = {**candidate_fields, **({"method": method, "required_reviewers": [REVIEWER]}
-                if action == "merge" else {"expected_version": str(version), "reason": "Reviewed exact native candidate"})}
-            slot, key = prepare(name, action, values, principal=principal,
-                                candidate_bundle=None if action == "withdraw" else bundle)
+        def candidate_finish(slot: Path, key: str, name: str, action: str, principal: str, expected: int = 0,
+                             *, method: str = "merge-commit", lose_bundle: bool = False) -> dict[str, Any]:
             sent = candidate_send(slot, key, action, principal, name + "-send", expected, method=method)
             require(sent["outcome"]["state"] == ("refused" if expected else "committed"),
                     "candidate action did not return the expected native terminal")
@@ -280,6 +275,15 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
                 require(answer["dispatched"] is False and answer["outcome"] == sent["outcome"],
                         "candidate recovery/replay uploaded again or changed the original outcome")
             return sent
+
+        def candidate_submit(name: str, action: str, version: int = 0, *, expected: int = 0,
+                             method: str = "merge-commit", lose_bundle: bool = False) -> dict[str, Any]:
+            principal = MERGER if action == "merge" else REVIEWER
+            values = {**candidate_fields, **({"method": method, "required_reviewers": [REVIEWER]}
+                if action == "merge" else {"expected_version": str(version), "reason": "Reviewed exact native candidate"})}
+            slot, key = prepare(name, action, values, principal=principal,
+                                candidate_bundle=None if action == "withdraw" else bundle)
+            return candidate_finish(slot, key, name, action, principal, expected, method=method, lose_bundle=lose_bundle)
 
         def exact_review(decision: str, version: int) -> list[dict[str, Any]]:
             rows = reviews()["reviews"]
@@ -325,7 +329,88 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         candidate_submit("wrong-method", "merge", expected=1, method="squash")
         require(reviews()["reviews"] == approved and readback() == before and refs() == after_refs,
                 "wrong merge method substituted a candidate or changed canonical state")
-        published = candidate_submit("reviewed-merge", "merge")
+
+        selection = {"endpoint": server.url, "scope": {k: v for k, v in scope.items() if k != "principal_id"},
+                     "number": "1", "expected_head": None}
+        review_script, candidate_script = ROOT / "scripts/fg_pull_review.mjs", ROOT / "scripts/fg_pull_candidate.mjs"
+        selection_path = directory / "review-selection.json"
+        selection_path.write_text(json.dumps(selection))
+        review_path = directory / "review-capture.json"
+        grants(full_grants, review_scopes="outcomes-read,reviews-write")
+        denied = campaign.node_command(review_script, ["capture", "--input", str(selection_path), "--token-file",
+            str(token_paths[REVIEWER]), "--output", str(directory / "review-denied.json")], 3, error_reply=True)
+        require(denied["status"] == 403 and denied["publication_attempted"] is False,
+                "review capture bypassed its independent read grants")
+        grants(full_grants)
+        captured = campaign.node_command(review_script, ["capture", "--input", str(selection_path), "--token-file",
+            str(token_paths[REVIEWER]), "--output", str(review_path)])
+        require(captured["publication_attempted"] is False and captured["merge_authorized"] is False
+                and captured["sha256"] == file_sha256(review_path), "review capture lost its retained identity")
+        snapshot = campaign.node_command(review_script, ["inspect", "--capture", str(review_path),
+            "--sha256", captured["sha256"]])
+        row = snapshot["review_pages"][0]["reviews"][0]
+        require(row["reviewer"] == REVIEWER and row["version"] == "4" and row["decision"] == "approve"
+                and row["candidate"]["candidate_commit"] == f"{fmt}:{objects['candidate']}",
+                "retained review snapshot differs from canonical Rust review")
+        bad_pin = campaign.node_command(review_script, ["inspect", "--capture", str(review_path),
+            "--sha256", "0" * 64], 2, error_reply=True)
+        require(bad_pin["publication_attempted"] is False, "wrong review pin claimed publication")
+        choice = directory / "review-choice.json"
+        choice.write_text(json.dumps({"action": "approve", "principal_id": REVIEWER,
+            "merge_base": objects["base"], "candidate_commit": objects["candidate"], "reason": "Retained native review"}))
+        drafted_path = directory / "review-draft.json"
+        campaign.node_command(review_script, ["draft", "--capture", str(review_path), "--sha256", captured["sha256"],
+            "--input", str(choice), "--output", str(drafted_path)])
+        drafted = json.loads(drafted_path.read_text())
+        require(drafted["scope"]["principal_id"] == REVIEWER and drafted["action"] == "approve"
+                and drafted["fields"] == {**candidate_fields, "expected_version": "4", "reason": "Retained native review"},
+                "review draft guessed a predecessor or changed the exact native subject")
+        campaign.facts[f"{fmt}_native_review_snapshot"] = True
+
+        candidate_input = directory / "candidate-input.json"
+        candidate_input.write_text(json.dumps({**selection, "method": "merge-commit", "metadata": {
+            "author": "Test <test@example.invalid>", "committer": "Test <test@example.invalid>", "timestamp": "1",
+            "message": "independently reviewed merge\n"}}))
+        package = directory / "candidate-package"
+        grants(full_grants, review_scopes="outcomes-read,pulls-read,reviews-read")
+        denied = campaign.node_command(candidate_script, ["capture", "--input", str(candidate_input), "--token-file",
+            str(token_paths[REVIEWER]), "--output-dir", str(directory / "candidate-denied")], 3, error_reply=True)
+        require(denied["status"] == 403 and denied["published"] is False,
+                "candidate acquisition bypassed its independent source-read grant")
+        grants(full_grants)
+        saved = campaign.node_command(candidate_script, ["capture", "--input", str(candidate_input), "--token-file",
+            str(token_paths[REVIEWER]), "--output-dir", str(package)])
+        require(saved["state"] == "clean" and saved["published"] is False
+                and saved["sha256"] == file_sha256(package / "manifest.json"), "native package is not independently pinned")
+        inspected_package = campaign.node_command(candidate_script, ["inspect", "--package", str(package),
+            "--sha256", saved["sha256"]])
+        native_capture = inspected_package["capture"]
+        require(native_capture["inspection"]["candidate_commit"] == objects["candidate"]
+                and native_capture["inspection"]["candidate_commit_body_hex"] == objects["candidate_body"].hex()
+                and native_capture["pull"]["snapshot_token"] == snapshot["pull"]["snapshot_token"],
+                "native candidate acquisition changed the exact commit or mixed authority snapshots")
+        bad_pin = campaign.node_command(candidate_script, ["inspect", "--package", str(package),
+            "--sha256", "0" * 64], 2, error_reply=True)
+        require(bad_pin["published"] is False, "wrong candidate pin claimed publication")
+        merge_choice = directory / "candidate-merge-choice.json"
+        merge_choice.write_text(json.dumps({"action": "merge", "principal_id": MERGER,
+            "candidate_commit": objects["candidate"], "required_reviewers": [REVIEWER], "method": "merge-commit"}))
+        merge_draft_path = directory / "candidate-merge-draft.json"
+        campaign.node_command(candidate_script, ["draft", "--package", str(package), "--sha256", saved["sha256"],
+            "--choices", str(merge_choice), "--output", str(merge_draft_path)])
+        merge_draft = json.loads(merge_draft_path.read_text())
+        require(merge_draft["fields"] == {**candidate_fields, "method": "merge-commit", "required_reviewers": [REVIEWER]}
+                and merge_draft["scope"]["principal_id"] == MERGER, "candidate draft changed the selected native command")
+        slot = directory / "staged-reviewed-merge.slot"
+        staged = campaign.node_command(candidate_script, ["stage", "--package", str(package), "--sha256", saved["sha256"],
+            "--choices", str(merge_choice), "--token-file", str(token_paths[MERGER]), "--request-dir", str(slot)])
+        require(staged["publication_attempted"] is False and staged["published"] is False
+                and staged["package_sha256"] == saved["sha256"]
+                and (slot / "candidate.bundle").read_bytes() == (package / "candidate.bundle").read_bytes()
+                and reviews()["reviews"] == approved and readback() == before and refs() == after_refs,
+                "offline staging changed the inspected bytes or published repository state")
+        campaign.facts[f"{fmt}_native_candidate_package"] = True
+        published = candidate_finish(slot, staged["key"], "reviewed-merge", "merge", MERGER)
         require(published["outcome"]["principal_id"] == MERGER
                 and published["publication"]["principal_id"] == MERGER
                 and published["publication"]["required_reviewers"] == [REVIEWER]
@@ -358,7 +443,8 @@ def main() -> None:
     require(not any(args.work.iterdir()) and args.work.stat().st_mode & 0o077 == 0, "empty private work directory required")
     campaign = OperatorCampaign(fg, node, args.work.resolve())
     summary: dict[str, Any] = {"complete": False, "facts": campaign.facts, "binary_sha256": file_sha256(fg),
-        "node_sha256": file_sha256(node), "entrypoint": "scripts/remote_pull.mjs", "oracle_pin": PIN,
+        "node_sha256": file_sha256(node), "entrypoint": "scripts/remote_pull.mjs",
+        "entrypoints": ["scripts/remote_pull.mjs", "scripts/fg_pull_review.mjs", "scripts/fg_pull_candidate.mjs"], "oracle_pin": PIN,
         "oracle_run": str(oracle_run), "artifacts": str(campaign.work),
         "non_claim": "Ten PR actions with a merge-commit candidate; not native squash success, full operator matrix, same-source qualification, TLS or deployment acceptance."}
 

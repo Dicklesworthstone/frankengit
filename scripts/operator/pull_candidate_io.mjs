@@ -133,6 +133,7 @@ export async function candidateRequest(address, token, operation, options = {}) 
     const abort = () => finish(new CandidateError('candidate_cancelled'));
     try {
       const headers = { Authorization: `Bearer ${token}`, Accept: 'multipart/mixed, application/json',
+        'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
         'Accept-Encoding': 'identity', 'Cache-Control': 'no-store', Connection: 'close' };
       if (selected.body !== undefined) {
         headers['Content-Type'] = selected.type; headers['Content-Length'] = String(Buffer.byteLength(selected.body));
