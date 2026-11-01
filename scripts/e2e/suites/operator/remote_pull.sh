@@ -7,7 +7,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init operator-remote-pull
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
-fge_context non_claim 'Six form-only PR actions in both hash domains; not candidate review/reviewed merge, every operator, TLS, deployment or same-source native qualification.'
+fge_context non_claim 'Ten PR actions in both hash domains with a merge-commit candidate; not native squash success, every operator, TLS, deployment or same-source native qualification.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
@@ -46,7 +46,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in pinned_git_fixture lifecycle_and_stale_twin discussion_and_original_recovery independent_outcome_grant fast_forward_and_code_grant owned_service_drained; do
+  for property in pinned_git_fixture lifecycle_and_stale_twin discussion_and_original_recovery independent_outcome_grant fast_forward_and_code_grant independent_review_grant candidate_review_and_stale_twin candidate_bundle_recovery reviewed_merge_and_method_twin owned_service_drained; do
     fge_assert_eq "OPERATOR-PULL-$format-$property" true "$(fact "${format}_$property")" "native PR $property"
   done
 done

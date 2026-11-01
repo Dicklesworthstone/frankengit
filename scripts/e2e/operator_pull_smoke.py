@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run form-only remote PR commands against native HTTP and canonical Rust reads.
+"""Run remote PR commands against native HTTP and canonical Rust reads.
 
 The existing pinned Git sandbox checks the source fixture. Git never supplies
-production behavior. Candidate review and reviewed merge are separate profiles.
+production behavior. Reviews and merges retain exact candidate/principal bounds.
 """
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 ORACLE = ROOT / "scripts/e2e/oracle/oracle.sh"
 PIN = "git-2.54.0"
 TOKEN = "c" * 64
+REVIEWER, MERGER = "44" * 16, "55" * 16
+TOKENS = {PRINCIPAL: TOKEN, REVIEWER: "e" * 64, MERGER: "f" * 64}
 FF_TARGET = "refs/heads/ff-base"
 
 
@@ -34,6 +36,7 @@ def check_fixture(campaign: OperatorCampaign, oracle_run: Path, source: Path, ob
         ("fsck", 0, ["fsck", "--full", "--strict", "--no-reflogs"]),
         ("ancestor", 0, ["merge-base", "--is-ancestor", objects["base"], objects["source"]]),
         ("diverged", 1, ["merge-base", "--is-ancestor", objects["target"], objects["source"]]),
+        ("candidate", 0, ["bundle", "verify", "../reviewed.bundle"]),
     ]:
         command = [str(ORACLE), "capture", PIN, str(oracle_run), str(relative), source.parent.name + "-" + label,
                    "--", *arguments]
@@ -53,6 +56,8 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     root, source = directory / "repository", directory / "source"
     objects = fixture(source, fmt)
     (source / FF_TARGET).write_text(objects["base"] + "\n", encoding="ascii")
+    bundle = directory / "reviewed.bundle"
+    bundle.write_bytes(objects["bundle"])
     check_fixture(campaign, oracle_run, source, objects)
     campaign.facts[f"{fmt}_pinned_git_fixture"] = True
     campaign.run("init", root, TENANT, REPOSITORY, fmt)
@@ -60,17 +65,24 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     credentials, incarnation = campaign.credentials(root, directory)
     header = credentials.read_text().splitlines()[0]
 
-    def grants(scopes: str) -> None:
+    def grants(scopes: str, *, review_scopes: str = "outcomes-read,reviews-read,reviews-write") -> None:
         pending = directory / "credentials.next"
         with pending.open("x", encoding="ascii") as out:
-            out.write(f"{header}\n{hashlib.sha256(TOKEN.encode()).hexdigest()} {PRINCIPAL} {scopes}\n")
+            out.write(header + "\n")
+            for principal, allowed in [(PRINCIPAL, scopes), (REVIEWER, review_scopes),
+                                       (MERGER, "outcomes-read,merges-write")]:
+                out.write(f"{hashlib.sha256(TOKENS[principal].encode()).hexdigest()} {principal} {allowed}\n")
         pending.replace(credentials)
 
     full_grants = "outcomes-read,pulls-read,pulls-write,merges-write"
     grants(full_grants)
-    token_path = directory / "token"
-    with token_path.open("x", encoding="ascii") as out:
-        out.write(TOKEN)
+    token_paths = {}
+    for principal, token in TOKENS.items():
+        path = directory / ("token" if principal == PRINCIPAL else "token-" + principal)
+        with path.open("x", encoding="ascii") as out:
+            out.write(token)
+        token_paths[principal] = path
+    token_path = token_paths[PRINCIPAL]
     server = HttpServer(campaign, root, credentials, "pull-" + fmt)
     server.command.append("--allow-outcomes")
     script = ROOT / "scripts/remote_pull.mjs"
@@ -108,13 +120,15 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
                     "source_tip": objects["source"], "target_tip": tip or objects["target"],
                     "title": name, "body": "Native PR operator " + fmt}
 
-        def prepare(name: str, action: str, values: dict[str, str], number: int = 1) -> tuple[Path, str]:
+        def prepare(name: str, action: str, values: dict[str, Any], number: int = 1, *,
+                    principal: str = PRINCIPAL, candidate_bundle: Path | None = None) -> tuple[Path, str]:
             input_path, slot = directory / (name + ".json"), directory / (name + ".slot")
             with input_path.open("x", encoding="utf-8") as out:
-                json.dump({"endpoint": server.url, "scope": scope, "number": str(number),
+                json.dump({"endpoint": server.url, "scope": {**scope, "principal_id": principal}, "number": str(number),
                            "action": action, "fields": values}, out)
             prepared = campaign.node_command(script, ["prepare", "--input", str(input_path), "--token-file",
-                                                     str(token_path), "--request-dir", str(slot)])
+                                                     str(token_paths[principal]), "--request-dir", str(slot),
+                                                     *(["--bundle", str(candidate_bundle)] if candidate_bundle else [])])
             require(prepared["publication_attempted"] is False, "offline prepare claimed publication")
             inspected = campaign.node_command(script, ["inspect", "--request-dir", str(slot)])
             require(inspected["intent"]["key"] == prepared["key"], "inspect changed the saved exact key")
@@ -215,8 +229,119 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(recover(slot, "ff-recover")["outcome"] == sent["outcome"] and refs() == after_refs,
                 "fast-forward recovery changed canonical refs")
         campaign.facts[f"{fmt}_fast_forward_and_code_grant"] = True
+
+        def reviews() -> dict[str, Any]:
+            page = json.loads(campaign.run("pr", "reviews", root, TENANT, REPOSITORY, "1",
+                                          "--trusted-local", "--object-format", fmt))
+            require(page["found"] is True and page["complete"] is True and page["node_closed"] is True,
+                    "native review stream is incomplete or did not close")
+            return page
+
+        inspected = json.loads(campaign.run("merge", "inspect", root, TENANT, REPOSITORY, TARGET, bundle,
+            "--trusted-local", "--source-ref", SOURCE, "--expected-source", objects["source"],
+            "--expected-target", objects["target"], "--merge-base", objects["base"],
+            "--expected-commit", objects["candidate"]))
+        require(inspected["candidate_commit"] == objects["candidate"] and inspected["node_closed"] is True
+                and inspected["published_to_repository"] is False and inspected["approval_granted"] is False,
+                "native inspection changed or authorized the untrusted candidate")
+        initial_reviews = reviews()
+        require(initial_reviews["reviews"] == [] and readback() == before and refs() == after_refs,
+                "candidate inspection/review read changed canonical state")
+        candidate_fields = {"pull_request_version": str(before["version"]),
+            "policy_epoch": str(initial_reviews["policy_epoch"]), "source_ref": SOURCE, "target_ref": TARGET,
+            "source_tip": objects["source"], "target_tip": objects["target"],
+            "merge_base": objects["base"], "candidate_commit": objects["candidate"]}
+
+        def candidate_send(slot: Path, key: str, action: str, principal: str, label: str, expected: int = 0,
+                           *, method: str = "merge-commit", known: Path | None = None) -> dict[str, Any]:
+            return campaign.node_command(script, ["send", "--request-dir", str(slot), "--token-file",
+                str(token_paths[principal]), "--confirm-key", key, "--confirm-candidate", objects["candidate"],
+                "--record", str(directory / (label + ".record")),
+                *(["--confirm-merge-method", method] if action == "merge" else []),
+                *(["--known", str(known)] if known else [])], expected)
+
+        def candidate_submit(name: str, action: str, version: int = 0, *, expected: int = 0,
+                             method: str = "merge-commit", lose_bundle: bool = False) -> dict[str, Any]:
+            principal = MERGER if action == "merge" else REVIEWER
+            values = {**candidate_fields, **({"method": method, "required_reviewers": [REVIEWER]}
+                if action == "merge" else {"expected_version": str(version), "reason": "Reviewed exact native candidate"})}
+            slot, key = prepare(name, action, values, principal=principal,
+                                candidate_bundle=None if action == "withdraw" else bundle)
+            sent = candidate_send(slot, key, action, principal, name + "-send", expected, method=method)
+            require(sent["outcome"]["state"] == ("refused" if expected else "committed"),
+                    "candidate action did not return the expected native terminal")
+            if lose_bundle:
+                (slot / "candidate.bundle").rename(slot / "candidate.retained-for-evidence")
+            observed = campaign.node_command(script, ["recover", "--request-dir", str(slot), "--token-file",
+                str(token_paths[principal]), "--record", str(directory / (name + "-recover.record"))], expected)
+            replay = candidate_send(slot, key, action, principal, name + "-replay", expected, method=method,
+                                    known=directory / (name + "-send.record"))
+            for answer in (observed, replay):
+                require(answer["dispatched"] is False and answer["outcome"] == sent["outcome"],
+                        "candidate recovery/replay uploaded again or changed the original outcome")
+            return sent
+
+        def exact_review(decision: str, version: int) -> list[dict[str, Any]]:
+            rows = reviews()["reviews"]
+            require(len(rows) == 1 and rows[0]["reviewer"] == REVIEWER and rows[0]["decision"] == decision
+                    and rows[0]["review_version"] == version and rows[0]["candidate_commit"] == objects["candidate"]
+                    and rows[0]["source_tip"] == objects["source"] and rows[0]["target_tip"] == objects["target"]
+                    and rows[0]["pull_request_version"] == before["version"]
+                    and rows[0]["policy_epoch"] == initial_reviews["policy_epoch"]
+                    and rows[0]["merge_base"] == objects["base"] and rows[0]["reviewer_is_opener"] is False,
+                    "native review lost its independent principal, predecessor or exact candidate")
+            require(readback() == before and refs() == after_refs, "review changed PR metadata or code refs")
+            return rows
+
+        candidate_submit("unapproved-merge", "merge", expected=1)
+        require(reviews()["reviews"] == [] and readback() == before and refs() == after_refs,
+                "missing independent approval changed canonical state")
+        approval_values = {**candidate_fields, "expected_version": "0", "reason": "Reviewed exact native candidate"}
+        slot, key = prepare("independent-review-grant", "approve", approval_values,
+                            principal=REVIEWER, candidate_bundle=bundle)
+        grants(full_grants, review_scopes="outcomes-read,reviews-read")
+        denied = candidate_send(slot, key, "approve", REVIEWER, "review-grant-denied", 3)
+        require(denied["publication"] is None and denied["error"]["status"] == 403
+                and reviews()["reviews"] == [] and readback() == before and refs() == after_refs,
+                "outcome/read grants published a candidate review")
+        grants(full_grants)
+        permitted = candidate_send(slot, key, "approve", REVIEWER, "review-grant-restored")
+        require(permitted["outcome"]["state"] == "committed", "restored review grant lost the exact original request")
+        approved = exact_review("approve", 1)
+        campaign.facts[f"{fmt}_independent_review_grant"] = True
+        candidate_submit("stale-changes", "request-changes", 0, expected=1)
+        require(reviews()["reviews"] == approved, "stale review predecessor replaced the current approval")
+        candidate_submit("current-changes", "request-changes", 1)
+        exact_review("request-changes", 2)
+        candidate_submit("withdraw", "withdraw", 2)
+        withdrawn = exact_review("withdraw", 3)
+        candidate_submit("withdrawn-merge", "merge", expected=1)
+        require(reviews()["reviews"] == withdrawn and readback() == before and refs() == after_refs,
+                "withdrawn approval authorized a merge or changed canonical state")
+        campaign.facts[f"{fmt}_candidate_review_and_stale_twin"] = True
+        candidate_submit("reapprove", "approve", 3, lose_bundle=True)
+        approved = exact_review("approve", 4)
+        campaign.facts[f"{fmt}_candidate_bundle_recovery"] = True
+        candidate_submit("wrong-method", "merge", expected=1, method="squash")
+        require(reviews()["reviews"] == approved and readback() == before and refs() == after_refs,
+                "wrong merge method substituted a candidate or changed canonical state")
+        published = candidate_submit("reviewed-merge", "merge")
+        require(published["outcome"]["principal_id"] == MERGER
+                and published["publication"]["principal_id"] == MERGER
+                and published["publication"]["required_reviewers"] == [REVIEWER]
+                and published["publication"]["method"] == "merge-commit",
+                "reviewed publication lost its independent submitter, reviewer or selected method")
+        merged = readback()
+        require(merged["state"] == "merged" and merged["version"] == before["version"] + 1
+                and merged["last_metadata_actor"] == before["last_metadata_actor"]
+                and merged["opened_by"] == PRINCIPAL and merged["data"] == before["data"]
+                and merged["merge"]["commit"] == objects["candidate"],
+                "reviewed merge lost its exact candidate, opener or preceding metadata")
+        require(refs() == {**after_refs, TARGET: objects["candidate"]} and readback(2)["state"] == "merged",
+                "reviewed merge changed a different ref, lost the fast-forward PR or missed the exact candidate")
+        campaign.facts[f"{fmt}_reviewed_merge_and_method_twin"] = True
     campaign.facts[f"{fmt}_owned_service_drained"] = True
-    print(f"OPERATOR_PULL {fmt}: native lifecycle, discussion, fast-forward, recovery, grants and drain", flush=True)
+    print(f"OPERATOR_PULL {fmt}: native lifecycle, discussion, exact reviews/merges, recovery, grants and drain", flush=True)
 
 
 def main() -> None:
@@ -235,7 +360,7 @@ def main() -> None:
     summary: dict[str, Any] = {"complete": False, "facts": campaign.facts, "binary_sha256": file_sha256(fg),
         "node_sha256": file_sha256(node), "entrypoint": "scripts/remote_pull.mjs", "oracle_pin": PIN,
         "oracle_run": str(oracle_run), "artifacts": str(campaign.work),
-        "non_claim": "Six form-only PR actions; not candidate review/reviewed merge, full operator matrix, same-source qualification, TLS or deployment acceptance."}
+        "non_claim": "Ten PR actions with a merge-commit candidate; not native squash success, full operator matrix, same-source qualification, TLS or deployment acceptance."}
 
     def stop(_signum: int, _frame: Any) -> None:
         raise InterruptedError("operator PR campaign interrupted; draining owned children")
