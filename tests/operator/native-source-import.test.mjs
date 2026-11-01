@@ -381,7 +381,7 @@ test('actual native fg verifies, imports and recovers one and 4096 refs in both 
     const f = await fixture(t, { format });
     // The node itself creates the storage root through its explicit init command.
     await rm(f.storage, { recursive: true });
-    const initialized = spawnSync(fg, ['init', f.storage, TENANT, REPO, '--object-format', format], { encoding: 'utf8', timeout: 30000 });
+    const initialized = spawnSync(fg, ['init', f.storage, TENANT, REPO, format], { encoding: 'utf8', timeout: 30000 });
     assert.equal(initialized.status, 0, initialized.stderr);
     await chmod(f.storage, 0o700); await writeFile(f.source, realBundle(format, count));
     const result = await importNativeSource(f.source, { ...f.config, fg, timeoutMs: 60000 });

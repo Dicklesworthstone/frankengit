@@ -76,7 +76,17 @@ async function initialize() {
     console.error(`JS verification requires Node ${expected}; running ${process.versions.node}`);
     process.exit(69);
   }
-  const files = (await readdir(resolve(root, scopes[scope]))).filter(name => name.endsWith('.test.mjs')).sort().map(name => join(root, scopes[scope], name));
+  // The supervisor's production-entrypoint tests live beside its scripts;
+  // scripts/tests alone silently omits them. Preserve the existing scope and
+  // profile while including both source-owned script-test locations.
+  const directories = [scopes[scope], ...(scope === 'scripts' ? ['scripts'] : [])];
+  const files = [];
+  for (const directory of directories) {
+    for (const name of await readdir(resolve(root, directory))) {
+      if (name.endsWith('.test.mjs')) files.push(join(root, directory, name));
+    }
+  }
+  files.sort();
   if (!files.length) throw new Error('JS verification discovered no test files');
   const revision = await metadata(['rev-parse', '--verify', 'HEAD']);
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(revision)) throw new Error('JS verification cannot bind a source revision');

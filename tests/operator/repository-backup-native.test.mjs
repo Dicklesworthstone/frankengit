@@ -68,6 +68,47 @@ test('verify-only operation never creates a restore record or destination', asyn
   assert.equal(result.native.destination_authority_published, false); assert.equal((await f.calls()).length, 1);
   assert.ok(!await exists(f.options.destination)); assert.ok(!await exists(f.options.approvalRecord));
 });
+
+const retainedCheckpoint = { transport_version: 2, retained_outcome_checkpoint_verified: true,
+  retained_outcome_checkpoint_root: '2:' + 'a'.repeat(64), retained_outcome_objects: 1, retained_outcome_payload_bytes: 8 };
+const verifyOnly = { operation: 'verify', destination: undefined, destinationInstance: undefined, approvalRecord: undefined };
+for (const checkpoint of [{ transport_version: 1, retained_outcome_checkpoint_verified: false,
+  retained_outcome_checkpoint_root: null, retained_outcome_objects: 0, retained_outcome_payload_bytes: 0 }, retainedCheckpoint]) {
+  test(`checkpoint receipt transport ${checkpoint.transport_version} preserves the exact native evidence`, async t => {
+    const f = await fixture(t); await f.mode({ checkpoint });
+    const result = await f.run(verifyOnly);
+    for (const [key, value] of Object.entries(checkpoint)) assert.equal(result.native[key], value);
+    assert.equal(result.native.signature_verified, true);
+    assert.equal(result.native.newest_checkpoint_verified, false);
+    assert.equal(result.native.destination_authority_published, false);
+  });
+}
+for (const [name, checkpoint, omitCheckpointField] of [
+  ['unknown transport', { ...retainedCheckpoint, transport_version: 3 }],
+  ['string transport', { ...retainedCheckpoint, transport_version: '2' }],
+  ['v1 verified checkpoint', { retained_outcome_checkpoint_verified: true }],
+  ['v1 non-null root', { retained_outcome_checkpoint_root: retainedCheckpoint.retained_outcome_checkpoint_root }],
+  ['v1 retained objects', { retained_outcome_objects: 1 }],
+  ['v1 retained bytes', { retained_outcome_payload_bytes: 1 }],
+  ['v2 unverified checkpoint', { ...retainedCheckpoint, retained_outcome_checkpoint_verified: false }],
+  ['v2 missing root', { ...retainedCheckpoint, retained_outcome_checkpoint_root: null }],
+  ['v2 wrong digest domain', { ...retainedCheckpoint, retained_outcome_checkpoint_root: '1:' + 'a'.repeat(40) }],
+  ['v2 malformed root', { ...retainedCheckpoint, retained_outcome_checkpoint_root: '2:' + 'A'.repeat(64) }],
+  ['v2 empty inventory', { ...retainedCheckpoint, retained_outcome_objects: 0 }],
+  ['v2 over-budget inventory', { ...retainedCheckpoint, retained_outcome_objects: 1000000 }],
+  ['v2 negative bytes', { ...retainedCheckpoint, retained_outcome_payload_bytes: -1 }],
+  ['v2 over-budget bytes', { ...retainedCheckpoint, retained_outcome_payload_bytes: 1000000 }],
+  ['missing required field', retainedCheckpoint, 'retained_outcome_payload_bytes'],
+  ['unknown checkpoint field', { ...retainedCheckpoint, unchecked_checkpoint_authority: true }],
+]) test(`checkpoint receipt refuses ${name} beside its permitted twin`, async t => {
+  const f = await fixture(t); await f.mode({ checkpoint, omitCheckpointField });
+  await assert.rejects(f.run(verifyOnly), code('backup_native_receipt_mismatch'));
+  assert.ok(!await exists(f.options.destination));
+  await f.mode({ checkpoint: retainedCheckpoint, omitCheckpointField: null });
+  const permitted = await f.run(verifyOnly);
+  assert.equal(permitted.native.retained_outcome_checkpoint_verified, true);
+  assert.equal(permitted.native.destination_authority_published, false);
+});
 for (const [mismatch, wrong] of [['tenant_id', '99'.repeat(16)], ['repository_id', '99'.repeat(16)], ['incarnation_id', '99'.repeat(16)],
   ['object_format', 'sha256'], ['head_generation', 1], ['archive_bytes', 1], ['sha256', '0'.repeat(64)], ['signature_verified', false],
   ['object_graph_verified', false], ['authority_import_verified', false], ['destination_authority_published', true], ['verification_instance', 12]]) {

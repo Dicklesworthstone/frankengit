@@ -28,9 +28,10 @@ async function fixture(t, failOperator = false) {
     await copyFile(join(repository, path), join(root, path));
   }
   await writeFile(join(root, 'tests/node-version'), process.versions.node + '\n');
-  const probe = (scope, extra = '') => `import test from 'node:test';import assert from 'node:assert/strict';import {writeFileSync} from 'node:fs';import vm from 'node:vm';test('${scope} fixture',()=>{${extra}assert.equal(process.env.FG_NATIVE_BIN,process.execPath);writeFileSync(new URL('../../${scope}-entered',import.meta.url),'executed');});\n`;
+  const probe = (scope, extra = '') => `import test from 'node:test';import assert from 'node:assert/strict';import {writeFileSync} from 'node:fs';import vm from 'node:vm';test('${scope} fixture',()=>{${extra}assert.equal(process.env.FG_NATIVE_BIN,process.execPath);writeFileSync(new URL('${scope === 'supervisor' ? '../' : '../../'}${scope}-entered',import.meta.url),'executed');});\n`;
   await writeFile(join(root, 'tests/operator/probe.test.mjs'), probe('operator', failOperator ? "assert.fail('planted operator failure');" : ''));
   await writeFile(join(root, 'scripts/tests/probe.test.mjs'), probe('scripts', "assert.equal(typeof vm.SourceTextModule,'function');"));
+  await writeFile(join(root, 'scripts/supervisor.test.mjs'), probe('supervisor', "assert.equal(typeof vm.SourceTextModule,'function');"));
   const environment = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
   for (const args of [['init', '-q'], ['add', 'scripts', 'tests'],
@@ -61,6 +62,7 @@ test('discovered operator suite executes both actual profile scopes and hands of
       assert.equal(result.records.find(row => row.acceptance_id === `OPERATOR-CONTRACT-${scope}-${suffix}`)?.result.status, 'pass');
     }
   }
+  assert.equal(await readFile(join(f.root, 'supervisor-entered'), 'utf8'), 'executed');
   assert.equal(result.records.at(-1).terminal.status, 'pass');
   f.complete();
 });
@@ -69,6 +71,7 @@ test('planted operator assertion fails the suite while the unchanged script scop
   const f = await fixture(t, true), result = await f.run();
   assert.notEqual(result.code, 0);
   assert.equal(await readFile(join(f.root, 'scripts-entered'), 'utf8'), 'executed');
+  assert.equal(await readFile(join(f.root, 'supervisor-entered'), 'utf8'), 'executed');
   assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-operator-001')?.result.status, 'fail');
   assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-scripts-001')?.result.status, 'pass');
   assert.equal(result.records.at(-1).terminal.status, 'fail');

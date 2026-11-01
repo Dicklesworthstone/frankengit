@@ -29,7 +29,9 @@ export async function fakeRepositoryBackup(configPath) {
     const base = { schema_version: 1, sha256, tenant_id: source.tenant_id, repository_id: source.repository_id, incarnation_id: source.incarnation_id,
       object_format: source.object_format, head_generation: BigInt(source.head_generation), objects: 2, references: 1, payload_bytes: 8,
       complete: true, scope: 'authority_and_selected_git_objects', object_graph_verified: true,
-      original_payload_commitments_verified: true, node_closed: true, signature_verified: false, routing_published: false, archive_bytes: bytes.length };
+      original_payload_commitments_verified: true, node_closed: true, signature_verified: false, routing_published: false, archive_bytes: bytes.length,
+      transport_version: 1, retained_outcome_checkpoint_verified: false, retained_outcome_checkpoint_root: null,
+      retained_outcome_objects: 0, retained_outcome_payload_bytes: 0, ...config.checkpoint };
     if (flags.has('--approval')) {
       // Real JS signature checks around FAKE archive/authority work: this is an
       // executable protocol peer, not evidence of native Rust verification.
@@ -71,6 +73,7 @@ export async function fakeRepositoryBackup(configPath) {
         resume_requested: Boolean(flags.get('--resume')), already_published: already };
       if (config.mode === 'restore-bad-report') result.signature_verified = false;
     }
+    if (typeof config.omitCheckpointField === 'string') delete result[config.omitCheckpointField];
     const text = json(result);
     process.stdout.write(config.mode === 'duplicate-report' ? text.replace('{', '{"complete":true,') : text);
   } catch (error) { process.stderr.write(JSON.stringify({ fake: true, error: error.message })); process.exitCode = 2; }

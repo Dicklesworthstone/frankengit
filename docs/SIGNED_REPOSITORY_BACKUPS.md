@@ -396,6 +396,15 @@ approval object explicitly reports that newest-checkpoint and complete-capsule
 verification are false. Approval receipt formatting does not recheck expiry
 after a confirmed publication.
 
+The JavaScript native adapter also validates the receipt's mandatory transport
+and retained-outcome checkpoint fields. Transport 1 reports no checkpoint, a
+null root and zero retained counters. Transport 2 reports a verified SHA-256
+checkpoint root and a nonempty retained inventory whose counters fit the
+authenticated archive bytes. Missing, unknown or inconsistent fields refuse;
+they are never filled in from caller input. Existing signature, artifact,
+instance, graph, publication and resume checks still apply. Retained-checkpoint
+verification does not establish newest-checkpoint selection or grant authority.
+
 The following commands select the added validation; this documentation does not
 assert that a particular checkout has passed them. Use the pinned toolchain and
 an isolated Cargo target directory. The native unit campaigns marked ignored

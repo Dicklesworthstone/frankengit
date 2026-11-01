@@ -27,7 +27,9 @@ Most cases still use explicit module or HTTP-schema peers. This wiring does
 not complete `x2mv.4.59`'s required live-server coverage of every production
 operator entrypoint, or replace its original acceptance conditions.
 
-Each invocation discovers all `.test.mjs` files in the selected directory and
+Each invocation discovers all `.test.mjs` files in the selected directory. The
+`scripts` scope includes both `scripts/tests/` and the root `scripts/` directory,
+where the workflow-supervisor entrypoint tests live. Each invocation
 runs TAP with two concurrent files, a five-minute per-test bound, and a ten-minute
 campaign bound. The 101-publication bootstrap test performs hundreds of durable
 filesystem operations. An exploratory 30-second bound timed it out on macOS;
