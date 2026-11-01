@@ -43,7 +43,7 @@ for format in sha1 sha256; do
   fge_assert_eq "OPERATOR-ISSUE-$format-005" true "$(fact "${format}_owned_service_drained")" 'native listener drains every accepted transport'
   fge_assert_eq "OPERATOR-ISSUE-$format-006" true "$(fact "${format}_forge_all_actions_and_recovery")" 'shipped IssueClient performs every forge mutation with canonical readback and original-key recovery'
   fge_assert_eq "OPERATOR-ISSUE-$format-007" true "$(fact "${format}_forge_stale_and_grant_twins")" 'forge stale preflight and denied write preserve state; exact retry commits after restored grant'
-  fge_assert_eq "OPERATOR-ISSUE-$format-008" true "$(fact "${format}_forge_reads_and_snapshot_refusal")" 'forge list/history/search preserve native pages and reject a moved snapshot'
+  fge_assert_eq "OPERATOR-ISSUE-$format-008" true "$(fact "${format}_forge_retained_reads_and_unknown_pin_refusal")" 'forge list/history/search preserve native pages and retained history; unknown pins refuse'
 done
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" operator-issue-summary; fi
 if [ -f "$WORK/campaign/commands.jsonl" ]; then fge_artifact "$WORK/campaign/commands.jsonl" native-and-operator-command-journal; fi

@@ -164,14 +164,19 @@ def forge_case(campaign: OperatorCampaign, server: HttpServer, directory: Path, 
             and search["pages"][-1]["issues"][0] == page["issue"], "forge search lost a zero-hit continuation")
     require(canonical("2") == page, "forge reads changed canonical state")
     campaign.issue(root, fmt, 10, "forge-cursor-successor", "move the repository snapshot")
-    moved = command("show", ["--number", "2", "--after", "3", "--expected-head", continuation["expected_head"]],
-                    2, error_reply=True)
-    require(moved["state"] == "read_incomplete" and moved["http_status"] == 409 and "pages" not in moved,
-            "moved forge snapshot returned an apparently complete prefix")
+    retained = command("show", ["--number", "2", "--limit", "100", "--after", "3",
+                                "--expected-head", continuation["expected_head"]])
+    require(retained["complete"] is True and retained["snapshot_token"] == continuation["expected_head"]
+            and retained["pages"][0]["events"] == native_events[3:],
+            "ordinary publication changed the retained forge history")
+    unknown = command("show", ["--number", "2", "--after", "3", "--expected-head", "alg:2:" + "00" * 32],
+                      2, error_reply=True)
+    require(unknown["state"] == "read_incomplete" and unknown["http_status"] == 409 and "pages" not in unknown,
+            "unknown forge snapshot returned an apparently complete prefix")
     fresh = command("show", ["--number", "2", "--limit", "100"])
     require(fresh["complete"] is True and fresh["pages"][0]["events"] == native_events,
             "fresh forge snapshot did not preserve canonical events")
-    campaign.facts[f"{fmt}_forge_reads_and_snapshot_refusal"] = True
+    campaign.facts[f"{fmt}_forge_retained_reads_and_unknown_pin_refusal"] = True
 
 
 def run_case(campaign: OperatorCampaign, fmt: str) -> None:
@@ -302,7 +307,7 @@ def run_case(campaign: OperatorCampaign, fmt: str) -> None:
         campaign.facts[f"{fmt}_independent_outcome_grant"] = True
         forge_case(campaign, server, directory, root, fmt, token_path, grants, canonical)
     campaign.facts[f"{fmt}_owned_service_drained"] = True
-    print(f"OPERATOR_ISSUE {fmt}: real CLI/HTTP/native readback, all actions, stale refusal, recovery and drain", flush=True)
+    print(f"OPERATOR_ISSUE {fmt}: both real CLI/HTTP/native paths, all supported actions, recovery, retained reads and drain", flush=True)
 
 
 def main() -> None:

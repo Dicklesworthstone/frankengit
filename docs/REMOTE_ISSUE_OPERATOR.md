@@ -150,7 +150,8 @@ The discovered `scripts/e2e/suites/operator/remote_issue.sh` campaign additional
 runs both `remote_issue.mjs` and this command against an actual prebuilt native
 HTTP listener in SHA-1 and SHA-256. It checks all supported mutation actions,
 original-record status/retry, Rust canonical readback, independent grants,
-list/history/search continuation, moved-snapshot refusal and owned service drain.
+list/history/search continuation, retained history after publication, unknown-pin
+refusal and owned service drain.
 It requires the repository's pinned Node and an explicit `FG_BIN`; the captured
 binary digest identifies the executable used. An older executable is diagnostic
 evidence only. This bounded campaign does not cover every operator entrypoint,
