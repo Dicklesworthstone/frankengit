@@ -1,6 +1,7 @@
 // A real HTTP response-schema peer, not GitHub or a native admission engine.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { listenForFetch } from '../fetch-peer.mjs';
 export const REPO='acme/project', TOKEN='github_pat_test', AT='2026-10-01T12:00:00Z';
 export const ACTOR={id:7,login:'alice'}, SOURCE={id:123,full_name:REPO};
 export function rawPull(n=9){return {id:900+n,number:n,html_url:`https://github.com/${REPO}/pull/${n}`,title:`Change ${n}`,
@@ -43,7 +44,7 @@ export async function githubPeer(t,{pulls=[9],discussions=1,reviews=1,inlines=1,
     }catch(e){res.writeHead(500,{'content-type':'application/json'});res.end(JSON.stringify({error:e.message}));}
   });
   server.on('connection',s=>{sockets.add(s);s.on('close',()=>sockets.delete(s));});
-  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  await listenForFetch(server);
   const origin=`http://127.0.0.1:${server.address().port}`;
   let closed=false;const close=async()=>{if(closed)return;closed=true;for(const s of sockets)s.destroy();await new Promise(r=>server.close(r));};
   t.after(close);

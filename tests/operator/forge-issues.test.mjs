@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { runIssueOperation, issueOperatorOptions } from '../../scripts/lib/forge-issue-operator.mjs';
 import { issueArguments } from '../../scripts/forge_issues.mjs';
 import { operatorJson } from '../../scripts/lib/forge-operator-io.mjs';
+import { listenForFetch } from '../fetch-peer.mjs';
 
 const tenant = '11'.repeat(16), repository = '22'.repeat(16), token = 'ab'.repeat(32);
 const actor = '33'.repeat(16), snapshot = 'alg:2:' + '12'.repeat(32);
@@ -81,7 +82,7 @@ async function fixture(t) {
     if (f.mode === 'bad-reply') wire.number = 2;
     respond(wire.outcome === 'committed' ? 200 : 409, wire);
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await listenForFetch(server);
   f.href = `http://127.0.0.1:${server.address().port}/repo/ui/issues/`;
   f.options = (operation = 'open', record = join(root, 'request.json')) => ({ operation, href: f.href, tenant, repository, tokenFile,
     record, ...(operation === 'open' ? { number: 1, expectedVersion: 0, fields: { title: 'Real request', body: 'private draft' } } : {}) });
@@ -181,8 +182,10 @@ test('caller mutation cannot replace snapshotted fields or target', async t => {
   await runIssueOperation(options); assert.equal(f.row.body, 'private draft');
 });
 test('redirect is refused without forwarding credentials or a mutation', async t => {
-  const f = await fixture(t); f.mode = 'redirect'; await assert.rejects(runIssueOperation(f.options()));
-  assert.equal(f.calls.length, 1); assert.equal(mutations(f).length, 0);
+  const f = await fixture(t); f.mode = 'redirect'; let rejected;
+  await assert.rejects(runIssueOperation(f.options()), error => { rejected = error; return true; });
+  assert.equal(f.calls.length, 1, `peer=${f.href} rejection=${rejected.message} cause=${rejected.cause?.message}`);
+  assert.equal(mutations(f).length, 0);
 });
 test('cancellation after remote publication retains original responsibility', async t => {
   const f = await fixture(t), stop = new AbortController(); f.mode = 'wait'; f.onMutation = () => setTimeout(() => stop.abort(), 5);
