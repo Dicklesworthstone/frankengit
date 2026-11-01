@@ -50,6 +50,15 @@ When `CARGO_BUILD_JOBS` is set, native tool builds pass it explicitly as Cargo
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
 
+The product `e2e` lane also discovers the operator module suite at
+[`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh).
+It reuses the [pinned JavaScript verifier](LOCAL_JS_VERIFICATION.md) for both
+operator and script tests and forwards the prebuilt `fg` to their existing
+native child cases. This is module coverage with explicitly identified native
+cells; it does not establish the full live-server operator matrix in
+`x2mv.4.59`. Missing prerequisites, failed profiles and empty TAP are non-pass;
+optional oracle skips remain skips rather than native compatibility evidence.
+
 In the pre-implementation repository, `docs`, `constitution`, and `fast` are runnable. `full` and `release` deliberately return exit code 3 with a typed dormant-gate refusal; they must not produce a false green status. As implementation grows, each lane delegates to Rust `xtask`/checker subcommands; shell remains a thin portable dispatcher.
 
 Activation is controlled by FG-091's exact suite manifest, not by a minimum script count. For the selected profile, the independent expected IDs must equal the scripts discovered, started, completed, and passed. Each required ID also names exactly one active owning Bead, and FG-091 must reach the complete owner set through blocking dependencies; dependency rewiring cannot silently detach a campaign. Missing, duplicate, unregistered, zero-run, skipped, unsupported, filtered, ignored, timed-out, malformed-log, stale-revision, wrong-profile, or unreachable-owner required entries keep the lane non-green, and first-attempt failures remain in the evidence.

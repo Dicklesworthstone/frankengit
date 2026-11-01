@@ -14,6 +14,19 @@ node scripts/verify_js.mjs operator
 node scripts/verify_js.mjs scripts
 ```
 
+The discovered suite
+[`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh)
+calls the existing `operator` and `scripts` profiles. `./scripts/verify.sh e2e`
+selects it alongside the browser module suite and supplies its once-built `fg`.
+The suite forwards that binary as `FG_NATIVE_BIN`, enabling the existing native
+bundle/import/backup/recovery tests that otherwise skip. An absent Node or `fg`
+is a non-pass disposition. Each scope retains complete TAP and the shared
+profile's source/runtime/containment header; empty, incomplete or failing TAP
+cannot pass. Optional oracle skips remain visible and earn no coverage credit.
+Most cases still use explicit module or HTTP-schema peers. This wiring does
+not complete `x2mv.4.59`'s required live-server coverage of every production
+operator entrypoint, or replace its original acceptance conditions.
+
 Each invocation discovers all `.test.mjs` files in the selected directory and
 runs TAP with two concurrent files, a five-minute per-test bound, and a ten-minute
 campaign bound. The 101-publication bootstrap test performs hundreds of durable
