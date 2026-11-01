@@ -34,6 +34,7 @@ text, tool argument, or annotation can widen the launch grants.
 
 The write group exposes `frankengit_issue_open`, `frankengit_issue_edit`,
 `frankengit_issue_close`, `frankengit_issue_reopen`,
+`frankengit_issue_lock`, `frankengit_issue_unlock`,
 `frankengit_issue_comment`, `frankengit_issue_append_comment`,
 `frankengit_issue_assign` and `frankengit_issue_unassign`. Each requires a positive
 `number` and `idempotency_key`. All except the explicit append tool require an
@@ -44,7 +45,26 @@ Opening requires version `"0"`, `title`, and an explicit `body` (possibly empty)
 Other exact-version actions require a positive, nonexhausted predecessor. Editing
 accepts one or more of `title`, `body`, and `labels`; omitted fields survive,
 `body: ""` clears the body, and `labels: []` clears labels. Commenting requires
-nonblank body text. Close/reopen accept none of those content fields.
+nonblank body text. Close/reopen/lock/unlock accept none of those content fields.
+
+Lock and unlock require the existing `--allow-issue-writes` launch grant,
+`number`, exact positive `expected_version`, and original `idempotency_key`.
+No new permission or payload field is implied. They work on open or closed
+issues; close/reopen, field edits and assignments preserve the lock. Both strict
+and append comments refuse new publication while locked. Repeating the current
+lock state with a fresh key refuses `ProtectedRefTransitionDenied`; a stale
+predecessor refuses `EvidenceStale`.
+
+```json
+{"jsonrpc":"2.0","id":"lock-attempt-1","method":"tools/call","params":{"name":"frankengit_issue_lock","arguments":{"number":"7","expected_version":"5","idempotency_key":"lock-issue-7-v6"}}}
+```
+
+Use a version obtained from the issue's current snapshot. List/show results add
+boolean `locked`, initially `false` in histories without a lock action, and
+timelines retain payloadless `lock` and `unlock` actions. An identical retry
+returns the original terminal result even after the lock changes. Previously
+committed comments still recover their commit while locked; previously refused
+comments keep their refusal after unlocking. Read current state separately.
 
 `frankengit_issue_append_comment` requires only `number`, `body`, and
 `idempotency_key`; `expected_version` is rejected. Use it to add discussion to an

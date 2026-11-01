@@ -19,6 +19,8 @@ pub(super) fn is_tool(name: &str) -> bool {
             | "frankengit_issue_edit"
             | "frankengit_issue_close"
             | "frankengit_issue_reopen"
+            | "frankengit_issue_lock"
+            | "frankengit_issue_unlock"
             | "frankengit_issue_comment"
             | "frankengit_issue_append_comment"
             | "frankengit_issue_assign"
@@ -31,6 +33,8 @@ pub(super) fn tools() -> Vec<Tool> {
         ("frankengit_issue_edit", "Replace only supplied issue fields at an exact positive version. Omitted fields survive; empty body or labels explicitly clears them."),
         ("frankengit_issue_close", "Close an issue at an exact positive version. A stale version is a canonical refusal, never a latest-version retry."),
         ("frankengit_issue_reopen", "Reopen a closed issue at an exact positive version. Requires the original stable key on retry."),
+        ("frankengit_issue_lock", "Lock comments on an open or closed issue at an exact positive version. Both strict and append comments refuse while locked; metadata edits and state changes remain available."),
+        ("frankengit_issue_unlock", "Unlock comments on an open or closed issue at an exact positive version. Retry the identical command and original key after an uncertain response."),
         ("frankengit_issue_comment", "Append literal comment text at an exact positive issue version. Replaying the identical command and key never duplicates the comment."),
         ("frankengit_issue_append_comment", "Append literal comment text to an existing issue without expected_version, even after independent issue edits. Retry the identical number, body and original key to recover the same outcome without a duplicate comment."),
         ("frankengit_issue_assign", "Add 1..16 principal IDs to an issue's metadata assignments at an exact version, preserving other assignees. Assignment grants no access or membership."),
@@ -188,6 +192,8 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
         }),
         "frankengit_issue_close" => IssueAction::Close,
         "frankengit_issue_reopen" => IssueAction::Reopen,
+        "frankengit_issue_lock" => IssueAction::Lock,
+        "frankengit_issue_unlock" => IssueAction::Unlock,
         "frankengit_issue_comment" => IssueAction::Comment {
             body: common::body(args, "body")?.ok_or(ToolError::invalid("body_required"))?,
         },
@@ -304,6 +310,65 @@ mod tests {
             unreachable!()
         };
         args
+    }
+    #[test]
+    fn lock_tools_declare_only_exact_version_inputs_and_reject_payloads() {
+        for (name, action) in [
+            ("frankengit_issue_lock", IssueAction::Lock),
+            ("frankengit_issue_unlock", IssueAction::Unlock),
+        ] {
+            assert!(is_tool(name));
+            let tool = tools().into_iter().find(|tool| tool.name == name).unwrap();
+            let schema = tool.schema.object().unwrap();
+            assert_eq!(schema["additionalProperties"], Value::Bool(false));
+            let properties = schema["properties"].object().unwrap();
+            assert_eq!(properties.len(), 3);
+            for field in ["number", "expected_version", "idempotency_key"] {
+                assert!(properties.contains_key(field));
+            }
+            assert_eq!(
+                schema["required"],
+                Value::Array(vec![
+                    text("number"),
+                    text("expected_version"),
+                    text("idempotency_key")
+                ])
+            );
+            let command = parse(name, &base("7")).unwrap();
+            assert_eq!(command.action, action);
+            assert_eq!(
+                command.expected_version,
+                fgit_forge::ExpectedVersion::Exactly(
+                    fgit_forge::AggregateVersion::try_new(7).unwrap()
+                )
+            );
+            for version in [
+                "0",
+                "01",
+                "-1",
+                "18446744073709551615",
+                "18446744073709551616",
+            ] {
+                assert!(parse(name, &base(version)).is_err(), "{name}: {version}");
+            }
+            let mut missing = base("7");
+            missing.remove("expected_version");
+            assert!(parse(name, &missing).is_err());
+            for field in [
+                "principal",
+                "repository",
+                "storage",
+                "body",
+                "title",
+                "labels",
+                "assignees",
+                "locked",
+            ] {
+                let mut injected = base("7");
+                injected.insert(field.into(), text("untrusted"));
+                assert!(parse(name, &injected).is_err(), "{name}: {field}");
+            }
+        }
     }
     #[test]
     fn edits_preserve_omissions_and_make_empty_replacements_explicit() {

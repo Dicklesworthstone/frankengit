@@ -94,6 +94,83 @@ test('comment selection requires no issue version; preparation does not publish'
   assert.ok(h.elements['prepared-summary'].textContent.includes('<svg onload=alert(1)>'));
   assert.equal(h.elements['prepare-change'].disabled, true); assert.equal(h.elements['send-change'].disabled, false);
 });
+for (const lifecycle of ['open', 'closed']) test(`locked ${lifecycle} issue blocks comments and prepares an exact unlock`, async () => {
+  const events = [...history().events, { version: 2, actor, action: { name: 'lock' } }];
+  if (lifecycle === 'closed') events.push({ version: 3, actor, action: { name: 'close' } });
+  const issue = state(1, { version: events.length, state: lifecycle, locked: true });
+  const h = harness(call => json(call.url.includes('/issues?') ? page({ issues: [issue] }) : history({ issue, events })));
+  await h.connect(); assert.match(h.elements['issue-content'].textContent, /locked/);
+  await h.read(1);
+  assert.ok(h.elements['issue-content'].textContent.includes(`${lifecycle} · locked`));
+  assert.equal(buttons(h.elements['issue-content']).find(b => b.textContent === 'Comment').disabled, true);
+  click(h.elements['issue-content'], 'Comment'); assert.match(h.elements['issue-status'].textContent, /locked/);
+  h.elements['change-number'].value = '1'; h.elements['change-action'].value = 'append-comment';
+  h.elements['change-action'].fire('change');
+  assert.equal(h.elements['change-body'].disabled, true); assert.equal(h.elements['prepare-change'].disabled, true);
+  await h.prepare(); assert.equal(h.client.pending, null); assert.equal(h.calls.length, 2);
+  click(h.elements['issue-content'], 'Edit issue');
+  assert.equal(h.elements['change-body'].disabled, false); assert.equal(h.elements['prepare-change'].disabled, false);
+  click(h.elements['issue-content'], lifecycle === 'open' ? 'Close issue' : 'Reopen issue');
+  assert.equal(h.elements['change-version'].value, String(events.length));
+  click(h.elements['issue-content'], 'Unlock discussion');
+  assert.equal(h.elements['change-version'].disabled, false); assert.equal(h.elements['change-version'].required, true);
+  assert.equal(h.elements['change-version'].value, String(events.length)); assert.equal(h.elements['body-field'].hidden, true);
+  await h.elements['issue-change'].fire('submit');
+  assert.equal(h.client.pending.action, 'unlock'); assert.deepEqual(h.client.pending.fields, {});
+  assert.equal(h.client.pending.body, `expected_version=${events.length}`); assert.equal(h.calls.length, 2);
+});
+test('legacy unlocked issue exposes lock and sends its prepared exact-version request', async () => {
+  const h = harness(call => json(call.method === 'POST' ? committed({ action: 'lock', expected_version: 1 })
+    : call.url.includes('/issues?') ? page() : history()));
+  await h.connect(); await h.read(1);
+  assert.ok(h.elements['issue-content'].textContent.includes('open · unlocked'));
+  assert.equal(buttons(h.elements['issue-content']).find(b => b.textContent === 'Comment').disabled, false);
+  click(h.elements['issue-content'], 'Lock discussion'); await h.elements['issue-change'].fire('submit');
+  assert.equal(h.client.pending.action, 'lock'); assert.deepEqual(h.client.pending.fields, {});
+  const key = h.client.pending.key;
+  h.elements['send-change'].fire('click'); await settled();
+  assert.ok(h.calls.at(-1).url.endsWith('/issues/1/lock')); assert.equal(h.calls.at(-1).body, 'expected_version=1');
+  assert.equal(h.calls.at(-1).headers['Idempotency-Key'], key); assert.equal(h.client.pending, null);
+  assert.match(h.elements['issue-status'].textContent, /^Committed/);
+});
+test('newly observed lock does not suppress recovery of an already prepared comment', async () => {
+  const issue = state(1, { version: 2, locked: true });
+  const detail = history({ issue, events: [...history().events, { version: 2, actor, action: { name: 'lock' } }] });
+  const h = harness(call => json(call.method === 'POST' ? committed() : call.url.includes('/issues?') ? page() : detail));
+  await h.connect(); await h.prepare(); const key = h.client.pending.key, body = h.client.pending.body;
+  await h.read(1);
+  assert.equal(h.elements['prepare-change'].disabled, true); assert.equal(h.elements['change-body'].disabled, true);
+  assert.equal(h.elements['send-change'].disabled, false); assert.equal(h.elements['check-outcome'].disabled, false);
+  h.elements['send-change'].fire('click'); await settled();
+  assert.equal(h.calls.at(-1).headers['Idempotency-Key'], key); assert.equal(h.calls.at(-1).body, body);
+  assert.equal(h.client.pending, null);
+});
+for (const mode of ['missing locked continuation', 'explicit locked continuation', 'legacy unlocked continuation']) {
+  test(`${mode} preserves the original snapshot lock contract`, async () => {
+    const locked = mode !== 'legacy unlocked continuation';
+    const issue = state(1, { version: 21, ...(locked ? { locked: true } : {}) });
+    const events = [...history().events, ...Array.from({ length: 20 }, (_, i) => ({ version: i + 2, actor,
+      action: i === 0 && locked ? { name: 'lock' } : { name: 'edit', title: issue.title } }))];
+    const h = harness(call => {
+      if (call.url.includes('/issues?')) return json(page({ issues: [issue] }));
+      const after = Number(new URL(call.url).searchParams.get('after_version')), snapshot = { ...issue };
+      if (after && mode === 'missing locked continuation') delete snapshot.locked;
+      return json(history({ issue: snapshot, after_version: after, events: events.slice(after, after + 20),
+        next_after_version: after === 0 ? 20 : null }));
+    });
+    await h.connect(); await h.read(1);
+    click(h.elements['issue-paging'], 'Next history page'); await settled();
+    assert.equal(new URL(h.calls.at(-1).url).searchParams.get('expected_head'), head);
+    assert.equal(new URL(h.calls.at(-1).url).searchParams.get('after_version'), '20');
+    if (mode === 'missing locked continuation') {
+      assert.equal(h.elements['issue-content'].textContent, '');
+      assert.match(h.elements['issue-status'].textContent, /lock state changed within the same snapshot/);
+    } else {
+      assert.ok(h.elements['issue-content'].textContent.includes(`open · ${locked ? 'locked' : 'unlocked'}`));
+      assert.match(h.elements['issue-status'].textContent, /Read complete/);
+    }
+  });
+}
 test('explicit send publishes the exact prepared draft even after editing the form again', async () => {
   const h = harness(call => json(call.method === 'GET' ? page() : committed())); await h.connect();
   await h.prepare('append-comment', { body: 'original' }); h.elements['change-body'].value = 'changed later';

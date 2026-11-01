@@ -114,6 +114,8 @@ fn action(value: &IssueAction, render: Option<super::rendered::Rendering>) -> St
         }
         IssueAction::Close => "{\"name\":\"close\"}".to_owned(),
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
+        IssueAction::Lock => "{\"name\":\"lock\"}".to_owned(),
+        IssueAction::Unlock => "{\"name\":\"unlock\"}".to_owned(),
         IssueAction::Assign { assignees: values } | IssueAction::Unassign { assignees: values } => {
             format!(
                 "{{\"name\":{},\"assignees\":{}}}",
@@ -200,7 +202,7 @@ fn snapshot(
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{}{},\"labels\":{},",
-            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{}}}"
+            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{},\"locked\":{}}}"
         ),
         value.number.get(),
         value.version.get(),
@@ -222,7 +224,8 @@ fn snapshot(
         quote(&value.opened_by.to_string()),
         quote(&value.last_actor.to_string()),
         value.comments,
-        assignees(&value.assignees)
+        assignees(&value.assignees),
+        value.locked
     ))
 }
 fn head_token(head: RepositoryAuthorityHeadId) -> String {
@@ -392,6 +395,56 @@ pub(super) fn history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn locked_snapshots_keep_state_independent_and_actions_have_no_rendered_body() {
+        use fgit_forge::ExpectedVersion;
+        use fgit_forge::event::issue::{IssueCommand, apply_event};
+        let actor = PrincipalId::from_bytes([1; 16]);
+        let opened = IssueCommand {
+            number: IssueNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: IssueAction::Open {
+                title: "Issue".into(),
+                body: String::new(),
+                labels: Vec::new(),
+            },
+        }
+        .proposed_event(actor)
+        .unwrap();
+        let mut issue = apply_event(None, &opened).unwrap();
+        assert!(snapshot(&issue, None).unwrap().contains("\"locked\":false"));
+        for (change, locked) in [
+            (IssueAction::Lock, true),
+            (IssueAction::Close, true),
+            (IssueAction::Unlock, false),
+        ] {
+            let event = IssueCommand {
+                number: issue.number,
+                expected_version: ExpectedVersion::Exactly(issue.version),
+                action: change.clone(),
+            }
+            .proposed_event(actor)
+            .unwrap();
+            issue = apply_event(Some(&issue), &event).unwrap();
+            let json = snapshot(&issue, None).unwrap();
+            assert!(json.contains(&format!("\"locked\":{locked}")));
+            for render in [
+                None,
+                Some(super::super::rendered::Rendering::HtmlSafe),
+                Some(super::super::rendered::Rendering::ApiJson),
+            ] {
+                assert_eq!(
+                    action(&change, render),
+                    format!("{{\"name\":\"{}\"}}", change.name())
+                );
+            }
+        }
+        assert!(
+            snapshot(&issue, None)
+                .unwrap()
+                .contains("\"state\":\"closed\"")
+        );
+    }
     #[test]
     fn json_preserves_unicode_and_escapes_controls_and_directional_text() {
         assert_eq!(

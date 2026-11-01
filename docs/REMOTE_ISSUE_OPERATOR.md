@@ -8,7 +8,8 @@ each request. This supplies a network operator alternative; it does not change
 the trusted-local principal semantics of the native `fg` or MCP commands.
 
 The command supports issue opening, partial edits (including labels), comments,
-closing, reopening, assigning and unassigning principals, outcome lookup and explicit same-request retry. Mutation
+closing, reopening, locking/unlocking discussion, assigning and unassigning
+principals, outcome lookup and explicit same-request retry. Mutation
 semantics and terminal-response validation are the same as the served issue UI.
 All commands require the exact issue-page URL and expected tenant/repository IDs.
 HTTPS is required except for loopback HTTP. Redirects are refused; no cookies,
@@ -60,6 +61,13 @@ and reject unrelated issue fields. Assignment records issue metadata; it does
 not create a principal, grant access or establish a notification destination.
 The native server also limits the resulting issue to 16 assignees.
 
+`lock` and `unlock` use the same connection, credential and record options with
+`--number` and a positive exact `--expected-version`. They accept no title,
+body, label or assignee fields and require the existing `issues-write` grant.
+The lock is independent of open/closed state. Both strict and append comments
+refuse new publication while locked; other edits, assignments and state changes
+remain available and retain the lock. Reads expose boolean `locked`.
+
 A new immutable record is created with exclusive file creation, synchronized,
 read back and followed by parent-directory synchronization and file close before
 the first mutation HTTP request. Failure at any of those stages prevents that
@@ -104,6 +112,10 @@ Concurrent retries retain the same native idempotency identity; the immutable
 record is not a client-side authority lock. Outcome lookup failures stop retry.
 Records are not retired automatically, and credential rotation across an
 unresolved request is deliberately unsupported by the existing client contract.
+These rules also apply after lock changes: retrying a committed lock or comment
+recovers its original result, while a comment refused under a lock keeps that
+refusal under its original key after unlocking. A new operation needs a fresh
+record and key; recovery never refreshes its predecessor.
 
 Use a fresh record only for a genuinely new operation. An exported/prepared
 record is treated as potentially sent. A crash while initially writing a record

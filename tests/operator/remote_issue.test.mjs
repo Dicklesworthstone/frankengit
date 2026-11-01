@@ -72,6 +72,7 @@ for (const [action, version, data, pairs] of [
   ['comment', '2', { body: '  literal\r\n💡  ' }, [['expected_version', '2'], ['body', '  literal\r\n💡  ']]],
   ['append-comment', null, { body: '  literal%26+&=\r\n💡  ' }, [['body', '  literal%26+&=\r\n💡  ']]],
   ['close', '3', {}, [['expected_version', '3']]], ['reopen', '4', {}, [['expected_version', '4']]],
+  ['lock', '7', {}, [['expected_version', '7']]], ['unlock', '8', {}, [['expected_version', '8']]],
   ['assign', '5', { assignees: [scope.principal_id] }, [['expected_version', '5'], ['assignee', scope.principal_id]]],
   ['unassign', '6', { assignees: [scope.principal_id] }, [['expected_version', '6'], ['assignee', scope.principal_id]]],
 ]) test(`native ${action} exact form and full round trip`, async t => {
@@ -81,6 +82,7 @@ for (const [action, version, data, pairs] of [
   const result = await p.send(); assert.equal(result.outcome.state, 'committed');
   assert.equal(result.outcome.decision.decision_sequence, '9007199254740993');
   assert.equal(p.calls.length, 3); assert.equal(p.calls[1].body, command.body);
+  assert.ok(p.calls[1].path.endsWith(`/issues/7/${action}`));
   for (const call of p.calls) {
     assert.equal(call.method, 'POST'); assert.equal(call.headers.authorization, `Bearer ${token}`);
     assert.equal(call.headers['idempotency-key'], p.intent.key); assert.equal(call.headers.cookie, undefined);
@@ -107,6 +109,11 @@ const invalidCommands = [
   ['append-comment', null, { body: 'x', principal: scope.principal_id }],
   ['append-comment', null, { body: 'x'.repeat(ISSUE_LIMITS.body + 1) }],
   ['append-comment', null, { body: '\ud800' }], ['append-comment', null, { body: 'a\0b' }],
+  ...['lock', 'unlock'].flatMap(action => [
+    ...['0', null, undefined, '18446744073709551615'].map(version => [action, version, {}]),
+    ...[{ locked: true }, { body: 'reason' }, { title: 'x' }, { labels: [] }, { assignees: [] }]
+      .map(fields => [action, '1', fields]),
+  ]),
 ];
 for (const [index, command] of invalidCommands.entries()) test(`refuse invalid native issue command ${index}`, () => {
   assert.throws(() => issueCommand('7', command[1], command[0], command[2]));

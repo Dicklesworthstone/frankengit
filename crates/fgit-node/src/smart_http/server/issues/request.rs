@@ -117,6 +117,8 @@ impl<'a> Request<'a> {
                         | "edit"
                         | "close"
                         | "reopen"
+                        | "lock"
+                        | "unlock"
                         | "comment"
                         | "append-comment"
                         | "assign"
@@ -239,6 +241,8 @@ impl<'a> Request<'a> {
             },
             "close" => IssueAction::Close,
             "reopen" => IssueAction::Reopen,
+            "lock" => IssueAction::Lock,
+            "unlock" => IssueAction::Unlock,
             "assign" => IssueAction::Assign { assignees },
             "unassign" => IssueAction::Unassign { assignees },
             _ => return Err(ApiError::not_found()),
@@ -467,6 +471,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lock_routes_require_a_positive_exact_version_and_no_payload_fields() {
+        for (verb, action) in [("lock", IssueAction::Lock), ("unlock", IssueAction::Unlock)] {
+            let parsed = command(verb, b"expected_version=7").unwrap();
+            assert_eq!(parsed.action, action);
+            assert_eq!(
+                parsed.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::try_new(7).unwrap())
+            );
+            for invalid in [
+                b"".as_slice(),
+                b"body=ignored",
+                b"expected_version=0",
+                b"expected_version=01",
+                b"expected_version=18446744073709551615",
+                b"expected_version=7&expected_version=8",
+                b"expected_version=7&body=ignored",
+                b"expected_version=7&title=ignored",
+                b"expected_version=7&label=ignored",
+                b"expected_version=7&clear_labels=true",
+                b"expected_version=7&assignee=11111111111111111111111111111111",
+                b"expected_version=7&principal=admin",
+                b"expected_version=7&locked=true",
+            ] {
+                assert!(
+                    command(verb, invalid).is_err(),
+                    "{verb}: {}",
+                    String::from_utf8_lossy(invalid)
+                );
+            }
+            let bytes =
+                format!("GET /repo.git/api/v1/issues/1/{verb} HTTP/1.1\r\nHost: local\r\n\r\n");
+            let head = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(Request::parse(&head).is_err(), "lock is never a read route");
+        }
+    }
     #[test]
     fn append_comment_accepts_only_an_immutable_body_and_preserves_strict_comments() {
         let Command::AppendComment(intent) =

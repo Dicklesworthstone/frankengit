@@ -40,6 +40,13 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
   require the adapter's existing issue-write grant and retain the authenticated
   actor separately. Tests assign an existing read-only principal and verify its
   write request remains forbidden; body-supplied actor overrides are rejected.
+- Native issue discussion locks use the existing repository issue-write grant
+  and exact aggregate predecessor. The canonical reducer refuses both strict
+  comments and append intents against a locked predecessor, including after a
+  losing authority-head CAS. No browser control, imported source actor or issue
+  author bypasses this gate. Edits and close/reopen preserve the independent lock.
+  Immutable terminal recovery still returns an earlier comment's original
+  committed or refused result; later lock changes cannot reinterpret that result.
 
 ### 1.4 Confidentiality and privacy
 

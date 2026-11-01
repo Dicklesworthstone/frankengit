@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, writeFile, readFile, readdir, rm, chmod, rename, mkdir, symlink, link } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exportIssueArchive, inspectIssueArchive } from '../../scripts/lib/forge-issue-archive.mjs';
+import { exportIssueArchive, inspectIssueArchive, readIssueArchive } from '../../scripts/lib/forge-issue-archive.mjs';
 import { recordDigest } from '../../scripts/lib/forge-operator-io.mjs';
 
 const tenant = '1'.repeat(32), repository = '2'.repeat(32), token = 'a'.repeat(64);
@@ -95,6 +95,56 @@ test('assignment deltas, reopen and partial edits reconstruct the retained final
   Object.assign(item.issue, { version: 8, state: 'open', title: 'Edited title', body: '', assignees: [] });
   const f = await fixture(t, { items }); const result = await exportIssueArchive({ ...f.options, pageSize: 2 });
   assert.equal(result.events, 8); assert.equal(result.pages, 5);
+});
+for (const locked of [false, true]) test(`archive replays cross-page locks and retains final locked=${locked}`, async t => {
+  const items = data().slice(0, 1), item = items[0];
+  item.events.push(event(6, actor, 'lock'), event(7, other, 'edit', { title: 'Edited while locked' }),
+    event(8, other, 'reopen'), event(9, actor, 'close'), event(10, actor, 'unlock'),
+    event(11, other, 'comment', { body: 'Allowed on a closed, unlocked issue' }));
+  if (locked) item.events.push(event(12, actor, 'lock'));
+  Object.assign(item.issue, { version: item.events.length, title: 'Edited while locked', comments: 2,
+    last_actor: locked ? actor : other, locked });
+  const f = await fixture(t, { items }), result = await exportIssueArchive(f.options);
+  const view = await readIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 });
+  assert.equal(view.records[0].snapshot.locked, locked); assert.equal(view.records[0].snapshot.state, 'closed');
+  assert.equal(view.records[0].snapshot.title, 'Edited while locked'); assert.equal(view.records[0].comments.length, 2);
+  assert.equal(view.records[0].comments[1].body, 'Allowed on a closed, unlocked issue');
+  assert.equal(view.archive.events, item.events.length); assert.equal(view.archive.network_accessed, false);
+  const retained = JSON.parse(await readFile(join(f.options.workdir, 'page-000007.json')));
+  assert.deepEqual(retained.events[0].action, { name: 'lock' });
+});
+test('legacy archives stay byte-identical while their owned state derives unlocked', async t => {
+  const f = await fixture(t), result = await exportIssueArchive(f.options);
+  const names = await readdir(f.options.workdir), before = await Promise.all(names.map(n => readFile(join(f.options.workdir, n))));
+  assert.ok(!JSON.parse(before[names.indexOf('page-000001.json')]).issues.some(row => Object.hasOwn(row, 'locked')));
+  const options = { workdir: f.options.workdir, confirm: result.archive_sha256 };
+  assert.equal((await inspectIssueArchive(options)).complete, true);
+  assert.ok((await readIssueArchive(options)).records.every(row => row.snapshot.locked === false));
+  for (const [i, name] of names.entries()) assert.deepEqual(await readFile(join(f.options.workdir, name)), before[i]);
+});
+for (const [name, actions, declared, comments, message] of [
+  ['comment while locked', ['lock', 'comment'], true, 2, /comment_while_locked/],
+  ['repeated lock', ['lock', 'lock'], true, 1, /invalid_lock_transition/],
+  ['unlock while unlocked', ['unlock'], false, 1, /invalid_lock_transition/],
+  ['false snapshot despite lock history', ['lock', 'edit'], false, 1, /history_state_disagreement/],
+  ['omitted snapshot flag despite lock history', ['lock', 'edit'], undefined, 1, /explicit issue lock state/],
+]) test(`archive refuses ${name} across separate history pages`, async t => {
+  const items = data().slice(0, 1), item = items[0];
+  for (const action of actions) item.events.push(event(item.events.length + 1, actor, action,
+    action === 'comment' ? { body: 'Must be refused' } : action === 'edit' ? { title: item.issue.title } : {}));
+  Object.assign(item.issue, { version: item.events.length, comments });
+  if (declared !== undefined) item.issue.locked = declared;
+  const f = await fixture(t, { items });
+  await assert.rejects(exportIssueArchive(f.options), message); await noRoot(f.options);
+});
+for (const locked of [null, 'false', 0]) test(`archive rejects malformed locked=${JSON.stringify(locked)}`, async t => {
+  const items = data(); items[0].issue.locked = locked;
+  const f = await fixture(t, { items }); await assert.rejects(exportIssueArchive(f.options), /lock state/); await noRoot(f.options);
+});
+test('list and history lock states must agree even when each page is otherwise valid', async t => {
+  const items = data().slice(0, 1); items[0].issue.locked = false;
+  const f = await fixture(t, { items, change(body) { if (body.type === 'issue_history') body.issue.locked = true; } });
+  await assert.rejects(exportIssueArchive(f.options), /list_history_disagreement/); await noRoot(f.options);
 });
 for (const [name, change, message] of [
   ['foreign repository', (b, n) => { if (n === 1) b.repository_id = '9'.repeat(32); }, /identity changed/],

@@ -51,7 +51,7 @@ read,receive,issues-read,issues-write,outcomes-read
 
 `read` means Git fetch, and `receive` means Git push. Neither grants issue access.
 `issues-read` permits repository-wide issue lists and histories. `issues-write`
-permits repository-wide issue mutation, including comments. Write does not imply
+permits repository-wide issue mutation, including comments and lock/unlock. Write does not imply
 read. A token with only issue scopes has no Git permission. Every endpoint also
 requires the deployment's explicit `--allow-issues` ceiling. `outcomes-read` is
 independent read-only transaction recovery, documented in [HTTP_OUTCOME_API.md](HTTP_OUTCOME_API.md).
@@ -86,6 +86,8 @@ POST {REPO_URL}/api/v1/issues/{number}/open
 POST {REPO_URL}/api/v1/issues/{number}/edit
 POST {REPO_URL}/api/v1/issues/{number}/close
 POST {REPO_URL}/api/v1/issues/{number}/reopen
+POST {REPO_URL}/api/v1/issues/{number}/lock
+POST {REPO_URL}/api/v1/issues/{number}/unlock
 POST {REPO_URL}/api/v1/issues/{number}/comment
 POST {REPO_URL}/api/v1/issues/{number}/append-comment
 POST {REPO_URL}/api/v1/issues/{number}/assign
@@ -100,7 +102,7 @@ trailers, incomplete framing, and buffered suffixes are refused before admission
 
 Every mutation requires an explicit `Idempotency-Key` header. Versioned actions
 require the `expected_version` form field: open requires `0` (absent stream),
-while edit, comment, close, reopen, assign and unassign require the exact positive
+while edit, comment, close, reopen, lock, unlock, assign and unassign require the exact positive
 predecessor. The separate `append-comment` action accepts only `body` and rejects
 `expected_version`; it binds an immutable comment intent and appends against the
 current canonical issue state. Independent appends can all commit while strict
@@ -112,7 +114,7 @@ edits or strict comments still refuse a stale predecessor.
 | `edit` | At least one of `title`, `body`, repeated `label`, or `clear_labels=true`. Omitted fields are preserved. `body=` clears a body. |
 | `comment` | Required nonblank `body`, with the exact `expected_version`. |
 | `append-comment` | Required nonblank `body` only; `expected_version` is forbidden. |
-| `close`, `reopen` | No fields besides `expected_version`. |
+| `close`, `reopen`, `lock`, `unlock` | No fields besides `expected_version`. |
 | `assign`, `unassign` | Required repeated `assignee`: 1–16 distinct 32-character lowercase hexadecimal principal IDs. |
 
 Assignment adds or removes only the named principals, preserving all other
@@ -124,6 +126,16 @@ mechanism, account-existence assertion, access grant or notification endpoint.
 `issues-write` remains required; naming an `issues-read` principal never widens
 that principal's credentials. The wire and upgrade contract is
 [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
+
+Lock/unlock uses the same `issues-write` grant and explicit idempotency header.
+It applies independently to open and closed issues. While locked, both strict
+`comment` and `append-comment` refuse new publication; edits, assignments,
+close and reopen preserve the lock and remain available. Repeating a lock state
+with a new key and current version refuses `ProtectedRefTransitionDenied`;
+a stale exact version refuses `EvidenceStale`. The server never refreshes it.
+An identical original-key retry recovers its original terminal decision even
+after the lock changes. In particular, unlocking cannot turn a previously
+refused comment into success under the same key.
 
 Repeated labels are sorted into the canonical set; duplicate labels are rejected.
 `clear_labels=true` cannot be combined with labels. Unknown fields, duplicate
@@ -208,6 +220,10 @@ IDs, empty for unassigned or historical pre-assignment state. Assignment history
 actions are `{"name":"assign","assignees":["<principal-id>"]}` or
 `{"name":"unassign","assignees":["<principal-id>"]}`. They retain the original
 delta rather than replacing it with the current assignment set.
+Snapshots also contain boolean `locked`, including `false` for histories with
+no lock action. Lock history actions are `{"name":"lock"}` and
+`{"name":"unlock"}` with no content payload. The current lock belongs to the
+selected snapshot, independently of the last event on a partial history page.
 
 Every page includes an algorithm-qualified `snapshot_token` and the exact
 `source_head`. Continue using that token and the returned cursor:

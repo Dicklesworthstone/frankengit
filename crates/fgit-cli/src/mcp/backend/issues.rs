@@ -153,6 +153,7 @@ fn snapshot(issue: &IssueSnapshot) -> Value {
         ("opened_by", text(issue.opened_by.to_string())),
         ("last_actor", text(issue.last_actor.to_string())),
         ("comments", text(issue.comments.to_string())),
+        ("locked", Value::Bool(issue.locked)),
     ])
 }
 fn action(action: &IssueAction) -> Value {
@@ -184,6 +185,8 @@ fn action(action: &IssueAction) -> Value {
         }
         IssueAction::Close => object([("name", text("close"))]),
         IssueAction::Reopen => object([("name", text("reopen"))]),
+        IssueAction::Lock => object([("name", text("lock"))]),
+        IssueAction::Unlock => object([("name", text("unlock"))]),
         IssueAction::Comment { body } => {
             object([("name", text("comment")), ("body", text(body.clone()))])
         }
@@ -198,6 +201,46 @@ fn action(action: &IssueAction) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshots_expose_boolean_lock_state_and_history_actions_are_payloadless() {
+        use fgit_forge::ExpectedVersion;
+        use fgit_forge::event::issue::{IssueCommand, apply_event};
+        let actor = fgit_types::PrincipalId::from_bytes([1; 16]);
+        let opened = IssueCommand {
+            number: IssueNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: IssueAction::Open {
+                title: "Issue".into(),
+                body: String::new(),
+                labels: Vec::new(),
+            },
+        }
+        .proposed_event(actor)
+        .unwrap();
+        let mut issue = apply_event(None, &opened).unwrap();
+        assert_eq!(
+            snapshot(&issue).object().unwrap()["locked"],
+            Value::Bool(false)
+        );
+        for (change, expected) in [
+            (IssueAction::Lock, true),
+            (IssueAction::Close, true),
+            (IssueAction::Unlock, false),
+        ] {
+            let event = IssueCommand {
+                number: issue.number,
+                expected_version: ExpectedVersion::Exactly(issue.version),
+                action: change.clone(),
+            }
+            .proposed_event(actor)
+            .unwrap();
+            issue = apply_event(Some(&issue), &event).unwrap();
+            let value = snapshot(&issue);
+            assert_eq!(value.object().unwrap()["locked"], Value::Bool(expected));
+            assert_eq!(action(&change), object([("name", text(change.name()))]));
+        }
+        assert_eq!(snapshot(&issue).object().unwrap()["state"], text("closed"));
+    }
     #[test]
     fn issue_payloads_remain_data_and_edits_preserve_field_presence() {
         let value = action(&IssueAction::Comment {

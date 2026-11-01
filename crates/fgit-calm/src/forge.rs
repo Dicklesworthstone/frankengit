@@ -27,6 +27,8 @@ pub enum ForgeOperation {
     IssueAppendComment,
     IssueAssign,
     IssueUnassign,
+    IssueLock,
+    IssueUnlock,
     ReviewProtection,
     MergeQueueChange,
     WorkflowCheck,
@@ -79,6 +81,8 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::IssueExactComment
         | ForgeOperation::IssueAssign
         | ForgeOperation::IssueUnassign
+        | ForgeOperation::IssueLock
+        | ForgeOperation::IssueUnlock
         | ForgeOperation::ReviewProtection
         | ForgeOperation::MergeQueueChange
         | ForgeOperation::WorkflowCheck
@@ -112,6 +116,8 @@ mod tests {
             ForgeOperation::IssueExactComment,
             ForgeOperation::IssueAssign,
             ForgeOperation::IssueUnassign,
+            ForgeOperation::IssueLock,
+            ForgeOperation::IssueUnlock,
             ForgeOperation::ReviewProtection,
             ForgeOperation::MergeQueueChange,
             ForgeOperation::WorkflowCheck,

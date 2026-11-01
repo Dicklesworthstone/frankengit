@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
-import { IssueClient, mutationRequest, issuePage, issueHistory, readJson }
+import { IssueClient, mutationRequest, issuePage, issueHistory, issueLocked, readJson }
   from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 const token = 'c'.repeat(64), head = `alg:1:${'b'.repeat(64)}`;
 const ids = { schema_version: 1, tenant_id: 'tenant', repository_id: 'repo' };
@@ -15,6 +15,72 @@ const terminal = { ...ids, type: 'issue_publication', principal_id: 'actor', num
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const fresh = fetchImpl => new IssueClient({ href: 'https://forge.example/repo.git/ui/issues/', fetchImpl, cryptoImpl: webcrypto });
 
+test('lock controls are payloadless exact-version requests', () => {
+  for (const action of ['lock', 'unlock']) {
+    const request = mutationRequest(1, 2, action, {});
+    assert.equal(request.action, action); assert.deepEqual(request.fields, {});
+    assert.equal(request.body, 'expected_version=2');
+    for (const version of [null, undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER]) {
+      assert.throws(() => mutationRequest(1, version, action, {}));
+    }
+    for (const fields of [{ locked: true }, { body: 'reason' }, { title: 'x' }, { labels: [] }, { assignees: [] }]) {
+      assert.throws(() => mutationRequest(1, 2, action, fields));
+    }
+  }
+});
+test('old snapshots derive unlocked without rewriting bytes; present lock fields are strict', () => {
+  const legacy = structuredClone(page), before = JSON.stringify(legacy);
+  assert.equal(issueLocked(issuePage(legacy).reply.issues[0]), false);
+  assert.equal(JSON.stringify(legacy), before); assert.equal(Object.hasOwn(legacy.issues[0], 'locked'), false);
+  for (const locked of [false, true]) {
+    const current = { ...page, issues: [{ ...row, locked }] };
+    assert.equal(issueLocked(issuePage(current).reply.issues[0]), locked);
+  }
+  for (const locked of [null, undefined, 0, 1, 'false', {}, []]) {
+    assert.throws(() => issuePage({ ...page, issues: [{ ...row, locked }] }), /lock state/);
+  }
+});
+test('history validates lock transitions, suppressed comments and the final declared lock', () => {
+  const opening = { version: 1, actor: 'actor', action: { name: 'open', title: row.title, body: row.body, labels: row.labels } };
+  const events = [opening, { version: 2, actor: 'actor', action: { name: 'lock' } },
+    { version: 3, actor: 'actor', action: { name: 'close' } }];
+  const history = { ...ids, type: 'issue_history', snapshot_token: head, after_version: 0, limit: 20,
+    found: true, issue: { ...row, state: 'closed', version: 3, locked: true }, next_after_version: null, events };
+  assert.equal(issueHistory(history, 1).reply.issue.locked, true);
+  const unlocked = structuredClone(history);
+  unlocked.events.push({ version: 4, actor: 'actor', action: { name: 'unlock' } },
+    { version: 5, actor: 'actor', action: { name: 'comment', body: 'After unlock' } });
+  Object.assign(unlocked.issue, { version: 5, comments: 1, locked: false });
+  assert.equal(issueHistory(unlocked, 1).reply.issue.state, 'closed');
+  for (const mutate of [
+    h => { delete h.issue.locked; }, h => { h.issue.locked = false; },
+    h => { h.events[2].action = { name: 'comment', body: 'While locked' }; h.issue.comments = 1; },
+    h => { h.events[2].action = { name: 'lock' }; },
+    h => { h.events[1].action = { name: 'unlock' }; },
+    h => { h.events[1].action = { name: 'lock', locked: true }; },
+  ]) {
+    const invalid = structuredClone(history); mutate(invalid);
+    assert.throws(() => issueHistory(invalid, 1));
+  }
+  // A continuation can start after the locking event. The shared archive
+  // traversal verifies earlier pages; this client must accept its exact page.
+  assert.equal(issueHistory({ ...history, after_version: 2, events: [events[2]] }, 1, { after: 2 }).reply.issue.locked, true);
+});
+test('lock receipts retain the original key and exact request across response loss and reload', async () => {
+  for (const action of ['lock', 'unlock']) {
+    const calls = [], result = { ...terminal, action, expected_version: 2 };
+    const first = fresh(async (url, options) => { calls.push({ url: String(url), ...options }); throw new Error('response lost'); });
+    await first.connect(token); await first.stage(1, 2, action, {});
+    await assert.rejects(first.send()); const receipt = first.exportReceipt();
+    const restored = fresh(async (url, options) => { calls.push({ url: String(url), ...options }); return json(result); });
+    await restored.connect(token); await restored.restoreReceipt(receipt);
+    assert.equal((await restored.send()).outcome, 'committed'); assert.equal(restored.pending, null);
+    assert.equal(calls[0].body, 'expected_version=2'); assert.equal(calls[1].body, calls[0].body);
+    assert.equal(calls[1].url, calls[0].url); assert.ok(calls[1].url.endsWith(`/issues/1/${action}`));
+    assert.equal(calls[1].headers['Idempotency-Key'], calls[0].headers['Idempotency-Key']);
+    assert.equal(receipt.includes(token), false);
+  }
+});
 test('assignment forms sort bounded principal sets and reject authority or malformed IDs', () => {
   const a = '11'.repeat(16), b = '22'.repeat(16);
   for (const action of ['assign', 'unassign']) {

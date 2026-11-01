@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 60,
-  "active_count": 56,
+  "total_count": 62,
+  "active_count": 58,
   "unsupported_count": 4,
   "tools": [
     {
@@ -512,6 +512,34 @@
       "rest_api_path": "GET /repos/{id}/issues"
     },
     {
+      "name": "frankengit_issue_lock",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Lock discussion on an open or closed issue at an exact positive version. Both exact-version and append comments refuse while locked; edits, assignment and close/reopen preserve the lock. Requires the existing issue-write grant.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "exact_predecessor_version",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_issue_number_required", "positive_version_required", "version_exhausted", "invalid_idempotency_key", "mutation_outcome_unknown"],
+      "cli_command": "fg issue lock",
+      "rest_api_path": "POST /{repository}/api/v1/issues/{number}/lock"
+    },
+    {
       "name": "frankengit_issue_open",
       "version": 1,
       "kind": "tool",
@@ -622,6 +650,34 @@
       "refusal_codes": ["positive_issue_number_required", "assignees_array_required", "invalid_assignee", "invalid_assignee_count", "duplicate_assignee", "principal_not_bound", "mutation_outcome_unknown"],
       "cli_command": "fg issue unassign",
       "rest_api_path": "DELETE /repos/{id}/issues/{number}/assignees"
+    },
+    {
+      "name": "frankengit_issue_unlock",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Unlock discussion on an open or closed issue at an exact positive version. Retry the identical action, number, version and original durable key; unlocking never reinterprets a previously refused comment. Requires the existing issue-write grant.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "exact_predecessor_version",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_issue_number_required", "positive_version_required", "version_exhausted", "invalid_idempotency_key", "mutation_outcome_unknown"],
+      "cli_command": "fg issue unlock",
+      "rest_api_path": "POST /{repository}/api/v1/issues/{number}/unlock"
     },
     {
       "name": "frankengit_protection_set",

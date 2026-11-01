@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 60,
+  "total_tools": 62,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -186,6 +186,16 @@
       "rest_api_path": "GET /repos/{id}/issues"
     },
     {
+      "tool": "frankengit_issue_lock",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg issue lock",
+      "rest_api_path": "POST /{repository}/api/v1/issues/{number}/lock"
+    },
+    {
       "tool": "frankengit_issue_open",
       "version": 1,
       "owner_subsystem": "forge",
@@ -224,6 +234,16 @@
       "capability": "mutate_forge_entity",
       "cli_command": "fg issue unassign",
       "rest_api_path": "DELETE /repos/{id}/issues/{number}/assignees"
+    },
+    {
+      "tool": "frankengit_issue_unlock",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg issue unlock",
+      "rest_api_path": "POST /{repository}/api/v1/issues/{number}/unlock"
     },
     {
       "tool": "frankengit_protection_set",

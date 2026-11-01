@@ -595,3 +595,4 @@ fn durable_assignments_preserve_authority_bounded_sets_pinned_history_and_exact_
 }
 
 mod append;
+mod locking;

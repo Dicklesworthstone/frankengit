@@ -209,6 +209,23 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Native issue discussion controls
+
+`fg issue` exposes canonical open, edit, comment, assignment, close/reopen and
+lock/unlock operations with snapshot-bound reads and original-key recovery.
+Locking works on open or closed issues and blocks both strict and append
+comments. Other edits and state changes preserve the lock. Lock/unlock require
+an exact positive issue version; stale or repeated state transitions refuse.
+Snapshots expose boolean `locked`, including `false` for older histories.
+
+The [native CLI](docs/NATIVE_ISSUE_COMMANDS.md),
+[authenticated HTTP API](docs/HTTP_ISSUE_API.md),
+[MCP tools](docs/MCP_METADATA_WRITES.md), and
+[browser](docs/BROWSER_ISSUE_WORKFLOW.md) use the same canonical events. HTTP
+and MCP retain their existing independent issue-write grants. Retrying an
+identical command recovers its original terminal outcome even if the issue is
+subsequently locked or unlocked.
+
 ### Native merge queues
 
 `fg queue enqueue|dequeue|reorder|show|list` manages durable queue membership and

@@ -15,13 +15,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 const USAGE: &str = "\
-usage: fg issue <open|edit|close|reopen|comment|assign|unassign> <storage-root> <tenant-id> <repository-id> <number>
+usage: fg issue <open|edit|close|reopen|lock|unlock|comment|assign|unassign> <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key> --expected-version <version>
   [--object-format sha1|sha256]
   open: --expected-version 0 --title <text> (--body <text> | --body-file <file>) [--label <text> ...]
   edit: positive version; one or more of --title, --body/--body-file, --label ... or --clear-labels
   comment: positive version; --body <text> or --body-file <file>
-  close/reopen: positive version; no title, body or label options
+  close/reopen/lock/unlock: positive version; no title, body, label or assignee options
   assign/unassign: positive version; --assignee <principal-id> ... (1..16 IDs)
 
 usage: fg issue append-comment <storage-root> <tenant-id> <repository-id> <number>
@@ -38,6 +38,7 @@ usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-loca
   See fg issue search --help for bounded scanning, matching and snapshot continuation.
 
 Edits preserve omitted fields; --body '' clears a body; --clear-labels clears labels.
+Locking blocks strict and append comments until unlocked; other edits and close/reopen remain available.
 Show returns current issue state plus paged, exact actions/comments at one snapshot.
 Every mutation requires a stable retry key. Only append-comment omits the issue predecessor.
 Existing comment and other changes retain their exact-version semantics; never refresh a retry.
@@ -60,6 +61,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     | "edit"
                     | "close"
                     | "reopen"
+                    | "lock"
+                    | "unlock"
                     | "comment"
                     | "append-comment"
                     | "assign"

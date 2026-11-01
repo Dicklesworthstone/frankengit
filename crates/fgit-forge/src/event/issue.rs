@@ -53,6 +53,10 @@ pub enum IssueAction {
     Unassign {
         assignees: Vec<PrincipalId>,
     },
+    /// Stop new comments without closing the issue or preventing maintenance.
+    Lock,
+    /// Permit new comments again without changing the open/closed state.
+    Unlock,
 }
 impl IssueAction {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
@@ -82,7 +86,7 @@ impl IssueAction {
                 Ok(())
             }
             Self::Comment { body } => validate_comment_body(body),
-            Self::Close | Self::Reopen => Ok(()),
+            Self::Close | Self::Reopen | Self::Lock | Self::Unlock => Ok(()),
             Self::Assign { assignees } | Self::Unassign { assignees } => {
                 if assignees.is_empty() {
                     return Err(invalid_native("issue.empty_assignees"));
@@ -101,6 +105,8 @@ impl IssueAction {
             Self::Comment { .. } => "comment",
             Self::Assign { .. } => "assign",
             Self::Unassign { .. } => "unassign",
+            Self::Lock => "lock",
+            Self::Unlock => "unlock",
         }
     }
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
@@ -113,6 +119,8 @@ impl IssueAction {
             Self::Comment { .. } => 5,
             Self::Assign { .. } => 6,
             Self::Unassign { .. } => 7,
+            Self::Lock => 8,
+            Self::Unlock => 9,
         });
         match self {
             Self::Open {
@@ -143,7 +151,7 @@ impl IssueAction {
                     Ok(())
                 })?;
             }
-            Self::Close | Self::Reopen => {}
+            Self::Close | Self::Reopen | Self::Lock | Self::Unlock => {}
         }
         Ok(())
     }
@@ -183,6 +191,8 @@ impl IssueAction {
             7 => Self::Unassign {
                 assignees: read_assignees(input)?,
             },
+            8 => Self::Lock,
+            9 => Self::Unlock,
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "issue.action",
@@ -357,6 +367,9 @@ pub struct IssueSnapshot {
     /// principal nor changes membership, authorization, or notification policy.
     pub assignees: Vec<PrincipalId>,
     pub state: IssueState,
+    /// Independent of open/closed state. Historical streams start unlocked;
+    /// only explicit Lock/Unlock events change whether new comments are allowed.
+    pub locked: bool,
     pub opened_by: PrincipalId,
     pub last_actor: PrincipalId,
     pub comments: u64,
@@ -397,6 +410,7 @@ pub fn apply_event(
             labels: labels.clone(),
             assignees: Vec::new(),
             state: IssueState::Open,
+            locked: false,
             opened_by: change.actor,
             last_actor: change.actor,
             comments: 0,
@@ -427,7 +441,17 @@ pub fn apply_event(
         IssueAction::Close | IssueAction::Reopen => {
             return Err(RefusalCode::ProtectedRefTransitionDenied);
         }
+        IssueAction::Lock if !previous.locked => next.locked = true,
+        IssueAction::Unlock if previous.locked => next.locked = false,
+        IssueAction::Lock | IssueAction::Unlock => {
+            return Err(RefusalCode::ProtectedRefTransitionDenied);
+        }
         IssueAction::Comment { .. } => {
+            // Strict comments and replanned append intents both pass this gate
+            // against their exact authenticated predecessor on every attempt.
+            if previous.locked {
+                return Err(RefusalCode::ProtectedRefTransitionDenied);
+            }
             next.comments = next
                 .comments
                 .checked_add(1)
@@ -458,6 +482,8 @@ pub fn apply_event(
     Ok(next)
 }
 
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod tests;
 
@@ -610,6 +636,7 @@ mod query_tests {
             labels: vec!["bug".into(), "urgent".into()],
             assignees: Vec::new(),
             state: IssueState::Open,
+            locked: false,
             opened_by: PrincipalId::from_bytes([1; 16]),
             last_actor: PrincipalId::from_bytes([2; 16]),
             comments: 0,

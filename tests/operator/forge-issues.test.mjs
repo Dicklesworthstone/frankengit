@@ -43,25 +43,29 @@ async function fixture(t) {
       return respond(200, { type: 'issue_history', ...common(), snapshot_token: snapshot, after_version: after, limit,
         found: Boolean(f.row), issue: f.row, events, next_after_version: f.events.length > after + events.length ? after + events.length : null });
     }
-    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign)$/.exec(url.pathname);
+    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign|lock|unlock)$/.exec(url.pathname);
     if (!match || req.method !== 'POST') return respond(404, {});
     if (f.onMutation) f.onMutation({ key, body });
     const form = new URLSearchParams(body), action = match[1], expected = Number(form.get('expected_version'));
     let decision = f.decisions.get(key);
     if (decision && decision.original_body !== body) return respond(409, { error: 'key reuse' });
     if (!decision) {
-      const committed = expected === f.version && f.mode !== 'refuse';
+      const permitted = action === 'comment' ? !f.row?.locked : action === 'lock' ? f.row?.locked === false
+        : action === 'unlock' ? f.row?.locked === true : true;
+      const committed = expected === f.version && f.mode !== 'refuse' && permitted;
       decision = { type: 'issue_publication', ...common(), number: 1, expected_version: expected, action,
         principal_id: actor, tx_id: 'tx-' + key, decision_sequence: f.decisions.size + 1,
         outcome: committed ? 'committed' : 'refused', repository_commit_id: committed ? 'rcr-1' : null,
-        refusal_code: committed ? null : 'expected_version', refusal_record_id: committed ? null : 'refusal-1', delivery_acknowledged: null };
+        refusal_code: committed ? null : !permitted ? 'ProtectedRefTransitionDenied' : 'expected_version',
+        refusal_record_id: committed ? null : 'refusal-1', delivery_acknowledged: null };
       f.decisions.set(key, { ...decision, original_body: body });
       if (committed) {
         f.version++;
         if (action === 'open') f.row = { number: 1, version: 1, title: form.get('title'), body: form.get('body'), labels: form.getAll('label'),
-          assignees: [], state: 'open', opened_by: actor, last_actor: actor, comments: 0 };
+          assignees: [], state: 'open', opened_by: actor, last_actor: actor, comments: 0, locked: false };
         f.row.version = f.version;
         if (action === 'close' || action === 'reopen') f.row.state = action === 'close' ? 'closed' : 'open';
+        if (action === 'lock' || action === 'unlock') f.row.locked = action === 'lock';
         if (action === 'comment') f.row.comments++;
         if (action === 'edit') {
           for (const k of ['title', 'body']) if (form.has(k)) f.row[k] = form.get(k);
@@ -89,7 +93,7 @@ async function fixture(t) {
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
   return f;
 }
-const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign)$/.test(c.path));
+const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign|lock|unlock)$/.test(c.path));
 function command(args) {
   const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = []; child.stdout.on('data', b => out.push(b)); child.stderr.on('data', b => err.push(b));
@@ -179,6 +183,32 @@ test('all issue transitions compose through exact expected versions and existing
   assert.equal(f.version, 6); assert.equal(f.row.state, 'open'); assert.equal(f.row.title, 'updated'); assert.deepEqual(f.row.labels, []);
   assert.ok(mutations(f).at(-1).body.includes('clear_labels=true'));
 });
+test('lock and unlock CLI recover their original requests while lifecycle and comments stay independent', async t => {
+  const f = await fixture(t); await runIssueOperation(f.options());
+  const lockRecord = join(f.root, 'lock.json'); f.mode = 'lost-reply';
+  const lost = await command([...flags(f, 'lock', lockRecord), '--number', '1', '--expected-version', '1']).done;
+  assert.equal(lost.code, 2); assert.equal(f.version, 2); assert.equal(f.row.locked, true);
+  const bytes = await readFile(lockRecord), request = JSON.parse(bytes).receipt.request;
+  assert.equal(request.action, 'lock'); assert.deepEqual(request.fields, {}); assert.equal(request.body, 'expected_version=1');
+  f.mode = null;
+  const recovered = await command(flags(f, 'retry', lockRecord)).done;
+  assert.equal(recovered.code, 0, recovered.stderr); assert.equal(mutations(f).length, 2);
+  const close = await runIssueOperation({ ...f.options('close', join(f.root, 'close.json')), number: 1, expectedVersion: 2, fields: {} });
+  assert.equal(close.result.outcome, 'committed'); assert.equal(f.row.state, 'closed'); assert.equal(f.row.locked, true);
+  const blocked = await runIssueOperation({ ...f.options('comment', join(f.root, 'blocked.json')), number: 1,
+    expectedVersion: 3, fields: { body: 'Must refuse while locked' } });
+  assert.equal(blocked.result.outcome, 'refused'); assert.equal(blocked.result.refusal, 'ProtectedRefTransitionDenied');
+  assert.equal(f.version, 3); assert.equal(f.row.comments, 0);
+  const unlocked = await command([...flags(f, 'unlock', join(f.root, 'unlock.json')), '--number', '1', '--expected-version', '3']).done;
+  assert.equal(unlocked.code, 0, unlocked.stderr); assert.equal(f.row.locked, false); assert.equal(f.row.state, 'closed');
+  const comment = await runIssueOperation({ ...f.options('comment', join(f.root, 'comment.json')), number: 1,
+    expectedVersion: 4, fields: { body: 'Allowed after unlock' } });
+  assert.equal(comment.result.outcome, 'committed'); assert.equal(f.row.comments, 1);
+  const count = mutations(f).length;
+  assert.equal((await command(flags(f, 'retry', lockRecord)).done).code, 0);
+  assert.equal(mutations(f).length, count); assert.equal(f.row.locked, false); assert.deepEqual(await readFile(lockRecord), bytes);
+  assert.deepEqual(f.events.map(row => row.action.name), ['open', 'lock', 'close', 'unlock', 'comment']);
+});
 test('caller mutation cannot replace snapshotted fields or target', async t => {
   const f = await fixture(t), options = f.options();
   options.onProgress = ({ phase }) => { if (phase === 'source_checked') { options.fields.body = 'attacker'; options.href = 'http://remote.invalid/ui/issues/'; } };
@@ -210,6 +240,22 @@ test('cancellation before intake and invalid grammar cause no network effects', 
   }
   assert.throws(() => issueArguments([...flags(f, 'retry'), '--body', 'replacement']));
   assert.throws(() => issueArguments([...flags(f, 'status'), '--token', token])); assert.equal(f.calls.length, 0);
+});
+test('lock CLI requires exact versions and rejects payload fields before network effects', async t => {
+  const f = await fixture(t);
+  for (const operation of ['lock', 'unlock']) {
+    const args = [...flags(f, operation), '--number', '1', '--expected-version', '2'];
+    const parsed = issueArguments(args);
+    assert.equal(parsed.options.operation, operation); assert.equal(parsed.options.expectedVersion, 2);
+    assert.deepEqual(parsed.options.fields, {});
+    for (const extra of [['--body', 'reason'], ['--title', 'x'], ['--label', 'bug'],
+      ['--assignee', actor], ['--locked', 'true'], ['--expected-version', '3']]) {
+      assert.throws(() => issueArguments([...args, ...extra]));
+    }
+    assert.throws(() => issueArguments([...flags(f, operation), '--number', '1']));
+    assert.throws(() => issueArguments([...flags(f, operation), '--number', '1', '--expected-version', '0']));
+  }
+  assert.equal(f.calls.length, 0);
 });
 test('assignment CLI validates bounded canonical IDs before files or network effects', async t => {
   const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16);

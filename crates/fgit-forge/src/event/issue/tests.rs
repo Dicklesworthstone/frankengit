@@ -307,10 +307,10 @@ fn assignment_tags_preserve_all_legacy_action_bytes_and_refuse_unknown_actions()
         }
     }
     assert!(matches!(
-        IssueAction::read(&mut Decoder::new(&[0, 0, 0, 8], DecodeLimits::DEFAULT)),
+        IssueAction::read(&mut Decoder::new(&[0, 0, 0, 10], DecodeLimits::DEFAULT)),
         Err(CodecRefusal::VariantUnknown {
             field: "issue.action",
-            observed: 8,
+            observed: 10,
             ..
         })
     ));

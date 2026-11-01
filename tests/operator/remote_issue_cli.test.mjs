@@ -120,6 +120,21 @@ test('lost reply across processes recovers without changing the request or repea
   assert.equal(recovered.value.dispatched_this_call, false); assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
   assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
 });
+for (const action of ['lock', 'unlock']) test(`${action} CLI preserves full-width version and exact recovery identity`, async t => {
+  const f = await fixture(t, { input: { action, expected_version: '18446744073709551614', fields: {} },
+    handle: ({ recovering, response }) => { if (recovering) return false; response.destroy(); return true; } });
+  const prepared = await f.prepare(); assert.equal(prepared.code, 0, prepared.stderr); assert.equal(f.calls.length, 0);
+  const before = await readFile(join(f.slot, 'intent.json')), intent = await loadIssueIntent(f.slot);
+  assert.equal(intent.action, action); assert.deepEqual(intent.fields, {});
+  assert.equal(intent.body, 'expected_version=18446744073709551614');
+  const failed = await invoke(f.sendArgs(prepared.value.key)); assert.equal(failed.code, 3);
+  const recovered = await invoke(f.recoverArgs); assert.equal(recovered.code, 0, recovered.stderr);
+  assert.equal(recovered.value.outcome.state, 'committed'); assert.equal(recovered.value.key, prepared.value.key);
+  assert.deepEqual(await readFile(join(f.slot, 'intent.json')), before);
+  const writes = f.calls.filter(call => !call.path.endsWith('/outcomes'));
+  assert.equal(writes.length, 1); assert.ok(writes[0].path.endsWith(`/issues/7/${action}`));
+  assert.equal(writes[0].body, intent.body); assert.equal(writes[0].headers['idempotency-key'], intent.key);
+});
 for (const signal of ['SIGKILL', 'SIGTERM']) test(`${signal} after dispatch retains exact recovery identity across restart`, async t => {
   let child;
   const f = await fixture(t, { handle: ({ recovering }) => { if (recovering) return false; child.kill(signal); return true; } });

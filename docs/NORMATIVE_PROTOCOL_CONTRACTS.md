@@ -824,7 +824,7 @@ authority head, reads its forge positions and canonical issue history, and plans
 the next checked issue version. The ordinary issue validator then applies the
 comment against that same history. Missing issues refuse with `EvidenceStale`;
 version exhaustion refuses with `ResourceBudgetExceeded`. Comments may be added
-to open or closed issues and do not change title, body, labels, assignments,
+to unlocked open or closed issues and do not change title, body, labels, assignments,
 lifecycle state, Git refs or policy epoch. Any intervening edit is preserved.
 
 A head-CAS loser repeats this validation with the **same sealed request, TxId,
@@ -890,6 +890,43 @@ additive replanning does not claim an order-independent canonical history root.
 Receipts MUST NOT infer the assigned comment version from a later conversation
 read. A receipt limited to the original terminal decision reports a null comment
 version and names its exact TxId, decision sequence and RCR instead.
+
+### 20.2.3 Native issue discussion locks
+
+The canonical issue owner adds payloadless required `IssueAction` tags **8**
+(`Lock`) and **9** (`Unlock`), each encoded as a big-endian `u32`. Existing tags
+1–7 and all previously sealed requests retain their bytes. Older readers refuse
+these unfamiliar required tags. New readers derive `locked: false` from opening
+an issue and replay historical streams without lock events unchanged; the derived
+snapshot field is not an alternate canonical storage format.
+
+Lock and unlock require an existing issue and an exact positive predecessor.
+They are independent of open/closed state. Locking an already locked issue or
+unlocking an unlocked issue refuses with `ProtectedRefTransitionDenied`; a stale
+predecessor refuses with `EvidenceStale`. Successful transitions advance the one
+issue aggregate version and preserve its text, labels, assignments, comment count
+and lifecycle state. Metadata edits, assignment and close/reopen preserve the
+current lock. The adapters require their existing repository issue-write grant;
+this profile creates no moderator role, author exemption or new access grant.
+
+Both strict comments and version-independent append intents MUST pass the shared
+issue reducer at the exact authenticated publication basis. A locked predecessor
+refuses new comments with `ProtectedRefTransitionDenied`. A losing append attempt
+rechecks that gate at the next basis with its original seal, actor and body;
+lock and unlock retain their original predecessor and never opt into additive
+replanning. CALM classifies both moderation actions as `HeadCasRequired` with
+`PreservePreconditions`. A refusal publishes no comment or forge outbox entry.
+
+Recovery of an existing immutable terminal decision precedes fresh-state
+validation. A committed comment retry after a lock returns its original outcome;
+a refused comment retry after an unlock returns its original refusal. Neither
+retry adds an event. Browser controls, API snapshots, archive projections and
+imported provenance are not authority for this gate. Snapshots expose a boolean
+`locked` at their selected head; legacy JSON snapshots that omit the field mean
+false, while a supplied nonboolean must refuse. Archive replay must validate lock
+transitions and reject comments published while locked before accepting a final
+snapshot. Historical raw JSON retained in archives is never rewritten to insert
+the compatibility default.
 
 ### 20.3 Native protected-review quorums
 

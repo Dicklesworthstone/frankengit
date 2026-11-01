@@ -28,6 +28,31 @@ test('read returns complete owned current state and discussion; inspector result
   view.records[0].snapshot.title = 'mutated caller';
   assert.equal((await readIssueArchive(options)).records[0].snapshot.title, 'Edited title');
 });
+test('v2 partition normalizes only absent legacy lock flags without mutating the source view', async t => {
+  const f = await setup(t), view = await readIssueArchive({ workdir: f.archiveDir, confirm: f.archive.archive_sha256 });
+  assert.ok(view.records.every(row => row.snapshot.locked === false));
+  const legacy = structuredClone(view);
+  for (const row of legacy.records) delete row.snapshot.locked;
+  const current = partitionNativeIssueArchive(view, 100), historical = partitionNativeIssueArchive(legacy, 100);
+  assert.equal(current.length, historical.length);
+  for (const [i, batch] of current.entries()) {
+    assert.deepEqual(batch.bytes, historical[i].bytes);
+    assert.equal(batch.sha256, historical[i].sha256);
+    const capture = parseNativeIssueCapture(batch.bytes);
+    assert.equal(capture.schema, 'frankengit-native-issue-capture-v2');
+    assert.ok(capture.issues.every(row => row.snapshot.locked === false));
+    assert.deepEqual(nativeIssueImportSteps(capture, 100), nativeIssueImportSteps(parseNativeIssueCapture(historical[i].bytes), 100));
+  }
+  assert.ok(view.records.every(row => row.snapshot.locked === false), 'partition must not rewrite the source view');
+  const locked = structuredClone(view); locked.records[0].snapshot.locked = true;
+  const steps = nativeIssueImportSteps(parseNativeIssueCapture(partitionNativeIssueArchive(locked, 100)[0].bytes), 100);
+  assert.deepEqual(steps.filter(step => step.number === 101).map(step => step.action), ['open', 'comment', 'close', 'lock']);
+  assert.ok(locked.records[0].snapshot.locked, 'partition preserves a source lock');
+  for (const value of [null, 'false', 0, undefined]) {
+    const rejected = structuredClone(view); rejected.records[0].snapshot.locked = value;
+    assert.throws(() => partitionNativeIssueArchive(rejected, 100), /Invalid issue lock state/);
+  }
+});
 test('native batch prepare/run/recovery use actual shipped client and loopback API', async t => {
   const f = await prepared(t);
   assert.equal(f.dest.calls.length, 0, 'offline preparation must not contact destination');

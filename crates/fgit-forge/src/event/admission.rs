@@ -59,6 +59,8 @@ pub const fn classify_event(
                 IssueAction::Comment { .. } => ForgeOperation::IssueExactComment,
                 IssueAction::Assign { .. } => ForgeOperation::IssueAssign,
                 IssueAction::Unassign { .. } => ForgeOperation::IssueUnassign,
+                IssueAction::Lock => ForgeOperation::IssueLock,
+                IssueAction::Unlock => ForgeOperation::IssueUnlock,
             },
             ForgeEventPayload::ReviewProtectionChanged(_) => ForgeOperation::ReviewProtection,
             ForgeEventPayload::MergeQueueChangedNative(_) => ForgeOperation::MergeQueueChange,
@@ -99,6 +101,8 @@ mod tests {
             IssueAction::Unassign {
                 assignees: vec![PrincipalId::from_bytes([2; 16])],
             },
+            IssueAction::Lock,
+            IssueAction::Unlock,
         ] {
             let is_comment = matches!(action, IssueAction::Comment { .. });
             let expected_version = if matches!(action, IssueAction::Open { .. }) {
