@@ -43,6 +43,7 @@ fn native_modes_require_all_independent_inputs_and_propagate_each_profile_limit(
         assert_eq!(parsed.instance.raw(), 992);
         assert!(!parsed.resume);
         assert!(parsed.witness.is_none());
+        assert!(parsed.replica_failover.is_none());
         let mut full = basic.clone();
         full.extend(
             [
@@ -100,6 +101,97 @@ fn native_modes_require_all_independent_inputs_and_propagate_each_profile_limit(
         .into();
         assert!(parse(&wrong_instance).is_err());
     }
+}
+
+#[test]
+fn replica_failover_requires_explicit_opt_in_and_a_separate_finite_read_allowance() {
+    for operation in ["verify-selected", "recover"] {
+        let basic = arguments(operation);
+        let mut defaulted = basic.clone();
+        defaulted.push("--replica-failover".into());
+        let parsed = parse(&defaulted).unwrap();
+        assert_eq!(
+            parsed.replica_failover,
+            Some(7 * parsed.profile.transfer.max_archive_bytes)
+        );
+        let mut narrowed = defaulted.clone();
+        narrowed.extend(["--max-archive-bytes".into(), "1024".into()]);
+        assert_eq!(parse(&narrowed).unwrap().replica_failover, Some(7168));
+        narrowed.extend(["--max-read-bytes".into(), "1".into()]);
+        let parsed = parse(&narrowed).unwrap();
+        assert_eq!(parsed.replica_failover, Some(1));
+        assert_eq!(parsed.profile.transfer.max_archive_bytes, 1024);
+        assert_eq!(
+            parsed.profile.transfer.max_blob_bytes,
+            Profile::default().transfer.max_blob_bytes
+        );
+        assert_eq!(
+            parsed.profile.transfer.max_objects,
+            Profile::default().transfer.max_objects
+        );
+        let mut unrequested = basic;
+        unrequested.extend(["--max-read-bytes".into(), "100".into()]);
+        assert!(
+            parse(&unrequested)
+                .unwrap_err()
+                .contains("requires explicit")
+        );
+        for value in [
+            "0",
+            "01",
+            "-1",
+            "+1",
+            "75866302316545",
+            "18446744073709551616",
+        ] {
+            let mut bad = defaulted.clone();
+            bad.extend(["--max-read-bytes".into(), value.into()]);
+            assert!(parse(&bad).is_err(), "{value}");
+        }
+        let mut duplicate = defaulted.clone();
+        duplicate.push("--replica-failover".into());
+        assert!(parse(&duplicate).is_err());
+        let mut duplicate_budget = narrowed;
+        duplicate_budget.extend(["--max-read-bytes".into(), "100".into()]);
+        assert!(parse(&duplicate_budget).is_err());
+        defaulted.extend([
+            "--max-read-bytes".into(),
+            MAX_REPLICA_READ_BYTES.to_string(),
+        ]);
+        assert_eq!(
+            parse(&defaulted).unwrap().replica_failover,
+            Some(MAX_REPLICA_READ_BYTES)
+        );
+    }
+    let mut maximum = arguments("recover");
+    for index in 1..64 {
+        maximum.extend([
+            "--candidate".into(),
+            format!("replica-{index}"),
+            "approval".into(),
+        ]);
+    }
+    maximum.extend([
+        "--max-archive-bytes".into(),
+        "1099511627776".into(),
+        "--max-blob-bytes".into(),
+        "1099511627776".into(),
+        "--max-objects".into(),
+        "1000000".into(),
+        "--timeout-secs".into(),
+        "86400".into(),
+        "--witness".into(),
+        "independent-witness".into(),
+        "--resume".into(),
+        "--replica-failover".into(),
+        "--max-read-bytes".into(),
+        MAX_REPLICA_READ_BYTES.to_string(),
+    ]);
+    assert_eq!(maximum.len(), 225);
+    assert_eq!(
+        parse(&maximum).unwrap().replica_failover,
+        Some(MAX_REPLICA_READ_BYTES)
+    );
 }
 
 #[test]

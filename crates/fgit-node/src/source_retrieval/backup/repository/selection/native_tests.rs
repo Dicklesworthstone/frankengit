@@ -1,6 +1,8 @@
 //! Real source archives and native recovery; adversarial observations use real
 //! independent DSSE signatures, never fabricated native verification evidence.
 
+#[path = "replica_tests.rs"]
+mod replica_tests;
 #[path = "witness_tests.rs"]
 mod witness_tests;
 
@@ -380,8 +382,13 @@ fn every_approval_authenticates_before_any_archive_open_and_foreign_lower_observ
             candidate(&fixture.root.join("z-missing-lower.fg"), &approval),
         ];
         let refused = options(&fixture, "recover", name, &candidates);
-        let error = execute_with_checkpoints(&refused, refused.profile.start(), |_| {
-            panic!("invalid supplied set reached post-authentication checkpoint")
+        let error = execute_with_checkpoints(&refused, refused.profile.start(), |stage| {
+            assert_eq!(
+                stage,
+                Checkpoint::ApprovalObserved,
+                "invalid supplied set reached post-authentication checkpoint"
+            );
+            Ok(())
         })
         .unwrap_err();
         assert!(

@@ -2,10 +2,12 @@
 //! Native work consumes the exact captured winner, never a reopened control.
 
 use fgit_crypto::{DigestHasher, Sha256Hasher};
+use std::cell::RefCell;
+use std::io::{Read, Seek};
 
 use super::super::super::{hex, quote};
-use super::super::approval::AuthenticatedApprovalObservation;
 use super::super::approval::witness::WitnessGuard;
+use super::super::approval::{AuthenticatedApprovalObservation, VerifiedApproval};
 use super::super::input::PinnedArchive;
 use super::super::profile::Deadline;
 use super::separation::Separation;
@@ -16,6 +18,9 @@ pub(super) enum Checkpoint {
     ApprovalObserved,
     AllApprovalsAuthenticated,
     WinnerSelected,
+    BeforeReplicaAttempt,
+    ReplicaUnavailable,
+    ReplicaPayloadRead { bytes: usize, total: u64 },
     BeforeNative,
     NativeCompleted,
 }
@@ -29,10 +34,11 @@ struct Progress {
 pub(super) fn execute_with_checkpoints(
     options: &Options,
     deadline: Deadline,
-    mut checkpoint: impl FnMut(Checkpoint) -> Result<(), String>,
+    checkpoint: impl FnMut(Checkpoint) -> Result<(), String>,
 ) -> Result<Receipt, String> {
     let mut progress = Progress::default();
-    let result = execute_inner(options, deadline, &mut checkpoint, &mut progress);
+    let checkpoint = RefCell::new(checkpoint);
+    let result = execute_inner(options, deadline, &checkpoint, &mut progress);
     result.map_err(|error| {
         if options.resume && !progress.native_started {
             format!("selected resume refused before destination publication state was established; a prior attempt may already have published authority; {error}")
@@ -45,13 +51,23 @@ pub(super) fn execute_with_checkpoints(
 fn execute_inner(
     options: &Options,
     deadline: Deadline,
-    checkpoint: &mut impl FnMut(Checkpoint) -> Result<(), String>,
+    checkpoint: &RefCell<impl FnMut(Checkpoint) -> Result<(), String>>,
     progress: &mut Progress,
 ) -> Result<Receipt, String> {
     deadline.check()?;
     options.profile.transfer.validate()?;
     if options.candidates.is_empty() || options.candidates.len() > super::MAX_CANDIDATES {
         return Err("selected recovery requires 1..64 explicit candidate pairs".into());
+    }
+    if options
+        .replica_failover
+        .is_some_and(|maximum| maximum == 0 || maximum > super::MAX_REPLICA_READ_BYTES)
+    {
+        return Err("selected replica read allowance is outside its finite profile".into());
+    }
+    #[cfg(not(unix))]
+    if options.replica_failover.is_some() {
+        return Err("selected replica failover requires Unix pinned source descriptors".into());
     }
     let trust = options.trust.load(deadline)?;
     let mut witness = options
@@ -72,9 +88,9 @@ fn execute_inner(
                 witness.observe(&observation)?;
             }
             inspected.push(observation);
-            checkpoint(Checkpoint::ApprovalObserved)?;
+            checkpoint.borrow_mut()(Checkpoint::ApprovalObserved)?;
         }
-        checkpoint(Checkpoint::AllApprovalsAuthenticated)?;
+        checkpoint.borrow_mut()(Checkpoint::AllApprovalsAuthenticated)?;
         deadline.check()?;
         let selected = highest(&inspected)?;
         let winner = &inspected[selected];
@@ -87,16 +103,18 @@ fn execute_inner(
             .transpose()?;
         let aliases = inspected
             .iter()
-            .filter(|observation| observation.same_statement(winner))
-            .count();
+            .enumerate()
+            .filter_map(|(index, observation)| observation.same_statement(winner).then_some(index))
+            .collect::<Vec<_>>();
         let selection = selection_json(
             &options.candidates,
             &inspected,
             selected,
-            aliases,
+            aliases.len(),
             witness.as_ref().map(WitnessGuard::snapshot_json),
+            options.replica_failover.is_some(),
         );
-        checkpoint(Checkpoint::WinnerSelected)?;
+        checkpoint.borrow_mut()(Checkpoint::WinnerSelected)?;
         deadline.check()?;
         let observation = inspected
             .into_iter()
@@ -106,16 +124,6 @@ fn execute_inner(
         // type the native verify/restore engines accept. Lower paths remain unopened.
         let approval = observation
             .into_verified(options.expected, options.profile.transfer.max_archive_bytes)?;
-        let archive = PinnedArchive::open(
-            &options.candidates[selected].input,
-            options.expected,
-            options.profile.transfer,
-            deadline,
-        )?;
-        approval.match_archive(archive.header(), archive.seal())?;
-        checkpoint(Checkpoint::BeforeNative)?;
-        approval.check_current()?;
-        deadline.check()?;
         let mut guard = || {
             if let Some(witness) = witness.as_ref() {
                 witness.check_selected()?;
@@ -125,74 +133,165 @@ fn execute_inner(
             }
             Ok(())
         };
-        progress.native_started = true;
-        let native = match (options.operation, witness.is_some()) {
-            (Operation::Verify, false) => super::super::restore::verify::execute_selected_in(
-                archive,
-                approval,
-                &options.destination,
-                options.instance,
-                options.profile,
-                deadline,
+        let (native, acquisition) = if let Some(maximum) = options.replica_failover {
+            execute_replicas(
+                options, &aliases, &approval, maximum, deadline, checkpoint, progress, &mut guard,
             )?
-            .json()
-            .to_owned(),
-            (Operation::Recover, false) => super::super::restore::execute_selected_in(
-                archive,
-                approval,
-                &options.destination,
-                options.instance,
-                options.profile,
-                options.resume,
+        } else {
+            let archive = PinnedArchive::open(
+                &options.candidates[selected].input,
+                options.expected,
+                options.profile.transfer,
                 deadline,
-            )?
-            .json()
-            .to_owned(),
-            (Operation::Verify, true) => {
-                super::super::restore::verify::execute_selected_guarded_in(
-                    archive,
-                    approval,
-                    &options.destination,
-                    options.instance,
-                    options.profile,
-                    deadline,
-                    &mut guard,
-                )?
-                .json()
-                .to_owned()
-            }
-            (Operation::Recover, true) => super::super::restore::execute_selected_guarded_in(
-                archive,
-                approval,
-                &options.destination,
-                options.instance,
-                options.profile,
-                options.resume,
-                deadline,
-                &mut guard,
-            )?
-            .json()
-            .to_owned(),
+            )?;
+            let native = execute_native(
+                options, archive, &approval, deadline, checkpoint, progress, &mut guard,
+            )?;
+            (native, None)
         };
-        progress.native_completed = true;
-        // Completion is monotonic. A failed observer/output after the native engine
-        // returns may report incomplete delivery, never non-publication or rollback.
-        checkpoint(Checkpoint::NativeCompleted).map_err(|error| format!(
-        "selected recovery native_operation_complete=true; preserve completed result and destination; {error}"
-    ))?;
         Ok(Receipt {
             json: format!(
-                "{{\"type\":{},\"schema_version\":1,\"complete\":true,\"selection\":{},\"native\":{}}}",
+                "{{\"type\":{},\"schema_version\":1,\"complete\":true,\"selection\":{},\"native\":{}{}}}",
                 quote(match options.operation {
                     Operation::Verify => "repository_source_backup_selected_verify",
                     Operation::Recover => "repository_source_backup_recover",
                 }),
                 selection,
                 native,
+                acquisition.map_or_else(String::new, |json| format!(",\"acquisition\":{json}")),
             ),
         })
     })();
     finish_witness(witness, result, progress)
+}
+
+fn execute_native<R: Read + Seek>(
+    options: &Options,
+    archive: PinnedArchive<R>,
+    approval: &VerifiedApproval,
+    deadline: Deadline,
+    checkpoint: &RefCell<impl FnMut(Checkpoint) -> Result<(), String>>,
+    progress: &mut Progress,
+    guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<String, String> {
+    approval.match_archive(archive.header(), archive.seal())?;
+    checkpoint.borrow_mut()(Checkpoint::BeforeNative)?;
+    approval.check_current()?;
+    deadline.check()?;
+    progress.native_started = true;
+    let guarded = options.witness.is_some() || options.replica_failover.is_some();
+    let native = match (options.operation, guarded) {
+        (Operation::Verify, false) => super::super::restore::verify::execute_selected_in(
+            archive,
+            approval,
+            &options.destination,
+            options.instance,
+            options.profile,
+            deadline,
+        )?
+        .json()
+        .to_owned(),
+        (Operation::Recover, false) => super::super::restore::execute_selected_in(
+            archive,
+            approval,
+            &options.destination,
+            options.instance,
+            options.profile,
+            options.resume,
+            deadline,
+        )?
+        .json()
+        .to_owned(),
+        (Operation::Verify, true) => super::super::restore::verify::execute_selected_guarded_in(
+            archive,
+            approval,
+            &options.destination,
+            options.instance,
+            options.profile,
+            deadline,
+            guard,
+        )?
+        .json()
+        .to_owned(),
+        (Operation::Recover, true) => super::super::restore::execute_selected_guarded_in(
+            archive,
+            approval,
+            &options.destination,
+            options.instance,
+            options.profile,
+            options.resume,
+            deadline,
+            guard,
+        )?
+        .json()
+        .to_owned(),
+    };
+    progress.native_completed = true;
+    // Completion is monotonic even if a subsequent observer or receipt fails.
+    checkpoint.borrow_mut()(Checkpoint::NativeCompleted).map_err(|error| format!(
+        "selected recovery native_operation_complete=true; preserve completed result and destination; {error}"
+    ))?;
+    Ok(native)
+}
+
+fn execute_replicas(
+    options: &Options,
+    aliases: &[usize],
+    approval: &VerifiedApproval,
+    maximum: u64,
+    deadline: Deadline,
+    checkpoint: &RefCell<impl FnMut(Checkpoint) -> Result<(), String>>,
+    progress: &mut Progress,
+    guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<(String, Option<String>), String> {
+    #[cfg(unix)]
+    {
+        use super::super::recovery_io::{Checkpoint as IoCheckpoint, Control, SourceFailure};
+        use super::replicas::{Acquired, acquire};
+
+        let mut io_checkpoint = |event| match event {
+            IoCheckpoint::PayloadRead { bytes, total } => {
+                checkpoint.borrow_mut()(Checkpoint::ReplicaPayloadRead { bytes, total })
+            }
+            _ => Ok(()),
+        };
+        let control = Control::new(approval, deadline, maximum, &mut io_checkpoint);
+        let Acquired {
+            archive,
+            source,
+            report,
+        } = acquire(
+            options,
+            aliases,
+            approval.artifact_seal(),
+            &control,
+            deadline,
+            |stage| checkpoint.borrow_mut()(stage),
+        )?;
+        let mut constrained = || {
+            control.check()?;
+            source.check().map_err(SourceFailure::message)?;
+            guard()?;
+            control.check()
+        };
+        let native = execute_native(
+            options,
+            archive,
+            approval,
+            deadline,
+            checkpoint,
+            progress,
+            &mut constrained,
+        )?;
+        Ok((native, Some(report.json(&control, maximum))))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            options, aliases, approval, maximum, deadline, checkpoint, progress, guard,
+        );
+        Err("selected replica failover requires Unix pinned source descriptors".into())
+    }
 }
 
 fn finish_witness(
@@ -251,6 +350,7 @@ fn selection_json(
     selected: usize,
     aliases: usize,
     witness: Option<String>,
+    replica_failover: bool,
 ) -> String {
     let mut digest = Sha256Hasher::new();
     digest.update(b"frankengit/native-backup-candidate-observations/v1\0");
@@ -276,7 +376,7 @@ fn selection_json(
             "{{\"type\":\"repository_backup_checkpoint_selection\",\"schema_version\":1,",
             "\"all_supplied_approvals_authenticated\":true,\"highest_supplied_generation_selected\":true,",
             "\"selected_index\":{},\"selected_head_generation\":{},\"candidates_authenticated\":{},",
-            "\"same_statement_replicas\":{},\"replica_failover\":false,",
+            "\"same_statement_replicas\":{},\"replica_failover\":{},",
             "\"candidate_set_sha256\":{},\"trusted_key_id\":{},\"approval_sha256\":{},",
             "\"statement\":{},\"candidates\":[{}],\"payloads_read_during_selection\":false,",
             "\"persistent_high_water_enforced\":{}{},\"newest_checkpoint_verified\":false,",
@@ -286,6 +386,7 @@ fn selection_json(
         quote(&winner.generation().to_string()),
         candidates.len(),
         aliases,
+        replica_failover,
         quote(&hex(&digest.finish())),
         quote(winner.trusted_key_id()),
         quote(&hex(&winner.approval_digest())),

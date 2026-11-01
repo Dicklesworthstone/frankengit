@@ -9,6 +9,8 @@ mod input;
 mod payload;
 mod profile;
 mod reconstruct;
+#[cfg(unix)]
+mod recovery_io;
 mod restore;
 mod selection;
 

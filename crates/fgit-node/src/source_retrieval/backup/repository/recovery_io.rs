@@ -2,16 +2,19 @@
 //! unavailable replica is distinct from a fatal deadline, read budget or I/O
 //! failure; only the former may cause another explicitly selected copy to run.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::super::approval::VerifiedApproval;
-use super::super::profile::Deadline;
+use super::approval::VerifiedApproval;
+use super::profile::Deadline;
 
-pub(super) const BUFFER_BYTES: usize = 64 * 1024;
+mod budget;
+
+use budget::ReadBudget;
+pub(super) use budget::{BUFFER_BYTES, ReadFailure};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Checkpoint {
@@ -20,80 +23,6 @@ pub(super) enum Checkpoint {
     BeforeVerification,
     AfterVerification,
     BeforePublication,
-}
-
-#[derive(Debug)]
-pub(super) enum ReadFailure {
-    Io(io::Error),
-    Gate(String),
-}
-
-impl ReadFailure {
-    pub(super) fn message(self) -> String {
-        match self {
-            Self::Io(error) => format!("backup payload read failed: {error}"),
-            Self::Gate(error) => error,
-        }
-    }
-}
-
-/// A zero remaining budget does not manufacture EOF. A real one-byte probe
-/// may return zero; any byte it returns is charged and makes failure sticky.
-struct ReadBudget {
-    maximum: u64,
-    bytes: Cell<u64>,
-    calls: Cell<u64>,
-    exceeded: Cell<bool>,
-}
-
-impl ReadBudget {
-    fn new(maximum: u64) -> Self {
-        Self {
-            maximum,
-            bytes: Cell::new(0),
-            calls: Cell::new(0),
-            exceeded: Cell::new(false),
-        }
-    }
-
-    fn remaining(&self) -> u64 {
-        self.maximum.saturating_sub(self.bytes.get())
-    }
-
-    fn read(&self, input: &mut impl Read, buffer: &mut [u8]) -> Result<usize, ReadFailure> {
-        if self.exceeded.get() {
-            return Err(ReadFailure::Gate(
-                "backup aggregate payload-read budget exceeded".into(),
-            ));
-        }
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-        let maximum = buffer
-            .len()
-            .min(BUFFER_BYTES)
-            .min(self.remaining().max(1).min(BUFFER_BYTES as u64) as usize);
-        self.calls.set(self.calls.get() + 1);
-        let count = input
-            .read(&mut buffer[..maximum])
-            .map_err(ReadFailure::Io)?;
-        if count > maximum {
-            self.exceeded.set(true);
-            return Err(ReadFailure::Gate(
-                "invalid backup payload reader byte count".into(),
-            ));
-        }
-        // The finite ceiling is 67 TiB, so even the final refused probe cannot
-        // overflow u64. Record actual consumption before refusing excess.
-        self.bytes.set(self.bytes.get() + count as u64);
-        if self.bytes.get() > self.maximum {
-            self.exceeded.set(true);
-            return Err(ReadFailure::Gate(
-                "backup aggregate payload-read budget exceeded".into(),
-            ));
-        }
-        Ok(count)
-    }
 }
 
 pub(super) struct Control<'a> {
@@ -150,10 +79,10 @@ impl<'a> Control<'a> {
     }
 
     pub(super) fn bytes_read(&self) -> u64 {
-        self.budget.bytes.get()
+        self.budget.bytes_read()
     }
     pub(super) fn read_calls(&self) -> u64 {
-        self.budget.calls.get()
+        self.budget.read_calls()
     }
 
     pub(super) fn read(
@@ -164,7 +93,13 @@ impl<'a> Control<'a> {
         self.check().map_err(ReadFailure::Gate)?;
         let count = match self.budget.read(input, buffer) {
             Err(ReadFailure::Gate(error)) => return Err(ReadFailure::Gate(self.stop(error))),
-            result => result?,
+            Err(ReadFailure::Io(error)) => {
+                if error.kind() != io::ErrorKind::Interrupted && !unavailable_io(&error) {
+                    self.stop(format!("backup payload read failed: {error}"));
+                }
+                return Err(ReadFailure::Io(error));
+            }
+            Ok(count) => count,
         };
         if count != 0 {
             self.checkpoint(Checkpoint::PayloadRead {
@@ -190,9 +125,9 @@ impl<'a> Control<'a> {
                     self.check()?;
                     return Ok(count);
                 }
-                Ok(_) => return Err("invalid backup catalog reader byte count".into()),
+                Ok(_) => return Err(self.stop("invalid backup catalog reader byte count".into())),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(format!("backup catalog read failed: {error}")),
+                Err(error) => return Err(self.stop(format!("backup catalog read failed: {error}"))),
             }
         }
     }
@@ -206,11 +141,13 @@ impl<'a> Control<'a> {
             self.check()?;
             let maximum = bytes.len().min(BUFFER_BYTES);
             match output.write(&bytes[..maximum]) {
-                Ok(0) => return Err("backup staging write made no progress".into()),
+                Ok(0) => return Err(self.stop("backup staging write made no progress".into())),
                 Ok(count) if count <= maximum => bytes = &bytes[count..],
-                Ok(_) => return Err("invalid backup staging writer byte count".into()),
+                Ok(_) => return Err(self.stop("invalid backup staging writer byte count".into())),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(format!("backup staging write failed: {error}")),
+                Err(error) => {
+                    return Err(self.stop(format!("backup staging write failed: {error}")));
+                }
             }
         }
         self.check()
@@ -236,7 +173,11 @@ impl<R: Read> Read for Metered<'_, '_, R> {
 impl<R: Seek> Seek for Metered<'_, '_, R> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         self.control.check().map_err(io::Error::other)?;
-        let position = self.input.seek(position)?;
+        let position = self.input.seek(position).map_err(|error| {
+            self.control
+                .stop(format!("backup payload seek failed: {error}"));
+            error
+        })?;
         self.control.check().map_err(io::Error::other)?;
         Ok(position)
     }
@@ -250,13 +191,7 @@ pub(super) enum SourceFailure {
 
 impl SourceFailure {
     pub(super) fn from_io(error: io::Error) -> Self {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::NotFound
-                | io::ErrorKind::NotADirectory
-                | io::ErrorKind::PermissionDenied
-        ) || error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
-        {
+        if unavailable_io(&error) {
             Self::Unavailable(format!("source unavailable: {error}"))
         } else {
             Self::Fatal(format!("backup source I/O failed: {error}"))
@@ -268,6 +203,13 @@ impl SourceFailure {
             Self::Unavailable(error) | Self::Fatal(error) => error,
         }
     }
+}
+
+fn unavailable_io(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory | io::ErrorKind::PermissionDenied
+    ) || error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
 }
 
 pub(super) struct Source {
@@ -335,79 +277,4 @@ fn same_file(left: &Metadata, right: &Metadata) -> bool {
         && left.mtime_nsec() == right.mtime_nsec()
         && left.ctime() == right.ctime()
         && left.ctime_nsec() == right.ctime_nsec()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn exact_budget_performs_real_eof_and_counts_refused_extra_byte() {
-        let budget = ReadBudget::new(3);
-        let mut input = Cursor::new(b"abc");
-        let mut buffer = [0; 9];
-        assert_eq!(budget.read(&mut input, &mut buffer).unwrap(), 3);
-        assert_eq!(budget.read(&mut input, &mut buffer).unwrap(), 0);
-        assert_eq!(budget.bytes.get(), 3);
-        assert_eq!(budget.calls.get(), 2);
-        let mut trailing = Cursor::new(b"x");
-        assert!(matches!(
-            budget.read(&mut trailing, &mut buffer),
-            Err(ReadFailure::Gate(_))
-        ));
-        assert_eq!(budget.bytes.get(), 4);
-        let calls = budget.calls.get();
-        assert!(budget.read(&mut input, &mut buffer).is_err());
-        assert_eq!(budget.calls.get(), calls, "excess is sticky");
-    }
-
-    #[test]
-    fn failed_candidates_and_late_io_share_actual_bytes_without_synthetic_eof() {
-        struct LateError {
-            first: bool,
-        }
-        impl Read for LateError {
-            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-                if !self.first {
-                    return Err(io::Error::other("late storage failure"));
-                }
-                self.first = false;
-                output[0] = 42;
-                Ok(1)
-            }
-        }
-        let budget = ReadBudget::new(4);
-        let mut buffer = [0; 8];
-        assert_eq!(
-            budget.read(&mut Cursor::new(b"bad"), &mut buffer).unwrap(),
-            3
-        );
-        let mut late = LateError { first: true };
-        assert_eq!(budget.read(&mut late, &mut buffer).unwrap(), 1);
-        assert!(matches!(
-            budget.read(&mut late, &mut buffer),
-            Err(ReadFailure::Io(_))
-        ));
-        assert_eq!(budget.bytes.get(), 4);
-        assert_eq!(budget.calls.get(), 3);
-        assert!(matches!(
-            SourceFailure::from_io(io::Error::other("late storage failure")),
-            SourceFailure::Fatal(_)
-        ));
-        assert!(matches!(
-            SourceFailure::from_io(io::Error::from(io::ErrorKind::Interrupted)),
-            SourceFailure::Fatal(_)
-        ));
-        for kind in [
-            io::ErrorKind::NotFound,
-            io::ErrorKind::NotADirectory,
-            io::ErrorKind::PermissionDenied,
-        ] {
-            assert!(matches!(
-                SourceFailure::from_io(io::Error::from(kind)),
-                SourceFailure::Unavailable(_)
-            ));
-        }
-    }
 }
