@@ -103,6 +103,24 @@ is used only by the test to generate ephemeral certificates. These tests are not
 a live Rust-node, native authorization/ancestry, full-workspace or deployment
 pass. The shared outcome module remains unchanged at blob `9d497c67e0b2f49895efd4259d7a28c5129f7541`.
 
+## Live native campaign
+
+`scripts/e2e/suites/operator/remote_pull.sh` is discovered by the existing E2E
+runner. With an explicit prebuilt `FG_BIN`, the pinned Node and the installed
+Git 2.54.0 sandbox, it exercises all six form-only actions in SHA-1 and SHA-256.
+Canonical Rust reads check metadata, the independent discussion stream and the
+complete ref map. The campaign includes original-key recovery/replay, stale and
+current predecessors, denied/restored outcome grants, divergent fast-forward
+refusal and an exact permitted fast-forward requiring the code-publication
+grant. The native service must drain every accepted connection.
+
+The Git oracle checks fixture integrity and both ancestry predicates inside its
+repository-owned sandbox; it is not a production Git dependency or a universal
+compatibility result. Campaign summaries identify the supplied executable by
+digest. An older executable supplies diagnostic evidence, not qualification of
+later Rust changes. Candidate review/reviewed merge, every operator entrypoint,
+TLS and deployment acceptance remain separate.
+
 ## Durable command-line workflow
 
 The CLI uses private files rather than token arguments, environment credentials,

@@ -34,10 +34,13 @@ fn inconsistent(detail: impl Into<String>) -> CliRefusal {
     })
 }
 fn live(request: &NodeRequestContext) -> Result<(), CliRefusal> {
-    request
-        .authority()
-        .checkpoint()
-        .map_err(|error| inconsistent(format!("snapshot request is no longer live: {error}")))
+    if request.is_live() {
+        Ok(())
+    } else {
+        Err(inconsistent(
+            "snapshot request is no longer live: cancellation or resource/deadline exhaustion",
+        ))
+    }
 }
 fn charge(total: &mut usize, amount: usize, limit: usize) -> Result<(), CliRefusal> {
     let attempted = total

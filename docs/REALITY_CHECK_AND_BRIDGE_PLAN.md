@@ -208,6 +208,55 @@ claimed. [Draft PR #37](https://github.com/Dicklesworthstone/frankengit/pull/37)
 contains the concrete change; `.4.59` remains in progress and `.4.26` blocked,
 with original acceptance and old custody obligations unchanged.
 
+**Native PR and compiler follow-through — November 1, 13:43–14:37 UTC:**
+`c36bfaf1b39b4ce3e4d3bb1c1f9dd827ad626677` adds a discovered actual PR operator
+campaign for all six form-only commands in both object formats. Its **15
+assertions complete with no failures or skips** against older native `a9d65885`:
+canonical Rust metadata, discussion and complete ref maps; original-key
+recovery/replay; stale/current twins; independent outcome/code grants; divergent
+refusal and permitted exact fast-forward; and native service drain. Sandboxed
+pinned Git 2.54.0 checks fixture integrity and both ancestry predicates. Removing
+the real native PR deployment switch makes the affected CLI fail with HTTP 403;
+SIGTERM after publication leaves an incomplete campaign, clean native drain and
+no owned process group. These controls do not qualify a newer Rust executable.
+The first candidate's incorrect JSON assumption for the native textual ref
+listing was corrected to a strict count/order/unique/native-width parser; raw
+failure evidence remains.
+
+The source-complete `9b6313c7` node test check reaches a real E0432, repaired by
+`9ace51976726687c7c870eaed0bd69e3fcff2bf6`: an existing workflow-input test imports
+its configuration from the actual public module rather than a nonexistent root
+export. A subsequent worker source-lock supervisor terminates before Cargo;
+its retained-ownership diagnostic and separate local retirement flags are both
+preserved without inferring remote custody discharge.
+
+Independent `hz4` native job **30090342971736083** compiles the node, then exits
+**101** at two actual CLI errors. Every worker source entry (**4,824 files /
+71,746,935 bytes**) matches frozen `9ace5197` by SHA-256, size and executable
+mode; all 2,579 tracked Rust files are present. Its acknowledgement and
+source/tree/pair retirement are true. No executable or prepared native campaign
+is claimed. `b1a28f23ea05abdeb1bd6508e45f07e0c943d844` corrects historical read
+fences through existing public request liveness/cancellation APIs and maps cell
+lifecycle refusal to the existing typed snapshot boundary, preserving authority
+privacy, final-head fences, all assertions and shutdown handling. Requalification
+of these repairs remains required. Original `.4.26` comment **5828** records the
+evidence without changing acceptance, status or ownership.
+
+[PR #37](https://github.com/Dicklesworthstone/frankengit/pull/37) was externally
+merged at `c16c97145c11facca51d59ba8e02f4031555b742` at 13:48:32 UTC. Published
+`81c628a0` is integrated on the follow-up branch at `7138b74a`. Its newer issue
+locking/import work is outside frozen `9ace5197` evidence. Candidate review,
+reviewed merge, the complete operator matrix, current native/default-profile
+fast/full/release gates and independent acceptance remain open.
+
+The next combined node/CLI syntax preflight at `6e710383` admits **no job**:
+no fresh worker clears the unchanged growth reservations plus protected floor.
+Its orchestration stops before Cargo; no local fallback, guard waiver or stale
+artifact substitution follows. The current private worktree has the same
+declared source-preserving transfer configuration, ready for a later stable
+verification cut. The failed native build is fully retired, while the earlier
+uncertain source-holder observation and old custody obligations remain separate.
+
 ## 3. What has improved since October 21
 
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).

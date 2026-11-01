@@ -76,7 +76,7 @@ fn nested_inputs_are_normalized_disjoint_and_cover_the_selected_workflow() {
 
 #[test]
 fn workflow_service_applies_the_same_narrow_prefix_contract() {
-    use crate::WorkflowWatchConfig;
+    use crate::workflow_watch::WorkflowWatchConfig;
     let config = |inputs: &[&[u8]]| {
         WorkflowWatchConfig::try_new(
             Format::Sha1,
