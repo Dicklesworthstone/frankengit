@@ -2,13 +2,14 @@
 // These narrow a trusted local operation; they do not authenticate an archive.
 import { importJson } from './native-import-process.mjs';
 import { BACKUP_LIMITS, backupError, exact } from './repository-backup-io.mjs';
+import { BACKUP_CHECKPOINT_FIELDS, validBackupCheckpoint } from './repository-backup-native.mjs';
 
 const IDENTITY = ['tenant_id', 'repository_id', 'incarnation_id', 'object_format'];
 const COUNTS = { objects: 100000n, references: 100000n, payload_bytes: BigInt(BACKUP_LIMITS.maximumArchiveBytes),
   local_edges: 1000000n, external_gitlinks: 1000000n };
 const TRUE = ['complete', 'object_graph_verified', 'original_payload_commitments_verified', 'source_head_revalidated', 'node_closed'];
 const FALSE = ['signature_verified', 'external_artifacts_included', 'physical_orphans_included'];
-const FIELDS = ['type', 'schema_version', 'sha256', 'bytes', ...IDENTITY, 'head_generation', ...Object.keys(COUNTS), ...TRUE, 'scope', ...FALSE];
+const FIELDS = ['type', 'schema_version', 'sha256', 'bytes', ...IDENTITY, 'head_generation', ...Object.keys(COUNTS), ...TRUE, 'scope', ...FALSE, ...BACKUP_CHECKPOINT_FIELDS];
 const integer = (v, minimum, maximum) => (typeof v === 'bigint' || Number.isSafeInteger(v)) && BigInt(v) >= minimum && BigInt(v) <= maximum;
 function fail(code) { throw backupError(code); }
 
@@ -25,6 +26,7 @@ export function repositoryBackupExportReceipt(result, declarations, maximumBytes
     || !integer(v.bytes, 1n, BigInt(maximumBytes))
     || Object.entries(COUNTS).some(([k, limit]) => !integer(v[k], 0n, limit))
     || BigInt(v.payload_bytes) > BigInt(v.bytes)
+    || !validBackupCheckpoint(v, BigInt(v.bytes))
     || TRUE.some(k => v[k] !== true) || FALSE.some(k => v[k] !== false)
     || v.scope !== 'authority_and_selected_git_objects') fail('backup_native_export_receipt_mismatch');
   return Object.freeze(Object.fromEntries(Object.entries(v).map(([k, value]) => [k, typeof value === 'bigint' ? String(value) : value])));

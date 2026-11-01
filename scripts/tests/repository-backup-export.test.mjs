@@ -4,11 +4,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createHash } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, lstat, rm, chmod, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exportApprovedRepositoryBackup } from '../lib/repository-backup-export.mjs';
+import { runApprovedRepositoryBackup } from '../lib/repository-backup-native.mjs';
+import { importJson } from '../lib/native-import-process.mjs';
+import { spawnSync } from 'node:child_process';
 import { approveVerifiedRepositoryBackup } from '../lib/repository-backup-verified-sign.mjs';
 import { authenticateRepositoryBackupFile } from '../lib/repository-backup-approval.mjs';
 import { backupExportCheckpoint } from '../lib/repository-backup-export-receipt.mjs';
@@ -39,6 +42,8 @@ if (mode.stall === op) { setInterval(() => {}, 1000); }
 else {
   let bytes, v;
   const counts = { objects: 2, references: 1, payload_bytes: 9, local_edges: 1, external_gitlinks: 0 };
+  const checkpoint = { transport_version: 1, retained_outcome_checkpoint_verified: false,
+    retained_outcome_checkpoint_root: null, retained_outcome_objects: 0, retained_outcome_payload_bytes: 0 };
   const identity = { ...${JSON.stringify(declarations)}, head_generation: 7 };
   if (op === 'export') {
     assert.deepEqual([args[2], args[4], args[5], args[6], args[7], args[9], args[11]],
@@ -48,7 +53,7 @@ else {
     v = { type: 'repository_source_backup_export', schema_version: 1, sha256: createHash('sha256').update(bytes).digest('hex'),
       bytes: bytes.length, ...identity, object_format: args[8], ...counts, complete: true, scope: 'authority_and_selected_git_objects',
       object_graph_verified: true, original_payload_commitments_verified: true, source_head_revalidated: true, node_closed: true,
-      signature_verified: false, external_artifacts_included: false, physical_orphans_included: false, ...mode.export };
+      signature_verified: false, external_artifacts_included: false, physical_orphans_included: false, ...checkpoint, ...mode.export };
     if (mode.changedArchive) fs.writeFileSync(args[3], Buffer.alloc(bytes.length, 43));
     if (mode.missingArchive) fs.unlinkSync(args[3]);
   } else {
@@ -62,7 +67,7 @@ else {
       object_graph_verified: true, original_payload_commitments_verified: true, node_closed: true,
       signature_verified: false, routing_published: false, archive_bytes: bytes.length, verification_instance: Number(args[8]),
       authority_import_verified: true, git_payloads_written: false, destination_authority_published: false, scratch_removed: true,
-      destination_readback_verified: false, newest_checkpoint_verified: false, external_artifacts_verified: false, ...mode.verify };
+      destination_readback_verified: false, newest_checkpoint_verified: false, external_artifacts_verified: false, ...checkpoint, ...mode.verify };
     if (mode.outputRace) fs.writeFileSync(${JSON.stringify(paths.output)}, 'concurrent approval', { flag: 'wx' });
   }
   let text = JSON.stringify(v);
@@ -121,7 +126,8 @@ for (const [name, value] of Object.entries({ type: { type: 'repository_source_ba
   head: { source_head_revalidated: false }, close: { node_closed: false }, scope: { scope: 'full_service' },
   signature: { signature_verified: true }, external: { external_artifacts_included: true }, orphans: { physical_orphans_included: true },
   count: { objects: 100001 }, negative: { references: -1 }, bytes: { bytes: 0 }, payload: { payload_bytes: 131074 },
-  unknown: { unexpected: true }, hash: { sha256: 'not-a-digest' } })) {
+  unknown: { unexpected: true }, hash: { sha256: 'not-a-digest' }, checkpoint_transport: { transport_version: 3 },
+  checkpoint_v1_root: { retained_outcome_checkpoint_root: '2:' + 'a'.repeat(64) } })) {
   test(`bad export ${name} refuses before verification or private key access`, async () => fixture(async ({ run, calls, paths }) => {
     await rm(paths.privateKey);
     await assert.rejects(run(), error => { assert.equal(error.code, 'backup_native_export_receipt_mismatch'); assert.equal(error.archive_state, 'export_attempted_unknown'); return true; });
@@ -129,6 +135,49 @@ for (const [name, value] of Object.entries({ type: { type: 'repository_source_ba
     assert.equal((await readFile(paths.archive)).length, 131073, 'never delete an exported archive on refusal');
   }, { export: value }));
 }
+
+for (const format of ['sha1', 'sha256']) test(`actual fg export-sign-restore preserves canonical issue state (${format})`, {
+  skip: !process.env.FG_NATIVE_BIN && 'FG_NATIVE_BIN required; schema peers are not native export evidence', timeout: 120000,
+}, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'fg-export-sign-native-'));
+  let validated = false;
+  t.after(async () => {
+    if (validated) await rm(root, { recursive: true, force: true });
+    else console.error(`Native export fixture retained: ${root}`);
+  });
+  const fg = resolve(process.env.FG_NATIVE_BIN), tenant = '11'.repeat(16), repository = '22'.repeat(16);
+  const source = join(root, 'source'), archive = join(root, 'operator.fgit'), output = join(root, 'operator.approval');
+  const privateKey = join(root, 'private.pem'), trustKey = join(root, 'public.pem'), destination = join(root, 'restored');
+  const run = args => {
+    const result = spawnSync(fg, args, { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
+    assert.equal(result.status, 0, result.stderr); return result.stdout;
+  };
+  run(['init', source, tenant, repository, format]);
+  const body = `canonical native export ${format}`;
+  run(['issue', 'open', source, tenant, repository, '1', '--trusted-local', '--object-format', format,
+    '--principal', '33'.repeat(16), '--idempotency-key', 'native-export-fixture', '--expected-version', '0',
+    '--title', 'Native export', '--body', body]);
+  // A separate native read supplies exact identity/generation pins; client
+  // reports never stand in for the source or final restored canonical state.
+  const control = importJson(Buffer.from(run(['backup', 'export', source, join(root, 'control.fgit'), tenant, repository, '--trusted-local', '--object-format', format])));
+  const selected = Object.fromEntries(['tenant_id', 'repository_id', 'incarnation_id', 'object_format'].map(key => [key, control[key]]));
+  selected.head_generation = String(control.head_generation);
+  const keys = generateKeyPairSync('ed25519'), publicPem = Buffer.from(keys.publicKey.export({ format: 'pem', type: 'spki' }));
+  await writeFile(privateKey, keys.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 });
+  await writeFile(trustKey, publicPem, { mode: 0o600 });
+  const exported = await exportApprovedRepositoryBackup({ fg, source, archive, output, privateKey,
+    declarations: selected, verificationInstance: '9000041', trustedLocal: true });
+  assert.equal(exported.state, 'complete'); assert.equal(exported.native.transport_version, control.transport_version);
+  const { head_generation, ...identity } = selected, policy = { ...identity, minimum_head_generation: head_generation };
+  const authenticated = await authenticateRepositoryBackupFile(archive, await readFile(output), publicPem, policy);
+  assert.equal(authenticated.authentication.signature_verified, true);
+  const restored = await runApprovedRepositoryBackup({ operation: 'restore', fg, input: archive, approval: output, trustKey, policy,
+    verificationInstance: '9000042', destinationInstance: '9000043', destination, approvalRecord: join(root, 'record'), trustedLocal: true });
+  assert.equal(restored.native.signature_verified, true); assert.equal(restored.native.reopened_and_verified, true);
+  assert.match(run(['issue', 'show', destination, tenant, repository, '1', '--trusted-local', '--object-format', format]), new RegExp(body));
+  run(['doctor', destination, tenant, repository]);
+  validated = true;
+});
 test('duplicate export receipt fields never become verified state', async () => fixture(async ({ run, paths }) => {
   await assert.rejects(run(), code('noncanonical_native_import_json')); await absent(paths.output);
 }, { duplicate: true }));

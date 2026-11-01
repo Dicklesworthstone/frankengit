@@ -83,7 +83,8 @@ export async function runNativeRecoveryPeer(configPath, args) {
     head_generation: BigInt(statement.head_generation), objects: 2, references: 1, payload_bytes: bytes.length - 9,
     complete: true, scope: 'authority_and_selected_git_objects', object_graph_verified: true,
     original_payload_commitments_verified: true, node_closed: true, signature_verified: true, routing_published: false,
-    archive_bytes: bytes.length,
+    archive_bytes: bytes.length, transport_version: 1, retained_outcome_checkpoint_verified: false,
+    retained_outcome_checkpoint_root: null, retained_outcome_objects: 0, retained_outcome_payload_bytes: 0,
     ...(operation === 'verify' ? { local_edges: 1, external_gitlinks: 0, verification_instance: BigInt(flags['--verification-instance']),
       authority_import_verified: true, git_payloads_written: false, destination_authority_published: false,
       scratch_removed: true, destination_readback_verified: false, newest_checkpoint_verified: false, external_artifacts_verified: false }

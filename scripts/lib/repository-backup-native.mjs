@@ -11,14 +11,31 @@ import { backupDecimal, backupPolicy, authenticateRepositoryBackupFile } from '.
 import { stageNativeBackupApproval, assertNativeBackupApproval, nativeBackupApprovalBinding } from './repository-backup-native-approval.mjs';
 
 const IDENTITY = ['tenant_id', 'repository_id', 'incarnation_id', 'object_format'];
+export const BACKUP_CHECKPOINT_FIELDS = Object.freeze(['transport_version', 'retained_outcome_checkpoint_verified',
+  'retained_outcome_checkpoint_root', 'retained_outcome_objects', 'retained_outcome_payload_bytes']);
 const COMMON = ['type', 'schema_version', 'sha256', ...IDENTITY, 'head_generation', 'objects', 'references', 'payload_bytes',
-  'complete', 'scope', 'object_graph_verified', 'original_payload_commitments_verified', 'node_closed', 'signature_verified', 'routing_published', 'archive_bytes'];
+  'complete', 'scope', 'object_graph_verified', 'original_payload_commitments_verified', 'node_closed', 'signature_verified', 'routing_published', 'archive_bytes',
+  ...BACKUP_CHECKPOINT_FIELDS];
 const VERIFY = ['local_edges', 'external_gitlinks', 'verification_instance', 'authority_import_verified', 'git_payloads_written',
   'destination_authority_published', 'scratch_removed', 'destination_readback_verified', 'newest_checkpoint_verified', 'external_artifacts_verified'];
 const RESTORE = ['destination_instance', 'source_tokens_preserved', 'reopened_and_verified', 'external_artifacts_restored',
   'streaming', 'resume_requested', 'already_published'];
 function fail(code) { throw backupError(code); }
 const nativeInteger = (v, minimum, maximum) => (typeof v === 'bigint' || Number.isSafeInteger(v)) && BigInt(v) >= minimum && BigInt(v) <= maximum;
+// repository/checkpoint.rs::receipt always emits this envelope, including v1.
+// These are native verification observations, never checkpoint freshness or an
+// alternative publication authority. Every retained payload is inside the
+// independently authenticated archive; its counters cannot exceed those bytes.
+export function validBackupCheckpoint(value, archiveBytes) {
+  const objects = value.retained_outcome_objects, bytes = value.retained_outcome_payload_bytes;
+  if (!nativeInteger(objects, 0n, archiveBytes) || !nativeInteger(bytes, 0n, archiveBytes)) return false;
+  if (value.transport_version === 1) return value.retained_outcome_checkpoint_verified === false
+    && value.retained_outcome_checkpoint_root === null && BigInt(objects) === 0n && BigInt(bytes) === 0n;
+  return value.transport_version === 2 && value.retained_outcome_checkpoint_verified === true
+    && typeof value.retained_outcome_checkpoint_root === 'string'
+    && /^2:[0-9a-f]{64}$/.test(value.retained_outcome_checkpoint_root)
+    && BigInt(objects) > 0n && BigInt(bytes) > 0n;
+}
 export function repositoryBackupReceipt(process, operation, statement, instance, resume = false, approval) {
   if (process.code !== 0) { const e = backupError('backup_native_refused'); e.native_exit_code = process.code; e.native_diagnostic = process.stderr?.subarray(0, 4096).toString('utf8') ?? ''; throw e; }
   const v = importJson(process.stdout);
@@ -29,6 +46,7 @@ export function repositoryBackupReceipt(process, operation, statement, instance,
     || !nativeInteger(v.archive_bytes, 1n, BigInt(BACKUP_LIMITS.maximumArchiveBytes)) || String(v.archive_bytes) !== statement.artifact.bytes
     || !nativeInteger(v.objects, 0n, 100000n) || !nativeInteger(v.references, 0n, 100000n)
     || !nativeInteger(v.payload_bytes, 0n, BigInt(statement.artifact.bytes))
+    || !validBackupCheckpoint(v, BigInt(statement.artifact.bytes))
     || ['complete', 'object_graph_verified', 'original_payload_commitments_verified', 'node_closed'].some(k => v[k] !== true)
     || v.signature_verified !== Boolean(approval) || v.routing_published !== false || v.scope !== 'authority_and_selected_git_objects') fail('backup_native_receipt_mismatch');
   if (approval) assertNativeBackupApproval(v.approval, approval);
