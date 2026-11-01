@@ -274,6 +274,55 @@ contains the follow-through and was externally merged at
 conditions. Current-native campaigns and independent acceptance remain open.
 No default-profile or full/release result is implied.
 
+**Exact-candidate operator follow-through — November 1, 20:11–20:47 UTC:**
+`3e0fc1c178d53fce5ff177b894b20c43b17b70d6` connects the four remaining
+`remote_pull.mjs` candidate actions to the existing native campaign.
+`841861beed0f5bee8238756e22a8b7f5063f67a9` connects real review snapshots and
+candidate capture/inspection/drafting/staging to the same sender. Live intake
+exposed a production defect: native HTTP emits raw Git OIDs, but the review
+snapshot reader rejected them as `invalid_review_oid`. The repair qualifies only
+known network fields using the explicit selected hash domain; retained captures
+still require qualified identities. Scope, snapshot, ordering, exact counters,
+ref bytes and all existing refusal checks remain. Both read clients also now
+send the required project User-Agent; actual socket assertions failed before
+the repair. No Rust wire, public API, dependency or gate change is involved.
+
+At clean `841861be`, the predeclared twelve-file focused corpus completes
+**533 passed / zero failed or skipped** under Node 26.8.1 and sandboxed pinned
+Git 2.54.0. Separately, the existing central E2E runner completes **27 assertions,
+zero failures or skips**, both hash formats, all three entrypoints and normal
+native drain. The binary remains **older native `a9d65885`**, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+This is mixed-source diagnostic evidence, not newer Rust qualification. Root
+receipt SHA-256: `622cf899619ddbf8bc2868b7206e8e52348521790ee6c5c4c29818c597684678`;
+raw artifacts: `/data/frankengit-targets/noble_operator_pull_packages_bound_841861be`.
+The lane checks independent reviewer/submitter grants, stale/current review
+streams, missing/withdrawn approvals, exact method refusal/permitted merge,
+original-key recovery without the saved bundle, independent package pins,
+unchanged state before explicit publication and exact final ref maps.
+
+The raw-wire regressions fail in all four new both-hash/open-or-merged cases
+before repair. First-run campaign mistakes are retained: invalid credential
+scope order, an incorrect merge-actor expectation for `last_metadata_actor`,
+and an incorrect qualified-OID expectation for the native candidate report.
+The first focused header run used the fixture's default host Git; it earns no
+pinned-Git credit. Accepted focused evidence instead uses the supported oracle
+override with verified Git 2.54.0 inside Bubblewrap. Removing `--allow-source`
+proved an ineffective candidate-route negative: the complete lane still passed,
+and this earns no negative credit. Corrected native deployment controls remove
+`--allow-pulls`: both read entrypoints refuse 403, while restored permitted twins
+complete against the same unchanged canonical repository. Cancellation after
+actual approval yields an incomplete driver and normal native drain with no
+owned process group. These bounded controls do not qualify current Rust.
+
+Newer peer received-pack restart code on published `e3d269b5` is outside the
+older executable's evidence. Under the replacement contributor contract's
+development limits, current native build/test/default gates belong to the
+independent batch lane; no implementer Cargo build or test was started. Original
+`.4.59` acceptance remains open for the full entrypoint matrix, conflict
+resolution/squash breadth, same-source native execution and independent review;
+`.4.26` retains its complete original fast/native/custody requirements.
+
 ## 3. What has improved since October 21
 
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).
