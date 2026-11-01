@@ -50,7 +50,7 @@ for format in sha1 sha256; do
     fge_assert_eq "OPERATOR-PULL-$format-$property" true "$(fact "${format}_$property")" "native PR $property"
   done
   for method in merge-commit squash; do
-    for property in conflict_resolution exact_reviewed_result resolution_service_drained; do
+    for property in resolution_read_grant conflict_resolution exact_reviewed_result resolution_service_drained; do
       fge_assert_eq "OPERATOR-PULL-$format-$method-$property" true "$(fact "${format}_${method}_$property")" "native $method $property"
     done
   done

@@ -78,7 +78,10 @@ def run_resolution_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str, 
         return report["pull_request"]
 
     def refs() -> dict[str, str]:
-        rows = native("refs")["references"]
+        page = native("refs")
+        require(page["node_closed"] is True and page["has_more"] is False and page["next_after_hex"] is None,
+                "native ref read is incomplete or did not close")
+        rows = page["references"]
         names = [bytes.fromhex(row["reference_hex"]).decode() for row in rows]
         require(names == sorted(names) and len(names) == len(set(names)), "native refs are unordered or duplicated")
         return dict(zip(names, (row["tip"] for row in rows)))
@@ -113,6 +116,23 @@ def run_resolution_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str, 
         require(refused["published"] is False and not (directory / "invalid").exists(), "invalid choices published a result")
         choices = directory / "choices.json"
         choices.write_text(json.dumps([{"path_hex": PATH.hex(), "choice": "file", "mode": "100755", "content_hex": CONTENT.hex()}]))
+        # Resolving constructs a candidate through native read authority. It is
+        # not authorized by review/publication grants or the saved local package.
+        original_credentials = credentials.read_text()
+        denied_credentials = original_credentials.replace(f"{READER} read,pulls-read,reviews-read",
+                                                           f"{READER} pulls-read,reviews-read")
+        require(denied_credentials != original_credentials, "source-read grant control did not alter its selected credential")
+        pending = directory / "credentials.next"
+        pending.write_text(denied_credentials)
+        pending.replace(credentials)
+        denied = campaign.node_command(candidate_script, ["resolve", "--package", str(conflict), "--sha256", saved["sha256"],
+            "--choices", str(choices), "--token-file", str(token_paths[READER]), "--output-dir", str(directory / "denied")],
+            3, error_reply=True)
+        require(denied["status"] == 403 and denied["published"] is False and not (directory / "denied").exists()
+                and campaign.run("at", root, TENANT, REPOSITORY, "latest") == before,
+                "resolution without source-read grant published a result or repository state")
+        pending.write_text(original_credentials)
+        pending.replace(credentials)
         resolved = directory / "resolved"
         receipt = campaign.node_command(candidate_script, ["resolve", "--package", str(conflict), "--sha256", saved["sha256"],
             "--choices", str(choices), "--token-file", str(token_paths[READER]), "--output-dir", str(resolved)])
@@ -131,6 +151,7 @@ def run_resolution_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str, 
         require(original_files == {p.name: p.read_bytes() for p in conflict.iterdir()}
                 and campaign.run("at", root, TENANT, REPOSITORY, "latest") == before,
                 "resolution rewrote the conflict package or published repository state")
+        campaign.facts[f"{fmt}_{method}_resolution_read_grant"] = True
         campaign.facts[f"{fmt}_{method}_conflict_resolution"] = True
 
         def stage(name: str, action: str) -> tuple[Path, str]:
