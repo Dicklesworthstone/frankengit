@@ -21,7 +21,7 @@
 //! peer — is refused, not trusted. `docs/GIT_TREE_FS.md` §5 is explicit that an
 //! unverified cache buffer is never exposed as a Git object.
 
-use crate::capability::{CapabilityRefusal, ReadGrant, TreeCapability};
+use crate::capability::{CapabilityRefusal, GrantScope, ReadGrant, TreeCapability};
 use crate::path::{PathPolicy, PathRefusal, TreePath};
 use core::fmt::{self, Display, Formatter};
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, NativeObjectIdentity};
@@ -300,6 +300,12 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         kind: GitObjectKind,
         grant: &ReadGrant,
     ) -> Result<Vec<u8>, ObjectSourceError> {
+        if matches!(grant.scope(), GrantScope::DirectoryTraversal(_)) && kind != GitObjectKind::Tree
+        {
+            return Err(ObjectSourceError::Refused {
+                reason: "directory traversal does not authorize payload bytes".to_owned(),
+            });
+        }
         let bytes = source.read_object(oid, kind, grant)?;
         if bytes.len() > self.parse_limits.max_object_bytes {
             return Err(ObjectSourceError::TooLarge {
@@ -341,12 +347,27 @@ impl<A: GitHashAlgorithm> BaseView<A> {
     /// (`docs/GIT_TREE_FS.md` §15); following one during resolution would let
     /// repository content redirect a read outside the capability scope, which
     /// is a workspace escape wearing ordinary clothes.
+    /// A grant for the exact nested path authorizes reaching it through parent
+    /// trees; resolving a parent itself still requires its own read authority.
     pub fn resolve<S: ObjectSource<A>>(
         &self,
         source: &S,
         capability: &mut TreeCapability,
         path: &TreePath,
         now: u64,
+    ) -> Result<BaseEntry<A>, BaseError> {
+        self.resolve_entry(source, capability, path, now, false)
+    }
+
+    /// Directory discovery may cross ancestors of an exact readable path;
+    /// ordinary resolution still requires that the requested path is readable.
+    fn resolve_entry<S: ObjectSource<A>>(
+        &self,
+        source: &S,
+        capability: &mut TreeCapability,
+        path: &TreePath,
+        now: u64,
+        directory_only: bool,
     ) -> Result<BaseEntry<A>, BaseError> {
         self.check_repository(capability)?;
 
@@ -361,21 +382,15 @@ impl<A: GitHashAlgorithm> BaseView<A> {
                 None => TreePath::parse(component, &self.path_policy)?,
                 Some(prefix) => prefix.join(component, &self.path_policy)?,
             };
-            // A scope refusal names the path the CALLER asked for, not the
-            // ancestor component the walk happened to stop at. Reporting the
-            // component leaked where the boundary sits: a holder of `docs`
-            // probing `src/lib.rs` learned that the refusal came at `src`,
-            // which is a coarse existence oracle for top-level names. The
-            // refusal is unchanged in kind and timing -- still before any
-            // source read -- only in what it discloses.
-            let grant = capability
-                .authorize_read(&here, now)
-                .map_err(|refusal| match refusal {
-                    CapabilityRefusal::ReadOutsideScope { .. } => {
-                        CapabilityRefusal::ReadOutsideScope { path: path.clone() }
-                    }
-                    other => other,
-                })?;
+            // Authorize the caller's whole selection before every fetch. A
+            // nested file grant permits reaching that file through its parent
+            // trees, but never reading parent payloads or sibling entries.
+            // Refusals therefore also name the requested path before any I/O.
+            let grant = if directory_only {
+                capability.authorize_directory(path, now)?
+            } else {
+                capability.authorize_read(path, now)?
+            };
             let body = self.read_object(source, &tree_oid, GitObjectKind::Tree, &grant)?;
             capability.charge_fetch(body.len() as u64)?;
             let entries = parse_tree(
@@ -403,6 +418,9 @@ impl<A: GitHashAlgorithm> BaseView<A> {
             }
 
             if index == last_index {
+                if directory_only && !entry.is_directory() {
+                    return Err(BaseError::NotADirectory { path: here });
+                }
                 return Ok(entry);
             }
 
@@ -423,7 +441,10 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         Err(BaseError::NotFound { path: path.clone() })
     }
 
-    /// Lists the immediate children of a tree path, or of the root for `None`.
+    /// Lists only disclosable immediate children of a tree path, or of the root
+    /// for `None`. Ancestors of readable prefixes may be listed as directories,
+    /// but their unrelated children and non-directory ancestor entries refuse
+    /// disclosure rather than acquiring payload-read authority.
     pub fn list<S: ObjectSource<A>>(
         &self,
         source: &S,
@@ -431,14 +452,13 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         directory: Option<&TreePath>,
         now: u64,
     ) -> Result<DirectoryListing<A>, BaseError> {
-        // Above the match: the Some(path) arm delegates to resolve, which checks
-        // for itself, but the root arm does not, and the root listing is exactly
-        // where an unchecked capability would be most useful to an attacker.
+        // Directory resolution rechecks this too, but the root arm has no
+        // resolving path and must never skip the repository boundary.
         self.check_repository(capability)?;
 
         let (tree_oid, scope) = match directory {
             None => (self.base_tree_oid, None),
-            Some(path) => match self.resolve(source, capability, path, now)? {
+            Some(path) => match self.resolve_entry(source, capability, path, now, true)? {
                 BaseEntry::Directory { oid } => (oid, Some(path.clone())),
                 _ => return Err(BaseError::NotADirectory { path: path.clone() }),
             },
@@ -447,7 +467,7 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         // The root has no path of its own, so it is authorised as the root
         // rather than through a fabricated path.
         let grant = match &scope {
-            Some(path) => capability.authorize_read(path, now)?,
+            Some(path) => capability.authorize_directory(path, now)?,
             None => capability.authorize_root(now)?,
         };
         let body = self.read_object(source, &tree_oid, GitObjectKind::Tree, &grant)?;
@@ -478,6 +498,15 @@ impl<A: GitHashAlgorithm> BaseView<A> {
                 continue;
             }
             let classified = classify(&entry)?;
+            let grant = capability.authorize_directory(&child, now)?;
+            if matches!(grant.scope(), GrantScope::DirectoryTraversal(_))
+                && !classified.is_directory()
+            {
+                // An ancestor name may be traversed only as a directory. Do
+                // not return a file/symlink/gitlink entry or fetch its body just
+                // because its spelling prefixes an authorized descendant.
+                return Err(BaseError::NotADirectory { path: child });
+            }
             out.push((entry.name.clone(), classified));
         }
         Ok(out)

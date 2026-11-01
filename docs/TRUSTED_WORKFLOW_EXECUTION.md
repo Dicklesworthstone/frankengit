@@ -86,9 +86,11 @@ Both SHA-1 and SHA-256 repositories use their native object identities; supply
 The head token uses the existing `alg:<algorithm-code>:<digest-hex>` syntax,
 optionally prefixed with `head:`.
 
-`--input` accepts distinct top-level file/directory names, not globs. It must
-include the workflow's top-level component. Unselected sibling trees are not
-copied. Raw-byte names can use `--workflow-hex`, `--input-hex`, and `--ref-hex`.
+`--input` accepts distinct, non-overlapping repository file/directory paths,
+including nested prefixes, not globs. The inputs must cover the workflow file.
+Parent directories are traversed without admitting unselected siblings; see
+[nested source inputs](TRUSTED_WORKFLOW_INPUTS.md). Raw-byte names can use
+`--workflow-hex`, `--input-hex`, and `--ref-hex`.
 Path traversal, duplicate flags/inputs, mixed workflow spellings, unknown options,
 zero run IDs, and missing trust confirmation refuse before opening the node.
 

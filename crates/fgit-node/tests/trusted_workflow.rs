@@ -31,6 +31,12 @@ impl Fixture {
         Self::new_inner(format, workflow, true)
     }
     fn new_inner(format: GitHashAlgorithm, workflow: &str, dispatch: bool) -> Self {
+        Self::new_layout(format, workflow, dispatch, false)
+    }
+    fn new_nested(format: GitHashAlgorithm, workflow: &str) -> Self {
+        Self::new_layout(format, workflow, false, true)
+    }
+    fn new_layout(format: GitHashAlgorithm, workflow: &str, dispatch: bool, nested: bool) -> Self {
         // Create-new ownership, including stale directories from a reused PID.
         let root = loop {
             let path = std::env::temp_dir().join(format!(
@@ -67,7 +73,53 @@ impl Fixture {
         );
         let input = loose(&source, format, GitObjectKind::Blob, "blob", b"original\n");
         let mut tree = Vec::new();
-        if dispatch {
+        if nested {
+            let hidden = loose(
+                &source,
+                format,
+                GitObjectKind::Blob,
+                "blob",
+                b"not selected\n",
+            );
+            let subtree = |entries: &[(&[u8], &[u8], GitOid)]| {
+                let mut bytes = Vec::new();
+                for (mode, name, oid) in entries {
+                    bytes.extend_from_slice(mode);
+                    bytes.push(b' ');
+                    bytes.extend_from_slice(name);
+                    bytes.push(0);
+                    bytes.extend_from_slice(oid.as_bytes());
+                }
+                loose(&source, format, GitObjectKind::Tree, "tree", &bytes)
+            };
+            let workflows = subtree(&[
+                (b"100644", b"component.yml", workflow),
+                (b"100644", b"other.yml", hidden),
+            ]);
+            let github = subtree(&[
+                (b"100644", b"private", hidden),
+                (b"40000", b"workflows", workflows),
+            ]);
+            let component = subtree(&[
+                (b"100644", b"input.txt", input),
+                (b"100644", b"private.txt", hidden),
+            ]);
+            let crates = subtree(&[
+                (b"40000", b"component", component),
+                (b"100644", b"other", hidden),
+            ]);
+            for (mode, name, oid) in [
+                (b"40000".as_slice(), b".github".as_slice(), github),
+                (b"40000".as_slice(), b"crates".as_slice(), crates),
+                (b"100644".as_slice(), b"private".as_slice(), hidden),
+            ] {
+                tree.extend_from_slice(mode);
+                tree.push(b' ');
+                tree.extend_from_slice(name);
+                tree.push(0);
+                tree.extend_from_slice(oid.as_bytes());
+            }
+        } else if dispatch {
             let mut children = Vec::new();
             for name in [b"a.yml".as_slice(), b"b.yml".as_slice()] {
                 children.extend_from_slice(b"100644 ");
@@ -82,7 +134,10 @@ impl Fixture {
         for (name, oid) in [
             (b"input.txt".as_slice(), input),
             (b"workflow.yml".as_slice(), workflow),
-        ] {
+        ]
+        .into_iter()
+        .filter(|_| !nested)
+        {
             tree.extend_from_slice(b"100644 ");
             tree.extend_from_slice(name);
             tree.push(0);
@@ -202,6 +257,69 @@ fn loose(
     )
     .unwrap();
     id
+}
+
+#[test]
+fn nested_component_workflow_materializes_exact_files_and_preserves_job_isolation() {
+    let workflow = "name: nested\non: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: test \"$(cat crates/component/input.txt)\" = original && test ! -e crates/component/private.txt && test ! -e crates/other && test ! -e .github/private && test ! -e .github/workflows/other.yml && test ! -e private && printf changed > crates/component/input.txt && printf selected-a\n  b:\n    runs-on: fgit-trusted-local\n    needs: a\n    steps:\n      - run: test \"$(cat crates/component/input.txt)\" = original && printf selected-b\n";
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new_nested(format, workflow);
+        let before = generation(f.node());
+        let paths = vec![
+            b".github/workflows/component.yml".to_vec(),
+            b"crates/component/input.txt".to_vec(),
+        ];
+        let mut overlapping = paths.clone();
+        overlapping.push(b"crates".to_vec());
+        assert!(
+            f.node()
+                .runtime()
+                .block_on(f.node().run_trusted_workflow_in(
+                    &f.node().request_context(),
+                    &reference(),
+                    b".github/workflows/component.yml",
+                    [0x71; 16],
+                    &f.parent(),
+                    &overlapping,
+                    (None, Some(f.tip)),
+                    Default::default(),
+                ))
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(f.parent()).unwrap().count(), 0);
+        let result = f
+            .node()
+            .runtime()
+            .block_on(f.node().run_trusted_workflow_in(
+                &f.node().request_context(),
+                &reference(),
+                b".github/workflows/component.yml",
+                [0x71; 16],
+                &f.parent(),
+                &paths,
+                (None, Some(f.tip)),
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(result.succeeded());
+        assert!(result.workspaces_closed);
+        assert_eq!(result.source_commit, f.tip);
+        assert_eq!(result.read_prefixes, paths);
+        assert_eq!(
+            result.execution.jobs[0].steps[0].observation.stdout,
+            b"selected-a"
+        );
+        assert_eq!(
+            result.execution.jobs[1].steps[0].observation.stdout,
+            b"selected-b"
+        );
+        let shared = result.shared_inputs.unwrap();
+        assert_eq!(
+            shared.cloned_bytes + shared.fallback_bytes,
+            2 * (workflow.len() + b"original\n".len()) as u64
+        );
+        assert_eq!(generation(f.node()), before);
+    }
 }
 
 #[test]

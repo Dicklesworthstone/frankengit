@@ -34,9 +34,10 @@ candidate. A supplied `--expected-head` additionally pins the authority snapshot
 All ordinary workflow input controls still apply. `--object-format sha256`
 selects a SHA-256 node (SHA-1 is the default). Native IDs must have the exact
 selected width and use lowercase hex. `--ref-hex`, `--workflow-hex`, and
-`--input-hex` retain byte-exact repository names. Input prefixes are distinct
-top-level names and must include the workflow path. They select copied inputs,
-not host access restrictions.
+`--input-hex` retain byte-exact repository names. Input prefixes are distinct,
+non-overlapping repository paths and must cover the workflow path. Nested
+[source input selection](TRUSTED_WORKFLOW_INPUTS.md) applies to the actual
+candidate tree. Inputs select materialized files, not host access restrictions.
 
 `--bundle` is a stable local regular file, bounded at 128 MiB; symlinks, devices,
 empty files and oversized files refuse. Intake completes before opening the

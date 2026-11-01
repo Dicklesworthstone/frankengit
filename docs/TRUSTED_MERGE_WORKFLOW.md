@@ -13,9 +13,12 @@ what the submitted candidate does. Explicitly resolved content and modified
 workflow scripts must be read from the actual uploaded commit and pack.
 
 `OneNode::run_trusted_merge_workflow_in` accepts an independently specified
-`NativeMerge`, its bundle bytes, a workflow path, explicit top-level input
+`NativeMerge`, its bundle bytes, a workflow path, explicit non-overlapping input
 prefixes, a fresh run ID, private run directory parent, optional exact authority
 head, and the existing `WorkflowLimits`.
+
+[Nested input prefixes](TRUSTED_WORKFLOW_INPUTS.md) select only the needed
+candidate files and directories while preserving exact source provenance.
 
 ## Validation before execution
 

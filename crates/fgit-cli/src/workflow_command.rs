@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <repository-id> <ref>
   --trusted-local --workflow <repository-path> --run-parent <absolute-private-directory>
-  --run-id <32-lowercase-hex> --input <top-level-path> [--input <top-level-path> ...]
+  --run-id <32-lowercase-hex> --input <repository-path> [--input <repository-path> ...]
   [--object-format sha1|sha256] [--expected-head <snapshot-token>]
   [--expected-commit <native-oid>] [--expected-incarnation <id>]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow]
@@ -54,7 +54,8 @@ To publish all completed jobs in an exact saved snapshot: fg workflow publish-ru
 Linux only. The run parent must already exist with mode 0700. Review and trust
 ALL scripts before invoking: jobs run as your host user, not inside a hostile-code
 sandbox. Inputs select copied repository files; they do not restrict host access.
-The workflow must be included in the explicit input prefixes. Its entire graph
+Input prefixes are normalized repository file/directory paths and must not overlap.
+The workflow must be included in those explicit input prefixes. Its entire graph
 must use runs-on: fgit-trusted-local and the native supported YAML subset.
 
 One pinned source snapshot; fresh private copies for jobs; ordered steps within
@@ -234,9 +235,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 value.as_bytes().to_vec()
             };
             validate_path(&bytes)?;
-            if bytes.contains(&b'/') || inputs.len() >= 1024 || !inputs.insert(bytes) {
+            if inputs.len() >= 1024 || !inputs.insert(bytes) {
                 return Err(
-                    "inputs must be distinct top-level file/directory names, at most 1024".into(),
+                    "inputs must be distinct repository file/directory paths, at most 1024".into(),
                 );
             }
         } else if matches!(flag, "--artifact" | "--artifact-hex") {
@@ -282,6 +283,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         _ => return Err("supply exactly one of --workflow and --workflow-hex".into()),
     };
     validate_path(&workflow)?;
+    if inputs.iter().any(|prefix| {
+        prefix
+            .iter()
+            .enumerate()
+            .any(|(offset, byte)| *byte == b'/' && inputs.contains(&prefix[..offset]))
+    }) {
+        return Err("input prefixes must not overlap".into());
+    }
     if inputs.is_empty()
         || inputs.iter().map(Vec::len).sum::<usize>() > 64 * 1024
         || !inputs.iter().any(|prefix| {
@@ -714,6 +723,39 @@ mod tests {
         let mut input = args();
         input[15] = "relative".into();
         assert!(parse(&input).is_err());
+    }
+    #[test]
+    fn nested_input_paths_are_explicit_disjoint_and_byte_preserving() {
+        let mut input = args();
+        input[7] = ".github/workflows/run.yml".into();
+        input[9] = ".github/workflows".into();
+        input[11] = "crates/component".into();
+        let options = parse(&input).unwrap();
+        assert_eq!(
+            options.inputs,
+            [b".github/workflows".to_vec(), b"crates/component".to_vec()]
+        );
+        input.extend(["--input".into(), "crates/component-old".into()]);
+        assert!(
+            parse(&input).is_ok(),
+            "prefix boundaries are path components"
+        );
+        for parent_first in [false, true] {
+            let mut overlap = input.clone();
+            let extra = ["--input".to_owned(), "crates".to_owned()];
+            if parent_first {
+                overlap.splice(5..5, extra);
+            } else {
+                overlap.extend(extra);
+            }
+            assert!(parse(&overlap).unwrap_err().contains("overlap"));
+        }
+        let mut raw = args();
+        raw[8] = "--input-hex".into();
+        raw[9] = "63692fff2e796d6c".into();
+        raw[6] = "--workflow-hex".into();
+        raw[7] = "63692fff2e796d6c".into();
+        assert_eq!(parse(&raw).unwrap().inputs[0], b"ci/\xff.yml");
     }
     #[test]
     fn known_execution_survives_cleanup_failure_and_broken_output_never_succeeds() {

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <repository-id> <branch>
-  --trusted-local --workflow <repository-directory> --input <top-level-path> [--input ...]
+  --trusted-local --workflow <repository-directory> --input <repository-path> [--input ...]
   --run-parent <absolute-private-directory> [--object-format sha1|sha256]
   [--pull-request <positive-native-pr-number> | --merge-queue <positive-queue-number>]
   [--merge-candidate-ref <separate-ci-branch> --merge-principal <id>

@@ -518,6 +518,42 @@ mod tests {
     }
 
     #[test]
+    fn server_workflow_inputs_accept_nested_selections_without_broadening_them() {
+        let mut arguments = server_arguments();
+        let directory = arguments
+            .iter()
+            .position(|arg| arg == "--workflow-dir")
+            .unwrap()
+            + 1;
+        arguments[directory] = ".github/workflows".into();
+        let input = arguments
+            .iter()
+            .position(|arg| arg == "--workflow-input")
+            .unwrap()
+            + 1;
+        arguments[input] = ".github/workflows".into();
+        arguments.extend(["--workflow-input".into(), "crates/component".into()]);
+        let selected = parse_server(&arguments).unwrap().workflow_service.unwrap();
+        assert_eq!(
+            selected.inputs(),
+            &[b".github/workflows".to_vec(), b"crates/component".to_vec()]
+        );
+        for bad in [
+            ".github",
+            "crates",
+            "crates/component/src",
+            "crates//other",
+            "../outside",
+        ] {
+            let mut invalid = arguments.clone();
+            invalid.extend(["--workflow-input".into(), bad.into()]);
+            assert!(parse_server(&invalid).is_err(), "{bad}");
+        }
+        arguments.extend(["--workflow-input".into(), "crates/component-old".into()]);
+        assert!(parse_server(&arguments).is_ok());
+    }
+
+    #[test]
     fn server_can_configure_workflow_and_index_workers_together() {
         let mut arguments = server_arguments();
         arguments.extend(

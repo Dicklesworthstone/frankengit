@@ -40,8 +40,9 @@ fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
   --allow-pulls --allow-receive
 ```
 
-All workflow selection flags are explicit. `--workflow-input` repeats for distinct
-top-level paths; the workflow directory must be included in those inputs.
+All workflow selection flags are explicit. `--workflow-input` repeats for distinct,
+non-overlapping repository paths, including [nested prefixes](TRUSTED_WORKFLOW_INPUTS.md);
+the workflow directory must be included in those inputs.
 `--workflow-format` must match the repository's SHA-1 or SHA-256 object format.
 The polling interval accepts 10–60000 milliseconds and defaults to 1000. Each
 attempt accepts a 1–3600 second deadline and defaults to 300. Pending publication,

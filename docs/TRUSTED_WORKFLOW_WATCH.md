@@ -47,7 +47,8 @@ selected deployment):
 
 `ref_hex` above is `refs/heads/main`; the directory is `.github/workflows`.
 Inputs above select `.github`, `src`, `Cargo.toml`, and `Cargo.lock`. Choose every
-needed top-level path explicitly. Hex preserves native byte names without
+needed file or directory prefix explicitly; [nested input paths](TRUSTED_WORKFLOW_INPUTS.md)
+can narrow this selection. Prefixes must not overlap. Hex preserves native byte names without
 turning them into shell syntax. SHA-256 native repositories are also supported.
 Only `push` and `workflow_dispatch` are native event-selection keys here.
 
