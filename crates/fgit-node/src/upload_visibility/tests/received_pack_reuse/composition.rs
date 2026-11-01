@@ -4,6 +4,7 @@
 use super::*;
 use fgit_crypto::{sha1_digest, sha256_digest};
 
+mod long_history;
 mod thin;
 
 struct Increment {

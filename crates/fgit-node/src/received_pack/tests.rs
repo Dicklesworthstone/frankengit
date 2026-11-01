@@ -511,14 +511,15 @@ fn pinned_readers_keep_capacity_until_they_finish() {
 }
 
 #[test]
-fn eight_entry_fifo_skips_pinned_entries() {
+fn sixty_four_entry_fifo_skips_pinned_entries() {
     let cache = ReceivedPackCache::new(256 * 1024);
     let first = whole(b"entry-0");
     retain(&cache, &first);
     let pin = payload(&cache, &first).unwrap();
     let second = whole(b"entry-1");
     retain(&cache, &second);
-    for index in 2..9 {
+    assert_eq!(MAX_ENTRIES, 64);
+    for index in 2..=MAX_ENTRIES {
         retain(&cache, &whole(format!("entry-{index}").as_bytes()));
     }
     assert_eq!(cache.retained_entries(), MAX_ENTRIES);
@@ -683,4 +684,5 @@ fn every_lookup_checkpoint_cancels_without_losing_verified_custody() {
 }
 
 mod composition;
+mod long_history;
 mod thin;

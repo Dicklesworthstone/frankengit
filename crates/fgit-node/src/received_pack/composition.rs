@@ -1,9 +1,11 @@
 //! Reframe complete verified entry runs without reconstructing their objects.
 //!
-//! There are at most eight retained sources. Membership is checked once per
-//! candidate, and pairwise overlap masks make the at-most-255 cover choices
-//! independent of repository size. Only exact, disjoint covers reach graph
-//! verification. OFS distances remain valid because no source run is split.
+//! Up to 64 retained sources share one byte budget. Exact FIFO singletons are
+//! tried first; larger selections propagate uniquely owned objects before
+//! enumerating at most eight remaining ambiguous sources. Forced selections
+//! with a whole residual-base candidate also get a bounded FIFO singleton
+//! pass. Only exact, disjoint covers reach graph verification. OFS distances
+//! remain valid because no source run is split.
 //! An external REF base additionally needs a same-basis, typed client-have
 //! proof; its bytes never enter the emitted selection or its resource totals.
 
@@ -17,6 +19,8 @@ use fgit_pack::{Deadline, PackError, PackLimits, PackOrderKey};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+mod cover;
 
 struct Candidate {
     entry: Arc<Entry>,
@@ -122,138 +126,122 @@ pub(super) fn select(
         }
         candidates.push(Candidate { entry, positions });
     }
-    let mut overlaps = [0u16; MAX_ENTRIES];
-    for left in 0..candidates.len() {
-        for right in left + 1..candidates.len() {
-            check(live)?;
-            if intersects(
-                &candidates[left].positions,
-                &candidates[right].positions,
-                live,
-            )? {
-                overlaps[left] |= 1 << right;
-                overlaps[right] |= 1 << left;
-            }
+    // Prefer the existing exact sender representation, then fewer sources,
+    // then FIFO mask order. A warm exact hit does not allocate ownership or
+    // queue metadata for the larger cover search. Verify bytes only for real
+    // covers, lazily and at most once per source across every attempted cover.
+    let mut integrity = [None; MAX_ENTRIES];
+    for (index, candidate) in candidates.iter().enumerate() {
+        check(live)?;
+        if candidate.positions.len() != keys.len() {
+            continue;
+        }
+        if let Some(pack) = materialize_cover(
+            &candidates,
+            1u64 << index,
+            keys,
+            held,
+            limits,
+            &mut integrity,
+            live,
+        )? {
+            return Ok(Some(pack));
         }
     }
-    // Prefer the existing exact sender representation, then fewer sources,
-    // then FIFO source order. A bad graph in one cover does not poison a
-    // later, independently valid representation of the same authorized set.
-    // Verify bytes only for actual cover candidates, and at most once per
-    // source. An unrelated/overlapping representation must not make a warm
-    // exact hit hash the whole retained cache.
-    let mut integrity = [None; MAX_ENTRIES];
-    for source_count in 1..=candidates.len() {
-        for mask in 1u16..1u16 << candidates.len() {
-            check(live)?;
-            if mask.count_ones() as usize != source_count {
-                continue;
-            }
-            let mut count = 0usize;
-            let mut disjoint = true;
-            for (index, candidate) in candidates.iter().enumerate() {
-                if mask & (1 << index) != 0 {
-                    if mask & overlaps[index] != 0 {
-                        disjoint = false;
-                        break;
-                    }
-                    count = count.saturating_add(candidate.positions.len());
-                }
-            }
-            if !disjoint || count != keys.len() {
-                continue;
-            }
-            let Some(mut receipt) = totals(&candidates, mask, format, limits, live)? else {
-                continue;
-            };
-            let mut intact = true;
-            for (index, candidate) in candidates.iter().enumerate() {
-                if mask & (1 << index) == 0 {
-                    continue;
-                }
-                let valid = if let Some(valid) = integrity[index] {
-                    valid
-                } else {
-                    let entry = &candidate.entry;
-                    let valid = strong_hash(entry.bytes.bytes(), live)? == entry.receipt.sha256
-                        && metadata_binding(
-                            &entry.objects,
-                            &entry.parents,
-                            &entry.receipt,
-                            entry.maximum_object_bytes,
-                            entry.total_entry_bytes,
-                            entry.maximum_delta_fanout,
-                            live,
-                        )? == entry.binding;
-                    integrity[index] = Some(valid);
-                    valid
-                };
-                if !valid {
-                    intact = false;
-                    break;
-                }
-            }
-            if !intact {
-                continue;
-            }
-            let Some(graph) = graph_shape(&candidates, mask, keys, held, limits, live)? else {
-                continue;
-            };
-            receipt.maximum_delta_depth = graph.maximum_delta_depth;
-            receipt.external_base_count = graph.external_base_count;
-            let mut entries = Vec::new();
-            if entries.try_reserve_exact(source_count).is_err() {
-                return Ok(None);
-            }
-            for (index, candidate) in candidates.iter().enumerate() {
-                if mask & (1 << index) != 0 {
-                    entries.push(Arc::clone(&candidate.entry));
-                }
-            }
-            check(live)?;
-            let header = if source_count == 1 {
-                // The bytes stay identical, but the output graph was just
-                // rechecked against this caller's exact held-base proof.
-                // Never replace its recomputed thin/depth accounting.
-                receipt.checksum = entries[0].receipt.checksum;
-                receipt.sha256 = entries[0].receipt.sha256;
-                None
-            } else {
-                Some(reframe(&entries, &mut receipt, format, live)?)
-            };
-            return Ok(Some(ReceivedPackPayload {
-                entries,
-                receipt,
-                header,
-                part: 0,
-                offset: 0,
-            }));
+    let Some(choices) = cover::choices(&candidates, keys.len(), live)? else {
+        return Ok(None);
+    };
+    for mask in choices {
+        check(live)?;
+        if let Some(pack) =
+            materialize_cover(&candidates, mask, keys, held, limits, &mut integrity, live)?
+        {
+            return Ok(Some(pack));
         }
     }
     check(live)?;
     Ok(None)
 }
 
-fn intersects(
-    left: &[usize],
-    right: &[usize],
+/// A metadata-exact cover still needs every source integrity, graph and
+/// envelope check. Failure leaves later choices available under the same
+/// per-request integrity cache.
+fn materialize_cover(
+    candidates: &[Candidate],
+    mask: u64,
+    keys: &[PackOrderKey],
+    held: &[(GitOid, ObjectType)],
+    limits: &PackLimits,
+    integrity: &mut [Option<bool>; MAX_ENTRIES],
     live: &mut impl Deadline,
-) -> Result<bool, PackError> {
-    let (mut a, mut b) = (0, 0);
-    while a < left.len() && b < right.len() {
+) -> Result<Option<ReceivedPackPayload>, PackError> {
+    let format = keys[0].id.algorithm();
+    let source_count = mask.count_ones() as usize;
+    let Some(mut receipt) = totals(candidates, mask, format, limits, live)? else {
+        return Ok(None);
+    };
+    for (index, candidate) in candidates.iter().enumerate() {
         check(live)?;
-        match left[a].cmp(&right[b]) {
-            std::cmp::Ordering::Less => a += 1,
-            std::cmp::Ordering::Greater => b += 1,
-            std::cmp::Ordering::Equal => return Ok(true),
+        if mask & (1u64 << index) == 0 {
+            continue;
+        }
+        let valid = if let Some(valid) = integrity[index] {
+            valid
+        } else {
+            let entry = &candidate.entry;
+            let valid = strong_hash(entry.bytes.bytes(), live)? == entry.receipt.sha256
+                && metadata_binding(
+                    &entry.objects,
+                    &entry.parents,
+                    &entry.receipt,
+                    entry.maximum_object_bytes,
+                    entry.total_entry_bytes,
+                    entry.maximum_delta_fanout,
+                    live,
+                )? == entry.binding;
+            integrity[index] = Some(valid);
+            valid
+        };
+        if !valid {
+            return Ok(None);
         }
     }
-    Ok(false)
+    let Some(graph) = graph_shape(candidates, mask, keys, held, limits, live)? else {
+        return Ok(None);
+    };
+    receipt.maximum_delta_depth = graph.maximum_delta_depth;
+    receipt.external_base_count = graph.external_base_count;
+    let mut entries = Vec::new();
+    if entries.try_reserve_exact(source_count).is_err() {
+        return Ok(None);
+    }
+    for (index, candidate) in candidates.iter().enumerate() {
+        if mask & (1u64 << index) != 0 {
+            entries.push(Arc::clone(&candidate.entry));
+        }
+    }
+    check(live)?;
+    let header = if source_count == 1 {
+        // Preserve the sender bytes/checksums without replacing the graph
+        // accounting recomputed for this exact output and held-base proof.
+        receipt.checksum = entries[0].receipt.checksum;
+        receipt.sha256 = entries[0].receipt.sha256;
+        None
+    } else {
+        Some(reframe(&entries, &mut receipt, format, live)?)
+    };
+    Ok(Some(ReceivedPackPayload {
+        entries,
+        receipt,
+        header,
+        part: 0,
+        offset: 0,
+    }))
 }
 
 fn totals(
     candidates: &[Candidate],
-    mask: u16,
+    mask: u64,
     format: GitHashAlgorithm,
     limits: &PackLimits,
     live: &mut impl Deadline,
@@ -273,7 +261,7 @@ fn totals(
     let mut entry_bytes = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
         check(live)?;
-        if mask & (1 << index) == 0 {
+        if mask & (1u64 << index) == 0 {
             continue;
         }
         let entry = &candidate.entry;
@@ -332,7 +320,7 @@ struct GraphShape {
 /// the caller's typed held proof; capture kept every OFS parent in its run.
 fn graph_shape(
     candidates: &[Candidate],
-    mask: u16,
+    mask: u64,
     keys: &[PackOrderKey],
     held: &[(GitOid, ObjectType)],
     limits: &PackLimits,
@@ -366,7 +354,7 @@ fn graph_shape(
         return Ok(None);
     }
     for (index, candidate) in candidates.iter().enumerate() {
-        if mask & (1 << index) == 0 {
+        if mask & (1u64 << index) == 0 {
             continue;
         }
         for (local, position) in candidate.positions.iter().copied().enumerate() {

@@ -29,10 +29,11 @@ use fgit_types::GitOid;
 mod composition;
 
 const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_ENTRIES: usize = 8;
+const MAX_ENTRIES: usize = 64;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
 // Includes the entry, Arc headers, bounded FIFO and receipt. The per-object
-// charge also covers temporary dependency/depth/visit arrays during capture.
+// charge also covers temporary dependency/depth/visit arrays during capture,
+// and selection ownership/queue metadata bounded by retained object membership.
 const ENTRY_OVERHEAD: usize = 1024;
 const OBJECT_OVERHEAD: usize = 512;
 
@@ -134,7 +135,8 @@ struct Entry {
 
 #[derive(Debug, Default)]
 struct State {
-    // At most eight entries. The first unpinned entry is the FIFO victim.
+    // At most 64 entries under the same byte budget. The first unpinned entry
+    // is the FIFO victim; additional source slots never add byte capacity.
     entries: Vec<Arc<Entry>>,
     resident_bytes: usize,
     reserved_bytes: usize,

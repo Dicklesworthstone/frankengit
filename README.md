@@ -90,7 +90,9 @@ thin responses. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
 its own representation receipt. This bounded process-local capability is
 described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);
-restarting the service discards it.
+restarting the service discards it. Up to 64 received representations share the
+same byte budget, and bounded cover selection preserves disjoint incremental
+histories without enumerating every possible source combination.
 Network packs also group related versions using verified raw tree-entry
 basenames, improving access to delta candidates within that same bounded
 window. The [ordering contract](docs/UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs)

@@ -103,7 +103,7 @@ work remains cancelled.
 ```
 
 The default is **128 MiB**, including conservative metadata charges. Zero
-disables received-pack capture and reuse. At most eight representations are
+disables received-pack capture and reuse. At most 64 representations are
 retained, and each original input allocation must fit **64 MiB**. Both its
 length and allocation capacity count; a pack outside the retention bound is
 still received normally under the independent receive envelope.
@@ -114,11 +114,23 @@ entries and owns an independent cursor. FIFO eviction skips pinned readers, and
 pending captures reserve their full charge before allocating metadata.
 This is a retained-entry budget, not a total process RSS ceiling.
 
-At most eight sources allow at most 255 cover combinations. Membership and
-pairwise overlaps are computed once; cover enumeration uses these bounded
-summaries. Graph scratch is bounded by the selected object count and the
-existing conservative per-object cache charge. Sources are pinned under the
-cache lock, then comparisons, graph checks and hashing run outside that lock.
+The source-count limit lets a full pack survive a longer sequence of small
+incremental pushes while they still fit the same byte budget. Candidate
+membership is indexed by selected object identity. An object owned by exactly
+one eligible source forces that source into every possible exact cover;
+overlapping sources are then removed and only their affected memberships are
+revisited. Disjoint incremental histories therefore select their complete cover
+without exponential enumeration.
+
+Exact singleton representations retain priority. After forced selections, one
+source that covers every remaining object is also sufficient; otherwise at
+most eight unresolved candidates are exhaustively considered, with at most
+255 residual combinations. Larger unresolved ambiguity uses the ordinary
+native writer. This keeps selection bounded while preserving exact membership,
+the minimum source count and FIFO tie-breaking for accepted covers. Graph and
+ownership scratch remain bounded by selected membership and the existing
+conservative per-object cache charge. Sources are pinned under the cache lock,
+then comparisons, graph checks and hashing run outside that lock.
 
 The cache is process-local and disposable. A newly started service rebuilds
 outgoing packs until it receives another eligible representation. Native
@@ -149,8 +161,8 @@ reuse or completion of the large-history clone bead.
 
 The singleton received profile preserves the sender's bytes and ordering; the
 composed profile preserves the constituent entry runs and replaces their outer
-framing. Neither claims equivalence to the native writer's frozen encoding. Both profiles must
-represent the exact authorized native object set. Local exports continue to
+framing. Neither claims equivalence to the native writer's frozen encoding. All
+received profiles must represent the exact authorized native object set. Local exports continue to
 use their explicit deterministic writer profile.
 
 ## Regression coverage and execution status
@@ -199,8 +211,19 @@ external roots, and preserve cancellation. Native regressions prepare a fetch
 against real client haves, remove fabric access after preparation, and require
 the retained thin representation. A separately seeded receiver checks its
 reconstruction. Non-thin, filtered, shallow and stale-basis requests retain their
-existing boundaries. These additional tests require their own execution result;
-the historical counts below do not include them.
+existing boundaries. The scoped component result below covers cache logic;
+the native regressions still require their own execution result.
+
+The authored long-history regressions cover 64 disjoint sources, forward REF
+chains at the internal and external depth limits, forced ownership propagation,
+small residual choices against an independent exhaustive oracle, and bounded
+fallback for large ambiguity. They also check exact membership, alternative
+valid representations, aggregate limits, cancellation, pinned readers and byte
+eviction. Native regressions receive a full pack followed by twelve thin pushes,
+then require the entire thirteen-source clone without reading object files
+after selection. Three large unrelated pushes independently exercise capture,
+eviction under the unchanged byte budget, and ordinary-writer fallback for the
+same authorized history. These native cases likewise need a separate node run.
 
 During the original single-pack implementation session, the node and CLI tests
 and stock-client campaign **were not executed**. That session's repeated node
@@ -218,6 +241,17 @@ cache, composition graph, framing and reconstruction behavior. It does not
 execute native OneNode integration, the CLI, SSH, the stock-client campaign, or
 whole-clone performance measurements; those lanes require separate results at
 the tested revision.
+
+For the thin-reuse source published in
+[`07031c86`](https://github.com/Dicklesworthstone/frankengit/commit/07031c862fba3fdb55e6a6a22a4f70e0b59827e3),
+the production-source component harness passed **43 tests**. An independent
+installed Git 2.51.1 oracle exercised **eight cases**: both native hash domains,
+singleton and composed thin payloads, and base-present/base-missing twins.
+`index-pack --stdin --fix-thin` accepted the production-generated payloads with
+their bases; object bodies and inventory were checked through `cat-file`.
+The same payloads were refused without their bases. This is scoped wire evidence
+using the installed Git binary, not the project's pinned differential campaign
+or execution of the native OneNode regressions.
 
 Run the focused lanes with the pinned toolchain and sufficient build capacity:
 
