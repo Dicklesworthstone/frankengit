@@ -396,8 +396,9 @@ approval object explicitly reports that newest-checkpoint and complete-capsule
 verification are false. Approval receipt formatting does not recheck expiry
 after a confirmed publication.
 
-The JavaScript native adapter also validates the receipt's mandatory transport
-and retained-outcome checkpoint fields. Transport 1 reports no checkpoint, a
+The JavaScript export, verification and restore adapters share validation of
+the receipt's mandatory transport and retained-outcome checkpoint fields.
+Transport 1 reports no checkpoint, a
 null root and zero retained counters. Transport 2 reports a verified SHA-256
 checkpoint root and a nonempty retained inventory whose counters fit the
 authenticated archive bytes. Missing, unknown or inconsistent fields refuse;

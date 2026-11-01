@@ -53,7 +53,9 @@ else {
     routing_published: false, archive_bytes: bytes.length, local_edges: 1, external_gitlinks: 0,
     verification_instance: Number(args[8]), authority_import_verified: true, git_payloads_written: false,
     destination_authority_published: false, scratch_removed: true, destination_readback_verified: false,
-    newest_checkpoint_verified: false, external_artifacts_verified: false, ...mode.receipt };
+    newest_checkpoint_verified: false, external_artifacts_verified: false, transport_version: 1,
+    retained_outcome_checkpoint_verified: false, retained_outcome_checkpoint_root: null,
+    retained_outcome_objects: 0, retained_outcome_payload_bytes: 0, ...mode.receipt };
   if (mode.leftover) { fs.mkdirSync(args[3]); fs.writeFileSync(path.join(args[3], 'evidence'), 'retain me'); }
   if (mode.change) fs.writeFileSync(args[2], Buffer.alloc(bytes.length + (mode.grow ? 1 : 0), 43));
   if (mode.createOutput) fs.writeFileSync(${JSON.stringify(paths.output)}, 'other publisher', { flag: 'wx' });
