@@ -27,6 +27,47 @@ Graph-object expansion and remembered native edges have separate work bounds,
 so an admitted tree's many leaf identities do not imply reading every leaf.
 Exhaustion returns a refusal, never a successful partial review.
 
+## Thin packs and partially decoded candidate paths
+
+A candidate can encode both changed directories and changed files as thin REF
+deltas against original objects. Those bases may be several directories below
+the selected parent tree. Inspection now uses each verified uploaded commit or
+tree as soon as reconstruction makes its bytes available. Matching directory
+names guide the original proof down the changed path before a deeper external
+base falls back to searching unrelated siblings and history.
+
+For example, the uploaded root can identify a changed `z/` directory while that
+directory's body still awaits its original delta base. The proof remembers the
+unresolved new/old directory pair. After that base reconstructs `z/`, the same
+proof continues into `z/deep/`, then authorizes the original file required by its
+delta. Independent depth-one deltas can therefore arrive in several decoding
+stages without being mistaken for one deeper delta chain. The order of entries
+in the pack need not put the directory bases before the file that needs them.
+
+These paths are navigation hints only. Original reads still require both current
+selected membership and a typed native-edge chain from the independently
+selected visible parent commits. An uploaded tree or claimed commit parent
+cannot authorize a base from an unrelated or hidden ref. Pack-local identities
+are discovered before external lookup; an explicitly supplied base remains
+transport data even if the same identity also exists on a hidden branch.
+
+Each uploaded graph body is parsed and charged once. Waiting path pairs consume
+the existing edge allowance before retention, and later stages retain all prior
+object, byte, and edge charges. External-base bytes and delta lookup/reconstruction
+work likewise share one allowance across all stages. Cancellation and exhaustion
+refuse the whole inspection. Native REF discovery retains its existing pass
+ceiling, and a final check of the original REF/OFS dependency graph enforces the
+actual delta-chain depth even when the resolver reused cached intermediate bytes.
+
+The focused `candidate_thin_frontier` integration target exercises real imported
+node state, actual SHA-1/SHA-256 thin packs, thick-pack review equivalence,
+restart, hidden-base refusals, explicitly supplied transport bases, and absence
+of candidate staging. Its unchanged-sibling fault preserves the original
+envelope while corrupting payload bytes: coverage still checks the reused
+object's availability and kind, and an unnecessary full payload read fails.
+The pack and proof unit cases cover staged depth-one resolution, over-depth
+local chains, cumulative limits, and cancellation during later guidance stages.
+
 ## Candidate and pack coverage
 
 Native merge, squash, fast-forward, and workspace validators check the candidate

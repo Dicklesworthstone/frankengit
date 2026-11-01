@@ -70,6 +70,10 @@ struct Fixture {
     old_dir: GitOid,
     old_deep: GitOid,
     inherited: GitOid,
+    new_deep: GitOid,
+    new_dir: GitOid,
+    new_tree: GitOid,
+    candidate: GitOid,
 }
 fn fixture(format: GitHashAlgorithm) -> Fixture {
     let mut objects = Objects::default();
@@ -105,12 +109,203 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
         old_dir,
         old_deep,
         inherited,
+        new_deep,
+        new_dir,
+        new_tree,
+        candidate,
     }
 }
 fn run(f: &Fixture, limits: MergeObjectLimits) -> Result<ParentReachability, MergeSourceError> {
     let mut proof = ParentReachability::new(f.root.algorithm(), &[f.root], limits)?;
     proof.guide_uploaded(&f.uploaded, |id| f.objects.load(id), || Ok(()))?;
     Ok(proof)
+}
+
+fn feed(
+    proof: &mut ParentReachability,
+    f: &Fixture,
+    ids: &[GitOid],
+) -> Result<(), MergeSourceError> {
+    proof.guide_uploaded(
+        ids.iter().map(|id| (id, &f.uploaded[id])),
+        |id| f.objects.load(id),
+        || Ok(()),
+    )
+}
+
+fn staged(f: &Fixture, limits: MergeObjectLimits) -> Result<ParentReachability, MergeSourceError> {
+    let mut proof = ParentReachability::new(f.root.algorithm(), &[f.root], limits)?;
+    for ids in [
+        vec![f.candidate, f.new_tree],
+        vec![f.new_dir],
+        vec![f.new_deep],
+    ] {
+        feed(&mut proof, f, &ids)?;
+    }
+    Ok(proof)
+}
+
+#[test]
+fn late_decoded_directories_resume_waiting_paths_without_opening_unrelated_graph() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = fixture(format);
+        let mut proof =
+            ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+        feed(&mut proof, &f, &[f.candidate, f.new_tree]).unwrap();
+        assert_eq!(*f.objects.reads.borrow(), [f.root, f.old_tree]);
+        assert!(proof.already_proves(f.old_dir));
+        assert!(!proof.already_proves(f.old_deep));
+        assert!(!proof.already_proves(f.inherited));
+        feed(&mut proof, &f, &[f.new_dir]).unwrap();
+        assert_eq!(*f.objects.reads.borrow(), [f.root, f.old_tree, f.old_dir]);
+        assert!(proof.already_proves(f.old_deep));
+        assert!(!proof.already_proves(f.inherited));
+        feed(&mut proof, &f, &[f.new_deep]).unwrap();
+        assert_eq!(
+            *f.objects.reads.borrow(),
+            [f.root, f.old_tree, f.old_dir, f.old_deep]
+        );
+        assert_eq!(proof.require_kind(f.inherited, ObjectType::Blob), Ok(()));
+        let consumed = (
+            proof.hint_objects,
+            proof.expanded.len(),
+            proof.edges,
+            proof.bytes,
+        );
+        feed(&mut proof, &f, &[]).unwrap();
+        assert_eq!(
+            (
+                proof.hint_objects,
+                proof.expanded.len(),
+                proof.edges,
+                proof.bytes
+            ),
+            consumed
+        );
+        assert_eq!(
+            proof.hint_objects, 4,
+            "each uploaded graph body is parsed once"
+        );
+        assert_eq!(
+            f.objects.reads.borrow().len(),
+            4,
+            "each original graph body is read once"
+        );
+    }
+}
+
+#[test]
+fn trees_arriving_before_their_candidate_commit_do_not_start_original_reads() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = fixture(format);
+        let mut proof =
+            ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+        for id in [f.new_deep, f.new_dir, f.new_tree] {
+            feed(&mut proof, &f, &[id]).unwrap();
+            assert!(f.objects.reads.borrow().is_empty());
+        }
+        feed(&mut proof, &f, &[f.candidate]).unwrap();
+        assert_eq!(
+            *f.objects.reads.borrow(),
+            [f.root, f.old_tree, f.old_dir, f.old_deep]
+        );
+        assert_eq!(proof.require_kind(f.inherited, ObjectType::Blob), Ok(()));
+        assert_eq!(proof.hint_objects, 4);
+        assert_eq!(
+            feed(&mut proof, &f, &[f.new_deep]),
+            Err(MergeSourceError::InvalidObject(f.new_deep))
+        );
+    }
+}
+
+#[test]
+fn incremental_phases_share_the_exact_one_shot_work_envelope() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = fixture(format);
+        let full = run(&f, MergeObjectLimits::default()).unwrap();
+        let exact = MergeObjectLimits {
+            max_objects: full.expanded.len() + full.hint_objects,
+            max_edges: full.edges,
+            max_total_bytes: full.bytes,
+            ..MergeObjectLimits::default()
+        };
+        let incremental = staged(&f, exact).unwrap();
+        assert_eq!(incremental.required, full.required);
+        assert_eq!(
+            (
+                incremental.hint_objects,
+                incremental.edges,
+                incremental.bytes
+            ),
+            (full.hint_objects, full.edges, full.bytes)
+        );
+        for limits in [
+            MergeObjectLimits {
+                max_objects: exact.max_objects - 1,
+                ..exact
+            },
+            MergeObjectLimits {
+                max_edges: exact.max_edges - 1,
+                ..exact
+            },
+            MergeObjectLimits {
+                max_total_bytes: exact.max_total_bytes - 1,
+                ..exact
+            },
+        ] {
+            assert!(matches!(
+                staged(&f, limits),
+                Err(MergeSourceError::BudgetExceeded)
+            ));
+        }
+    }
+}
+
+#[test]
+fn cancellation_at_every_later_stage_checkpoint_refuses_without_replenishing_work() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = fixture(format);
+        let mut measured =
+            ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+        feed(&mut measured, &f, &[f.candidate, f.new_tree, f.new_dir]).unwrap();
+        let mut checkpoints = 0usize;
+        measured
+            .guide_uploaded(
+                [(&f.new_deep, &f.uploaded[&f.new_deep])],
+                |id| f.objects.load(id),
+                || {
+                    checkpoints += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        for stop in 0..checkpoints {
+            let mut proof =
+                ParentReachability::new(format, &[f.root], MergeObjectLimits::default()).unwrap();
+            feed(&mut proof, &f, &[f.candidate, f.new_tree, f.new_dir]).unwrap();
+            let before = (proof.hint_objects, proof.edges, proof.bytes);
+            let mut calls = 0usize;
+            let result = proof.guide_uploaded(
+                [(&f.new_deep, &f.uploaded[&f.new_deep])],
+                |id| f.objects.load(id),
+                || {
+                    let cancelled = calls == stop;
+                    calls += 1;
+                    if cancelled {
+                        Err(MergeSourceError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result, Err(MergeSourceError::Cancelled));
+            assert!(
+                proof.hint_objects >= before.0
+                    && proof.edges >= before.1
+                    && proof.bytes >= before.2
+            );
+        }
+    }
 }
 
 #[test]

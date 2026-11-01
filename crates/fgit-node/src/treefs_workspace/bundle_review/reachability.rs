@@ -23,6 +23,7 @@ pub(super) struct ParentReachability {
     // populated exclusively by observe's authenticated, typed native edges.
     commit_trees: BTreeMap<GitOid, GitOid>,
     directories: BTreeMap<GitOid, BTreeMap<Vec<u8>, GitOid>>,
+    path_hints: path_frontier::Guide,
     edges: usize,
     hint_objects: usize,
     bytes: usize,
@@ -57,6 +58,7 @@ impl ParentReachability {
             expanded: BTreeSet::new(),
             commit_trees: BTreeMap::new(),
             directories: BTreeMap::new(),
+            path_hints: path_frontier::Guide::default(),
             edges: 0,
             hint_objects: 0,
             bytes: 0,
@@ -72,13 +74,25 @@ impl ParentReachability {
     /// They never add membership; historical/moved dependencies retain ensure's
     /// bounded graph fallback. All hints and proof work share this instance's
     /// existing object, edge and byte allowances.
-    pub(super) fn guide_uploaded(
+    /// Supply each verified uploaded commit/tree once. The guide retains
+    /// unresolved directory pairs so a later decoded tree can continue the
+    /// same proof without rereading originals or replenishing its allowances.
+    pub(super) fn guide_uploaded<'a>(
         &mut self,
-        objects: &BTreeMap<GitOid, PlannedMergeObject>,
+        objects: impl IntoIterator<Item = (&'a GitOid, &'a PlannedMergeObject)>,
         mut load: impl FnMut(GitOid) -> Result<(ObjectType, Vec<u8>), MergeSourceError>,
         mut live: impl FnMut() -> Result<(), MergeSourceError>,
     ) -> Result<(), MergeSourceError> {
-        path_frontier::guide(self, objects, &mut load, &mut live)
+        let mut hints = std::mem::take(&mut self.path_hints);
+        let result = hints.extend(self, objects, &mut load, &mut live);
+        self.path_hints = hints;
+        result
+    }
+
+    /// Lookup-order hint only. Actual original reads still require selected
+    /// membership, the full typed proof and the ordinary integrity checks.
+    pub(super) fn already_proves(&self, id: GitOid) -> bool {
+        self.required.contains_key(&id)
     }
 
     pub(super) fn ensure(

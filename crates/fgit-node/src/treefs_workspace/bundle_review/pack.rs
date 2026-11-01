@@ -195,12 +195,25 @@ pub(super) fn unpack(
     let mut live = || original.live().is_ok();
     let parsed = read_verified_pack(input, format, limits, &mut live, &NativeChecksumVerifier)?;
     let unpacked = reconstruct(parsed, format, limits, original, &mut live)?;
-    // Native uploaded trees guide proof discovery before the validator asks
-    // for omitted dependencies. They never become an original-object grant.
-    // The same hook covers workspace, merge and every intermediate rebase tree.
+    original.live().map_err(BundleInspectionRefusal::Source)?;
+    Ok(unpacked)
+}
+
+fn guide_resolved(
+    original: &OriginalSource<'_>,
+    objects: &BTreeMap<GitOid, PlannedMergeObject>,
+    pending: &mut BTreeSet<GitOid>,
+    has_commit: bool,
+) -> Result<(), BundleInspectionRefusal> {
+    original.live().map_err(BundleInspectionRefusal::Source)?;
+    // Preserve blob-only/transport-only behavior. Retain earlier tree hints
+    // until an actual decoded commit supplies their candidate roots.
+    if !has_commit || pending.is_empty() {
+        return Ok(());
+    }
     if let Some(frontier) = &original.frontier {
         let guided = frontier.borrow_mut().guide_uploaded(
-            &unpacked.objects,
+            pending.iter().map(|id| (id, &objects[id])),
             |id| original.read_selected(id),
             || original.live(),
         );
@@ -209,19 +222,111 @@ pub(super) fn unpack(
         }
         guided.map_err(BundleInspectionRefusal::Source)?;
     }
-    original.live().map_err(BundleInspectionRefusal::Source)?;
-    Ok(unpacked)
+    pending.clear();
+    original.live().map_err(BundleInspectionRefusal::Source)
 }
 
 #[derive(Default)]
-struct ExternalBases(BTreeMap<GitOid, (ObjectType, Vec<u8>)>);
+struct ExternalBases {
+    objects: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
+    bytes: usize,
+    declined: BTreeSet<GitOid>,
+}
 impl ExternalBaseLookup for ExternalBases {
     fn lookup(&self, id: &GitOid) -> Option<&[u8]> {
-        self.0.get(id).map(|(_, body)| body.as_slice())
+        self.objects.get(id).map(|(_, body)| body.as_slice())
     }
     fn lookup_typed(&self, id: &GitOid) -> Option<(ObjectType, &[u8])> {
-        self.0.get(id).map(|(kind, body)| (*kind, body.as_slice()))
+        self.objects
+            .get(id)
+            .map(|(kind, body)| (*kind, body.as_slice()))
     }
+}
+impl ExternalBases {
+    fn read(
+        &mut self,
+        id: GitOid,
+        original: &OriginalSource<'_>,
+        limits: &PackLimits,
+    ) -> Result<bool, BundleInspectionRefusal> {
+        // This gate remains mandatory even for an already-proved scheduling
+        // hint: the current selected set and typed native proof both apply.
+        if !original
+            .permits(id)
+            .map_err(BundleInspectionRefusal::Source)?
+        {
+            self.declined.insert(id);
+            return Ok(false);
+        }
+        let (kind, body) = original.read(id).map_err(BundleInspectionRefusal::Source)?;
+        self.bytes = self
+            .bytes
+            .checked_add(body.len())
+            .filter(|total| *total <= limits.max_cached_bytes)
+            .ok_or(BundleInspectionRefusal::BudgetExceeded)?;
+        self.objects.insert(id, (kind, body));
+        Ok(true)
+    }
+}
+
+/// Resolve every already-proved base before attempting an unknown path. If
+/// breadth-first discovery is necessary, fetch one useful base and let its
+/// decoded graph extend the guide before another original lookup.
+fn load_external_stage(
+    inputs: &[PackObject],
+    objects: &BTreeMap<GitOid, PlannedMergeObject>,
+    bases: &mut ExternalBases,
+    original: &OriginalSource<'_>,
+    limits: &PackLimits,
+    budget: &mut ResolutionBudget,
+    deadline: &mut impl fgit_pack::Deadline,
+) -> Result<bool, BundleInspectionRefusal> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    for input in inputs {
+        check(deadline)?;
+        budget.charge_work(1, limits)?;
+        let PackObject::Delta(delta) = input else {
+            continue;
+        };
+        let DeltaBase::Ref(base) = &delta.base else {
+            continue;
+        };
+        if objects.contains_key(base)
+            || bases.objects.contains_key(base)
+            || bases.declined.contains(base)
+            || !seen.insert(*base)
+        {
+            continue;
+        }
+        candidates
+            .try_reserve(1)
+            .map_err(|_| BundleInspectionRefusal::BudgetExceeded)?;
+        candidates.push(*base);
+    }
+    let mut loaded = false;
+    for id in &candidates {
+        check(deadline)?;
+        budget.charge_work(1, limits)?;
+        let known = original
+            .frontier
+            .as_ref()
+            .is_none_or(|frontier| frontier.borrow().already_proves(*id));
+        if known {
+            loaded |= bases.read(*id, original, limits)?;
+        }
+    }
+    if loaded {
+        return Ok(true);
+    }
+    for id in candidates {
+        check(deadline)?;
+        budget.charge_work(1, limits)?;
+        if !bases.declined.contains(&id) && bases.read(id, original, limits)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn reconstruct(
@@ -245,7 +350,8 @@ fn reconstruct(
     let mut expanded_bytes = 0usize;
     let mut budget = ResolutionBudget::new();
     let mut bases = ExternalBases::default();
-    let mut external_attempted = false;
+    let mut pending_hints = BTreeSet::new();
+    let mut has_commit = false;
     let parse_limits = ParseLimits {
         max_object_bytes: limits.max_object_bytes,
         tree_reference_bytes: format.digest_len(),
@@ -253,13 +359,15 @@ fn reconstruct(
     };
     for _ in 0..=limits.max_delta_depth {
         check(deadline)?;
-        let mut newly_resolved = Vec::new();
-        let mut pending_bytes = 0usize;
+        let mut assigned = Vec::new();
         loop {
+            let mut newly_resolved = Vec::new();
+            let mut pending_bytes = 0usize;
             {
                 let mut resolver = CachedResolver::new(&inputs, &bases, limits, deadline)?;
                 for location in offsets.keys() {
                     check(deadline)?;
+                    budget.charge_work(1, limits)?;
                     if ids.contains_key(location) {
                         continue;
                     }
@@ -282,76 +390,81 @@ fn reconstruct(
                     }
                 }
             }
-            if !newly_resolved.is_empty() || external_attempted || ids.len() == inputs.len() {
-                break;
-            }
-            // Exhaust pack-local progress before looking up original bytes.
-            // In particular, a selected hidden object supplied in this pack is
-            // a transport base, not a request to disclose it from repository
-            // history. Only unresolved native REF identities need permission.
-            external_attempted = true;
-            let mut base_bytes = 0usize;
-            for input in &inputs {
-                original.live().map_err(BundleInspectionRefusal::Source)?;
-                let PackObject::Delta(delta) = input else {
-                    continue;
-                };
-                let DeltaBase::Ref(base) = &delta.base else {
-                    continue;
-                };
-                if objects.contains_key(base)
-                    || bases.0.contains_key(base)
-                    || !original
-                        .permits(*base)
-                        .map_err(BundleInspectionRefusal::Source)?
-                {
-                    continue;
-                }
-                let (kind, body) = original
-                    .read(*base)
-                    .map_err(BundleInspectionRefusal::Source)?;
-                base_bytes = base_bytes
+            for (location, kind, body) in newly_resolved {
+                check(deadline)?;
+                let id = git_object_id(format, kind, &body);
+                let parsed = verify_native_object(
+                    format,
+                    kind,
+                    &body,
+                    &id,
+                    AcceptanceProfile::GitCompatibleImport,
+                    &parse_limits,
+                )?;
+                drop(parsed);
+                check(deadline)?;
+                expanded_bytes = expanded_bytes
                     .checked_add(body.len())
-                    .filter(|total| *total <= limits.max_cached_bytes)
+                    .filter(|total| *total <= limits.max_total_expanded_bytes)
                     .ok_or(BundleInspectionRefusal::BudgetExceeded)?;
-                bases.0.insert(*base, (kind, body));
+                if objects
+                    .insert(id, PlannedMergeObject { id, kind, body })
+                    .is_some()
+                    || ids.insert(location, id).is_some()
+                {
+                    return Err(invalid("duplicate native object in candidate pack"));
+                }
+                if matches!(kind, ObjectType::Commit | ObjectType::Tree) {
+                    pending_hints.insert(id);
+                    has_commit |= kind == ObjectType::Commit;
+                }
+                let index = *offsets
+                    .get(&location)
+                    .ok_or_else(|| invalid("missing pack offset"))?;
+                assigned.push((index, id));
             }
-            if bases.0.is_empty() {
+            if ids.len() == inputs.len() {
                 break;
             }
-            // Retry this same pass once with authorized external bases. The
-            // original ResolutionBudget and outer depth/pass limit still apply.
+            // A newly discovered in-pack REF identity gets the next original
+            // discovery pass before any external lookup. Installing it here
+            // would silently reset the existing depth/pass envelope.
+            let mut local_progress = false;
+            for input in &inputs {
+                check(deadline)?;
+                budget.charge_work(1, limits)?;
+                if !ids.contains_key(&offset(input))
+                    && let PackObject::Delta(delta) = input
+                    && let DeltaBase::Ref(base) = &delta.base
+                    && objects.contains_key(base)
+                {
+                    local_progress = true;
+                    break;
+                }
+            }
+            if local_progress {
+                break;
+            }
+            // The verified partial graph can now navigate visible parent
+            // paths before an unresolved external delta asks for their bytes.
+            guide_resolved(original, &objects, &mut pending_hints, has_commit)?;
+            if !load_external_stage(
+                &inputs,
+                &objects,
+                &mut bases,
+                original,
+                limits,
+                &mut budget,
+                deadline,
+            )? {
+                break;
+            }
         }
-        if newly_resolved.is_empty() {
+        if assigned.is_empty() {
             break;
         }
-        for (location, kind, body) in newly_resolved {
+        for (index, id) in assigned {
             check(deadline)?;
-            let id = git_object_id(format, kind, &body);
-            let parsed = verify_native_object(
-                format,
-                kind,
-                &body,
-                &id,
-                AcceptanceProfile::GitCompatibleImport,
-                &parse_limits,
-            )?;
-            drop(parsed);
-            check(deadline)?;
-            expanded_bytes = expanded_bytes
-                .checked_add(body.len())
-                .filter(|total| *total <= limits.max_total_expanded_bytes)
-                .ok_or(BundleInspectionRefusal::BudgetExceeded)?;
-            if objects
-                .insert(id, PlannedMergeObject { id, kind, body })
-                .is_some()
-                || ids.insert(location, id).is_some()
-            {
-                return Err(invalid("duplicate native object in candidate pack"));
-            }
-            let index = *offsets
-                .get(&location)
-                .ok_or_else(|| invalid("missing pack offset"))?;
             match &mut inputs[index] {
                 PackObject::Base { id: slot, .. } | PackObject::TypedBase { id: slot, .. } => {
                     *slot = Some(id);
@@ -366,6 +479,8 @@ fn reconstruct(
     if objects.len() != inputs.len() {
         return Err(PackError::MissingDeltaBase.into());
     }
+    guide_resolved(original, &objects, &mut pending_hints, has_commit)?;
+    validate_dependency_depths(&inputs, &ids, &offsets, limits, &mut budget, deadline)?;
     let mut dependencies: BTreeMap<GitOid, BTreeSet<GitOid>> = BTreeMap::new();
     for object in &inputs {
         check(deadline)?;
@@ -389,6 +504,103 @@ fn reconstruct(
         dependencies,
     })
 }
+
+/// Cached bytes do not carry their original chain depth. Re-derive that depth
+/// from the original pack edges after every native identity is known, so an
+/// earlier cache hit cannot hide a long backward OFS or discovered REF chain.
+fn validate_dependency_depths(
+    inputs: &[PackObject],
+    ids: &BTreeMap<u64, GitOid>,
+    offsets: &BTreeMap<u64, usize>,
+    limits: &PackLimits,
+    budget: &mut ResolutionBudget,
+    deadline: &mut impl fgit_pack::Deadline,
+) -> Result<(), BundleInspectionRefusal> {
+    let mut by_id = BTreeMap::new();
+    for (location, id) in ids {
+        check(deadline)?;
+        budget.charge_work(1, limits)?;
+        by_id.insert(*id, *location);
+    }
+    let mut parents = BTreeMap::new();
+    let mut depths = BTreeMap::new();
+    for input in inputs {
+        check(deadline)?;
+        budget.charge_work(1, limits)?;
+        match input {
+            PackObject::Base { offset, .. } | PackObject::TypedBase { offset, .. } => {
+                depths.insert(*offset, 0usize);
+            }
+            PackObject::Delta(delta) => {
+                let parent = match &delta.base {
+                    DeltaBase::Ofs(base) => {
+                        if !offsets.contains_key(base) {
+                            return Err(PackError::MissingDeltaBase.into());
+                        }
+                        Some(*base)
+                    }
+                    DeltaBase::Ref(base) => by_id.get(base).copied(),
+                };
+                parents.insert(delta.offset, parent);
+            }
+        }
+    }
+    for location in offsets.keys() {
+        check(deadline)?;
+        budget.charge_work(1, limits)?;
+        let mut current = *location;
+        let mut chain = Vec::new();
+        let mut active = BTreeSet::new();
+        let mut depth = loop {
+            check(deadline)?;
+            budget.charge_work(1, limits)?;
+            if let Some(depth) = depths.get(&current) {
+                break *depth;
+            }
+            if !active.insert(current) {
+                return Err(PackError::DeltaCycle.into());
+            }
+            let minimum = chain
+                .len()
+                .checked_add(1)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "inspection delta depth",
+                })?;
+            if minimum > limits.max_delta_depth {
+                return Err(PackError::DeltaDepthLimit {
+                    depth: minimum,
+                    limit: limits.max_delta_depth,
+                }
+                .into());
+            }
+            chain
+                .try_reserve(1)
+                .map_err(|_| BundleInspectionRefusal::BudgetExceeded)?;
+            chain.push(current);
+            match parents.get(&current).ok_or(PackError::MissingDeltaBase)? {
+                Some(parent) => current = *parent,
+                None => break 0,
+            }
+        };
+        while let Some(location) = chain.pop() {
+            check(deadline)?;
+            budget.charge_work(1, limits)?;
+            depth = depth.checked_add(1).ok_or(PackError::IntegerOverflow {
+                context: "inspection delta depth",
+            })?;
+            if depth > limits.max_delta_depth {
+                return Err(PackError::DeltaDepthLimit {
+                    depth,
+                    limit: limits.max_delta_depth,
+                }
+                .into());
+            }
+            depths.insert(location, depth);
+        }
+    }
+    check(deadline)
+}
+
 const fn offset(object: &PackObject) -> u64 {
     match object {
         PackObject::Base { offset, .. } | PackObject::TypedBase { offset, .. } => *offset,
