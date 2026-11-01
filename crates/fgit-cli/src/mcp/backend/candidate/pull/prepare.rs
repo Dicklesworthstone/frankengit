@@ -9,13 +9,39 @@ use fgit_forge::preparation::{
 use fgit_node::NodeWorkspaceRefusal;
 
 #[derive(Debug)]
-struct Input {
-    selection: Selection,
-    metadata: MergeMetadata,
-    limits: PreparationLimits,
-    profile: MergeProfile,
-    style: MergeCommitStyle,
+pub(super) struct Input {
+    pub selection: Selection,
+    pub metadata: MergeMetadata,
+    pub limits: PreparationLimits,
+    pub profile: MergeProfile,
+    pub style: MergeCommitStyle,
 }
+
+pub(super) const PREPARATION_FIELDS: &[&str] = &[
+    "author",
+    "committer",
+    "timestamp",
+    "message_hex",
+    "merge_profile",
+    "method",
+    "max_commits",
+    "max_tree_entries",
+    "max_output_bytes",
+    "max_conflicts",
+];
+
+pub(super) const REQUIRED_FIELDS: &[&str] = &[
+    "operation",
+    "number",
+    "expected_version",
+    "expected_source",
+    "expected_target",
+    "policy_epoch",
+    "author",
+    "committer",
+    "timestamp",
+    "message_hex",
+];
 
 fn bound(args: &Object, field: &str, default: usize, maximum: usize) -> Result<usize, ToolError> {
     let value = args
@@ -36,22 +62,17 @@ fn bound(args: &Object, field: &str, default: usize, maximum: usize) -> Result<u
 
 fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     let mut allowed = SUBJECT_FIELDS.to_vec();
-    allowed.extend([
-        "author",
-        "committer",
-        "timestamp",
-        "message_hex",
-        "merge_profile",
-        "method",
-        "max_commits",
-        "max_tree_entries",
-        "max_output_bytes",
-        "max_conflicts",
-    ]);
+    allowed.extend(PREPARATION_FIELDS);
     require_fields(args, &allowed)?;
     if required(args, "operation")? != PREPARE {
         return Err(ToolError::invalid("unsupported_candidate_operation"));
     }
+    configuration(args, format)
+}
+
+/// Operation-specific callers first close their own field set and check grants.
+/// The shared metadata and finite native work envelope have one parser.
+pub(super) fn configuration(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     let profile = match string(args, "merge_profile")?.unwrap_or("path-merge-v1") {
         "path-merge-v1" => MergeProfile::PathMergeV1,
         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
@@ -82,8 +103,8 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     })
 }
 
-pub(super) fn schema() -> Value {
-    let mut properties = subject_properties(PREPARE);
+pub(super) fn properties(operation: &str) -> Object {
+    let mut properties = subject_properties(operation);
     for name in ["author", "committer"] {
         properties.insert(name.into(), text_schema(1024));
     }
@@ -127,21 +148,11 @@ pub(super) fn schema() -> Value {
             ]),
         );
     }
-    let mut schema = reviews::candidate_schema(
-        properties,
-        &[
-            "operation",
-            "number",
-            "expected_version",
-            "expected_source",
-            "expected_target",
-            "policy_epoch",
-            "author",
-            "committer",
-            "timestamp",
-            "message_hex",
-        ],
-    );
+    properties
+}
+
+pub(super) fn schema() -> Value {
+    let mut schema = reviews::candidate_schema(properties(PREPARE), REQUIRED_FIELDS);
     if let Value::Object(fields) = &mut schema {
         fields.insert("description".into(), text("Requires source AND PR read grants. Explicit commit metadata; no reviewer, principal, retry key or publication. Only a clean complete native result carries candidate arguments."));
     }
@@ -192,15 +203,22 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         &prepared.outcome,
         prepared.bundle.as_deref(),
     )?);
-    let inspection = match result.get("candidate_arguments") {
+    let inspection = inspection_arguments(&result, prepared.source_head, input.style)?;
+    result.insert("inspection_arguments".into(), inspection);
+    Ok(Value::Object(result))
+}
+
+pub(super) fn inspection_arguments(
+    result: &Object,
+    source_head: RepositoryAuthorityHeadId,
+    style: MergeCommitStyle,
+) -> Result<Value, ToolError> {
+    match result.get("candidate_arguments") {
         Some(Value::Object(arguments)) => {
             let mut fields = arguments.clone();
             fields.insert("operation".into(), text(INSPECT));
-            fields.insert("method".into(), text(merge_method_name(input.style)));
-            fields.insert(
-                "expected_head".into(),
-                text(head_token(prepared.source_head)),
-            );
+            fields.insert("method".into(), text(merge_method_name(style)));
+            fields.insert("expected_head".into(), text(head_token(source_head)));
             fields.insert(
                 "expected_bundle_sha256".into(),
                 result["bundle_sha256"].clone(),
@@ -209,13 +227,11 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             arguments
                 .encode(json::MAX_INPUT - 4096)
                 .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
-            arguments
+            Ok(arguments)
         }
-        Some(Value::Null) => Value::Null,
-        _ => return Err(invalid_report()),
-    };
-    result.insert("inspection_arguments".into(), inspection);
-    Ok(Value::Object(result))
+        Some(Value::Null) => Ok(Value::Null),
+        _ => Err(invalid_report()),
+    }
 }
 
 fn render(
@@ -223,6 +239,18 @@ fn render(
     input: &Input,
     outcome: &MergePreparation,
     bundle: Option<&[u8]>,
+) -> Result<Object, ToolError> {
+    render_with_publication(format, input, outcome, bundle, |candidate, bytes| {
+        publication_arguments(&input.selection.subject, candidate, bytes, input.style)
+    })
+}
+
+pub(super) fn render_with_publication(
+    format: GitHashAlgorithm,
+    input: &Input,
+    outcome: &MergePreparation,
+    bundle: Option<&[u8]>,
+    publication: impl FnOnce(CandidateBinding, &[u8]) -> Result<Value, ToolError>,
 ) -> Result<Object, ToolError> {
     let subject = &input.selection.subject;
     let mut result = Object::new();
@@ -257,7 +285,7 @@ fn render(
             };
             let bytes = bundle.ok_or_else(invalid_report)?;
             let arguments = candidate_arguments(subject, candidate, bytes)?;
-            let publication = publication_arguments(subject, candidate, bytes, input.style)?;
+            let publication = publication(candidate, bytes)?;
             let mut total = 0usize;
             let mut commit = None;
             for object in &plan.objects {
@@ -388,7 +416,7 @@ fn entry(entry: Option<&MergeEntry>, format: GitHashAlgorithm) -> Result<Value, 
         ("mode", text(format!("{:06o}", entry.mode))),
     ]))
 }
-fn preparation_error(error: NodeWorkspaceRefusal) -> ToolError {
+pub(super) fn preparation_error(error: NodeWorkspaceRefusal) -> ToolError {
     match error {
         NodeWorkspaceRefusal::StaleWorkspaceBase => ToolError::failed("pull_subject_moved"),
         NodeWorkspaceRefusal::RefUnavailable => ToolError::failed("reference_unavailable"),

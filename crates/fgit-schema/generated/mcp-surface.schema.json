@@ -2275,7 +2275,7 @@
     },
     "frankengit_source_candidate": {
       "title": "frankengit_source_candidate",
-      "description": "Prepare or inspect bounded native Git candidate bundles and pull request merge candidates without publishing.",
+      "description": "Prepare or inspect bounded native Git candidate bundles and pull request merge candidates without publishing. prepare_queue_merge additionally requires source, PR and queue read grants and constructs the exact canonical queue-head two-parent candidate; only its separate queue-landing tool may publish.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -2283,7 +2283,7 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "Candidate operation selector (prepare_patch, prepare_initial, inspect, inspect_initial, prepare_pull_merge, inspect_pull_merge, resolve_pull_merge).",
+              "description": "Candidate operation selector (prepare_patch, prepare_initial, inspect, inspect_initial, prepare_pull_merge, inspect_pull_merge, resolve_pull_merge, prepare_queue_merge).",
               "x-classification": "selector_position",
               "maxLength": 64
             },
@@ -2298,6 +2298,20 @@
               "description": "Optional exact authority snapshot token pin.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "queue_number": {
+              "type": "string",
+              "description": "Required only for prepare_queue_merge: exact positive canonical queue number, distinct from the PR number field. The native API selects the complete visible idle queue and its current head at one authenticated snapshot.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_queue_version": {
+              "type": "string",
+              "description": "Required only for prepare_queue_merge: exact positive queue predecessor version with two available successors. The separate expected_version field binds the PR. Preparation never refreshes stale queue, PR, tip or policy guards.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
             }
           },
           "required": ["operation"],

@@ -709,3 +709,57 @@ fn queue_candidate_landing_keeps_native_authority_and_bounded_retry_transport() 
             .contains("POST /{repository}/api/v1/queues/{number}/land-candidate")
     );
 }
+
+#[test]
+fn exact_queue_preparation_is_read_only_and_keeps_queue_guards_distinct() {
+    let tool = find_tool("frankengit_source_candidate").unwrap();
+    assert_eq!(tool.read_mutation, ReadMutationClass::ReadOnly);
+    assert_eq!(tool.principal, PrincipalRequirement::None);
+    assert_eq!(
+        tool.capability,
+        CapabilityRequirement::READ_CANONICAL_OBJECT
+    );
+    assert_eq!(tool.idempotency, IdempotencyRequirement::NotApplicable);
+    assert!(
+        tool.description
+            .contains("source, PR and queue read grants")
+    );
+    let operation = tool
+        .input_fields
+        .iter()
+        .find(|field| field.name == "operation")
+        .unwrap();
+    assert!(operation.description.contains("prepare_queue_merge"));
+    for name in ["queue_number", "expected_queue_version"] {
+        let field = tool
+            .input_fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap();
+        assert_eq!(field.classification, FieldClassification::SelectorPosition);
+        assert_eq!(field.pattern, Some("^[1-9][0-9]*$"));
+        assert_eq!(field.max_bytes, Some(20));
+        assert!(
+            !field.required,
+            "queue guards apply only to queue preparation"
+        );
+        assert!(field.description.contains("prepare_queue_merge"));
+    }
+    assert!(tool.refusal_codes.contains(&"queue_subject_moved"));
+    assert!(tool.refusal_codes.contains(&"queue_requires_merge_commit"));
+    assert!(admit_call(tool.name, 1, "{}", &["read_canonical_object"], None).is_ok());
+    let generated = fgit_schema::emit::artifacts();
+    for name in ["mcp-surface.schema.json", "mcp_tools.json"] {
+        let artifact = generated
+            .iter()
+            .find(|artifact| artifact.name == name)
+            .unwrap();
+        assert!(artifact.contents.contains("prepare_queue_merge"));
+        // The tool catalog carries descriptions and counts; full input field
+        // definitions belong to the generated surface schema.
+        if name == "mcp-surface.schema.json" {
+            assert!(artifact.contents.contains("expected_queue_version"));
+            assert!(artifact.contents.contains("queue_number"));
+        }
+    }
+}

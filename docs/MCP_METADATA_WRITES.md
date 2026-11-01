@@ -219,6 +219,12 @@ use the existing binary HTTP or native CLI landing surface. Candidate
 preparation and review have separate grants; obtaining a bundle never grants
 queue landing permission.
 
+For read-only construction of the exact queue-head artifact, use
+[`prepare_queue_merge`](MCP_QUEUE_CANDIDATES.md) with source, PR and queue read
+grants together. Its separate inspection, review and queue-publication templates
+preserve the original queue and PR guards through independently authorized
+candidate review and landing.
+
 After an uncertain candidate landing, retry the original key and every original
 guard. An omitted upload or `bundle_hex_chunks: []` reaches the native recovery
 path, which returns an already known terminal outcome before object intake,

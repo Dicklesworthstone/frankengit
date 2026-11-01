@@ -8,6 +8,12 @@ Source-write, review-write and merge-write grants do not imply either read grant
 This is an operator-sponsored local surface, not an IntentRun capability issuer
 or the complete FG-096 / x2mv.4.24 agent execution path.
 
+For a queued PR, [`prepare_queue_merge`](MCP_QUEUE_CANDIDATES.md) additionally
+requires the queue read grant and exact queue number/version. It constructs the
+canonical queue-head candidate and returns arguments for
+`frankengit_queue_land_candidate`. Preserve that original queue publication
+template when using the generic PR inspection operation described below.
+
 ## Prepare the recorded PR, not newer branch tips
 
 Supply the exact positive decimal strings `number`, `expected_version` and

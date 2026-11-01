@@ -22,7 +22,7 @@ const MAX_BUNDLE_BYTES: usize = CHUNK_BYTES * MAX_CHUNKS;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare an exact patch into a bounded native Git bundle (prepare_initial creates zero-parent history at an absent branch), prepare_pull_merge constructs a two-parent PR candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result; all PR operations additionally require the PR read grant, or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Initial inspection previews every file and empty directory at an absent branch. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source- or merge-write tool and an original retry key.",
+        description: "Prepare an exact patch into a bounded native Git bundle (prepare_initial creates zero-parent history at an absent branch), prepare_pull_merge constructs a PR candidate, prepare_queue_merge constructs the exact canonical queue-head candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result. PR operations additionally require PR read; queue preparation also requires queue read. Or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires its independent source-, merge-, or queue-landing tool and an original retry key.",
         schema: object([
             ("type", text("object")),
             (
@@ -35,6 +35,7 @@ pub(super) fn tool() -> Tool {
                     pull::schema(),
                     pull::inspection_schema(),
                     pull::resolution_schema(),
+                    pull::queue_schema(),
                 ]),
             ),
         ]),
@@ -51,7 +52,9 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         "prepare_initial" => initial::call(backend, args)?,
         "inspect" => inspect::call(backend, args)?,
         "inspect_initial" => inspect_initial::call(backend, args)?,
-        pull::PREPARE | pull::INSPECT | pull::RESOLVE => pull::call(backend, args)?,
+        pull::PREPARE | pull::INSPECT | pull::RESOLVE | pull::QUEUE_PREPARE => {
+            pull::call(backend, args)?
+        }
         _ => return Err(ToolError::invalid("unsupported_candidate_operation")),
     };
     result

@@ -1385,7 +1385,7 @@
       "kind": "tool",
       "owner_subsystem": "git-core",
       "support_profile": "active",
-      "description": "Prepare or inspect bounded native Git candidate bundles and pull request merge candidates without publishing.",
+      "description": "Prepare or inspect bounded native Git candidate bundles and pull request merge candidates without publishing. prepare_queue_merge additionally requires source, PR and queue read grants and constructs the exact canonical queue-head two-parent candidate; only its separate queue-landing tool may publish.",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
       "principal": "none",
@@ -1403,7 +1403,7 @@
       "disclosure": "untrusted_content_data",
       "receipt": "none",
       "cancellation": "immediate_quiescent",
-      "refusal_codes": ["unsupported_candidate_operation", "candidate_chunk_limit", "candidate_byte_limit", "candidate_response_limit"],
+      "refusal_codes": ["unsupported_candidate_operation", "candidate_chunk_limit", "candidate_byte_limit", "candidate_response_limit", "positive_queue_number_required", "positive_queue_version_required", "queue_requires_merge_commit", "queue_subject_moved"],
       "cli_command": "fg workspace inspect",
       "rest_api_path": "POST /repos/{id}/candidates/inspect"
     },

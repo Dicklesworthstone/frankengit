@@ -2,6 +2,7 @@
 //! independently required; neither a write grant nor a candidate grants either.
 mod inspect;
 mod prepare;
+mod queue;
 mod resolve;
 #[cfg(test)]
 mod tests;
@@ -16,6 +17,7 @@ use fgit_types::{PolicyEpoch, RepositoryAuthorityHeadId};
 pub(super) const PREPARE: &str = "prepare_pull_merge";
 pub(super) const INSPECT: &str = "inspect_pull_merge";
 pub(super) const RESOLVE: &str = "resolve_pull_merge";
+pub(super) const QUEUE_PREPARE: &str = "prepare_queue_merge";
 const MAX_COMMIT_BYTES: usize = 64 * 1024;
 const SUBJECT_FIELDS: &[&str] = &[
     "operation",
@@ -216,6 +218,9 @@ pub(super) fn inspection_schema() -> Value {
 pub(super) fn resolution_schema() -> Value {
     resolve::schema()
 }
+pub(super) fn queue_schema() -> Value {
+    queue::schema()
+}
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     permitted(backend)?;
@@ -223,6 +228,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         PREPARE => prepare::call(backend, args),
         INSPECT => inspect::call(backend, args),
         RESOLVE => resolve::call(backend, args),
+        QUEUE_PREPARE => queue::call(backend, args),
         _ => Err(ToolError::invalid("unsupported_candidate_operation")),
     }
 }

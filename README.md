@@ -209,6 +209,12 @@ real two-parent candidate for a divergent head. Each landing moves the target,
 merges the PR and completes the queue entry in one Repository Commit Record.
 Commands retain their original transaction outcome across retries and restart.
 
+The [MCP queue-candidate lifecycle](docs/MCP_QUEUE_CANDIDATES.md) exposes exact
+queue-head preparation through `prepare_queue_merge`, native inspection and
+separate candidate review, then `frankengit_queue_land_candidate` under its
+independent landing grant. Preparation returns the exact guarded landing
+arguments; terminal retries retain the original key and can omit the upload.
+
 Administrators can require canonical queue landing for an exact branch with
 `fg protection set ... --require-merge-queue refs/heads/main`. Ordinary ref
 publication and PR merges then refuse; queue landing still requires the selected
@@ -223,7 +229,9 @@ alone never grant publication approval. The [queue candidate CI
 watcher](docs/NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md) selects the current head,
 prepares and executes its actual two-parent candidate on a fixed CI branch, and
 optionally publishes canonical checks. Its queue-wide custody survives head
-changes and restart. Speculative multi-PR trains, synthetic queue refs and
+changes and restart. [Verified completed-watch recovery](docs/NATIVE_WORKFLOW_WATCH_RECOVERY.md)
+can restore a missing final settlement from original closed execution records
+without replaying scripts. Speculative multi-PR trains, synthetic queue refs and
 autonomous target landing remain work under FG-083a.
 See [Native merge queues](docs/NATIVE_MERGE_QUEUE.md) for exact commands,
 [branch protection](docs/MANDATORY_REVIEW_PROTECTION.md) for queue-required
