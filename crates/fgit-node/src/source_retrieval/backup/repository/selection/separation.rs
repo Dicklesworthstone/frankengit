@@ -77,7 +77,7 @@ struct Location {
     physical: PathBuf,
 }
 
-pub(super) struct Separation {
+pub(in super::super) struct Separation {
     locations: Vec<Location>,
     parents: BTreeMap<PathBuf, Parent>,
 }
@@ -88,7 +88,28 @@ impl Separation {
         witness: Option<&Path>,
         deadline: Deadline,
     ) -> Result<Self, String> {
-        let mut paths = Vec::with_capacity(5 + options.candidates.len() * 2);
+        Self::capture_inner(options, witness, None, deadline)
+    }
+
+    /// A replica publication directory must stay independent of every source,
+    /// trust control, verification root and retained witness, without opening
+    /// losing archive payloads or treating a directory listing as authority.
+    pub(in super::super) fn capture_for_output(
+        options: &Options,
+        witness: Option<&Path>,
+        output: &Path,
+        deadline: Deadline,
+    ) -> Result<Self, String> {
+        Self::capture_inner(options, witness, Some(output), deadline)
+    }
+
+    fn capture_inner(
+        options: &Options,
+        witness: Option<&Path>,
+        output: Option<&Path>,
+        deadline: Deadline,
+    ) -> Result<Self, String> {
+        let mut paths = Vec::with_capacity(6 + options.candidates.len() * 2);
         paths.push(options.destination.as_path());
         paths.push(options.trust.trust_key_path());
         paths.extend(
@@ -109,6 +130,11 @@ impl Separation {
             paths.push(reconstruction.catalog.as_path());
             let index = paths.len();
             paths.push(reconstruction.root.as_path());
+            index
+        });
+        let output_index = output.map(|path| {
+            let index = paths.len();
+            paths.push(path);
             index
         });
         let mut locations = Vec::with_capacity(paths.len());
@@ -135,20 +161,26 @@ impl Separation {
                 return Err("selected recovery witness must be physically separate from every input, control and destination".into());
             }
         }
-        if let Some(index) = reconstruction_index {
+        for (index, label) in reconstruction_index
+            .map(|index| (index, "reconstruction root"))
+            .into_iter()
+            .chain(output_index.map(|index| (index, "replica directory")))
+        {
             let root = &locations[index].physical;
             if locations.iter().enumerate().any(|(other, location)| {
                 other != index
                     && (location.physical.starts_with(root) || root.starts_with(&location.physical))
             }) {
-                return Err("selected reconstruction root must be physically separate from every input, control, witness and native destination".into());
+                return Err(format!(
+                    "selected {label} must be physically separate from every input, control, witness and native destination"
+                ));
             }
             let destination = &locations[0].physical;
             if locations.iter().skip(1).any(|location| {
                 location.physical.starts_with(destination)
                     || destination.starts_with(&location.physical)
             }) {
-                return Err("selected reconstruction native destination must be physically separate from every input and control".into());
+                return Err("selected native destination must be physically separate from every input and control".into());
             }
         }
         let separation = Self { locations, parents };
@@ -156,7 +188,7 @@ impl Separation {
         Ok(separation)
     }
 
-    pub(super) fn check(&self, deadline: Deadline) -> Result<(), String> {
+    pub(in super::super) fn check(&self, deadline: Deadline) -> Result<(), String> {
         for (path, parent) in &self.parents {
             deadline.check()?;
             parent.check(path)?;

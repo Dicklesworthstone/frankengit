@@ -2,11 +2,12 @@
 //! native recovery engine with the exact captured approval and one deadline.
 //! An unusable higher checkpoint never licenses recovery of an older one.
 
-mod engine;
+pub(super) mod engine;
+pub(super) mod intake;
 mod reconstruction;
 #[cfg(unix)]
-mod replicas;
-mod separation;
+pub(super) mod replicas;
+pub(super) mod separation;
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -119,19 +120,19 @@ Exit 0: selected checkpoint and native operation completed; 2: refusal or an
 incomplete operation, including failed receipt delivery after native completion.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Operation {
+pub(super) enum Operation {
     Verify,
     Recover,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct Candidate {
-    input: PathBuf,
-    approval: PathBuf,
+pub(super) struct Candidate {
+    pub(super) input: PathBuf,
+    pub(super) approval: PathBuf,
 }
 
 #[derive(Debug)]
-struct ReconstructionOptions {
+pub(super) struct ReconstructionOptions {
     catalog: PathBuf,
     root: PathBuf,
     max_read_bytes: u64,
@@ -139,17 +140,17 @@ struct ReconstructionOptions {
 
 #[derive(Debug)]
 pub(super) struct Options {
-    operation: Operation,
-    destination: PathBuf,
-    candidates: Vec<Candidate>,
-    expected: [u8; 32],
-    instance: StoreInstanceId,
-    trust: SelectionTrustOptions,
-    profile: Profile,
-    resume: bool,
-    witness: Option<PathBuf>,
-    replica_failover: Option<u64>,
-    reconstruction: Option<ReconstructionOptions>,
+    pub(super) operation: Operation,
+    pub(super) destination: PathBuf,
+    pub(super) candidates: Vec<Candidate>,
+    pub(super) expected: [u8; 32],
+    pub(super) instance: StoreInstanceId,
+    pub(super) trust: SelectionTrustOptions,
+    pub(super) profile: Profile,
+    pub(super) resume: bool,
+    pub(super) witness: Option<PathBuf>,
+    pub(super) replica_failover: Option<u64>,
+    pub(super) reconstruction: Option<ReconstructionOptions>,
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
@@ -392,7 +393,7 @@ fn parse_instance(text: &str) -> Result<StoreInstanceId, String> {
 }
 
 /// Normalize explicit names without following a source or control symlink.
-fn normalized(base: &Path, path: &Path) -> Result<PathBuf, String> {
+pub(super) fn normalized(base: &Path, path: &Path) -> Result<PathBuf, String> {
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {

@@ -237,13 +237,27 @@ impl AuthenticatedApprovalObservation {
 
     /// Transfer this exact observation into the existing native recovery
     /// boundary. No envelope/key is reopened, and no new deadline is started.
+    #[cfg(test)]
     pub(in super::super) fn into_verified(
         self,
         expected: [u8; 32],
         maximum_archive_bytes: u64,
     ) -> Result<VerifiedApproval, String> {
+        self.into_verified_with_envelope(expected, maximum_archive_bytes)
+            .map(|(verified, _)| verified)
+    }
+
+    /// Move the exact observed envelope together with its native admission
+    /// evidence. Publication may retain these original bytes without reopening
+    /// a control file or reconstructing a differently formatted approval.
+    pub(in super::super) fn into_verified_with_envelope(
+        self,
+        expected: [u8; 32],
+        maximum_archive_bytes: u64,
+    ) -> Result<(VerifiedApproval, Vec<u8>), String> {
         let verified = VerifiedApproval {
             binding: binding(&self.envelope, &self.der, self.policy),
+            approval_digest: sha256(&self.envelope),
             statement: self.statement,
             trusted_key_id: self.trusted_key_id,
             policy: self.policy,
@@ -252,7 +266,7 @@ impl AuthenticatedApprovalObservation {
             clock: self.clock,
         };
         verified.check_selected(expected, maximum_archive_bytes)?;
-        Ok(verified)
+        Ok((verified, self.envelope))
     }
 }
 

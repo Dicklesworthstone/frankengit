@@ -2,6 +2,12 @@
 
 Related: `frankengit-root-doctrine-x2mv.4.21` (partial, not closed).
 
+The native `fg backup replicate` command is documented in
+[native verified replica publication](NATIVE_BACKUP_REPLICATION.md). It performs
+mandatory complete native preflight before publication and retains one original
+source descriptor, approval, deadline, and actual-byte ledger in the Rust process.
+The JavaScript adapter described below remains a separate operator surface.
+
 `scripts/lib/repository-backup-replication.mjs` publishes another exact copy of
 an independently approved native backup. It selects the highest uniquely signed
 checkpoint from an explicit candidate set using the existing selector. A missing

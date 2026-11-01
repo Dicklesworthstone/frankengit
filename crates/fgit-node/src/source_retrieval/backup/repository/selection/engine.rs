@@ -10,11 +10,12 @@ use super::super::approval::witness::WitnessGuard;
 use super::super::approval::{AuthenticatedApprovalObservation, VerifiedApproval};
 use super::super::input::PinnedArchive;
 use super::super::profile::Deadline;
+use super::intake::{CapturedSelection, inspect};
 use super::separation::Separation;
 use super::{Candidate, Operation, Options, Receipt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Checkpoint {
+pub(in super::super) enum Checkpoint {
     ApprovalObserved,
     AllApprovalsAuthenticated,
     WinnerSelected,
@@ -97,25 +98,9 @@ fn execute_inner(
     // No early return after acquiring the lease may guess that native work has
     // settled. Explicit progress governs the one finalization path below.
     let result = (|| {
-        let mut inspected = Vec::with_capacity(options.candidates.len());
-        for candidate in &options.candidates {
-            deadline.check()?;
-            let observation = trust.inspect_path(&candidate.approval)?;
-            // Authentication creates a retention obligation before any observer,
-            // next candidate, lifetime/eligibility gate or archive operation.
-            if let Some(witness) = witness.as_mut() {
-                witness.observe(&observation)?;
-            }
-            inspected.push(observation);
-            checkpoint.borrow_mut()(Checkpoint::ApprovalObserved)?;
-        }
-        checkpoint.borrow_mut()(Checkpoint::AllApprovalsAuthenticated)?;
-        deadline.check()?;
-        let selected = highest(&inspected)?;
-        let winner = &inspected[selected];
-        if let Some(witness) = witness.as_mut() {
-            witness.require(winner)?;
-        }
+        let inspected = inspect(options, &trust, &mut witness, deadline, |event| {
+            checkpoint.borrow_mut()(event)
+        })?;
         let separation = (witness.is_some() || options.reconstruction.is_some())
             .then(|| {
                 Separation::capture(
@@ -125,30 +110,18 @@ fn execute_inner(
                 )
             })
             .transpose()?;
-        let aliases = inspected
-            .iter()
-            .enumerate()
-            .filter_map(|(index, observation)| observation.same_statement(winner).then_some(index))
-            .collect::<Vec<_>>();
-        let selection = selection_json(
-            &options.candidates,
-            &inspected,
+        let CapturedSelection {
+            approval,
+            envelope: _,
             selected,
-            aliases.len(),
+            aliases,
+            json: selection,
+        } = inspected.capture(
+            options,
             witness.as_ref().map(WitnessGuard::snapshot_json),
-            options.replica_failover.is_some(),
-            options.reconstruction.is_some(),
-        );
-        checkpoint.borrow_mut()(Checkpoint::WinnerSelected)?;
-        deadline.check()?;
-        let observation = inspected
-            .into_iter()
-            .nth(selected)
-            .ok_or("selected recovery internal candidate mismatch")?;
-        // Only a selected, currently eligible observation can become the evidence
-        // type the native verify/restore engines accept. Lower paths remain unopened.
-        let approval = observation
-            .into_verified(options.expected, options.profile.transfer.max_archive_bytes)?;
+            deadline,
+            |event| checkpoint.borrow_mut()(event),
+        )?;
         let mut guard = || {
             if let Some(witness) = witness.as_ref() {
                 witness.check_selected()?;
@@ -375,7 +348,7 @@ pub(super) fn highest(observations: &[AuthenticatedApprovalObservation]) -> Resu
     Ok(selected)
 }
 
-fn selection_json(
+pub(super) fn selection_json(
     candidates: &[Candidate],
     observations: &[AuthenticatedApprovalObservation],
     selected: usize,

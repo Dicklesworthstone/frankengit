@@ -11,6 +11,7 @@ mod profile;
 mod reconstruct;
 #[cfg(unix)]
 mod recovery_io;
+mod replication;
 mod restore;
 mod selection;
 
@@ -379,7 +380,11 @@ pub(super) fn run_with_timeout(
         emit(output, attest::USAGE)?;
         emit(output, reconstruct::USAGE)?;
         emit(output, selection::USAGE)?;
+        emit(output, replication::USAGE)?;
         return emit(output, approval::witness::USAGE);
+    }
+    if args.first().is_some_and(|arg| arg == "replicate") {
+        return replication::run(args, output, timeout);
     }
     if args.first().is_some_and(|arg| arg == "witness") {
         return approval::witness::run(args, output, timeout);
