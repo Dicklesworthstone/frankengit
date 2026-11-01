@@ -46,7 +46,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in pinned_git_fixture lifecycle_and_stale_twin discussion_and_original_recovery independent_outcome_grant fast_forward_and_code_grant independent_review_grant candidate_review_and_stale_twin candidate_bundle_recovery reviewed_merge_and_method_twin owned_service_drained; do
+  for property in pinned_git_fixture lifecycle_and_stale_twin discussion_and_original_recovery independent_outcome_grant fast_forward_and_code_grant independent_review_grant candidate_review_and_stale_twin candidate_bundle_recovery native_review_snapshot native_candidate_package reviewed_merge_and_method_twin owned_service_drained; do
     fge_assert_eq "OPERATOR-PULL-$format-$property" true "$(fact "${format}_$property")" "native PR $property"
   done
 done

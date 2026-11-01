@@ -25,6 +25,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     assert.equal(candidateCanonical(result.capture).includes(TOKEN), false);
     for (const request of p.requests) {
       assert.equal(request.headers['idempotency-key'], undefined); assert.equal(request.headers['accept-encoding'], 'identity');
+      assert.equal(request.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
       assert.equal(request.headers.cookie, undefined); assert.ok(!/\/(?:merge|approve|apply|outcomes)$/.test(request.url));
     }
     assert.equal(result.capture.inspection.merge_authorized, false);

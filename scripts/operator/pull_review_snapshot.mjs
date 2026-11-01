@@ -72,6 +72,28 @@ export function reviewOid(value, format) {
       /^0+$/.test(value.slice(format.length + 1))) failReview('invalid_review_oid');
   return value;
 }
+// Native HTTP displays GitOid as raw hex and binds the domain in object_format.
+// Retained captures keep the qualified schema. Normalize only these known wire
+// fields at intake; saved-capture validation never accepts an unqualified OID.
+function qualifyWireOids(value, format) {
+  if (value?.object_format !== format) return;
+  const fields = (record, names) => {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) return;
+    for (const name of names) {
+      if (!Object.hasOwn(record, name)) continue;
+      const oid = record[name];
+      const qualified = typeof oid === 'string' && new RegExp(`^[0-9a-f]{${format === 'sha1' ? 40 : 64}}$`).test(oid)
+        ? `${format}:${oid}` : oid;
+      record[name] = reviewOid(qualified, format);
+    }
+  };
+  fields(value.pull_request?.data, ['source_tip', 'target_tip']);
+  fields(value.pull_request?.merge, ['source_tip', 'target_tip_before', 'base_tip', 'merge_commit']);
+  if (Array.isArray(value.reviews)) for (const row of value.reviews) {
+    fields(row?.subject, ['source_tip', 'target_tip']);
+    fields(row?.candidate, ['merge_base', 'candidate_commit']);
+  }
+}
 function refs(row) {
   for (const side of ['source', 'target']) {
     const value = row[`${side}_ref`], hex = row[`${side}_ref_hex`];
@@ -243,6 +265,7 @@ function get(address, token, number, page, config) {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'GET', agent: false, maxHeaderSize: 16384, rejectUnauthorized: true, ...(config.ca ? { ca: config.ca } : {}),
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Encoding': 'identity',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           Connection: 'close', 'Cache-Control': 'no-store' },
       });
       request.once('close', () => { closed = true; if (!done) finish(new ReviewSnapshotError('review_response_incomplete')); else deliver(); });
@@ -296,6 +319,7 @@ export async function capturePullReviews(input, token, options = {}) {
     if (wire >= maxWire) failReview('review_wire_limit');
     const result = await get(selected.endpoint, token, selected.number, page,
       { timeoutMs: remaining, signal, ca, pageLimit, maximum: Math.min(REVIEW_LIMITS.reply, maxWire - wire) });
+    qualifyWireOids(result.value, selected.scope.object_format);
     wire += result.bytes; return result;
   };
   const first = await request({ reviews: false, head: selected.expected_head, after: null });
