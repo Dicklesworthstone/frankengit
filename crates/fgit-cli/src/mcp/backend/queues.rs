@@ -1,5 +1,7 @@
 //! Queue tools retain the launch-bound operator and the node's canonical keys.
-//! Observation, membership management and fast-forward landing are independent.
+//! Observation, membership management and landing are independent.
+#[cfg(test)]
+mod candidate_tests;
 mod input;
 #[cfg(test)]
 mod integration_tests;
@@ -12,7 +14,9 @@ use super::super::QueueGrants;
 use super::super::json::{Object, Value};
 use super::super::protocol::{Tool, ToolError};
 use super::{NodeTools, decimal, head, limit, mutations as common, require_fields};
+use fgit_admission::merge::native::queue::QueueCandidateLandingCommand;
 use fgit_forge::QueueNumber;
+use fgit_types::{GitHashAlgorithm, RepositoryIncarnationId};
 use input::Command;
 
 pub(super) const LIST: &str = "frankengit_queue_list";
@@ -21,6 +25,7 @@ pub(super) const ENQUEUE: &str = "frankengit_queue_enqueue";
 pub(super) const DEQUEUE: &str = "frankengit_queue_dequeue";
 pub(super) const REORDER: &str = "frankengit_queue_reorder";
 pub(super) const LAND: &str = "frankengit_queue_land";
+pub(super) const LAND_CANDIDATE: &str = "frankengit_queue_land_candidate";
 const MAX_RESPONSE: usize = 1024 * 1024;
 // The ordinary MCP parser bounds every array at 256 items. Native queues can
 // be larger; their complete reorder is available in the CLI/HTTP profiles.
@@ -31,7 +36,7 @@ pub(super) fn permitted(grants: QueueGrants, name: &str) -> bool {
     match name {
         LIST | SHOW => grants.read,
         ENQUEUE | DEQUEUE | REORDER => grants.write,
-        LAND => grants.land,
+        LAND | LAND_CANDIDATE => grants.land,
         _ => false,
     }
 }
@@ -46,11 +51,27 @@ pub(super) fn tools(grants: QueueGrants) -> Vec<Tool> {
         (DEQUEUE, "Remove one PR from an exact queue version with an explicit reason. Requires the independent queue-write grant; no Git ref or PR state changes."),
         (REORDER, "Replace the complete order of an exact queue with 1..256 distinct PR numbers. No member may be added or omitted. Requires the independent queue-write grant."),
         (LAND, "Atomically fast-forward the exact queue-head PR and publish its PR merge plus queue completion. Requires the independent queue-landing grant and exact queue/PR versions, policy epoch and native tips. Current review/check/protected-ref rules remain mandatory; no new commit, force, implicit refresh or merge-method fallback."),
+        (LAND_CANDIDATE, "Atomically land one exact two-parent queue-head candidate, its PR merge and queue completion. Requires the independent queue-landing grant, exact queue/PR versions, policy epoch, source/target/base/candidate commits and an inline native bundle of at most 24 KiB. Current protected-ref, review and check requirements remain mandatory. Retry the original coordinates and key; absent or empty chunks can recover an already terminal outcome without another upload."),
     ]
     .into_iter()
     .filter(|(name, _)| permitted(grants, name))
     .map(|(name, description)| Tool { name, description, schema: schema::for_tool(name) })
     .collect()
+}
+
+/// Validate a prepared landing template with the same closed parser used by
+/// publication. This performs no canonical read, intake or admission.
+pub(super) fn parse_candidate_landing(
+    args: &Object,
+    format: GitHashAlgorithm,
+    incarnation: RepositoryIncarnationId,
+) -> Result<QueueCandidateLandingCommand, ToolError> {
+    let (_, Command::CandidateLanding { command, .. }) =
+        input::parse(LAND_CANDIDATE, args, format, incarnation)?
+    else {
+        unreachable!()
+    };
+    Ok(command)
 }
 
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
@@ -80,31 +101,39 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     }
     let request = fgit_cli::command_request_context(&backend.node);
     let result = match &command {
-        Command::Management(command) => {
-            backend
-                .node
-                .runtime()
-                .block_on(backend.node.admit_queue_durable_in(
-                    &request,
-                    &session,
-                    command,
-                    Default::default(),
-                ))
-        }
-        Command::Landing(command) => {
-            backend
-                .node
-                .runtime()
-                .block_on(backend.node.land_queue_head_durable_in(
-                    &request,
-                    &session,
-                    command,
-                    Default::default(),
-                ))
-        }
+        Command::Management(command) => backend
+            .node
+            .runtime()
+            .block_on(backend.node.admit_queue_durable_in(
+                &request,
+                &session,
+                command,
+                Default::default(),
+            ))
+            .map_err(|_| ToolError::uncertain("queue_mutation_outcome_unknown")),
+        Command::Landing(command) => backend
+            .node
+            .runtime()
+            .block_on(backend.node.land_queue_head_durable_in(
+                &request,
+                &session,
+                command,
+                Default::default(),
+            ))
+            .map_err(|_| ToolError::uncertain("queue_mutation_outcome_unknown")),
+        Command::CandidateLanding { command, bundle } => backend
+            .node
+            .runtime()
+            .block_on(backend.node.land_queue_head_bundle_durable_in(
+                &request,
+                &session,
+                command,
+                bundle,
+                Default::default(),
+            ))
+            .map_err(|_| ToolError::uncertain("queue_mutation_outcome_unknown")),
     };
-    let (tx, terminal) =
-        result.map_err(|_| ToolError::uncertain("queue_mutation_outcome_unknown"))?;
+    let (tx, terminal) = result?;
     // The original terminal is authoritative even after later queue, PR or
     // policy changes. Never replace it with a latest-state read.
     let result = output::publication(backend, principal, &command, tx, &terminal);

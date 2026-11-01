@@ -225,6 +225,12 @@ const WRITE_ERRORS: &[&str] = &[
     "queue_order_limit",
     "duplicate_queue_entry",
     "invalid_queue_command",
+    "bundle_chunks_required",
+    "bundle_chunk_limit",
+    "bundle_chunk_must_be_hex",
+    "invalid_bundle_chunk",
+    "bundle_byte_limit",
+    "allocation_refused",
     "queue_mutation_outcome_unknown",
 ];
 
@@ -405,13 +411,13 @@ const WRITE_OUTPUT: &[McpField] = &[
     output(
         "action",
         "string",
-        "enqueue, dequeue, reorder or land.",
-        Some(7),
+        "enqueue, dequeue, reorder, land or land-candidate.",
+        Some(14),
     ),
     output(
         "proposed_action",
         "object",
-        "Original action and immutable guards, including exact PR/source/target/policy coordinates where applicable. Land names the fast-forward-only method. Contains no refreshed guards or client key.",
+        "Original action and immutable guards, including exact PR/source/target/policy coordinates where applicable. Land names fast-forward-only; land-candidate names merge-commit and preserves the base/candidate OIDs. Contains no refreshed guards, uploaded bytes or client key.",
         None,
     ),
     output(
@@ -722,5 +728,54 @@ pub(super) const LAND: McpToolEntry = McpToolEntry {
         ],
         "fg queue land",
         "POST /{repository}/api/v1/queues/{number}/land",
+    )
+};
+
+pub(super) const LAND_CANDIDATE: McpToolEntry = McpToolEntry {
+    capability: CapabilityRequirement::PREPARE_PUBLICATION,
+    ..write_entry(
+        "frankengit_queue_land_candidate",
+        "Land one exact two-parent queue-head candidate through native quarantine and canonical admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source preparation and ordinary merge grants do not imply it. Exact queue/PR versions, policy epoch and source/target/base/candidate OIDs remain immutable. Current protected-ref, required-queue, review and required-check rules apply. One decision atomically moves the target, merges the PR and advances the queue twice. No method fallback, caller actor or check evidence is accepted. The bounded inline bundle is at most 24 KiB. Retry identical coordinates and key after uncertainty; omitted or empty chunks recover an already terminal outcome before intake, and otherwise cannot publish without valid objects. The authenticated HTTP counterpart retains its independent queues-land and reference-write ceilings.",
+        &[
+            NUMBER,
+            VERSION,
+            KEY,
+            INCARNATION,
+            FORMAT,
+            TARGET,
+            TARGET_HEX,
+            PULL,
+            PULL_VERSION,
+            SOURCE,
+            SOURCE_HEX,
+            SOURCE_TIP,
+            TARGET_TIP,
+            POLICY_EPOCH,
+            selector(
+                "merge_base",
+                "Exact nonzero native merge-base OID in the launch format. It is verified against native ancestry; never recomputed to refresh this request.",
+                true,
+                64,
+                NATIVE_OID,
+            ),
+            selector(
+                "candidate_commit",
+                "Exact nonzero two-parent candidate OID in the launch format, distinct from source, target and merge base. The native bundle must prove this commit and its closure.",
+                true,
+                64,
+                NATIVE_OID,
+            ),
+            McpField {
+                name: "bundle_hex_chunks",
+                field_type: "array",
+                classification: FieldClassification::UntrustedContent,
+                description: "Optional ordered inline bundle: at most three nonempty lowercase hexadecimal chunks of at most 8192 decoded bytes each, 24576 decoded bytes total. Omit or use [] to recover a known terminal outcome using the original immutable coordinates and key. Invalid or missing unknown-operation bytes cannot publish and return uncertainty rather than asserting rollback.",
+                required: false,
+                max_bytes: None,
+                pattern: None,
+            },
+        ],
+        "fg queue land-candidate",
+        "POST /{repository}/api/v1/queues/{number}/land-candidate",
     )
 };

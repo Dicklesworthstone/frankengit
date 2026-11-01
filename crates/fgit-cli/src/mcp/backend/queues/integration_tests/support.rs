@@ -128,6 +128,12 @@ impl Fixture {
         configuration(&self.options)
     }
     pub fn new(format: GitHashAlgorithm) -> Self {
+        Self::with_divergence(format, false)
+    }
+    pub fn divergent(format: GitHashAlgorithm) -> Self {
+        Self::with_divergence(format, true)
+    }
+    fn with_divergence(format: GitHashAlgorithm, divergent: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "fg-mcp-queues-{}-{}",
             std::process::id(),
@@ -243,6 +249,41 @@ impl Fixture {
             published.commands[0].terminal.outcome,
             DecisionOutcome::Committed { .. }
         ));
+        let target = if divergent {
+            let patch = b"diff --git a/target b/target\nnew file mode 100644\n--- /dev/null\n+++ b/target\n@@ -0,0 +1 @@\n+target branch\n";
+            let prepared = node
+                .runtime()
+                .block_on(node.prepare_trusted_patch_in(
+                    &request,
+                    &target_ref,
+                    target,
+                    [0x86; 16],
+                    patch,
+                    &metadata,
+                    Default::default(),
+                ))
+                .unwrap();
+            let next = prepared.candidate_commit;
+            let published = node
+                .runtime()
+                .block_on(node.apply_workspace_bundle_durable_in(
+                    &request,
+                    actor(),
+                    b"advance-target",
+                    &target_ref,
+                    target,
+                    next,
+                    prepared.bundle_bytes(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                published.commands[0].terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            ));
+            next
+        } else {
+            target
+        };
         for number in [7, 9] {
             let command = PullRequestCommand {
                 number: PullRequestNumber::try_new(number).unwrap(),
@@ -289,7 +330,7 @@ impl Fixture {
             ("idempotency_key", text(key)),
             ("target_reference", text("refs/heads/main")),
         ]);
-        if matches!(name, ENQUEUE | LAND) {
+        if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE) {
             fields.extend([
                 ("pull_request".into(), text(pull.to_string())),
                 ("expected_pull_request_version".into(), text("1")),
@@ -297,7 +338,7 @@ impl Fixture {
                 ("expected_source".into(), text(self.source.to_string())),
                 ("expected_target".into(), text(self.target.to_string())),
             ]);
-            if name == LAND {
+            if matches!(name, LAND | LAND_CANDIDATE) {
                 fields.insert("expected_policy_epoch".into(), text("1"));
             }
         } else if name == DEQUEUE {

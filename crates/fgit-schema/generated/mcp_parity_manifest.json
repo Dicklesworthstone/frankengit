@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 59,
+  "total_tools": 60,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -414,6 +414,16 @@
       "capability": "prepare_publication",
       "cli_command": "fg queue land",
       "rest_api_path": "POST /{repository}/api/v1/queues/{number}/land"
+    },
+    {
+      "tool": "frankengit_queue_land_candidate",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg queue land-candidate",
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/land-candidate"
     },
     {
       "tool": "frankengit_queue_list",

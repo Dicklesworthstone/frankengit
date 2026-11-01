@@ -64,6 +64,7 @@ fn all_queue_grant_combinations_are_independent_and_writes_pin_the_operator() {
             (2, "frankengit_queue_dequeue"),
             (2, "frankengit_queue_reorder"),
             (4, "frankengit_queue_land"),
+            (4, "frankengit_queue_land_candidate"),
         ] {
             assert_eq!(names.contains(name), mask & bit != 0);
         }
@@ -71,7 +72,7 @@ fn all_queue_grant_combinations_are_independent_and_writes_pin_the_operator() {
             names.len(),
             usize::from(mask & 1 != 0) * 2
                 + usize::from(mask & 2 != 0) * 3
-                + usize::from(mask & 4 != 0)
+                + usize::from(mask & 4 != 0) * 2
         );
         if mask & 6 != 0 {
             for name in ["--principal", "--expected-incarnation"] {

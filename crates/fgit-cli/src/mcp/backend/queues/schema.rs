@@ -63,12 +63,16 @@ pub(super) fn for_tool(name: &str) -> Value {
         "object_format",
     ];
     let mut references = vec![("target_reference", "target_reference_hex")];
-    if matches!(name, ENQUEUE | LAND) {
+    if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE) {
         for field in ["pull_request", "expected_pull_request_version"] {
             properties.insert(field.into(), positive());
             required.push(field);
         }
-        for field in ["expected_source", "expected_target"] {
+        let mut commits = vec!["expected_source", "expected_target"];
+        if name == LAND_CANDIDATE {
+            commits.extend(["merge_base", "candidate_commit"]);
+        }
+        for field in commits {
             properties.insert(field.into(), object([
                 ("type", text("string")), ("maxLength", json::number(64)),
                 ("pattern", text("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")),
@@ -77,9 +81,23 @@ pub(super) fn for_tool(name: &str) -> Value {
             required.push(field);
         }
         references.push(("source_reference", "source_reference_hex"));
-        if name == LAND {
+        if matches!(name, LAND | LAND_CANDIDATE) {
             properties.insert("expected_policy_epoch".into(), positive());
             required.push("expected_policy_epoch");
+            if name == LAND_CANDIDATE {
+                properties.insert("bundle_hex_chunks".into(), object([
+                    ("type", text("array")),
+                    ("minItems", json::number(0)),
+                    ("maxItems", json::number(3)),
+                    ("items", object([
+                        ("type", text("string")),
+                        ("minLength", json::number(2)),
+                        ("maxLength", json::number(16_384)),
+                        ("pattern", text("^(?:[0-9a-f]{2})+$")),
+                    ])),
+                    ("description", text("Ordered inline native bundle: at most three nonempty lowercase hex chunks of 8192 decoded bytes each, 24576 bytes total. Omit or use [] only to recover the original terminal outcome; an unknown operation still requires a valid bundle for publication.")),
+                ]));
+            }
         } else {
             properties.insert("priority".into(), object([
                 ("type", text("string")), ("maxLength", json::number(10)),

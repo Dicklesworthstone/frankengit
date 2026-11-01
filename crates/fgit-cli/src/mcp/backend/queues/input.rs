@@ -1,19 +1,24 @@
-//! Closed typed commands; no latest-state refresh, principal, force or bundle.
+//! Closed typed commands; no latest-state refresh, principal or force.
 use std::collections::BTreeSet;
 
 use fgit_admission::merge::native::queue::QueueLandingCommand;
 use fgit_authority::IdempotencyKey;
+use fgit_forge::event::NativeMerge;
 use fgit_forge::merge_queue::{DequeueReason, QueueCommand, QueueCommandAction};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{GitHashAlgorithm, PolicyEpoch, RefName, RepositoryIncarnationId};
 
-use super::super::{pull_writes, string};
+use super::super::{pull_writes, review_writes, string};
 use super::*;
 
 #[derive(Debug)]
 pub(super) enum Command {
     Management(QueueCommand),
     Landing(QueueLandingCommand),
+    CandidateLanding {
+        command: QueueCandidateLandingCommand,
+        bundle: Vec<u8>,
+    },
 }
 
 pub(super) const COMMON: &[&str] = &[
@@ -42,13 +47,16 @@ pub(super) fn parse(
 ) -> Result<(IdempotencyKey, Command), ToolError> {
     let mut allowed = COMMON.to_vec();
     match name {
-        ENQUEUE | LAND => {
+        ENQUEUE | LAND | LAND_CANDIDATE => {
             allowed.extend(CANDIDATE);
             allowed.push(if name == ENQUEUE {
                 "priority"
             } else {
                 "expected_policy_epoch"
             });
+            if name == LAND_CANDIDATE {
+                allowed.extend(["merge_base", "candidate_commit", "bundle_hex_chunks"]);
+            }
         }
         DEQUEUE => allowed.extend(["pull_request", "reason"]),
         REORDER => allowed.push("order"),
@@ -83,7 +91,7 @@ pub(super) fn parse(
     };
     let target_ref = branch(args, "target_reference", "target_reference_hex")?;
     let command = match name {
-        ENQUEUE | LAND => {
+        ENQUEUE | LAND | LAND_CANDIDATE => {
             let pull_request = pull_number(common::required(args, "pull_request")?)?;
             let expected_pull_request_version =
                 AggregateVersion::try_new(common::number(args, "expected_pull_request_version")?)
@@ -94,7 +102,7 @@ pub(super) fn parse(
             }
             let head_tip = pull_writes::oid(args, "expected_source", format)?;
             let expected_target_tip = pull_writes::oid(args, "expected_target", format)?;
-            if name == LAND {
+            if matches!(name, LAND | LAND_CANDIDATE) {
                 if head_tip == expected_target_tip {
                     return Err(ToolError::invalid("invalid_queue_command"));
                 }
@@ -111,17 +119,55 @@ pub(super) fn parse(
                 let expected_policy_epoch =
                     PolicyEpoch::try_new(common::number(args, "expected_policy_epoch")?)
                         .map_err(|_| ToolError::invalid("positive_policy_epoch_required"))?;
-                Command::Landing(QueueLandingCommand {
-                    number,
-                    expected_version,
-                    expected_policy_epoch,
-                    pull_request,
-                    expected_pull_request_version,
-                    source_ref,
-                    head_tip,
-                    target_ref,
-                    expected_target_tip,
-                })
+                if name == LAND_CANDIDATE {
+                    let merge = NativeMerge {
+                        source_ref,
+                        source_tip: head_tip,
+                        target_ref,
+                        target_tip_before: expected_target_tip,
+                        base_tip: pull_writes::oid(args, "merge_base", format)?,
+                        merge_commit: pull_writes::oid(args, "candidate_commit", format)?,
+                    };
+                    merge
+                        .validate()
+                        .map_err(|_| ToolError::invalid("invalid_queue_command"))?;
+                    if merge.merge_commit == merge.source_tip
+                        || merge.merge_commit == merge.base_tip
+                    {
+                        return Err(ToolError::invalid("invalid_queue_command"));
+                    }
+                    // Known-terminal recovery precedes native intake. An
+                    // omitted upload must reach that boundary with the original
+                    // key and immutable command; it is not a new publication.
+                    let bundle = match args.get("bundle_hex_chunks") {
+                        None => Vec::new(),
+                        Some(Value::Array(chunks)) if chunks.is_empty() => Vec::new(),
+                        _ => review_writes::bundle(args)?,
+                    };
+                    Command::CandidateLanding {
+                        command: QueueCandidateLandingCommand {
+                            number,
+                            expected_version,
+                            expected_policy_epoch,
+                            pull_request,
+                            expected_pull_request_version,
+                            merge,
+                        },
+                        bundle,
+                    }
+                } else {
+                    Command::Landing(QueueLandingCommand {
+                        number,
+                        expected_version,
+                        expected_policy_epoch,
+                        pull_request,
+                        expected_pull_request_version,
+                        source_ref,
+                        head_tip,
+                        target_ref,
+                        expected_target_tip,
+                    })
+                }
             } else {
                 let priority = u32::try_from(super::super::decimal(args, "priority", 0)?)
                     .map_err(|_| ToolError::invalid("invalid_priority"))?;

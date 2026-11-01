@@ -1873,6 +1873,136 @@
       },
       "additionalProperties": false
     },
+    "frankengit_queue_land_candidate": {
+      "title": "frankengit_queue_land_candidate",
+      "description": "Land one exact two-parent queue-head candidate through native quarantine and canonical admission. Requires independent --allow-queue-landings plus the trusted-local launch principal and incarnation; queue management, source preparation and ordinary merge grants do not imply it. Exact queue/PR versions, policy epoch and source/target/base/candidate OIDs remain immutable. Current protected-ref, required-queue, review and required-check rules apply. One decision atomically moves the target, merges the PR and advances the queue twice. No method fallback, caller actor or check evidence is accepted. The bounded inline bundle is at most 24 KiB. Retry identical coordinates and key after uncertainty; omitted or empty chunks recover an already terminal outcome before intake, and otherwise cannot publish without valid objects. The authenticated HTTP counterpart retains its independent queues-land and reference-write ceilings.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal queue number bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact positive queue predecessor version; landing requires two available successor versions. Never refresh this guard while retrying the original key.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key. Retry identical operation, versions, policy and candidate coordinates after an uncertain response.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "expected_incarnation": {
+              "type": "string",
+              "description": "Exact 32-lowercase-hex repository incarnation. Must equal both the operator launch binding and the current node configuration; cannot select another repository.",
+              "x-classification": "selector_position",
+              "maxLength": 32,
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "object_format": {
+              "type": "string",
+              "description": "Exact launch-bound native object format: sha1 or sha256.",
+              "x-classification": "selector_position",
+              "maxLength": 6,
+              "pattern": "^(sha1|sha256)$"
+            },
+            "target_reference": {
+              "type": "string",
+              "description": "Literal full refs/heads/ target, at most 1024 UTF-8 bytes. Supply exactly one of target_reference and target_reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "target_reference_hex": {
+              "type": "string",
+              "description": "Exact full refs/heads/ target bytes encoded as lowercase hexadecimal, at most 1024 decoded bytes. Supply exactly one target-reference representation.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "pull_request": {
+              "type": "string",
+              "description": "Positive canonical decimal native pull request number bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_pull_request_version": {
+              "type": "string",
+              "description": "Exact positive canonical PR version, checked against the current open PR on every publication attempt; landing also requires its successor to exist.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "source_reference": {
+              "type": "string",
+              "description": "Literal full refs/heads/ source, distinct from target, at most 1024 UTF-8 bytes. Supply exactly one of source_reference and source_reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "source_reference_hex": {
+              "type": "string",
+              "description": "Exact full refs/heads/ source bytes encoded as lowercase hexadecimal, at most 1024 decoded bytes. Supply exactly one source-reference representation.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_source": {
+              "type": "string",
+              "description": "Exact nonzero native source commit OID in lowercase hexadecimal for the launch object format. Landing requires a different OID from expected_target.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_target": {
+              "type": "string",
+              "description": "Exact nonzero native target commit OID in lowercase hexadecimal for the launch object format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_policy_epoch": {
+              "type": "string",
+              "description": "Exact positive canonical decimal policy epoch. The current protected-ref, review and required-check rules remain mandatory; the epoch is not permission to bypass them.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "merge_base": {
+              "type": "string",
+              "description": "Exact nonzero native merge-base OID in the launch format. It is verified against native ancestry; never recomputed to refresh this request.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "candidate_commit": {
+              "type": "string",
+              "description": "Exact nonzero two-parent candidate OID in the launch format, distinct from source, target and merge base. The native bundle must prove this commit and its closure.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "bundle_hex_chunks": {
+              "type": "array",
+              "description": "Optional ordered inline bundle: at most three nonempty lowercase hexadecimal chunks of at most 8192 decoded bytes each, 24576 decoded bytes total. Omit or use [] to recover a known terminal outcome using the original immutable coordinates and key. Invalid or missing unknown-operation bytes cannot publish and return uncertainty rather than asserting rollback.",
+              "x-classification": "untrusted_content"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "expected_incarnation", "object_format", "pull_request", "expected_pull_request_version", "expected_source", "expected_target", "expected_policy_epoch", "merge_base", "candidate_commit"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_queue_list": {
       "title": "frankengit_queue_list",
       "description": "Read complete visible queues in numeric order from one authenticated snapshot. Requires the independent --allow-queues launch grant; source/PR grants and queue writes or landings do not imply it. Page limit 1..20 defaults to 5; continuation pins expected_head. Hidden target or queued source hides the whole queue. A page above 1 MiB refuses instead of returning partial queues.",

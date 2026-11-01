@@ -79,7 +79,7 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 59);
+    assert_eq!(REGISTRY.len(), 60);
     assert!(find_tool("frankengit_pull_append_comment").is_some());
 
     // Verify strict alphabetical ASCII sort order
@@ -397,8 +397,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 59"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 55"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 60"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 56"));
     assert!(
         mcp_tools
             .contents
@@ -410,7 +410,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 59"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 60"));
 }
 
 #[test]
@@ -420,7 +420,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 55);
+    assert_eq!(active_names.len(), 56);
     assert!(active_names.contains(&"frankengit_pull_append_comment"));
 
     // 1. Consistent twin passes.
@@ -456,7 +456,7 @@ fn queue_registry_separates_read_management_and_landing_authority() {
         .iter()
         .filter(|tool| tool.name.starts_with("frankengit_queue_"))
         .collect();
-    assert_eq!(queue_tools.len(), 6);
+    assert_eq!(queue_tools.len(), 7);
     for tool in queue_tools {
         assert_eq!(tool.support_profile, SupportProfile::Active);
         assert_eq!(tool.owner_subsystem, "forge");
@@ -499,7 +499,10 @@ fn queue_registry_separates_read_management_and_landing_authority() {
                             .any(|entry| entry.name == field && entry.required)
                     );
                 }
-                let is_landing = tool.name == "frankengit_queue_land";
+                let is_landing = matches!(
+                    tool.name,
+                    "frankengit_queue_land" | "frankengit_queue_land_candidate"
+                );
                 let capability = if is_landing {
                     "prepare_publication"
                 } else {
@@ -533,7 +536,8 @@ fn queue_registry_separates_read_management_and_landing_authority() {
 fn queue_schemas_preserve_exact_versions_reference_aliases_and_complete_bounded_reorder() {
     let enqueue = find_tool("frankengit_queue_enqueue").unwrap();
     let landing = find_tool("frankengit_queue_land").unwrap();
-    for tool in [enqueue, landing] {
+    let candidate = find_tool("frankengit_queue_land_candidate").unwrap();
+    for tool in [enqueue, landing, candidate] {
         for name in [
             "pull_request",
             "expected_pull_request_version",
@@ -653,4 +657,55 @@ fn queue_landing_catalog_names_the_authenticated_http_counterpart_without_changi
         manifest.contains("\"rest_api_path\": \"POST /{repository}/api/v1/queues/{number}/land\"")
     );
     assert!(!manifest.contains("local-only: fg queue land"));
+}
+
+#[test]
+fn queue_candidate_landing_keeps_native_authority_and_bounded_retry_transport() {
+    let tool = find_tool("frankengit_queue_land_candidate").unwrap();
+    assert_eq!(tool.cli_command, "fg queue land-candidate");
+    assert_eq!(
+        tool.rest_api_path,
+        "POST /{repository}/api/v1/queues/{number}/land-candidate"
+    );
+    assert_eq!(tool.read_mutation, ReadMutationClass::Mutation);
+    assert_eq!(tool.principal, PrincipalRequirement::OperatorBound);
+    assert_eq!(tool.capability, CapabilityRequirement::PREPARE_PUBLICATION);
+    assert_eq!(tool.idempotency, IdempotencyRequirement::RequiredDurableKey);
+    for name in ["merge_base", "candidate_commit", "expected_policy_epoch"] {
+        assert!(
+            tool.input_fields
+                .iter()
+                .any(|field| field.name == name && field.required)
+        );
+    }
+    let bundle = tool
+        .input_fields
+        .iter()
+        .find(|field| field.name == "bundle_hex_chunks")
+        .unwrap();
+    assert_eq!(bundle.field_type, "array");
+    assert_eq!(bundle.classification, FieldClassification::UntrustedContent);
+    assert!(
+        !bundle.required,
+        "known-terminal recovery must not require an upload"
+    );
+    assert!(bundle.description.contains("24576"));
+    assert!(bundle.description.contains("8192"));
+    for name in [
+        "method",
+        "principal",
+        "approved",
+        "required_reviewers",
+        "bundle_path",
+        "bundle_url",
+    ] {
+        assert!(!tool.input_fields.iter().any(|field| field.name == name));
+    }
+    assert!(tool.description.contains("--allow-queue-landings"));
+    assert!(tool.description.contains("before intake"));
+    assert!(tool.description.contains("No method fallback"));
+    assert!(
+        fgit_schema::emit::mcp_parity_manifest()
+            .contains("POST /{repository}/api/v1/queues/{number}/land-candidate")
+    );
 }

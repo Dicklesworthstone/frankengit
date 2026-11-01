@@ -140,7 +140,7 @@ Three independent launch grants expose the canonical merge queue APIs:
 | --- | --- | --- |
 | `--allow-queues` | `frankengit_queue_list`, `frankengit_queue_show` | Complete visible snapshots. |
 | `--allow-queue-writes` | `frankengit_queue_enqueue`, `frankengit_queue_dequeue`, `frankengit_queue_reorder` | Queue membership and order only. |
-| `--allow-queue-landings` | `frankengit_queue_land` | Exact queue-head fast-forward, coupled PR merge and queue completion. |
+| `--allow-queue-landings` | `frankengit_queue_land`, `frankengit_queue_land_candidate` | Exact queue-head fast-forward or uploaded two-parent merge, coupled PR merge and queue completion. |
 
 None implies another grant, PR/source access, approval authority, or outcome
 recovery. A queue writer cannot land, and a landing-only process cannot edit
@@ -183,6 +183,7 @@ fields are rejected before admission.
 | `dequeue` | `pull_request` and `reason`: `withdrawn`, `conflict`, `check-failed`, `base-moved`, `evicted`, or `admin-override`. |
 | `reorder` | `order`, the complete desired array of 1–256 distinct positive PR-number strings, without added or omitted members. |
 | `land` | The enqueue candidate coordinates without `priority`, plus positive `expected_policy_epoch`. |
+| `land_candidate` | The `land` coordinates, plus exact `merge_base`, `candidate_commit`, and an inline `bundle_hex_chunks` upload; omit the upload or supply `[]` to recover an existing terminal outcome. |
 
 The source and target OIDs are explicit nonzero lowercase IDs in the pinned
 native hash format. Landing additionally requires distinct tips, the exact
@@ -198,6 +199,35 @@ the target to the existing source tip, advances the PR once, and advances the
 queue twice for batch formation/completion. No intermediate active batch is
 published. Source refs remain unchanged. See
 [NATIVE_MERGE_QUEUE.md](NATIVE_MERGE_QUEUE.md) for the native landing contract.
+
+`frankengit_queue_land_candidate` closes the divergent-branch publication path.
+It accepts a native two-parent bundle prepared for the actual target branch,
+then uses the same private quarantine, closure verification and canonical
+queue-head admission as `fg queue land-candidate` and the authenticated HTTP
+endpoint. The commit's ordered parents must be the exact target and source
+tips. The candidate and merge base are explicit immutable coordinates; the
+adapter never constructs a replacement commit or switches merge methods.
+Required reviews and checks bind the actual candidate, and a canonical
+queue-required branch remains enforced. A successful decision publishes the
+target move, PR merge, batch formation and queue completion atomically.
+
+The inline upload contains at most three nonempty lowercase hexadecimal chunks,
+each at most 8 KiB decoded, for a total of **24 KiB**. The full MCP request still
+must fit 64 KiB. No host path, URL, upload handle, actor, `method`, force flag,
+reviewer list or passing-check assertion is accepted. Larger candidate bundles
+use the existing binary HTTP or native CLI landing surface. Candidate
+preparation and review have separate grants; obtaining a bundle never grants
+queue landing permission.
+
+After an uncertain candidate landing, retry the original key and every original
+guard. An omitted upload or `bundle_hex_chunks: []` reaches the native recovery
+path, which returns an already known terminal outcome before object intake,
+including after later queue, PR or policy changes. Unknown operations still
+need valid bundle bytes to publish. Missing or corrupt unknown-operation bytes
+produce `queue_mutation_outcome_unknown`, not an assertion that a canonical
+refusal or rollback occurred. A malformed transport field is rejected before
+admission. The original canonical refusal remains a refusal even when later
+reviews or protection changes would permit a new operation.
 
 ```json
 {"jsonrpc":"2.0","id":"queue-enqueue-1","method":"tools/call","params":{"name":"frankengit_queue_enqueue","arguments":{"number":"1","expected_version":"0","idempotency_key":"queue-1-pr-7","expected_incarnation":"11111111111111111111111111111111","object_format":"sha1","target_reference":"refs/heads/main","pull_request":"7","expected_pull_request_version":"1","source_reference":"refs/heads/topic","expected_source":"2222222222222222222222222222222222222222","expected_target":"3333333333333333333333333333333333333333"}}}

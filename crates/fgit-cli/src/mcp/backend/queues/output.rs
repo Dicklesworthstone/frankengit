@@ -274,6 +274,39 @@ fn action(command: &Command) -> (Object, &'static str) {
             );
             "land"
         }
+        Command::CandidateLanding { command, .. } => {
+            fields.insert("method".into(), text("merge-commit"));
+            fields.insert(
+                "pull_request".into(),
+                text(command.pull_request.get().to_string()),
+            );
+            fields.insert(
+                "expected_pull_request_version".into(),
+                text(command.expected_pull_request_version.get().to_string()),
+            );
+            fields.insert(
+                "expected_policy_epoch".into(),
+                text(command.expected_policy_epoch.get().to_string()),
+            );
+            reference(&mut fields, "source_reference", &command.merge.source_ref);
+            fields.insert(
+                "expected_source".into(),
+                text(command.merge.source_tip.to_string()),
+            );
+            fields.insert(
+                "expected_target".into(),
+                text(command.merge.target_tip_before.to_string()),
+            );
+            fields.insert(
+                "merge_base".into(),
+                text(command.merge.base_tip.to_string()),
+            );
+            fields.insert(
+                "candidate_commit".into(),
+                text(command.merge.merge_commit.to_string()),
+            );
+            "land-candidate"
+        }
     };
     fields.insert("name".into(), text(name));
     (fields, name)
@@ -300,6 +333,12 @@ pub(super) fn publication(
             command.expected_version.get(),
             &command.target_ref,
             command.head_tip != command.expected_target_tip,
+        ),
+        Command::CandidateLanding { command, .. } => (
+            command.number,
+            command.expected_version.get(),
+            &command.merge.target_ref,
+            command.merge.merge_commit != command.merge.target_tip_before,
         ),
     };
     let (proposed, name) = action(command);

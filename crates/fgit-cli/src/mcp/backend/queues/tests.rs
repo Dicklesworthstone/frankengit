@@ -4,10 +4,10 @@ use fgit_forge::ExpectedVersion;
 use fgit_forge::merge_queue::QueueCommandAction;
 use fgit_types::{GitHashAlgorithm, RepositoryIncarnationId};
 
-fn incarnation() -> RepositoryIncarnationId {
+pub(super) fn incarnation() -> RepositoryIncarnationId {
     RepositoryIncarnationId::from_bytes([0xab; 16])
 }
-fn args(name: &str, format: GitHashAlgorithm) -> Object {
+pub(super) fn args(name: &str, format: GitHashAlgorithm) -> Object {
     let Value::Object(mut fields) = object([
         ("number", text("1")),
         (
@@ -21,7 +21,7 @@ fn args(name: &str, format: GitHashAlgorithm) -> Object {
     ]) else {
         unreachable!()
     };
-    if matches!(name, ENQUEUE | LAND) {
+    if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE) {
         fields.extend([
             ("pull_request".into(), text("7")),
             ("expected_pull_request_version".into(), text("3")),
@@ -35,8 +35,16 @@ fn args(name: &str, format: GitHashAlgorithm) -> Object {
                 text("bb".repeat(format.digest_len())),
             ),
         ]);
-        if name == LAND {
+        if matches!(name, LAND | LAND_CANDIDATE) {
             fields.insert("expected_policy_epoch".into(), text("4"));
+        }
+        if name == LAND_CANDIDATE {
+            fields.insert("merge_base".into(), text("cc".repeat(format.digest_len())));
+            fields.insert(
+                "candidate_commit".into(),
+                text("dd".repeat(format.digest_len())),
+            );
+            fields.insert("bundle_hex_chunks".into(), Value::Array(vec![text("abcd")]));
         }
     } else if name == DEQUEUE {
         fields.insert("pull_request".into(), text("7"));
@@ -50,7 +58,7 @@ fn args(name: &str, format: GitHashAlgorithm) -> Object {
 #[test]
 fn exact_guards_and_native_hash_domains_survive_typed_parsing() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        for name in [ENQUEUE, DEQUEUE, REORDER, LAND] {
+        for name in [ENQUEUE, DEQUEUE, REORDER, LAND, LAND_CANDIDATE] {
             let fields = args(name, format);
             let (_, command) = input::parse(name, &fields, format, incarnation()).unwrap();
             match command {
@@ -60,6 +68,20 @@ fn exact_guards_and_native_hash_domains_survive_typed_parsing() {
                     assert_eq!(command.expected_policy_epoch.get(), 4);
                     assert_eq!(command.head_tip.algorithm(), format);
                     assert_eq!(command.expected_target_tip.algorithm(), format);
+                }
+                Command::CandidateLanding { command, bundle } => {
+                    assert_eq!(command.expected_version.get(), 2);
+                    assert_eq!(command.expected_pull_request_version.get(), 3);
+                    assert_eq!(command.expected_policy_epoch.get(), 4);
+                    for oid in [
+                        command.merge.source_tip,
+                        command.merge.target_tip_before,
+                        command.merge.base_tip,
+                        command.merge.merge_commit,
+                    ] {
+                        assert_eq!(oid.algorithm(), format);
+                    }
+                    assert_eq!(bundle, [0xab, 0xcd]);
                 }
                 Command::Management(command) => {
                     if name == ENQUEUE {
@@ -140,7 +162,7 @@ fn incarnation_format_positive_versions_and_capacity_are_exact() {
     let mut last = original;
     last.insert("expected_version".into(), text((u64::MAX - 2).to_string()));
     assert!(input::parse(LAND, &last, GitHashAlgorithm::Sha1, incarnation()).is_ok());
-    for name in [ENQUEUE, DEQUEUE, REORDER, LAND] {
+    for name in [ENQUEUE, DEQUEUE, REORDER, LAND, LAND_CANDIDATE] {
         for value in [
             text("01"),
             text("-1"),
