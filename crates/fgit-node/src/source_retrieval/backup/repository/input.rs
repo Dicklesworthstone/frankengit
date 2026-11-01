@@ -12,6 +12,33 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+/// Only disagreement with the independently approved whole-file seal permits
+/// trying another copy. A matching seal selects one immutable input; later
+/// codec, resource, storage or liveness failures cannot be blamed on a replica.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DamageKind {
+    LengthMismatch,
+    ChecksumMismatch,
+}
+
+#[cfg(unix)]
+impl DamageKind {
+    pub(super) const fn code(self) -> &'static str {
+        match self {
+            Self::LengthMismatch => "archive_length_mismatch",
+            Self::ChecksumMismatch => "archive_checksum_mismatch",
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(super) enum ReplicaInputFailure {
+    Damaged(DamageKind),
+    Fatal(String),
+}
+
 pub(super) struct PinnedArchive<R = File> {
     input: R,
     header: StreamHeader,
@@ -51,6 +78,47 @@ impl<R: Read + Seek> PinnedArchive<R> {
         Self::new(input, expected, limits, deadline)
     }
 
+    /// Acquire one explicitly named replica under its original approved size
+    /// and digest. The same owned reader performs exactly the ordinary two
+    /// admission passes and remains pinned for every subsequent native pass.
+    #[cfg(unix)]
+    pub(super) fn from_replica_reader(
+        mut input: R,
+        expected: Seal,
+        limits: TransferLimits,
+        deadline: Deadline,
+    ) -> Result<Self, ReplicaInputFailure> {
+        use ReplicaInputFailure::{Damaged, Fatal};
+
+        limits.validate().map_err(Fatal)?;
+        deadline.check().map_err(Fatal)?;
+        if expected.bytes == 0 || expected.bytes > limits.max_archive_bytes {
+            return Err(Fatal(
+                "approved replica length is outside the selected archive-byte allowance".into(),
+            ));
+        }
+        input
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| Fatal(error.to_string()))?;
+        let initial = match checksum_pass(&mut input, expected.bytes, deadline) {
+            Ok(seal) => seal,
+            Err(ChecksumFailure::LimitExceeded) => {
+                deadline.check().map_err(Fatal)?;
+                return Err(Damaged(DamageKind::LengthMismatch));
+            }
+            Err(ChecksumFailure::Fatal(error)) => return Err(Fatal(error)),
+        };
+        if initial.bytes != expected.bytes {
+            return Err(Damaged(DamageKind::LengthMismatch));
+        }
+        if initial.digest != expected.digest {
+            return Err(Damaged(DamageKind::ChecksumMismatch));
+        }
+        // Once original whole-file commitments agree, every further refusal is
+        // fatal. Do not retry identical bytes for a codec/resource failure.
+        Self::after_checksum(input, initial, limits, deadline).map_err(Fatal)
+    }
+
     fn new(
         mut input: R,
         expected: [u8; 32],
@@ -62,6 +130,15 @@ impl<R: Read + Seek> PinnedArchive<R> {
         // Preserve checksum-before-decoding precedence and avoid feeding an
         // untrusted, wrong-pin authority bundle to the canonical parser.
         let initial = check_checksum(&mut input, expected, limits, deadline)?;
+        Self::after_checksum(input, initial, limits, deadline)
+    }
+
+    fn after_checksum(
+        mut input: R,
+        initial: Seal,
+        limits: TransferLimits,
+        deadline: Deadline,
+    ) -> Result<Self, String> {
         input.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let mut live = || deadline.check();
         let mut decoded = StreamDecoder::new(&mut input, limits, &mut live)?;
@@ -80,7 +157,7 @@ impl<R: Read + Seek> PinnedArchive<R> {
             }
             deadline.check()
         })? {}
-        let (header, seal) = decoded.finish(expected, &mut live)?;
+        let (header, seal) = decoded.finish(initial.digest, &mut live)?;
         if seal != initial {
             return Err("repository backup changed between checksum and validation".into());
         }
@@ -154,38 +231,70 @@ fn check_checksum(
     limits: TransferLimits,
     deadline: Deadline,
 ) -> Result<Seal, String> {
+    let seal =
+        checksum_pass(input, limits.max_archive_bytes, deadline).map_err(
+            |failure| match failure {
+                ChecksumFailure::LimitExceeded => {
+                    "repository backup archive-byte limit exceeded".into()
+                }
+                ChecksumFailure::Fatal(error) => error,
+            },
+        )?;
+    if seal.digest != expected {
+        return Err("repository backup checksum mismatch".into());
+    }
+    Ok(seal)
+}
+
+enum ChecksumFailure {
+    LimitExceeded,
+    Fatal(String),
+}
+
+/// One bounded whole-file checksum pass. Ordinary intake interprets excess as
+/// its resource refusal; replica intake compares the authenticated exact length.
+fn checksum_pass(
+    input: &mut impl Read,
+    maximum_bytes: u64,
+    deadline: Deadline,
+) -> Result<Seal, ChecksumFailure> {
     let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(64 * 1024)
-        .map_err(|_| "repository backup checksum buffer allocation failed")?;
+    buffer.try_reserve_exact(64 * 1024).map_err(|_| {
+        ChecksumFailure::Fatal("repository backup checksum buffer allocation failed".into())
+    })?;
     buffer.resize(64 * 1024, 0);
     let mut hash = Sha256Hasher::new();
     let mut bytes = 0_u64;
     loop {
-        deadline.check()?;
+        deadline.check().map_err(ChecksumFailure::Fatal)?;
         // At capacity, probe one byte to distinguish exact EOF from oversize.
-        let maximum = (limits.max_archive_bytes - bytes + 1).min(buffer.len() as u64) as usize;
+        let maximum = (maximum_bytes - bytes + 1).min(buffer.len() as u64) as usize;
         let count = match input.read(&mut buffer[..maximum]) {
             Ok(0) => break,
             Ok(count) if count <= maximum => count,
-            Ok(_) => return Err("invalid backup checksum reader byte count".into()),
+            Ok(_) => {
+                return Err(ChecksumFailure::Fatal(
+                    "invalid backup checksum reader byte count".into(),
+                ));
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(format!("backup checksum read failed: {error}")),
+            Err(error) => {
+                return Err(ChecksumFailure::Fatal(format!(
+                    "backup checksum read failed: {error}"
+                )));
+            }
         };
         bytes = bytes
             .checked_add(count as u64)
-            .filter(|n| *n <= limits.max_archive_bytes)
-            .ok_or("repository backup archive-byte limit exceeded")?;
+            .filter(|n| *n <= maximum_bytes)
+            .ok_or(ChecksumFailure::LimitExceeded)?;
         hash.update(&buffer[..count]);
     }
-    deadline.check()?;
+    deadline.check().map_err(ChecksumFailure::Fatal)?;
     let seal = Seal {
         digest: hash.finish(),
         bytes,
     };
-    if seal.digest != expected {
-        return Err("repository backup checksum mismatch".into());
-    }
     Ok(seal)
 }
 

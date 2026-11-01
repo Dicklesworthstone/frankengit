@@ -3,6 +3,8 @@
 //! An unusable higher checkpoint never licenses recovery of an older one.
 
 mod engine;
+#[cfg(unix)]
+mod replicas;
 mod separation;
 
 use std::io::Write;
@@ -17,6 +19,9 @@ use super::profile::{Deadline, Profile, ProfileFlags};
 
 const MAX_CANDIDATES: usize = 64;
 const MAX_CANDIDATE_PATH_BYTES: usize = 256 * 1024;
+// At most 64 original checksum attempts, one accepted decoding pass, and
+// four native restore scans. Independent of the per-archive byte ceiling.
+const MAX_REPLICA_READ_BYTES: u64 = (MAX_CANDIDATES as u64 + 5) * (1_u64 << 40);
 
 pub(super) const USAGE: &str = "usage: fg backup verify-selected <new-scratch-root>
          --verification-instance <positive-integer>
@@ -28,6 +33,7 @@ pub(super) const USAGE: &str = "usage: fg backup verify-selected <new-scratch-ro
          --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
          --object-format sha1|sha256 --minimum-head-generation <positive-u64>
          [--witness <existing-independent-witness-directory>]
+         [--replica-failover [--max-read-bytes <1..75866302316544>]]
          [--max-archive-bytes <1..1099511627776>] [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>] [--timeout-secs <1..86400>]
 
@@ -35,8 +41,24 @@ Authenticate ALL 1..64 explicitly supplied approvals against one captured public
 key and namespace before opening any archive or reserving native scratch/state.
 Select the highest full-width signed generation. Distinct canonical statements
 at that generation are ambiguous and refuse. Equal statements are aliases; the
-first absolute lexical (archive, approval) pair wins deterministically. There is
-no automatic alias failover. Exact duplicate candidate pairs refuse.
+first absolute lexical (archive, approval) pair binds the native approval and
+resume identity deterministically. Exact duplicate candidate pairs refuse.
+
+Explicit --replica-failover tries only aliases of that same canonical statement,
+in lexical order. Missing, unavailable, short or checksum-damaged copies may be
+skipped before native intake accepts a complete pinned archive. A native decode,
+resource, deadline, cancellation or unknown I/O failure is terminal. Acceptance
+ends all failover; a later native failure never tries another copy. Duplicate
+underlying files are skipped without reading their payload again. The original
+lexical approval remains unchanged even when another archive supplies the bytes.
+Without this flag, the original first-copy-only acquisition remains in force.
+
+The failover-only --max-read-bytes allowance meters actual bytes across failed
+copies, accepted input validation and ALL native archive passes. It defaults to
+seven times --max-archive-bytes and is capped at 69 TiB. Healthy verification needs
+three archive passes; fresh recovery reserves six, including resumed unpublished
+work. Zero-byte EOF probes remain real reads; any excess byte is charged. This
+budget never widens individual archive, blob, object, metadata or runtime limits.
 
 Only after selection are the winner's expiry, future issue time, independent
 generation floor, archive-byte limit and independently supplied digest applied.
@@ -96,10 +118,11 @@ pub(super) struct Options {
     profile: Profile,
     resume: bool,
     witness: Option<PathBuf>,
+    replica_failover: Option<u64>,
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if !(22..=222).contains(&args.len())
+    if !(22..=225).contains(&args.len())
         || args
             .iter()
             .any(|value| value.is_empty() || value.len() > 8192 || value.contains('\0'))
@@ -122,6 +145,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let mut trust = SelectionTrustFlags::default();
     let mut candidates = Vec::new();
     let mut witness = None;
+    let (mut replica_failover, mut read_budget) = (false, None);
     let mut path_bytes = 0_usize;
     let mut cursor = 2;
     while let Some(flag) = args.get(cursor) {
@@ -132,6 +156,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         }
         if flag == "--resume" && operation == Operation::Recover && !resume {
             resume = true;
+            continue;
+        }
+        if flag == "--replica-failover" && !replica_failover {
+            replica_failover = true;
             continue;
         }
         let value = args
@@ -180,6 +208,18 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 }
                 witness = Some(path);
             }
+            "--max-read-bytes" if read_budget.is_none() => {
+                if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("--max-read-bytes requires canonical positive decimal".into());
+                }
+                read_budget = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0 && *value <= MAX_REPLICA_READ_BYTES)
+                        .ok_or("--max-read-bytes exceeds the finite 69 TiB replica profile")?,
+                );
+            }
             "--max-archive-bytes" | "--max-blob-bytes" | "--max-objects" | "--timeout-secs" => {
                 profile.set(flag, value)?;
             }
@@ -198,6 +238,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     }
     if candidates.is_empty() {
         return Err("selected recovery requires 1..64 explicit --candidate pairs".into());
+    }
+    if read_budget.is_some() && !replica_failover {
+        return Err("--max-read-bytes requires explicit --replica-failover".into());
     }
     candidates.sort();
     if candidates.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -231,6 +274,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     }) {
         return Err("selected recovery witness must be separate from the destination".into());
     }
+    let profile = profile.finish();
     Ok(Options {
         operation,
         destination,
@@ -242,9 +286,11 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             Operation::Recover => "recover requires --destination-instance",
         })?,
         trust,
-        profile: profile.finish(),
+        profile,
         resume,
         witness,
+        replica_failover: replica_failover
+            .then(|| read_budget.unwrap_or(7 * profile.transfer.max_archive_bytes)),
     })
 }
 

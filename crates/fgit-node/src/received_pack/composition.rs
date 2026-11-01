@@ -4,14 +4,18 @@
 //! candidate, and pairwise overlap masks make the at-most-255 cover choices
 //! independent of repository size. Only exact, disjoint covers reach graph
 //! verification. OFS distances remain valid because no source run is split.
+//! An external REF base additionally needs a same-basis, typed client-have
+//! proof; its bytes never enter the emitted selection or its resource totals.
 
 use super::{
     Entry, MAX_ENTRIES, ReceivedPackCache, ReceivedPackPayload, ReceivedPackReceipt, check,
     metadata_binding, strong_hash,
 };
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
+use fgit_git_object::ObjectType;
 use fgit_pack::{Deadline, PackError, PackLimits, PackOrderKey};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 struct Candidate {
@@ -25,6 +29,7 @@ pub(super) fn select(
     keys: &[PackOrderKey],
     limits: &PackLimits,
     allow_ofs_delta: bool,
+    held: &[(GitOid, ObjectType)],
     live: &mut impl Deadline,
 ) -> Result<Option<ReceivedPackPayload>, PackError> {
     check(live)?;
@@ -41,6 +46,15 @@ pub(super) fn select(
             || key.id.is_zero()
             || (index != 0 && keys[index - 1].id >= key.id)
         {
+            return Ok(None);
+        }
+    }
+    if held.len() > limits.max_entries as usize {
+        return Ok(None);
+    }
+    for (index, (id, _)) in held.iter().enumerate() {
+        check(live)?;
+        if id.algorithm() != format || id.is_zero() || (index != 0 && held[index - 1].0 >= *id) {
             return Ok(None);
         }
     }
@@ -71,6 +85,7 @@ pub(super) fn select(
             || entry.objects.len() != receipt.object_count as usize
             || entry.parents.len() != entry.objects.len()
             || receipt.source_pack_count != 1
+            || receipt.external_base_count > receipt.ref_delta_count
             || receipt.checksum.algorithm() != format
             || entry.bytes.format() != format
             || entry.bytes.checksum() != receipt.checksum
@@ -181,10 +196,11 @@ pub(super) fn select(
             if !intact {
                 continue;
             }
-            let Some(depth) = graph_depth(&candidates, mask, keys, limits, live)? else {
+            let Some(graph) = graph_shape(&candidates, mask, keys, held, limits, live)? else {
                 continue;
             };
-            receipt.maximum_delta_depth = depth;
+            receipt.maximum_delta_depth = graph.maximum_delta_depth;
+            receipt.external_base_count = graph.external_base_count;
             let mut entries = Vec::new();
             if entries.try_reserve_exact(source_count).is_err() {
                 return Ok(None);
@@ -196,7 +212,11 @@ pub(super) fn select(
             }
             check(live)?;
             let header = if source_count == 1 {
-                receipt = entries[0].receipt.clone();
+                // The bytes stay identical, but the output graph was just
+                // rechecked against this caller's exact held-base proof.
+                // Never replace its recomputed thin/depth accounting.
+                receipt.checksum = entries[0].receipt.checksum;
+                receipt.sha256 = entries[0].receipt.sha256;
                 None
             } else {
                 Some(reframe(&entries, &mut receipt, format, live)?)
@@ -248,6 +268,7 @@ fn totals(
         output_bytes: 12 + format.digest_len(),
         maximum_delta_depth: 0,
         source_pack_count: 0,
+        external_base_count: 0,
     };
     let mut entry_bytes = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -300,15 +321,23 @@ fn filled<T: Clone>(count: usize, value: T) -> Option<Vec<T>> {
     Some(values)
 }
 
-/// Revalidate the assembled representation, not just each source's local
-/// lower bounds. This admits no client-side/external base dependency.
-fn graph_depth(
+struct GraphShape {
+    maximum_delta_depth: usize,
+    external_base_count: usize,
+}
+
+/// Revalidate the complete output graph. An emitted base always takes
+/// precedence over client-have membership, so a held ID cannot hide a cycle
+/// or a wrong kind in the actual pack. Only unresolved REF parents may use
+/// the caller's typed held proof; capture kept every OFS parent in its run.
+fn graph_shape(
     candidates: &[Candidate],
     mask: u16,
     keys: &[PackOrderKey],
+    held: &[(GitOid, ObjectType)],
     limits: &PackLimits,
     live: &mut impl Deadline,
-) -> Result<Option<usize>, PackError> {
+) -> Result<Option<GraphShape>, PackError> {
     check(live)?;
     let Some(mut parents) = filled(keys.len(), None::<usize>) else {
         return Ok(None);
@@ -322,6 +351,12 @@ fn graph_depth(
     let Some(mut visits) = filled(keys.len(), 0u8) else {
         return Ok(None);
     };
+    let Some(mut external_roots) = filled(keys.len(), false) else {
+        return Ok(None);
+    };
+    // At most one external-parent edge per emitted object. This map counts
+    // fanout across every selected source, not each received pack separately.
+    let mut external_fanout = BTreeMap::<GitOid, usize>::new();
     let mut chain = Vec::new();
     // Depth, not repository size, bounds the live ancestor stack.
     if chain
@@ -339,16 +374,31 @@ fn graph_depth(
             let Some(base) = candidate.entry.parents[local] else {
                 continue;
             };
-            let Ok(parent) = keys.binary_search_by_key(&base, |key| key.id) else {
-                return Ok(None);
-            };
-            if keys[parent].object_type != keys[position].object_type {
-                return Ok(None);
-            }
-            parents[position] = Some(parent);
-            fanout[parent] += 1;
-            if fanout[parent] > limits.max_delta_fanout {
-                return Ok(None);
+            match keys.binary_search_by_key(&base, |key| key.id) {
+                Ok(parent) => {
+                    if keys[parent].object_type != keys[position].object_type {
+                        return Ok(None);
+                    }
+                    parents[position] = Some(parent);
+                    fanout[parent] += 1;
+                    if fanout[parent] > limits.max_delta_fanout {
+                        return Ok(None);
+                    }
+                }
+                Err(_) => {
+                    let Ok(parent) = held.binary_search_by_key(&base, |(id, _)| *id) else {
+                        return Ok(None);
+                    };
+                    if held[parent].1 != keys[position].object_type {
+                        return Ok(None);
+                    }
+                    external_roots[position] = true;
+                    let fanout = external_fanout.entry(base).or_default();
+                    *fanout += 1;
+                    if *fanout > limits.max_delta_fanout {
+                        return Ok(None);
+                    }
+                }
             }
         }
     }
@@ -382,7 +432,9 @@ fn graph_depth(
                     Some(depth) => depth,
                     None => return Ok(None),
                 },
-                None => 0,
+                // Client-held objects are native roots: their private storage
+                // encoding is neither known nor part of this emitted graph.
+                None => usize::from(external_roots[index]),
             };
             if depth > limits.max_delta_depth {
                 return Ok(None);
@@ -392,7 +444,10 @@ fn graph_depth(
             maximum = maximum.max(depth);
         }
     }
-    Ok(Some(maximum))
+    Ok(Some(GraphShape {
+        maximum_delta_depth: maximum,
+        external_base_count: external_fanout.len(),
+    }))
 }
 
 enum NativeHasher {

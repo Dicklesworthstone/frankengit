@@ -286,6 +286,8 @@ mod adapter_tests {
                 "--candidate",
                 "--expected-sha256",
                 "--minimum-head-generation",
+                "--replica-failover",
+                "--max-read-bytes",
             ] {
                 assert!(help.contains(required), "{operation}: {required}");
             }

@@ -50,6 +50,9 @@ resume binding. See [native checkpoint recovery](NATIVE_CHECKPOINT_RECOVERY.md).
 An optional `--witness` retains higher or conflicting authenticated observations
 across invocations. Initialize or inspect it with `fg backup witness init|inspect`;
 missing witness state is never recreated automatically.
+Selected verification and recovery also support explicit `--replica-failover`
+among copies of the identical highest signed statement, with one aggregate
+`--max-read-bytes` ledger and the original approval/resume binding preserved.
 
 Export, verification, attestation and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
 `--max-objects` and `--timeout-secs`. For a 2 GiB archive containing up to

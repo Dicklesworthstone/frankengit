@@ -7,7 +7,7 @@ mod catalog;
 #[cfg(unix)]
 mod engine;
 #[cfg(unix)]
-mod io;
+use super::recovery_io as io;
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};

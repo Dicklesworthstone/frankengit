@@ -82,8 +82,11 @@ When a later fetch's freshly authorized object set matches one received pack
 or a disjoint combination of complete packs exactly, the clone can reuse their
 compressed entries without re-reading blob bodies or recomputing deltas. This
 also supports compatible thin incremental pushes when all their delta bases
-are present in the selected combination. The complete delta graph and resource
-limits are rechecked before streaming a self-contained pack. Reuse begins only after immutable
+are present in the selected combination. For negotiated, unfiltered full-history
+thin fetches, verified client-held bases can instead satisfy external REF deltas,
+even after the older received base pack is evicted. The combined graph and
+aggregate limits are rechecked, and receipts distinguish self-contained from
+thin responses. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
 its own representation receipt. This bounded process-local capability is
 described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);

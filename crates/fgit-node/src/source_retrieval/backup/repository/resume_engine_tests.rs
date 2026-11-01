@@ -257,7 +257,7 @@ fn approval_expiring_inside_final_recovery_guard_cannot_publish_authority() {
         let error = execute_prepared_in(
             &request,
             archive,
-            approval,
+            approval.as_ref(),
             deadline,
             |stage| {
                 if stage == Stage::DataPrepared {

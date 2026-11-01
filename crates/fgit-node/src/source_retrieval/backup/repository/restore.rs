@@ -6,7 +6,7 @@ mod resume;
 pub(super) mod verify;
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::{NodeConfig, OneNode};
@@ -557,8 +557,15 @@ fn execute_with_checkpoints(
         Ok((archive, approval))
     })()
     .map_err(|error| before_resume_inspection(options, error))?;
-    execute_prepared_in(options, archive, approval, deadline, checkpoint, || Ok(()))
-        .map(|receipt| receipt.json)
+    execute_prepared_in(
+        options,
+        archive,
+        approval.as_ref(),
+        deadline,
+        checkpoint,
+        || Ok(()),
+    )
+    .map(|receipt| receipt.json)
 }
 
 /// Native restore completion, rendered only after final destination readback,
@@ -577,9 +584,9 @@ impl RestoreReceipt {
 /// Restore the already selected, independently pinned archive without reopening
 /// approval/key paths or renewing the selecting invocation's deadline. The exact
 /// original signed binding remains the resume identity.
-pub(super) fn execute_selected_in(
-    archive: PinnedArchive<File>,
-    approval: VerifiedApproval,
+pub(super) fn execute_selected_in<R: Read + Seek>(
+    archive: PinnedArchive<R>,
+    approval: &VerifiedApproval,
     destination: &Path,
     instance: StoreInstanceId,
     profile: Profile,
@@ -602,9 +609,9 @@ pub(super) fn execute_selected_in(
 /// signed eligibility. The guard is checked before any destination inspection,
 /// before visible publication, and after the final native node has closed.
 /// It can only narrow the existing approval; it cannot authorize native state.
-pub(super) fn execute_selected_guarded_in(
-    archive: PinnedArchive<File>,
-    approval: VerifiedApproval,
+pub(super) fn execute_selected_guarded_in<R: Read + Seek>(
+    archive: PinnedArchive<R>,
+    approval: &VerifiedApproval,
     destination: &Path,
     instance: StoreInstanceId,
     profile: Profile,
@@ -631,10 +638,10 @@ pub(super) fn execute_selected_guarded_in(
     )
 }
 
-fn execute_prepared_in(
+fn execute_prepared_in<R: Read + Seek>(
     options: &Options,
-    mut archive: PinnedArchive<File>,
-    approval: Option<VerifiedApproval>,
+    mut archive: PinnedArchive<R>,
+    approval: Option<&VerifiedApproval>,
     deadline: Deadline,
     mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
     mut guard: impl FnMut() -> Result<(), String>,
@@ -648,14 +655,14 @@ fn execute_prepared_in(
         if archive.seal().digest != options.expected {
             return Err("prepared restore does not match the independent archive pin".into());
         }
-        match_approval(approval.as_ref(), &archive, deadline)?;
+        match_approval(approval, &archive, deadline)?;
         if archive.header().authority.instance == options.instance.raw() {
             return Err("destination instance must differ from source".into());
         }
         Ok(())
     })()
     .map_err(|error| before_resume_inspection(options, error))?;
-    let binding = approval.as_ref().map(VerifiedApproval::binding_digest);
+    let binding = approval.map(VerifiedApproval::binding_digest);
     let intent = if options.resume {
         resume::Intent::open_bound(&options.output, options.expected, options.instance, binding)
     } else {
@@ -724,7 +731,7 @@ fn execute_prepared_in(
                 return Err("restored graph changed across quarantine reopen".into());
             }
             checkpoint(Stage::QuarantineVerified)?;
-            check_approval_current(approval.as_ref(), deadline)?;
+            check_approval_current(approval, deadline)?;
             guard()?;
             let publication = PreparedPublication::prepare(&quarantine, &options.output)?;
             checkpoint(Stage::DataPrepared)?;
@@ -748,7 +755,7 @@ fn execute_prepared_in(
         // final approval observation before the no-replace link, including
         // resumed unpublished work. Later expiry cannot prevent publication
         // that has already succeeded.
-        check_approval_current(approval.as_ref(), deadline).map_err(|error| {
+        check_approval_current(approval, deadline).map_err(|error| {
             format!(
                 "{error}; destination authority not published; retained restore state at {}",
                 options.output.display()
@@ -809,7 +816,7 @@ fn execute_prepared_in(
             graph.payload_bytes,
             options.instance.raw(),
             approval.is_some(),
-            approval_receipt_fields(approval.as_ref()),
+            approval_receipt_fields(approval),
             archive.seal().bytes,
             options.resume,
             already_published,

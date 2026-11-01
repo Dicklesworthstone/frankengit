@@ -17,6 +17,9 @@ no-fallback behavior and exact resume.
 The selected native commands also accept an independently retained `--witness`
 to prevent later omission of known higher or conflicting signed checkpoints;
 `fg backup witness init|inspect` owns explicit initialization and inspection.
+Explicit `--replica-failover` can acquire the same selected checkpoint from another
+healthy copy without changing its original approval or signed resume identity;
+all attempted reads and native passes share a finite `--max-read-bytes` allowance.
 
 `fg backup attest` verifies a repository-source archive and issues its detached
 Ed25519 approval in the native executable. It uses the same authority import,

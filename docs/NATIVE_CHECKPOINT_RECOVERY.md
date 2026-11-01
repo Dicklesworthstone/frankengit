@@ -87,11 +87,12 @@ prove that publication was prevented.
 5. Apply the winner's lifetime, independent generation floor, selected archive
    limit and independently supplied expected SHA-256. A failed eligibility check
    never falls back to a lower generation.
-6. Open the first normalized lexical `(archive, approval)` pair for that exact
-   highest statement and retain its
-   descriptor across native checks. This version performs no automatic replica
-   failover. Missing, corrupt or natively invalid selected input terminates the
-   attempt without choosing an older checkpoint or another copy.
+6. Retain the first normalized lexical `(archive, approval)` pair's original
+   approval as the exact native/resume binding. By default, only that pair's
+   archive is opened. With explicit `--replica-failover`, try payload copies of
+   that identical highest statement in lexical order under one aggregate read
+   allowance. Keep the acquired descriptor across all native checks; no other
+   copy is attempted after native entry.
 
 Authenticating a signed observation is deliberately separate from admitting it
 for restore. Expired, future-dated, below-floor and currently over-budget statements
@@ -103,6 +104,70 @@ metadata bounds remain independent. Payload memory continues to use the existing
 streaming verification and restore paths; candidate metadata is separately bounded.
 The output receipt contains `selection` evidence and the directly embedded `native`
 completion receipt. No child executable or receipt parser composes these commands.
+
+## Recover from redundant copies of the same checkpoint
+
+Add `--replica-failover` when the selected signed checkpoint has multiple explicit
+copies and one may be missing, damaged or unreadable:
+
+```sh
+fg backup recover /fresh/restored-node \
+  --candidate /media-a/repository.fgit /controls/original.approval.json \
+  --candidate /media-b/repository.fgit /controls/replica.approval.json \
+  --destination-instance 9002 --trusted-local \
+  --expected-sha256 "$EXPECTED_SHA256" \
+  --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT" --repository-id "$REPOSITORY" \
+  --incarnation-id "$INCARNATION" --object-format sha256 \
+  --minimum-head-generation "$MINIMUM_GENERATION" \
+  --replica-failover \
+  --max-archive-bytes 2147483648 --max-read-bytes 15032385536
+```
+
+The same flags work with `verify-selected`, and can be combined with an existing
+`--witness`. Every supplied approval still authenticates before payload access.
+Only copies whose authenticated canonical statement is identical to the selected
+highest statement may participate. An older checkpoint, a conflicting statement,
+or a different archive digest cannot become a substitute.
+
+The original selected approval remains fixed even if another payload supplies the
+bytes. Independently valid envelopes with different whitespace or other permitted
+outer serialization can name the same statement, but their bytes do not replace
+the lexical-first approval's sealed resume binding. A later exact `--resume` may
+read a different healthy copy while retaining that original approval and policy.
+
+Missing, permission-denied, symlink, nonregular, short or wrong-checksum copies
+can be recorded as unavailable or damaged. Repeated names for the same underlying
+file are skipped without rereading its payload. Other I/O failures, an exhausted
+read allowance, cancellation, expiry or deadline failure terminate the operation.
+Once a copy matches the original whole-file checksum, malformed archive structure
+or a native verification failure is terminal too: another copy of those exact
+bytes cannot repair their meaning. Failover never retries a native operation or
+reclassifies an uncertain restore as prevented publication.
+
+`--max-read-bytes` is an independent aggregate allowance, available only with
+`--replica-failover`. It defaults to seven times the selected archive-byte limit and
+has a finite ceiling of 75,866,302,316,544 bytes (69 TiB). The ledger charges actual
+bytes returned by every attempted payload and by every native archive pass.
+Approval/control reads retain their separate bounds. A zero remaining allowance
+does not manufacture EOF: a real zero-byte EOF probe is permitted, and any extra
+byte is charged and causes a sticky refusal.
+
+For an archive of length N, successful verification reads 3N bytes; a fresh
+recovery reads 6N; readback of an already-published exact resume reads 3N. A failed
+full checksum attempt adds N to those totals. Before each payload attempt, the
+driver reserves enough remaining allowance for verification's 3N or recovery's
+conservative 6N path; reservation does not charge bytes. Choose a larger explicit
+allowance when more than one complete damaged copy may need to be read. Memory
+use remains bounded by streaming buffers, metadata and at most 64 attempt rows.
+
+Successful failover-mode receipts keep `selection.selected_index` and its original
+`approval_sha256` unchanged. A separate `acquisition` object identifies
+`acquired_candidate_index`, `candidates_attempted`, `duplicate_sources_skipped`,
+`payload_bytes_read`, `payload_read_calls`, `max_read_bytes`, and the bounded
+per-candidate outcomes. Its `read_budget_scope` is `all_archive_passes`.
+`selection.replica_failover` records whether the explicit mode was enabled;
+commands without it retain their original single-copy receipt shape.
 
 ## Retain recovery knowledge between invocations
 

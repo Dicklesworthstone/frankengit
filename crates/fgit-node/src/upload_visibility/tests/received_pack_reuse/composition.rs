@@ -4,6 +4,8 @@
 use super::*;
 use fgit_crypto::{sha1_digest, sha256_digest};
 
+mod thin;
+
 struct Increment {
     pack: Vec<u8>,
     tip: GitOid,

@@ -242,9 +242,12 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - native typed hash domains and collision-defense profile;
 - exact hidden-ref authorization and advertisement policy;
 - received-pack reuse requires a freshly authorized exact object set. Joining
-  cached packs requires a disjoint complete cover, a self-contained combined
-  delta graph, aggregate limits, and verification of bytes plus parent metadata.
-  Cached presence never authorizes an extra object or an external thin base;
+  cached packs requires a disjoint complete cover, a verified combined delta
+  graph, aggregate limits, and verification of bytes plus parent metadata.
+  Only a negotiated full-history, unfiltered thin response may resolve external
+  REF parents against identity-and-kind proofs of authorized client-held objects
+  at that same basis. External fanout remains bounded. Cached presence never
+  authorizes an extra object or an external thin base;
 - protocol/service/capability matrix; no fictional protocol-v2 push assumption;
 - fuzz/source-derived/adversarial differential corpus;
 - no shell command/path construction from repository data.

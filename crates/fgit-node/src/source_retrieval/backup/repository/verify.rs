@@ -170,9 +170,9 @@ impl VerificationReceipt {
 
 /// Verify a captured selected approval and archive under the selecting
 /// invocation's original deadline. No trust control or archive path is reopened.
-pub(in super::super) fn execute_selected_in(
-    archive: PinnedArchive<File>,
-    approval: super::VerifiedApproval,
+pub(in super::super) fn execute_selected_in<R: Read + Seek>(
+    archive: PinnedArchive<R>,
+    approval: &super::VerifiedApproval,
     scratch: &Path,
     instance: StoreInstanceId,
     profile: Profile,
@@ -191,9 +191,9 @@ pub(in super::super) fn execute_selected_in(
 
 /// A retained recovery witness narrows admission before scratch creation and
 /// after complete native shutdown/cleanup, without becoming archive authority.
-pub(in super::super) fn execute_selected_guarded_in(
-    archive: PinnedArchive<File>,
-    approval: super::VerifiedApproval,
+pub(in super::super) fn execute_selected_guarded_in<R: Read + Seek>(
+    archive: PinnedArchive<R>,
+    approval: &super::VerifiedApproval,
     scratch: &Path,
     instance: StoreInstanceId,
     profile: Profile,
@@ -211,16 +211,16 @@ pub(in super::super) fn execute_selected_guarded_in(
         approval: None,
     };
     let verified =
-        verify_pinned_with_checkpoints(archive, &options, Some(&approval), deadline, |_| Ok(()))?;
+        verify_pinned_with_checkpoints(archive, &options, Some(approval), deadline, |_| Ok(()))?;
     guard().map_err(|error| {
         format!("archive verified and scratch removed; recovery witness check failed: {error}")
     })?;
     // Guard I/O may outlive signed eligibility, so perform the final lifetime
     // and deadline check after the filesystem-backed recovery constraints.
-    check_approval_current(Some(&approval), deadline).map_err(|error| {
+    check_approval_current(Some(approval), deadline).map_err(|error| {
         format!("archive verified and scratch removed; approval check failed: {error}")
     })?;
-    Ok(verification_receipt(&verified, instance, Some(&approval)))
+    Ok(verification_receipt(&verified, instance, Some(approval)))
 }
 
 fn verification_receipt<R: Read + Seek>(
