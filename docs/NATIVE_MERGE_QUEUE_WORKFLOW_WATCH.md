@@ -175,13 +175,23 @@ uses retained candidate identities, not the current head. Failure after candidat
 reservation retains the original key and lease and requires reconciliation.
 Neither a disconnected client nor a missing final response proves rollback.
 
+New candidate events carry a versioned intent that permits ordinary restart to
+resume an uncertain CI publication and begin the original candidate's first
+dispatch, but only after proving no execution-start fence or dispatch directory
+exists. The same input prefixes, limits and artifact configuration must match.
+Original CI keys, old-tip leases, candidate bytes and source-head guards survive;
+no newer queue head substitutes for that intent. Stale or refused candidates,
+legacy events without this proof, and started or corrupt custody still block the
+entire scope. Deferred intents appear as `pending_execution` in publication and
+service receipts and provide no check evidence.
+
 A completed execution whose final `settled` marker was lost can now reconcile
 automatically from its durable `check-sources` handoff, original completed owner
 receipts and exact journal pins. This runs before later polling, retained check
 publication and owned service readiness, with the original check identities and
 without another script run or CI-ref publication. Closed failed runs remain
 failed checks. Missing or incomplete completion evidence still blocks the
-queue. See [bounded completed-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md).
+queue. See [bounded native-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md).
 
 This slice executes one current queue head at a time. Speculative multi-PR
 trains, a synthetic queue-ref namespace and autonomous target landing under the

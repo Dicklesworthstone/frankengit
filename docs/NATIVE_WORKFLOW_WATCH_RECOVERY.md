@@ -1,12 +1,69 @@
-# Recovering completed native workflow watches
+# Recovering native workflow watches
 
-Native ref, PR and merge-queue watchers can finish a missing local settlement
-after a crash **without executing the workflow again**. Recovery uses the
-original durable completion handoff and independently verifies its retained
-execution records. It does not turn local execution into a passing canonical
-check or authorize a target merge.
+Native watchers recover two distinct durable boundaries. PR and merge-queue
+candidate watches can finish an uncertain CI publication and begin the original
+candidate's first execution when retained custody proves execution never
+started. Ref, PR and queue watchers can also finish a missing settlement for an
+already completed execution **without executing the workflow again**. Neither
+path invents a passing canonical check or authorizes a target merge.
 
-## The recoverable boundary
+## Before the first candidate execution
+
+New merge-candidate events retain a versioned intent before CI publication. It
+binds the original event and execution IDs, source authority head, native
+candidate, bundle commitments, CI principal, publication key and exact old-tip
+lease. The execution configuration is also retained: input prefixes, workflow
+limits and artifact configuration must agree with the restarting controller.
+Restart the same foreground watch or owned HTTP service with its original
+private run parent and configuration. No reset option or replacement identity
+is required.
+
+Recovery validates the intent, candidate artifacts, scope and configuration
+while holding the existing exclusive watch owner. It can defer an event only
+when the durable execution-start fence and every dispatch directory are absent.
+The original protocol writes and syncs that fence before entering dispatch;
+therefore even a crash between the fence and the first script remains blocked.
+An old event without the versioned intent cannot establish this new boundary.
+
+The next native poll processes retained eligible work before selecting a new
+PR or queue head. It uses the original publication key, CI old-tip lease,
+candidate bytes and prepared authority head. A known terminal CI outcome can
+be recovered before current subject validation. A new publication still needs
+its original head and normal native admission. The watcher then validates the
+same PR/queue subject and candidate before beginning its first dispatch under
+the original run identity. It never refreshes a lease, regenerates a candidate
+or runs an already-started script again.
+
+The retained-check publisher only counts and defers these intents as
+`pending_execution`. It neither retries their CI publication nor manufactures
+`check-sources`, `settled`, `reported` or successful job evidence. Its receipt
+continues to report `execution_retried: false` and `refs_changed: false`.
+Completed events in the same scope retain their existing check publication
+semantics.
+
+`pending_execution` describes verified local custody, not permission to publish
+or execute. A retained refusal receipt blocks this classification. If a refusal
+receipt was lost, or the canonical PR/queue changed after preparation, the
+post-readiness poll discovers that outcome through the original transaction
+replay and subject checks. It then retains the blocked event without starting a
+script or manufacturing settlement.
+
+Owned HTTP startup verifies eligible intent custody and the complete execution
+configuration before readiness. Pending intents may survive that check, with
+their count retained in the service receipt. **CI publication retry and first
+script execution wait for successful HTTP listener readiness.** A failed or
+stopped readiness callback cannot start either operation. The startup check
+reporter may still recover original completed checks under its independent
+publisher authority. A stopped or failed scan cannot clear a previously
+observed pending execution count.
+
+Stale subjects, refused CI publications, corrupt intents or artifacts, changed
+configuration and any started dispatch remain blocked. They are not retired as
+empty executions or relabeled as green checks. A queue reorder or removed head
+cannot discard an earlier unresolved intent. Retain its original custody for
+reconciliation.
+
+## After completed execution
 
 After a native dispatch returns, the watcher checks that its processes and
 workspaces have closed. It then writes and syncs `check-sources`, retaining the
@@ -69,11 +126,12 @@ check. Ordinary canonical check admission still decides whether original
 evidence can be published, using the unchanged original keys and identities.
 
 Missing or corrupt handoffs, unfinished owners, changed journal pins, foreign
-bindings, cancellation and unresolved process containment remain blocked. In
-particular, a crash during CI candidate publication or script execution happens
-before the completed-dispatch handoff and is not resumed by this feature. Keep
-the original publication key, lease, candidate artifacts and execution custody;
-absence of a response never proves rollback or that a script did not run.
+bindings, cancellation and unresolved process containment remain blocked.
+An uncertain CI candidate publication is eligible for the separate pre-execution
+recovery path above only when its versioned intent proves the first dispatch
+never started. A crash during execution cannot use that path. Keep the original
+publication key, lease, candidate artifacts and execution custody; absence of a
+response never proves rollback or that a script did not run.
 
 An unresolved event still fences the whole watch scope. For merge queues this
 includes later heads after reorder, dequeue, landing or queue removal. Deleting,
@@ -110,8 +168,15 @@ cancellation, corrupt custody and no script replay:
 ```sh
 cargo test --locked -p fgit-runner --lib coordinator::delivery::journal::attempt::tests -- --test-threads=1
 cargo test --locked -p fgit-node --test trusted_watch_settlement_recovery -- --test-threads=1
+cargo test --locked -p fgit-node --test trusted_merge_watch_recovery -- --test-threads=1
 ```
 
 The runner's real-process tests require a host where its supervisor can observe
 the complete child process group. A restricted process view correctly produces
 a containment refusal, not a passing execution.
+
+The merge-watch recovery test sources exercise original CI identity and leases,
+first execution after uncertain publication, deferred check reporting, immutable
+configuration, readiness failure/stop and corrupt or already-started custody.
+These entrypoints describe validation to run at the selected revision; they are
+not a claim that an unexecuted revision has passed.
