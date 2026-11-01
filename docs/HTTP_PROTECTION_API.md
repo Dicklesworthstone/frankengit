@@ -85,12 +85,17 @@ event/evidence version; older readers refuse it rather than losing the actor
 restriction. Browser editors retain the exact observed profile and frame.
 Policy administrators are lowercase principal IDs. Each branch contains
 `reference_hex`, `required_reviewers`, `required_approvals`, `require_merge_queue`
-and `required_checks`; hex preserves exact
+and `required_checks` plus `required_candidate_checks`; hex preserves exact
 native branch bytes, including non-UTF-8 names. Each check contains
 `source_ref_hex`, `publisher`, `graph_root` and the exact UTF-8 `job`. Empty check
 arrays preserve review-only policies; check-only branches have empty reviewer
 arrays. The [check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md) defines their
 explicit publisher authority and exact-candidate enforcement.
+Each candidate selector contains exactly `publisher`, `graph_root` and `job`.
+It requires a verified observation for the exact original PR subject and native
+candidate, without a CI source branch. Candidate and ordinary selectors remain
+independent requirements; their combined per-branch maximum is 32. See
+[unpublished candidate checks](UNPUBLISHED_CANDIDATE_CHECKS.md).
 The `require_merge_queue` boolean is false for historical policies. When true,
 the branch requires an authenticated canonical queue landing targeting that
 exact ref, alongside its reviews, checks and DSL gates. Queue-only branches
@@ -122,12 +127,13 @@ Every request is a complete replacement:
 | Repeated `required_approvals` | `REFERENCE_BYTES_HEX:COUNT`; the default is all listed reviewers. Zero is valid only with no reviewers and a required check or queue. |
 | Repeated `require_merge_queue` | Exact protected `refs/heads/*` bytes as lowercase hex, once per branch that requires queue landing. The value is a reference, not a boolean string. |
 | Repeated `required_check` | `TARGET_REF_HEX:SOURCE_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; refs name exact `refs/heads/*`, publisher is a 32-character principal ID, graph is 64 lowercase hex characters, and job is exact UTF-8 encoded as hex. |
+| Repeated `required_candidate_check` | `TARGET_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; same exact target, publisher, graph and job bounds as ordinary checks, without a CI source ref. Omission removes candidate selectors in this complete replacement. |
 | `ref_policy_source` | Optional UTF-8 policy source, at most 64 KiB, compiled and validated against the available reference facts and exact request `actor.id` before sealing. |
 | `ref_policy_frame_hex` | Optional canonical compiled policy frame as lowercase hex, at most 64 KiB decoded. Mutually exclusive with `ref_policy_source`. |
 | `clear` | Exactly `true` to disable branch and DSL requirements; mutually exclusive with reviewer, check, queue and DSL entries. |
 
 Supply reviewers, workflow checks, merge queue requirements, a DSL policy, or explicitly supply `clear=true`. Native
-bounds are 64 branches, 32 reviewers and 32 checks per branch, 1,024 bytes per
+bounds are 64 branches, 32 reviewers and 32 ordinary plus candidate checks combined per branch, 1,024 bytes per
 reference and 1,024 UTF-8 bytes per job. Job names must be nonempty and contain
 no control characters. Repeated sets are canonically sorted; duplicates refuse. Numeric strings cannot have leading
 zeros, signs or overflow. Unknown fields, duplicate scalars, malformed escaping
