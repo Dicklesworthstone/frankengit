@@ -6,6 +6,7 @@ mod dispatch;
 mod merge;
 mod merge_dispatch;
 mod publish;
+mod publish_candidate;
 mod publish_run;
 mod recovery;
 mod watch;
@@ -49,6 +50,7 @@ For event-matched directory dispatch: fg workflow dispatch --help.
 For canonical ref-change polling: fg workflow watch --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
 To record a saved job observation on its canonical branch: fg workflow publish --help.
+To record an exact unpublished PR candidate observation: fg workflow publish-candidate --help.
 To publish all completed jobs in an exact saved snapshot: fg workflow publish-run --help.
 
 Linux only. The run parent must already exist with mode 0700. Review and trust
@@ -121,6 +123,12 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args
+        .first()
+        .is_some_and(|action| action == "publish-candidate")
+    {
+        return publish_candidate::run(args, &mut std::io::stdout().lock());
+    }
     if args
         .first()
         .is_some_and(|action| action == "dispatch-merge-candidate")

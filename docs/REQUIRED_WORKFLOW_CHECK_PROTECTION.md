@@ -6,6 +6,13 @@ apply in the native admission paths that publish protected refs and PR merges.
 They use the same durable policy, predecessor version, policy epoch and
 authority-head CAS as mandatory review protection.
 
+A second explicit selector, `required_candidate_checks`, can require verified
+[unpublished PR candidate observations](UNPUBLISHED_CANDIDATE_CHECKS.md).
+It binds publisher, graph and job to the exact current PR subject and candidate,
+and does not require creating a CI branch. The ordinary `required_checks` profile
+below retains its existing branch lease; neither profile satisfies the other.
+Both can be configured together and share a combined 32-selector branch limit.
+
 ## Authority and subject
 
 Each protected branch has a sorted `required_checks` list. Every selector binds:
@@ -49,8 +56,10 @@ For a fast-forward merge the candidate is the PR source commit. A configured
 PR source branch can therefore be used directly if it still names that commit.
 For a two-parent merge or squash, the candidate is the newly prepared merge
 commit. Passing checks on a different source-tip commit cannot authorize it.
-Publish the prepared candidate on a separate ordinary CI branch, execute the
-workflow there and publish the retained result before submitting the merge.
+For this ordinary selector profile, publish the prepared candidate on a separate
+ordinary CI branch, execute the workflow there and publish the retained result
+before submitting the merge. Alternatively configure the explicit candidate
+selectors linked above and publish verified retained candidate execution.
 The protection policy itself does not schedule CI or create that branch.
 An operator can automate those steps with
 [exact PR merge-candidate watch](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md),
