@@ -14,6 +14,33 @@ node scripts/verify_js.mjs operator
 node scripts/verify_js.mjs scripts
 ```
 
+An unsupported runtime exits **3** with one JSON `js_verification_refusal` on
+stderr: code `js_runtime_version_mismatch`, expected/actual Node versions, scope,
+and `corpus_started: false`. It acquires no Git metadata or test-process
+responsibility. `node scripts/verify_js.mjs runtime` checks that same pin and
+returns an explicit `js_runtime_identity` without running tests; live native
+campaigns use this command rather than maintaining another runtime policy.
+That identity-only command earns no test coverage credit.
+
+The shared GitHub pull peer and issue operator fixture allocate listeners through
+`tests/fetch-peer.mjs`. Hosts may assign ephemeral ports that Fetch refuses
+before any TCP request. The helper retires those selections before exposing a
+URL, preserves an already usable listener, and fails after sixteen forbidden
+selections. Tests exercise a real blocked listener, its permitted Fetch twin and
+bounded exhaustion. This changes fixture allocation, with no production request
+retry or relaxed redirect assertion. Older failures without a retained selected
+port remain unexplained; the port hazard alone does not establish their cause.
+
+The discovered live suite
+[`scripts/e2e/suites/operator/remote_issue.sh`](../scripts/e2e/suites/operator/remote_issue.sh)
+drives the actual remote issue CLI against `fg serve-http` in SHA-1 and SHA-256.
+It checks all eight actions through canonical Rust issue/event reads, stale-version
+refusal beside its current-version twin, original-key recovery, independent
+outcome grants and complete owned service drain. Complete command streams and
+private failure artifacts are retained. This covers one operator entrypoint;
+the complete entrypoint matrix and same-revision binary qualification remain
+separate acceptance conditions in `x2mv.4.59`.
+
 The discovered suite
 [`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh)
 calls the existing `operator` and `scripts` profiles. `./scripts/verify.sh e2e`

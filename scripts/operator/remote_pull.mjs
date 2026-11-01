@@ -50,6 +50,7 @@ function postPull(intent, token, options, envelope) {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, maxHeaderSize: 16384, rejectUnauthorized: true, ...(options.ca ? { ca: options.ca } : {}),
         headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': intent.key, Accept: 'application/json',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           'Content-Type': envelope.contentType, 'Content-Length': String(envelope.body.length),
           'Accept-Encoding': 'identity', Connection: 'close', 'Cache-Control': 'no-store' },
       });

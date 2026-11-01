@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { runIssueRead, issueReadOptions } from '../../scripts/lib/forge-issue-reader.mjs';
 import { issueArguments, runIssueCommand } from '../../scripts/forge_issues.mjs';
+import { listenForFetch } from '../fetch-peer.mjs';
 
 const tenant = '11'.repeat(16), repository = '22'.repeat(16), actor = '33'.repeat(16);
 const token = 'a'.repeat(64), head = 'alg:2:' + 'ab'.repeat(32);
@@ -21,7 +22,7 @@ async function fixture(t) {
   const server = createServer(async (req, res) => {
     let body = ''; for await (const b of req) body += b;
     const url = new URL(req.url, 'http://localhost'), params = req.method === 'POST' ? new URLSearchParams(body) : url.searchParams;
-    const call = { path: url.pathname, method: req.method, params, key: req.headers['idempotency-key'], authorization: req.headers.authorization };
+    const call = { path: url.pathname, method: req.method, params, key: req.headers['idempotency-key'], authorization: req.headers.authorization, userAgent: req.headers['user-agent'] };
     f.calls.push(call);
     const common = { schema_version: 1, tenant_id: tenant, repository_id: repository, snapshot_token: head };
     const limit = Number(params.get('limit')), after = Number(params.get(url.pathname.endsWith('/1') ? 'after_version' : 'after'));
@@ -48,7 +49,7 @@ async function fixture(t) {
     if (f.delay) await new Promise(resolve => setTimeout(resolve, f.delay));
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(result));
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await listenForFetch(server);
   f.href = `http://127.0.0.1:${server.address().port}/repo/ui/issues/`;
   f.options = (operation = 'list') => ({ operation, href: f.href, tenant, repository, tokenFile,
     ...(operation === 'show' ? { number: 1 } : {}), ...(operation === 'search' ? { query: { text: 'needle', labels: ['bug'] } } : {}) });
@@ -67,6 +68,8 @@ test('bounded list follows one snapshot and preserves exact page order without l
   assert.equal(f.calls[0].params.has('expected_head'), false);
   assert.ok(f.calls.slice(1).every(c => c.params.get('expected_head') === head));
   assert.deepEqual(await readdir(f.root), ['token']); assert.deepEqual(await readFile(f.tokenFile), original);
+  assert.ok(f.calls.every(c => c.userAgent ===
+    'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)'));
 });
 test('one-page default returns explicit incomplete prefix and complete continuation identity', async t => {
   const f = await fixture(t), first = await runIssueRead({ ...f.options(), limit: 2 });

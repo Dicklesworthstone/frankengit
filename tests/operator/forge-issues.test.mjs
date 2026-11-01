@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { runIssueOperation, issueOperatorOptions } from '../../scripts/lib/forge-issue-operator.mjs';
 import { issueArguments } from '../../scripts/forge_issues.mjs';
 import { operatorJson } from '../../scripts/lib/forge-operator-io.mjs';
+import { listenForFetch } from '../fetch-peer.mjs';
 
 const tenant = '11'.repeat(16), repository = '22'.repeat(16), token = 'ab'.repeat(32);
 const actor = '33'.repeat(16), snapshot = 'alg:2:' + '12'.repeat(32);
@@ -23,7 +24,7 @@ async function fixture(t) {
   const server = createServer(async (req, res) => {
     let body = ''; for await (const part of req) body += part;
     const url = new URL(req.url, 'http://localhost'), key = req.headers['idempotency-key'];
-    f.calls.push({ method: req.method, path: url.pathname, body, key, authorization: req.headers.authorization });
+    f.calls.push({ method: req.method, path: url.pathname, body, key, authorization: req.headers.authorization, userAgent: req.headers['user-agent'] });
     const respond = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (req.headers.authorization !== `Bearer ${token}` || f.mode === 'unauthorized') return respond(401, {});
     if (f.mode === 'redirect') { res.writeHead(307, { Location: '/leak' }); return res.end(); }
@@ -85,7 +86,7 @@ async function fixture(t) {
     if (f.mode === 'bad-reply') wire.number = 2;
     respond(wire.outcome === 'committed' ? 200 : 409, wire);
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await listenForFetch(server);
   f.href = `http://127.0.0.1:${server.address().port}/repo/ui/issues/`;
   f.options = (operation = 'open', record = join(root, 'request.json')) => ({ operation, href: f.href, tenant, repository, tokenFile,
     record, ...(operation === 'open' ? { number: 1, expectedVersion: 0, fields: { title: 'Real request', body: 'private draft' } } : {}) });
@@ -116,6 +117,9 @@ test('fresh mutation syncs exact token-free receipt before HTTP and recovers wit
   assert.equal(status.result.outcome, 'committed'); assert.equal(status.mutation_submitted, false);
   const retry = await runIssueOperation(f.options('retry'));
   assert.equal(retry.result.outcome, 'committed'); assert.equal(mutations(f).length, 1);
+  assert.ok(f.calls.length > 0);
+  for (const call of f.calls) assert.equal(call.userAgent,
+    'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
 });
 test('lost mutation reply retains key; status observes real remote terminal fixture', async t => {
   const f = await fixture(t); f.mode = 'lost-reply';
@@ -211,8 +215,10 @@ test('caller mutation cannot replace snapshotted fields or target', async t => {
   await runIssueOperation(options); assert.equal(f.row.body, 'private draft');
 });
 test('redirect is refused without forwarding credentials or a mutation', async t => {
-  const f = await fixture(t); f.mode = 'redirect'; await assert.rejects(runIssueOperation(f.options()));
-  assert.equal(f.calls.length, 1); assert.equal(mutations(f).length, 0);
+  const f = await fixture(t); f.mode = 'redirect'; let rejected;
+  await assert.rejects(runIssueOperation(f.options()), error => { rejected = error; return true; });
+  assert.equal(f.calls.length, 1, `peer=${f.href} rejection=${rejected.message} cause=${rejected.cause?.message}`);
+  assert.equal(mutations(f).length, 0);
 });
 test('cancellation after remote publication retains original responsibility', async t => {
   const f = await fixture(t), stop = new AbortController(); f.mode = 'wait'; f.onMutation = () => setTimeout(() => stop.abort(), 5);

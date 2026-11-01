@@ -21,6 +21,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const action of PULL_ACTIONS) f
       assert.equal(r.method, 'POST'); assert.equal(r.headers.authorization, `Bearer ${TOKEN}`);
       assert.equal(r.headers['idempotency-key'], p.intent.key); assert.equal(r.headers.cookie, undefined);
       assert.equal(r.headers['accept-encoding'], 'identity');
+      assert.equal(r.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
     }
     assert.equal(before.url, '/repo.git/api/v1/outcomes'); assert.equal(after.url, before.url);
     assert.equal(before.body, ''); assert.equal(after.body, '');
