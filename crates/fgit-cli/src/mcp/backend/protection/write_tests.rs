@@ -1,3 +1,5 @@
+mod candidate_checks;
+
 use super::*;
 use fgit_forge::{ExpectedVersion, event::protection::MAX_POLICY_ADMINISTRATORS};
 

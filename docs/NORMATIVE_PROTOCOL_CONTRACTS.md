@@ -1044,6 +1044,87 @@ original terminal decision under the original policy, including after restart
 or subsequent policy changes; an old decision is never reinterpreted as a new
 queue-authorized operation.
 
+### 20.5 Verified unpublished-candidate workflow checks
+
+The candidate-check profile binds one trusted job observation to an exact
+existing native pull request and candidate without requiring a canonical ref
+to name that candidate. Its original subject is the PR number and predecessor
+version, exact source and target ref bytes and native tips, and policy epoch.
+The candidate adds the merge-base and candidate-commit OIDs. A raw 32-byte
+SHA-256 additionally pins the supplied candidate bundle. These coordinates
+remain separate from execution provenance and from the final protected-ref
+effect. The retained execution authority head is provenance; it is not required
+to equal the current publication head.
+
+Required forge payload kind **20**, owned by
+`fgit-forge/src/event/workflow_check/candidate.rs`, encodes the authenticated
+publisher (16 bytes), PR number and version (big-endian u64), source and target
+refs, source and target native OIDs, policy epoch (u64), merge-base and candidate
+OIDs, raw bundle SHA-256, then the existing workflow-check record fields without
+a second actor. The embedded check's source ref is exactly the original target
+anchor and its source commit is exactly the candidate commit. It does not claim
+that the target currently names the candidate. The existing bounded ref, native
+OID, job, conclusion and retained-evidence encodings and validation rules apply.
+Every original kind-11 byte remains unchanged.
+
+Candidate and ordinary observations share the existing full
+publisher/run/attempt/job check identity and singleton aggregate version.
+Changing profile, subject, bundle pin, evidence or conclusion cannot mint a
+second stream for the same execution. A conflicting observation must refuse;
+a deliberate rerun has a distinct attempt identity. Canonical evidence retains
+the original job bytes. A local succeeded job becomes canonical Success only
+after verification against that actual saved execution; skipped or unsuccessful
+jobs cannot become Success through caller-selected fields.
+
+Fresh candidate-check admission authenticates the reporting principal, verifies
+the independent bundle digest and real merge/squash/fast-forward object shape,
+and validates the exact current PR, source/target tips and policy epoch at each
+selected publication basis. The statement is published through the ordinary
+sealed metadata operation and authority-head CAS. It neither stages candidate
+objects nor moves refs, records an approval, acknowledges delivery, or grants a
+merge. Exact terminal recovery uses the original principal, key, subject, pin
+and retained execution record before fresh bundle or current-eligibility
+checks. An undecided recovery lookup creates no new seal or observation.
+A losing CAS attempt revalidates at its new basis.
+
+Each protected branch may independently contain a strictly sorted unique
+`required_candidate_checks` vector. A selector contains publisher, raw 32-byte
+workflow graph commitment and exact bounded UTF-8 job name; it contains no CI
+source ref. Ordinary and candidate selector counts **combined** are at most
+32 per branch. All configured selectors remain mandatory alongside reviews,
+reviewer independence, queue requirements and any compiled ref policy.
+
+Required protection kind **21** is used exactly when at least one branch has a
+candidate selector. Each branch writes its existing name and reviewer vector,
+an explicit u16 approval count, ordinary check count and selectors, canonical
+queue boolean, then a u32 candidate-selector count and its publisher/graph/job
+entries. These fields occur on every branch. A kind-21 policy without any
+candidate selector is a redundant alternate encoding and must refuse. A
+candidate-only branch has no reviewers and zero required approvals. Empty
+candidate vectors preserve every existing byte of kinds **9**, **13**, **14**
+and **19**. Compiled-policy wrappers **16**, **17** and **18** may select base
+kind 21 with their existing profile and snapshot checks. No ForgeEvent family
+or codec version changes; unknown required kinds and inner bases fail closed.
+
+At an authenticated native PR or queue-landing basis, protection reconstructs
+the original PR subject and exact candidate from the independently validated
+merge intent. A reverse canonical-history scan requires the latest matching
+publication from each configured publisher/graph/job to be Success. Later exact
+non-success results supersede earlier success; unrelated subjects or publishers
+do not. All configured ordinary selectors retain their canonical source-ref
+lease and can be satisfied only by ordinary observations. Candidate observations
+can satisfy only candidate selectors. A generic direct ref write, candidate
+shape alone or caller assertion cannot supply the validated PR subject and
+therefore cannot satisfy candidate-check protection. Ref/PR/policy movement
+invalidates stale applicability; unrelated metadata publication does not.
+
+Old readers must be upgraded before activation. Complete policy replacements
+must deliberately preserve every requirement intended to remain. Built-in
+policy clients preserve candidate selectors during unrelated edits and expose
+their removal in the complete replacement preview. The profile does not grant
+multi-PR prefix review or atomic prefix landing authority, independent runner
+attestation, or an implicit execution/retry permission.
+
 ## 21. Graph and search generations
 
 Graph/search generations follow anti-rollback activation and `GRAPH_INTELLIGENCE_ARCHITECTURE.md`.

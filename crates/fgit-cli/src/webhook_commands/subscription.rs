@@ -26,6 +26,9 @@ pub(super) fn require_subscription(
             ForgeEventPayload::ReviewProtectionChanged(_) => "review_protection",
             ForgeEventPayload::MergeQueueChangedNative(_) => "merge_queue",
             ForgeEventPayload::WorkflowCheckObservedNative(_) => "workflow_check",
+            ForgeEventPayload::CandidateWorkflowCheckObservedNative(_) => {
+                "candidate_workflow_check"
+            }
         };
         if !filter.matches(name) && !filter.matches(&format!("kind:{}", event.payload.kind())) {
             return Err(format!(

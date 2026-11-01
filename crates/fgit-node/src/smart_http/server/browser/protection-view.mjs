@@ -60,6 +60,7 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
     const requireQueue = fields[3] === undefined ? previous?.require_merge_queue ?? false : fields[3] === 'true';
     if (typeof requireQueue !== 'boolean') throw new Error('Invalid observed merge queue requirement.');
     const checks = checkRows === undefined ? previous?.required_checks ?? [] : checksByBranch.get(fields[0]) ?? [];
+    const candidateChecks = structuredClone(previous?.required_candidate_checks ?? []);
     const selected = fields[2];
     if (selected !== undefined && selected !== 'all' && !/^(0|[1-9][0-9]?)$/.test(selected)) throw new Error('Approval count must be a whole number or “all”.');
     const approvals = selected === 'all' ? reviewers.length : selected !== undefined ? Number(selected)
@@ -67,8 +68,9 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
     if (!Number.isSafeInteger(approvals) || approvals < (reviewers.length ? 1 : 0) || approvals > reviewers.length) {
       throw new Error('Approval count must be 1 through the reviewer count, or 0 for a check-only or queue-only branch.');
     }
-    if (!reviewers.length && !checks.length && !requireQueue) throw new Error('A protected branch needs reviewers, configured checks or a required merge queue.');
+    if (!reviewers.length && !checks.length && !candidateChecks.length && !requireQueue) throw new Error('A protected branch needs reviewers, configured checks or a required merge queue.');
     return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}),
+      ...(candidateChecks.length ? { required_candidate_checks: candidateChecks } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}) };
   }), ...(observedRefPolicy ? { ref_policy: structuredClone(observedRefPolicy) } : {}) };
@@ -189,6 +191,10 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       if (branch.require_merge_queue) section.append(node('p', 'Merge queue required. Only an authenticated canonical queue landing targeting this branch may update it; reviews and checks still apply.'));
       for (const check of branch.required_checks ?? []) section.append(node('p',
         `Required check: ${check.job}; publisher ${check.publisher}; workflow ${check.graph_root}; source ${referenceLabel(check.source_ref_hex)}. The latest result must succeed for the exact proposed commit.`));
+      for (const check of branch.required_candidate_checks ?? []) section.append(node('p',
+        `Required unpublished candidate check: ${check.job}; publisher ${check.publisher}; workflow ${check.graph_root}. The latest result must succeed for the exact PR subject and candidate.`));
+      if (branch.required_candidate_checks?.length) section.append(node('p',
+        'Candidate check requirements are retained when editing this branch. Use the protection CLI or API to change these selectors. Removing the branch rule removes its candidate requirements; review the complete replacement preview.'));
       ui.policy.append(section);
     }
     ui.administrators.value = policy.administrators.join('\n');

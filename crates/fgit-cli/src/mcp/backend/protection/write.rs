@@ -5,8 +5,8 @@ use fgit_forge::{
     event::protection::{
         MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
         MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES,
-        ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
-        compile_ref_policy, decode_ref_policy,
+        ProtectedBranch, ProtectionCommand, RequiredCandidateWorkflowCheck, RequiredWorkflowCheck,
+        ReviewProtection, compile_ref_policy, decode_ref_policy,
     },
 };
 use fgit_types::{DecisionOutcome, PolicyEpoch, PrincipalId, RefName};
@@ -123,6 +123,14 @@ pub(super) fn tool() -> Tool {
             ),
         ]),
     );
+    let mut candidate_check = check.clone();
+    candidate_check.remove("source_ref_hex");
+    branch.insert("required_candidate_checks".into(), object([
+        ("type", text("array")), ("maxItems", json::number(MAX_BRANCH_REQUIRED_CHECKS as u64)),
+        ("uniqueItems", Value::Bool(true)),
+        ("items", mutations::input_schema(candidate_check, &["publisher", "graph_root", "job"])),
+        ("description", text("Trusted results for the exact native PR subject and candidate without a CI reference. Strictly sorted by publisher, graph bytes and UTF-8 job bytes. Ordinary and candidate check counts together must not exceed 32. Omitted means empty and removes candidate requirements on this complete policy replacement.")),
+    ]));
     branch.insert("required_checks".into(), object([
         ("type", text("array")), ("maxItems", json::number(MAX_BRANCH_REQUIRED_CHECKS as u64)),
         ("uniqueItems", Value::Bool(true)),
@@ -264,6 +272,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
                 "reference_hex",
                 "required_reviewers",
                 "required_checks",
+                "required_candidate_checks",
                 "required_approvals",
                 "require_merge_queue",
             ],
@@ -314,11 +323,48 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             Some(Value::Bool(value)) => *value,
             Some(_) => return Err(ToolError::invalid("invalid_merge_queue_requirement")),
         };
+        let raw_candidate_checks = match fields.get("required_candidate_checks") {
+            None => &[][..],
+            Some(_) => array(
+                fields,
+                "required_candidate_checks",
+                MAX_BRANCH_REQUIRED_CHECKS,
+            )?,
+        };
+        if required_checks.len() + raw_candidate_checks.len() > MAX_BRANCH_REQUIRED_CHECKS {
+            return Err(ToolError::invalid("policy_check_count_limit"));
+        }
+        let mut required_candidate_checks = Vec::new();
+        for value in raw_candidate_checks {
+            let check = value
+                .object()
+                .ok_or(ToolError::invalid("policy_candidate_check_object_required"))?;
+            require_fields(check, &["publisher", "graph_root", "job"])?;
+            let check = RequiredCandidateWorkflowCheck {
+                publisher: canonical_principal(mutations::required(check, "publisher")?)?,
+                graph_root: unhex(mutations::required(check, "graph_root")?, 32)?
+                    .try_into()
+                    .map_err(|_| ToolError::invalid("invalid_check_graph"))?,
+                job: mutations::required(check, "job")?.to_owned(),
+            };
+            check
+                .validate()
+                .map_err(|_| ToolError::invalid("invalid_required_candidate_check"))?;
+            if required_candidate_checks
+                .last()
+                .is_some_and(|previous| previous >= &check)
+            {
+                return Err(ToolError::invalid("policy_candidate_checks_not_canonical"));
+            }
+            required_candidate_checks.push(check);
+        }
         let reviewers = principals(
             fields,
             "required_reviewers",
             MAX_BRANCH_REVIEWERS,
-            !required_checks.is_empty() || require_merge_queue,
+            !required_checks.is_empty()
+                || !required_candidate_checks.is_empty()
+                || require_merge_queue,
         )?;
         let required_approvals = match fields.get("required_approvals") {
             Some(value) => u16::try_from(
@@ -333,6 +379,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             require_merge_queue,
             required_approvals,
             required_checks,
+            required_candidate_checks,
             name,
             reviewers,
         });

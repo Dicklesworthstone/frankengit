@@ -286,6 +286,22 @@ fn policy_value(policy: &ReviewProtection) -> Result<Value, ToolError> {
                                         .collect(),
                                 ),
                             ),
+                            (
+                                "required_candidate_checks",
+                                Value::Array(
+                                    branch
+                                        .required_candidate_checks
+                                        .iter()
+                                        .map(|check| {
+                                            object([
+                                                ("publisher", text(check.publisher.to_string())),
+                                                ("graph_root", text(hex(&check.graph_root))),
+                                                ("job", text(&check.job)),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
                         ])
                     })
                     .collect(),

@@ -5,6 +5,7 @@
 //! actual source and evidence; this module never trusts a journal as authority.
 use std::future::Future;
 
+pub mod candidate;
 mod read;
 pub use read::{
     PullRequestCheckEvidence, PullRequestChecksPage, WorkflowCheckSummary,
@@ -16,6 +17,7 @@ use fgit_authority::{
     TerminalOutcome,
 };
 use fgit_chronicle::PublicationBasis;
+use fgit_forge::event::workflow_check::candidate::NativeCandidateWorkflowCheck;
 use fgit_forge::event::workflow_check::{
     NativeWorkflowCheck, WorkflowCheckId, WorkflowCheckRecord,
 };
@@ -170,6 +172,46 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    Ok(
+        match read_observation_at(store, cx, basis, id, cancelled).await? {
+            Some(Observation::Branch(change)) => Some(change),
+            Some(Observation::Candidate(_)) | None => None,
+        },
+    )
+}
+
+enum Observation {
+    Branch(NativeWorkflowCheck),
+    Candidate(NativeCandidateWorkflowCheck),
+}
+
+fn observation(event: ForgeEvent, id: WorkflowCheckId) -> Result<Observation, AdmissionError> {
+    if event.aggregate != AggregateId::WorkflowCheck(id) || event.version != AggregateVersion::FIRST
+    {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    match event.payload {
+        ForgeEventPayload::WorkflowCheckObservedNative(change) if change.id() == id => {
+            Ok(Observation::Branch(change))
+        }
+        ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) if change.id() == id => {
+            Ok(Observation::Candidate(change))
+        }
+        _ => Err(unavailable(RefusalCode::EvidenceInvalid)),
+    }
+}
+
+async fn read_observation_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    id: WorkflowCheckId,
+    cancelled: &C,
+) -> Result<Option<Observation>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     if cancelled() {
         return Err(unavailable(RefusalCode::CancellationInProgress));
     }
@@ -205,16 +247,10 @@ where
     let event = matches
         .next()
         .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
-    if matches.next().is_some() || event.version != AggregateVersion::FIRST {
+    if matches.next().is_some() {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    let ForgeEventPayload::WorkflowCheckObservedNative(change) = event.payload else {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    };
-    if change.id() != id {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    }
-    Ok(Some(change))
+    Ok(Some(observation(event, id)?))
 }
 
 #[cfg(test)]

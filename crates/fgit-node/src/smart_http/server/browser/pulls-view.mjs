@@ -679,7 +679,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     for (const input of [administrators, clear, nodes['add-branch'], nodes.preview]) input.disabled = !editable;
     for (const row of rows) {
       for (const input of [row.reference, row.reviewers, row.approvals, row.requireQueue, row.remove, row.addCheck]) input.disabled = !editable;
-      row.addCheck.disabled ||= row.checks.length >= 32;
+      row.addCheck.disabled ||= row.checks.length + row.candidateChecks.length >= 32;
       for (const check of row.checks) for (const input of [...Object.values(check.fields), check.remove]) input.disabled = !editable;
     }
     nodes['add-branch'].disabled ||= rows.length >= 64;
@@ -731,10 +731,16 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     item(doc, group, 'p', 'Every listed check must succeed for the exact candidate commit. Choose the source branch, publisher, workflow graph and job to require. Review requirements continue to apply alongside these checks.');
     const checks = item(doc, group, 'div');
     const addCheck = item(doc, group, 'button', 'Add required workflow check'); addCheck.type = 'button';
-    const row = { reference, reviewers, approvals, requireQueue, remove, checks: [], addCheck }; rows.push(row);
+    const candidateChecks = structuredClone(data.required_candidate_checks ?? []);
+    if (candidateChecks.length) {
+      item(doc, group, 'h4', 'Required unpublished candidate checks');
+      item(doc, group, 'p', 'These exact requirements are retained while editing this branch. Use the protection CLI or API to change the selectors. Removing this branch rule removes its candidate requirements; inspect the complete replacement preview.');
+      item(doc, group, 'pre', displayText(JSON.stringify(candidateChecks, null, 2)));
+    }
+    const row = { reference, reviewers, approvals, requireQueue, remove, checks: [], candidateChecks, addCheck }; rows.push(row);
     let checkNumber = 0;
     function appendCheck(selected = { source_ref_hex: '', publisher: '', graph_root: '', job: '' }) {
-      if (row.checks.length >= 32) fail('At most 32 workflow checks can be required per branch.');
+      if (row.checks.length + row.candidateChecks.length >= 32) fail('At most 32 ordinary and candidate workflow checks combined can be required per branch.');
       const holder = item(doc, checks, 'div'); holder.setAttribute('data-required-check-row', 'true');
       item(doc, holder, 'h5', `Required check ${++checkNumber}`);
       const fields = {};
@@ -795,6 +801,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
       branches: rows.map(row => ({ reference_hex: row.reference.value, required_reviewers: people(row.reviewers),
         ...(row.checks.length ? { required_checks: row.checks.map(check => Object.fromEntries(
           Object.entries(check.fields).map(([name, input]) => [name, input.value]))) } : {}),
+        ...(row.candidateChecks.length ? { required_candidate_checks: structuredClone(row.candidateChecks) } : {}),
         ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}),
         ...(row.requireQueue.checked ? { require_merge_queue: true } : {}) })),
       ...(!clear.checked && client.observed?.policy?.ref_policy ? { ref_policy: client.observed.policy.ref_policy } : {}) }), clear: clear.checked };

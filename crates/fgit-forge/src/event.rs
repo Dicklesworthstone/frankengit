@@ -46,6 +46,8 @@ const KIND_REPOSITORY_REF_POLICY_CHANGED: u32 = 16;
 const KIND_REPOSITORY_ACTOR_REF_POLICY_CHANGED: u32 = 17;
 const KIND_REPOSITORY_AUTHENTICATED_REF_POLICY_CHANGED: u32 = 18;
 const KIND_QUEUE_REQUIRED_PROTECTION_CHANGED: u32 = 19;
+const KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED: u32 = 20;
+const KIND_CANDIDATE_CHECK_PROTECTION_CHANGED: u32 = 21;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -129,7 +131,8 @@ const fn invalid_native(field: &'static str) -> CodecRefusal {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeEventPayload {
     /// Canonical protection replacement: historical unanimous-review kind 9,
-    /// required-check kind 13, explicit review-quorum kind 14, or queue kind 19.
+    /// required-check kind 13, explicit review-quorum kind 14, queue kind 19,
+    /// or exact-candidate check kind 21.
     ReviewProtectionChanged(protection::NativeProtectionEvent),
     PullRequestOpened {
         source_ref: Vec<u8>,
@@ -163,6 +166,9 @@ pub enum ForgeEventPayload {
     /// Immutable reported job evidence. Only explicit canonical protection can
     /// grant a named publisher's exact observation authority over a ref update.
     WorkflowCheckObservedNative(workflow_check::NativeWorkflowCheck),
+    /// Exact original PR and candidate coordinates with verified job evidence.
+    /// Shares the immutable execution stream with ordinary check observations.
+    CandidateWorkflowCheckObservedNative(workflow_check::candidate::NativeCandidateWorkflowCheck),
     /// Append-only PR conversation text in its independent stream: kind 12 for
     /// plain text, kind 15 when exact immutable source coordinates are included.
     PullRequestCommentedNative(pull_request_comment::NativePullRequestComment),
@@ -192,6 +198,8 @@ impl ForgeEventPayload {
                         }
                         _ => KIND_REPOSITORY_REF_POLICY_CHANGED,
                     }
+                } else if change.protection.has_required_candidate_checks() {
+                    KIND_CANDIDATE_CHECK_PROTECTION_CHANGED
                 } else if change.protection.has_required_merge_queue() {
                     KIND_QUEUE_REQUIRED_PROTECTION_CHANGED
                 } else if change.protection.has_review_quorum() {
@@ -204,6 +212,7 @@ impl ForgeEventPayload {
             }
             Self::MergeQueueChangedNative(_) => KIND_NATIVE_MERGE_QUEUE_CHANGED,
             Self::WorkflowCheckObservedNative(_) => KIND_WORKFLOW_CHECK_OBSERVED,
+            Self::CandidateWorkflowCheckObservedNative(_) => KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED,
             Self::PullRequestCommentedNative(comment) => {
                 if comment.anchor.is_some() {
                     KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED
@@ -449,6 +458,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         }
         ForgeEventPayload::MergeQueueChangedNative(queue_event) => queue_event.write(out)?,
         ForgeEventPayload::WorkflowCheckObservedNative(change) => change.write(out)?,
+        ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => change.write(out)?,
         ForgeEventPayload::PullRequestCommentedNative(comment) => comment.write(out)?,
     }
     Ok(())
@@ -505,6 +515,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_QUEUE_REQUIRED_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read(input, true, true, true)?,
         ),
+        KIND_CANDIDATE_CHECK_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
+            protection::NativeProtectionEvent::read_with_candidate_checks(input)?,
+        ),
         KIND_REPOSITORY_REF_POLICY_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read_with_policy(input)?,
         ),
@@ -519,6 +532,11 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(
             workflow_check::NativeWorkflowCheck::read(input)?,
         ),
+        KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED => {
+            ForgeEventPayload::CandidateWorkflowCheckObservedNative(
+                workflow_check::candidate::NativeCandidateWorkflowCheck::read(input)?,
+            )
+        }
         KIND_NATIVE_PULL_REQUEST_COMMENTED => ForgeEventPayload::PullRequestCommentedNative(
             pull_request_comment::NativePullRequestComment::read(input)?,
         ),

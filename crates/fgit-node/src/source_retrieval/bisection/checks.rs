@@ -1,18 +1,17 @@
 //! Fold immutable workflow observations in canonical publication order. The
 //! aggregate identity is per publisher/run/attempt/job, while the query selects
-//! a ref/commit/publisher/graph/job across those executions.
+//! an ordinary ref/commit/publisher/graph/job across those executions. Candidate
+//! observations share identity validation but cannot satisfy this branch query.
 use super::{Error, Predicate};
 use fgit_forge::aggregate::{AggregateId, AggregateVersion};
-use fgit_forge::event::workflow_check::{
-    NativeWorkflowCheck, WorkflowCheckConclusion, WorkflowCheckId,
-};
+use fgit_forge::event::workflow_check::{WorkflowCheckConclusion, WorkflowCheckId};
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(super) struct WorkflowChecks<'history> {
     // Keep references into the already bounded history; evidence is not cloned.
-    observed: BTreeMap<WorkflowCheckId, &'history NativeWorkflowCheck>,
+    observed: BTreeMap<WorkflowCheckId, &'history ForgeEventPayload>,
     latest: Option<WorkflowCheckConclusion>,
 }
 
@@ -33,43 +32,62 @@ impl<'history> WorkflowChecks<'history> {
         else {
             return Ok(());
         };
-        let observation = match (&event.aggregate, &event.payload) {
+        let (id, actor, record, ordinary) = match (&event.aggregate, &event.payload) {
             (
                 AggregateId::WorkflowCheck(_),
                 ForgeEventPayload::WorkflowCheckObservedNative(observation),
-            ) => observation,
+            ) => {
+                observation.record.validate().map_err(corrupt)?;
+                (
+                    observation.id(),
+                    observation.actor,
+                    &observation.record,
+                    true,
+                )
+            }
+            (
+                AggregateId::WorkflowCheck(_),
+                ForgeEventPayload::CandidateWorkflowCheckObservedNative(observation),
+            ) => {
+                observation.record.validate().map_err(corrupt)?;
+                (
+                    observation.id(),
+                    observation.actor,
+                    &observation.record.check,
+                    false,
+                )
+            }
             (AggregateId::WorkflowCheck(_), _)
-            | (_, ForgeEventPayload::WorkflowCheckObservedNative(_)) => {
+            | (_, ForgeEventPayload::WorkflowCheckObservedNative(_))
+            | (_, ForgeEventPayload::CandidateWorkflowCheckObservedNative(_)) => {
                 return Err(corrupt("workflow-check aggregate and payload disagree"));
             }
             _ => return Ok(()),
         };
-        observation.record.validate().map_err(corrupt)?;
-        let id = observation.id();
         if event.version != AggregateVersion::FIRST
             || event.aggregate != AggregateId::WorkflowCheck(id)
-            || observation.record.source_commit.algorithm() != source_commit.algorithm()
+            || record.source_commit.algorithm() != source_commit.algorithm()
         {
             return Err(corrupt(
                 "workflow check has an invalid immutable identity, version or native hash domain",
             ));
         }
         // Validate before selector filtering: reusing an immutable identity for
-        // another subject or evidence must not disappear as an unrelated check.
+        // another subject, profile or evidence must not vanish as unrelated.
         if self
             .observed
             .get(&id)
-            .is_some_and(|previous| *previous != observation)
+            .is_some_and(|previous| *previous != &event.payload)
         {
             return Err(corrupt(
                 "one immutable workflow-check identity has conflicting observations",
             ));
         }
-        self.observed.entry(id).or_insert(observation);
-        let record = &observation.record;
-        if record.source_ref == *source_ref
+        self.observed.entry(id).or_insert(&event.payload);
+        if ordinary
+            && record.source_ref == *source_ref
             && record.source_commit == *source_commit
-            && observation.actor == *publisher
+            && actor == *publisher
             && record.graph_root == *graph_root
             && record.job == *job
         {

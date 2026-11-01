@@ -20,6 +20,7 @@ fn protect(f: &mut Fixture) {
             ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
                 required_approvals: 1,
                 required_checks: Vec::new(),

@@ -58,6 +58,7 @@ impl Fixture {
                         require_merge_queue: false,
                         required_approvals: 1,
                         required_checks: Vec::new(),
+                        required_candidate_checks: Vec::new(),
                         name: RefName::try_new(b"refs/heads/protected-\xff").unwrap(),
                         reviewers: vec![REVIEWER],
                     }],

@@ -4,8 +4,8 @@ use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
     MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
     MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES,
-    ProtectedBranch, ProtectionCommand, RequiredWorkflowCheck, ReviewProtection,
-    compile_ref_policy, decode_ref_policy,
+    ProtectedBranch, ProtectionCommand, RequiredCandidateWorkflowCheck, RequiredWorkflowCheck,
+    ReviewProtection, compile_ref_policy, decode_ref_policy,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
@@ -27,6 +27,7 @@ usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-lo
   [--require-approvals <refs/heads/branch>:<count> ...]\n\
   [--require-merge-queue <refs/heads/branch> ...]\n\
   [--require-check <target-ref>:<source-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
+  [--require-candidate-check <target-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
   [--policy-source <UTF-8-policy-file> | --policy-frame <canonical-policy-frame>]\n\
   [--clear]\n\
   [--object-format sha1|sha256]\n\
@@ -39,7 +40,9 @@ A check-only or queue-only branch has zero required approvals. Opener and submit
 --require-merge-queue requires an authenticated canonical queue landing targeting that branch.\n\
 Direct ref writes and ordinary PR merges cannot satisfy this requirement; existing reviews and checks still apply.\n\
 Every check requires the latest trusted publisher result for the exact NEW commit.\n\
-Its source ref must still name that commit; the workflow graph and UTF-8 job name must match exactly.\n\
+--require-check also requires its source ref to remain at that commit.\n\
+--require-candidate-check binds the exact native PR subject and unpublished candidate without a CI ref.\n\
+The workflow graph and UTF-8 job name must match exactly; ordinary and candidate checks are independently required.\n\
 --clear disables branch and DSL protection but retains explicit administrators and immutable history.\n\
 Current administrators authorize replacement; the new list does not authorize itself.\n\
 All embedded-node ref publications enforce installed rules. No per-mutation opt-in is needed.\n\
@@ -88,8 +91,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut singleton = BTreeMap::new();
     let (mut trusted, mut clear) = (false, false);
     let mut admins = Vec::new();
-    let mut branches =
-        BTreeMap::<RefName, (Vec<PrincipalId>, Vec<RequiredWorkflowCheck>, bool)>::new();
+    let mut branches = BTreeMap::<
+        RefName,
+        (
+            Vec<PrincipalId>,
+            Vec<RequiredWorkflowCheck>,
+            bool,
+            Vec<RequiredCandidateWorkflowCheck>,
+        ),
+    >::new();
     let mut quorums = BTreeMap::<RefName, u16>::new();
     let mut i = 4;
     while i < args.len() {
@@ -122,6 +132,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "--require-approvals"
                         | "--require-merge-queue"
                         | "--require-check"
+                        | "--require-candidate-check"
                         | "--policy-source"
                         | "--policy-frame"
                 ))
@@ -219,11 +230,38 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
                     return Err("too many protected branches".into());
                 }
-                let checks = &mut branches.entry(name).or_default().1;
-                if checks.len() == MAX_BRANCH_REQUIRED_CHECKS {
+                let branch = branches.entry(name).or_default();
+                if branch.1.len() + branch.3.len() == MAX_BRANCH_REQUIRED_CHECKS {
                     return Err("too many required branch checks".into());
                 }
-                checks.push(check);
+                branch.1.push(check);
+            }
+            "--require-candidate-check" => {
+                let parts: Vec<_> = value.splitn(4, ':').collect();
+                if parts.len() != 4 {
+                    return Err(
+                        "candidate check must be target-ref:publisher-id:graph-sha256:job".into(),
+                    );
+                }
+                let name = RefName::try_new(parts[0].as_bytes())
+                    .map_err(|_| "invalid candidate check target branch")?;
+                let check = RequiredCandidateWorkflowCheck {
+                    publisher: PrincipalId::from_hex(parts[1])
+                        .map_err(|_| "invalid candidate check publisher")?,
+                    graph_root: graph_bytes(parts[2])?,
+                    job: parts[3].to_owned(),
+                };
+                check
+                    .validate()
+                    .map_err(|_| "invalid required candidate check")?;
+                if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
+                    return Err("too many protected branches".into());
+                }
+                let branch = branches.entry(name).or_default();
+                if branch.1.len() + branch.3.len() == MAX_BRANCH_REQUIRED_CHECKS {
+                    return Err("too many required branch checks".into());
+                }
+                branch.3.push(check);
             }
             _ => {
                 if singleton.insert(flag, value.as_str()).is_some() {
@@ -297,9 +335,18 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let branches = branches
             .into_iter()
             .map(
-                |(name, (mut reviewers, mut required_checks, require_merge_queue))| {
+                |(
+                    name,
+                    (
+                        mut reviewers,
+                        mut required_checks,
+                        require_merge_queue,
+                        mut required_candidate_checks,
+                    ),
+                )| {
                     reviewers.sort();
                     required_checks.sort();
+                    required_candidate_checks.sort();
                     ProtectedBranch {
                         require_merge_queue,
                         required_approvals: quorums
@@ -307,6 +354,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                             .copied()
                             .unwrap_or(reviewers.len() as u16),
                         required_checks,
+                        required_candidate_checks,
                         name,
                         reviewers,
                     }
@@ -416,7 +464,7 @@ fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
                 format!(
-                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}]}}",
+                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}],\"required_candidate_checks\":[{}]}}",
                     name,
                     quote(&hex),
                     ids(&branch.reviewers),
@@ -426,6 +474,10 @@ fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
                         "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                         quote(&bytes_hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),
                         quote(&bytes_hex(&check.graph_root)), quote(&check.job)
+                    )).collect::<Vec<_>>().join(","),
+                    branch.required_candidate_checks.iter().map(|check| format!(
+                        "{{\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
+                        quote(&check.publisher.to_string()), quote(&bytes_hex(&check.graph_root)), quote(&check.job)
                     )).collect::<Vec<_>>().join(",")
                 )
             })

@@ -77,17 +77,17 @@ function branchHex(value) {
   }
   return value;
 }
-function requiredChecks(values) {
+function requiredChecks(values, candidate = false) {
   if (!Array.isArray(values) || values.length > LIMITS.checks) fail('invalid_required_check_count');
   const result = values.map(value => {
-    fields(value, ['source_ref_hex', 'publisher', 'graph_root', 'job']);
+    fields(value, [...(candidate ? [] : ['source_ref_hex']), 'publisher', 'graph_root', 'job']);
     if (typeof value.job !== 'string' || !value.job.length || Buffer.byteLength(value.job) > LIMITS.job ||
         /[\u0000-\u001f\u007f-\u009f]/u.test(value.job) || Buffer.from(value.job).toString('utf8') !== value.job) fail('invalid_check_job');
-    return { source_ref_hex: branchHex(value.source_ref_hex), publisher: identity(value.publisher),
+    return { ...(candidate ? {} : { source_ref_hex: branchHex(value.source_ref_hex) }), publisher: identity(value.publisher),
       graph_root: hash(value.graph_root), job: value.job };
   });
   const order = (a, b) => {
-    for (const field of ['source_ref_hex', 'publisher', 'graph_root']) {
+    for (const field of [...(candidate ? [] : ['source_ref_hex']), 'publisher', 'graph_root']) {
       if (a[field] !== b[field]) return a[field] < b[field] ? -1 : 1;
     }
     return Buffer.compare(Buffer.from(a.job), Buffer.from(b.job));
@@ -111,12 +111,15 @@ export function policy(value) {
   if (!Array.isArray(value.branches) || value.branches.length > LIMITS.branches) fail('invalid_branch_count');
   const branches = value.branches.map(row => {
     fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
+      ...(Object.hasOwn(row, 'required_candidate_checks') ? ['required_candidate_checks'] : []),
       ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : []),
       ...(Object.hasOwn(row, 'require_merge_queue') ? ['require_merge_queue'] : [])]);
     const requireQueue = Object.hasOwn(row, 'require_merge_queue') ? row.require_merge_queue : false;
     if (typeof requireQueue !== 'boolean') fail('invalid_merge_queue_requirement');
     const checks = requiredChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
-    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0 || requireQueue);
+    const candidateChecks = requiredChecks(Object.hasOwn(row, 'required_candidate_checks') ? row.required_candidate_checks : [], true);
+    if (checks.length + candidateChecks.length > LIMITS.checks) fail('invalid_required_check_count');
+    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0 || candidateChecks.length > 0 || requireQueue);
     const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
     if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
         approvals > reviewers.length) fail('invalid_required_approval_count');
@@ -124,6 +127,7 @@ export function policy(value) {
     // request bodies and retry identities. An explicit smaller quorum survives.
     return { reference_hex: branchHex(row.reference_hex), required_reviewers: reviewers,
       ...(checks.length ? { required_checks: checks } : {}),
+      ...(candidateChecks.length ? { required_candidate_checks: candidateChecks } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
@@ -155,6 +159,9 @@ function command(source, replacement, clear) {
   for (const row of replacement.branches) for (const person of row.required_reviewers) form.append('required_reviewer', `${row.reference_hex}:${person}`);
   for (const row of replacement.branches) for (const check of row.required_checks ?? []) {
     form.append('required_check', `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${Buffer.from(check.job).toString('hex')}`);
+  }
+  for (const row of replacement.branches) for (const check of row.required_candidate_checks ?? []) {
+    form.append('required_candidate_check', `${row.reference_hex}:${check.publisher}:${check.graph_root}:${Buffer.from(check.job).toString('hex')}`);
   }
   for (const row of replacement.branches) if (Object.hasOwn(row, 'required_approvals')) {
     form.append('required_approvals', `${row.reference_hex}:${row.required_approvals}`);

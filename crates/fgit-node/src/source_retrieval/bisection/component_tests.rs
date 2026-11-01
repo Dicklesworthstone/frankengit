@@ -849,3 +849,78 @@ fn existing_predicate_json_encodings_remain_in_the_original_v1_profile() {
         verify_json_digest(&json);
     }
 }
+
+#[test]
+fn candidate_checks_are_valid_history_without_satisfying_ordinary_branch_predicates() {
+    use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
+    use fgit_forge::event::workflow_check::candidate::CandidateWorkflowCheckRecord;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let candidate = |run, conclusion| {
+            let check = record(format, run, conclusion);
+            CandidateWorkflowCheckRecord {
+                subject: ReviewSubject {
+                    pull_request: fgit_forge::PullRequestNumber::FIRST,
+                    pull_request_version: AggregateVersion::FIRST,
+                    source_ref: RefName::try_new(b"refs/heads/feature").unwrap(),
+                    target_ref: check.source_ref.clone(),
+                    source_tip: oid(format, '2'),
+                    target_tip: oid(format, '3'),
+                    policy_epoch: PolicyEpoch::FIRST,
+                },
+                candidate: CandidateBinding {
+                    merge_base: oid(format, '4'),
+                    commit: check.source_commit,
+                },
+                bundle_sha256: [0x55; 32],
+                check,
+            }
+            .proposed_event(publisher(), format)
+            .unwrap()
+        };
+        let (selected, head) = history(vec![
+            (1, vec![candidate(2, WorkflowCheckConclusion::Success)]),
+            (1, vec![event(format, 1, WorkflowCheckConclusion::Success)]),
+            (1, vec![candidate(3, WorkflowCheckConclusion::Failure)]),
+        ]);
+        assert_eq!(
+            fold_values(
+                &selected,
+                &head,
+                &query(format, WorkflowCheckConclusion::Success)
+            )
+            .unwrap(),
+            [false, true, true]
+        );
+        assert_eq!(
+            fold_values(
+                &selected,
+                &head,
+                &query(format, WorkflowCheckConclusion::Failure)
+            )
+            .unwrap(),
+            [false, false, false]
+        );
+        // The same publisher/run/attempt/job cannot switch profiles to hide a
+        // conflicting result, regardless of which mode appeared first.
+        for reverse in [false, true] {
+            let mut events = [
+                event(format, 1, WorkflowCheckConclusion::Success),
+                candidate(1, WorkflowCheckConclusion::Success),
+            ];
+            assert_eq!(events[0].aggregate, events[1].aggregate);
+            if reverse {
+                events.reverse();
+            }
+            let (selected, head) =
+                history(events.into_iter().map(|event| (1, vec![event])).collect());
+            assert!(
+                fold_values(
+                    &selected,
+                    &head,
+                    &query(format, WorkflowCheckConclusion::Success)
+                )
+                .is_err()
+            );
+        }
+    }
+}

@@ -256,7 +256,7 @@ impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore>
     }
 }
 
-fn validate_record(
+pub(super) fn validate_record(
     record: &WorkflowCheckRecord,
     tenant: TenantId,
     repository: RepositoryId,

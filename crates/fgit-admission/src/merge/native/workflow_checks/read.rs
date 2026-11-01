@@ -199,7 +199,9 @@ where
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
             let batch = read_batch(store, cx, basis, entry, &mut scan, cancelled).await?;
-            let change = observation(batch, id)?;
+            let Some(change) = observation(batch, id)? else {
+                continue;
+            };
             if change.record.source_ref != page.source_ref
                 || change.record.source_commit != page.source_tip
             {
@@ -259,7 +261,9 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     let batch = read_batch(store, cx, basis, frontier, &mut scan, cancelled).await?;
-    let change = observation(batch, check)?;
+    let Some(change) = observation(batch, check)? else {
+        return Ok(None);
+    };
     if change.record.source_ref != page.source_ref || change.record.source_commit != page.source_tip
     {
         return Ok(None);
@@ -360,7 +364,7 @@ fn summary(change: &NativeWorkflowCheck) -> WorkflowCheckSummary {
 fn observation(
     batch: ForgeEventBatch,
     id: WorkflowCheckId,
-) -> Result<NativeWorkflowCheck, AdmissionError> {
+) -> Result<Option<NativeWorkflowCheck>, AdmissionError> {
     let mut events = batch
         .events
         .into_iter()
@@ -368,16 +372,13 @@ fn observation(
     let event = events
         .next()
         .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
-    if events.next().is_some() || event.version != AggregateVersion::FIRST {
+    if events.next().is_some() {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    let ForgeEventPayload::WorkflowCheckObservedNative(change) = event.payload else {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    };
-    if change.id() != id {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    }
-    Ok(change)
+    Ok(match super::observation(event, id)? {
+        super::Observation::Branch(change) => Some(change),
+        super::Observation::Candidate(_) => None,
+    })
 }
 
 #[derive(Default)]

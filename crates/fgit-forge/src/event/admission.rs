@@ -64,7 +64,10 @@ pub const fn classify_event(
             },
             ForgeEventPayload::ReviewProtectionChanged(_) => ForgeOperation::ReviewProtection,
             ForgeEventPayload::MergeQueueChangedNative(_) => ForgeOperation::MergeQueueChange,
-            ForgeEventPayload::WorkflowCheckObservedNative(_) => ForgeOperation::WorkflowCheck,
+            ForgeEventPayload::WorkflowCheckObservedNative(_)
+            | ForgeEventPayload::CandidateWorkflowCheckObservedNative(_) => {
+                ForgeOperation::WorkflowCheck
+            }
             ForgeEventPayload::PullRequestCommentedNative(_) => ForgeOperation::PullRequestComment,
         },
     };

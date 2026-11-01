@@ -51,6 +51,52 @@ where
         return Err(denied());
     }
     let mut unresolved: Vec<_> = required.iter().collect();
+    verify_observations_at(
+        store,
+        cx,
+        basis,
+        |payload| {
+            let ForgeEventPayload::WorkflowCheckObservedNative(observation) = payload else {
+                return Ok(false);
+            };
+            let check = &observation.record;
+            if check.source_commit != candidate {
+                return Ok(false);
+            }
+            if let Some(index) = unresolved.iter().position(|requirement| {
+                requirement.source_ref == check.source_ref
+                    && requirement.publisher == observation.actor
+                    && requirement.graph_root == check.graph_root
+                    && requirement.job == check.job
+            }) {
+                // The latest exact observation decides; never seek an older green.
+                if check.conclusion != WorkflowCheckConclusion::Success {
+                    return Err(denied());
+                }
+                unresolved.remove(index);
+            }
+            Ok(unresolved.is_empty())
+        },
+        cancelled,
+    )
+    .await
+}
+
+/// Walk one authenticated history with the existing cumulative resource limits.
+/// A predicate can resolve several independently mandatory observation profiles
+/// without performing a second history scan or accepting an older failed check.
+pub(super) async fn verify_observations_at<S, C, F>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    mut observe: F,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+    F: FnMut(&ForgeEventPayload) -> Result<bool, ProjectionFailure> + Send,
+{
     let mut successor = basis.body().clone();
     let mut walked = 0;
     let mut batches_seen = 0usize;
@@ -108,30 +154,9 @@ where
                 ))?;
             for event in events.events.iter().rev() {
                 live(cancelled).map_err(infrastructure)?;
-                let ForgeEventPayload::WorkflowCheckObservedNative(observation) = &event.payload
-                else {
-                    continue;
-                };
-                let check = &observation.record;
-                if check.source_commit != candidate {
-                    continue;
-                }
-                if let Some(index) = unresolved.iter().position(|requirement| {
-                    requirement.source_ref == check.source_ref
-                        && requirement.publisher == observation.actor
-                        && requirement.graph_root == check.graph_root
-                        && requirement.job == check.job
-                }) {
-                    // This is the LAST committed observation for the exact
-                    // selector. A failure never falls back to an older success.
-                    if check.conclusion != WorkflowCheckConclusion::Success {
-                        return Err(denied());
-                    }
-                    unresolved.remove(index);
-                    if unresolved.is_empty() {
-                        live(cancelled).map_err(infrastructure)?;
-                        return Ok(());
-                    }
+                if observe(&event.payload)? {
+                    live(cancelled).map_err(infrastructure)?;
+                    return Ok(());
                 }
             }
         }
