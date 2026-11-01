@@ -5,7 +5,7 @@ const USAGE: &str = "usage: fg workflow dispatch-merge-candidate <storage-root> 
   --trusted-local --event pull_request|workflow_dispatch
   --bundle <reviewed-file> --candidate-commit <reviewed-oid> --expected-commit <target-tip>
   --source-ref <incoming-branch> --expected-source <incoming-tip> --merge-base <common-base>
-  --workflow <candidate-directory> --input <top-level-path> [--input ...]
+  --workflow <candidate-directory> --input <repository-path> [--input ...]
   --run-parent <absolute-private-0700-directory> --run-id <32-lowercase-hex>
   [--method merge-commit|squash] [--object-format sha1|sha256]
   [--expected-head <snapshot-token>] [--expected-incarnation <id>]

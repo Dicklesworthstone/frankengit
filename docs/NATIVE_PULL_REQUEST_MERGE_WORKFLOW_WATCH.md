@@ -121,12 +121,19 @@ later to report original settled executions without repeating them. Existing
 publisher binding, stable check keys and terminal-decision recovery still apply.
 Closing a PR stops new execution but does not erase original reporting custody.
 
-Any failure after event reservation retains the original bundle, key and old-tip
-lease and blocks later work until reconciled. The watcher does not refresh a
-refused lease, invent replacement keys or replay scripts after ambiguous effects.
-This includes malformed definitions found after candidate publication: the CI ref
-may already have been admitted even though no script ran. Inspect the original
-candidate-publication receipt and retained event before taking further action.
+New candidate events retain a versioned pre-execution intent. On ordinary
+restart, exact intent/artifact/configuration validation plus an absent durable
+execution-start fence can resume original CI publication and the candidate's
+first dispatch. The original bundle, key, old-tip lease and authority-head guard
+remain unchanged. Existing started dispatches, legacy events without the intent,
+stale subjects, refused publication and corrupt custody still block later work.
+The watcher never invents replacement keys or retries an already-started script.
+See [native watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md) for the exact
+boundary and readiness rules.
+
+Malformed definitions found after the start fence also remain unresolved: the
+CI ref may already have been admitted even though no script ran. Preserve the
+original candidate-publication receipt, intent and execution custody.
 
 Conflict and stale-metadata observations are non-green: a foreground watch exits
 1 even though no dispatch ran. Infrastructure/output errors retain their existing

@@ -5,7 +5,7 @@ use std::io::Write;
 
 const USAGE: &str = "usage: fg workflow dispatch <storage-root> <tenant-id> <repository-id> <ref>
   --trusted-local --event push|workflow_dispatch
-  --workflow <repository-directory> --input <top-level-path> [--input ...]
+  --workflow <repository-directory> --input <repository-path> [--input ...]
   --run-parent <absolute-private-directory> --run-id <32-lowercase-hex>
   --expected-head <snapshot-token> --expected-commit <native-oid>
   [--expected-incarnation <id>] [--object-format sha1|sha256]

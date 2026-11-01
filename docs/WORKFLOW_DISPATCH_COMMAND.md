@@ -26,9 +26,11 @@ algorithm-qualified snapshot-token syntax. SHA-256 repositories use
 Unlike `workflow run`, the `--workflow` argument names a **directory**. Only its
 direct `.yml` and `.yaml` children are definitions; nested files and other
 extensions are not discovered. The existing byte-valued `--workflow-hex`,
-`--input-hex`, and `--ref-hex` forms remain available. Inputs must be distinct
-top-level names and include the workflow directory's top-level prefix. They
-select copied files, not the process's host-access permissions.
+`--input-hex`, and `--ref-hex` forms remain available. Inputs must be distinct,
+non-overlapping repository paths and cover the workflow directory. Nested
+prefixes can select that directory and only the needed components; see
+[source input selection](TRUSTED_WORKFLOW_INPUTS.md). They select materialized
+files, not the process's host-access permissions.
 
 `--event` accepts `push` or `workflow_dispatch`. It is the local operator's
 matching key, **not proof that a push was admitted**. Every discovered definition

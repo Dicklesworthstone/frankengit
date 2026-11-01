@@ -88,7 +88,10 @@ pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
-pub use treefs_workspace::{PreparedQueueHeadBundle, QueueRead, QueueReadRefusal};
+pub use treefs_workspace::{
+    PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
+    QueueReadRefusal,
+};
 pub use treefs_workspace::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,

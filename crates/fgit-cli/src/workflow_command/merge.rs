@@ -9,7 +9,7 @@ const USAGE: &str =
   --trusted-local --bundle <stable-local-file> --candidate-commit <reviewed-merge-oid>
   --expected-commit <target-before-oid> --source-ref <incoming-branch>
   --expected-source <incoming-tip-oid> --merge-base <common-ancestor-oid>
-  --workflow <candidate-path> --input <top-level-path> [--input <path> ...]
+  --workflow <candidate-path> --input <repository-path> [--input <repository-path> ...]
   --run-id <32-lowercase-hex> --run-parent <absolute-private-0700-directory>
   [--method merge-commit|squash]
   [--object-format sha1|sha256] [--expected-head <snapshot-token>]

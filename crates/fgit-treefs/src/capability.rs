@@ -5,9 +5,10 @@
 //! are enforced here rather than left to callers:
 //!
 //! * **Discovery is not authorisation.** Learning that a path exists — from
-//!   search, a graph query, a directory listing — grants nothing. Every byte
+//!   search, a graph query, a directory listing — grants nothing. Every payload
 //!   read goes through [`TreeCapability::authorize_read`], and a lazy fetch
-//!   rechecks the capability at the moment it would reveal bytes.
+//!   rechecks the capability at the moment it would reveal bytes. Ancestor tree
+//!   traversal has separate directory-only grants, never payload authority.
 //! * **Repository content cannot widen a capability.** No method on this type
 //!   takes repository bytes as input. A capability is narrowed by
 //!   [`TreeCapability::attenuate`] and never widened at all, so a prompt, a
@@ -172,6 +173,9 @@ pub enum GrantScope {
     Root,
     /// One exact path.
     Path(TreePath),
+    /// An ancestor directory needed to reach a readable descendant. This grant
+    /// authorizes verified tree traversal only, never file or symlink bytes.
+    DirectoryTraversal(TreePath),
 }
 
 impl ReadGrant {
@@ -187,12 +191,13 @@ impl ReadGrant {
         &self.scope
     }
 
-    /// The exact path this grant authorises, or `None` for the root.
+    /// The path this grant names, or `None` for the root. Inspect [`Self::scope`]
+    /// before treating a directory-traversal grant as ordinary read authority.
     #[must_use]
     pub const fn path(&self) -> Option<&TreePath> {
         match &self.scope {
             GrantScope::Root => None,
-            GrantScope::Path(path) => Some(path),
+            GrantScope::Path(path) | GrantScope::DirectoryTraversal(path) => Some(path),
         }
     }
 }
@@ -435,6 +440,37 @@ impl TreeCapability {
         Ok(ReadGrant {
             workspace_id: self.workspace_id,
             scope: GrantScope::Path(path.clone()),
+        })
+    }
+
+    /// Traverse only a directory that is readable or an ancestor of a readable
+    /// prefix. Kept inside TreeFS: callers cannot turn ancestor discovery into
+    /// a payload grant. BaseView verifies directory kinds and filters every
+    /// child before disclosing its entry.
+    pub(crate) fn authorize_directory(
+        &self,
+        path: &TreePath,
+        now: u64,
+    ) -> Result<ReadGrant, CapabilityRefusal> {
+        self.check_live(now)?;
+        let scope = if self
+            .read_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+        {
+            GrantScope::Path(path.clone())
+        } else if self
+            .read_prefixes
+            .iter()
+            .any(|prefix| prefix.starts_with(path))
+        {
+            GrantScope::DirectoryTraversal(path.clone())
+        } else {
+            return Err(CapabilityRefusal::ReadOutsideScope { path: path.clone() });
+        };
+        Ok(ReadGrant {
+            workspace_id: self.workspace_id,
+            scope,
         })
     }
 

@@ -48,6 +48,9 @@ const LIMITS: SparseLimits = SparseLimits {
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[path = "shared_workspace/nested_inputs.rs"]
+mod nested_inputs;
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {

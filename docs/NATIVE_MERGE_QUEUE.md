@@ -12,8 +12,11 @@ queue head. `fg queue land-candidate` validates its bundle and publishes the
 candidate with the same atomic queue/PR/ref transition. Both landing profiles
 handle one exact queue head. A [queue workflow watcher](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md)
 can select the current head, prepare its real candidate, execute it on a fixed
-CI branch and publish exact checks. Speculative multi-PR trains, synthetic queue
-refs and autonomous landing remain separate work under
+CI branch and publish exact checks. The read-only
+[HTTP prefix preparation endpoint](NATIVE_HTTP_QUEUE_PREFIX_PREPARATION.md) can
+construct up to 16 ordered PRs against successive projected candidates and
+return their complete native bundle. Multi-PR landing and evidence, synthetic
+queue refs and autonomous landing remain separate work under
 `frankengit-fg083a-merge-queue-impl-95fm`. Queue membership and
 preparation do not grant approval; landing enforces current review, check,
 authentication and protected-ref rules.

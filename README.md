@@ -741,6 +741,11 @@ heuristic over mutable tables. `fg at <decision>` will open a complete read-only
 forge snapshot, and bisection will generalize from commits to forge state.
 The [dated reality snapshot](#reality-snapshot-2026-10-21) above identifies the
 bounded `at` and `bisect` implementation and its historical evidence.
+The trusted-local [`fg bisect` command](docs/FORGE_STATE_BISECTION.md) can also
+find the first published state where an exact workflow job concluded failure,
+success, cancellation, timeout or action-required. It follows the latest
+canonical observation for the selected branch, commit, publisher, workflow
+graph and job, and catches temporary failures between successful runs.
 The remaining historical projection work requires non-empty durable-history
 coverage and verification of the production checkpoint path, not just parser
 coverage or an older passing revision. A complete time-travel product is not yet

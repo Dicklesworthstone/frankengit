@@ -12,6 +12,13 @@ mod output;
 mod preparation;
 mod request;
 
+// Queue preparation shares only the bounded artifact formatter and native
+// read-error mapping. Queue selection and its independent grants remain local.
+pub(super) use preparation::{
+    Reply as PreparationReply, build_queue as queue_preparation_reply,
+    preparation_error as candidate_preparation_error,
+};
+
 // Source editing shares the established ingress/MIME implementation, not PR
 // authorization. These helpers parse bytes and confer no publication authority.
 pub(super) use collaboration::source_upload::{

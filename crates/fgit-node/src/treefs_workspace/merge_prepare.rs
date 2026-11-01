@@ -7,8 +7,11 @@ mod comment_anchor;
 mod commit_replay;
 #[path = "merge_resolution.rs"]
 mod merge_resolution;
+#[path = "queue_prefix.rs"]
+mod queue_prefix;
 #[path = "rebase.rs"]
 mod rebase;
+pub use queue_prefix::{PreparedQueuePrefixBundle, QueuePrefixEntry};
 #[path = "source_history.rs"]
 mod source_history;
 #[path = "source_review.rs"]

@@ -16,6 +16,7 @@ use fgit_diff::{
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
+pub mod queue_prefix;
 pub mod rebase;
 pub mod renames;
 pub mod replay;
@@ -234,6 +235,7 @@ pub enum PreparationError {
     Rename(renames::RenameRefusal),
     InvalidLimits,
     InvalidMetadata,
+    InvalidPrefix,
     ObjectFormat,
     Source(MergeSourceError),
     Graph(MergeBaseError<GitOid, MergeSourceError>),
@@ -438,6 +440,7 @@ pub fn prepare_merge_with_options<S: MergeObjectSource>(
         limits,
         entries: 0,
         content_merges: 0,
+        emitted_objects: 0,
         output_bytes: 0,
         objects: BTreeMap::new(),
         trees: BTreeMap::new(),
@@ -496,6 +499,29 @@ fn finish_merge_with_style<S: MergeObjectSource>(
     metadata: &MergeMetadata,
     style: MergeCommitStyle,
 ) -> Result<PreparedMerge, PreparationError> {
+    let commit = emit_merge_commit(&mut planner, target, incoming, tree, metadata, style)?;
+    Ok(PreparedMerge {
+        style,
+        base,
+        target,
+        source: incoming,
+        tree,
+        commit,
+        objects: planner.objects.into_values().collect(),
+    })
+}
+
+/// Emit one native commit without consuming the shared construction planner.
+/// Sequence preparation keeps the same tree/content/object/byte counters and
+/// generated objects while preserving ordinary merge bytes exactly.
+fn emit_merge_commit<S: MergeObjectSource>(
+    planner: &mut Planner<'_, S>,
+    target: GitOid,
+    incoming: GitOid,
+    tree: GitOid,
+    metadata: &MergeMetadata,
+    style: MergeCommitStyle,
+) -> Result<GitOid, PreparationError> {
     let incoming_parent = match style {
         MergeCommitStyle::TwoParent => format!("parent {incoming}\n"),
         MergeCommitStyle::Squash => String::new(),
@@ -510,15 +536,7 @@ fn finish_merge_with_style<S: MergeObjectSource>(
     body.extend_from_slice(&metadata.message);
     let commit = planner.emit(GitObjectKind::Commit, body)?;
     planner.source.checkpoint()?;
-    Ok(PreparedMerge {
-        style,
-        base,
-        target,
-        source: incoming,
-        tree,
-        commit,
-        objects: planner.objects.into_values().collect(),
-    })
+    Ok(commit)
 }
 
 struct Planner<'a, S> {
@@ -527,6 +545,9 @@ struct Planner<'a, S> {
     limits: PreparationLimits,
     entries: usize,
     content_merges: usize,
+    // Construction work is never refunded when rename alignment discards a
+    // temporary comparison tree. A sequence spends one object-work budget.
+    emitted_objects: usize,
     output_bytes: usize,
     objects: BTreeMap<GitOid, PlannedMergeObject>,
     // Request-owned, validated immutable maps. Generated trees stay available
@@ -545,6 +566,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
             limits,
             entries: 0,
             content_merges: 0,
+            emitted_objects: 0,
             output_bytes: 0,
             objects: BTreeMap::new(),
             trees: BTreeMap::new(),
@@ -573,9 +595,10 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
             }
             return Ok(id);
         }
-        if self.objects.len() == self.limits.max_objects {
+        if self.emitted_objects == self.limits.max_objects {
             return Err(PreparationError::Budget("objects"));
         }
+        self.emitted_objects += 1;
         self.output_bytes = self
             .output_bytes
             .checked_add(body.len())

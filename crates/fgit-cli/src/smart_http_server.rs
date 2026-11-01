@@ -43,7 +43,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    [--index-interval-secs <1..3600>] [--index-attempt-timeout-secs <1..3600>]]
   [--workflow-trusted-local --workflow-ref <refs/heads/...>
    --workflow-format sha1|sha256 --workflow-dir <committed-directory>
-   --workflow-input <top-level-entry> [--workflow-input <top-level-entry> ...]
+   --workflow-input <repository-path> [--workflow-input <repository-path> ...]
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
@@ -81,8 +81,8 @@ publish repository state.
 On Linux, the optional workflow service runs selected committed scripts as a
 native sibling of the HTTP listener. It requires --credentials-file, --continuous,
 --stop-file and a separate --workflow-trusted-local acknowledgement that trusts
-all future selected scripts with host-user privileges. Select 1-64 unique top-level
-inputs covering the workflow directory, and an existing absolute private run
+all future selected scripts with host-user privileges. Select 1-64 distinct,
+non-overlapping repository input paths covering the workflow directory, and an existing absolute private run
 parent. The worker waits 1000 ms between polls and bounds each attempt to 300 seconds
 by default. --workflow-publish-checks and --workflow-principal require an explicit
 --expected-incarnation; --workflow-artifact-logs requires --artifact-root. Readiness

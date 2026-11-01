@@ -199,6 +199,7 @@ fn prepare_replay_inner<S: MergeObjectSource>(
         limits,
         entries: 0,
         content_merges: 0,
+        emitted_objects: 0,
         output_bytes: 0,
         objects: BTreeMap::new(),
         trees: BTreeMap::new(),

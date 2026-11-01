@@ -40,8 +40,9 @@ fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
   --allow-pulls --allow-receive
 ```
 
-All workflow selection flags are explicit. `--workflow-input` repeats for distinct
-top-level paths; the workflow directory must be included in those inputs.
+All workflow selection flags are explicit. `--workflow-input` repeats for distinct,
+non-overlapping repository paths, including [nested prefixes](TRUSTED_WORKFLOW_INPUTS.md);
+the workflow directory must be included in those inputs.
 `--workflow-format` must match the repository's SHA-1 or SHA-256 object format.
 The polling interval accepts 10–60000 milliseconds and defaults to 1000. Each
 attempt accepts a 1–3600 second deadline and defaults to 300. Pending publication,
@@ -124,7 +125,9 @@ their source-head coordinates.
 Retain identical deterministic metadata and merge configuration across restart.
 Conflicts and stale recorded PR tips produce non-green observations without
 candidate publication or scripts. A failure after reservation retains the
-original bundle/key/lease and stops later work. See
+original bundle/key/lease. New versioned intents can resume only their first
+dispatch when exact custody proves execution never started; all other unresolved
+events still stop later work. See
 [exact PR candidate CI](NATIVE_PULL_REQUEST_MERGE_WORKFLOW_WATCH.md) for
 protected-merge setup, immutable configuration and recovery.
 
@@ -189,9 +192,18 @@ Intermediate branch tips may coalesce between polls. Startup can recover a
 missing final settlement from the original durable completed-dispatch handoff
 and verified closed execution/journal records before readiness. This performs
 no script execution or CI-ref publication. See
-[completed-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md) for its finite
-verification profile. An event without that verified completion boundary still
-blocks later events and refuses service readiness on restart until reconciled.
+[native-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md) for its finite
+verification profile.
+
+For new merge-candidate events, startup may also defer a versioned intent whose
+original scope, candidate artifacts and complete execution configuration verify
+and whose execution-start fence and dispatch directories are absent. Such an
+event remains `pending_execution`; it is never treated as settled or reported.
+The startup check publisher only skips and counts it. Its original CI publication
+retry and first script dispatch occur after the HTTP readiness callback succeeds,
+using the original key, old-tip lease, candidate and head guard. Failed readiness
+or a startup stop performs neither effect. Legacy events without that intent,
+begun executions and corrupt or mismatched custody still refuse readiness.
 
 Source index maintenance can run alongside CI with its existing explicit flags.
 Both workers belong to the same listener's stop/drain path; enabling CI grants

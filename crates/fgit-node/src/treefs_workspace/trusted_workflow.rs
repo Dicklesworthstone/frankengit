@@ -50,6 +50,9 @@ const SOURCE_LIMITS: SparseLimits = SparseLimits {
 const MAX_REPLICATED_BYTES: usize = 256 * 1024 * 1024;
 const MAX_REPLICATED_ENTRIES: usize = 100_000;
 
+#[cfg(test)]
+mod input_tests;
+
 #[derive(Debug)]
 pub enum TrustedWorkflowFailure {
     InvalidInput(&'static str),
@@ -284,7 +287,7 @@ impl OneNode {
     /// select inputs, NOT a process sandbox. No secrets, network isolation,
     /// canonical check publication, or automatic retry is provided.
     ///
-    /// The workflow itself must be a regular file within the declared top-level
+    /// The workflow itself must be a regular file within the declared
     /// input prefixes. Validate the entire graph and all host inputs before any
     /// script starts. Each job gets fresh descriptor-relative TreeFS files;
     /// supporting filesystems share immutable extents through copy-on-write.
@@ -500,8 +503,17 @@ fn validate_inputs(
     let mut paths = BTreeSet::new();
     for prefix in prefixes {
         let path = TreePath::parse_default(prefix).map_err(|_| invalid("invalid input prefix"))?;
-        if path.component_count() != 1 || !paths.insert(path) {
-            return Err(invalid("input prefixes must be distinct top-level paths"));
+        if !paths.insert(path) {
+            return Err(invalid("input prefixes must be distinct repository paths"));
+        }
+    }
+    for path in &paths {
+        let mut ancestor = path.parent();
+        while let Some(parent) = ancestor {
+            if paths.contains(&parent) {
+                return Err(invalid("input prefixes must not overlap"));
+            }
+            ancestor = parent.parent();
         }
     }
     if !paths.iter().any(|path| workflow.starts_with(path)) {

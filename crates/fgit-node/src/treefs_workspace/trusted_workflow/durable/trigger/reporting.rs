@@ -21,6 +21,9 @@ pub struct TrustedRefCheckPublication {
     pub previously_reported: usize,
     pub committed: usize,
     pub refused: usize,
+    /// Verified retained candidate intents awaiting their first dispatch. This
+    /// pass only defers them; it neither retries CI publication nor executes.
+    pub pending_execution: usize,
     /// Stopped between complete events, before the next event's preparation or
     /// admission. This does not acknowledge or discard any outstanding custody.
     pub request_stopped: bool,
@@ -29,11 +32,12 @@ pub struct TrustedRefCheckPublication {
 impl TrustedRefCheckPublication {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"type\":\"workflow_watch_publication\",\"schema_version\":1,\"events_reported\":{},\"previously_reported\":{},\"committed_decisions\":{},\"refused_decisions\":{},\"request_stopped\":{},\"error\":{},\"execution_retried\":false,\"refs_changed\":false}}",
+            "{{\"type\":\"workflow_watch_publication\",\"schema_version\":1,\"events_reported\":{},\"previously_reported\":{},\"committed_decisions\":{},\"refused_decisions\":{},\"pending_execution\":{},\"request_stopped\":{},\"error\":{},\"execution_retried\":false,\"refs_changed\":false}}",
             self.events_reported,
             self.previously_reported,
             self.committed,
             self.refused,
+            self.pending_execution,
             self.request_stopped,
             self.error.as_deref().map_or_else(|| "null".into(), quote)
         )
@@ -47,6 +51,8 @@ impl OneNode {
     /// Call before polling to reconcile old work, then after polling to publish
     /// new work. A failed call must stop automatic later execution in that scope.
     /// All child sets of an event are verified before its first submission.
+    /// A verified never-started merge intent is counted and deferred to the
+    /// execution owner; it provides no check and is never marked reported.
     /// This is not whole-event atomicity, hostile-code isolation or a new queue.
     pub async fn publish_trusted_ref_workflow_checks_in(
         &self,
@@ -197,6 +203,12 @@ impl OneNode {
                     .ok_or_else(|| invalid("unknown watch custody entry"))?;
                 check_directory(&path)?;
                 if !recover_settlement(self, reporting_reference, directory, &path, &scope, key, &|| request.checkpoint_is_live())? {
+                    if let Some(config) = merge_config
+                        && super::prestart::pending(self, reference, directory, &path, &scope,
+                            key, config, None, &|| request.checkpoint_is_live())? {
+                        result.pending_execution += 1;
+                        continue;
+                    }
                     return Err(invalid("watch event unresolved; automatic check publication and later execution blocked"));
                 }
                 let sources = Sources::read(&path, &scope, key)?;

@@ -249,6 +249,9 @@ pub struct WorkflowWatchReceipt {
     /// Observed publication responsibility not yet cleared by a complete pass.
     /// Cancellation of a read-only recovery scan alone does not create it.
     pub publication_pending: bool,
+    /// Last observed retained candidate intents still awaiting a completed
+    /// first dispatch. A partial scan cannot clear prior pending responsibility.
+    pub pending_execution: u64,
     pub node_closed: bool,
     pub service_failed: bool,
 }
@@ -261,7 +264,7 @@ impl WorkflowWatchReceipt {
                 "{{\"type\":\"workflow_service_drained\",\"schema_version\":1,",
                 "\"polls\":{},\"dispatched\":{},\"checks_committed\":{},",
                 "\"checks_refused\":{},\"non_green\":{},\"interrupted\":{},",
-                "\"requires_reconciliation\":{},\"publication_pending\":{},",
+                "\"requires_reconciliation\":{},\"publication_pending\":{},\"pending_execution\":{},",
                 "\"node_closed\":{},\"service_failed\":{},\"execution_retried\":false}}"
             ),
             self.polls,
@@ -272,6 +275,7 @@ impl WorkflowWatchReceipt {
             self.interrupted,
             self.requires_reconciliation,
             self.publication_pending,
+            self.pending_execution,
             self.node_closed,
             self.service_failed,
         )
@@ -361,7 +365,9 @@ pub fn run_service(
 
 /// Readiness follows authority authentication, exclusive service ownership,
 /// validation of retained execution custody and pending check reconciliation.
-/// No new script starts before the readiness callback succeeds.
+/// Verified never-started candidate intents remain pending through readiness;
+/// neither their CI publication nor their first script starts before the
+/// readiness callback succeeds.
 pub fn run_service_with_ready(
     node_config: NodeConfig,
     config: WorkflowWatchConfig,
@@ -380,6 +386,7 @@ pub fn run_service_with_ready(
         node.bring_into_service(head.receipt().generation())
             .map_err(|error| WorkflowWatchError::Authority(error.to_string()))?;
         custody = Some(Custody::open(&node, &config, &control)?);
+        receipt.pending_execution = custody.as_ref().expect("opened custody").pending_execution;
         if control.is_stopped() {
             return Err(WorkflowWatchError::StoppedBeforeReadiness);
         }
@@ -572,6 +579,9 @@ fn attempt(
     }
     if let Some(dispatch) = poll.dispatch() {
         add(&mut receipt.dispatched, 1)?;
+        if poll.execution_settled() {
+            receipt.pending_execution = receipt.pending_execution.saturating_sub(1);
+        }
         receipt.publication_pending |= config.publisher.is_some();
         receipt.non_green |= !dispatch.succeeded();
         receipt.interrupted |= dispatch.runs().iter().any(|run| run.request_interrupted);
@@ -694,6 +704,16 @@ fn publish(
     add(&mut receipt.checks_committed, result.committed)?;
     add(&mut receipt.checks_refused, result.refused)?;
     receipt.non_green |= result.refused != 0;
+    let pending_execution = u64::try_from(result.pending_execution).map_err(|_| {
+        WorkflowWatchError::Attempt("pending workflow observation counter exhausted".into())
+    })?;
+    // A stopped or failed scan can observe only a prefix. It may add pending
+    // responsibility but cannot erase the preceding complete observation.
+    if result.error.is_none() && !result.request_stopped {
+        receipt.pending_execution = pending_execution;
+    } else {
+        receipt.pending_execution = receipt.pending_execution.max(pending_execution);
+    }
     if let Some(error) = result.error {
         receipt.requires_reconciliation = true;
         receipt.publication_pending = true;
@@ -729,6 +749,7 @@ struct Custody {
     watch_root: PathBuf,
     watch_metadata: fs::Metadata,
     watch_owner: fs::File,
+    pending_execution: u64,
 }
 
 impl Custody {
@@ -776,7 +797,7 @@ impl Custody {
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
         let watch_owner = fs::File::open(events.join("owner.lock"))
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
-        let result = Self {
+        let mut result = Self {
             parent: config.run_parent.clone(),
             parent_metadata,
             root,
@@ -784,6 +805,7 @@ impl Custody {
             watch_root: events.clone(),
             watch_metadata,
             watch_owner,
+            pending_execution: 0,
         };
         result.check()?;
         let request = node.command_request_context(Some(config.attempt_timeout));
@@ -818,6 +840,34 @@ impl Custody {
                     custody(error)
                 }
             })? {
+                if let Some(merge) = &config.merge_candidate
+                    && super::prestart::pending(
+                        node,
+                        &config.reference,
+                        &config.directory,
+                        &entry.path(),
+                        &scope,
+                        key,
+                        merge,
+                        Some((&config.inputs, config.limits, config.artifacts.as_ref())),
+                        &live,
+                    )
+                    .map_err(|error| {
+                        if control.is_stopped() {
+                            WorkflowWatchError::StoppedBeforeReadiness
+                        } else {
+                            custody(error)
+                        }
+                    })?
+                {
+                    result.pending_execution =
+                        result.pending_execution.checked_add(1).ok_or_else(|| {
+                            WorkflowWatchError::Custody(
+                                "pending workflow observation counter exhausted".into(),
+                            )
+                        })?;
+                    continue;
+                }
                 return Err(WorkflowWatchError::Custody(
                     "unresolved event blocks startup; preserve original execution custody".into(),
                 ));
