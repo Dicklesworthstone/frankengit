@@ -8,6 +8,7 @@ No Git subprocess, schema peer, implicit build or production credential is used.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import signal
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import urlsplit
 
 from scoped_events_smoke import Campaign, HttpServer, PRINCIPAL, REPOSITORY, TENANT, require, file_sha256
 
@@ -29,7 +31,8 @@ class OperatorCampaign(Campaign):
         self.node = node
         self.client_serial = 0
 
-    def node_command(self, script: Path, args: list[str], expected: int = 0) -> dict[str, Any]:
+    def node_command(self, script: Path, args: list[str], expected: int = 0, *,
+                     error_reply: bool = False) -> dict[str, Any]:
         self.client_serial += 1
         stem = self.work / f"operator-{self.client_serial:03d}"
         command = [str(self.node), str(script), *args]
@@ -40,7 +43,135 @@ class OperatorCampaign(Campaign):
         if result.returncode != expected:
             sys.stderr.write(stem.with_suffix(".stderr").read_text(errors="replace"))
             raise AssertionError(f"operator exit {result.returncode}, expected {expected}; see {stem}")
-        return json.loads(stem.with_suffix(".stdout").read_bytes())
+        return json.loads(stem.with_suffix(".stderr" if error_reply else ".stdout").read_bytes())
+
+
+@contextmanager
+def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt: str):
+    # Fetch rejects some ports even on loopback. Select only native-owned
+    # listeners above the pinned runtime's highest blocked port (10080),
+    # before any request. Every discarded listener must drain normally.
+    for attempt in range(16):
+        server = HttpServer(campaign, root, credentials, f"issue-{fmt}-{attempt}")
+        server.command.append("--allow-outcomes")
+        with server:
+            port = urlsplit(server.url).port
+            require(port is not None, "native listener omitted its port")
+            if port <= 10080:
+                campaign.record(kind="fetch_listener_discarded", port=port, attempt=attempt)
+                continue
+            yield server
+            return
+    raise AssertionError("native Fetch-compatible listener selection exhausted its 16-attempt budget")
+
+
+def forge_case(campaign: OperatorCampaign, server: HttpServer, directory: Path, root: Path,
+               fmt: str, token_path: Path, grants, canonical) -> None:
+    script = ROOT / "scripts/forge_issues.mjs"
+    connection = ["--url", server.url + "/ui/issues/", "--tenant-id", TENANT,
+                  "--repository-id", REPOSITORY, "--token-file", str(token_path)]
+
+    def command(operation: str, fields: list[str], expected: int = 0, *,
+                error_reply: bool = False) -> dict[str, Any]:
+        return campaign.node_command(script, [operation, *connection, *fields], expected,
+                                     error_reply=error_reply)
+
+    def submit(action: str, version: int, fields: list[str]) -> dict[str, Any]:
+        record = directory / f"forge-{action}.json"
+        result = command(action, ["--number", "2", "--expected-version", str(version),
+                                  "--record", str(record), *fields])
+        require(result["state"] == "terminal_observed" and result["result"]["outcome"] == "committed",
+                f"forge {action} did not observe native commitment")
+        before, original = canonical("2"), record.read_bytes()
+        for operation in ("status", "retry"):
+            recovered = command(operation, ["--record", str(record)])
+            require(recovered["state"] == "terminal_observed" and recovered["mutation_submitted"] is False
+                    and recovered["result"]["tx"] == result["result"]["tx"]
+                    and recovered["result"]["rcr"] == result["result"]["rcr"],
+                    f"forge {operation} changed or resubmitted {action}")
+            require(record.read_bytes() == original and canonical("2") == before,
+                    "recovery changed the exact record or canonical state")
+        require(before["issue"]["version"] == version + 1, "forge mutation lost its canonical version")
+        return before
+
+    page = submit("open", 0, ["--title", "Forge native issue", "--body", f"shipped client {fmt}",
+                             "--label", "native", "--label", "operator"])
+    require(page["issue"]["body"] == f"shipped client {fmt}"
+            and page["issue"]["labels"] == ["native", "operator"], "forge open fields differ in Rust")
+    page = submit("comment", 1, ["--body", "forge canonical comment"])
+    require("forge canonical comment" in json.dumps(page["events"]), "forge comment is absent in Rust")
+    page = submit("edit", 2, ["--title", "Forge native edited", "--body", "forge edited body", "--label", "edited"])
+    require(page["issue"]["title"] == "Forge native edited" and page["issue"]["body"] == "forge edited body"
+            and page["issue"]["labels"] == ["edited"], "forge edit fields differ in Rust")
+    assignee = "44" * 16
+    require(submit("assign", 3, ["--assignee", assignee])["issue"]["assignees"] == [assignee],
+            "forge assignment differs in Rust")
+    require(submit("unassign", 4, ["--assignee", assignee])["issue"]["assignees"] == [],
+            "forge unassignment differs in Rust")
+    require(submit("close", 5, [])["issue"]["state"] == "closed", "forge close differs in Rust")
+    require(submit("reopen", 6, [])["issue"]["state"] == "open", "forge reopen differs in Rust")
+    campaign.facts[f"{fmt}_forge_all_actions_and_recovery"] = True
+
+    stale_record = directory / "forge-stale.json"
+    before = canonical("2")
+    stale = command("comment", ["--number", "2", "--expected-version", "6", "--body", "must not appear",
+                                "--record", str(stale_record)], 2, error_reply=True)
+    require(stale["code"] == "issue_operator_version_moved" and stale["state"] == "not_submitted"
+            and not stale_record.exists() and canonical("2") == before,
+            "forge stale preflight created a record or changed canonical state")
+
+    # Denial after receipt sync preserves uncertainty and the exact retry key.
+    record = directory / "forge-grant.json"
+    grants("issues-read,outcomes-read")
+    denied = command("comment", ["--number", "2", "--expected-version", "7", "--body", "restored grant comment",
+                                 "--record", str(record)], 2, error_reply=True)
+    require(denied["state"] == "submitted_unknown" and denied["http_status"] == 403
+            and canonical("2") == before, "denied forge write changed canonical issue state")
+    original = record.read_bytes()
+    unresolved = command("status", ["--record", str(record)], 2)
+    require(unresolved["state"] == "unresolved" and unresolved["mutation_submitted"] is False
+            and unresolved["absence_proves_non_commit"] is False and canonical("2") == before,
+            "missing forge outcome claimed non-commit or dispatched a mutation")
+    grants("issues-read,issues-write,outcomes-read")
+    retried = command("retry", ["--record", str(record)])
+    require(retried["mutation_submitted"] is True and retried["result"]["outcome"] == "committed"
+            and record.read_bytes() == original, "forge retry replaced the original exact receipt")
+    page = canonical("2")
+    require(page["issue"]["version"] == 8 and "restored grant comment" in json.dumps(page["events"]),
+            "permitted forge retry is absent from Rust")
+    require(command("status", ["--record", str(record)])["result"]["tx"] == retried["result"]["tx"]
+            and canonical("2") == page, "forge recovery changed the permitted retry")
+    campaign.facts[f"{fmt}_forge_stale_and_grant_twins"] = True
+
+    listing = command("list", ["--limit", "1", "--max-pages", "2"])
+    require(listing["complete"] is True and listing["page_count"] == 2
+            and [row["number"] for part in listing["pages"] for row in part["issues"]] == [1, 2],
+            "forge list lost native page order")
+    history = command("show", ["--number", "2", "--limit", "3"], 4)
+    continuation = history["continuation"]
+    require(history["complete"] is False and continuation["after"] == 3, "forge history lost its bounded prefix")
+    tail = command("show", ["--number", "2", "--limit", "3", "--max-pages", "3", "--after", "3",
+                            "--expected-head", continuation["expected_head"]])
+    events = [event for part in [*history["pages"], *tail["pages"]] for event in part["events"]]
+    # The native CLI repeats the issue number on every event; HTTP binds it
+    # through the requested issue and enclosing history row instead.
+    require(all(event["number"] == 2 for event in page["events"]), "native history mixed issue numbers")
+    native_events = [{key: value for key, value in event.items() if key != "number"} for event in page["events"]]
+    require(tail["complete"] is True and events == native_events, "forge history continuation lost native events")
+    search = command("search", ["--query", "Forge native", "--label", "edited", "--limit", "1",
+                                "--max-scan", "1", "--max-pages", "3"])
+    require(search["complete"] is True and [len(part["issues"]) for part in search["pages"]] == [0, 1]
+            and search["pages"][-1]["issues"][0] == page["issue"], "forge search lost a zero-hit continuation")
+    require(canonical("2") == page, "forge reads changed canonical state")
+    campaign.issue(root, fmt, 10, "forge-cursor-successor", "move the repository snapshot")
+    moved = command("show", ["--number", "2", "--after", "3", "--expected-head", continuation["expected_head"]],
+                    2, error_reply=True)
+    require(moved["state"] == "read_incomplete" and moved["http_status"] == 409 and "pages" not in moved,
+            "moved forge snapshot returned an apparently complete prefix")
+    fresh = command("show", ["--number", "2", "--limit", "100"])
+    require(fresh["complete"] is True and fresh["pages"][0]["events"] == native_events,
+            "fresh forge snapshot did not preserve canonical events")
+    campaign.facts[f"{fmt}_forge_reads_and_snapshot_refusal"] = True
 
 
 def run_case(campaign: OperatorCampaign, fmt: str) -> None:
@@ -62,17 +193,15 @@ def run_case(campaign: OperatorCampaign, fmt: str) -> None:
     token_path = directory / "token"
     with token_path.open("x", encoding="ascii") as out:
         out.write(TOKEN)
-    server = HttpServer(campaign, root, credentials, f"issue-{fmt}")
-    server.command.append("--allow-outcomes")
     script = ROOT / "scripts/remote_issue.mjs"
 
-    def canonical() -> dict[str, Any]:
-        page = json.loads(campaign.run("issue", "show", root, TENANT, REPOSITORY, "1",
+    def canonical(number: str = "1") -> dict[str, Any]:
+        page = json.loads(campaign.run("issue", "show", root, TENANT, REPOSITORY, number,
                                        "--trusted-local", "--object-format", fmt))
         require(page["found"] is True and page["node_closed"] is True, "native canonical issue read incomplete")
         return page
 
-    with server:
+    with issue_server(campaign, root, credentials, fmt) as server:
         scope = {"tenant_id": TENANT, "repository_id": REPOSITORY,
                  "repository_incarnation": incarnation, "principal_id": PRINCIPAL}
 
@@ -171,6 +300,7 @@ def run_case(campaign: OperatorCampaign, fmt: str) -> None:
                 "restored outcome grant did not recover the original committed operation")
         require(canonical() == page, "outcome recovery changed canonical issue state")
         campaign.facts[f"{fmt}_independent_outcome_grant"] = True
+        forge_case(campaign, server, directory, root, fmt, token_path, grants, canonical)
     campaign.facts[f"{fmt}_owned_service_drained"] = True
     print(f"OPERATOR_ISSUE {fmt}: real CLI/HTTP/native readback, all actions, stale refusal, recovery and drain", flush=True)
 
@@ -191,8 +321,8 @@ def main() -> None:
     campaign = OperatorCampaign(fg, node, args.work.resolve())
     summary: dict[str, Any] = {"complete": False, "facts": campaign.facts,
         "binary_sha256": file_sha256(fg), "node_sha256": file_sha256(node), "artifacts": str(campaign.work),
-        "entrypoint": "scripts/remote_issue.mjs",
-        "non_claim": "One real operator entrypoint; not every operator, same-source build qualification, browser, TLS or D10 acceptance."}
+        "entrypoints": ["scripts/remote_issue.mjs", "scripts/forge_issues.mjs"],
+        "non_claim": "Two real issue entrypoints; not every operator, same-source build qualification, browser UI, TLS or D10 acceptance."}
 
     def stop(_signum: int, _frame: Any) -> None:
         raise InterruptedError("operator campaign interrupted; draining owned children")

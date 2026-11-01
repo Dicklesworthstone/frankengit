@@ -15,6 +15,8 @@ HTTPS is required except for loopback HTTP. Redirects are refused; no cookies,
 environment-token fallback or credentials in arguments/URLs are used. This does
 not add TLS to the native server; remote HTTPS needs a separately trusted TLS
 endpoint. HTTP responses remain trusted-server claims, not authenticated roots.
+Node operator requests use the `frankengit-agent` project User-Agent while
+preserving the shipped client's authentication, redirect and cancellation policy.
 
 ## First mutation
 
@@ -143,6 +145,16 @@ while a concurrent retry establishes its own barrier. They are not native
 Rust/node/authority integration or a power-loss campaign, and do not close the
 broader CLI/MCP authentication work. The wrapper uses the native mutation grammar
 and does not define additional permissions, codecs or authority.
+
+The discovered `scripts/e2e/suites/operator/remote_issue.sh` campaign additionally
+runs both `remote_issue.mjs` and this command against an actual prebuilt native
+HTTP listener in SHA-1 and SHA-256. It checks all supported mutation actions,
+original-record status/retry, Rust canonical readback, independent grants,
+list/history/search continuation, moved-snapshot refusal and owned service drain.
+It requires the repository's pinned Node and an explicit `FG_BIN`; the captured
+binary digest identifies the executable used. An older executable is diagnostic
+evidence only. This bounded campaign does not cover every operator entrypoint,
+browser UI execution, TLS, power loss or complete authentication acceptance.
 
 ## Read, inspect and search before choosing a version
 

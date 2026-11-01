@@ -13,6 +13,7 @@ fn search_post_is_read_only_and_rejects_get_query_and_wrong_media() {
     let request = Request::parse(&head).unwrap().unwrap();
     assert!(matches!(request.operation, Operation::Search));
     assert!(!request.is_mutation());
+    assert!(request.accepts_body());
     assert_eq!(request.repository_route, "/repo.git");
     assert!(
         request

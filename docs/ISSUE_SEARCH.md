@@ -48,6 +48,12 @@ Form fields are `query`, `state`, `opened_by`, `case_sensitive` (`true` or `fals
 
 The adapter retains the existing body/framing ceilings, response-byte ceiling, no-store/private-authorization response handling, and runtime deadline checks. It rechecks the deadline during response rendering and assembles a complete bounded JSON body before emitting success. The existing listener remains a loopback capability profile with externally terminated TLS, repository-wide issue grants, and no new per-issue ACL or hosted-IAM claim.
 
+Search accepts its bounded POST body whether it arrives with the request headers
+or after an explicit `100 Continue`. Its typed read classification selects the
+read quota and leaves writer permits and mutation quotas available to writes.
+GET list/history bodies remain forbidden. Transport or quota refusal does not
+create a transaction or imply an unknown mutation outcome.
+
 ## Verification scope
 
 Tests cover predicate boundaries and ASCII/UTF-8 behavior, scalar literal equivalence, exact-head continuation, sparse issue numbering, empty partial pages, result/scan-limit interactions, source errors, malformed pages, exhausted tails, parser rejection, and JSON completeness metadata. Exhaustive small-pattern pagination tests compare all eight-issue match patterns across result and scan limits against a scalar filter. HTTP tests cover read-only route classification, bounded form semantics, authority-field rejection, error outcomes, exact response ceilings, and deadline refusal. These are deterministic unit/contract tests, not a claim of a completed discussion/inbox product, indexed search, or executed deployment conformance.

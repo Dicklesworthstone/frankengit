@@ -1448,6 +1448,9 @@ fn serve_connection(
         } else {
             None
         };
+        if let Some(request) = &issue_request {
+            native_mutation = request.is_mutation();
+        }
         let git_request = if protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
@@ -1505,7 +1508,12 @@ fn serve_connection(
             || git_request
                 .as_ref()
                 .is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        if (protection_request.is_some() || queue_request.is_some() || source_request.is_some())
+        if (protection_request.is_some()
+            || queue_request.is_some()
+            || source_request.is_some()
+            || issue_request
+                .as_ref()
+                .is_some_and(|request| request.accepts_body()))
             && !mutation
         {
             let principal = session
@@ -1568,7 +1576,7 @@ fn serve_connection(
                 .is_some_and(|request| !request.accepts_body())
             || issue_request
                 .as_ref()
-                .is_some_and(|request| !request.is_mutation())
+                .is_some_and(|request| !request.accepts_body())
             || git_request
                 .as_ref()
                 .is_some_and(|request| matches!(request.operation, Operation::Discover(_)));
@@ -1813,6 +1821,7 @@ fn log_cleanup(error: &NodeRefusal) {
 
 #[cfg(test)]
 mod tests {
+    mod issue_search;
     mod queue_preparation;
 
     #[test]

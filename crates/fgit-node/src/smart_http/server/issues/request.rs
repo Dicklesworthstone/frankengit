@@ -142,6 +142,10 @@ impl<'a> Request<'a> {
         matches!(self.operation, Operation::Mutate { .. })
     }
 
+    pub(crate) const fn accepts_body(&self) -> bool {
+        matches!(self.operation, Operation::Search | Operation::Mutate { .. })
+    }
+
     pub(super) fn command(&self, body: &[u8]) -> Result<Command, ApiError> {
         let Operation::Mutate { number, action } = self.operation else {
             return Err(ApiError::bad("not_a_mutation"));

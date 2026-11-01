@@ -8,7 +8,7 @@ fge_init operator-remote-issue
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
 fge_context evidence_class real_js_cli_native_http_and_canonical_reads
-fge_context non_claim 'One operator entrypoint, all issue actions in SHA-1/SHA-256; not the complete operator matrix, browser, TLS, D10 or same-revision native build qualification.'
+fge_context non_claim 'Two issue operator entrypoints in SHA-1/SHA-256; not the complete operator matrix, browser UI, TLS, D10 or same-revision native build qualification.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
@@ -41,6 +41,9 @@ for format in sha1 sha256; do
   fge_assert_eq "OPERATOR-ISSUE-$format-003" true "$(fact "${format}_all_actions_and_original_key_recovery")" 'all eight actions have canonical Rust readback and original-key recovery'
   fge_assert_eq "OPERATOR-ISSUE-$format-004" true "$(fact "${format}_independent_outcome_grant")" 'unavailable outcome read preserves uncertainty; recovery never resubmits'
   fge_assert_eq "OPERATOR-ISSUE-$format-005" true "$(fact "${format}_owned_service_drained")" 'native listener drains every accepted transport'
+  fge_assert_eq "OPERATOR-ISSUE-$format-006" true "$(fact "${format}_forge_all_actions_and_recovery")" 'shipped IssueClient performs every forge mutation with canonical readback and original-key recovery'
+  fge_assert_eq "OPERATOR-ISSUE-$format-007" true "$(fact "${format}_forge_stale_and_grant_twins")" 'forge stale preflight and denied write preserve state; exact retry commits after restored grant'
+  fge_assert_eq "OPERATOR-ISSUE-$format-008" true "$(fact "${format}_forge_reads_and_snapshot_refusal")" 'forge list/history/search preserve native pages and reject a moved snapshot'
 done
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" operator-issue-summary; fi
 if [ -f "$WORK/campaign/commands.jsonl" ]; then fge_artifact "$WORK/campaign/commands.jsonl" native-and-operator-command-journal; fi

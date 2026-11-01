@@ -28,6 +28,12 @@ export async function connectIssueToken(client, o, check) {
     await client.connect(token.toString('ascii').replace(/\n$/, '')); check();
   } finally { token.fill(0); }
 }
+// Node operators identify themselves; browser clients retain browser-owned headers.
+export function issueOperatorFetch(url, init, signal) {
+  const headers = new Headers(init.headers);
+  headers.set('User-Agent', 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
+  return fetch(url, { ...init, headers, signal: AbortSignal.any([signal, init.signal]) });
+}
 export function issueOperatorOptions(raw) {
   const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))) fail('issue_operator_options');
@@ -61,7 +67,7 @@ export async function runIssueOperation(raw) {
   const check = () => { if (signal.aborted) fail('issue_operator_cancelled_or_deadline'); };
   const progress = phase => { o.onProgress(Object.freeze({ phase })); check(); };
   const client = new IssueClient({ href: o.href, timeoutMs: o.timeoutMs,
-    fetchImpl: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([signal, init.signal]) }) });
+    fetchImpl: (url, init) => issueOperatorFetch(url, init, signal) });
   let state = ACTIONS.includes(o.operation) ? 'not_submitted' : 'existing_unknown';
   let path = o.record, digest = null, bytes;
   try {

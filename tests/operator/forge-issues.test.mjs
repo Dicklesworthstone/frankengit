@@ -24,7 +24,7 @@ async function fixture(t) {
   const server = createServer(async (req, res) => {
     let body = ''; for await (const part of req) body += part;
     const url = new URL(req.url, 'http://localhost'), key = req.headers['idempotency-key'];
-    f.calls.push({ method: req.method, path: url.pathname, body, key, authorization: req.headers.authorization });
+    f.calls.push({ method: req.method, path: url.pathname, body, key, authorization: req.headers.authorization, userAgent: req.headers['user-agent'] });
     const respond = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (req.headers.authorization !== `Bearer ${token}` || f.mode === 'unauthorized') return respond(401, {});
     if (f.mode === 'redirect') { res.writeHead(307, { Location: '/leak' }); return res.end(); }
@@ -113,6 +113,9 @@ test('fresh mutation syncs exact token-free receipt before HTTP and recovers wit
   assert.equal(status.result.outcome, 'committed'); assert.equal(status.mutation_submitted, false);
   const retry = await runIssueOperation(f.options('retry'));
   assert.equal(retry.result.outcome, 'committed'); assert.equal(mutations(f).length, 1);
+  assert.ok(f.calls.length > 0);
+  for (const call of f.calls) assert.equal(call.userAgent,
+    'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
 });
 test('lost mutation reply retains key; status observes real remote terminal fixture', async t => {
   const f = await fixture(t); f.mode = 'lost-reply';

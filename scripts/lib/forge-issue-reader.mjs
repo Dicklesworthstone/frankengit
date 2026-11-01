@@ -1,7 +1,7 @@
 // Bounded read-only terminal workflow using the same native issue client.
 // Cursor progression follows examined candidates, not the number of matches.
 import { IssueClient, natural, snapshotToken, issueSearchQuery } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
-import { issueConnectionOptions, connectIssueToken } from './forge-issue-operator.mjs';
+import { issueConnectionOptions, connectIssueToken, issueOperatorFetch } from './forge-issue-operator.mjs';
 import { operatorError, operatorJson } from './forge-operator-io.mjs';
 const fail = code => { throw operatorError(code); };
 export function issueReadOptions(raw) {
@@ -31,7 +31,7 @@ export async function runIssueRead(raw) {
   const check = () => { if (signal.aborted) fail('issue_read_cancelled_or_deadline'); };
   const timer = setTimeout(() => stop.abort(), o.timeoutMs);
   const client = new IssueClient({ href: o.href, timeoutMs: o.timeoutMs,
-    fetchImpl: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([signal, init.signal]) }) });
+    fetchImpl: (url, init) => issueOperatorFetch(url, init, signal) });
   const pages = []; let head = o.head, after = o.after, next = null, retained = 0;
   try {
     check(); await connectIssueToken(client, o, check);
