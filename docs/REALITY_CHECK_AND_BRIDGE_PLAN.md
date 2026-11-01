@@ -288,8 +288,13 @@ send the required project User-Agent; actual socket assertions failed before
 the repair. No Rust wire, public API, dependency or gate change is involved.
 
 At clean `841861be`, the predeclared twelve-file focused corpus completes
-**533 passed / zero failed or skipped** under Node 26.8.1 and sandboxed pinned
-Git 2.54.0. Separately, the existing central E2E runner completes **27 assertions,
+**533 passed / zero failed or skipped** under Node 26.8.1. **Oracle-profile
+correction (November 1, 23:46 UTC):** the candidate fixture honored the pinned
+sandbox override, but the resolution fixture hard-coded host Git and ignored
+it. The earlier statement that the entire corpus used sandboxed Git 2.54.0 is
+withdrawn; the observed focused-test counters remain. Original Bead correction
+**5832** and the corrected PR #40 description preserve this reporting error.
+Separately, the existing central E2E runner completes **27 assertions,
 zero failures or skips**, both hash formats, all three entrypoints and normal
 native drain. The binary remains **older native `a9d65885`**, SHA-256
 `95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
@@ -306,8 +311,9 @@ before repair. First-run campaign mistakes are retained: invalid credential
 scope order, an incorrect merge-actor expectation for `last_metadata_actor`,
 and an incorrect qualified-OID expectation for the native candidate report.
 The first focused header run used the fixture's default host Git; it earns no
-pinned-Git credit. Accepted focused evidence instead uses the supported oracle
-override with verified Git 2.54.0 inside Bubblewrap. Removing `--allow-source`
+pinned-Git credit. The attempted correction through the override covered the
+candidate fixture, but missed the hard-coded resolution fixture; the whole-run
+profile claim was therefore still incorrect, as recorded above. Removing `--allow-source`
 proved an ineffective candidate-route negative: the complete lane still passed,
 and this earns no negative credit. Corrected native deployment controls remove
 `--allow-pulls`: both read entrypoints refuse 403, while restored permitted twins

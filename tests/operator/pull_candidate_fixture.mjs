@@ -1,6 +1,6 @@
 // Native-schema HTTP peers, NOT a Rust fg server. Git runs only here as a
 // bounded independent fixture oracle, producing real native commits/bundles.
-import { execFileSync } from 'node:child_process';
+import { pinnedFixtureGit } from './pinned_git_fixture.mjs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,10 +27,9 @@ async function build(algorithm, method) {
   const env = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', TZ: 'UTC', GIT_AUTHOR_NAME: 'Alice', GIT_AUTHOR_EMAIL: 'alice@example.invalid',
     GIT_COMMITTER_NAME: 'Bob', GIT_COMMITTER_EMAIL: 'bob@example.invalid', GIT_AUTHOR_DATE: '@1700000000 +0000', GIT_COMMITTER_DATE: '@1700000000 +0000' };
-  const git = (args, input) => execFileSync(process.env.FG_GIT_ORACLE ?? 'git', ['-C', root, ...args],
-    { input, env, timeout: 10000, maxBuffer: 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
-  const id = (args, input) => git(args, input).toString('utf8').trim();
   try {
+    const git = pinnedFixtureGit(root, env, 1024 * 1024);
+    const id = (args, input) => git(args, input).toString('utf8').trim();
     const version = id(['--version']);
     git(['init', '--bare', '--quiet', `--object-format=${algorithm}`]);
     const path = Buffer.from([102, 105, 108, 101, 255]), before = Buffer.from('before\n'), after = Buffer.from('after\n');
