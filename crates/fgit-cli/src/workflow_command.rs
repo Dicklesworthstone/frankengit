@@ -1,7 +1,7 @@
 //! Explicit local-owner entry point for repository-bound workflow execution.
 //! Parsing never opens a repository or interprets workflow text as authority.
 
-mod artifacts;
+pub(crate) mod artifacts;
 mod dispatch;
 mod merge;
 mod merge_dispatch;

@@ -1,13 +1,20 @@
 //! Immutable operator configuration for the HTTP service's native CI sibling.
 
 use super::{BTreeMap, Duration, GitHashAlgorithm, PathBuf, PrincipalId, RefName, number};
+use crate::workflow_command::artifacts;
 use fgit_node::workflow_watch::WorkflowWatchConfig;
 
 pub(super) fn parse(
     flags: &BTreeMap<&str, &str>,
     inputs: Vec<Vec<u8>>,
+    artifact_selections: Vec<artifacts::Selection>,
+    artifact_inputs: Vec<artifacts::InputSelection>,
 ) -> Result<Option<WorkflowWatchConfig>, String> {
-    if inputs.is_empty() && !flags.keys().any(|name| name.starts_with("--workflow-")) {
+    if inputs.is_empty()
+        && artifact_selections.is_empty()
+        && artifact_inputs.is_empty()
+        && !flags.keys().any(|name| name.starts_with("--workflow-"))
+    {
         return Ok(None);
     }
     if !flags.contains_key("--workflow-trusted-local") {
@@ -108,23 +115,60 @@ pub(super) fn parse(
             .with_merge_candidate(merge.node_config()?)
             .map_err(|error| error.to_string())?;
     }
-    if flags.contains_key("--workflow-artifact-logs") {
-        let artifacts = fgit_node::TrustedWorkflowArtifactConfig::new_with_logs(
-            PathBuf::from(required("--artifact-root")?),
-            Vec::new(),
-            16 * 1024 * 1024,
-            64 * 1024 * 1024,
-        )
-        .map_err(str::to_owned)?;
+    if let Some(artifacts) = artifact_config(flags, artifact_selections, artifact_inputs)? {
         config = config.with_artifacts(artifacts);
     }
     Ok(Some(config))
+}
+
+/// Share the foreground workflow's exact contract and limits. An artifact root
+/// alone may serve retained downloads and does not enable workflow capture.
+fn artifact_config(
+    flags: &BTreeMap<&str, &str>,
+    selections: Vec<artifacts::Selection>,
+    inputs: Vec<artifacts::InputSelection>,
+) -> Result<Option<fgit_node::TrustedWorkflowArtifactConfig>, String> {
+    let mut capture = BTreeMap::new();
+    for (server, command) in [
+        ("--workflow-artifact-logs", "--artifact-logs"),
+        ("--workflow-max-artifact-mib", "--max-artifact-mib"),
+        (
+            "--workflow-max-artifact-total-mib",
+            "--max-artifact-total-mib",
+        ),
+        (
+            "--workflow-max-artifact-input-total-mib",
+            "--max-artifact-input-total-mib",
+        ),
+    ] {
+        if let Some(value) = flags.get(server) {
+            capture.insert(command, *value);
+        }
+    }
+    if capture.is_empty() && selections.is_empty() && inputs.is_empty() {
+        return Ok(None);
+    }
+    if let Some(root) = flags.get("--artifact-root") {
+        capture.insert("--artifact-root", *root);
+    }
+    artifacts::options_with_inputs(&capture, selections, inputs)?
+        .map(|options| options.node_config())
+        .transpose()
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{CredentialInput, parse as parse_server};
     use super::*;
+
+    fn parse(
+        flags: &BTreeMap<&str, &str>,
+        inputs: Vec<Vec<u8>>,
+    ) -> Result<Option<WorkflowWatchConfig>, String> {
+        super::parse(flags, inputs, Vec::new(), Vec::new())
+    }
+
+    mod artifacts;
 
     fn flags() -> BTreeMap<&'static str, &'static str> {
         BTreeMap::from([

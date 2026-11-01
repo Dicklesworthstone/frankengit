@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(super) struct Selection {
+pub(crate) struct Selection {
     workflow: Vec<u8>,
     job: String,
     output: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(super) struct InputSelection {
+pub(crate) struct InputSelection {
     workflow: Vec<u8>,
     consumer: String,
     producer: String,
@@ -19,7 +19,7 @@ pub(super) struct InputSelection {
     destination: Vec<u8>,
 }
 
-pub(super) fn input_selection(value: &str, encoded: bool) -> Result<InputSelection, String> {
+pub(crate) fn input_selection(value: &str, encoded: bool) -> Result<InputSelection, String> {
     let fields = value.splitn(5, ':').collect::<Vec<_>>();
     if fields.len() != 5 {
         return Err("artifact input must be workflow:consumer:producer:output:destination".into());
@@ -45,7 +45,7 @@ pub(super) fn input_selection(value: &str, encoded: bool) -> Result<InputSelecti
 }
 
 #[derive(Debug)]
-pub(super) struct Options {
+pub(crate) struct Options {
     root: PathBuf,
     selections: Vec<Selection>,
     capture_logs: bool,
@@ -55,7 +55,7 @@ pub(super) struct Options {
     input_total_bytes: usize,
 }
 
-pub(super) fn selection(value: &str, encoded: bool) -> Result<Selection, String> {
+pub(crate) fn selection(value: &str, encoded: bool) -> Result<Selection, String> {
     let mut fields = value.splitn(3, ':');
     let workflow = fields.next().ok_or("missing artifact workflow")?;
     let job = fields
@@ -93,7 +93,7 @@ pub(super) fn selection(value: &str, encoded: bool) -> Result<Selection, String>
     })
 }
 
-pub(super) fn options_with_inputs(
+pub(crate) fn options_with_inputs(
     flags: &BTreeMap<&str, &str>,
     mut selections: Vec<Selection>,
     mut inputs: Vec<InputSelection>,
@@ -209,7 +209,7 @@ fn options(
 
 #[cfg(target_os = "linux")]
 impl Options {
-    pub(super) fn node_config(&self) -> Result<fgit_node::TrustedWorkflowArtifactConfig, String> {
+    pub(crate) fn node_config(&self) -> Result<fgit_node::TrustedWorkflowArtifactConfig, String> {
         let selections = self
             .selections
             .iter()
