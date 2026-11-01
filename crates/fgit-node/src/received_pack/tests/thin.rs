@@ -250,11 +250,22 @@ fn forward_ref_and_shifted_ofs_chains_count_depth_from_the_omitted_root() {
             max_delta_depth: 2,
             ..PackLimits::default()
         };
-        assert!(
-            cache
-                .try_reuse_with_held(&keys, &limits, false, &held, &mut || true)
-                .unwrap()
-                .is_none()
+        let converted = cache
+            .try_reuse_with_held(&keys, &limits, false, &held, &mut || true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            converted.receipt().profile(),
+            "received-pack-select-thin-v1"
+        );
+        assert_eq!(converted.receipt().ofs_delta_count(), 0);
+        assert_eq!(converted.receipt().ref_delta_count(), 3);
+        assert_eq!(converted.receipt().maximum_delta_depth(), 2);
+        assert_native_reconstruction(
+            &converted.into_bytes().unwrap(),
+            format,
+            &[b"base"],
+            &[b"middle", b"last", b"sibling"],
         );
         let too_shallow = PackLimits {
             max_delta_depth: 1,
@@ -312,7 +323,15 @@ fn held_objects_neither_widen_nor_complete_the_emitted_selection() {
     );
     let mixed_cache = ReceivedPackCache::new(64 * 1024);
     retain(&mixed_cache, &mixed);
-    assert!(reuse(&mixed_cache, &source.keys, &held, &limits).is_none());
+    let subset = reuse(&mixed_cache, &source.keys, &held, &limits).unwrap();
+    assert_eq!(subset.receipt().profile(), "received-pack-select-thin-v1");
+    assert_native_reconstruction(
+        &subset.into_bytes().unwrap(),
+        format,
+        &[b"base"],
+        &[b"result"],
+    );
+    assert!(reuse(&mixed_cache, &source.keys, &[], &limits).is_none());
     let permitted = reuse(&mixed_cache, &mixed.keys, &held, &limits).unwrap();
     assert_eq!(permitted.receipt().object_count(), 2);
     assert_native_reconstruction(
@@ -629,7 +648,7 @@ fn held_proofs_cannot_bless_corrupted_dependency_metadata() {
 }
 
 #[test]
-fn held_base_candidates_are_unique_external_ref_parents_within_the_held_set() {
+fn held_base_candidates_are_unique_parents_of_selected_targets_within_the_held_set() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let local_id = git_object_id(format, GitObjectKind::Blob, b"local");
         let local = fixture(
@@ -672,20 +691,38 @@ fn held_base_candidates_are_unique_external_ref_parents_within_the_held_set() {
             .into_iter()
             .map(|(id, _)| id)
             .collect();
-        let candidates = cache.held_base_candidates(&held, &mut || true).unwrap();
+        let keys = selected(&[&local, &first, &second, &other, &unheld]);
+        let candidates = cache
+            .held_base_candidates(&keys, &held, &mut || true)
+            .unwrap();
         assert_eq!(candidates, expected);
         assert!(candidates.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(!candidates.contains(&local_id));
+        let without_local: Vec<_> = keys
+            .iter()
+            .copied()
+            .filter(|key| key.id != local_id)
+            .collect();
+        let with_local_root = held_blobs(format, &[b"local", b"shared", b"another"])
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cache
+                .held_base_candidates(&without_local, &held, &mut || true)
+                .unwrap(),
+            with_local_root
+        );
         let irrelevant = BTreeSet::from([local_id]);
         assert!(
             cache
-                .held_base_candidates(&irrelevant, &mut || true)
+                .held_base_candidates(&keys, &irrelevant, &mut || true)
                 .unwrap()
                 .is_empty()
         );
         assert!(
             cache
-                .held_base_candidates(&BTreeSet::new(), &mut || true)
+                .held_base_candidates(&keys, &BTreeSet::new(), &mut || true)
                 .unwrap()
                 .is_empty()
         );
@@ -713,9 +750,10 @@ fn every_held_candidate_scan_checkpoint_cancels_and_releases_snapshot_pins() {
         .map(|(id, _)| id)
         .collect();
     let resident = cache.state.lock().unwrap().resident_bytes;
+    let keys = selected(&[&first, &local, &second]);
     let mut calls = 0;
     let expected = cache
-        .held_base_candidates(&held, &mut || {
+        .held_base_candidates(&keys, &held, &mut || {
             calls += 1;
             true
         })
@@ -723,7 +761,7 @@ fn every_held_candidate_scan_checkpoint_cancels_and_releases_snapshot_pins() {
     assert_eq!(expected.len(), 2);
     for stop in 1..=calls {
         let mut at = 0;
-        let result = cache.held_base_candidates(&held, &mut || {
+        let result = cache.held_base_candidates(&keys, &held, &mut || {
             at += 1;
             at < stop
         });
@@ -747,7 +785,9 @@ fn every_held_candidate_scan_checkpoint_cancels_and_releases_snapshot_pins() {
         );
     }
     assert_eq!(
-        cache.held_base_candidates(&held, &mut || true).unwrap(),
+        cache
+            .held_base_candidates(&keys, &held, &mut || true)
+            .unwrap(),
         expected
     );
     let typed = held_blobs(format, &[b"base-a", b"base-b"]);

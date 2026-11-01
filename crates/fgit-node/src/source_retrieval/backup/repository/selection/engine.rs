@@ -10,25 +10,30 @@ use super::super::approval::witness::WitnessGuard;
 use super::super::approval::{AuthenticatedApprovalObservation, VerifiedApproval};
 use super::super::input::PinnedArchive;
 use super::super::profile::Deadline;
+use super::intake::{CapturedSelection, inspect};
 use super::separation::Separation;
 use super::{Candidate, Operation, Options, Receipt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Checkpoint {
+pub(in super::super) enum Checkpoint {
     ApprovalObserved,
     AllApprovalsAuthenticated,
     WinnerSelected,
     BeforeReplicaAttempt,
     ReplicaUnavailable,
     ReplicaPayloadRead { bytes: usize, total: u64 },
+    BeforeReconstruction,
+    ReconstructionChunkAccepted { chunk: usize, replica: usize },
+    ReconstructionPayloadRead { bytes: usize, total: u64 },
+    ReconstructionPrepared,
     BeforeNative,
     NativeCompleted,
 }
 
 #[derive(Default)]
-struct Progress {
-    native_started: bool,
-    native_completed: bool,
+pub(super) struct Progress {
+    pub(super) native_started: bool,
+    pub(super) native_completed: bool,
 }
 
 pub(super) fn execute_with_checkpoints(
@@ -65,9 +70,24 @@ fn execute_inner(
     {
         return Err("selected replica read allowance is outside its finite profile".into());
     }
+    if options
+        .reconstruction
+        .as_ref()
+        .is_some_and(|reconstruction| {
+            reconstruction.max_read_bytes == 0
+                || reconstruction.max_read_bytes > super::MAX_RECONSTRUCTION_READ_BYTES
+        })
+    {
+        return Err("selected reconstruction read allowance is outside its finite profile".into());
+    }
+    if options.replica_failover.is_some() && options.reconstruction.is_some() {
+        return Err(
+            "selected replica failover and direct reconstruction are mutually exclusive".into(),
+        );
+    }
     #[cfg(not(unix))]
-    if options.replica_failover.is_some() {
-        return Err("selected replica failover requires Unix pinned source descriptors".into());
+    if options.replica_failover.is_some() || options.reconstruction.is_some() {
+        return Err("selected replica acquisition requires Unix pinned source descriptors".into());
     }
     let trust = options.trust.load(deadline)?;
     let mut witness = options
@@ -78,52 +98,30 @@ fn execute_inner(
     // No early return after acquiring the lease may guess that native work has
     // settled. Explicit progress governs the one finalization path below.
     let result = (|| {
-        let mut inspected = Vec::with_capacity(options.candidates.len());
-        for candidate in &options.candidates {
-            deadline.check()?;
-            let observation = trust.inspect_path(&candidate.approval)?;
-            // Authentication creates a retention obligation before any observer,
-            // next candidate, lifetime/eligibility gate or archive operation.
-            if let Some(witness) = witness.as_mut() {
-                witness.observe(&observation)?;
-            }
-            inspected.push(observation);
-            checkpoint.borrow_mut()(Checkpoint::ApprovalObserved)?;
-        }
-        checkpoint.borrow_mut()(Checkpoint::AllApprovalsAuthenticated)?;
-        deadline.check()?;
-        let selected = highest(&inspected)?;
-        let winner = &inspected[selected];
-        if let Some(witness) = witness.as_mut() {
-            witness.require(winner)?;
-        }
-        let separation = witness
-            .as_ref()
-            .map(|witness| Separation::capture(options, witness.directory(), deadline))
+        let inspected = inspect(options, &trust, &mut witness, deadline, |event| {
+            checkpoint.borrow_mut()(event)
+        })?;
+        let separation = (witness.is_some() || options.reconstruction.is_some())
+            .then(|| {
+                Separation::capture(
+                    options,
+                    witness.as_ref().map(WitnessGuard::directory),
+                    deadline,
+                )
+            })
             .transpose()?;
-        let aliases = inspected
-            .iter()
-            .enumerate()
-            .filter_map(|(index, observation)| observation.same_statement(winner).then_some(index))
-            .collect::<Vec<_>>();
-        let selection = selection_json(
-            &options.candidates,
-            &inspected,
+        let CapturedSelection {
+            approval,
+            envelope: _,
             selected,
-            aliases.len(),
+            aliases,
+            json: selection,
+        } = inspected.capture(
+            options,
             witness.as_ref().map(WitnessGuard::snapshot_json),
-            options.replica_failover.is_some(),
-        );
-        checkpoint.borrow_mut()(Checkpoint::WinnerSelected)?;
-        deadline.check()?;
-        let observation = inspected
-            .into_iter()
-            .nth(selected)
-            .ok_or("selected recovery internal candidate mismatch")?;
-        // Only a selected, currently eligible observation can become the evidence
-        // type the native verify/restore engines accept. Lower paths remain unopened.
-        let approval = observation
-            .into_verified(options.expected, options.profile.transfer.max_archive_bytes)?;
+            deadline,
+            |event| checkpoint.borrow_mut()(event),
+        )?;
         let mut guard = || {
             if let Some(witness) = witness.as_ref() {
                 witness.check_selected()?;
@@ -133,7 +131,11 @@ fn execute_inner(
             }
             Ok(())
         };
-        let (native, acquisition) = if let Some(maximum) = options.replica_failover {
+        let (native, acquisition) = if options.reconstruction.is_some() {
+            super::reconstruction::execute(
+                options, &aliases, &approval, deadline, checkpoint, progress, &mut guard,
+            )?
+        } else if let Some(maximum) = options.replica_failover {
             execute_replicas(
                 options, &aliases, &approval, maximum, deadline, checkpoint, progress, &mut guard,
             )?
@@ -165,7 +167,7 @@ fn execute_inner(
     finish_witness(witness, result, progress)
 }
 
-fn execute_native<R: Read + Seek>(
+pub(super) fn execute_native<R: Read + Seek>(
     options: &Options,
     archive: PinnedArchive<R>,
     approval: &VerifiedApproval,
@@ -179,7 +181,9 @@ fn execute_native<R: Read + Seek>(
     approval.check_current()?;
     deadline.check()?;
     progress.native_started = true;
-    let guarded = options.witness.is_some() || options.replica_failover.is_some();
+    let guarded = options.witness.is_some()
+        || options.replica_failover.is_some()
+        || options.reconstruction.is_some();
     let native = match (options.operation, guarded) {
         (Operation::Verify, false) => super::super::restore::verify::execute_selected_in(
             archive,
@@ -344,13 +348,14 @@ pub(super) fn highest(observations: &[AuthenticatedApprovalObservation]) -> Resu
     Ok(selected)
 }
 
-fn selection_json(
+pub(super) fn selection_json(
     candidates: &[Candidate],
     observations: &[AuthenticatedApprovalObservation],
     selected: usize,
     aliases: usize,
     witness: Option<String>,
     replica_failover: bool,
+    range_reconstruction: bool,
 ) -> String {
     let mut digest = Sha256Hasher::new();
     digest.update(b"frankengit/native-backup-candidate-observations/v1\0");
@@ -376,7 +381,7 @@ fn selection_json(
             "{{\"type\":\"repository_backup_checkpoint_selection\",\"schema_version\":1,",
             "\"all_supplied_approvals_authenticated\":true,\"highest_supplied_generation_selected\":true,",
             "\"selected_index\":{},\"selected_head_generation\":{},\"candidates_authenticated\":{},",
-            "\"same_statement_replicas\":{},\"replica_failover\":{},",
+            "\"same_statement_replicas\":{},\"replica_failover\":{}{},",
             "\"candidate_set_sha256\":{},\"trusted_key_id\":{},\"approval_sha256\":{},",
             "\"statement\":{},\"candidates\":[{}],\"payloads_read_during_selection\":false,",
             "\"persistent_high_water_enforced\":{}{},\"newest_checkpoint_verified\":false,",
@@ -387,6 +392,11 @@ fn selection_json(
         candidates.len(),
         aliases,
         replica_failover,
+        if range_reconstruction {
+            ",\"range_reconstruction\":true"
+        } else {
+            ""
+        },
         quote(&hex(&digest.finish())),
         quote(winner.trusted_key_id()),
         quote(&hex(&winner.approval_digest())),

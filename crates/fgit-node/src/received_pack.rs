@@ -27,12 +27,17 @@ use fgit_pack::{
 use fgit_types::GitOid;
 
 mod composition;
+mod selective;
+mod spans;
+
+use spans::WireEntry;
 
 const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_ENTRIES: usize = 8;
+const MAX_ENTRIES: usize = 64;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
 // Includes the entry, Arc headers, bounded FIFO and receipt. The per-object
-// charge also covers temporary dependency/depth/visit arrays during capture.
+// charge also covers temporary dependency/depth/visit arrays during capture,
+// and selection ownership/queue metadata bounded by retained object membership.
 const ENTRY_OVERHEAD: usize = 1024;
 const OBJECT_OVERHEAD: usize = 512;
 
@@ -58,11 +63,19 @@ pub struct ReceivedPackReceipt {
     maximum_delta_depth: usize,
     source_pack_count: usize,
     external_base_count: usize,
+    selective: bool,
 }
 
 impl ReceivedPackReceipt {
     #[must_use]
     pub const fn profile(&self) -> &'static str {
+        if self.selective {
+            return if self.external_base_count == 0 {
+                "received-pack-select-v1"
+            } else {
+                "received-pack-select-thin-v1"
+            };
+        }
         match (self.source_pack_count, self.external_base_count) {
             (1, 0) => "received-pack-v1",
             (_, 0) => "received-pack-concat-v1",
@@ -70,7 +83,7 @@ impl ReceivedPackReceipt {
             (_, _) => "received-pack-concat-thin-v1",
         }
     }
-    /// Number of complete verified sender entry runs in this representation.
+    /// Number of distinct verified sender allocations used by this representation.
     #[must_use]
     pub const fn source_pack_count(&self) -> usize {
         self.source_pack_count
@@ -122,6 +135,9 @@ struct Entry {
     // In the same sorted order as objects. REF parents may be external to the
     // received pack; OFS parents were verified inside its unchanged entry run.
     parents: Vec<Option<GitOid>>,
+    // Exact raw entry boundaries in the same identity order. Established from
+    // the retained bytes, not inferred later from mutable caller metadata.
+    wire: Vec<WireEntry>,
     receipt: ReceivedPackReceipt,
     // Includes both native body sizes and inflated delta-program sizes.
     maximum_object_bytes: usize,
@@ -134,7 +150,8 @@ struct Entry {
 
 #[derive(Debug, Default)]
 struct State {
-    // At most eight entries. The first unpinned entry is the FIFO victim.
+    // At most 64 entries under the same byte budget. The first unpinned entry
+    // is the FIFO victim; additional source slots never add byte capacity.
     entries: Vec<Arc<Entry>>,
     resident_bytes: usize,
     reserved_bytes: usize,
@@ -281,6 +298,9 @@ impl ReceivedPackCache {
         else {
             return Ok(None);
         };
+        let Some(wire) = spans::capture(pack, &metadata, ids_at_offset, limits, deadline)? else {
+            return Ok(None);
+        };
         // The native writer applies the object ceiling to delta programs too.
         maximum_object_bytes = maximum_object_bytes.max(dependencies.maximum_entry_bytes);
         let sha256 = strong_hash(bytes.bytes(), deadline)?;
@@ -295,31 +315,23 @@ impl ReceivedPackCache {
             maximum_delta_depth: dependencies.depth,
             source_pack_count: 1,
             external_base_count: dependencies.external_base_count,
+            selective: false,
         };
-        let binding = metadata_binding(
-            &metadata,
-            &dependencies.parents,
-            &receipt,
+        let mut entry = Entry {
+            bytes: bytes.clone(),
+            objects: metadata,
+            parents: dependencies.parents,
+            wire,
+            receipt,
             maximum_object_bytes,
-            dependencies.total_entry_bytes,
-            dependencies.fanout,
-            deadline,
-        )?;
+            total_entry_bytes: dependencies.total_entry_bytes,
+            maximum_delta_fanout: dependencies.fanout,
+            binding: [0; 32],
+            charge,
+        };
+        entry.binding = metadata_binding(&entry, deadline)?;
         check(deadline)?;
-        Ok(Some(PendingReceivedPack {
-            entry: Entry {
-                bytes: bytes.clone(),
-                objects: metadata,
-                parents: dependencies.parents,
-                receipt,
-                maximum_object_bytes,
-                total_entry_bytes: dependencies.total_entry_bytes,
-                maximum_delta_fanout: dependencies.fanout,
-                binding,
-                charge,
-            },
-            reservation,
-        }))
+        Ok(Some(PendingReceivedPack { entry, reservation }))
     }
 
     #[cfg(test)]
@@ -357,7 +369,7 @@ impl ReceivedPackCache {
         allow_ofs_delta: bool,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Option<ReceivedPackPayload>, PackWriteError> {
-        composition::select(self, keys, limits, allow_ofs_delta, &[], live).map_err(Into::into)
+        self.try_reuse_with_held(keys, limits, allow_ofs_delta, &[], live)
     }
 
     /// Reuse only the exact selected output, allowing external REF bases from
@@ -372,7 +384,10 @@ impl ReceivedPackCache {
         held: &[(GitOid, ObjectType)],
         live: &mut impl FnMut() -> bool,
     ) -> Result<Option<ReceivedPackPayload>, PackWriteError> {
-        composition::select(self, keys, limits, allow_ofs_delta, held, live).map_err(Into::into)
+        if let Some(pack) = composition::select(self, keys, limits, allow_ofs_delta, held, live)? {
+            return Ok(Some(pack));
+        }
+        selective::select(self, keys, limits, held, live).map_err(Into::into)
     }
 
     /// Candidate base identities only: these grant no authority or kind proof.
@@ -381,11 +396,12 @@ impl ReceivedPackCache {
     /// Cache changes after this snapshot can only lose a reuse opportunity.
     pub(crate) fn held_base_candidates(
         &self,
+        keys: &[PackOrderKey],
         held: &BTreeSet<GitOid>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Vec<GitOid>, PackWriteError> {
         check(live)?;
-        if held.is_empty() {
+        if held.is_empty() || keys.is_empty() {
             return Ok(Vec::new());
         }
         let mut snapshot = Vec::new();
@@ -404,26 +420,37 @@ impl ReceivedPackCache {
         let mut candidates = BTreeSet::new();
         for entry in snapshot {
             check(live)?;
-            // A self-contained received run cannot contribute a missing
-            // external base. Do not rescan a large full-history pack for each
-            // small incremental fetch. A false zero can only forfeit reuse.
-            if entry.receipt.external_base_count == 0 {
+            if entry.parents.len() != entry.objects.len() {
                 continue;
             }
-            for parent in &entry.parents {
-                check(live)?;
-                let Some(base) = parent else {
-                    continue;
-                };
-                // Only REF parents may lie outside their original run. An
-                // OFS parent remains present whenever that complete run is sent.
-                if held.contains(base)
-                    && entry
-                        .objects
-                        .binary_search_by_key(base, |object| object.id)
-                        .is_err()
+            // Inspect the smaller membership side. A small fetch from a full
+            // retained history must not rescan every historical dependency.
+            // Internal source parents can become external after selection.
+            let mut consider = |local: usize, key: &PackOrderKey| {
+                if entry.objects[local].kind == key.object_type
+                    && let Some(base) = entry.parents[local]
+                    && held.contains(&base)
+                    && keys.binary_search_by_key(&base, |key| key.id).is_err()
                 {
-                    candidates.insert(*base);
+                    candidates.insert(base);
+                }
+            };
+            if keys.len() < entry.objects.len() {
+                for key in keys {
+                    check(live)?;
+                    if let Ok(local) = entry
+                        .objects
+                        .binary_search_by_key(&key.id, |object| object.id)
+                    {
+                        consider(local, key);
+                    }
+                }
+            } else {
+                for (local, object) in entry.objects.iter().enumerate() {
+                    check(live)?;
+                    if let Ok(position) = keys.binary_search_by_key(&object.id, |key| key.id) {
+                        consider(local, &keys[position]);
+                    }
                 }
             }
         }
@@ -501,6 +528,7 @@ pub struct ReceivedPackPayload {
     // A composed pack emits this header, each complete entry run, then its new
     // native trailer. No expanded body or joined compressed copy is allocated.
     header: Option<[u8; 12]>,
+    selected: Option<Vec<selective::Piece>>,
     part: usize,
     offset: usize,
 }
@@ -516,6 +544,15 @@ impl ReceivedPackPayload {
         };
         if part == 0 {
             Some(header)
+        } else if let Some(selected) = &self.selected {
+            let index = (part - 1) / 2;
+            if let Some(piece) = selected.get(index) {
+                Some(piece.part_bytes(&self.entries, (part - 1) % 2))
+            } else if part == selected.len() * 2 + 1 {
+                Some(self.receipt.checksum.as_bytes())
+            } else {
+                None
+            }
         } else if let Some(entry) = self.entries.get(part - 1) {
             let bytes = entry.bytes.bytes();
             Some(&bytes[12..bytes.len() - self.receipt.checksum.as_bytes().len()])
@@ -587,22 +624,25 @@ fn strong_hash(bytes: &[u8], deadline: &mut impl Deadline) -> Result<[u8; 32], P
     Ok(hash.finish())
 }
 
-fn metadata_binding(
-    objects: &[VerifiedReceivedObject],
-    parents: &[Option<GitOid>],
-    receipt: &ReceivedPackReceipt,
-    maximum_object_bytes: usize,
-    total_entry_bytes: usize,
-    maximum_delta_fanout: usize,
-    deadline: &mut impl Deadline,
-) -> Result<[u8; 32], PackError> {
+fn metadata_binding(entry: &Entry, deadline: &mut impl Deadline) -> Result<[u8; 32], PackError> {
     check(deadline)?;
+    let Entry {
+        objects,
+        parents,
+        wire,
+        receipt,
+        maximum_object_bytes,
+        total_entry_bytes,
+        maximum_delta_fanout,
+        ..
+    } = entry;
     let mut hash = Sha256Hasher::new();
-    hash.update(b"frankengit/received-pack-v3/verified-association\0");
+    hash.update(b"frankengit/received-pack-v4/verified-association\0");
     hash.update(&receipt.sha256);
     hash.update(&[receipt.checksum.as_bytes().len() as u8]);
     hash.update(receipt.checksum.as_bytes());
     hash.update(&receipt.object_count.to_be_bytes());
+    hash.update(&[u8::from(receipt.selective)]);
     for value in [
         receipt.ofs_delta_count,
         receipt.ref_delta_count,
@@ -611,11 +651,12 @@ fn metadata_binding(
         receipt.maximum_delta_depth,
         receipt.source_pack_count,
         receipt.external_base_count,
-        maximum_object_bytes,
-        total_entry_bytes,
-        maximum_delta_fanout,
+        *maximum_object_bytes,
+        *total_entry_bytes,
+        *maximum_delta_fanout,
         objects.len(),
         parents.len(),
+        wire.len(),
     ] {
         hash.update(&(value as u64).to_be_bytes());
     }
@@ -641,8 +682,28 @@ fn metadata_binding(
             None => hash.update(&[0]),
         }
     }
+    for span in wire {
+        check(deadline)?;
+        for value in [
+            span.start,
+            span.header_end,
+            span.payload,
+            span.end,
+            span.declared_size,
+        ] {
+            hash.update(&(value as u64).to_be_bytes());
+        }
+        hash.update(&[spans::kind_code(span.kind)]);
+    }
     check(deadline)?;
     Ok(hash.finish())
+}
+
+fn intact(entry: &Entry, live: &mut impl Deadline) -> Result<bool, PackError> {
+    Ok(
+        strong_hash(entry.bytes.bytes(), live)? == entry.receipt.sha256
+            && metadata_binding(entry, live)? == entry.binding,
+    )
 }
 
 struct Dependencies {

@@ -848,6 +848,9 @@ mod tests;
 /// Durable local execution ownership paired with this custody journal.
 pub mod attempt;
 
+/// Bounded original-candidate custody before a first dispatch.
+pub mod prestart;
+
 /// Launch-fenced execution through the existing journal and workflow engine.
 pub mod execution;
 

@@ -15,6 +15,10 @@ use fgit_schema::json::{self, Value};
 mod reconstruction;
 #[path = "backup_attestation/replicas.rs"]
 mod replicas;
+#[path = "backup_attestation/replication.rs"]
+mod replication;
+#[path = "backup_attestation/selected_reconstruction.rs"]
+mod selected_reconstruction;
 #[path = "backup_attestation/selection.rs"]
 mod selection;
 #[path = "backup_attestation/witness.rs"]

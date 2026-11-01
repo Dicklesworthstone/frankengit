@@ -287,10 +287,25 @@ mod adapter_tests {
                 "--expected-sha256",
                 "--minimum-head-generation",
                 "--replica-failover",
+                "--reconstruct-catalog",
+                "--reconstruction-root",
                 "--max-read-bytes",
             ] {
                 assert!(help.contains(required), "{operation}: {required}");
             }
+        }
+        assert!(text.contains("fg backup replicate"));
+        let mut output = Vec::new();
+        run(&["replicate".into(), "--help".into()], &mut output).unwrap();
+        let help = String::from_utf8(output).unwrap();
+        for required in [
+            "--candidate",
+            "--verification-root",
+            "--verification-instance",
+            "--max-read-bytes",
+            "--witness",
+        ] {
+            assert!(help.contains(required), "replicate: {required}");
         }
         assert!(text.contains("fg backup witness init|inspect"));
         let mut output = Vec::new();

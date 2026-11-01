@@ -200,6 +200,24 @@ pub(in super::super) fn execute_selected_guarded_in<R: Read + Seek>(
     deadline: Deadline,
     guard: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<VerificationReceipt, String> {
+    let verified = verify_selected_pinned_in(
+        archive, approval, scratch, instance, profile, deadline, guard,
+    )?;
+    Ok(verification_receipt(&verified, instance, Some(approval)))
+}
+
+/// The selected native preflight retains its same owned archive for a caller
+/// which subsequently publishes verified replica bytes. This is the ordinary
+/// verifier, including complete graph checks, shutdown and scratch cleanup.
+pub(in super::super) fn verify_selected_pinned_in<R: Read + Seek>(
+    archive: PinnedArchive<R>,
+    approval: &super::VerifiedApproval,
+    scratch: &Path,
+    instance: StoreInstanceId,
+    profile: Profile,
+    deadline: Deadline,
+    guard: &mut impl FnMut() -> Result<(), String>,
+) -> Result<VerifiedSourceArchive<R>, String> {
     guard()?;
     let options = Options {
         input: PathBuf::new(),
@@ -220,10 +238,10 @@ pub(in super::super) fn execute_selected_guarded_in<R: Read + Seek>(
     check_approval_current(Some(approval), deadline).map_err(|error| {
         format!("archive verified and scratch removed; approval check failed: {error}")
     })?;
-    Ok(verification_receipt(&verified, instance, Some(approval)))
+    Ok(verified)
 }
 
-fn verification_receipt<R: Read + Seek>(
+pub(in super::super) fn verification_receipt<R: Read + Seek>(
     verified: &VerifiedSourceArchive<R>,
     instance: StoreInstanceId,
     approval: Option<&super::VerifiedApproval>,

@@ -1,23 +1,21 @@
 //! The native catalog/recovery driver. Every payload pass shares its original
 //! approval, deadline and read ledger; only verified private bytes are linked.
 
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{ErrorKind, Seek, SeekFrom};
-use std::path::PathBuf;
 
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_treefs::integrity::GraphReport;
 
 use super::super::super::{hex, quote, require_absent};
 use super::super::approval::VerifiedApproval;
-use super::super::archive::stream::Seal;
 use super::super::attest::filesystem::Stage;
 use super::super::input::PinnedArchive;
 use super::super::profile::Deadline;
 use super::super::restore::verify::verify_pinned_in;
-use super::catalog::{self, CHUNK_BYTES, Catalog, MAX_CATALOG_BYTES};
+use super::catalog::{CHUNK_BYTES, Catalog};
 use super::io::{BUFFER_BYTES, Checkpoint, Control, Metered, ReadFailure, Source, SourceFailure};
+use super::ranges::{self, DuplicateSources, Replica};
 use super::{MAX_READ_BYTES, MAX_REPLICAS, Operation, Options, Receipt};
 
 pub(super) fn execute_with_checkpoints(
@@ -165,41 +163,6 @@ fn read_payload(
     }
 }
 
-fn read_catalog(
-    options: &Options,
-    original: Seal,
-    control: &Control<'_>,
-) -> Result<Catalog, String> {
-    control.check()?;
-    let mut source =
-        Source::open(&options.input, MAX_CATALOG_BYTES as u64).map_err(SourceFailure::message)?;
-    let expected = catalog::encoded_length(original)?;
-    if source.length() != expected as u64 {
-        return Err(
-            "backup catalog length disagrees with original authenticated range count".into(),
-        );
-    }
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(expected)
-        .map_err(|_| "backup catalog input allocation refused")?;
-    bytes.resize(expected, 0);
-    let mut at = 0;
-    while at < expected {
-        let count = control.metadata_read(&mut source.file, &mut bytes[at..])?;
-        if count == 0 {
-            return Err("backup catalog was truncated while reading".into());
-        }
-        at += count;
-    }
-    if control.metadata_read(&mut source.file, &mut [0; 1])? != 0 {
-        return Err("backup catalog has trailing bytes".into());
-    }
-    source.check().map_err(SourceFailure::message)?;
-    control.check()?;
-    Catalog::parse(&bytes, original)
-}
-
 fn readback_catalog(file: &mut File, expected: &[u8], control: &Control<'_>) -> Result<(), String> {
     control.check()?;
     file.seek(SeekFrom::Start(0))
@@ -222,45 +185,6 @@ fn readback_catalog(file: &mut File, expected: &[u8], control: &Control<'_>) -> 
     control.check()
 }
 
-struct Replica {
-    path: PathBuf,
-    source: Option<Source>,
-    chunks_used: usize,
-    chunks_rejected: usize,
-    unavailable: Option<String>,
-}
-
-fn open_replicas(
-    options: &Options,
-    original: Seal,
-    control: &Control<'_>,
-) -> Result<Vec<Replica>, String> {
-    let mut replicas = Vec::with_capacity(options.replicas.len());
-    let mut identities = BTreeSet::new();
-    for path in &options.replicas {
-        control.check()?;
-        let (source, unavailable) = match Source::open(path, original.bytes) {
-            Ok(source) => {
-                if !identities.insert(source.identity()) {
-                    return Err("backup replicas must name distinct underlying files".into());
-                }
-                (Some(source), None)
-            }
-            Err(SourceFailure::Unavailable(error)) => (None, Some(error)),
-            Err(SourceFailure::Fatal(error)) => return Err(error),
-        };
-        replicas.push(Replica {
-            path: path.clone(),
-            source,
-            chunks_used: 0,
-            chunks_rejected: 0,
-            unavailable,
-        });
-    }
-    control.check()?;
-    Ok(replicas)
-}
-
 fn reconstruct(
     options: &Options,
     deadline: Deadline,
@@ -268,61 +192,22 @@ fn reconstruct(
     control: &Control<'_>,
 ) -> Result<Receipt, String> {
     let original = approval.artifact_seal();
-    let catalog = read_catalog(options, original, control)?;
-    let mut replicas = open_replicas(options, original, control)?;
+    let catalog = ranges::read_catalog(&options.input, original, control)?;
+    let mut replicas = ranges::open_replicas(
+        &options.replicas,
+        original,
+        control,
+        DuplicateSources::Refuse,
+    )?;
     let mut stage = Stage::reserve(&options.output, deadline)?;
     let result = (|| {
-        let mut buffer = [0; BUFFER_BYTES];
-        for chunk in 0..catalog.count() {
-            let start = chunk as u64 * CHUNK_BYTES;
-            let end = original.bytes.min(start + CHUNK_BYTES);
-            let mut accepted = false;
-            for (index, replica) in replicas.iter_mut().enumerate() {
-                control.check()?;
-                let Some(source) = replica.source.as_mut() else {
-                    continue;
-                };
-                if source.length() < end {
-                    replica.chunks_rejected += 1;
-                    continue;
-                }
-                // Failed attempts consume the same ledger. Before each one,
-                // reserve the remaining source ranges plus three native scans.
-                control.reserve(4 * original.bytes - start)?;
-                match copy_candidate(
-                    source,
-                    stage.file(),
-                    start,
-                    end,
-                    catalog.hash(chunk),
-                    control,
-                    &mut buffer,
-                ) {
-                    Ok(true) => {
-                        replica.chunks_used += 1;
-                        control.checkpoint(Checkpoint::ChunkAccepted {
-                            chunk,
-                            replica: index,
-                        })?;
-                        accepted = true;
-                        break;
-                    }
-                    Ok(false) => replica.chunks_rejected += 1,
-                    Err(SourceFailure::Unavailable(error)) => {
-                        replica.chunks_rejected += 1;
-                        replica.unavailable = Some(error);
-                        // A changed/short descriptor is never reconsidered.
-                        replica.source = None;
-                    }
-                    Err(SourceFailure::Fatal(error)) => return Err(error),
-                }
-            }
-            if !accepted {
-                return Err(format!(
-                    "no surviving approved byte range for backup chunk {chunk}"
-                ));
-            }
-        }
+        ranges::copy_ranges(
+            &catalog,
+            &mut replicas,
+            stage.file(),
+            control,
+            3 * original.bytes,
+        )?;
         // This is a custody fence, not a content proof. The same frozen file
         // must then pass full pin, decoding, original commitments and graph.
         stage.synchronize_content(original.bytes, deadline)?;
@@ -338,50 +223,6 @@ fn reconstruct(
         ))
     })();
     result.map_err(|error| stage.failure(error))
-}
-
-fn copy_candidate(
-    source: &mut Source,
-    output: &mut File,
-    start: u64,
-    end: u64,
-    expected: &[u8; 32],
-    control: &Control<'_>,
-    buffer: &mut [u8],
-) -> Result<bool, SourceFailure> {
-    control.check().map_err(SourceFailure::Fatal)?;
-    source.check()?;
-    source
-        .file
-        .seek(SeekFrom::Start(start))
-        .map_err(SourceFailure::from_io)?;
-    output
-        .seek(SeekFrom::Start(start))
-        .map_err(|error| SourceFailure::Fatal(format!("backup staging seek failed: {error}")))?;
-    let mut hash = Sha256Hasher::new();
-    let mut at = start;
-    while at < end {
-        let maximum = (end - at).min(buffer.len() as u64) as usize;
-        let count = match control.read(&mut source.file, &mut buffer[..maximum]) {
-            Ok(0) => {
-                return Err(SourceFailure::Unavailable(
-                    "source became short while reading a range".into(),
-                ));
-            }
-            Ok(count) => count,
-            Err(ReadFailure::Io(error)) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(ReadFailure::Io(error)) => return Err(SourceFailure::from_io(error)),
-            Err(ReadFailure::Gate(error)) => return Err(SourceFailure::Fatal(error)),
-        };
-        hash.update(&buffer[..count]);
-        control
-            .write_all(output, &buffer[..count])
-            .map_err(SourceFailure::Fatal)?;
-        at += count as u64;
-    }
-    source.check()?;
-    control.check().map_err(SourceFailure::Fatal)?;
-    Ok(&hash.finish() == expected)
 }
 
 fn receipt(

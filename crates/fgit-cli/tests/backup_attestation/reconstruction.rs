@@ -1,7 +1,7 @@
 //! Real command composition from a native approval to catalog and repaired bytes.
 use super::*;
 
-fn recovery_arguments(
+pub(super) fn recovery_arguments(
     export: &Value,
     operation: &str,
     input: &str,

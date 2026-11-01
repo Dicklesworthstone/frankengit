@@ -53,6 +53,17 @@ missing witness state is never recreated automatically.
 Selected verification and recovery also support explicit `--replica-failover`
 among copies of the identical highest signed statement, with one aggregate
 `--max-read-bytes` ledger and the original approval/resume binding preserved.
+The paired `--reconstruct-catalog` and `--reconstruction-root` options recover
+directly from complementary intact ranges under that same signed commitment,
+with a private assembled input passed to the native engine and no intermediate
+archive publication.
+
+`fg backup replicate` runs complete native preflight and publishes another exact
+copy of the selected signed backup. It verifies and synchronizes the archive
+before publishing the original approval, supports inode-preserving exact retry,
+and returns a candidate pair usable by `verify-selected` and `recover`. All
+archive passes share the original finite read allowance. See
+[native verified replication](NATIVE_BACKUP_REPLICATION.md).
 
 Export, verification, attestation and restore accept `--max-archive-bytes`, `--max-blob-bytes`,
 `--max-objects` and `--timeout-secs`. For a 2 GiB archive containing up to

@@ -20,6 +20,17 @@ to prevent later omission of known higher or conflicting signed checkpoints;
 Explicit `--replica-failover` can acquire the same selected checkpoint from another
 healthy copy without changing its original approval or signed resume identity;
 all attempted reads and native passes share a finite `--max-read-bytes` allowance.
+When no complete copy remains, paired `--reconstruct-catalog` and
+`--reconstruction-root` options assemble surviving ranges directly into a private
+native recovery input, still requiring the original signed whole-file commitment
+and full native verification.
+
+`fg backup replicate` selects and natively verifies the approved checkpoint,
+then publishes its exact archive and original approval to an independent private
+directory. The archive is durable before approval publication; exact retries
+verify and reuse existing files. No signing key is required. See
+[native verified replication](NATIVE_BACKUP_REPLICATION.md) for commands,
+whole-operation read accounting, and publication failure boundaries.
 
 `fg backup attest` verifies a repository-source archive and issues its detached
 Ed25519 approval in the native executable. It uses the same authority import,

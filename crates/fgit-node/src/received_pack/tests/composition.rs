@@ -175,17 +175,23 @@ fn forward_ref_chains_and_shifted_ofs_runs_reconstruct_without_external_bases() 
         let raw = payload.into_bytes().unwrap();
         assert_eq!(raw, concatenated(format, &[&last, &middle, &root]));
         assert_reconstructs(&raw, format, &[b"base", b"middle", b"last", b"sibling"]);
-        assert!(
-            cache
-                .try_reuse(&keys, &PackLimits::default(), false, &mut || true)
-                .unwrap()
-                .is_none()
+        let converted = cache
+            .try_reuse(&keys, &PackLimits::default(), false, &mut || true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(converted.receipt().profile(), "received-pack-select-v1");
+        assert_eq!(converted.receipt().ofs_delta_count(), 0);
+        assert_eq!(converted.receipt().ref_delta_count(), 3);
+        assert_reconstructs(
+            &converted.into_bytes().unwrap(),
+            format,
+            &[b"base", b"middle", b"last", b"sibling"],
         );
     }
 }
 
 #[test]
-fn overlapping_packs_are_not_a_disjoint_cover_and_an_alternative_can_complete_it() {
+fn overlapping_packs_use_selection_until_an_exact_run_cover_is_available() {
     let left = fixture(
         GitHashAlgorithm::Sha1,
         &[Input::Whole(b"a".to_vec()), Input::Whole(b"b".to_vec())],
@@ -199,9 +205,16 @@ fn overlapping_packs_are_not_a_disjoint_cover_and_an_alternative_can_complete_it
     retain(&cache, &left);
     retain(&cache, &right);
     let keys = union_keys(&[&left, &right]);
-    assert!(reuse(&cache, &keys, &PackLimits::default()).is_none());
+    let selected = reuse(&cache, &keys, &PackLimits::default()).unwrap();
+    assert_eq!(selected.receipt().profile(), "received-pack-select-v1");
+    assert_reconstructs(
+        &selected.into_bytes().unwrap(),
+        GitHashAlgorithm::Sha1,
+        &[b"a", b"b", b"c"],
+    );
     retain(&cache, &tail);
     let payload = reuse(&cache, &keys, &PackLimits::default()).unwrap();
+    assert_eq!(payload.receipt().profile(), "received-pack-concat-v1");
     assert_eq!(payload.receipt().source_pack_count(), 2);
     assert_reconstructs(
         &payload.into_bytes().unwrap(),

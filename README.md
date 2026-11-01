@@ -84,13 +84,19 @@ compressed entries without re-reading blob bodies or recomputing deltas. This
 also supports compatible thin incremental pushes when all their delta bases
 are present in the selected combination. For negotiated, unfiltered full-history
 thin fetches, verified client-held bases can instead satisfy external REF deltas,
-even after the older received base pack is evicted. The combined graph and
-aggregate limits are rechecked, and receipts distinguish self-contained from
-thin responses. Reuse begins only after immutable
+even after the older received base pack is evicted. When whole packs do not fit,
+selective reuse can take individual verified entries from overlapping packs,
+omit unrelated objects, and convert offset deltas to identity references while
+preserving their compressed data. This supports narrower branches and filtered
+or have-reduced selections when their selected or proven held bases suffice.
+The combined graph and aggregate limits are rechecked, and receipts distinguish
+whole-run, selective, self-contained and thin responses. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
 its own representation receipt. This bounded process-local capability is
 described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);
-restarting the service discards it.
+restarting the service discards it. Up to 64 received representations share the
+same byte budget, and bounded cover selection preserves disjoint incremental
+histories without enumerating every possible source combination.
 Network packs also group related versions using verified raw tree-entry
 basenames, improving access to delta candidates within that same bounded
 window. The [ordering contract](docs/UPLOAD_PACK_VISIBILITY_AND_TAGS.md#verified-basename-grouping-for-served-packs)

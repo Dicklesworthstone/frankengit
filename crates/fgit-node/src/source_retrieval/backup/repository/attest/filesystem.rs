@@ -53,6 +53,14 @@ pub(super) fn destination_preflight(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Result of a create-only link. An existing winner still requires the caller's
+/// exact content and custody verification; this value alone proves no bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in super::super) enum StagePublication {
+    Created,
+    Existing,
+}
+
 pub(in super::super) struct Stage {
     destination: PathBuf,
     temporary: PathBuf,
@@ -61,12 +69,40 @@ pub(in super::super) struct Stage {
     file: File,
     identity: Metadata,
     state: &'static str,
+    frozen: bool,
 }
 
 impl Stage {
     pub(in super::super) fn reserve(path: &Path, deadline: Deadline) -> Result<Self, String> {
+        Self::reserve_inner(path, deadline, false)
+    }
+
+    /// Reserve a private candidate even if an exact concurrent publisher may
+    /// already own the final name. Publication remains create-only, and Existing
+    /// must be independently verified before the caller acknowledges a replica.
+    pub(in super::super) fn reserve_reusable(
+        path: &Path,
+        deadline: Deadline,
+    ) -> Result<Self, String> {
+        Self::reserve_inner(path, deadline, true)
+    }
+
+    fn reserve_inner(path: &Path, deadline: Deadline, reusable: bool) -> Result<Self, String> {
         deadline.check()?;
-        destination_preflight(path)?;
+        if reusable {
+            if path.file_name().is_none() {
+                return Err("backup publication requires a named file".into());
+            }
+            let metadata = fs::symlink_metadata(parent(path))
+                .map_err(|error| format!("backup publication parent: {error}"))?;
+            if !metadata.is_dir() || metadata.mode() & 0o077 != 0 {
+                return Err(
+                    "backup publication requires an existing owner-private directory".into(),
+                );
+            }
+        } else {
+            destination_preflight(path)?;
+        }
         let parent_identity =
             fs::symlink_metadata(parent(path)).map_err(|error| error.to_string())?;
         let directory = File::open(parent(path)).map_err(|error| error.to_string())?;
@@ -103,6 +139,7 @@ impl Stage {
                 file,
                 identity,
                 state: "staged",
+                frozen: false,
             };
             if let Err(error) = stage.check_parent().and_then(|()| stage.check_stage(1)) {
                 return Err(stage.failure(error));
@@ -146,8 +183,77 @@ impl Stage {
             return Err("verified backup staging changed during synchronization".into());
         }
         self.identity = after;
+        self.frozen = true;
         self.check_stage(1)?;
         deadline.check()
+    }
+
+    /// Check the original synchronization fence without accepting newly written
+    /// bytes. Native composition retains this stage while consuming a cloned
+    /// descriptor; neither inspection nor final cleanup renews its evidence.
+    pub(in super::super) fn check_frozen_content(&self) -> Result<(), String> {
+        if !self.frozen || self.state != "staged" {
+            return Err("backup private content is not an unpublished frozen stage".into());
+        }
+        self.check_parent()?;
+        self.check_stage(1)?;
+        if !same_file(
+            &self.identity,
+            &self.file.metadata().map_err(|error| error.to_string())?,
+        ) {
+            return Err("frozen backup staging content changed".into());
+        }
+        Ok(())
+    }
+
+    /// Explicit settled disposal, never Drop cleanup. The original fresh-file
+    /// or synchronized content metadata must still match exactly. A changed
+    /// stage is preserved even when no public output has been created.
+    pub(in super::super) fn discard(&mut self) -> Result<(), String> {
+        if self.state != "staged" {
+            return Err(format!(
+                "backup staging disposal refused in state {}",
+                self.state
+            ));
+        }
+        self.check_parent()?;
+        self.check_stage(1)?;
+        if !same_file(
+            &self.identity,
+            &self.file.metadata().map_err(|error| error.to_string())?,
+        ) {
+            return Err("backup staging changed; preserve it instead of deleting".into());
+        }
+        self.remove_staged()
+    }
+
+    /// Pre-native abort may remove an owned partial write without treating its
+    /// bytes as verified. Once content is frozen, exact custody is still required.
+    /// Callers must never use this to guess quiescence after native work begins.
+    pub(in super::super) fn abort_unverified(&mut self) -> Result<(), String> {
+        if self.frozen {
+            return self.discard();
+        }
+        if self.state != "staged" {
+            return Err(format!(
+                "backup staging abort refused in state {}",
+                self.state
+            ));
+        }
+        self.check_parent()?;
+        self.check_stage(1)?;
+        self.remove_staged()
+    }
+
+    fn remove_staged(&mut self) -> Result<(), String> {
+        self.state = "discard_uncertain";
+        fs::remove_file(&self.temporary)
+            .map_err(|error| format!("backup private staging removal: {error}"))?;
+        self.parent
+            .sync_all()
+            .map_err(|error| format!("backup private staging parent synchronization: {error}"))?;
+        self.state = "discarded";
+        Ok(())
     }
 
     fn check_parent(&self) -> Result<(), String> {
@@ -179,7 +285,7 @@ impl Stage {
         Ok(())
     }
 
-    pub(super) fn write_verified(
+    pub(in super::super) fn write_verified(
         &mut self,
         bytes: &[u8],
         deadline: Deadline,
@@ -249,8 +355,23 @@ impl Stage {
 
     pub(in super::super) fn publish(
         &mut self,
-        mut live: impl FnMut() -> Result<(), String>,
+        live: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
+        self.publish_inner(live, false).map(|_| ())
+    }
+
+    pub(in super::super) fn publish_or_existing(
+        &mut self,
+        live: impl FnMut() -> Result<(), String>,
+    ) -> Result<StagePublication, String> {
+        self.publish_inner(live, true)
+    }
+
+    fn publish_inner(
+        &mut self,
+        mut live: impl FnMut() -> Result<(), String>,
+        reusable: bool,
+    ) -> Result<StagePublication, String> {
         live()?;
         self.check_parent()?;
         self.check_stage(1)?;
@@ -260,12 +381,17 @@ impl Stage {
         ) {
             return Err("verified backup output changed after readback".into());
         }
-        super::super::super::require_absent(&self.destination)?;
+        if !reusable {
+            super::super::super::require_absent(&self.destination)?;
+        }
         live()?;
         self.state = "publication_uncertain";
         if let Err(error) = fs::hard_link(&self.temporary, &self.destination) {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 self.state = "staged";
+                if reusable {
+                    return Ok(StagePublication::Existing);
+                }
             }
             return Err(format!("verified backup output publication: {error}"));
         }
@@ -285,7 +411,20 @@ impl Stage {
             .sync_all()
             .map_err(|error| format!("backup approval parent synchronization: {error}"))?;
         self.state = "durable";
-        Ok(())
+        Ok(StagePublication::Created)
+    }
+
+    /// Settle only an unambiguously unpublished owned stage. A possible public
+    /// link or changed frozen content is retained, never inferred to be rollback.
+    pub(in super::super) fn cleanup_unpublished(&mut self) -> Result<(), String> {
+        match self.state {
+            "staged" => self.abort_unverified(),
+            "discarded" | "durable" => Ok(()),
+            state => Err(format!(
+                "backup staging cleanup is unresolved in state {state}; retained_stage={}",
+                self.temporary.display()
+            )),
+        }
     }
 
     pub(in super::super) fn failure(&mut self, error: String) -> String {

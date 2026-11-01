@@ -7,7 +7,8 @@ mod observation;
 pub(super) mod witness;
 
 pub(super) use observation::{
-    AuthenticatedApprovalObservation, SelectionTrustFlags, SelectionTrustOptions,
+    AuthenticatedApprovalObservation, LoadedApprovalTrust, SelectionTrustFlags,
+    SelectionTrustOptions,
 };
 
 use std::collections::BTreeMap;
@@ -35,7 +36,7 @@ use std::sync::{
 const PAYLOAD_TYPE: &str = "application/vnd.frankengit.repository-backup-approval.v1+json";
 const STATEMENT_TYPE: &str = "frankengit-repository-backup-approval-v1";
 const SCOPE: &str = "authority_and_selected_git_objects";
-const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
+pub(super) const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 4096;
 const MAX_KEY_BYTES: usize = 8192;
 const MAX_SIGNED_ARCHIVE_BYTES: u64 = 1 << 40;
@@ -196,6 +197,7 @@ impl ApprovalOptions {
             policy: self.policy,
             trusted_key_id,
             binding: binding(encoded, &der, self.policy),
+            approval_digest: sha256(encoded),
             deadline,
             #[cfg(test)]
             clock: self.clock.clone(),
@@ -268,6 +270,7 @@ pub(super) struct VerifiedApproval {
     policy: Policy,
     trusted_key_id: String,
     binding: [u8; 32],
+    approval_digest: [u8; 32],
     deadline: Deadline,
     #[cfg(test)]
     clock: Option<Arc<AtomicI64>>,
@@ -341,6 +344,12 @@ impl VerifiedApproval {
             return Err("signed backup identity, generation or artifact does not match the verified archive".into());
         }
         Ok(())
+    }
+
+    /// Exact originally authenticated envelope, independent of its semantic
+    /// statement and the broader native resume binding.
+    pub(super) const fn approval_digest(&self) -> [u8; 32] {
+        self.approval_digest
     }
 
     pub(super) const fn binding_digest(&self) -> [u8; 32] {

@@ -3,9 +3,10 @@
 The network receive and upload paths share a bounded, immutable compressed
 representation inside one serving process (`frankengit-1tl9`). After pushes have
 validated and placed their objects, a matching clone's pack-materialization
-step can reuse one original pack or join complete entry runs from several
-packs without re-reading expanded blob bodies, choosing new deltas, or
-recompressing them. This includes an initial full push followed by compatible
+step can reuse one original pack, join complete entry runs from several
+packs, or select individual verified entries without re-reading expanded blob
+bodies, choosing new deltas, or recompressing them. This includes an initial
+full push followed by compatible
 thin incremental pushes, and incremental fetches whose client already holds
 the verified external bases. Normal authorization and graph
 selection still run first; this is not a claim of an I/O-free whole fetch.
@@ -21,7 +22,10 @@ resolve every delta, verify every native object identity and structure, and
 validate the requested closure.
 
 A reusable candidate records every raw entry's verified identity, type and
-expanded length, plus its delta-parent identity when present. Every entry must
+expanded length, plus its delta-parent identity when present. It also binds the
+original byte span, entry header, delta prefix and compressed-data boundary to
+those identities. Capture checks those fields against the original bytes before
+retaining them. Every entry must
 belong to the validated closure and traverse the object fabric's placement
 checks. A thin pack may retain a REF-delta dependency on an object already
 verified by the receive path. This does not make the thin pack independently
@@ -36,13 +40,16 @@ does not publish a ref: repository state still changes only at the ordinary
 authority-head CAS.
 
 Every fetch independently authenticates its basis and computes the visible
-selection. Reuse requires an exact, disjoint cover of those sorted native
-identities and types using complete cached packs. Each candidate must be a
-subset of the selection; overlapping objects cannot be emitted twice. A cache
-cannot authorize an object, add a delta-support object, or widen a filtered,
-shallow, or have-reduced selection.
-An OFS-delta representation also requires the client's negotiated `ofs-delta`
-capability. Self-contained REF deltas do not require that capability.
+selection. Reuse must emit each selected native identity and type exactly once.
+The first path looks for an exact, disjoint cover using complete cached packs.
+If that cannot serve the request, selective reuse considers individual entries
+from the retained sources, including sources containing unrelated objects or
+overlapping representations. Neither path can authorize an object, add a
+delta-support object, or widen a filtered, shallow, or have-reduced selection.
+A verbatim OFS-delta representation requires the client's negotiated
+`ofs-delta` capability. Selective reuse converts its selected OFS entries to REF
+entries, so a self-contained result can also serve a client without that
+capability.
 
 The composed delta graph is checked against the complete selected object set.
 For a self-contained response, every REF base must resolve inside that set with
@@ -67,8 +74,10 @@ objects to the same authenticated basis as the outgoing selection. Hidden or
 unreachable haves cannot add an external base. Cache lookup receives this proof
 only under the thin profile, and each external REF parent must match both an
 identity and its kind. The response still contains exactly the selected objects;
-it does not emit the held base or any other support object. OFS parents remain
-inside their original complete entry run.
+it does not emit the held base or any other support object. Complete-run reuse
+keeps OFS parents in the same run. Selective reuse may omit an original internal
+parent only when that parent has the same current typed held proof; the emitted
+delta then names it by native identity.
 
 This lets an incremental fetch reuse the original thin push even after the
 older base pack has been evicted from the server's representation cache. A
@@ -84,13 +93,42 @@ native object identity across runs. The source order is deterministic: an exact
 single source is preferred, then fewer sources, then FIFO source order. The
 payload streams these segments without allocating a combined compressed buffer.
 
+### Selective entries and overlapping representations
+
+Selective reuse starts only after the complete-run paths miss. It considers
+verified representations of the requested identities, never emits a duplicate,
+and does not copy an unwanted entry just to retain its delta support. A whole
+object is an immediately available root; a delta becomes available when its
+selected parent has a usable representation or its external parent has the
+current typed held proof. Selected parents take precedence over held proofs.
+Choosing a representation only after its parent is available prevents cycles,
+while allowing a later rooted representation to satisfy an identity whose
+earlier alternative participates in a cycle.
+
+Choices use increasing delta depth, selected identity order, and FIFO source
+order with a fixed local tie-break. Each candidate enters the bounded work
+queue at most once. Source integrity is checked lazily before a representation
+is chosen, including bytes omitted from the response. Depth and parent fanout
+must fit the current envelope. An unavailable or over-budget complete choice
+falls back to native construction; the selector does not claim an optimal
+compressed size or search every possible combination.
+
+Chosen entries are emitted in FIFO source order and original offset order
+within a source. Whole-object and existing REF entries preserve their original
+bytes. An OFS entry gets a REF kind and the verified parent's native identity in
+its small prefix; its size declaration and zlib data stay unchanged. The pack
+gets a new count, native trailer and full-byte SHA-256. Streaming reads borrow
+source spans and emit bounded rewritten prefixes without joining compressed
+data or reconstructing objects.
+
 Current object-count, object-size, aggregate-expanded, output-byte, delta-depth,
-and fanout limits apply to the complete output. Object-size checks include inflated delta programs
-as well as native bodies; raw entry inflation and reconstructed object totals
-are bounded separately. The node rechecks the retained bytes' SHA-256 and
-their metadata and parent association with bounded cancellation checkpoints
-before reuse. Bytes are hashed only for candidates participating in a complete
-cover, at most once per retained source per request.
+and fanout limits apply to the complete output. Object-size checks include
+inflated delta programs as well as native bodies; raw entry inflation and
+reconstructed object totals are bounded separately. Omitted entries do not
+consume the output's object or expansion allowance. The retained source still
+occupies its full cache charge and must pass its full-byte SHA-256 and bound
+metadata checks. These checks include cancellation checkpoints and run at most
+once per source within each selection pass.
 Incompatible or unavailable entries use the existing native writer. Cancelled
 work remains cancelled.
 
@@ -103,7 +141,7 @@ work remains cancelled.
 ```
 
 The default is **128 MiB**, including conservative metadata charges. Zero
-disables received-pack capture and reuse. At most eight representations are
+disables received-pack capture and reuse. At most 64 representations are
 retained, and each original input allocation must fit **64 MiB**. Both its
 length and allocation capacity count; a pack outside the retention bound is
 still received normally under the independent receive envelope.
@@ -114,17 +152,33 @@ entries and owns an independent cursor. FIFO eviction skips pinned readers, and
 pending captures reserve their full charge before allocating metadata.
 This is a retained-entry budget, not a total process RSS ceiling.
 
-At most eight sources allow at most 255 cover combinations. Membership and
-pairwise overlaps are computed once; cover enumeration uses these bounded
-summaries. Graph scratch is bounded by the selected object count and the
-existing conservative per-object cache charge. Sources are pinned under the
-cache lock, then comparisons, graph checks and hashing run outside that lock.
+The source-count limit lets a full pack survive a longer sequence of small
+incremental pushes while they still fit the same byte budget. Candidate
+membership is indexed by selected object identity. An object owned by exactly
+one eligible source forces that source into every possible exact cover;
+overlapping sources are then removed and only their affected memberships are
+revisited. Disjoint incremental histories therefore select their complete cover
+without exponential enumeration.
+
+Exact singleton representations retain priority. After forced selections, one
+source that covers every remaining object is also sufficient; otherwise at
+most eight unresolved candidates are exhaustively considered, with at most
+255 residual combinations. Larger unresolved ambiguity moves on to selective
+entry reuse, then the ordinary native writer if necessary. The complete-run
+search preserves exact membership, minimum source count and FIFO tie-breaking
+for its accepted covers. Graph and
+ownership scratch remain bounded by selected membership and the existing
+conservative per-object cache charge. Sources are pinned under the cache lock,
+then comparisons, graph checks and hashing run outside that lock.
+
+Selective search scratch is bounded by retained object membership, including
+alternative representations, under the same conservative metadata charge.
+Reader descriptors retain source allocations rather than duplicate zlib data.
 
 The cache is process-local and disposable. A newly started service rebuilds
 outgoing packs until it receives another eligible representation. Native
-imports and selections that require splitting a cached pack still use the
-native construction path. A self-contained clone also needs every required base
-representation to remain retained; a negotiated thin fetch can instead use its
+imports still use the native construction path. A self-contained clone also
+needs a usable retained representation for every required base; a negotiated thin fetch can instead use its
 authorized client-held bases. This change does not claim restart-persistent
 reuse or completion of the large-history clone bead.
 
@@ -146,12 +200,19 @@ reuse or completion of the large-history clone bead.
   distinct external bases actually used. A thin-capable request that produces
   a self-contained result keeps the corresponding non-thin profile and a zero
   external-base count.
+- Selective entries use `received-pack-select-v1` or
+  `received-pack-select-thin-v1`. These profiles record the actual output's
+  counts and graph limits; rewritten OFS entries count as REF entries.
+  `source_pack_count()` counts the distinct retained source allocations used,
+  even when only part of each source is emitted.
 
 The singleton received profile preserves the sender's bytes and ordering; the
 composed profile preserves the constituent entry runs and replaces their outer
-framing. Neither claims equivalence to the native writer's frozen encoding. Both profiles must
-represent the exact authorized native object set. Local exports continue to
-use their explicit deterministic writer profile.
+framing. Selective profiles preserve compressed data while explicitly recording
+their changed entry framing and selection. None claims equivalence to the native
+writer's frozen encoding. All received profiles must represent the exact
+authorized native object set. Local exports continue to use their explicit
+deterministic writer profile.
 
 ## Regression coverage and execution status
 
@@ -199,8 +260,30 @@ external roots, and preserve cancellation. Native regressions prepare a fetch
 against real client haves, remove fabric access after preparation, and require
 the retained thin representation. A separately seeded receiver checks its
 reconstruction. Non-thin, filtered, shallow and stale-basis requests retain their
-existing boundaries. These additional tests require their own execution result;
-the historical counts below do not include them.
+existing boundaries. The scoped component result below covers cache logic;
+the native regressions still require their own execution result.
+
+The authored long-history regressions cover 64 disjoint sources, forward REF
+chains at the internal and external depth limits, forced ownership propagation,
+small residual choices against an independent exhaustive oracle, and bounded
+fallback for large ambiguity. They also check exact membership, alternative
+valid representations, aggregate limits, cancellation, pinned readers and byte
+eviction. Native regressions receive a full pack followed by twelve thin pushes,
+then require the entire thirteen-source clone without reading object files
+after selection. Three large unrelated pushes independently exercise capture,
+eviction under the unchanged byte budget, and ordinary-writer fallback for the
+same authorized history. These native cases likewise need a separate node run.
+
+The authored selective regressions remove unrelated entries between OFS bases
+and children, use overlapping source representations, and compare the emitted
+native identities and bodies independently of retained offset hints. They pair
+omitted internal bases with permitted held proofs and missing or wrong proofs,
+exercise client capability and selected-output envelopes, and retain integrity
+checks over omitted source bytes. Native cases prepare actual filtered, shallow,
+branch and have-reduced selections before making object files unavailable to
+materialization. Their expected output remains exactly the authenticated
+selection. These cases do not establish restart persistence or whole-repository
+performance.
 
 During the original single-pack implementation session, the node and CLI tests
 and stock-client campaign **were not executed**. That session's repeated node
@@ -218,6 +301,26 @@ cache, composition graph, framing and reconstruction behavior. It does not
 execute native OneNode integration, the CLI, SSH, the stock-client campaign, or
 whole-clone performance measurements; those lanes require separate results at
 the tested revision.
+
+For the thin-reuse source published in
+[`07031c86`](https://github.com/Dicklesworthstone/frankengit/commit/07031c862fba3fdb55e6a6a22a4f70e0b59827e3),
+the production-source component harness passed **43 tests**. An independent
+installed Git 2.51.1 oracle exercised **eight cases**: both native hash domains,
+singleton and composed thin payloads, and base-present/base-missing twins.
+`index-pack --stdin --fix-thin` accepted the production-generated payloads with
+their bases; object bodies and inventory were checked through `cat-file`.
+The same payloads were refused without their bases. This is scoped wire evidence
+using the installed Git binary, not the project's pinned differential campaign
+or execution of the native OneNode regressions.
+
+For the longer-history source published in
+[`445d3c53`](https://github.com/Dicklesworthstone/frankengit/commit/445d3c5379182dae340eb790d4d56c84d47e1d84),
+the production-source component suite passed **57 tests**. A separate installed
+Git 2.51.1 oracle accepted 64-source self-contained REF chains at depth 63 and
+thin chains at depth 64 with their required root, and refused the same thin
+bytes without that root, in both hash domains: **six cases**. Native IDs,
+bodies and complete inventories were checked. These source-bound results
+predate selective-entry reuse and do not execute native OneNode integration.
 
 Run the focused lanes with the pinned toolchain and sufficient build capacity:
 

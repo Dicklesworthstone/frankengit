@@ -43,7 +43,7 @@ impl Attempt {
     }
 }
 
-pub(super) struct Report {
+pub(in super::super) struct Report {
     acquired: usize,
     attempts: Vec<Attempt>,
     duplicates: usize,
@@ -52,7 +52,7 @@ pub(super) struct Report {
 impl Report {
     /// Attempt bytes describe acquisition; totals also include every subsequent
     /// native archive pass through this same ledger, captured after completion.
-    pub(super) fn json(&self, control: &Control<'_>, maximum: u64) -> String {
+    pub(in super::super) fn json(&self, control: &Control<'_>, maximum: u64) -> String {
         format!(
             concat!(
                 "{{\"acquired_candidate_index\":{},\"candidates_attempted\":{},",
@@ -75,15 +75,15 @@ impl Report {
     }
 }
 
-pub(super) struct Acquired<'control, 'scope> {
-    pub(super) archive: PinnedArchive<Metered<'control, 'scope, File>>,
+pub(in super::super) struct Acquired<'control, 'scope> {
+    pub(in super::super) archive: PinnedArchive<Metered<'control, 'scope, File>>,
     // The original descriptor pins the input's metadata while the archive owns
     // its cloned read descriptor. All native work retains this custody check.
-    pub(super) source: Source,
-    pub(super) report: Report,
+    pub(in super::super) source: Source,
+    pub(in super::super) report: Report,
 }
 
-pub(super) fn acquire<'control, 'scope>(
+pub(in super::super) fn acquire<'control, 'scope>(
     options: &Options,
     aliases: &[usize],
     expected: Seal,

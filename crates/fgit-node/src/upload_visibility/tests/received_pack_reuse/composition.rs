@@ -4,6 +4,7 @@
 use super::*;
 use fgit_crypto::{sha1_digest, sha256_digest};
 
+mod long_history;
 mod thin;
 
 struct Increment {
@@ -25,7 +26,7 @@ fn write_size(output: &mut Vec<u8>, mut size: usize) {
     }
 }
 
-fn copy_and_append_delta(base: &[u8], suffix: &[u8]) -> Vec<u8> {
+pub(super) fn copy_and_append_delta(base: &[u8], suffix: &[u8]) -> Vec<u8> {
     assert!(!base.is_empty() && base.len() < (1 << 24));
     let mut program = Vec::new();
     write_size(&mut program, base.len());
@@ -48,7 +49,7 @@ fn copy_and_append_delta(base: &[u8], suffix: &[u8]) -> Vec<u8> {
     program
 }
 
-fn object_header(output: &mut Vec<u8>, kind: u8, mut size: usize) {
+pub(super) fn object_header(output: &mut Vec<u8>, kind: u8, mut size: usize) {
     let mut byte = (kind << 4) | (size & 0xf) as u8;
     size >>= 4;
     while size != 0 {
@@ -59,7 +60,7 @@ fn object_header(output: &mut Vec<u8>, kind: u8, mut size: usize) {
     output.push(byte);
 }
 
-fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
     let length = u16::try_from(bytes.len()).expect("small native metadata and delta fixture");
     let mut output = vec![0x78, 0x01, 0x01];
     output.extend_from_slice(&length.to_le_bytes());
@@ -300,7 +301,13 @@ fn partial_fetches_do_not_import_unselected_bases_or_whole_pack_extras() {
             if case == 0 || case == 2 {
                 assert_eq!(selected_ids(&selection), increment.objects);
             }
-            assert_written_subset(&fixture.node, &head, &selection);
+            if case == 0 || case == 2 {
+                // The incremental blob still depends on a base omitted from
+                // these non-thin requests. Cached custody cannot supply it.
+                assert_written_subset(&fixture.node, &head, &selection);
+            } else {
+                super::selective::assert_exact_selected_subset(&fixture.node, &head, &selection);
+            }
         }
         // A historical request that exactly equals the original full pack
         // remains reusable; reduced history alone does not prohibit a hit.
@@ -314,7 +321,7 @@ fn partial_fetches_do_not_import_unselected_bases_or_whole_pack_extras() {
 }
 
 #[test]
-fn unreachable_and_deleted_branch_objects_prevent_composition_into_a_public_clone() {
+fn unreachable_and_deleted_branch_objects_are_omitted_from_selected_composition() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for extra in [ExtraObject::Unreachable, ExtraObject::PrivateBranch] {
             let fixture = received_fixture(format, extra);
@@ -336,7 +343,24 @@ fn unreachable_and_deleted_branch_objects_prevent_composition_into_a_public_clon
                 .copied()
                 .collect();
             assert_eq!(selected_ids(&selection), expected);
-            assert_written_subset(&fixture.node, &head, &selection);
+            if matches!(extra, ExtraObject::Unreachable) {
+                let payload =
+                    super::selective::without_fabric_objects(&fixture.node, &head, &selection);
+                let receipt = payload.receipt().received().unwrap();
+                assert_eq!(receipt.profile(), "received-pack-select-v1");
+                assert_eq!(receipt.source_pack_count(), 2);
+                assert_eq!(receipt.object_count(), 9);
+                super::selective::assert_exact_selected_bytes(
+                    &payload.into_bytes().unwrap(),
+                    format,
+                    &selection,
+                    &BTreeMap::new(),
+                );
+            } else {
+                // OID ordering can make a public tree/commit depend on a
+                // deleted private base. Reuse is optional; disclosure is exact.
+                super::selective::assert_exact_selected_subset(&fixture.node, &head, &selection);
+            }
         }
     }
 }
