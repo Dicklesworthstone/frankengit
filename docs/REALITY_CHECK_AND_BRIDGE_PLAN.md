@@ -257,6 +257,23 @@ declared source-preserving transfer configuration, ready for a later stable
 verification cut. The failed native build is fully retired, while the earlier
 uncertain source-holder observation and old custody obligations remain separate.
 
+At frozen `495541419f0d295b5b0e6972be9e38fd8495b8a4`, fresh normal capacity on
+`hz2` permits the combined node/CLI **all-target syntax check**. Job
+**30090342971736092** completes Cargo and RCH with exit **0**, acknowledged,
+with source/tree/pair custody released. Every full-receipt entry (**4,850 files /
+152,005,256 bytes**) matches local SHA-256, size and executable mode; all
+**2,584 tracked Rust files** are included. Receipt root:
+`83fcf4049743a5a2ff947b9b8c563b1c0b8f297b90b304f2d60125a02cc3056c`.
+This checks the repaired consumers and test compilation, not test execution or
+a native binary. The follow-on native preflight admits no job: the warm worker
+has 19.66 GiB free against the unchanged 20 GiB growth-plus-floor requirement,
+and no other fresh eligible worker exists. [PR #38](https://github.com/Dicklesworthstone/frankengit/pull/38)
+contains the follow-through and was externally merged at
+`b2371e895b21318f47507c51cef2923cf7c48159` at 15:08:08 UTC. Original Beads
+`.4.59` and `.4.26` comments **5829** and **5830** retain the complete acceptance
+conditions. Current-native campaigns and independent acceptance remain open.
+No default-profile or full/release result is implied.
+
 ## 3. What has improved since October 21
 
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).
