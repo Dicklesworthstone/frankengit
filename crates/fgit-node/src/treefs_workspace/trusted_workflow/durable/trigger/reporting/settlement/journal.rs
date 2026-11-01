@@ -22,6 +22,7 @@ pub(super) fn verify(
     definition: &metadata::Definition,
     source: &Run,
     commit: GitOid,
+    terminal_dispatch: bool,
     budget: &mut Budget,
     live: &dyn Fn() -> bool,
 ) -> Result<(), TrustedWorkflowFailure> {
@@ -84,10 +85,11 @@ pub(super) fn verify(
         || completed.run_id() != recorded.binding().run_id()
         || completed.attempt_id() != recorded.binding().attempt_id()
         || completed.requires_containment()
-        || report
-            .jobs
-            .iter()
-            .any(|job| job.outcome == JobOutcome::Cancelled)
+        || (!terminal_dispatch
+            && report
+                .jobs
+                .iter()
+                .any(|job| job.outcome == JobOutcome::Cancelled))
         || hex(report.graph.digest().bytes().as_bytes()) != hex(&definition.graph)
     {
         return Err(invalid(

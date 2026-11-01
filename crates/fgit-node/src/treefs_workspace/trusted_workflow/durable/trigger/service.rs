@@ -586,10 +586,10 @@ fn attempt(
         receipt.non_green |= !dispatch.succeeded();
         receipt.interrupted |= dispatch.runs().iter().any(|run| run.request_interrupted);
         if !request.checkpoint_is_live() {
-            // A closed process report can precede the event handoff/settlement
-            // fence. A late stop cannot imply that this custody is complete.
+            // Interruption is still non-green, but a completed durable handoff
+            // already discharged this producer's execution responsibility.
             receipt.interrupted = true;
-            receipt.requires_reconciliation = true;
+            receipt.requires_reconciliation |= !poll.execution_settled();
             receipt.non_green = true;
         }
     }

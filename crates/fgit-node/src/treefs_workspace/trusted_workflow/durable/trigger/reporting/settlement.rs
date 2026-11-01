@@ -38,7 +38,7 @@ impl Default for Budget {
 }
 
 /// Call only while the watch scope's original exclusive Owner is held. The
-/// unchanged `check-sources` format is written only after closed(dispatch),
+/// `check-sources` handoff is written only after closed(dispatch),
 /// including workspace/cache drain. It therefore anchors a stronger boundary
 /// than arbitrary completed job proposals. Every listed execution is still
 /// independently checked before reconstructing the missing acknowledgement.
@@ -84,19 +84,18 @@ pub(in super::super) fn recover(
         .iter()
         .filter(|definition| definition.selected)
         .collect::<Vec<_>>();
-    if sources.runs.len() > selected.len()
-        || (sources.runs.is_empty() && !selected.is_empty())
-        || sources
-            .runs
-            .iter()
-            .zip(&selected)
-            .any(|(run, definition)| run.run != definition.run)
+    sources.verify_selection(selected.len(), dispatch.identity)?;
+    if sources
+        .runs
+        .iter()
+        .zip(&selected)
+        .any(|(run, definition)| run.run != definition.run)
     {
         return Err(invalid(
             "watch handoff does not match its original selected child prefix",
         ));
     }
-    // A closed failed prefix may stop a dispatch before later definitions.
+    // A closed failed or explicitly stopped prefix may precede later definitions.
     // Retain precisely that observed prefix, never pretend those jobs ran.
     verify_children(&dispatch.directory.path, &sources, live)?;
     for (run, definition) in sources.runs.iter().zip(selected) {
@@ -124,6 +123,7 @@ pub(in super::super) fn recover(
             definition,
             run,
             sources.commit,
+            sources.terminal.is_some(),
             &mut budget,
             live,
         )?;

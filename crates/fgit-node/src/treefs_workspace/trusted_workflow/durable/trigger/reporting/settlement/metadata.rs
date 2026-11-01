@@ -5,6 +5,7 @@ use super::{
     TrustedWorkflowFailure, checkpoint, hex, invalid, read_private,
 };
 use crate::treefs_workspace::trusted_workflow::durable::dispatch::child_id;
+use fgit_crypto::sha256_digest;
 use fgit_schema::json::{self, Object, Value};
 use std::collections::BTreeSet;
 
@@ -18,6 +19,7 @@ pub(super) struct Definition {
 
 pub(super) struct Dispatch {
     pub(super) directory: PrivateDirectory,
+    pub(super) identity: [u8; 32],
     document: Value,
     pub(super) definitions: Vec<Definition>,
 }
@@ -64,7 +66,7 @@ pub(super) fn dispatch(
     equal_text(subject, "ref_hex", &hex(reference.as_bytes()))?;
     let run_id = bytes::<16>(&key[..32])?;
     let directory = PrivateDirectory::open(&path.join(format!("dispatch-{}", hex(&run_id))))?;
-    let document = read_json(
+    let (document, identity) = read_json_with_identity(
         &directory.path.join("dispatch.json"),
         1024 * 1024,
         budget,
@@ -136,6 +138,7 @@ pub(super) fn dispatch(
     }
     Ok(Dispatch {
         directory,
+        identity,
         document,
         definitions: selected,
     })
@@ -208,6 +211,15 @@ fn read_json(
     budget: &mut Budget,
     live: &dyn Fn() -> bool,
 ) -> Result<Value, TrustedWorkflowFailure> {
+    read_json_with_identity(path, maximum, budget, live).map(|(value, _)| value)
+}
+
+fn read_json_with_identity(
+    path: &Path,
+    maximum: usize,
+    budget: &mut Budget,
+    live: &dyn Fn() -> bool,
+) -> Result<(Value, [u8; 32]), TrustedWorkflowFailure> {
     checkpoint(live)?;
     let bytes = read_private(path, maximum.min(budget.metadata))?;
     budget.metadata = budget
@@ -226,7 +238,7 @@ fn read_json(
     )
     .map_err(|_| invalid("invalid bounded watch custody JSON"))?;
     checkpoint(live)?;
-    Ok(value)
+    Ok((value, sha256_digest(&bytes)))
 }
 
 fn scope(node: &OneNode, fields: &Object) -> Result<(), TrustedWorkflowFailure> {

@@ -57,6 +57,22 @@ impl TrustedWorkflowDispatch {
         &self.runs
     }
 
+    /// Only the native dispatcher constructs this terminal description. A
+    /// stopped empty prefix must retain the exact selected plan and reason;
+    /// absence of child directories is never proof that execution terminated.
+    pub(super) fn stopped_custody(&self) -> Option<(usize, &'static str, [u8; 32])> {
+        self.stop_reason.map(|reason| {
+            (
+                self.definitions
+                    .iter()
+                    .filter(|definition| definition.selected)
+                    .count(),
+                reason,
+                sha256_digest(self.manifest_json().as_bytes()),
+            )
+        })
+    }
+
     fn manifest_json(&self) -> String {
         let definitions = self.definitions.iter().map(|d| format!(
             "{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"graph_sha256\":\"{}\",\"run_id\":\"{}\",\"selected\":{}}}",

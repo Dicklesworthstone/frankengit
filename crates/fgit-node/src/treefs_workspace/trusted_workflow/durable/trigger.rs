@@ -125,8 +125,10 @@ impl OneNode {
     /// A canonical check or unrelated forge update does not create a new event.
     /// A->B->A does: identity binds the actual decision batch, not only the tip.
     /// Source selection is rechecked before existing native dispatch admission.
-    /// Interrupted custody blocks later events in this watch scope until operator
-    /// reconciliation; changing limits or input selectors never releases an ID.
+    /// Unclosed custody blocks later events until reconciliation. A cooperative
+    /// stop with proved process/workspace closure retains its original terminal
+    /// results and settles without rerunning scripts. Changing execution inputs
+    /// never releases an occupied identity.
     pub async fn poll_trusted_ref_workflows_in(
         &self,
         request: &NodeRequestContext,
@@ -722,7 +724,7 @@ fn reserve_event(
 }
 
 fn finish_dispatch(
-    request: &NodeRequestContext,
+    _request: &NodeRequestContext,
     directory: &Path,
     scope: [u8; 32],
     event_id: [u8; 32],
@@ -731,13 +733,28 @@ fn finish_dispatch(
     dispatch: TrustedWorkflowDispatch,
     state: &'static str,
 ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
-    let execution_settled = if closed(&dispatch) && workspace_request_live(request) {
-        reporting::capture(directory, scope, event_id, commit, &dispatch, request).map_err(
+    // Execution cancellation cannot discard the producer's already-owned
+    // terminal handoff. One finite allowance covers every child journal and
+    // the final write decision; it is never renewed per child or retry.
+    const FINALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let finalization_started = std::time::Instant::now();
+    let finalizing = || finalization_started.elapsed() < FINALIZATION_TIMEOUT;
+    let execution_settled = if closed(&dispatch) {
+        reporting::capture(directory, scope, event_id, commit, &dispatch, &finalizing).map_err(
             |error| TrustedWorkflowFailure::Journal {
                 directory: directory.to_path_buf(),
                 detail: format!("{error}; original execution custody retained"),
             },
         )?;
+        if !finalizing() {
+            return Err(TrustedWorkflowFailure::Journal {
+                directory: directory.to_path_buf(),
+                detail: "watch terminal finalization deadline exceeded; original handoff retained"
+                    .to_owned(),
+            });
+        }
+        // Once this bounded record write begins, finish the directory sync.
+        // A crash after the handoff can be reconciled from original receipts.
         write_new(&directory.join("settled"), hex(&event_id).as_bytes())
             .and_then(|()| File::open(directory)?.sync_all())
             .map_err(|error| TrustedWorkflowFailure::Journal {
@@ -759,7 +776,6 @@ fn finish_dispatch(
 fn closed(dispatch: &TrustedWorkflowDispatch) -> bool {
     dispatch.runs().iter().all(|run| {
         run.workspaces_closed
-            && !run.request_interrupted
             && run
                 .execution
                 .jobs

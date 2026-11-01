@@ -176,8 +176,12 @@ reports observed execution/check counts, non-green results, interruption,
 reconciliation, publication pending, and node/service failure separately.
 
 An ordinary failed build can settle and the service can execute a later source
-event. Unknown or interrupted execution, corrupt custody, incomplete publication
-or a worker failure stops the service. An idle clean stop exits 0. A requested
+event. A cooperatively cancelled build also settles when native owners prove
+process, workspace and shared-input closure: one bounded terminal handoff keeps
+its original cancelled checks for the next live publisher. Restart uses those
+same receipts and never reruns the original scripts. Unknown or unclosed
+execution, corrupt custody, incomplete publication or a worker failure stops
+the service. An idle clean stop exits 0. A requested
 shutdown that drains normally but reports non-green execution, interruption,
 unresolved custody or known pending publication exits 1. Startup, controller
 operation (including an exhausted attempt), output or cleanup failure exits 2.
@@ -194,6 +198,12 @@ and verified closed execution/journal records before readiness. This performs
 no script execution or CI-ref publication. See
 [native-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md) for its finite
 verification profile.
+
+Stopped dispatch handoffs bind the original selected count, terminal reason and
+exact dispatch-plan digest. This also supports a stopped dispatch that selected
+work but terminated before its first child, when that explicit terminal record
+exists. Missing children alone do not prove a stop. An interruption during
+earlier source discovery or an unfinished execution owner remains fenced.
 
 For new merge-candidate events, startup may also defer a versioned intent whose
 original scope, candidate artifacts and complete execution configuration verify
