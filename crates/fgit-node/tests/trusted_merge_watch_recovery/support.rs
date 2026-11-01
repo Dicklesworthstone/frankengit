@@ -1,5 +1,5 @@
-//! Real prestart custody: a bootstrapping node can select and prepare, but its
-//! ordinary publication gate refuses before scripts or a start fence exist.
+//! Real prestart custody: a verified read-only node selects and prepares, but
+//! its ordinary receive gate refuses before scripts or a start fence exist.
 #[path = "../trusted_merge_workflow/support.rs"]
 mod base;
 pub(super) use base::*;
@@ -20,6 +20,7 @@ use fgit_pack::{
 };
 use fgit_runner::workflow::WorkflowLimits;
 use fgit_schema::json::{self, Value};
+use fgit_types::cell::{CellState, CellTransitionCause};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, RefName};
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
@@ -393,13 +394,33 @@ impl Pending {
             branch(&f, ci_ref(), None, f.source, b"prestart-seed-ci");
         }
         f.node.take().unwrap().shutdown().unwrap();
-        f.node = Some(OneNode::open_existing(f.config.clone()).unwrap());
+        let mut node = OneNode::open_existing(f.config.clone()).unwrap();
+        let head = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
+        // Explicitly permit native current reads while withholding receive
+        // intake. The public watcher creates the real original intent; no
+        // successful execution or publication is removed to manufacture it.
+        node.transition_cell_state(
+            CellState::VerifiedReadOnly,
+            CellTransitionCause::Operator,
+            head.receipt().generation(),
+        )
+        .unwrap();
+        f.node = Some(node);
         let before = generation(f.node());
         let directory = match poll(&f, mode, &config(), &inputs(), Default::default(), None) {
-            Err(TrustedWorkflowFailure::Journal { directory, .. }) => directory,
+            Err(TrustedWorkflowFailure::Journal { directory, detail }) => {
+                assert!(
+                    detail.contains("StateAdmitsNoStaging") && detail.contains("VerifiedReadOnly"),
+                    "expected the native read-only receive refusal: {detail}"
+                );
+                directory
+            }
             Err(error) => panic!("prepublication refusal must retain original custody: {error}"),
             Ok(observation) => panic!(
-                "bootstrapping node published or dispatched: {}",
+                "read-only node published or dispatched: {}",
                 observation.json
             ),
         };
@@ -442,8 +463,12 @@ impl Pending {
             .runtime()
             .block_on(node.authenticate_authority_head())
             .unwrap();
-        node.bring_into_service(head.receipt().generation())
-            .unwrap();
+        node.transition_cell_state(
+            CellState::Serving,
+            CellTransitionCause::Operator,
+            head.receipt().generation(),
+        )
+        .unwrap();
     }
     pub(super) fn poll(&self) -> Result<Poll, TrustedWorkflowFailure> {
         poll(

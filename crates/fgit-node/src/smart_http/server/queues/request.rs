@@ -39,6 +39,9 @@ pub(super) enum Operation {
         number: QueueNumber,
         boundary: String,
     },
+    Prepare {
+        number: QueueNumber,
+    },
 }
 
 #[derive(Debug)]
@@ -136,6 +139,22 @@ impl<'a> Request<'a> {
                 }) {
                     return Err(ApiError::media());
                 }
+                if let Some(number_text) = suffix
+                    .strip_prefix('/')
+                    .and_then(|text| text.strip_suffix("/prepare"))
+                {
+                    if matches!(head.body, BodyFraming::ContentLength(size)
+                        if size > super::preparation::MAX_COMMAND_BYTES as u64)
+                    {
+                        return Err(ApiError::too_large());
+                    }
+                    return Ok(Self {
+                        repository_route,
+                        operation: Operation::Prepare {
+                            number: number(number_text)?,
+                        },
+                    });
+                }
                 if matches!(head.body, BodyFraming::ContentLength(size) if size > MAX_COMMAND_BYTES as u64)
                 {
                     return Err(ApiError::too_large());
@@ -176,6 +195,14 @@ impl<'a> Request<'a> {
             self.operation,
             Operation::Mutate { .. } | Operation::Land { .. } | Operation::LandCandidate { .. }
         )
+    }
+
+    pub(in crate::smart_http::server) const fn accepts_body(&self) -> bool {
+        self.is_mutation() || self.is_preparation()
+    }
+
+    pub(super) const fn is_preparation(&self) -> bool {
+        matches!(self.operation, Operation::Prepare { .. })
     }
 
     pub(super) const fn is_landing(&self) -> bool {

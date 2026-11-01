@@ -20,7 +20,7 @@ use fgit_forge::preparation::{MergeSourceError, PreparationError, PreparationLim
 use fgit_types::RefusalCode;
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, Service, head::Envelope};
 use fgit_wire::visibility::RefVisibility;
-pub(super) use output::Reply;
+pub(in crate::smart_http::server) use output::{Reply, build_queue};
 pub(super) use request::Request;
 use std::io::Read;
 
@@ -186,7 +186,7 @@ fn resolution_error(error: &ResolutionError) -> ApiError {
         ResolutionError::ReconstructionMismatch => ApiError::unavailable(),
     }
 }
-fn preparation_error(error: &NodeWorkspaceRefusal) -> ApiError {
+pub(in crate::smart_http::server) fn preparation_error(error: &NodeWorkspaceRefusal) -> ApiError {
     match error {
         NodeWorkspaceRefusal::RefUnavailable => ApiError::not_found(),
         NodeWorkspaceRefusal::StaleWorkspaceBase => {

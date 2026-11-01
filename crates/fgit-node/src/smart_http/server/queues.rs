@@ -2,19 +2,20 @@
 //! Membership grants never authorize the separate protected code publication.
 mod candidate;
 mod output;
+mod preparation;
 mod request;
 #[cfg(test)]
 mod tests;
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 
 use fgit_authority::IdempotencyKey;
 use fgit_types::DecisionOutcome;
-use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
+use fgit_wire::smart_http::{BodyFraming, HttpLimits, HttpVersion, Service, head::Envelope};
 use fgit_wire::visibility::RefVisibility;
 
 use super::super::drive_request_while;
-use super::issues::{ApiError, Reply, admission_error, read_form};
+use super::issues::{ApiError, Reply as JsonReply, admission_error, read_form};
 use super::{Profile, Status, retry_key};
 use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
@@ -26,6 +27,19 @@ pub(super) use request::Request;
 const ROUTE: &str = "/api/v1/queues";
 const MAX_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+pub(super) enum Reply {
+    Json(JsonReply),
+    Preparation(super::pulls::PreparationReply),
+}
+impl Reply {
+    pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
+        match self {
+            Self::Json(reply) => reply.send(writer, version),
+            Self::Preparation(reply) => reply.send(writer, version),
+        }
+    }
+}
 
 pub(super) fn is_route(target: &str) -> bool {
     target
@@ -47,7 +61,13 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    let permitted = if request.is_landing() {
+    let permitted = if request.is_preparation() {
+        profile.config.http_queue_management_enabled()
+            && profile.allow_pulls()
+            && grant.permits(Service::UploadPack)
+            && grant.permits_pulls(false)
+            && grant.permits_queues(false)
+    } else if request.is_landing() {
         profile.config.http_queue_landings_enabled() && grant.permits_queue_landing()
     } else {
         profile.config.http_queue_management_enabled()
@@ -82,6 +102,20 @@ pub(super) fn execute(
     let authenticated = session
         .authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    if let Operation::Prepare { number } = &request.operation {
+        // The candidate encoder owns its binary response envelope. Queue
+        // metadata's smaller JSON cap does not narrow the downloadable bundle.
+        return preparation::execute(
+            node,
+            *number,
+            session,
+            framing,
+            reader,
+            limits,
+            maximum_response,
+        )
+        .map(Reply::Preparation);
+    }
     let principal = authenticated.principal_id();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
@@ -114,11 +148,11 @@ pub(super) fn execute(
                 &mut live,
             )
             .map_err(read_error)?;
-            Ok(Reply {
+            Ok(Reply::Json(JsonReply {
                 status: Status::Success,
                 body: output::list(node, *page, &selected, maximum)?,
                 terminal: None,
-            })
+            }))
         }
         Operation::Show {
             number,
@@ -131,7 +165,7 @@ pub(super) fn execute(
                 &mut live,
             )
             .map_err(read_error)?;
-            Ok(Reply {
+            Ok(Reply::Json(JsonReply {
                 status: if selected.queue.is_some() {
                     Status::Success
                 } else {
@@ -139,7 +173,7 @@ pub(super) fn execute(
                 },
                 body: output::show(node, *number, *expected_head, &selected, maximum)?,
                 terminal: None,
-            })
+            }))
         }
         Operation::LandCandidate { boundary, .. } => {
             let bytes = super::pulls::read_candidate_upload(reader, framing, limits)?;
@@ -180,14 +214,14 @@ pub(super) fn execute(
                 );
                 return Err(ApiError::unknown());
             }
-            Ok(Reply {
+            Ok(Reply::Json(JsonReply {
                 status: match terminal.outcome {
                     DecisionOutcome::Committed { .. } => Status::Success,
                     DecisionOutcome::Refused { .. } => Status::Conflict,
                 },
                 body,
                 terminal: Some((tx, terminal)),
-            })
+            }))
         }
         Operation::Mutate { .. } | Operation::Land { .. } => {
             let limits = HttpLimits {
@@ -256,14 +290,15 @@ pub(super) fn execute(
                 );
                 return Err(ApiError::unknown());
             }
-            Ok(Reply {
+            Ok(Reply::Json(JsonReply {
                 status: match terminal.outcome {
                     DecisionOutcome::Committed { .. } => Status::Success,
                     DecisionOutcome::Refused { .. } => Status::Conflict,
                 },
                 body,
                 terminal: Some((tx, terminal)),
-            })
+            }))
         }
+        Operation::Prepare { .. } => Err(ApiError::unavailable()),
     }
 }

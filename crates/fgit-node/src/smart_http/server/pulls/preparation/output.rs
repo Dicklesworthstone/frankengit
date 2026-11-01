@@ -6,13 +6,14 @@ use super::super::super::{
     Status,
     issues::{ApiError, quote, ref_fields},
 };
-use crate::OneNode;
+use crate::{OneNode, PreparedQueueHeadBundle};
 use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedMerge, ResolvedPath};
 use fgit_forge::preparation::{
     ConflictKind, MergeCommitStyle, MergeEntry, MergePreparation, MergeProfile,
 };
+use fgit_forge::{AggregateVersion, QueueNumber};
 use fgit_types::RepositoryAuthorityHeadId;
 use fgit_wire::smart_http::HttpVersion;
 use std::io::{self, Write};
@@ -183,7 +184,46 @@ pub(super) fn build(
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
     build_inner(
-        node, head, subject, outcome, bundle, None, profile, style, maximum, live,
+        node, head, subject, outcome, bundle, None, None, profile, style, maximum, live,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct QueueContext {
+    number: QueueNumber,
+    expected_version: AggregateVersion,
+}
+
+pub(in crate::smart_http::server) fn build_queue(
+    node: &OneNode,
+    prepared: PreparedQueueHeadBundle,
+    profile: MergeProfile,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<Reply, ApiError> {
+    let PreparedQueueHeadBundle {
+        number,
+        expected_version,
+        source_head,
+        subject,
+        outcome,
+        bundle,
+    } = prepared;
+    build_inner(
+        node,
+        source_head,
+        &subject,
+        &outcome,
+        bundle,
+        None,
+        Some(QueueContext {
+            number,
+            expected_version,
+        }),
+        profile,
+        MergeCommitStyle::TwoParent,
+        maximum,
+        live,
     )
 }
 
@@ -205,6 +245,7 @@ pub(super) fn build_resolved(
         &MergePreparation::Clean(plan),
         Some(bundle),
         Some(&resolutions),
+        None,
         MergeProfile::PathMergeV1,
         style,
         maximum,
@@ -219,6 +260,7 @@ fn build_inner(
     outcome: &MergePreparation,
     bundle: Option<Vec<u8>>,
     resolutions: Option<&[ResolvedPath]>,
+    queue: Option<QueueContext>,
     profile: MergeProfile,
     style: MergeCommitStyle,
     maximum: usize,
@@ -236,6 +278,9 @@ fn build_inner(
     {
         return Err(ApiError::unavailable());
     }
+    if queue.is_some() && (resolutions.is_some() || style != MergeCommitStyle::TwoParent) {
+        return Err(ApiError::unavailable());
+    }
     let bundle_digest = bundle.as_ref().map(|bytes| hex(&sha256_digest(bytes)));
     checkpoint(live)?;
     let id = head.as_internal_object_id();
@@ -246,13 +291,18 @@ fn build_inner(
     );
     let mut metadata = format!(
         concat!(
-            "{{\"type\":\"merge_preparation\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
+            "{{\"type\":{},\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
             "\"repository_incarnation\":{},\"object_format\":{},\"source_head\":{},\"snapshot_token\":{},",
             "\"profile\":{},\"method\":{},\"read_only\":true,\"objects_staged\":false,",
             "\"transaction_created\":false,\"published\":false,\"merge_authorized\":false,",
             "\"subject\":{{\"pull_request\":{},\"pull_request_version\":{},\"policy_epoch\":{},",
             "{},{},\"source_tip\":{},\"target_tip\":{}}},"
         ),
+        quote(if queue.is_some() {
+            "queue_merge_preparation"
+        } else {
+            "merge_preparation"
+        }),
         quote(&node.tenant_id.to_string()),
         quote(&node.repository_id.to_string()),
         quote(&node.repository_incarnation_id().to_string()),
@@ -275,6 +325,35 @@ fn build_inner(
         quote(&subject.source_tip.to_string()),
         quote(&subject.target_tip.to_string())
     );
+    if let Some(queue) = queue {
+        append(
+            &mut metadata,
+            &format!(
+                "\"queue\":{{\"number\":{},\"expected_version\":{}}},",
+                queue.number.get(),
+                queue.expected_version.get()
+            ),
+        )?;
+        let landing = match outcome {
+            MergePreparation::Clean(plan) => format!(
+                "{{\"api_path\":{},\"command_form\":{}}}",
+                quote(&format!(
+                    "/api/v1/queues/{}/land-candidate",
+                    queue.number.get()
+                )),
+                quote(&queue_landing_form(
+                    node.repository_incarnation_id(),
+                    node.object_format,
+                    queue,
+                    subject,
+                    plan.base,
+                    plan.commit,
+                ))
+            ),
+            _ => "null".to_owned(),
+        };
+        append(&mut metadata, &format!("\"landing\":{landing},"))?;
+    }
     if let Some(paths) = resolutions {
         resolution_metadata(&mut metadata, paths, live)?;
     }
@@ -375,6 +454,40 @@ fn build_inner(
             live,
         ),
     }
+}
+
+/// Only coordinates are returned. A fresh landing credential and key, current
+/// queue/PR/policy validation and independent evidence still own publication.
+/// Hex references make the exact form reusable without lossy UTF-8 conversion
+/// or ambiguous escaping, including non-UTF-8 branches.
+fn queue_landing_form(
+    incarnation: fgit_types::RepositoryIncarnationId,
+    format: fgit_types::GitHashAlgorithm,
+    queue: QueueContext,
+    subject: &ReviewSubject,
+    base: fgit_types::GitOid,
+    commit: fgit_types::GitOid,
+) -> String {
+    format!(
+        concat!(
+            "expected_incarnation={}&object_format={}&expected_version={}",
+            "&pull_request={}&expected_pull_request_version={}&expected_policy_epoch={}",
+            "&source_ref_hex={}&target_ref_hex={}&expected_source_tip={}&expected_target_tip={}",
+            "&merge_base={}&expected_commit={}"
+        ),
+        incarnation,
+        format.as_str(),
+        queue.expected_version.get(),
+        subject.pull_request.get(),
+        subject.pull_request_version.get(),
+        subject.policy_epoch.get(),
+        hex(subject.source_ref.as_bytes()),
+        hex(subject.target_ref.as_bytes()),
+        subject.source_tip,
+        subject.target_tip,
+        base,
+        commit,
+    )
 }
 
 fn contains(

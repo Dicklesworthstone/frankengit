@@ -1540,6 +1540,9 @@ fn serve_connection(
         // A Git receive takes its admission inside the node instead, once its
         // upload is complete, so a slow pack upload holds no writer slot.
         let _writer = if native_mutation
+            || queue_request
+                .as_ref()
+                .is_some_and(|request| request.accepts_body())
             || pull_request
                 .as_ref()
                 .is_some_and(|request| request.accepts_body())
@@ -1559,7 +1562,7 @@ fn serve_connection(
             .is_some_and(|request| !request.is_mutation())
             || queue_request
                 .as_ref()
-                .is_some_and(|request| !request.is_mutation())
+                .is_some_and(|request| !request.accepts_body())
             || pull_request
                 .as_ref()
                 .is_some_and(|request| !request.accepts_body())
@@ -1810,6 +1813,8 @@ fn log_cleanup(error: &NodeRefusal) {
 
 #[cfg(test)]
 mod tests {
+    mod queue_preparation;
+
     #[test]
     fn review_byte_line_counts_preserve_empty_final_and_binary_fragments() {
         let cases: &[(&[u8], usize)] = &[

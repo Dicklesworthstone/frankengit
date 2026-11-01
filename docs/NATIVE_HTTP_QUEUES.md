@@ -21,7 +21,7 @@ Add the required independent scopes to a credential row:
 
 | Scope | Permission |
 |---|---|
-| `queues-read` | List queues and read one queue |
+| `queues-read` | List/read queues; with `read,pulls-read`, prepare an exact queue-head candidate |
 | `queues-write` | Enqueue, dequeue and reorder |
 | `queues-land` | Land exactly the first queued PR by fast-forward or an uploaded two-parent candidate, subject to its target ref ceiling and canonical protection |
 | `outcomes-read` | Recover a prior transaction through the separate outcome API |
@@ -58,14 +58,22 @@ The paths below follow the configured repository route, for example
 | `POST` | `/api/v1/queues/{number}/enqueue` | Insert or replace an exact PR candidate |
 | `POST` | `/api/v1/queues/{number}/dequeue` | Remove an entry with an explicit reason |
 | `POST` | `/api/v1/queues/{number}/reorder` | Set the complete nonempty execution order |
+| `POST` | `/api/v1/queues/{number}/prepare` | Read-only preparation of the exact queue-head/PR candidate at one authority head |
 | `POST` | `/api/v1/queues/{number}/land` | Atomically fast-forward the exact queue head and merge its PR |
 | `POST` | `/api/v1/queues/{number}/land-candidate` | Atomically publish an uploaded two-parent candidate for the exact queue head |
 
-Use `Authorization: Bearer <token>`. Reads accept no body or idempotency header.
+Use `Authorization: Bearer <token>`. List/show reads accept no body or idempotency header.
 Every write requires the original client `Idempotency-Key` header. Management
 and fast-forward landing use `Content-Type: application/x-www-form-urlencoded`.
 Candidate landing uses the closed multipart profile below. Unknown or inapplicable fields, duplicate scalar
 fields, malformed encodings and noncanonical integer spellings refuse.
+
+Candidate preparation is a body-bearing read requiring `--allow-pulls` and
+`--allow-queues`, plus `read,pulls-read,queues-read` on the same credential. It
+accepts no idempotency key and returns the existing binary candidate bundle
+profile with exact original queue landing coordinates. See
+[HTTP queue-head preparation](NATIVE_HTTP_QUEUE_PREPARATION.md) for its closed
+input, finite bounds and independent review/landing permissions.
 
 ## Exact write coordinates
 
