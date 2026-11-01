@@ -1,6 +1,6 @@
 //! Parse exact-version commands and explicit append intents before node or file IO.
 use fgit_authority::IdempotencyKey;
-use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
+use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber, MilestoneNumber};
 use fgit_forge::event::issue::{
     IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES,
     MAX_LABELS,
@@ -68,6 +68,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             | "append-comment"
             | "assign"
             | "unassign"
+            | "set-milestone"
+            | "clear-milestone"
     );
     if !mutate && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
@@ -115,6 +117,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                     || (action != "append-comment" && flag == "--expected-version")
                     || (matches!(action, "open" | "edit") && matches!(flag, "--title" | "--label"))
                     || (matches!(action, "assign" | "unassign") && flag == "--assignee")
+                    || (action == "set-milestone"
+                        && matches!(flag, "--milestone" | "--expected-milestone-version"))
                     || (matches!(action, "open" | "edit" | "comment" | "append-comment")
                         && matches!(flag, "--body" | "--body-file"))
             } else {
@@ -250,6 +254,16 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 "unlock" => IssueAction::Unlock,
                 "assign" => IssueAction::Assign { assignees },
                 "unassign" => IssueAction::Unassign { assignees },
+                "set-milestone" => IssueAction::SetMilestone {
+                    milestone: MilestoneNumber::try_new(decimal(required(&flags, "--milestone")?)?)
+                        .ok_or("milestone number must be positive")?,
+                    expected_milestone_version: AggregateVersion::try_new(decimal(required(
+                        &flags,
+                        "--expected-milestone-version",
+                    )?)?)
+                    .ok_or("milestone version must be positive")?,
+                },
+                "clear-milestone" => IssueAction::ClearMilestone,
                 _ => unreachable!("action whitelist"),
             };
             let command = IssueCommand {
@@ -332,7 +346,7 @@ fn required<'a>(flags: &BTreeMap<&str, &'a str>, name: &str) -> Result<&'a str, 
         .copied()
         .ok_or_else(|| format!("{name} is required"))
 }
-pub(super) fn decimal(text: &str) -> Result<u64, String> {
+pub(crate) fn decimal(text: &str) -> Result<u64, String> {
     if text.is_empty()
         || !text.bytes().all(|byte| byte.is_ascii_digit())
         || (text.len() > 1 && text.starts_with('0'))
@@ -348,7 +362,7 @@ pub(super) const fn expected_version(command: &IssueCommand) -> u64 {
         ExpectedVersion::Exactly(version) => version.get(),
     }
 }
-pub(super) fn head_token(head: RepositoryAuthorityHeadId) -> String {
+pub(crate) fn head_token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id();
     let bytes = id
         .digest()
@@ -358,7 +372,7 @@ pub(super) fn head_token(head: RepositoryAuthorityHeadId) -> String {
         .collect::<String>();
     format!("alg:{}:{bytes}", id.algorithm().code_point())
 }
-pub(super) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
+pub(crate) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     let text = text.strip_prefix("head:").unwrap_or(text);
     let (algorithm, digest) = text
         .strip_prefix("alg:")

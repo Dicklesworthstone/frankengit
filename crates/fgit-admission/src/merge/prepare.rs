@@ -105,6 +105,9 @@ pub fn prepare_event(
         ForgeEventPayload::IssueChangedNative(_) => {
             matches!(event.aggregate, fgit_forge::AggregateId::Issue(_))
         }
+        ForgeEventPayload::MilestoneChangedNative(_) => {
+            matches!(event.aggregate, fgit_forge::AggregateId::Milestone(_))
+        }
         ForgeEventPayload::ReviewProtectionChanged(_) => {
             event.aggregate == fgit_forge::AggregateId::ReviewProtection
         }
@@ -314,11 +317,42 @@ pub fn prepare_event(
                 return Err(RefusalCode::EvidenceInvalid);
             }
             verify_issue_seal(context, event, attempt)?;
+            // A selected milestone is a second exact predecessor in this same
+            // authority basis. Its open-state replay is owned by admission;
+            // this independent preparation gate also binds its frontier.
+            if let fgit_forge::event::issue::IssueAction::SetMilestone {
+                milestone,
+                expected_milestone_version,
+            } = &change.action
+            {
+                let milestone_stream = AsciiSlug::try_new(
+                    "forge_stream",
+                    fgit_forge::AggregateId::Milestone(*milestone).to_string().as_bytes(),
+                )
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                if resolved.forge.entry(milestone_stream)
+                    .map(|entry| entry.successor_position())
+                    != Some(expected_milestone_version.get())
+                {
+                    return Err(RefusalCode::EvidenceStale);
+                }
+            }
             (
                 ForgeEventKind::IssueChanged { issue: entity },
                 Vec::new(),
                 None,
             )
+        }
+        ForgeEventPayload::MilestoneChangedNative(change) => {
+            change.action.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            super::native::milestones::verify_event_seal(context, event, attempt)?;
+            (ForgeEventKind::MilestoneChanged { milestone: entity }, Vec::new(), None)
         }
         ForgeEventPayload::MergeCommittedNative(merge) => {
             merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;

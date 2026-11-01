@@ -60,6 +60,15 @@ fn action(value: &IssueAction) -> String {
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
         IssueAction::Lock => "{\"name\":\"lock\"}".to_owned(),
         IssueAction::Unlock => "{\"name\":\"unlock\"}".to_owned(),
+        IssueAction::SetMilestone {
+            milestone,
+            expected_milestone_version,
+        } => format!(
+            "{{\"name\":\"set-milestone\",\"milestone\":{},\"expected_milestone_version\":{}}}",
+            milestone.get(),
+            expected_milestone_version.get(),
+        ),
+        IssueAction::ClearMilestone => "{\"name\":\"clear-milestone\"}".to_owned(),
         IssueAction::Assign { assignees: values } | IssueAction::Unassign { assignees: values } => {
             format!(
                 "{{\"name\":{},\"assignees\":{}}}",
@@ -189,7 +198,7 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, String> {
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{},\"labels\":{},",
-            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{},\"locked\":{}}}"
+            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{},\"locked\":{},\"milestone\":{}}}"
         ),
         value.number.get(),
         value.version.get(),
@@ -204,7 +213,10 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, String> {
         quote(&value.last_actor.to_string()),
         value.comments,
         assignees(&value.assignees),
-        value.locked
+        value.locked,
+        value
+            .milestone
+            .map_or_else(|| "null".to_owned(), |number| number.get().to_string())
     ))
 }
 fn header(
@@ -402,10 +414,15 @@ pub(super) fn search(
         .text
         .as_deref()
         .map_or_else(|| "null".into(), quote);
+    let milestone = match predicate.milestone {
+        None => "null".to_owned(),
+        Some(fgit_forge::event::issue::MilestoneFilter::Unassigned) => quote("none"),
+        Some(fgit_forge::event::issue::MilestoneFilter::Number(number)) => number.get().to_string(),
+    };
     let mut out = format!(
         concat!(
             "{{\"type\":\"issue_search_page\",{},\"query\":{{\"state\":{},\"opened_by\":{},",
-            "\"labels\":{},\"text\":{},\"case_sensitive\":{},\"text_scope\":\"title_or_body\"}},",
+            "\"labels\":{},\"text\":{},\"case_sensitive\":{},\"text_scope\":\"title_or_body\",\"milestone\":{}}},",
             "\"after\":{},\"limit\":{},\"max_scan\":{},\"scanned\":{},\"count\":{},",
             "\"complete\":{},\"stop_reason\":{},\"has_more_candidates\":{},\"next_after\":{},",
             "\"refs_changed\":false,\"transaction_created\":false,\"issues\":["
@@ -416,6 +433,7 @@ pub(super) fn search(
         labels(&predicate.labels),
         text,
         predicate.case_sensitive,
+        milestone,
         read.after,
         read.limit,
         max_scan,

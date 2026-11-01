@@ -13,6 +13,12 @@ The local interface assumes operator-controlled storage and does not provide rem
 
 All supplied predicates are conjunctive. `--state` accepts `open`, `closed`, or `all` (the default). `--opened-by` matches the original principal, not the latest actor. Repeated `--label` values require every exact label and must be unique; at most 32 bounded labels are accepted. CLI input order is normalized to the issue label ordering.
 
+`--milestone N` selects the positive repository-local milestone number;
+`--milestone none` selects issues without a milestone. Omission imposes no
+membership filter. This uses the issue's membership at the selected snapshot,
+including for closed milestones, and grants no access. See
+[native milestones](NATIVE_MILESTONES.md) for membership commands and progress.
+
 `--query` is a literal, nonempty UTF-8 string of at most 256 bytes without NUL. It matches the title OR body independently; comment text is not searched and a match cannot span those fields. Default case handling folds ASCII only. `--case-sensitive` requires a query and preserves all bytes. Neither mode performs regex evaluation, Unicode normalization, stemming, fuzzy ranking or locale-dependent matching. The reusable matcher has linear text work and no per-issue text-copy allocation.
 
 `--limit` bounds returned matches (1..100; default 50). `--max-scan` independently bounds examined issues (1..1000; default 1000). The engine obtains ascending source pages of at most 100 issues and makes at most ten page reads. The reader remains responsible for authorization, retained-snapshot verification, runtime cancellation and storage budgets. This is a bounded scan, not an indexed-search performance claim.
@@ -44,7 +50,17 @@ curl --request POST \
   "$REPOSITORY_URL/api/v1/issues/search"
 ```
 
-Form fields are `query`, `state`, `opened_by`, `case_sensitive` (`true` or `false`), repeated `label`, `limit`, `max_scan`, `after`, and `expected_head`. The eight non-label fields are singletons. All match, limit, and continuation semantics above apply. Predicate text stays in the request body rather than the URL; query-string parameters and GET search are not accepted. Mutation fields, caller-selected principals, storage paths, tenant/repository selectors, duplicate singleton fields, malformed percent encodings, invalid UTF-8 and NUL are refused. `opened_by` is only a filter, never an authentication principal.
+Form fields are `query`, `state`, `opened_by`, `case_sensitive` (`true` or `false`),
+`milestone` (a positive number or `none`), repeated `label`, `limit`, `max_scan`,
+`after`, and `expected_head`. All non-label fields are singletons. All match,
+limit, and continuation semantics above apply. Predicate text stays in the
+request body rather than the URL; query-string parameters and GET search are not
+accepted. Mutation fields, caller-selected principals, storage paths,
+tenant/repository selectors, duplicate singleton fields, malformed percent
+encodings, invalid UTF-8 and NUL are refused. `opened_by` and `milestone` are only
+filters, never authentication or authorization inputs. JSON query echoes use
+`milestone: null`, `"none"`, or an integer; a historical missing field means no
+milestone predicate.
 
 The adapter retains the existing body/framing ceilings, response-byte ceiling, no-store/private-authorization response handling, and runtime deadline checks. It rechecks the deadline during response rendering and assembles a complete bounded JSON body before emitting success. The existing listener remains a loopback capability profile with externally terminated TLS, repository-wide issue grants, and no new per-issue ACL or hosted-IAM claim.
 

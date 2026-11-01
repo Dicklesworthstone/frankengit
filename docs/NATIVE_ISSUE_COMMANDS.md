@@ -117,6 +117,17 @@ Snapshots expose `assignees: []` for unassigned issues, including histories
 created before these actions were supported, and history retains each delta.
 The byte and upgrade contract is [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
 
+## Plan issues with milestones
+
+Issues also support exact-version milestone membership through
+`fg issue set-milestone --milestone N --expected-milestone-version V` and
+`fg issue clear-milestone`. Both require the ordinary issue predecessor and retry
+identity. Setting requires an open milestone at the selected version in the same
+publication basis; clearing remains available after milestone closure. The
+snapshot exposes `milestone: null` or the positive repository-local number.
+See [native milestones](NATIVE_MILESTONES.md) for lifecycle, due dates,
+same-snapshot progress counts, history and milestone-filtered issue search.
+
 ## Lock and unlock discussion
 
 ```sh

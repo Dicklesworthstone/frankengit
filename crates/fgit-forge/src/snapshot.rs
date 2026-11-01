@@ -482,6 +482,7 @@ pub fn apply_forge_event_to_prs(
             }
             ForgeEventPayload::ReviewProtectionChanged(_)
             | ForgeEventPayload::IssueChangedNative(_)
+            | ForgeEventPayload::MilestoneChangedNative(_)
             | ForgeEventPayload::PullRequestReviewedNative(_)
             | ForgeEventPayload::MergeQueueChangedNative(_)
             | ForgeEventPayload::PullRequestCommentedNative(_)

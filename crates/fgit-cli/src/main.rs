@@ -11,6 +11,7 @@ mod fsck;
 mod guarded_git_server;
 mod import_command;
 mod issues;
+mod milestones;
 mod mcp;
 mod merge_apply;
 mod patch_command;
@@ -436,6 +437,18 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         .is_some_and(|argument| argument == "queue")
     {
         return match queue::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "milestone")
+    {
+        return match milestones::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
                 eprintln!("fg: {error}");

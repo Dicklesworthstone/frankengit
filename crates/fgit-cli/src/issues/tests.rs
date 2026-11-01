@@ -263,6 +263,54 @@ fn assignment_arguments_are_bounded_canonical_metadata_with_an_exact_version() {
         "assignment is its own versioned delta"
     );
 }
+
+#[test]
+fn milestone_membership_seals_both_selected_predecessors_and_never_infers_them() {
+    use fgit_forge::MilestoneNumber;
+    let mut set = input("set-milestone");
+    assert!(parse(&set).is_err());
+    set.extend(["--milestone", "9"].map(str::to_owned));
+    assert!(parse(&set).is_err());
+    set.extend(["--expected-milestone-version", "3"].map(str::to_owned));
+    let parsed = parse(&set).unwrap();
+    assert_eq!(
+        mutation(&parsed).command.action,
+        IssueAction::SetMilestone {
+            milestone: MilestoneNumber::try_new(9).unwrap(),
+            expected_milestone_version: AggregateVersion::try_new(3).unwrap(),
+        }
+    );
+    assert_eq!(
+        mutation(&parsed).command.expected_version,
+        ExpectedVersion::Exactly(AggregateVersion::FIRST)
+    );
+    let (tx, terminal) = terminal(true);
+    let receipt = output::mutation(&parsed, mutation(&parsed), tx, &terminal, None);
+    assert!(receipt.contains(
+        "\"action\":{\"name\":\"set-milestone\",\"milestone\":9,\"expected_milestone_version\":3}"
+    ));
+    for flag in [
+        "--milestone",
+        "--expected-milestone-version",
+        "--expected-version",
+    ] {
+        for value in ["0", "01", "-1", "18446744073709551616"] {
+            let mut invalid = set.clone();
+            replace(&mut invalid, flag, value);
+            assert!(parse(&invalid).is_err(), "{flag}={value}");
+        }
+    }
+    for flag in ["--body", "--title", "--assignee", "--label"] {
+        let mut invalid = set.clone();
+        invalid.extend([flag, "unexpected"].map(str::to_owned));
+        assert!(parse(&invalid).is_err());
+    }
+    let clear = parse(&input("clear-milestone")).unwrap();
+    assert_eq!(mutation(&clear).command.action, IssueAction::ClearMilestone);
+    let mut invalid = input("clear-milestone");
+    invalid.extend(["--milestone", "9"].map(str::to_owned));
+    assert!(parse(&invalid).is_err());
+}
 #[test]
 fn trust_required_fields_and_inapplicable_or_duplicate_arguments_refuse() {
     for action in [

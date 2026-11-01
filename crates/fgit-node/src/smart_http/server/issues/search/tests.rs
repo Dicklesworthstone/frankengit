@@ -89,6 +89,10 @@ fn invalid_or_authority_widening_fields_refuse_before_search() {
         "idempotency_key=forged",
         "clear_labels=true",
         "after_version=1",
+        "milestone=0",
+        "milestone=01",
+        "milestone=1&milestone=1",
+        "milestone=18446744073709551616",
     ] {
         assert!(parse(body.as_bytes()).is_err(), "{body}");
     }
@@ -98,6 +102,25 @@ fn invalid_or_authority_widening_fields_refuse_before_search() {
         .collect::<Vec<_>>()
         .join("&");
     assert!(parse(labels.as_bytes()).is_err());
+}
+
+#[test]
+fn milestone_filter_is_explicit_and_exact_without_changing_legacy_queries() {
+    assert!(parse(b"").unwrap().0.query().milestone.is_none());
+    assert_eq!(
+        parse(b"milestone=none").unwrap().0.query().milestone,
+        Some(MilestoneFilter::Unassigned)
+    );
+    assert_eq!(
+        parse(b"milestone=18446744073709551615")
+            .unwrap()
+            .0
+            .query()
+            .milestone,
+        Some(MilestoneFilter::Number(
+            MilestoneNumber::try_new(u64::MAX).unwrap()
+        ))
+    );
 }
 
 #[test]

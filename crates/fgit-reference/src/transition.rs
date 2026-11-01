@@ -541,6 +541,7 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
             ForgeEventKind::WorkflowCheckObserved { source, .. } => Some(source),
             ForgeEventKind::PullRequestClosed { .. }
             | ForgeEventKind::IssueChanged { .. }
+            | ForgeEventKind::MilestoneChanged { .. }
             | ForgeEventKind::PullRequestCommented { .. }
             | ForgeEventKind::ReviewProtectionChanged { .. } => None,
         },

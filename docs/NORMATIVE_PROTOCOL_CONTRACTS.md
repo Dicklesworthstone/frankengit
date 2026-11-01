@@ -928,6 +928,73 @@ transitions and reject comments published while locked before accepting a final
 snapshot. Historical raw JSON retained in archives is never rewritten to insert
 the compatibility default.
 
+### 20.2.4 Native milestones and issue membership
+
+Milestones are repository-local canonical aggregates, independent of issue
+streams. Their lifecycle is open, edit, close and reopen. Metadata consists of a
+nonblank UTF-8 title of at most 256 bytes with no control characters, a UTF-8 body
+of at most 65,536 bytes without NUL, and an optional UTC Unix-second due date in
+`0..=253402300799`. A due date is descriptive metadata and cannot authorize an
+automatic transition. An edit preserves omitted fields; explicit empty body
+clears text, and an explicit absent date clears the due date. Empty edits refuse.
+Close and reopen require the corresponding open and closed predecessor states;
+they never close, reopen, detach or otherwise mutate member issues.
+
+The canonical owner is `fgit-forge/src/event/milestone.rs`. Required aggregate
+escape kind **9**, after the existing zero `u64`, carries the positive milestone
+number as a big-endian `u64`; its stream label is `milestone/N`. Required event
+kind **22**, `MilestoneChangedNative`, carries the raw 16-byte authenticated actor
+followed by the action. Action tags are big-endian `u32`: **1** open, **2** edit,
+**3** close, **4** reopen. Open writes the ordinary canonical length-prefixed
+title and body, then a canonical presence boolean and optional `u64` due date.
+Edit writes title presence and optional text, body presence and optional text,
+then date-edit presence and, when present, the same optional-date encoding.
+Close and reopen have no action payload. The reference/transaction append marker
+is **11**, `MilestoneChanged`, followed by its canonical forge entity string.
+Every existing aggregate, event, action, marker and sealed request keeps its
+bytes. Older readers refuse unfamiliar required kinds instead of ignoring them.
+
+Milestone commands seal their actor, number, exact predecessor and complete action
+under the `forge` scope `milestone.event-batch-root.v1`. Creation requires a new
+stream; later mutations require an exact positive version. Independent final
+preparation reconstructs the entire command and seal. The existing metadata
+admission owner publishes the milestone event, forge position and one outbox
+obligation through the ordinary authority-head CAS. These commands preserve
+preconditions after contention and never gain additive-comment replanning.
+Historical terminal recovery precedes new intake: a retry returns its original
+committed or refused outcome, and changed semantics under an existing key refuse.
+
+Within an issue event, new required action tag **10** is `SetMilestone`, followed
+by the positive milestone number and selected positive milestone version, both
+big-endian `u64`. Payloadless tag **11** is `ClearMilestone`. These actions retain
+the issue command's exact predecessor, actor and ordinary sealed issue identity.
+Set admission MUST resolve the selected milestone at the same authenticated
+publication basis as the issue and require both its selected version and open
+state. A missing or stale milestone yields `EvidenceStale`; a closed one yields
+`ProtectedRefTransitionDenied`. Set replaces the one optional membership; clear
+removes it without requiring that the former milestone remain open. Both operate
+on open, closed or locked issues, advance the issue version even when membership
+is unchanged, and preserve all other issue metadata. They neither authenticate
+nor grant authority to any principal and never alter the milestone version.
+
+Issue snapshots expose `milestone: null` or a positive number. A missing field in
+historical JSON means no membership, while malformed supplied values refuse.
+Milestone open/closed issue counts are derived by complete bounded issue replay
+at the **same selected authority head** as the milestone, not stored as another
+authoritative counter or fetched from a newer projection. Retained-snapshot
+continuations preserve both lifecycle and membership history; incomplete replay,
+missing evidence, cancellation or exhausted bounds refuse the read. Issue search
+can conjunctively select a milestone number or explicitly unassigned issues.
+
+Native HTTP and MCP adapters require their existing independent issue-read or
+issue-write grants for milestone metadata; Git read/write never implies either.
+The milestone's selected number, title, body and date cannot select the actor or
+widen capabilities. The frozen issue archive/import v1/v2 profiles do not define
+cross-repository milestone mappings: they MUST explicitly refuse milestone-bearing
+snapshots or membership history rather than drop it or rebind numbers. The
+`issues-pulls-v1` scoped event feed does not silently gain milestone aggregates;
+the granted milestone history API exposes their lifecycle directly.
+
 ### 20.3 Native protected-review quorums
 
 Repository review protection binds a sorted set of eligible reviewer principals

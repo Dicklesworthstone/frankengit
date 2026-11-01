@@ -23,6 +23,7 @@ pub(super) fn require_subscription(
             ForgeEventPayload::PullRequestReviewedNative(_) => "pull_request_review",
             ForgeEventPayload::PullRequestCommentedNative(_) => "pull_request_commented",
             ForgeEventPayload::IssueChangedNative(_) => "issue",
+            ForgeEventPayload::MilestoneChangedNative(_) => "milestone",
             ForgeEventPayload::ReviewProtectionChanged(_) => "review_protection",
             ForgeEventPayload::MergeQueueChangedNative(_) => "merge_queue",
             ForgeEventPayload::WorkflowCheckObservedNative(_) => "workflow_check",
@@ -48,6 +49,40 @@ mod tests {
     };
     use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
     use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
+
+    #[test]
+    fn milestones_require_their_own_family_or_exact_kind() {
+        use fgit_forge::event::milestone::{MilestoneAction, MilestoneCommand};
+        let event = MilestoneCommand {
+            number: fgit_forge::MilestoneNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: MilestoneAction::Open {
+                title: "Release".into(),
+                body: String::new(),
+                due_at: None,
+            },
+        }
+        .proposed_event(PrincipalId::from_bytes([7; 16]))
+        .unwrap();
+        for selector in ["milestone", "kind:22"] {
+            assert!(
+                require_subscription(
+                    &WebhookEventFilter::Selected(vec![selector.into()]),
+                    std::slice::from_ref(&event)
+                )
+                .is_ok()
+            );
+        }
+        for selector in ["issue", "pull_request", "kind:8"] {
+            assert!(
+                require_subscription(
+                    &WebhookEventFilter::Selected(vec![selector.into()]),
+                    std::slice::from_ref(&event)
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn conversation_delivery_requires_its_own_event_family_or_exact_kind() {

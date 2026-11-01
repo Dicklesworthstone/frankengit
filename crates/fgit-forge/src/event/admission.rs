@@ -61,7 +61,10 @@ pub const fn classify_event(
                 IssueAction::Unassign { .. } => ForgeOperation::IssueUnassign,
                 IssueAction::Lock => ForgeOperation::IssueLock,
                 IssueAction::Unlock => ForgeOperation::IssueUnlock,
+                IssueAction::SetMilestone { .. } => ForgeOperation::IssueSetMilestone,
+                IssueAction::ClearMilestone => ForgeOperation::IssueClearMilestone,
             },
+            ForgeEventPayload::MilestoneChangedNative(_) => ForgeOperation::MilestoneChange,
             ForgeEventPayload::ReviewProtectionChanged(_) => ForgeOperation::ReviewProtection,
             ForgeEventPayload::MergeQueueChangedNative(_) => ForgeOperation::MergeQueueChange,
             ForgeEventPayload::WorkflowCheckObservedNative(_)
@@ -106,6 +109,11 @@ mod tests {
             },
             IssueAction::Lock,
             IssueAction::Unlock,
+            IssueAction::SetMilestone {
+                milestone: crate::MilestoneNumber::FIRST,
+                expected_milestone_version: AggregateVersion::FIRST,
+            },
+            IssueAction::ClearMilestone,
         ] {
             let is_comment = matches!(action, IssueAction::Comment { .. });
             let expected_version = if matches!(action, IssueAction::Open { .. }) {

@@ -125,6 +125,35 @@ where
         .await?;
         let previous = timelines.get(&number).map(|timeline| &timeline.issue);
         apply_event(previous, event).map_err(ProjectionFailure::Refuse)?;
+        // Membership is an issue-owned change, but its selected target is an
+        // independent exact read precondition. Never look up a fresh head here:
+        // the issue and milestone must both be valid at this publication basis.
+        if let fgit_forge::ForgeEventPayload::IssueChangedNative(change) = &event.payload
+            && let fgit_forge::event::issue::IssueAction::SetMilestone {
+                milestone,
+                expected_milestone_version,
+            } = &change.action
+        {
+            let selected = super::milestones::read_snapshot_from_roots(
+                store,
+                cx,
+                basis.body().repository_id,
+                &resolved.forge,
+                &resolved.outbox,
+                *milestone,
+                &|| projection.merge_checkpoint(cx).is_err(),
+            )
+            .await?
+            .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceStale))?;
+            if selected.version != *expected_milestone_version {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+            }
+            if selected.state != fgit_forge::event::milestone::MilestoneState::Open {
+                return Err(
+                    ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied).into(),
+                );
+            }
+        }
         projection
             .merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
@@ -452,6 +481,56 @@ fn page_numbers<C: Fn() -> bool + Sync>(
         numbers.insert(number);
     }
     Ok((numbers, more))
+}
+
+/// Progress is derived from the same selected canonical issue history as the
+/// milestone page. Reuse the complete issue reducer, so comment, lock, state
+/// and membership histories cannot acquire a second permissive interpretation.
+/// An incomplete replay refuses the whole summary instead of inventing counts.
+pub(super) async fn milestone_counts_at_roots<S, C>(
+    store: &S,
+    cx: &S::Context,
+    repository: RepositoryId,
+    forge: &CanonicalForgePositionState,
+    outbox: &CanonicalOutboxState,
+    wanted: &BTreeSet<fgit_forge::MilestoneNumber>,
+    cancelled: &C,
+) -> Result<BTreeMap<fgit_forge::MilestoneNumber, (u64, u64)>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    checkpoint(cancelled)?;
+    if wanted.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let numbers = issue_frontiers(forge, cancelled)?.into_keys().collect();
+    let timelines = replay_selected(
+        store, cx, repository, forge, outbox, &numbers, None, cancelled,
+    )
+    .await?;
+    let mut counts = BTreeMap::<_, (u64, u64)>::new();
+    for timeline in timelines.into_values() {
+        checkpoint(cancelled)?;
+        let Some(number) = timeline
+            .issue
+            .milestone
+            .filter(|number| wanted.contains(number))
+        else {
+            continue;
+        };
+        let count = counts.entry(number).or_default();
+        let selected = if timeline.issue.state == fgit_forge::event::issue::IssueState::Open {
+            &mut count.0
+        } else {
+            &mut count.1
+        };
+        *selected = selected
+            .checked_add(1)
+            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+    }
+    checkpoint(cancelled)?;
+    Ok(counts)
 }
 
 #[cfg(test)]

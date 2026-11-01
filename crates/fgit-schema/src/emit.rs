@@ -899,8 +899,20 @@ pub fn mcp_schema() -> String {
             } else {
                 ","
             };
+            let field_type = if f.field_type.contains('|') {
+                format!(
+                    "[{}]",
+                    f.field_type
+                        .split('|')
+                        .map(json_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                json_string(f.field_type)
+            };
             let mut props = vec![
-                format!("              \"type\": {}", json_string(f.field_type)),
+                format!("              \"type\": {field_type}"),
                 format!(
                     "              \"description\": {}",
                     json_string(f.description)

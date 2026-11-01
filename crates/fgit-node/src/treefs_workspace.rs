@@ -19,11 +19,13 @@ mod tags;
 pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
 mod events;
 mod issues;
+mod milestones;
 mod protection;
 mod publication;
 mod pull_request;
 mod queue;
 pub use issues::IssueReadRefusal;
+pub use milestones::MilestoneReadRefusal;
 pub use pull_request::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,

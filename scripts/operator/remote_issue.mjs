@@ -9,7 +9,7 @@ import { lookupOutcome, outcomeEndpoint, outcomeScope, validateOutcomeReply, Out
 export const ISSUE_LIMITS = Object.freeze({ form: 256 * 1024, reply: 16 * 1024, intent: 512 * 1024,
   body: 64 * 1024, title: 256, labels: 32, assignees: 16 });
 const MAX_U64 = 18446744073709551615n;
-const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock'];
+const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
 const INTENT = 'frankengit-remote-issue-intent-v1';
 const ID = /^[0-9a-f]{32}$/, HASH = /^[0-9a-f]{64}$/;
 export class IssueError extends Error {
@@ -104,7 +104,8 @@ export function issueCommand(number, version, action, input) {
   else issueU64(version, 0n, MAX_U64 - 1n);
   if (!ACTIONS.includes(action) || (!append && (action === 'open') !== (version === '0'))) fail('invalid_issue_action_or_version');
   const names = ['open', 'edit'].includes(action) ? ['title', 'body', 'labels']
-    : ['comment', 'append-comment'].includes(action) ? ['body'] : ['assign', 'unassign'].includes(action) ? ['assignees'] : [];
+    : ['comment', 'append-comment'].includes(action) ? ['body'] : ['assign', 'unassign'].includes(action) ? ['assignees']
+      : action === 'set-milestone' ? ['milestone', 'expected_milestone_version'] : [];
   fields(input, names, action === 'open' ? ['title', 'body'] : action === 'edit' ? [] : names);
   const normalized = {};
   if (Object.hasOwn(input, 'title')) normalized.title = text(input.title, ISSUE_LIMITS.title, true);
@@ -112,6 +113,10 @@ export function issueCommand(number, version, action, input) {
   if (Object.hasOwn(input, 'labels')) normalized.labels = list(input.labels, ISSUE_LIMITS.labels, label => text(label, 64, true));
   if (action === 'open') normalized.labels ??= [];
   if (Object.hasOwn(input, 'assignees')) normalized.assignees = list(input.assignees, ISSUE_LIMITS.assignees, identity);
+  if (action === 'set-milestone') {
+    normalized.milestone = issueU64(input.milestone, 1n);
+    normalized.expected_milestone_version = issueU64(input.expected_milestone_version, 1n);
+  }
   if ((action === 'edit' && !Object.keys(normalized).length) || (['comment', 'append-comment'].includes(action) && !normalized.body.trim()) ||
       (['assign', 'unassign'].includes(action) && !normalized.assignees.length)) fail('empty_issue_change');
   const form = new URLSearchParams(append ? {} : { expected_version: version });
@@ -121,6 +126,7 @@ export function issueCommand(number, version, action, input) {
     if (action === 'edit' && !normalized.labels.length) form.append('clear_labels', 'true');
   }
   for (const person of normalized.assignees ?? []) form.append('assignee', person);
+  for (const name of ['milestone', 'expected_milestone_version']) if (Object.hasOwn(normalized, name)) form.append(name, normalized[name]);
   const body = form.toString(); if (body.length > ISSUE_LIMITS.form) fail('issue_form_limit');
   return { number, expected_version: version, action, fields: normalized, body };
 }

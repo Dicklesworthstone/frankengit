@@ -110,6 +110,7 @@ export function mountIssues(document, location, options = {}) {
           node('p', `Opened by ${issue.opened_by} · last changed by ${issue.last_actor}`),
           node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`),
           node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
+        content.append(node('p', `Milestone: ${issue.milestone == null ? '(none)' : `#${issue.milestone}`}`));
         const actions = node('div'); actions.className = 'issue-actions';
         for (const [label, action] of [['Comment', 'append-comment'], ['Edit issue', 'edit'], ['Add assignees', 'assign'], ['Remove assignees', 'unassign'],
           [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen'],
@@ -127,6 +128,7 @@ export function mountIssues(document, location, options = {}) {
           if (Object.hasOwn(event.action, 'body')) entry.append(body(event.action));
           if (Object.hasOwn(event.action, 'labels')) entry.append(node('p', `Labels: ${event.action.labels.join(', ') || '(none)'}`));
           if (Object.hasOwn(event.action, 'assignees')) entry.append(node('p', `Principals: ${event.action.assignees.join(', ')}`));
+          if (Object.hasOwn(event.action, 'milestone')) entry.append(node('p', `Milestone #${event.action.milestone} at version ${event.action.expected_milestone_version}`));
           content.append(entry);
         }
         if (reply.next_after_version !== null) byId('issue-paging').append(button('Next history page', () => { void read(number, reply.next_after_version, result.head, locked); }));

@@ -37,6 +37,7 @@ pub mod issues;
 mod metadata;
 #[cfg(test)]
 mod metadata_read_tests;
+pub mod milestones;
 pub mod objects;
 pub mod policy_preparation;
 pub mod prepare;

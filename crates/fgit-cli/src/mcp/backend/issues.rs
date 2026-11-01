@@ -154,6 +154,10 @@ fn snapshot(issue: &IssueSnapshot) -> Value {
         ("last_actor", text(issue.last_actor.to_string())),
         ("comments", text(issue.comments.to_string())),
         ("locked", Value::Bool(issue.locked)),
+        (
+            "milestone",
+            optional(issue.milestone.map(|number| number.get())),
+        ),
     ])
 }
 fn action(action: &IssueAction) -> Value {
@@ -187,6 +191,18 @@ fn action(action: &IssueAction) -> Value {
         IssueAction::Reopen => object([("name", text("reopen"))]),
         IssueAction::Lock => object([("name", text("lock"))]),
         IssueAction::Unlock => object([("name", text("unlock"))]),
+        IssueAction::SetMilestone {
+            milestone,
+            expected_milestone_version,
+        } => object([
+            ("name", text("set-milestone")),
+            ("milestone", text(milestone.get().to_string())),
+            (
+                "expected_milestone_version",
+                text(expected_milestone_version.get().to_string()),
+            ),
+        ]),
+        IssueAction::ClearMilestone => object([("name", text("clear-milestone"))]),
         IssueAction::Comment { body } => {
             object([("name", text("comment")), ("body", text(body.clone()))])
         }

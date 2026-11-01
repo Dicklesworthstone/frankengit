@@ -84,6 +84,28 @@ test('empty repository is a complete one-page read, not an invented issue', asyn
   assert.equal(result.issues, 0); assert.equal(result.events, 0); assert.equal(result.pages, 1);
   assert.equal((await inspectIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 })).complete, true);
 });
+
+test('new null membership keeps archive traversal compatible without inventing a milestone mapping', async t => {
+  const items=data(); for (const item of items) item.issue.milestone=null;
+  const f=await fixture(t,{items}), result=await exportIssueArchive(f.options);
+  const read=await readIssueArchive({workdir:f.options.workdir,confirm:result.archive_sha256});
+  assert.equal(read.records.length,2);
+  assert.ok(read.records.every(row=>!Object.hasOwn(row.snapshot,'milestone')));
+  assert.equal((await inspectIssueArchive({workdir:f.options.workdir,confirm:result.archive_sha256})).complete,true);
+});
+test('active native membership refuses archive capture rather than losing or rebinding its target', async t => {
+  const items=data(); items[0].issue.milestone=7;
+  const f=await fixture(t,{items});
+  await assert.rejects(exportIssueArchive(f.options),/milestones_unsupported/); await noRoot(f.options);
+});
+test('cleared milestone history is also explicitly unsupported across separate archive pages', async t => {
+  const items=data().slice(0,1), item=items[0];
+  item.events.push(event(6,actor,'set-milestone',{milestone:7,expected_milestone_version:1}),
+    event(7,actor,'clear-milestone'));
+  Object.assign(item.issue,{version:7,milestone:null});
+  const f=await fixture(t,{items});
+  await assert.rejects(exportIssueArchive(f.options),/milestones_unsupported/); await noRoot(f.options);
+});
 test('explicit initial snapshot is sent before the first page and remains fixed', async t => {
   const f = await fixture(t); await exportIssueArchive({ ...f.options, head });
   assert.ok(f.calls.every(row => row.url.searchParams.get('expected_head') === head));

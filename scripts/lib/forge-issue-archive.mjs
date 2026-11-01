@@ -3,7 +3,7 @@
 import { constants as F } from 'node:fs';
 import { mkdir, open, lstat, realpath, opendir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { IssueClient, issuePage, issueHistory, issueState, issueLocked, issueAction, natural, snapshotToken }
+import { IssueClient, issuePage, issueHistory, issueState, issueLocked, issueMilestone, issueAction, natural, snapshotToken }
   from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { operatorError, operatorPath, privateRecordPath, readPrivateOperatorFile,
   saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
@@ -57,6 +57,7 @@ async function syncDirectory(path) {
 }
 function stateView(row) {
   issueState(row);
+  if (issueMilestone(row) !== null) fail('milestones_unsupported');
   return { number: row.number, version: row.version, title: row.title, body: row.body, labels: row.labels,
     state: row.state, opened_by: row.opened_by, last_actor: row.last_actor,
     comments: row.comments, assignees: row.assignees ?? [], locked: issueLocked(row) };
@@ -92,6 +93,7 @@ class Walk {
     if (!reply.found || !equal(stateView(reply.issue), expected)) fail('list_history_disagreement');
     for (const event of reply.events) {
       const { name, body_rendered: _rendered, ...fields } = event.action;
+      if (name === 'set-milestone' || name === 'clear-milestone') fail('milestones_unsupported');
       const action = issueAction(name, fields);
       if (name === 'open') this.folded = { number, version: 0, title: action.title, body: action.body,
         labels: action.labels, state: 'open', opened_by: event.actor, last_actor: event.actor, comments: 0, assignees: [], locked: false };

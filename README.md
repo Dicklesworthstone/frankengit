@@ -215,6 +215,17 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Native milestone planning
+
+`fg milestone` now opens, edits, closes and reopens repository milestones with
+descriptions and optional due dates. Issues can join, move between or leave
+milestones through explicit versioned commands. Lists and history include open
+and closed issue counts from one selected authority snapshot; continuation keeps
+that snapshot even as other writers change the repository. The authenticated
+HTTP API and MCP expose the same operations under the existing independent issue
+read/write grants. See [native milestones](docs/NATIVE_MILESTONES.md) for commands,
+membership preconditions, retry behavior and the current migration boundary.
+
 ### Native issue discussion controls
 
 `fg issue` exposes canonical open, edit, comment, assignment, close/reopen and

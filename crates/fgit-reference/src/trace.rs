@@ -344,6 +344,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(6);
             write_slug(out, "ForgeEntityId", issue.label())?;
         }
+        ForgeEventKind::MilestoneChanged { milestone } => {
+            out.write_raw_byte(11);
+            write_slug(out, "ForgeEntityId", milestone.label())?;
+        }
         ForgeEventKind::PullRequestReviewed { review, target } => {
             out.write_raw_byte(5);
             write_slug(out, "ForgeEntityId", review.label())?;
@@ -407,6 +411,9 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         6 => Ok(ForgeEventKind::IssueChanged {
             issue: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        11 => Ok(ForgeEventKind::MilestoneChanged {
+            milestone: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
         }),
         8 => Ok(ForgeEventKind::WorkflowCheckObserved {
             check: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
@@ -2269,5 +2276,25 @@ mod tests {
             assert_eq!(read_forge_event(&mut decoded).unwrap(), changed);
             decoded.finish().unwrap();
         }
+    }
+
+    #[test]
+    fn milestone_trace_uses_tag_eleven_and_never_implies_a_reference_effect() {
+        let event = ForgeEventKind::MilestoneChanged {
+            milestone: ForgeEntityId::new(crate::harness::label("milestone/7")),
+        };
+        let literal = b"\x0b\0\0\0\x0bmilestone/7";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut input).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity().label().as_str(), "milestone/7");
     }
 }

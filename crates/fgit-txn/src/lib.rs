@@ -601,6 +601,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(6);
             out.write_text("ForgeEntityId", issue.label().as_str())?;
         }
+        ForgeEventKind::MilestoneChanged { milestone } => {
+            out.write_raw_byte(11);
+            out.write_text("ForgeEntityId", milestone.label().as_str())?;
+        }
         ForgeEventKind::WorkflowCheckObserved { check, source } => {
             out.write_raw_byte(8);
             out.write_text("ForgeEntityId", check.label().as_str())?;
@@ -637,6 +641,7 @@ const fn absorption_code(reason: AbsorptionReason) -> u8 {
 mod tests {
     use super::*;
     include!("issue_normal_form_tests.rs");
+    include!("milestone_normal_form_tests.rs");
     include!("workflow_check_normal_form_tests.rs");
     include!("pull_request_comment_normal_form_tests.rs");
     include!("merge_queue_normal_form_tests.rs");

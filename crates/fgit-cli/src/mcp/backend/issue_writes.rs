@@ -5,7 +5,7 @@ use super::super::protocol::{Tool, ToolError};
 use super::mutations as common;
 use super::{NodeTools, require_fields, string};
 use fgit_forge::{
-    IssueNumber,
+    AggregateVersion, IssueNumber, MilestoneNumber,
     event::issue::{
         IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_LABELS,
     },
@@ -25,6 +25,8 @@ pub(super) fn is_tool(name: &str) -> bool {
             | "frankengit_issue_append_comment"
             | "frankengit_issue_assign"
             | "frankengit_issue_unassign"
+            | "frankengit_issue_set_milestone"
+            | "frankengit_issue_clear_milestone"
     )
 }
 pub(super) fn tools() -> Vec<Tool> {
@@ -39,11 +41,18 @@ pub(super) fn tools() -> Vec<Tool> {
         ("frankengit_issue_append_comment", "Append literal comment text to an existing issue without expected_version, even after independent issue edits. Retry the identical number, body and original key to recover the same outcome without a duplicate comment."),
         ("frankengit_issue_assign", "Add 1..16 principal IDs to an issue's metadata assignments at an exact version, preserving other assignees. Assignment grants no access or membership."),
         ("frankengit_issue_unassign", "Remove only the named 1..16 principal IDs from issue metadata at an exact version. Retry the identical command and original key after an uncertain response."),
+        ("frankengit_issue_set_milestone", "Assign an issue to an existing open milestone using exact issue and milestone versions at the same authority head. Membership is metadata, not authorization. Retry the identical command and original key."),
+        ("frankengit_issue_clear_milestone", "Clear an issue's milestone at the exact issue version, including after the milestone closes. Other issue fields and history survive. Uses the issue-write grant."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }
 fn schema(name: &str) -> Value {
     let mut properties = common::base_properties();
     let mut required = vec!["number", "expected_version", "idempotency_key"];
+    if name == "frankengit_issue_set_milestone" {
+        properties.insert("milestone".into(), super::decimal_schema());
+        properties.insert("expected_milestone_version".into(), super::decimal_schema());
+        required.extend(["milestone", "expected_milestone_version"]);
+    }
     if name == "frankengit_issue_append_comment" {
         properties.remove("expected_version");
         required.retain(|field| *field != "expected_version");
@@ -173,6 +182,13 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
         "frankengit_issue_assign" | "frankengit_issue_unassign" => {
             &["number", "expected_version", "idempotency_key", "assignees"]
         }
+        "frankengit_issue_set_milestone" => &[
+            "number",
+            "expected_version",
+            "idempotency_key",
+            "milestone",
+            "expected_milestone_version",
+        ],
         _ => &["number", "expected_version", "idempotency_key"],
     };
     require_fields(args, allowed)?;
@@ -203,6 +219,16 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
         "frankengit_issue_unassign" => IssueAction::Unassign {
             assignees: assignees(args)?,
         },
+        "frankengit_issue_set_milestone" => IssueAction::SetMilestone {
+            milestone: MilestoneNumber::try_new(common::number(args, "milestone")?)
+                .ok_or(ToolError::invalid("positive_milestone_number_required"))?,
+            expected_milestone_version: AggregateVersion::try_new(common::number(
+                args,
+                "expected_milestone_version",
+            )?)
+            .ok_or(ToolError::invalid("positive_milestone_version_required"))?,
+        },
+        "frankengit_issue_clear_milestone" => IssueAction::ClearMilestone,
         _ => return Err(ToolError::invalid("tool_not_granted")),
     };
     action

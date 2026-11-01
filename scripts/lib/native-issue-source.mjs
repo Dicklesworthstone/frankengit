@@ -1,6 +1,6 @@
 // Current issue state and discussion from a completely verified native archive.
 // Source identities are attribution only; NEVER destination actor/assignee IDs.
-import { IssueClient, issueState, issueLocked, issueAction, mutationRequest, natural, snapshotToken }
+import { IssueClient, issueState, issueLocked, issueMilestone, issueAction, mutationRequest, natural, snapshotToken }
   from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { recordDigest, operatorError } from './forge-operator-io.mjs';
 
@@ -42,6 +42,7 @@ export function nativeCaptureBytes(value) {
     keys(row, ['number', 'id', 'snapshot', 'comments']);
     natural(row.number, 'source issue', previous + 1); previous = row.number;
     if (row.id !== String(row.number) || row.snapshot?.number !== row.number) fail('issue_identity');
+    if (issueMilestone(row.snapshot) !== null) fail('milestones_unsupported');
     keys(row.snapshot, snapshotFields);
     issueState(row.snapshot);
     if (!Array.isArray(row.comments) || row.comments.length !== row.snapshot.comments) fail('comment_count');
@@ -129,7 +130,9 @@ export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
     // Normalize only the historical absence of the flag. Never coerce a
     // malformed supplied value, mutate the verified source view or rewrite v1.
     const locked = issueLocked(record.snapshot);
+    if (issueMilestone(record.snapshot) !== null) fail('milestones_unsupported');
     const snapshot = structuredClone(record.snapshot);
+    delete snapshot.milestone;
     delete snapshot.locked;
     snapshot.locked = locked;
     const row = { number: record.snapshot.number, id: String(record.snapshot.number),

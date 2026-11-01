@@ -11,8 +11,7 @@ use crate::CoordinationClass;
 /// Semantic operations, distinguished before canonical events are prepared.
 /// An exact-version comment and an append intent deliberately differ here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ForgeOperation {
-    PullRequestOpen,
+pub enum ForgeOperation {    PullRequestOpen,
     PullRequestHeadAdvance,
     PullRequestMerge,
     PullRequestClose,
@@ -29,6 +28,9 @@ pub enum ForgeOperation {
     IssueUnassign,
     IssueLock,
     IssueUnlock,
+    IssueSetMilestone,
+    IssueClearMilestone,
+    MilestoneChange,
     ReviewProtection,
     MergeQueueChange,
     WorkflowCheck,
@@ -83,6 +85,9 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::IssueUnassign
         | ForgeOperation::IssueLock
         | ForgeOperation::IssueUnlock
+        | ForgeOperation::IssueSetMilestone
+        | ForgeOperation::IssueClearMilestone
+        | ForgeOperation::MilestoneChange
         | ForgeOperation::ReviewProtection
         | ForgeOperation::MergeQueueChange
         | ForgeOperation::WorkflowCheck
@@ -118,6 +123,9 @@ mod tests {
             ForgeOperation::IssueUnassign,
             ForgeOperation::IssueLock,
             ForgeOperation::IssueUnlock,
+            ForgeOperation::IssueSetMilestone,
+            ForgeOperation::IssueClearMilestone,
+            ForgeOperation::MilestoneChange,
             ForgeOperation::ReviewProtection,
             ForgeOperation::MergeQueueChange,
             ForgeOperation::WorkflowCheck,

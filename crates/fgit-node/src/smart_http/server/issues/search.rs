@@ -1,7 +1,10 @@
 //! Read-only issue search forms. Identity comes only from gateway credentials;
 //! filters never confer access and HTTP transport never refreshes a snapshot.
 use super::{ApiError, request};
-use fgit_forge::event::issue::{CompiledIssueQuery, IssueQuery, IssueState, MAX_LABELS};
+use fgit_forge::MilestoneNumber;
+use fgit_forge::event::issue::{
+    CompiledIssueQuery, IssueQuery, IssueState, MAX_LABELS, MilestoneFilter,
+};
 use fgit_forge::issue_search::{MAX_RESULTS, MAX_SCAN, SearchError, SearchRequest};
 use fgit_types::PrincipalId;
 use std::collections::BTreeMap;
@@ -9,7 +12,7 @@ use std::collections::BTreeMap;
 pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), ApiError> {
     let mut flags = BTreeMap::new();
     let mut labels = Vec::new();
-    for (name, value) in request::form(body, MAX_LABELS + 8)? {
+    for (name, value) in request::form(body, MAX_LABELS + 9)? {
         if name == "label" {
             if labels.len() == MAX_LABELS {
                 return Err(ApiError::too_large());
@@ -26,6 +29,7 @@ pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), 
                     | "limit"
                     | "max_scan"
                     | "expected_head"
+                    | "milestone"
             ) {
                 return Err(ApiError::bad("unknown_search_field"));
             }
@@ -50,6 +54,18 @@ pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), 
         _ => return Err(ApiError::bad("invalid_case_sensitive")),
     };
     let text = flags.remove("query");
+    let milestone = flags
+        .get("milestone")
+        .map(|value| {
+            if value == "none" {
+                Ok(MilestoneFilter::Unassigned)
+            } else {
+                MilestoneNumber::try_new(request::decimal(value)?)
+                    .map(MilestoneFilter::Number)
+                    .ok_or_else(|| ApiError::bad("invalid_milestone_number"))
+            }
+        })
+        .transpose()?;
     if case_sensitive && text.is_none() {
         return Err(ApiError::bad("case_sensitive_requires_query"));
     }
@@ -60,6 +76,7 @@ pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), 
         labels,
         text,
         case_sensitive,
+        milestone,
     }
     .compile()
     .map_err(|_| ApiError::bad("invalid_issue_query"))?;

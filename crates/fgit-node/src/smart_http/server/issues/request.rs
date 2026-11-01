@@ -1,6 +1,7 @@
 //! Native issue routes and form commands. Text never supplies a principal,
 //! storage path, authority root, or executable operation outside this grammar.
 
+use fgit_forge::MilestoneNumber;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_forge::event::issue::{
     IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES,
@@ -36,6 +37,15 @@ pub enum Operation<'a> {
         number: IssueNumber,
         action: &'a str,
     },
+    MilestoneList(Page),
+    MilestoneShow {
+        number: MilestoneNumber,
+        page: Page,
+    },
+    MilestoneMutate {
+        number: MilestoneNumber,
+        action: &'a str,
+    },
 }
 
 /// Keep versioned mutations and append-only intents distinct through admission
@@ -44,6 +54,7 @@ pub enum Operation<'a> {
 pub(super) enum Command {
     Versioned(IssueCommand),
     AppendComment(IssueCommentIntent),
+    Milestone(fgit_forge::event::milestone::MilestoneCommand),
 }
 
 #[derive(Debug)]
@@ -59,7 +70,7 @@ impl<'a> Request<'a> {
             .split_once('?')
             .map_or((head.target, None), |(p, q)| (p, Some(q)));
         let Some((repository_route, suffix)) = path.split_once("/api/v1/issues") else {
-            return Ok(None);
+            return super::milestones::parse(head);
         };
         if repository_route.len() < 2
             || !repository_route.starts_with('/')
@@ -123,6 +134,8 @@ impl<'a> Request<'a> {
                         | "append-comment"
                         | "assign"
                         | "unassign"
+                        | "set-milestone"
+                        | "clear-milestone"
                 ) {
                     return Err(ApiError::not_found());
                 }
@@ -141,14 +154,23 @@ impl<'a> Request<'a> {
     }
 
     pub(crate) const fn is_mutation(&self) -> bool {
-        matches!(self.operation, Operation::Mutate { .. })
+        matches!(
+            self.operation,
+            Operation::Mutate { .. } | Operation::MilestoneMutate { .. }
+        )
     }
 
     pub(crate) const fn accepts_body(&self) -> bool {
-        matches!(self.operation, Operation::Search | Operation::Mutate { .. })
+        matches!(
+            self.operation,
+            Operation::Search | Operation::Mutate { .. } | Operation::MilestoneMutate { .. }
+        )
     }
 
     pub(super) fn command(&self, body: &[u8]) -> Result<Command, ApiError> {
+        if let Operation::MilestoneMutate { number, action } = self.operation {
+            return super::milestones::command(number, action, body).map(Command::Milestone);
+        }
         let Operation::Mutate { number, action } = self.operation else {
             return Err(ApiError::bad("not_a_mutation"));
         };
@@ -156,6 +178,7 @@ impl<'a> Request<'a> {
         let (mut title, mut text, mut version, mut clear_labels) = (None, None, None, None);
         let mut labels = Vec::new();
         let mut assignees = Vec::new();
+        let (mut milestone, mut milestone_version) = (None, None);
         for (key, value) in fields {
             match key.as_str() {
                 "expected_version" if action != "append-comment" => {
@@ -182,6 +205,20 @@ impl<'a> Request<'a> {
                         PrincipalId::from_hex(&value)
                             .map_err(|_| ApiError::bad("invalid_assignee"))?,
                     );
+                }
+                "milestone" if action == "set-milestone" => {
+                    set_once(
+                        &mut milestone,
+                        MilestoneNumber::try_new(decimal(&value)?)
+                            .ok_or_else(|| ApiError::bad("invalid_milestone_number"))?,
+                    )?;
+                }
+                "expected_milestone_version" if action == "set-milestone" => {
+                    set_once(
+                        &mut milestone_version,
+                        AggregateVersion::try_new(decimal(&value)?)
+                            .ok_or_else(|| ApiError::bad("invalid_milestone_version"))?,
+                    )?;
                 }
                 _ => return Err(ApiError::bad("unknown_or_inapplicable_field")),
             }
@@ -245,6 +282,12 @@ impl<'a> Request<'a> {
             "unlock" => IssueAction::Unlock,
             "assign" => IssueAction::Assign { assignees },
             "unassign" => IssueAction::Unassign { assignees },
+            "set-milestone" => IssueAction::SetMilestone {
+                milestone: milestone.ok_or_else(|| ApiError::bad("milestone_required"))?,
+                expected_milestone_version: milestone_version
+                    .ok_or_else(|| ApiError::bad("expected_milestone_version_required"))?,
+            },
+            "clear-milestone" => IssueAction::ClearMilestone,
             _ => return Err(ApiError::not_found()),
         };
         action

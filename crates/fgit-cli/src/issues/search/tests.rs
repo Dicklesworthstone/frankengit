@@ -65,12 +65,43 @@ fn parses_filters_and_reuses_exact_read_identity_contract() {
                 assignees: Vec::new(),
                 state: IssueState::Closed,
                 locked: false,
+                milestone: None,
                 opened_by: PrincipalId::from_bytes([3; 16]),
                 last_actor: PrincipalId::from_bytes([4; 16]),
                 comments: 0,
             })
             .unwrap()
     );
+}
+
+#[test]
+fn milestone_search_is_an_explicit_conjunctive_snapshot_filter() {
+    let numbered = parse(&args(&["--milestone", "7", "--state", "open"])).unwrap();
+    assert_eq!(
+        numbered.query.query().milestone,
+        Some(MilestoneFilter::Number(
+            fgit_forge::MilestoneNumber::try_new(7).unwrap()
+        ))
+    );
+    assert_eq!(numbered.query.query().state, Some(IssueState::Open));
+    assert_eq!(
+        parse(&args(&["--milestone", "none"]))
+            .unwrap()
+            .query
+            .query()
+            .milestone,
+        Some(MilestoneFilter::Unassigned)
+    );
+    assert_eq!(parse(&args(&[])).unwrap().query.query().milestone, None);
+    for fields in [
+        vec!["--milestone", "0"],
+        vec!["--milestone", "01"],
+        vec!["--milestone", "all"],
+        vec!["--milestone", "1", "--milestone", "none"],
+        vec!["--milestone"],
+    ] {
+        assert!(parse(&args(&fields)).is_err(), "{fields:?}");
+    }
 }
 
 #[test]

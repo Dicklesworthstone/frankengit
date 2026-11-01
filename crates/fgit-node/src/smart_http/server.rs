@@ -1300,6 +1300,7 @@ fn serve_connection(
     let mut native_mutation = false;
     let mut protection_api = false;
     let mut pull_api = false;
+    let mut milestone_api = false;
     let mut queue_api = false;
     let mut source_api = false;
     let mut api_error = None;
@@ -1378,10 +1379,16 @@ fn serve_connection(
             .split('?')
             .next()
             .is_some_and(|path| path.contains("/api/v1/pulls"));
+        milestone_api = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/milestones"));
         native = protection_api
             || queue_api
             || source_api
             || pull_api
+            || milestone_api
             || envelope
                 .target
                 .split('?')
@@ -1788,6 +1795,8 @@ fn serve_connection(
                     let _ = error.send_named(&mut writer, version, "source_error");
                 } else if pull_api {
                     let _ = error.send_named(&mut writer, version, "pull_request_error");
+                } else if milestone_api {
+                    let _ = error.send_named(&mut writer, version, "milestone_error");
                 } else {
                     let _ = error.send(&mut writer, version);
                 }

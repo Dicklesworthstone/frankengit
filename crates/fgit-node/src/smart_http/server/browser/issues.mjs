@@ -63,15 +63,20 @@ function checkedAssignees(values, canonical = false) {
 }
 export function issueAction(name, fields) {
   object(fields);
-  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock'].includes(name)) fail('Unsupported issue action.');
+  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock', 'set-milestone', 'clear-milestone'].includes(name)) fail('Unsupported issue action.');
   const assignment = name === 'assign' || name === 'unassign';
-  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees'] : [];
+  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees']
+    : name === 'set-milestone' ? ['milestone', 'expected_milestone_version'] : [];
   if (Object.keys(fields).some(key => !allowed.includes(key))) fail('Unknown or inapplicable issue field.');
   const result = {};
   if (own(fields, 'title')) result.title = text(fields.title, 256, 'title', true);
   if (own(fields, 'body')) result.body = text(fields.body, 64 * 1024, 'body');
   if (own(fields, 'labels')) result.labels = checkedLabels(fields.labels);
   if (own(fields, 'assignees')) result.assignees = checkedAssignees(fields.assignees);
+  if (name === 'set-milestone') {
+    result.milestone = natural(fields.milestone, 'milestone number', 1);
+    result.expected_milestone_version = natural(fields.expected_milestone_version, 'expected milestone version', 1);
+  }
   if (name === 'open') {
     if (!own(result, 'title') || !own(result, 'body')) fail('Opening an issue requires title and body.');
     result.labels ??= [];
@@ -99,6 +104,7 @@ export function mutationRequest(number, version, action, fields) {
     if (action === 'edit' && !checked.labels.length) form.append('clear_labels', 'true');
   }
   if (checked.assignees) for (const id of checked.assignees) form.append('assignee', id);
+  for (const name of ['milestone', 'expected_milestone_version']) if (own(checked, name)) form.append(name, String(checked[name]));
   const body = form.toString();
   if (body.length > MAX_FORM_BYTES) fail('Encoded issue form exceeds 256 KiB.');
   return { number, expected_version: version, action, fields: checked, body };
@@ -120,6 +126,13 @@ export function issueLocked(row) {
   if (typeof row.locked !== 'boolean') fail('Invalid issue lock state.');
   return row.locked;
 }
+// Absence in an older snapshot means unassigned. Keep the original record
+// untouched so saved receipts and archive commitments retain their exact bytes.
+export function issueMilestone(row) {
+  object(row);
+  if (!own(row, 'milestone') || row.milestone === null) return null;
+  return natural(row.milestone, 'milestone number', 1);
+}
 export function issueState(row) {
   object(row);
   natural(row.number, 'issue number', 1); natural(row.version, 'issue version', 1);
@@ -129,6 +142,7 @@ export function issueState(row) {
   // the complete set; a present malformed field is never replaced with empty.
   if (own(row, 'assignees')) checkedAssignees(row.assignees, true);
   issueLocked(row);
+  issueMilestone(row);
   if (!['open', 'closed'].includes(row.state)) fail('Invalid issue state.');
   opaque(row.opened_by, 'opening principal'); opaque(row.last_actor, 'last principal');
   natural(row.comments, 'comment count', 0, row.version - 1);
@@ -168,6 +182,7 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
       fail('Incomplete issue history or invalid continuation.');
     }
     let locked = after === 0 ? false : null;
+    let milestone = after === 0 ? null : undefined;
     reply.events.forEach((event, i) => {
       object(event); object(event.action);
       if (event.version !== after + i + 1) fail('History contains a version gap.');
@@ -181,6 +196,10 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
         delete fields.body_rendered;
       }
       issueAction(name, fields);
+      if (name === 'set-milestone' || name === 'clear-milestone') {
+        if (!own(reply.issue, 'milestone')) fail('Milestone history requires an explicit membership state.');
+        milestone = name === 'set-milestone' ? fields.milestone : null;
+      }
       if (own(fields, 'assignees')) checkedAssignees(fields.assignees, true);
       if ((event.version === 1) !== (name === 'open')) fail('Invalid opening event position.');
       if (name === 'lock' || name === 'unlock') {
@@ -193,6 +212,9 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
     if (reply.next_after_version === null && locked !== null && locked !== issueLocked(reply.issue)) {
       fail('Issue lock state disagrees with its history.');
     }
+    if (reply.next_after_version === null && milestone !== undefined && milestone !== issueMilestone(reply.issue)) {
+      fail('Issue milestone disagrees with its history.');
+    }
   }
   return { reply, binding: observed, head: snapshot };
 }
@@ -200,11 +222,13 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
 // A frozen copy prevents edits to a form/array from changing an in-flight query.
 export function issueSearchQuery(input = {}) {
   object(input);
-  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive'].includes(key))) {
+  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive', 'milestone'].includes(key))) {
     fail('Unknown issue search field.');
   }
   const state = input.state ?? null, opened_by = input.opened_by ?? null;
   const needle = input.text ?? null, case_sensitive = input.case_sensitive ?? false;
+  const milestone = input.milestone ?? null;
+  if (milestone !== null && milestone !== 'none') natural(milestone, 'milestone filter', 1);
   if (state !== null && !['open', 'closed'].includes(state)) fail('Invalid issue search state.');
   if (opened_by !== null && (typeof opened_by !== 'string' || !/^[0-9a-f]{32}$/.test(opened_by))) {
     fail('Opening principal must be 32 lowercase hexadecimal characters.');
@@ -216,7 +240,7 @@ export function issueSearchQuery(input = {}) {
   if (typeof case_sensitive !== 'boolean' || (case_sensitive && needle === null)) {
     fail('Case-sensitive matching requires literal search text.');
   }
-  return Object.freeze({ state, opened_by, text: needle, case_sensitive,
+  return Object.freeze({ state, opened_by, text: needle, case_sensitive, ...(milestone === null ? {} : { milestone }),
     labels: Object.freeze(checkedLabels(input.labels ?? [])) });
 }
 function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } = {}) {
@@ -227,6 +251,7 @@ function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } 
   return { after, limit, head, maxScan };
 }
 function matchesSearch(row, query) {
+  if (query.milestone !== undefined && issueMilestone(row) !== (query.milestone === 'none' ? null : query.milestone)) return false;
   if ((query.state !== null && row.state !== query.state) ||
       (query.opened_by !== null && row.opened_by !== query.opened_by) ||
       !query.labels.every(label => row.labels.includes(label))) return false;
@@ -247,6 +272,7 @@ export function issueSearchPage(reply, input, options = {}) {
   if (reply.type !== 'issue_search_page' || reply.scope !== 'repository_issues' ||
       echo.text_scope !== 'title_or_body' || echo.state !== query.state ||
       echo.opened_by !== query.opened_by || echo.text !== query.text ||
+      (echo.milestone ?? null) !== (query.milestone ?? null) ||
       echo.case_sensitive !== query.case_sensitive || reply.refs_changed !== false ||
       reply.transaction_created !== false) fail('Issue search response changed its predicate or read-only contract.');
   checkedLabels(echo.labels, true);
@@ -471,6 +497,7 @@ export class IssueClient {
       limit: String(limit), max_scan: String(maxScan) });
     if (query.text !== null) body.append('query', query.text);
     if (query.opened_by !== null) body.append('opened_by', query.opened_by);
+    if (query.milestone !== undefined) body.append('milestone', String(query.milestone));
     for (const label of query.labels) body.append('label', label);
     if (head !== null) body.append('expected_head', head);
     const raw = await this.#request('issues/search', { method: 'POST', body: body.toString(), view: true });
