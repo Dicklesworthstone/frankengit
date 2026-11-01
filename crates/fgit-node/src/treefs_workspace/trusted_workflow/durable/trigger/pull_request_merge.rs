@@ -75,19 +75,19 @@ impl PullRequestMergeWatchConfig {
         self.style
     }
 
-    const fn profile_name(&self) -> &'static str {
+    pub(super) const fn profile_name(&self) -> &'static str {
         match self.profile {
             MergeProfile::PathMergeV1 => "path",
             MergeProfile::ExactRenamesV1 => "exact-renames",
         }
     }
-    const fn style_name(&self) -> &'static str {
+    pub(super) const fn style_name(&self) -> &'static str {
         match self.style {
             MergeCommitStyle::TwoParent => "merge-commit",
             MergeCommitStyle::Squash => "squash",
         }
     }
-    fn identity(&self) -> [u8; 32] {
+    pub(super) fn identity(&self) -> [u8; 32] {
         commitment(&[
             b"frankengit/pull-request-merge-watch-config/v1",
             self.reference.as_bytes(),
@@ -127,15 +127,67 @@ pub(super) enum Preparation {
 pub(super) struct Prepared {
     pub commit: GitOid,
     pub bundle: Vec<u8>,
-    subject: ReviewSubject,
-    source_head: RepositoryAuthorityHeadId,
-    base: GitOid,
-    tree: GitOid,
-    expected_old: Option<GitOid>,
-    publication_key: [u8; 32],
-    queue: Option<merge_queue::QueueSelection>,
+    pub(super) subject: ReviewSubject,
+    pub(super) source_head: RepositoryAuthorityHeadId,
+    pub(super) base: GitOid,
+    pub(super) tree: GitOid,
+    pub(super) expected_old: Option<GitOid>,
+    pub(super) publication_key: [u8; 32],
+    pub(super) queue: Option<merge_queue::QueueSelection>,
 }
 impl Prepared {
+    /// Reconstruct the importer's original single atomic ref command with the
+    /// existing canonical request/seal derivation. This is an equality check,
+    /// never evidence that a terminal decision exists.
+    pub(super) fn publication_identity(
+        &self,
+        node: &OneNode,
+        config: &PullRequestMergeWatchConfig,
+    ) -> Result<fgit_types::TxId, TrustedWorkflowFailure> {
+        use fgit_authority::{
+            ExpectedOld, ProposedNew, RECEIVE_ADMISSION_SCHEMA, RefCommand, SealAttempt,
+            SemanticRequest,
+        };
+        let request = SemanticRequest::build(
+            RECEIVE_ADMISSION_SCHEMA,
+            node.object_format(),
+            true,
+            vec![RefCommand {
+                name: config.reference.clone(),
+                expected_old: self
+                    .expected_old
+                    .map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
+                proposed_new: ProposedNew::Update(self.commit),
+                force: false,
+            }],
+            vec![],
+            vec![],
+        )
+        .map_err(|_| invalid("invalid retained candidate command"))?;
+        let attempt = SealAttempt {
+            tenant_id: node.tenant_id(),
+            repository_id: node.repository_id(),
+            authenticated_principal_id: config.principal,
+            idempotency_key: IdempotencyKey::new(self.publication_key.to_vec())
+                .map_err(|_| invalid("invalid candidate publication identity"))?,
+            request,
+        };
+        attempt
+            .derive()
+            .map(|(id, _)| id)
+            .map_err(|_| invalid("invalid retained candidate transaction"))
+    }
+
+    pub(super) fn publication_receipt(&self, tx_id: fgit_types::TxId, committed: bool) -> String {
+        format!(
+            "{{\"transaction_id\":\"{}\",\"committed\":{},\"publication_key\":\"{}\",\"candidate\":\"{}\"}}",
+            tx_id,
+            committed,
+            hex(&self.publication_key),
+            self.commit,
+        )
+    }
+
     pub(super) fn to_json(
         &self,
         config: &PullRequestMergeWatchConfig,
@@ -191,7 +243,7 @@ impl Prepared {
         Ok(json)
     }
 
-    fn landing_bundle(
+    pub(super) fn landing_bundle(
         &self,
         config: &PullRequestMergeWatchConfig,
         live: &mut impl fgit_pack::Deadline,
@@ -419,17 +471,11 @@ impl OneNode {
         config: &PullRequestMergeWatchConfig,
         directory: &Path,
     ) -> Result<RepositoryAuthorityHeadId, TrustedWorkflowFailure> {
-        if let Some(queue) = &prepared.queue {
-            self.validate_queue_workflow_candidate_in(
-                request,
-                queue,
-                &prepared.subject,
-                Some(prepared.source_head),
-            )
-            .await?;
-        }
         // This lease is the one persisted BEFORE admission. Never refresh it
         // on a CAS refusal or derive a new key to escape a terminal decision.
+        // Terminal resolution must precede current queue/head validation: the
+        // original successful publication itself advanced that head. Fresh
+        // intake still pins the original authenticated preparation snapshot.
         let key = IdempotencyKey::new(prepared.publication_key.to_vec())
             .map_err(|_| invalid("invalid candidate publication identity"))?;
         let session = crate::LoopbackReceiveSession::authenticated(config.principal, key);
@@ -450,20 +496,31 @@ impl OneNode {
             ));
         }
         let command = &admitted.commands[0];
+        if command.tx_id != prepared.publication_identity(self, config)? {
+            return Err(invalid(
+                "candidate publication returned another transaction",
+            ));
+        }
         let committed = matches!(command.terminal.outcome, DecisionOutcome::Committed { .. });
-        let receipt = format!(
-            "{{\"transaction_id\":\"{}\",\"committed\":{},\"publication_key\":\"{}\",\"candidate\":\"{}\"}}",
-            command.tx_id,
-            committed,
-            hex(&prepared.publication_key),
-            prepared.commit
-        );
-        write_new(
-            &directory.join("candidate-publication.json"),
-            receipt.as_bytes(),
-        )
-        .and_then(|()| File::open(directory)?.sync_all())
-        .map_err(io)?;
+        let receipt = prepared.publication_receipt(command.tx_id, committed);
+        let receipt_path = directory.join("candidate-publication.json");
+        match super::fs::symlink_metadata(&receipt_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                write_new(&receipt_path, receipt.as_bytes())
+                    .and_then(|()| File::open(directory)?.sync_all())
+                    .map_err(io)?;
+            }
+            Err(error) => return Err(io(error)),
+            Ok(_) => {
+                if reporting::read_private(&receipt_path, 4096)? != receipt.as_bytes() {
+                    return Err(invalid("retained candidate publication receipt differs"));
+                }
+                File::open(&receipt_path)
+                    .and_then(|file| file.sync_all())
+                    .and_then(|()| File::open(directory)?.sync_all())
+                    .map_err(io)?;
+            }
+        }
         if !committed {
             return Err(invalid(
                 "canonical candidate CI ref publication refused; original lease and identity retained",

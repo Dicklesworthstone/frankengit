@@ -15,6 +15,7 @@ use std::os::unix::fs::MetadataExt;
 
 mod cancellation;
 mod merge_queue;
+mod prestart;
 mod pull_request;
 mod pull_request_merge;
 mod reporting;
@@ -185,37 +186,6 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Ok(stopped_poll());
         }
-        let selection = match (pull_number, queue_number) {
-            (_, Some(number)) => {
-                self.select_queue_workflow_event(request, reference, number)
-                    .await?
-            }
-            (Some(number), None) => {
-                self.select_pull_request_workflow_event(request, reference, number)
-                    .await?
-            }
-            (None, None) => self.select_ref_workflow_event(request, reference).await?,
-        };
-        let mut idle_state = None;
-        let selected = match selection {
-            Selection::Absent => None,
-            Selection::Idle(state) => {
-                idle_state = Some(state);
-                None
-            }
-            Selection::Ready(selected) => Some(selected),
-            Selection::StoppedBeforeReservation => return Ok(stopped_poll()),
-            Selection::ChangedBeforeReservation => {
-                // No event or execution custody was acquired. Another bounded
-                // poll may select again; failures AFTER reservation stay blocked.
-                return Ok(TrustedRefWorkflowPoll {
-                    state: "source_moved",
-                    event: "null".into(),
-                    dispatch: None,
-                    execution_settled: false,
-                });
-            }
-        };
         let scope = match (pull_number, queue_number, merge_config) {
             (_, Some(number), _) => merge_queue::scope(self, reference, directory, number),
             (Some(number), None, Some(_)) => {
@@ -231,6 +201,7 @@ impl OneNode {
             config.bind(&root)?;
         }
         let entries = reporting::event_entries(&root)?;
+        let mut pending = None;
         for entry in &entries {
             if entry.file_name() == "owner.lock" {
                 continue;
@@ -253,6 +224,30 @@ impl OneNode {
                 key,
                 &|| request.checkpoint_is_live(),
             )? {
+                if let Some(config) = merge_config {
+                    if let Some(original) = prestart::read(
+                        self,
+                        reference,
+                        directory,
+                        &entry.path(),
+                        &scope,
+                        key,
+                        config,
+                        Some((read_prefixes, limits, artifacts)),
+                        &|| workspace_request_live(request),
+                    )
+                    .map_err(|error| TrustedWorkflowFailure::Journal {
+                        directory: entry.path(),
+                        detail: format!("{error}; original prestart custody retained"),
+                    })? {
+                        if pending.replace((entry.path(), original)).is_some() {
+                            return Err(invalid(
+                                "multiple unresolved prestart events in one watch scope",
+                            ));
+                        }
+                        continue;
+                    }
+                }
                 return Ok(TrustedRefWorkflowPoll {
                     state: "blocked_unresolved",
                     event: format!(
@@ -264,6 +259,65 @@ impl OneNode {
                 });
             }
         }
+        if let Some((path, mut pending)) = pending {
+            let config =
+                merge_config.ok_or_else(|| invalid("prestart merge configuration missing"))?;
+            pending
+                .load_bundle(&path, config, &|| workspace_request_live(request))
+                .map_err(|error| TrustedWorkflowFailure::Journal {
+                    directory: path.clone(),
+                    detail: format!("{error}; original prestart custody retained"),
+                })?;
+            // Original custody wins over current head/queue selection. The
+            // ordinary importer recovers its exact terminal result before any
+            // live subject check, without refreshing the retained old-tip lease.
+            return prestart::execute(
+                self,
+                request,
+                config,
+                &pending.selected,
+                &pending.prepared,
+                scope,
+                pending.event_id,
+                pending.event,
+                &path,
+                directory,
+                read_prefixes,
+                limits,
+                artifacts,
+                true,
+            )
+            .await;
+        }
+        let selection = match (pull_number, queue_number) {
+            (_, Some(number)) => {
+                self.select_queue_workflow_event(request, reference, number)
+                    .await?
+            }
+            (Some(number), None) => {
+                self.select_pull_request_workflow_event(request, reference, number)
+                    .await?
+            }
+            (None, None) => self.select_ref_workflow_event(request, reference).await?,
+        };
+        let mut idle_state = None;
+        let selected = match selection {
+            Selection::Absent => None,
+            Selection::Idle(state) => {
+                idle_state = Some(state);
+                None
+            }
+            Selection::Ready(selected) => Some(selected),
+            Selection::StoppedBeforeReservation => return Ok(stopped_poll()),
+            Selection::ChangedBeforeReservation => {
+                return Ok(TrustedRefWorkflowPoll {
+                    state: "source_moved",
+                    event: "null".into(),
+                    dispatch: None,
+                    execution_settled: false,
+                });
+            }
+        };
         let Some(selected) = selected else {
             return Ok(TrustedRefWorkflowPoll {
                 state: if let Some(state) = idle_state {
@@ -430,23 +484,48 @@ impl OneNode {
                         directory: event_directory.clone(),
                         detail: format!("{error}; original queue candidate custody retained"),
                     })?;
+                prestart::record(
+                    &event_directory,
+                    scope,
+                    event_id,
+                    &event,
+                    config,
+                    prepared,
+                    directory,
+                    read_prefixes,
+                    limits,
+                    artifacts,
+                    &|| workspace_request_live(request),
+                )
+                .map_err(|error| TrustedWorkflowFailure::Journal {
+                    directory: event_directory.clone(),
+                    detail: format!("{error}; original candidate custody retained before dispatch"),
+                })?;
+                return prestart::execute(
+                    self,
+                    request,
+                    config,
+                    &selected,
+                    prepared,
+                    scope,
+                    event_id,
+                    event,
+                    &event_directory,
+                    directory,
+                    read_prefixes,
+                    limits,
+                    artifacts,
+                    false,
+                )
+                .await;
             }
         }
         let retained = |error: String| TrustedWorkflowFailure::Journal {
             directory: event_directory.clone(),
             detail: error,
         };
-        let (execution_ref, execution_head, execution_commit) = if let (
-            Some(config),
-            Some(prepared),
-        ) = (merge_config, &prepared)
-        {
-            let head = self.publish_watched_merge_in(request, prepared, config, &event_directory).await
-                .map_err(|error| retained(format!("{error}; original candidate and publication identity retained; never replay automatically")))?;
-            (config.reference(), head, prepared.commit)
-        } else {
-            (reference, selected.head, selected.commit)
-        };
+        let (execution_ref, execution_head, execution_commit) =
+            (reference, selected.head, selected.commit);
         let dispatch_result = self
             .dispatch_trusted_workflows_with_trigger_branch_in(
                 request,
@@ -474,13 +553,11 @@ impl OneNode {
                         (
                             Some(pull.path_comparison_base()),
                             fgit_forge::review::ComparisonMode::MergeBase,
-                            merge_config.map(|_| selected.commit),
+                            None,
                         )
                     },
                 )),
-                prepared.is_none().then_some(|| {
-                    reserve_event(&root, &event_directory, &event, None, &mut reserved)
-                }),
+                Some(|| reserve_event(&root, &event_directory, &event, None, &mut reserved)),
             )
             .await;
         let dispatch = match dispatch_result {
@@ -519,29 +596,18 @@ impl OneNode {
             }
             Err(error) => return Err(error),
         };
-        let execution_settled = if closed(&dispatch) && workspace_request_live(request) {
-            reporting::capture(
-                &event_directory,
-                scope,
-                event_id,
-                execution_commit,
-                &dispatch,
-                request,
-            )?;
-            write_new(&event_directory.join("settled"), key.as_bytes())
-                .and_then(|()| File::open(&event_directory)?.sync_all())
-                .map_err(|e| retained(e.to_string()))?;
-            true
-        } else {
-            false
-        };
-        drop(owner);
-        Ok(TrustedRefWorkflowPoll {
-            state: "dispatched",
+        let result = finish_dispatch(
+            request,
+            &event_directory,
+            scope,
+            event_id,
             event,
-            dispatch: Some(dispatch),
-            execution_settled,
-        })
+            execution_commit,
+            dispatch,
+            "dispatched",
+        );
+        drop(owner);
+        result
     }
 
     async fn select_ref_workflow_event(
@@ -653,6 +719,41 @@ fn reserve_event(
             directory: directory.to_path_buf(),
             detail: error.to_string(),
         })
+}
+
+fn finish_dispatch(
+    request: &NodeRequestContext,
+    directory: &Path,
+    scope: [u8; 32],
+    event_id: [u8; 32],
+    event: String,
+    commit: GitOid,
+    dispatch: TrustedWorkflowDispatch,
+    state: &'static str,
+) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
+    let execution_settled = if closed(&dispatch) && workspace_request_live(request) {
+        reporting::capture(directory, scope, event_id, commit, &dispatch, request).map_err(
+            |error| TrustedWorkflowFailure::Journal {
+                directory: directory.to_path_buf(),
+                detail: format!("{error}; original execution custody retained"),
+            },
+        )?;
+        write_new(&directory.join("settled"), hex(&event_id).as_bytes())
+            .and_then(|()| File::open(directory)?.sync_all())
+            .map_err(|error| TrustedWorkflowFailure::Journal {
+                directory: directory.to_path_buf(),
+                detail: error.to_string(),
+            })?;
+        true
+    } else {
+        false
+    };
+    Ok(TrustedRefWorkflowPoll {
+        state,
+        event,
+        dispatch: Some(dispatch),
+        execution_settled,
+    })
 }
 
 fn closed(dispatch: &TrustedWorkflowDispatch) -> bool {
