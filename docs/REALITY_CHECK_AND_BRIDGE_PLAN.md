@@ -151,6 +151,63 @@ The first `2425a1a3` campaign remains **failed**: operator 5,125 passed / one fa
 
 The strict-remote native attempt at `2425a1a3`, job **30088827368374467** on `hz4`, ends **120 before Cargo**: free 20,284,063,744 bytes cannot cover the unchanged 10 GiB growth reservation plus 10 GiB protected floor. Its acknowledgement and source/tree/pair retirement are all true; old jobs 387 and 7ba remain separately held. Two earlier local invocations failed option validation before admission. No compiler result or current native campaign is claimed; the LTO-off hypothesis remains untested. [PR #36](https://github.com/Dicklesworthstone/frankengit/pull/36) was externally merged at 05:50:14 UTC, merge `cee6b12bd81fb6b692ec342d8d4a6efb02fa60fd`, head `8377a38b`; that is not independent batch acceptance. Comment **5826** maps the continuation to every original `.4.59` condition. It remains **in progress**, including the absent full operator frontend/matrix and same-revision native qualification; `.4.26` remains **blocked**. No condition is moved to a follow-up or self-closed.
 
+**Shipped issue-client integration and native search repair:**
+`aefb787f190697e63442963ec0a4ac63f92f5fc2` corrects a real native routing
+defect exposed by `forge_issues.mjs`: read-only issue search rejected a POST body
+coalesced with its headers, and inherited mutation quota/writer classification
+from the method heuristic. Parsed issue operations now distinguish body intake
+from mutation; search uses the existing read quota without a writer permit.
+GET-body and search-idempotency-key refusals remain. New real embedded/TCP
+regressions cover buffered and `100 Continue` split requests, occupied writers,
+independent quota exhaustion and unchanged authority in both hash domains.
+These Rust tests still require execution and independent batch verification.
+
+The existing discovered issue campaign now includes the shipped `IssueClient`
+through `forge_issues.mjs`, all seven mutations, exact-record status/retry,
+denied-write uncertainty and permitted exact retry, native Rust readback, and
+list/history/search continuation. `9b6313c771cd4b3b2639f7bea1197c20deaeb902`
+corrects a pending probe expectation from the retained-basis contract: ordinary
+publication preserves a selected historical view; an unknown pin refuses.
+No production snapshot policy changed. Node issue requests now identify the
+project while preserving client headers, redirect policy and cancellation.
+
+At clean `aefb787f`, focused JavaScript checks report **47 passed, zero failed or
+skipped**, and the unchanged-source docs checker exits zero with **427 Markdown
+files / 492 registry rows**. The header assertion failed before repair. Actual
+older native `a9d65885` executes the seven forge mutations/recovery/grant twins
+in SHA-1 before search fails. An exact-body control returns **buffered 400 /
+split 200**; a separate CLI control confirms retained-history success and an
+unknown-pin 409. These are diagnostic controls, not repaired-native acceptance.
+The initial event comparison incorrectly expected HTTP to repeat the CLI's
+per-event issue number; owning serializers justify explicit number validation
+plus comparison of every remaining field. All failed runs remain retained.
+
+Frozen `aefb787f` underwent strict remote syntax qualification with a fresh
+private target. The first worker refused **103 / no slots before Cargo** after
+capacity fell. The separate normal `hz4` job **30088827368374473** reached
+`fgit-node`, then exited **101** because transfer filters omitted tracked
+`trusted_workflow/artifacts/inputs.rs` and `logs.rs`, producing E0583 and
+derivative E0599 errors. This incomplete remote source is neither a valid source
+failure nor a successful gate. Its terminal acknowledgement and source/tree/pair
+retirement are all true.
+
+A supported private `.rch/config.toml` in the new frozen `9b6313c7` build worktree
+anchors only `artifacts/` and `artifacts/**` to the repository root. All other
+entries in the 80-pattern exclusion list remain identical. A real rsync dry run
+selects all **2,579 tracked Rust files**, including both missing modules, while
+secret files and root generated outputs remain excluded. Effective-config
+comparison confirms exactly two changes; config lint reports no errors or
+warnings. The config digest is
+`23c22f55b48a447afda68dbef0c82bed4d3dac2261e985a6721646a258b0ac0c`.
+This is a local source-selection correction, not a global RCH edit or worker
+transfer/compiler result. The follow-on strict check refuses **103 / RCH-I002**
+before Cargo under critical disk/I/O pressure. One job, debug/LTO disabled,
+normal disk/deadline guards and strict source receipts remain in force. No
+native executable, new Rust-test execution or repaired end-to-end success is
+claimed. [Draft PR #37](https://github.com/Dicklesworthstone/frankengit/pull/37)
+contains the concrete change; `.4.59` remains in progress and `.4.26` blocked,
+with original acceptance and old custody obligations unchanged.
+
 ## 3. What has improved since October 21
 
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).
