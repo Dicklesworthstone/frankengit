@@ -92,7 +92,9 @@ prove that publication was prevented.
    archive is opened. With explicit `--replica-failover`, try payload copies of
    that identical highest statement in lexical order under one aggregate read
    allowance. Keep the acquired descriptor across all native checks; no other
-   copy is attempted after native entry.
+   copy is attempted after native entry. An explicit reconstruction mode can
+   instead assemble the original archive from cataloged ranges of those same
+   highest-statement copies before entering the native engine.
 
 Authenticating a signed observation is deliberately separate from admitting it
 for restore. Expired, future-dated, below-floor and currently over-budget statements
@@ -145,9 +147,9 @@ or a native verification failure is terminal too: another copy of those exact
 bytes cannot repair their meaning. Failover never retries a native operation or
 reclassifies an uncertain restore as prevented publication.
 
-`--max-read-bytes` is an independent aggregate allowance, available only with
-`--replica-failover`. It defaults to seven times the selected archive-byte limit and
-has a finite ceiling of 75,866,302,316,544 bytes (69 TiB). The ledger charges actual
+`--max-read-bytes` is an independent aggregate allowance for either explicit
+acquisition mode. With `--replica-failover`, it defaults to seven times the selected archive-byte
+limit and has a finite ceiling of 75,866,302,316,544 bytes (69 TiB). The ledger charges actual
 bytes returned by every attempted payload and by every native archive pass.
 Approval/control reads retain their separate bounds. A zero remaining allowance
 does not manufacture EOF: a real zero-byte EOF probe is permitted, and any extra
@@ -167,7 +169,108 @@ Successful failover-mode receipts keep `selection.selected_index` and its origin
 `payload_bytes_read`, `payload_read_calls`, `max_read_bytes`, and the bounded
 per-candidate outcomes. Its `read_budget_scope` is `all_archive_passes`.
 `selection.replica_failover` records whether the explicit mode was enabled;
-commands without it retain their original single-copy receipt shape.
+commands without either acquisition mode retain their original single-copy
+receipt shape.
+
+## Recover directly from complementary damaged copies
+
+When no complete copy remains, provide the original chunk catalog and a fresh
+private input root. This uses the same highest-checkpoint selection and native
+recovery command:
+
+```sh
+fg backup recover /fresh/restored-node \
+  --candidate /media-a/repository.fgit /controls/original.approval.json \
+  --candidate /media-b/repository.fgit /controls/replica.approval.json \
+  --reconstruct-catalog /controls/repository.chunks \
+  --reconstruction-root /private/recovery-input \
+  --destination-instance 9002 --trusted-local \
+  --expected-sha256 "$EXPECTED_SHA256" \
+  --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT" --repository-id "$REPOSITORY" \
+  --incarnation-id "$INCARNATION" --object-format sha256 \
+  --minimum-head-generation "$MINIMUM_GENERATION" \
+  --max-archive-bytes 2147483648 --max-read-bytes 17179869184
+```
+
+`--reconstruct-catalog` and `--reconstruction-root` are a required pair and cannot
+be combined with `--replica-failover`. They also work with `verify-selected` and
+an optional existing witness. The catalog is the existing `FGCHNK01` format
+produced by `fg backup catalog`; preserve it when making the original backup.
+The command does not discover copies or infer chunk commitments from damaged
+material.
+
+Every supplied approval authenticates before the catalog or payloads are read.
+Only copies of the selected highest canonical statement can supply ranges. The
+shared reconstruction kernel tries each 4 MiB range in deterministic copy order,
+uses bounded 64 KiB reads, checks its chunk digest and source custody, and writes
+to an owned private stage. Duplicate underlying source files are skipped. An
+older checkpoint cannot fill a missing range, and a different highest statement
+still makes selection ambiguous.
+
+A catalog is a derived acquisition hint. It cannot authorize content: the
+assembled archive must match the original signed length and SHA-256, then pass
+the native archive decoder, exact object inventory, complete graph, portable
+authority and retained-outcome checks. A forged catalog, a mismatch with the
+original commitment, or a native failure terminates the operation. The same
+opened private descriptor and frozen file identity remain under custody through
+native verification or recovery; no intermediate archive is published.
+
+The reconstruction root must be new, have an existing owner-private stable
+parent and be physically separate from the destination, catalog, key, approvals, candidates and
+witness. The command creates it owner-private and checks its identity throughout
+native work. These checks also apply without a witness and include aliases
+through parent directories. A successful operation explicitly removes its owned
+stage and empty input root and synchronizes the parent directories. Source
+copies, the catalog and the original approval remain untouched.
+
+A failure before native work may remove the private input only while its owned
+identity remains known. An unresolved error after native entry retains that
+input and any witness lease for inspection; dropping a descriptor is not evidence
+that native work or publication was prevented. If native work completed but later
+cleanup or receipt delivery failed, the error preserves
+`native_operation_complete=true`. Keep the destination and any retained recovery
+state until their status is independently established.
+
+This mode defaults to eight times `--max-archive-bytes`, with a finite
+`--max-read-bytes` ceiling of 76,965,813,944,320 bytes (70 TiB). The one ledger
+charges actual bytes from rejected and accepted ranges and every later archive
+pass. Catalog reads remain separately bounded. Before each range attempt, enough
+allowance must remain for the outstanding source ranges and all subsequent
+verification or recovery passes. Incomplete, unavailable or rejected ranges never
+reset that allowance.
+
+For an archive of length N with no rejected range reads:
+
+| Operation | Actual archive bytes read |
+|---|---:|
+| Direct reconstruction and selected verification | 4N |
+| Direct reconstruction and fresh recovery | 7N |
+| Direct reconstruction and an already-published exact resume | 4N |
+
+Recovery conservatively reserves its full 7N path even when a later destination
+inspection can establish an already-published resume. Each rejected range adds
+its actual bytes to these totals. A separate standalone reconstruction followed
+by fresh recovery reads 10N; the direct path removes three complete archive
+passes. These counts describe the algorithm's reads, not a measured throughput
+or memory benchmark.
+
+The lexical-first selected approval remains the exact signed resume binding.
+A later `--resume` may use different available copies and a different fresh
+`--reconstruction-root`, while retaining that original approval, expected digest,
+trust policy and destination instance. An existing private root is never reused
+or automatically cleared.
+
+Successful receipts set `selection.range_reconstruction=true` and report
+`acquisition.method="reconstructed_ranges"`. The acquisition evidence includes
+`chunk_bytes`, `chunks`, per-replica accepted and rejected range counts, skipped
+duplicates, `candidate_indices` mapping replica order to the original selected
+candidate list, actual `payload_bytes_read` and `payload_read_calls`, and
+`max_read_bytes`. Its `read_budget_scope` is `all_archive_passes`.
+`root_removed=true` is emitted only after successful private cleanup;
+`intermediate_archive_published=false` records that the assembled input stayed
+private. The native receipt continues to describe the actual verification or
+recovery result.
 
 ## Retain recovery knowledge between invocations
 
@@ -235,7 +338,8 @@ policy and closure verification. `newest_checkpoint_verified` and
 
 For signed approval issuance, see [Signed Repository Backups](SIGNED_REPOSITORY_BACKUPS.md).
 For recovery of bytes from damaged copies, see
-[Native Backup Reconstruction](NATIVE_BACKUP_RECONSTRUCTION.md). Reconstruction
-preserves the original approval; its recovered file can be supplied as the archive
-for the same signed statement here. The existing JavaScript operator interfaces
+[Native Backup Reconstruction](NATIVE_BACKUP_RECONSTRUCTION.md). Standalone
+reconstruction publishes a separately verified archive for later use; the explicit
+mode above feeds its private assembled archive directly into the selected native
+operation. Both preserve the original approval. The existing JavaScript operator interfaces
 remain described in [Checkpoint Set Recovery](CHECKPOINT_SET_RECOVERY.md).

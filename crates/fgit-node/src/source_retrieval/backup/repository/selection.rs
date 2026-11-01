@@ -3,6 +3,7 @@
 //! An unusable higher checkpoint never licenses recovery of an older one.
 
 mod engine;
+mod reconstruction;
 #[cfg(unix)]
 mod replicas;
 mod separation;
@@ -22,6 +23,9 @@ const MAX_CANDIDATE_PATH_BYTES: usize = 256 * 1024;
 // At most 64 original checksum attempts, one accepted decoding pass, and
 // four native restore scans. Independent of the per-archive byte ceiling.
 const MAX_REPLICA_READ_BYTES: u64 = (MAX_CANDIDATES as u64 + 5) * (1_u64 << 40);
+// At most 64 complete source-range reads plus two pinned admission and four
+// native restore scans, all within the same original actual-byte allowance.
+const MAX_RECONSTRUCTION_READ_BYTES: u64 = (MAX_CANDIDATES as u64 + 6) * (1_u64 << 40);
 
 pub(super) const USAGE: &str = "usage: fg backup verify-selected <new-scratch-root>
          --verification-instance <positive-integer>
@@ -34,6 +38,8 @@ pub(super) const USAGE: &str = "usage: fg backup verify-selected <new-scratch-ro
          --object-format sha1|sha256 --minimum-head-generation <positive-u64>
          [--witness <existing-independent-witness-directory>]
          [--replica-failover [--max-read-bytes <1..75866302316544>]]
+         [--reconstruct-catalog <catalog> --reconstruction-root <new-private-root>
+          [--max-read-bytes <1..76965813944320>]]
          [--max-archive-bytes <1..1099511627776>] [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>] [--timeout-secs <1..86400>]
 
@@ -51,14 +57,31 @@ resource, deadline, cancellation or unknown I/O failure is terminal. Acceptance
 ends all failover; a later native failure never tries another copy. Duplicate
 underlying files are skipped without reading their payload again. The original
 lexical approval remains unchanged even when another archive supplies the bytes.
-Without this flag, the original first-copy-only acquisition remains in force.
+Direct --reconstruct-catalog with --reconstruction-root instead assembles the
+selected statement's same aliases from surviving 4 MiB ranges. The two options
+are required together and are mutually exclusive with --replica-failover. Catalog
+hashes are hints; the private stage must match the original approved whole-file
+size and digest before entering the same complete native verification or restore.
+No intermediate archive is published and no lower checkpoint supplies bytes.
+Without either explicit mode, original first-copy-only acquisition remains in force.
 
-The failover-only --max-read-bytes allowance meters actual bytes across failed
-copies, accepted input validation and ALL native archive passes. It defaults to
-seven times --max-archive-bytes and is capped at 69 TiB. Healthy verification needs
-three archive passes; fresh recovery reserves six, including resumed unpublished
-work. Zero-byte EOF probes remain real reads; any excess byte is charged. This
-budget never widens individual archive, blob, object, metadata or runtime limits.
+For either explicit mode, --max-read-bytes meters actual bytes across failed
+copies/ranges, accepted input validation and ALL native archive passes. Failover
+defaults to seven times --max-archive-bytes and is capped at 69 TiB; healthy verify
+needs three archive reads and recover conservatively reserves six. Reconstruction
+defaults to eight times the archive limit and is capped at 70 TiB; healthy verify
+needs four archive reads and recover conservatively reserves seven, including
+resumed work. Catalog metadata is separately bounded. Zero-byte EOF probes remain
+real reads; any excess byte is charged. This budget never widens individual
+archive, blob, object, metadata or runtime limits.
+
+The reconstruction root must be new, physically independent of every input,
+control, witness and native destination, with an existing owner-private, stable
+parent. It holds
+one owner-private stage through native completion. Successful native work is
+followed by exact owned stage/root cleanup. Unresolved native errors retain that
+root and any witness lease; cleanup or receipt failure after completion preserves
+the completed native result. --resume still requires a NEW reconstruction root.
 
 Only after selection are the winner's expiry, future issue time, independent
 generation floor, archive-byte limit and independently supplied digest applied.
@@ -108,6 +131,13 @@ struct Candidate {
 }
 
 #[derive(Debug)]
+struct ReconstructionOptions {
+    catalog: PathBuf,
+    root: PathBuf,
+    max_read_bytes: u64,
+}
+
+#[derive(Debug)]
 pub(super) struct Options {
     operation: Operation,
     destination: PathBuf,
@@ -119,14 +149,15 @@ pub(super) struct Options {
     resume: bool,
     witness: Option<PathBuf>,
     replica_failover: Option<u64>,
+    reconstruction: Option<ReconstructionOptions>,
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if !(22..=225).contains(&args.len())
+    if !(22..=228).contains(&args.len())
         || args
             .iter()
             .any(|value| value.is_empty() || value.len() > 8192 || value.contains('\0'))
-        || args.iter().map(String::len).sum::<usize>() > MAX_CANDIDATE_PATH_BYTES + 32768
+        || args.iter().map(String::len).sum::<usize>() > MAX_CANDIDATE_PATH_BYTES + 49152
     {
         return Err(USAGE.into());
     }
@@ -146,6 +177,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let mut candidates = Vec::new();
     let mut witness = None;
     let (mut replica_failover, mut read_budget) = (false, None);
+    let (mut reconstruction_catalog, mut reconstruction_root) = (None, None);
     let mut path_bytes = 0_usize;
     let mut cursor = 2;
     while let Some(flag) = args.get(cursor) {
@@ -208,6 +240,20 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 }
                 witness = Some(path);
             }
+            "--reconstruct-catalog" if reconstruction_catalog.is_none() => {
+                let path = normalized(&base, Path::new(value))?;
+                if path.file_name().is_none() {
+                    return Err("selected reconstruction requires a named catalog".into());
+                }
+                reconstruction_catalog = Some(path);
+            }
+            "--reconstruction-root" if reconstruction_root.is_none() => {
+                let path = normalized(&base, Path::new(value))?;
+                if path.file_name().is_none() {
+                    return Err("selected reconstruction requires a named new private root".into());
+                }
+                reconstruction_root = Some(path);
+            }
             "--max-read-bytes" if read_budget.is_none() => {
                 if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
                     return Err("--max-read-bytes requires canonical positive decimal".into());
@@ -216,8 +262,8 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                     value
                         .parse::<u64>()
                         .ok()
-                        .filter(|value| *value > 0 && *value <= MAX_REPLICA_READ_BYTES)
-                        .ok_or("--max-read-bytes exceeds the finite 69 TiB replica profile")?,
+                        .filter(|value| *value > 0 && *value <= MAX_RECONSTRUCTION_READ_BYTES)
+                        .ok_or("--max-read-bytes exceeds the finite 70 TiB acquisition profile")?,
                 );
             }
             "--max-archive-bytes" | "--max-blob-bytes" | "--max-objects" | "--timeout-secs" => {
@@ -239,8 +285,17 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if candidates.is_empty() {
         return Err("selected recovery requires 1..64 explicit --candidate pairs".into());
     }
-    if read_budget.is_some() && !replica_failover {
-        return Err("--max-read-bytes requires explicit --replica-failover".into());
+    if reconstruction_catalog.is_some() != reconstruction_root.is_some() {
+        return Err("--reconstruct-catalog and --reconstruction-root are required together".into());
+    }
+    if replica_failover && reconstruction_catalog.is_some() {
+        return Err("--replica-failover and direct reconstruction are mutually exclusive".into());
+    }
+    if read_budget.is_some() && !replica_failover && reconstruction_catalog.is_none() {
+        return Err("--max-read-bytes requires explicit --replica-failover or paired direct reconstruction options".into());
+    }
+    if replica_failover && read_budget.is_some_and(|value| value > MAX_REPLICA_READ_BYTES) {
+        return Err("--max-read-bytes exceeds the finite 69 TiB replica profile".into());
     }
     candidates.sort();
     if candidates.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -252,10 +307,20 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         .flat_map(|candidate| [&candidate.input, &candidate.approval])
         .map(PathBuf::as_path)
         .chain(std::iter::once(trust.trust_key_path()))
+        .chain(reconstruction_catalog.as_deref())
     {
         if destination.starts_with(path) || path.starts_with(&destination) {
             return Err(
                 "selected recovery destination must be disjoint from every input and control path"
+                    .into(),
+            );
+        }
+        if reconstruction_root
+            .as_ref()
+            .is_some_and(|root| root.starts_with(path) || path.starts_with(root))
+        {
+            return Err(
+                "selected reconstruction root must be disjoint from every input and control path"
                     .into(),
             );
         }
@@ -274,7 +339,26 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     }) {
         return Err("selected recovery witness must be separate from the destination".into());
     }
+    if reconstruction_root.as_ref().is_some_and(|root| {
+        root.starts_with(&destination)
+            || destination.starts_with(root)
+            || witness
+                .as_ref()
+                .is_some_and(|directory| root.starts_with(directory) || directory.starts_with(root))
+    }) {
+        return Err(
+            "selected reconstruction root must be separate from the native destination and witness"
+                .into(),
+        );
+    }
     let profile = profile.finish();
+    let reconstruction = reconstruction_catalog
+        .zip(reconstruction_root)
+        .map(|(catalog, root)| ReconstructionOptions {
+            catalog,
+            root,
+            max_read_bytes: read_budget.unwrap_or(8 * profile.transfer.max_archive_bytes),
+        });
     Ok(Options {
         operation,
         destination,
@@ -291,6 +375,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         witness,
         replica_failover: replica_failover
             .then(|| read_budget.unwrap_or(7 * profile.transfer.max_archive_bytes)),
+        reconstruction,
     })
 }
 

@@ -287,6 +287,8 @@ mod adapter_tests {
                 "--expected-sha256",
                 "--minimum-head-generation",
                 "--replica-failover",
+                "--reconstruct-catalog",
+                "--reconstruction-root",
                 "--max-read-bytes",
             ] {
                 assert!(help.contains(required), "{operation}: {required}");

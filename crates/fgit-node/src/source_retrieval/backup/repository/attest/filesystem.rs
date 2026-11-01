@@ -61,6 +61,7 @@ pub(in super::super) struct Stage {
     file: File,
     identity: Metadata,
     state: &'static str,
+    frozen: bool,
 }
 
 impl Stage {
@@ -103,6 +104,7 @@ impl Stage {
                 file,
                 identity,
                 state: "staged",
+                frozen: false,
             };
             if let Err(error) = stage.check_parent().and_then(|()| stage.check_stage(1)) {
                 return Err(stage.failure(error));
@@ -146,8 +148,77 @@ impl Stage {
             return Err("verified backup staging changed during synchronization".into());
         }
         self.identity = after;
+        self.frozen = true;
         self.check_stage(1)?;
         deadline.check()
+    }
+
+    /// Check the original synchronization fence without accepting newly written
+    /// bytes. Native composition retains this stage while consuming a cloned
+    /// descriptor; neither inspection nor final cleanup renews its evidence.
+    pub(in super::super) fn check_frozen_content(&self) -> Result<(), String> {
+        if !self.frozen || self.state != "staged" {
+            return Err("backup private content is not an unpublished frozen stage".into());
+        }
+        self.check_parent()?;
+        self.check_stage(1)?;
+        if !same_file(
+            &self.identity,
+            &self.file.metadata().map_err(|error| error.to_string())?,
+        ) {
+            return Err("frozen backup staging content changed".into());
+        }
+        Ok(())
+    }
+
+    /// Explicit settled disposal, never Drop cleanup. The original fresh-file
+    /// or synchronized content metadata must still match exactly. A changed
+    /// stage is preserved even when no public output has been created.
+    pub(in super::super) fn discard(&mut self) -> Result<(), String> {
+        if self.state != "staged" {
+            return Err(format!(
+                "backup staging disposal refused in state {}",
+                self.state
+            ));
+        }
+        self.check_parent()?;
+        self.check_stage(1)?;
+        if !same_file(
+            &self.identity,
+            &self.file.metadata().map_err(|error| error.to_string())?,
+        ) {
+            return Err("backup staging changed; preserve it instead of deleting".into());
+        }
+        self.remove_staged()
+    }
+
+    /// Pre-native abort may remove an owned partial write without treating its
+    /// bytes as verified. Once content is frozen, exact custody is still required.
+    /// Callers must never use this to guess quiescence after native work begins.
+    pub(in super::super) fn abort_unverified(&mut self) -> Result<(), String> {
+        if self.frozen {
+            return self.discard();
+        }
+        if self.state != "staged" {
+            return Err(format!(
+                "backup staging abort refused in state {}",
+                self.state
+            ));
+        }
+        self.check_parent()?;
+        self.check_stage(1)?;
+        self.remove_staged()
+    }
+
+    fn remove_staged(&mut self) -> Result<(), String> {
+        self.state = "discard_uncertain";
+        fs::remove_file(&self.temporary)
+            .map_err(|error| format!("backup private staging removal: {error}"))?;
+        self.parent
+            .sync_all()
+            .map_err(|error| format!("backup private staging parent synchronization: {error}"))?;
+        self.state = "discarded";
+        Ok(())
     }
 
     fn check_parent(&self) -> Result<(), String> {

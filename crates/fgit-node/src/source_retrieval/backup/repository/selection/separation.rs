@@ -1,5 +1,6 @@
-//! Witness independence is checked through directory identities, without
-//! opening losing payloads. Missing acquisition suffixes stay ordinary names;
+//! Witness and private reconstruction roots remain independent through pinned
+//! directory identities without opening losing payloads. Missing acquisition
+//! suffixes stay ordinary names;
 //! unknown I/O and dangling parent symlinks never become an empty location.
 
 use std::collections::BTreeMap;
@@ -84,31 +85,36 @@ pub(super) struct Separation {
 impl Separation {
     pub(super) fn capture(
         options: &Options,
-        witness: &Path,
+        witness: Option<&Path>,
         deadline: Deadline,
     ) -> Result<Self, String> {
-        let requested_witness = options
-            .witness
-            .as_deref()
-            .ok_or("selected recovery witness path is absent")?;
-        let paths =
-            std::iter::once(requested_witness)
-                .chain(std::iter::once(options.destination.as_path()))
-                .chain(std::iter::once(options.trust.trust_key_path()))
-                .chain(options.candidates.iter().flat_map(|candidate| {
-                    [candidate.input.as_path(), candidate.approval.as_path()]
-                }));
-        let mut locations = Vec::with_capacity(3 + options.candidates.len() * 2);
+        let mut paths = Vec::with_capacity(5 + options.candidates.len() * 2);
+        paths.push(options.destination.as_path());
+        paths.push(options.trust.trust_key_path());
+        paths.extend(
+            options
+                .candidates
+                .iter()
+                .flat_map(|candidate| [candidate.input.as_path(), candidate.approval.as_path()]),
+        );
+        let witness_index = options.witness.as_deref().map(|path| {
+            let index = paths.len();
+            paths.push(path);
+            index
+        });
+        if witness_index.is_some() != witness.is_some() {
+            return Err("selected recovery captured witness path is absent".into());
+        }
+        let reconstruction_index = options.reconstruction.as_ref().map(|reconstruction| {
+            paths.push(reconstruction.catalog.as_path());
+            let index = paths.len();
+            paths.push(reconstruction.root.as_path());
+            index
+        });
+        let mut locations = Vec::with_capacity(paths.len());
         let mut parents = BTreeMap::new();
-        for (index, path) in paths.enumerate() {
+        for path in paths {
             let (physical, parent) = physical_location(path, deadline)?;
-            if index == 0 {
-                if physical != witness {
-                    return Err("selected recovery witness parent alias changed".into());
-                }
-            } else if physical.starts_with(witness) || witness.starts_with(&physical) {
-                return Err("selected recovery witness must be physically separate from every input, control and destination".into());
-            }
             if !parents.contains_key(&parent) {
                 parents.insert(parent.clone(), Parent::open(&parent)?);
             }
@@ -116,6 +122,34 @@ impl Separation {
                 requested: path.to_path_buf(),
                 physical,
             });
+        }
+        if let (Some(index), Some(witness)) = (witness_index, witness) {
+            if locations[index].physical != witness {
+                return Err("selected recovery witness parent alias changed".into());
+            }
+            if locations.iter().enumerate().any(|(other, location)| {
+                other != index
+                    && (location.physical.starts_with(witness)
+                        || witness.starts_with(&location.physical))
+            }) {
+                return Err("selected recovery witness must be physically separate from every input, control and destination".into());
+            }
+        }
+        if let Some(index) = reconstruction_index {
+            let root = &locations[index].physical;
+            if locations.iter().enumerate().any(|(other, location)| {
+                other != index
+                    && (location.physical.starts_with(root) || root.starts_with(&location.physical))
+            }) {
+                return Err("selected reconstruction root must be physically separate from every input, control, witness and native destination".into());
+            }
+            let destination = &locations[0].physical;
+            if locations.iter().skip(1).any(|location| {
+                location.physical.starts_with(destination)
+                    || destination.starts_with(&location.physical)
+            }) {
+                return Err("selected reconstruction native destination must be physically separate from every input and control".into());
+            }
         }
         let separation = Self { locations, parents };
         separation.check(deadline)?;

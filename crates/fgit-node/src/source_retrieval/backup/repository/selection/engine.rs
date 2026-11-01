@@ -21,14 +21,18 @@ pub(super) enum Checkpoint {
     BeforeReplicaAttempt,
     ReplicaUnavailable,
     ReplicaPayloadRead { bytes: usize, total: u64 },
+    BeforeReconstruction,
+    ReconstructionChunkAccepted { chunk: usize, replica: usize },
+    ReconstructionPayloadRead { bytes: usize, total: u64 },
+    ReconstructionPrepared,
     BeforeNative,
     NativeCompleted,
 }
 
 #[derive(Default)]
-struct Progress {
-    native_started: bool,
-    native_completed: bool,
+pub(super) struct Progress {
+    pub(super) native_started: bool,
+    pub(super) native_completed: bool,
 }
 
 pub(super) fn execute_with_checkpoints(
@@ -65,9 +69,24 @@ fn execute_inner(
     {
         return Err("selected replica read allowance is outside its finite profile".into());
     }
+    if options
+        .reconstruction
+        .as_ref()
+        .is_some_and(|reconstruction| {
+            reconstruction.max_read_bytes == 0
+                || reconstruction.max_read_bytes > super::MAX_RECONSTRUCTION_READ_BYTES
+        })
+    {
+        return Err("selected reconstruction read allowance is outside its finite profile".into());
+    }
+    if options.replica_failover.is_some() && options.reconstruction.is_some() {
+        return Err(
+            "selected replica failover and direct reconstruction are mutually exclusive".into(),
+        );
+    }
     #[cfg(not(unix))]
-    if options.replica_failover.is_some() {
-        return Err("selected replica failover requires Unix pinned source descriptors".into());
+    if options.replica_failover.is_some() || options.reconstruction.is_some() {
+        return Err("selected replica acquisition requires Unix pinned source descriptors".into());
     }
     let trust = options.trust.load(deadline)?;
     let mut witness = options
@@ -97,9 +116,14 @@ fn execute_inner(
         if let Some(witness) = witness.as_mut() {
             witness.require(winner)?;
         }
-        let separation = witness
-            .as_ref()
-            .map(|witness| Separation::capture(options, witness.directory(), deadline))
+        let separation = (witness.is_some() || options.reconstruction.is_some())
+            .then(|| {
+                Separation::capture(
+                    options,
+                    witness.as_ref().map(WitnessGuard::directory),
+                    deadline,
+                )
+            })
             .transpose()?;
         let aliases = inspected
             .iter()
@@ -113,6 +137,7 @@ fn execute_inner(
             aliases.len(),
             witness.as_ref().map(WitnessGuard::snapshot_json),
             options.replica_failover.is_some(),
+            options.reconstruction.is_some(),
         );
         checkpoint.borrow_mut()(Checkpoint::WinnerSelected)?;
         deadline.check()?;
@@ -133,7 +158,11 @@ fn execute_inner(
             }
             Ok(())
         };
-        let (native, acquisition) = if let Some(maximum) = options.replica_failover {
+        let (native, acquisition) = if options.reconstruction.is_some() {
+            super::reconstruction::execute(
+                options, &aliases, &approval, deadline, checkpoint, progress, &mut guard,
+            )?
+        } else if let Some(maximum) = options.replica_failover {
             execute_replicas(
                 options, &aliases, &approval, maximum, deadline, checkpoint, progress, &mut guard,
             )?
@@ -165,7 +194,7 @@ fn execute_inner(
     finish_witness(witness, result, progress)
 }
 
-fn execute_native<R: Read + Seek>(
+pub(super) fn execute_native<R: Read + Seek>(
     options: &Options,
     archive: PinnedArchive<R>,
     approval: &VerifiedApproval,
@@ -179,7 +208,9 @@ fn execute_native<R: Read + Seek>(
     approval.check_current()?;
     deadline.check()?;
     progress.native_started = true;
-    let guarded = options.witness.is_some() || options.replica_failover.is_some();
+    let guarded = options.witness.is_some()
+        || options.replica_failover.is_some()
+        || options.reconstruction.is_some();
     let native = match (options.operation, guarded) {
         (Operation::Verify, false) => super::super::restore::verify::execute_selected_in(
             archive,
@@ -351,6 +382,7 @@ fn selection_json(
     aliases: usize,
     witness: Option<String>,
     replica_failover: bool,
+    range_reconstruction: bool,
 ) -> String {
     let mut digest = Sha256Hasher::new();
     digest.update(b"frankengit/native-backup-candidate-observations/v1\0");
@@ -376,7 +408,7 @@ fn selection_json(
             "{{\"type\":\"repository_backup_checkpoint_selection\",\"schema_version\":1,",
             "\"all_supplied_approvals_authenticated\":true,\"highest_supplied_generation_selected\":true,",
             "\"selected_index\":{},\"selected_head_generation\":{},\"candidates_authenticated\":{},",
-            "\"same_statement_replicas\":{},\"replica_failover\":{},",
+            "\"same_statement_replicas\":{},\"replica_failover\":{}{},",
             "\"candidate_set_sha256\":{},\"trusted_key_id\":{},\"approval_sha256\":{},",
             "\"statement\":{},\"candidates\":[{}],\"payloads_read_during_selection\":false,",
             "\"persistent_high_water_enforced\":{}{},\"newest_checkpoint_verified\":false,",
@@ -387,6 +419,11 @@ fn selection_json(
         candidates.len(),
         aliases,
         replica_failover,
+        if range_reconstruction {
+            ",\"range_reconstruction\":true"
+        } else {
+            ""
+        },
         quote(&hex(&digest.finish())),
         quote(winner.trusted_key_id()),
         quote(&hex(&winner.approval_digest())),

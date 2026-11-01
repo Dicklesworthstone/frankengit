@@ -1,6 +1,8 @@
 //! Real source archives and native recovery; adversarial observations use real
 //! independent DSSE signatures, never fabricated native verification evidence.
 
+#[path = "reconstruction_tests.rs"]
+mod reconstruction_tests;
 #[path = "replica_tests.rs"]
 mod replica_tests;
 #[path = "witness_tests.rs"]

@@ -7,6 +7,10 @@ mod catalog;
 #[cfg(unix)]
 mod engine;
 #[cfg(unix)]
+pub(super) mod private;
+#[cfg(unix)]
+mod ranges;
+#[cfg(unix)]
 use super::recovery_io as io;
 
 use std::io::Write;

@@ -88,6 +88,24 @@ outputs and replicas are never overwritten or removed. A late synchronization,
 cleanup or receipt-output failure reports publication uncertainty; preserve any
 visible output and independently verify it before deciding how to proceed.
 
+## Feed reconstructed bytes directly into selected recovery
+
+`fg backup verify-selected` and `fg backup recover` also accept the paired
+`--reconstruct-catalog <catalog>` and `--reconstruction-root <new-private-root>`
+options. They authenticate and select the highest unique supplied checkpoint,
+then use this same range-copy kernel on only that statement's explicit copies.
+The original signed whole-archive commitment and native graph/authority checks
+remain mandatory. The private assembled descriptor is passed directly to the
+native engine, avoiding an intermediate archive publication and three complete
+archive scans compared with standalone reconstruction followed by fresh recovery.
+
+The direct mode preserves the original selected approval and exact resume identity,
+shares one actual-byte ledger across reconstruction and native work, and removes
+its owned private input only after settled success. Its read-budget defaults,
+conservative restore reservation, custody checks and retained-error behavior are
+specified in [Native Checkpoint Recovery](NATIVE_CHECKPOINT_RECOVERY.md#recover-directly-from-complementary-damaged-copies).
+Standalone `catalog` and `reconstruct` retain the output and budget semantics below.
+
 ## Resource and filesystem profile
 
 Both commands share the existing `--max-archive-bytes`, `--max-blob-bytes`,

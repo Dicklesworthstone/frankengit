@@ -44,6 +44,7 @@ fn native_modes_require_all_independent_inputs_and_propagate_each_profile_limit(
         assert!(!parsed.resume);
         assert!(parsed.witness.is_none());
         assert!(parsed.replica_failover.is_none());
+        assert!(parsed.reconstruction.is_none());
         let mut full = basic.clone();
         full.extend(
             [
@@ -327,4 +328,175 @@ fn candidate_and_control_paths_cannot_overlap_native_destination_or_scratch() {
         normalized(Path::new("/tmp/root"), Path::new("a/../archive")).unwrap(),
         PathBuf::from("/tmp/root/archive")
     );
+}
+
+#[test]
+fn direct_reconstruction_requires_paired_exclusive_paths_and_its_own_read_profile() {
+    for operation in ["verify-selected", "recover"] {
+        let basic = arguments(operation);
+        for flag in ["--reconstruct-catalog", "--reconstruction-root"] {
+            let mut missing = basic.clone();
+            missing.extend([flag.into(), "only-one-option".into()]);
+            assert!(parse(&missing).unwrap_err().contains("required together"));
+        }
+        let mut direct = basic.clone();
+        direct.extend([
+            "--reconstruct-catalog".into(),
+            "archive.chunks".into(),
+            "--reconstruction-root".into(),
+            "assembly-private".into(),
+        ]);
+        let parsed = parse(&direct).unwrap();
+        let reconstruction = parsed.reconstruction.as_ref().unwrap();
+        assert!(parsed.replica_failover.is_none());
+        assert_eq!(
+            reconstruction.max_read_bytes,
+            8 * parsed.profile.transfer.max_archive_bytes
+        );
+        assert!(reconstruction.catalog.ends_with("archive.chunks"));
+        assert!(reconstruction.root.ends_with("assembly-private"));
+        let mut narrowed = direct.clone();
+        narrowed.extend(["--max-archive-bytes".into(), "1024".into()]);
+        assert_eq!(
+            parse(&narrowed)
+                .unwrap()
+                .reconstruction
+                .unwrap()
+                .max_read_bytes,
+            8192
+        );
+        narrowed.extend(["--max-read-bytes".into(), "1".into()]);
+        let parsed = parse(&narrowed).unwrap();
+        assert_eq!(parsed.reconstruction.unwrap().max_read_bytes, 1);
+        assert_eq!(parsed.profile.transfer.max_archive_bytes, 1024);
+        assert_eq!(
+            parsed.profile.transfer.max_blob_bytes,
+            Profile::default().transfer.max_blob_bytes
+        );
+        assert_eq!(
+            parsed.profile.transfer.max_objects,
+            Profile::default().transfer.max_objects
+        );
+        for value in [
+            "0",
+            "01",
+            "+1",
+            "-1",
+            "76965813944321",
+            "18446744073709551616",
+        ] {
+            let mut bad = direct.clone();
+            bad.extend(["--max-read-bytes".into(), value.into()]);
+            assert!(parse(&bad).is_err(), "{operation}: {value}");
+        }
+        for maximum in [MAX_REPLICA_READ_BYTES + 1, MAX_RECONSTRUCTION_READ_BYTES] {
+            let mut permitted = direct.clone();
+            permitted.extend(["--max-read-bytes".into(), maximum.to_string()]);
+            assert_eq!(
+                parse(&permitted)
+                    .unwrap()
+                    .reconstruction
+                    .unwrap()
+                    .max_read_bytes,
+                maximum
+            );
+        }
+        for flag in ["--reconstruct-catalog", "--reconstruction-root"] {
+            let mut duplicate = direct.clone();
+            duplicate.extend([flag.into(), "other".into()]);
+            assert!(parse(&duplicate).is_err());
+        }
+        let mut mixed = direct.clone();
+        mixed.push("--replica-failover".into());
+        assert!(parse(&mixed).unwrap_err().contains("mutually exclusive"));
+        let mut duplicate_budget = narrowed;
+        duplicate_budget.extend(["--max-read-bytes".into(), "100".into()]);
+        assert!(parse(&duplicate_budget).is_err());
+        direct.push("--resume".into());
+        assert_eq!(parse(&direct).is_ok(), operation == "recover");
+    }
+    let mut maximum = arguments("recover");
+    for index in 1..64 {
+        maximum.extend([
+            "--candidate".into(),
+            format!("copy-{index}"),
+            "approval".into(),
+        ]);
+    }
+    maximum.extend([
+        "--max-archive-bytes".into(),
+        "1099511627776".into(),
+        "--max-blob-bytes".into(),
+        "1099511627776".into(),
+        "--max-objects".into(),
+        "1000000".into(),
+        "--timeout-secs".into(),
+        "86400".into(),
+        "--witness".into(),
+        "independent-witness".into(),
+        "--resume".into(),
+        "--reconstruct-catalog".into(),
+        "archive.chunks".into(),
+        "--reconstruction-root".into(),
+        "assembly-private".into(),
+        "--max-read-bytes".into(),
+        MAX_RECONSTRUCTION_READ_BYTES.to_string(),
+    ]);
+    assert_eq!(maximum.len(), 228);
+    let parsed = parse(&maximum).unwrap();
+    assert!(parsed.resume && parsed.witness.is_some());
+    assert_eq!(parsed.candidates.len(), 64);
+    assert_eq!(
+        parsed.reconstruction.unwrap().max_read_bytes,
+        MAX_RECONSTRUCTION_READ_BYTES
+    );
+}
+
+#[test]
+fn direct_private_root_is_bounded_and_separate_from_all_named_inputs_and_controls() {
+    for operation in ["verify-selected", "recover"] {
+        let mut basic = arguments(operation);
+        basic.extend([
+            "--witness".into(),
+            "witness".into(),
+            "--reconstruct-catalog".into(),
+            "archive.chunks".into(),
+        ]);
+        for path in [
+            "/",
+            "destination",
+            "destination/assembly",
+            "archive",
+            "archive/assembly",
+            "approval",
+            "public.pem",
+            "archive.chunks",
+            "archive.chunks/assembly",
+            "witness",
+            "witness/assembly",
+        ] {
+            let mut bad = basic.clone();
+            bad.extend(["--reconstruction-root".into(), path.into()]);
+            assert!(parse(&bad).is_err(), "{operation}: {path}");
+        }
+        for at in [1, 4, 5, 11, 23, 25] {
+            let mut bad = basic.clone();
+            bad[at] = "assembly/nested/input".into();
+            bad.extend(["--reconstruction-root".into(), "assembly".into()]);
+            assert!(parse(&bad).is_err(), "{operation}: {at}");
+        }
+        let mut permitted = basic.clone();
+        permitted.extend(["--reconstruction-root".into(), "assembly/../private".into()]);
+        assert!(
+            parse(&permitted)
+                .unwrap()
+                .reconstruction
+                .unwrap()
+                .root
+                .ends_with("private")
+        );
+        let mut oversized = basic;
+        oversized.extend(["--reconstruction-root".into(), "x".repeat(8193)]);
+        assert!(parse(&oversized).is_err());
+    }
 }
