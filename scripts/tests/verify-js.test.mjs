@@ -17,6 +17,7 @@ const environment = () => ({ ...Object.fromEntries(Object.entries(process.env).f
 
 async function fixture(t, body = "import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync,writeFileSync} from 'node:fs';test('fixture corpus',()=>{assert.equal(readFileSync(new URL('../node-version',import.meta.url),'utf8').trim(),process.versions.node);writeFileSync(new URL('../../executed',import.meta.url),'selected browser corpus executed');});\n") {
   const root = await mkdtemp(join(tmpdir(), 'fg-js-controller-')), runs = [];
+  let validated = false;
   t.after(async () => {
     for (const r of runs) {
       if (r.child.exitCode === null && r.child.signalCode === null) r.child.kill('SIGTERM');
@@ -31,7 +32,8 @@ async function fixture(t, body = "import test from 'node:test';import assert fro
       }
       await r.closed;
     }
-    await rm(root, { recursive: true, force: true });
+    if (validated) await rm(root, { recursive: true, force: true });
+    else console.error(`JS controller fixture retained: ${root}`);
   });
   await mkdir(join(root, 'scripts/lib'), { recursive: true });await mkdir(join(root, 'tests/browser'), { recursive: true });
   await mkdir(join(root, 'tests/operator'));await writeFile(join(root, 'tests/operator/unselected.test.mjs'), "throw new Error('unselected scope was executed');\n");
@@ -43,8 +45,8 @@ async function fixture(t, body = "import test from 'node:test';import assert fro
   });
   git(['init', '-q']);git(['add', 'scripts', 'tests']);
   git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'controller fixture']);
-  const start = (extraEnvironment = {}) => {
-    const child = spawn(process.execPath, [join(root, 'scripts/verify_js.mjs'), 'browser'], {
+  const start = (extraEnvironment = {}, scope = 'browser') => {
+    const child = spawn(process.execPath, [join(root, 'scripts/verify_js.mjs'), scope], {
       // Retain the enclosing test's group so its cancellation reaches this
       // controller; the controller itself owns its detached metadata/test groups.
       env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root, GIT_DIR: '/nonexistent-fixture-git-dir', ...extraEnvironment },
@@ -55,7 +57,7 @@ async function fixture(t, body = "import test from 'node:test';import assert fro
     r.closed = new Promise((resolve, reject) => { child.once('error', reject);child.once('close', (code, signal) => resolve({ code, signal })); });
     runs.push(r);return r;
   };
-  return { root, start, async blockIndex() {
+  return { root, start, complete() { validated = true; }, async blockIndex() {
     await rename(join(root, '.git/index'), join(root, '.git/index.saved'));
     execFileSync('mkfifo', [join(root, '.git/index')], { timeout: 5000 });
   } };
@@ -87,6 +89,7 @@ test('actual profile verifies its selected source and completes a real one-test 
   assert.match(r.stdout, /# pass 1\b/, r.stderr);assert.match(r.stderr, /dirty=false/);
   assert.equal(await readFile(join(f.root, 'executed'), 'utf8'), 'selected browser corpus executed');
   assert.match(r.stderr, /owned process group is quiescent/);
+  f.complete();
 });
 
 test('SIGTERM during stopped Git metadata drains its owned process before controller exit', { timeout: 15000 }, async t => {
@@ -96,6 +99,7 @@ test('SIGTERM during stopped Git metadata drains its owned process before contro
   if (r.ownedGroups.has(pid)) assert.throws(() => process.kill(-pid, 0), e => e.code === 'ESRCH');
   r.ownedPids.delete(pid);
   assert.match(r.stderr, /native_process_cancelled/);assert.doesNotMatch(r.stderr, /JS profile:/);
+  f.complete();
 });
 
 test('blocked Git metadata reaches a real deadline without launching a test worker', { timeout: 15000 }, async t => {
@@ -105,12 +109,33 @@ test('blocked Git metadata reaches a real deadline without launching a test work
   if (r.ownedGroups.has(pid)) assert.throws(() => process.kill(-pid, 0), e => e.code === 'ESRCH');
   r.ownedPids.delete(pid);
   assert.match(r.stderr, /native_process_deadline/);assert.doesNotMatch(r.stderr, /JS profile:/);
+  f.complete();
 });
 
 test('runtime identity mismatch refuses before a corpus is launched', { timeout: 15000 }, async t => {
   const f = await fixture(t);await writeFile(join(f.root, 'tests/node-version'), '0.0.0\n');
   const r = f.start(), result = await r.closed;
-  assert.equal(result.code, 69);assert.doesNotMatch(r.stdout, /TAP version/);
+  assert.equal(result.code, 3);assert.equal(r.stdout, '');
+  assert.deepEqual(JSON.parse(r.stderr), { type: 'js_verification_refusal', schema_version: 1,
+    code: 'js_runtime_version_mismatch', expected_node: '0.0.0', actual_node: process.versions.node,
+    scope: 'browser', corpus_started: false });
+  await assert.rejects(readFile(join(f.root, 'executed')), { code: 'ENOENT' });
+  await writeFile(join(f.root, 'tests/node-version'), process.versions.node + '\n');
+  const permitted = f.start(), completed = await permitted.closed;
+  assert.equal(completed.code, 0, permitted.stderr);
+  assert.equal(await readFile(join(f.root, 'executed'), 'utf8'), 'selected browser corpus executed');
+  f.complete();
+});
+
+test('runtime-only command checks the same pin before Git metadata or corpus responsibility', { timeout: 15000 }, async t => {
+  const f = await fixture(t);await f.blockIndex();
+  const r = f.start({}, 'runtime'), result = await r.closed;
+  assert.equal(result.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { type: 'js_runtime_identity', schema_version: 1,
+    node: process.versions.node, corpus_started: false });
+  assert.equal(r.stderr, '');
+  await assert.rejects(readFile(join(f.root, 'executed')), { code: 'ENOENT' });
+  f.complete();
 });
 
 test('a denied process-group probe during cancellation is containment failure, not ordinary interruption', { timeout: 15000 }, async t => {
@@ -149,6 +174,7 @@ test('a denied process-group probe during cancellation is containment failure, n
     assert(performance.now() < drained, 'fixture group survived controller stop');await sleep(10);
   }
   r.ownedPids.delete(group);
+  f.complete();
 });
 
 test('denied stop signals bound controller retirement and report unproved containment', { timeout: 18000 }, async t => {
@@ -185,4 +211,5 @@ test('denied stop signals bound controller retirement and report unproved contai
     while(true){try{process.kill(-group,0);}catch(e){if(e.code==='ESRCH')break;throw e;}assert(performance.now()<end,'fixture group did not drain');await sleep(10);}
     r.ownedPids.delete(group);
   }
+  f.complete();
 });

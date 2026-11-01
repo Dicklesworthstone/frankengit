@@ -67,15 +67,20 @@ async function metadata(args) {
 }
 
 async function initialize() {
-  if (process.argv.length !== 3 || !Object.hasOwn(scopes, scope) || !['darwin', 'linux'].includes(process.platform)) {
-    console.error('usage: node scripts/verify_js.mjs browser|operator|scripts (macOS or Linux)');
+  if (process.argv.length !== 3 || (!Object.hasOwn(scopes, scope) && scope !== 'runtime') || !['darwin', 'linux'].includes(process.platform)) {
+    console.error('usage: node scripts/verify_js.mjs browser|operator|scripts|runtime (macOS or Linux)');
     process.exit(64);
   }
   const expected = (await readFile(join(root, 'tests/node-version'), 'utf8')).trim();
+  initialization.signal.throwIfAborted();
   if (process.versions.node !== expected) {
-    console.error(`JS verification requires Node ${expected}; running ${process.versions.node}`);
-    process.exit(69);
+    throw Object.assign(new Error('JS verification runtime identity mismatch'), {
+      code: 'js_runtime_version_mismatch', expected, actual: process.versions.node,
+    });
   }
+  // Live native campaigns need the same identity check, not a second pin or a
+  // second module-test controller. This explicit mode launches no test corpus.
+  if (scope === 'runtime') return null;
   // The supervisor's production-entrypoint tests live beside its scripts;
   // scripts/tests alone silently omits them. Preserve the existing scope and
   // profile while including both source-owned script-test locations.
@@ -102,40 +107,53 @@ async function initialize() {
 let code = 1;
 try {
   deadline = setTimeout(() => stop('campaign_deadline'), Math.max(1, Math.ceil(until - performance.now())));
-  const { files, runtimeFlags } = await initialize();
-  const testEnvironment = { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary };
-  // This is a new isolated runner, even when invoked by another node:test
-  // process. Inheriting its internal context makes Node skip a recursive run.
-  delete testEnvironment.NODE_TEST_CONTEXT;
-  child = spawn(process.execPath, [...runtimeFlags, '--test', '--test-reporter=tap', '--test-concurrency=2', '--test-timeout=300000', ...files], {
-    cwd: root, detached: true, stdio: 'inherit',
-    env: testEnvironment,
-  });
-  code = await new Promise((resolve, reject) => {
-    rejectRun = reject;
-    child.once('error', reject);
-    child.once('close', (status, signal) => {
-      if (requested === null && performance.now() >= until) requested = 'campaign_deadline';
-      resolve(requested === 'campaign_deadline' ? 124 : requested ? 130 : status ?? (signal ? 1 : 0));
+  const profile = await initialize();
+  if (profile === null) {
+    console.log(JSON.stringify({ type: 'js_runtime_identity', schema_version: 1,
+      node: process.versions.node, corpus_started: false }));
+    code = 0;
+  } else {
+    const { files, runtimeFlags } = profile;
+    const testEnvironment = { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary };
+    // This is a new isolated runner, even when invoked by another node:test
+    // process. Inheriting its internal context makes Node skip a recursive run.
+    delete testEnvironment.NODE_TEST_CONTEXT;
+    child = spawn(process.execPath, [...runtimeFlags, '--test', '--test-reporter=tap', '--test-concurrency=2', '--test-timeout=300000', ...files], {
+      cwd: root, detached: true, stdio: 'inherit',
+      env: testEnvironment,
     });
-  });
-  if (containmentFailure) throw containmentFailure;
-  if (groupPresent()) {
-    console.error('JS verification runner exited with descendants remaining');
-    if (code === 0) code = 1;
-    signalGroup('SIGKILL');
-    const drainUntil = performance.now() + 5000;
-    while (groupPresent()) {
-      if (containmentFailure) throw containmentFailure;
-      if (performance.now() >= drainUntil) throw containment(new Error('process group did not reach quiescence'));
-      await new Promise(resolve => setTimeout(resolve, 25));
+    code = await new Promise((resolve, reject) => {
+      rejectRun = reject;
+      child.once('error', reject);
+      child.once('close', (status, signal) => {
+        if (requested === null && performance.now() >= until) requested = 'campaign_deadline';
+        resolve(requested === 'campaign_deadline' ? 124 : requested ? 130 : status ?? (signal ? 1 : 0));
+      });
+    });
+    if (containmentFailure) throw containmentFailure;
+    if (groupPresent()) {
+      console.error('JS verification runner exited with descendants remaining');
+      if (code === 0) code = 1;
+      signalGroup('SIGKILL');
+      const drainUntil = performance.now() + 5000;
+      while (groupPresent()) {
+        if (containmentFailure) throw containmentFailure;
+        if (performance.now() >= drainUntil) throw containment(new Error('process group did not reach quiescence'));
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
     }
+    console.error('JS verification owned process group is quiescent');
   }
-  console.error('JS verification owned process group is quiescent');
 } catch (error) {
-  if (error.code === 'js_profile_containment_failed' && child?.pid) signalGroup('SIGKILL');
-  code = ['native_process_containment_failed', 'js_profile_containment_failed'].includes(error.code) ? 1 : requested === 'campaign_deadline' ? 124 : requested ? 130 : 1;
-  console.error(`JS verification failed: ${error.code ?? error.message}${error.cause?.code ? ` cause=${error.cause.code}` : ''}`);
+  if (error.code === 'js_runtime_version_mismatch') {
+    code = 3;
+    console.error(JSON.stringify({ type: 'js_verification_refusal', schema_version: 1,
+      code: error.code, expected_node: error.expected, actual_node: error.actual, scope, corpus_started: false }));
+  } else {
+    if (error.code === 'js_profile_containment_failed' && child?.pid) signalGroup('SIGKILL');
+    code = ['native_process_containment_failed', 'js_profile_containment_failed'].includes(error.code) ? 1 : requested === 'campaign_deadline' ? 124 : requested ? 130 : 1;
+    console.error(`JS verification failed: ${error.code ?? error.message}${error.cause?.code ? ` cause=${error.cause.code}` : ''}`);
+  }
 } finally {
   clearTimeout(deadline);clearTimeout(escalation);clearTimeout(finalizer);
   process.off('SIGINT', interrupt);process.off('SIGTERM', terminate);
