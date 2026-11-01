@@ -267,7 +267,8 @@ fn source_error(error: &MergeSourceError) -> ApiError {
 }
 fn preparation_error(error: &PreparationError) -> ApiError {
     match error {
-        PreparationError::InvalidLimits
+        PreparationError::InvalidPrefix
+        | PreparationError::InvalidLimits
         | PreparationError::InvalidMetadata
         | PreparationError::ObjectFormat => ApiError::bad("invalid_rebase_inputs"),
         PreparationError::Budget(_) => ApiError::too_large(),

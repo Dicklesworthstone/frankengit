@@ -15,7 +15,7 @@ use super::super::super::issues::{ApiError, parse_decimal, parse_form_with_field
 use super::super::request::{binding, branch, oid, pull_number, take};
 use super::MAX_COMMAND_BYTES;
 
-const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+pub(in crate::smart_http::server::queues) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct Command {
@@ -99,24 +99,8 @@ pub(super) fn parse(
     subject
         .validate()
         .map_err(|_| ApiError::bad("invalid_preparation_subject"))?;
-    let metadata = MergeMetadata {
-        author: take(&mut fields, "author")?,
-        committer: take(&mut fields, "committer")?,
-        timestamp: parse_decimal(&take(&mut fields, "timestamp")?)?,
-        message: message(&mut fields)?,
-    };
-    metadata
-        .validate()
-        .map_err(|_| ApiError::bad("invalid_commit_metadata"))?;
-    let profile = match fields.remove("profile").as_deref() {
-        None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
-        Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
-        Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
-    };
-    match fields.remove("method").as_deref() {
-        None | Some("merge-commit") => {}
-        Some(_) => return Err(ApiError::bad("unsupported_merge_method")),
-    }
+    let metadata = metadata(&mut fields)?;
+    let profile = profile(&mut fields)?;
     if !fields.is_empty() {
         return Err(ApiError::bad("unknown_or_inapplicable_field"));
     }
@@ -126,6 +110,36 @@ pub(super) fn parse(
         metadata,
         profile,
     })
+}
+
+pub(in crate::smart_http::server::queues) fn metadata(
+    fields: &mut BTreeMap<String, String>,
+) -> Result<MergeMetadata, ApiError> {
+    let metadata = MergeMetadata {
+        author: take(fields, "author")?,
+        committer: take(fields, "committer")?,
+        timestamp: parse_decimal(&take(fields, "timestamp")?)?,
+        message: message(fields)?,
+    };
+    metadata
+        .validate()
+        .map_err(|_| ApiError::bad("invalid_commit_metadata"))?;
+    Ok(metadata)
+}
+
+pub(in crate::smart_http::server::queues) fn profile(
+    fields: &mut BTreeMap<String, String>,
+) -> Result<MergeProfile, ApiError> {
+    let profile = match fields.remove("profile").as_deref() {
+        None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
+        Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
+        Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
+    };
+    match fields.remove("method").as_deref() {
+        None | Some("merge-commit") => {}
+        Some(_) => return Err(ApiError::bad("unsupported_merge_method")),
+    }
+    Ok(profile)
 }
 
 fn message(fields: &mut BTreeMap<String, String>) -> Result<Vec<u8>, ApiError> {

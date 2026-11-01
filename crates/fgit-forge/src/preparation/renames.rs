@@ -96,6 +96,19 @@ pub(super) fn merge<S: MergeObjectSource>(
     ours: GitOid,
     theirs: GitOid,
 ) -> Result<Option<GitOid>, PreparationError> {
+    merge_retaining(planner, base, ours, theirs, &BTreeSet::new())
+}
+
+/// Sequence construction retains earlier immutable candidates as parents.
+/// Only their identities are copied; their object bodies stay in the planner.
+/// Ordinary single-merge preparation supplies an empty retained set.
+pub(super) fn merge_retaining<S: MergeObjectSource>(
+    planner: &mut Planner<'_, S>,
+    base: GitOid,
+    ours: GitOid,
+    theirs: GitOid,
+    retained: &BTreeSet<GitOid>,
+) -> Result<Option<GitOid>, PreparationError> {
     // Trivial equality needs no inferred correspondence or extra inventory.
     if ours == theirs || base == ours || base == theirs {
         return planner.directory(Some(base), ours, theirs, &[], 0, false);
@@ -151,10 +164,10 @@ pub(super) fn merge<S: MergeObjectSource>(
     let t = rebuild(planner, t, &original_trees, &mut budget)?;
     let tree = planner.directory(Some(b), o, t, &[], 0, false)?;
     if let Some(root) = tree {
-        if planner.objects.len() == planner.limits.max_objects {
+        if planner.emitted_objects == planner.limits.max_objects {
             return Err(PreparationError::Budget("objects"));
         }
-        retain_candidate_objects(planner, root)?;
+        retain_candidate_objects(planner, root, retained)?;
     }
     planner.source.checkpoint()?;
     Ok(tree)
@@ -525,12 +538,13 @@ fn rebuild<S: MergeObjectSource>(
 fn retain_candidate_objects<S: MergeObjectSource>(
     planner: &mut Planner<'_, S>,
     root: GitOid,
+    retained: &BTreeSet<GitOid>,
 ) -> Result<(), PreparationError> {
     let mut pending = vec![root];
     let mut keep = BTreeSet::new();
     while let Some(id) = pending.pop() {
         planner.source.checkpoint()?;
-        if !planner.objects.contains_key(&id) || !keep.insert(id) {
+        if retained.contains(&id) || !planner.objects.contains_key(&id) || !keep.insert(id) {
             continue;
         }
         if planner.objects[&id].kind == GitObjectKind::Tree {
@@ -549,7 +563,9 @@ fn retain_candidate_objects<S: MergeObjectSource>(
             }
         }
     }
-    planner.objects.retain(|id, _| keep.contains(id));
+    planner
+        .objects
+        .retain(|id, _| retained.contains(id) || keep.contains(id));
     // Deliberately do not refund construction bytes or object/tree work.
     Ok(())
 }

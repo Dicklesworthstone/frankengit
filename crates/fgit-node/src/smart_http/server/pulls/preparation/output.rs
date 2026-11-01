@@ -37,6 +37,54 @@ enum Body {
     },
 }
 impl Reply {
+    /// Shared bounded framing for read-only native candidate artifacts. The
+    /// caller has already derived the metadata and artifact digest; moving the
+    /// bundle here avoids a second bundle-sized response allocation.
+    pub(in crate::smart_http::server) fn artifact(
+        status: Status,
+        metadata: String,
+        bundle: Option<Vec<u8>>,
+        digest: Option<&str>,
+        maximum: usize,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ApiError> {
+        checkpoint(live)?;
+        if metadata.len() > MAX_METADATA_BYTES
+            || bundle
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() > MAX_BUNDLE_BYTES)
+        {
+            return Err(ApiError::too_large());
+        }
+        let maximum = maximum.min(MAX_REPLY_BYTES);
+        match bundle {
+            None => {
+                if digest.is_some() {
+                    return Err(ApiError::unavailable());
+                }
+                if metadata.len() > maximum {
+                    return Err(ApiError::too_large());
+                }
+                Ok(Self(Body::Json {
+                    status,
+                    body: metadata,
+                }))
+            }
+            Some(bundle) => {
+                if status != Status::Success || bundle.is_empty() {
+                    return Err(ApiError::unavailable());
+                }
+                mixed(
+                    metadata,
+                    bundle,
+                    digest.ok_or_else(ApiError::unavailable)?,
+                    maximum,
+                    live,
+                )
+            }
+        }
+    }
+
     pub(crate) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         let (status, content_type, length) = match &self.0 {
             Body::Json { status, body } => (*status, "application/json; charset=utf-8", body.len()),
@@ -434,26 +482,14 @@ fn build_inner(
             Status::Success
         }
     };
-    checkpoint(live)?;
-    let maximum = maximum.min(MAX_REPLY_BYTES);
-    match bundle {
-        None => {
-            if metadata.len() > maximum {
-                return Err(ApiError::too_large());
-            }
-            Ok(Reply(Body::Json {
-                status,
-                body: metadata,
-            }))
-        }
-        Some(bundle) => mixed(
-            metadata,
-            bundle,
-            bundle_digest.as_deref().ok_or_else(ApiError::unavailable)?,
-            maximum,
-            live,
-        ),
-    }
+    Reply::artifact(
+        status,
+        metadata,
+        bundle,
+        bundle_digest.as_deref(),
+        maximum,
+        live,
+    )
 }
 
 /// Only coordinates are returned. A fresh landing credential and key, current

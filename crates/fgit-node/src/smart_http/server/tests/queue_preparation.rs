@@ -28,9 +28,9 @@ impl Drop for Credentials {
     }
 }
 
-fn preparation_head(token: char, extra: &str) -> Vec<u8> {
+fn preparation_head(operation: &str, token: char, extra: &str) -> Vec<u8> {
     format!(
-        "POST /repo.git/api/v1/queues/1/prepare HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1024\r\nExpect: 100-continue\r\nAuthorization: Bearer {}\r\n{extra}\r\n",
+        "POST /repo.git/api/v1/queues/1/{operation} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1024\r\nExpect: 100-continue\r\nAuthorization: Bearer {}\r\n{extra}\r\n",
         token.to_string().repeat(64),
     )
     .into_bytes()
@@ -50,6 +50,12 @@ fn authenticate_preparation(
 
 #[test]
 fn queue_preparation_requires_both_deployment_switches_and_all_three_token_reads() {
+    for operation in ["prepare", "prepare-prefix"] {
+        exercise_preparation_grants(operation);
+    }
+}
+
+fn exercise_preparation_grants(operation: &str) {
     let credentials = Credentials::new();
     let binding = Binding {
         tenant: TenantId::from_bytes([1; 16]),
@@ -96,7 +102,8 @@ fn queue_preparation_requires_both_deployment_switches_and_all_three_token_reads
     enabled.services = RepositoryHttpServices::NONE.with(RepositoryHttpService::Pulls, true);
     enabled.credentials = CredentialSource::File { path, binding };
 
-    let session = authenticate_preparation(&enabled, &preparation_head('0', "")).unwrap();
+    let session =
+        authenticate_preparation(&enabled, &preparation_head(operation, '0', "")).unwrap();
     let authenticated = session.authenticated_session().unwrap();
     assert_eq!(authenticated.principal_id(), principal);
     assert!(!authenticated.permits_ref_write_bytes(b"refs/heads/main"));
@@ -105,7 +112,8 @@ fn queue_preparation_requires_both_deployment_switches_and_all_three_token_reads
         fgit_admission::evidence::AdmissionAuthentication::HttpToken,
     );
     for token in ['1', '2', '3', '4', '5', '6', '7'] {
-        let error = authenticate_preparation(&enabled, &preparation_head(token, "")).unwrap_err();
+        let error = authenticate_preparation(&enabled, &preparation_head(operation, token, ""))
+            .unwrap_err();
         assert_eq!(error.status, Status::Forbidden, "token {token}");
         assert!(!error.outcome_unknown);
     }
@@ -117,19 +125,20 @@ fn queue_preparation_requires_both_deployment_switches_and_all_three_token_reads
         if !allow_queues {
             selected.config = profile().config;
         }
-        let error = authenticate_preparation(&selected, &preparation_head('0', "")).unwrap_err();
+        let error =
+            authenticate_preparation(&selected, &preparation_head(operation, '0', "")).unwrap_err();
         assert_eq!(error.status, Status::Forbidden);
         assert!(!error.outcome_unknown);
     }
     let key = authenticate_preparation(
         &enabled,
-        &preparation_head('0', "Idempotency-Key: not-a-mutation\r\n"),
+        &preparation_head(operation, '0', "Idempotency-Key: not-a-mutation\r\n"),
     )
     .unwrap_err();
     assert_eq!(key.code, "idempotency_key_not_allowed");
     assert!(!key.outcome_unknown);
     assert_eq!(
-        authenticate_preparation(&enabled, &preparation_head('f', ""))
+        authenticate_preparation(&enabled, &preparation_head(operation, 'f', ""))
             .unwrap_err()
             .status,
         Status::Unauthorized,

@@ -12,6 +12,11 @@ and changes neither refs nor queue/PR metadata. The downloaded artifact can be
 inspected and reviewed through the existing PR APIs. Actual publication uses
 the separately authorized queue `land-candidate` endpoint and its native guards.
 
+For several ordered PRs against successive projected candidates, use the
+separate [queue-prefix preparation endpoint](NATIVE_HTTP_QUEUE_PREFIX_PREPARATION.md).
+That read-only profile returns construction artifacts without a batch landing
+template or publication authority.
+
 ## Enable the endpoint and authorize reads
 
 Enable the existing PR and queue services:

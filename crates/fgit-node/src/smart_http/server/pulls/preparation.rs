@@ -226,7 +226,8 @@ fn native_preparation_error(error: &PreparationError) -> ApiError {
         PreparationError::MultipleMergeBases(_) => {
             ApiError::new(Status::Conflict, "multiple_merge_bases")
         }
-        PreparationError::InvalidLimits
+        PreparationError::InvalidPrefix
+        | PreparationError::InvalidLimits
         | PreparationError::InvalidMetadata
         | PreparationError::ObjectFormat => ApiError::bad("invalid_preparation_request"),
         PreparationError::Budget(_)

@@ -1,5 +1,6 @@
 use super::*;
 mod candidate;
+mod prefix;
 mod preparation;
 use fgit_forge::merge_queue::QueueCommandAction;
 use fgit_forge::{ExpectedVersion, QueueNumber};

@@ -2,7 +2,7 @@
 //! The queue gateway has already required fetch, PR-read and queue-read on a
 //! single credential. Native preparation owns selection, visibility and bytes.
 
-mod request;
+pub(super) mod request;
 
 use std::io::Read;
 

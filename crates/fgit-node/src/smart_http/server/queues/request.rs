@@ -42,6 +42,9 @@ pub(super) enum Operation {
     Prepare {
         number: QueueNumber,
     },
+    PreparePrefix {
+        number: QueueNumber,
+    },
 }
 
 #[derive(Debug)]
@@ -141,6 +144,22 @@ impl<'a> Request<'a> {
                 }
                 if let Some(number_text) = suffix
                     .strip_prefix('/')
+                    .and_then(|text| text.strip_suffix("/prepare-prefix"))
+                {
+                    if matches!(head.body, BodyFraming::ContentLength(size)
+                        if size > super::preparation::MAX_COMMAND_BYTES as u64)
+                    {
+                        return Err(ApiError::too_large());
+                    }
+                    return Ok(Self {
+                        repository_route,
+                        operation: Operation::PreparePrefix {
+                            number: number(number_text)?,
+                        },
+                    });
+                }
+                if let Some(number_text) = suffix
+                    .strip_prefix('/')
                     .and_then(|text| text.strip_suffix("/prepare"))
                 {
                     if matches!(head.body, BodyFraming::ContentLength(size)
@@ -202,7 +221,10 @@ impl<'a> Request<'a> {
     }
 
     pub(super) const fn is_preparation(&self) -> bool {
-        matches!(self.operation, Operation::Prepare { .. })
+        matches!(
+            self.operation,
+            Operation::Prepare { .. } | Operation::PreparePrefix { .. }
+        )
     }
 
     pub(super) const fn is_landing(&self) -> bool {

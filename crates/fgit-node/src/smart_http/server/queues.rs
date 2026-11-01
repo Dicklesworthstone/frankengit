@@ -2,6 +2,7 @@
 //! Membership grants never authorize the separate protected code publication.
 mod candidate;
 mod output;
+mod prefix;
 mod preparation;
 mod request;
 #[cfg(test)]
@@ -106,6 +107,18 @@ pub(super) fn execute(
         // The candidate encoder owns its binary response envelope. Queue
         // metadata's smaller JSON cap does not narrow the downloadable bundle.
         return preparation::execute(
+            node,
+            *number,
+            session,
+            framing,
+            reader,
+            limits,
+            maximum_response,
+        )
+        .map(Reply::Preparation);
+    }
+    if let Operation::PreparePrefix { number } = &request.operation {
+        return prefix::execute(
             node,
             *number,
             session,
@@ -299,6 +312,6 @@ pub(super) fn execute(
                 terminal: Some((tx, terminal)),
             }))
         }
-        Operation::Prepare { .. } => Err(ApiError::unavailable()),
+        Operation::Prepare { .. } | Operation::PreparePrefix { .. } => Err(ApiError::unavailable()),
     }
 }
