@@ -59,12 +59,19 @@ create no check. A repeated settled event returns `previously_settled` without
 executing or claiming its report succeeded. A missing or invalid settlement
 cannot be promoted from a process exit, candidate file or report snippet.
 
-Any unresolved event blocks ALL later events in the same watch scope, including
-after ref movement and restart. No automatic repair, force retry or record
-pruning is provided. Inspect the retained event/dispatch and use the existing
-workflow recover/publish commands for completed job evidence. This deliberately
-prefers unresolved work over accidental repeat effects. A file lock is not
-hostile-code containment, and SIGKILL cannot perform cooperative process drain.
+A missing final settlement can be recovered automatically when the original
+`check-sources` completion handoff and every original closed execution receipt
+and journal pin verify. Polling, retained check publication and owned service
+startup share this bounded verification; no script is rerun. Closed failures
+retain their failure checks. See [completed-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md)
+for the exact proof, limits and remaining unresolved cases.
+
+Any event without that verified completion boundary blocks ALL later events in
+the same watch scope, including after ref movement and restart. No force retry
+or record pruning is provided. Inspect the retained event/dispatch and use the
+existing workflow recover/publish commands for completed job evidence. A file
+lock is not hostile-code containment, and SIGKILL cannot perform cooperative
+process drain.
 
 The custody scan is bounded to 1024 retained events; source-history and dispatch
 retain their existing finite work/byte limits. Filesystem parents must remain

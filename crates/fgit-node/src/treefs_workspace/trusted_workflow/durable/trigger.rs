@@ -244,7 +244,15 @@ impl OneNode {
                 .filter(|key| lower_hash(key))
                 .ok_or_else(|| invalid("unknown watch custody entry"))?;
             check_directory(&entry.path())?;
-            if !settled(&entry.path(), key)? {
+            if !reporting::recover_settlement(
+                self,
+                merge_config.map_or(reference, |config| config.reference()),
+                directory,
+                &entry.path(),
+                &scope,
+                key,
+                &|| request.checkpoint_is_live(),
+            )? {
                 return Ok(TrustedRefWorkflowPoll {
                     state: "blocked_unresolved",
                     event: format!(

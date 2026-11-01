@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 mod sources;
 use sources::Sources;
 pub(super) use sources::read_private;
+mod settlement;
+pub(super) use settlement::recover as recover_settlement;
 
 /// Counts refer to observed canonical decisions, including historical retries.
 /// Previously reported events are suppression records, never passing checks.
@@ -194,7 +196,9 @@ impl OneNode {
                 let key = name.to_str().and_then(|s|s.strip_prefix("event-")).filter(|s|lower_hash(s))
                     .ok_or_else(|| invalid("unknown watch custody entry"))?;
                 check_directory(&path)?;
-                if !settled(&path, key)? { return Err(invalid("watch event unresolved; automatic check publication and later execution blocked")); }
+                if !recover_settlement(self, reporting_reference, directory, &path, &scope, key, &|| request.checkpoint_is_live())? {
+                    return Err(invalid("watch event unresolved; automatic check publication and later execution blocked"));
+                }
                 let sources = Sources::read(&path, &scope, key)?;
                 let token = commitment(&[b"frankengit/watch-reported/v1", &reporter, &sources.identity]);
                 if reported(&path, &token)? {

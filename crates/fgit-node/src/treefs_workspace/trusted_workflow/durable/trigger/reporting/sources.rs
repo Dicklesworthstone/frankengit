@@ -145,17 +145,35 @@ pub(in super::super) fn read_private(
     {
         return Err(invalid("invalid bounded private watch record"));
     }
-    let file = File::open(path).map_err(io)?;
+    let mut file = File::open(path).map_err(io)?;
     let actual = file.metadata().map_err(io)?;
-    if (meta.dev(), meta.ino(), meta.len()) != (actual.dev(), actual.ino(), actual.len()) {
+    if !actual.is_file()
+        || actual.mode() & 0o777 != 0o600
+        || actual.nlink() != 1
+        || (meta.dev(), meta.ino(), meta.len()) != (actual.dev(), actual.ino(), actual.len())
+    {
         return Err(invalid("watch record changed during open"));
     }
     let mut bytes = Vec::new();
-    file.take(maximum as u64 + 1)
+    bytes
+        .try_reserve_exact(meta.len() as usize)
+        .map_err(|_| invalid("watch record allocation refused"))?;
+    file.by_ref()
+        .take(maximum as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(io)?;
     if bytes.len() as u64 != meta.len() || bytes.len() > maximum {
         return Err(invalid("watch record length changed"));
+    }
+    let named = fs::symlink_metadata(path).map_err(io)?;
+    let held = file.metadata().map_err(io)?;
+    if [named, held].iter().any(|current| {
+        !current.is_file()
+            || current.mode() & 0o777 != 0o600
+            || current.nlink() != 1
+            || (current.dev(), current.ino(), current.len()) != (meta.dev(), meta.ino(), meta.len())
+    }) {
+        return Err(invalid("watch record changed during read"));
     }
     Ok(bytes)
 }

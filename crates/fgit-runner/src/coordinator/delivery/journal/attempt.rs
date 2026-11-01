@@ -30,6 +30,10 @@ impl WorkflowAttemptBinding {
         self.run
     }
     #[must_use]
+    pub const fn attempt_id(self) -> AttemptId {
+        self.attempt
+    }
+    #[must_use]
     pub const fn request_commitment(self) -> Commitment {
         self.request
     }
@@ -173,12 +177,99 @@ impl FileWorkflowAttempt {
             return Err(CheckDeliveryRefusal::Cancelled.into());
         }
         check_parent(path)?;
+        let file = private_file(path, false)?;
+        Self::open_locked(
+            path,
+            file,
+            binding,
+            minimum,
+            MAX_ATTEMPT_RECEIPT_BYTES,
+            live,
+        )
+    }
+
+    /// Read the completed local observation from one exact retained journal
+    /// scope without reconstructing a workflow plan or acquiring execution
+    /// authority. The caller must independently retain the journal identity;
+    /// accepting an identity discovered from this file is not authentication.
+    ///
+    /// The same descriptor and lock cover header selection and complete frame
+    /// validation. The receipt budget is checked before payload allocation.
+    /// Prepared and Started attempts remain unresolved; a returned receipt's
+    /// containment flag and exact check-journal pin still require validation by
+    /// the caller. No file is created, repaired, truncated, or appended.
+    pub fn read_completed_scoped(
+        path: &Path,
+        expected: CheckJournalScope,
+        minimum: Option<WorkflowAttemptPin>,
+        maximum_receipt_bytes: usize,
+        live: &dyn Fn() -> bool,
+    ) -> Result<RecordedWorkflowReceipt, WorkflowAttemptRefusal> {
+        if !(1..=MAX_ATTEMPT_RECEIPT_BYTES).contains(&maximum_receipt_bytes) {
+            return Err(CheckDeliveryRefusal::InvalidLimits.into());
+        }
+        if !live() {
+            return Err(CheckDeliveryRefusal::Cancelled.into());
+        }
+        check_parent(path)?;
         let mut file = private_file(path, false)?;
+        let end = file.metadata().map_err(storage)?.len();
+        if end < ATTEMPT_HEADER_BYTES {
+            return Err(CheckDeliveryRefusal::CorruptJournal.into());
+        }
+        if end > ATTEMPT_HEADER_BYTES + 155 + maximum_receipt_bytes as u64 {
+            return Err(CheckDeliveryRefusal::BatchTooLarge.into());
+        }
+        let mut header = [0; ATTEMPT_HEADER_BYTES as usize];
+        file.read_exact(&mut header).map_err(read_error)?;
+        if &header[..8] != ATTEMPT_HEADER {
+            return Err(CheckDeliveryRefusal::CorruptJournal.into());
+        }
+        let mut scope = ATTEMPT_HEADER.to_vec();
+        scope.extend_from_slice(expected.tenant.as_bytes());
+        scope.extend_from_slice(expected.repository.as_bytes());
+        root(&mut scope, expected.journal_id);
+        if header[..72] != scope {
+            return Err(WorkflowAttemptRefusal::IdentityMismatch);
+        }
+        let mut input = Input(&header[72..]);
+        let binding = WorkflowAttemptBinding {
+            scope: expected,
+            run: WorkflowRunId(input.root()?),
+            attempt: AttemptId(input.root()?),
+            request: input.root()?,
+        };
+        file.seek(SeekFrom::Start(0)).map_err(storage)?;
+        let mut owner =
+            Self::open_locked(path, file, binding, minimum, maximum_receipt_bytes, live)?;
+        if !live() {
+            return Err(CheckDeliveryRefusal::Cancelled.into());
+        }
+        let recorded = owner
+            .completed_receipt()?
+            .ok_or(WorkflowAttemptRefusal::ReconciliationRequired)?;
+        if !live() {
+            return Err(CheckDeliveryRefusal::Cancelled.into());
+        }
+        Ok(recorded)
+    }
+
+    fn open_locked(
+        path: &Path,
+        mut file: File,
+        binding: WorkflowAttemptBinding,
+        minimum: Option<WorkflowAttemptPin>,
+        maximum_receipt_bytes: usize,
+        live: &dyn Fn() -> bool,
+    ) -> Result<Self, WorkflowAttemptRefusal> {
         let end = file.metadata().map_err(storage)?.len();
         if !(ATTEMPT_HEADER_BYTES..=ATTEMPT_HEADER_BYTES + 155 + MAX_ATTEMPT_RECEIPT_BYTES as u64)
             .contains(&end)
         {
             return Err(CheckDeliveryRefusal::CorruptJournal.into());
+        }
+        if end > ATTEMPT_HEADER_BYTES + 155 + maximum_receipt_bytes as u64 {
+            return Err(CheckDeliveryRefusal::BatchTooLarge.into());
         }
         let mut header = [0; ATTEMPT_HEADER_BYTES as usize];
         file.read_exact(&mut header).map_err(read_error)?;
@@ -203,6 +294,9 @@ impl FileWorkflowAttempt {
                 || owner.pin.bytes + 36 + length as u64 > end
             {
                 return Err(CheckDeliveryRefusal::CorruptJournal.into());
+            }
+            if owner.started.is_some() && length > 42 + maximum_receipt_bytes {
+                return Err(CheckDeliveryRefusal::BatchTooLarge.into());
             }
             let mut payload = vec![0; length];
             owner.file.read_exact(&mut payload).map_err(read_error)?;

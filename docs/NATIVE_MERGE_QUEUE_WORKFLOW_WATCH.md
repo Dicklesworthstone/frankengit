@@ -175,6 +175,14 @@ uses retained candidate identities, not the current head. Failure after candidat
 reservation retains the original key and lease and requires reconciliation.
 Neither a disconnected client nor a missing final response proves rollback.
 
+A completed execution whose final `settled` marker was lost can now reconcile
+automatically from its durable `check-sources` handoff, original completed owner
+receipts and exact journal pins. This runs before later polling, retained check
+publication and owned service readiness, with the original check identities and
+without another script run or CI-ref publication. Closed failed runs remain
+failed checks. Missing or incomplete completion evidence still blocks the
+queue. See [bounded completed-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md).
+
 This slice executes one current queue head at a time. Speculative multi-PR
 trains, a synthetic queue-ref namespace and autonomous target landing under the
 plan's named policy classes remain separate functionality.

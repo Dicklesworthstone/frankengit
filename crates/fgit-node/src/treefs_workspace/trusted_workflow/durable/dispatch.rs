@@ -101,7 +101,7 @@ fn workflow_child(path: &[u8], directory: &[u8]) -> bool {
         })
 }
 
-fn child_id(batch: [u8; 16], event: &str, path: &[u8]) -> [u8; 16] {
+pub(super) fn child_id(batch: [u8; 16], event: &str, path: &[u8]) -> [u8; 16] {
     let mut input = b"frankengit/workflow-dispatch-child/v1\0".to_vec();
     input.extend_from_slice(&batch);
     input.extend_from_slice(&(event.len() as u64).to_be_bytes());

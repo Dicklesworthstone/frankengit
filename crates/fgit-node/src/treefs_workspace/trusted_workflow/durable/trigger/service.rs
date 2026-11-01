@@ -6,7 +6,7 @@ use super::super::super::validate_inputs;
 pub use super::pull_request_merge::PullRequestMergeWatchConfig;
 use super::{
     Owner, check_directory, hex, lower_hash, merge_queue, pull_request, pull_request_merge,
-    reporting, settled,
+    reporting,
 };
 use crate::treefs_workspace::TrustedWorkflowArtifactConfig;
 use crate::{GitDaemonSessionTimeout, NodeConfig, NodeRequestContext, OneNode};
@@ -379,7 +379,7 @@ pub fn run_service_with_ready(
             .map_err(|error| WorkflowWatchError::Authority(error.to_string()))?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|error| WorkflowWatchError::Authority(error.to_string()))?;
-        custody = Some(Custody::open(&node, &config)?);
+        custody = Some(Custody::open(&node, &config, &control)?);
         if control.is_stopped() {
             return Err(WorkflowWatchError::StoppedBeforeReadiness);
         }
@@ -732,7 +732,11 @@ struct Custody {
 }
 
 impl Custody {
-    fn open(node: &OneNode, config: &WorkflowWatchConfig) -> Result<Self, WorkflowWatchError> {
+    fn open(
+        node: &OneNode,
+        config: &WorkflowWatchConfig,
+        control: &WorkflowWatchControl,
+    ) -> Result<Self, WorkflowWatchError> {
         let custody =
             |error: super::TrustedWorkflowFailure| WorkflowWatchError::Custody(error.to_string());
         merge_queue::validate_selection(
@@ -782,7 +786,12 @@ impl Custody {
             watch_owner,
         };
         result.check()?;
+        let request = node.command_request_context(Some(config.attempt_timeout));
+        let live = || !control.is_stopped() && request.checkpoint_is_live();
         for entry in reporting::event_entries(&events).map_err(custody)? {
+            if control.is_stopped() {
+                return Err(WorkflowWatchError::StoppedBeforeReadiness);
+            }
             let name = entry.file_name();
             let key = name
                 .to_str()
@@ -790,7 +799,25 @@ impl Custody {
                 .filter(|key| lower_hash(key))
                 .ok_or_else(|| WorkflowWatchError::Custody("unknown watch custody entry".into()))?;
             check_directory(&entry.path()).map_err(custody)?;
-            if !settled(&entry.path(), key).map_err(custody)? {
+            if !reporting::recover_settlement(
+                node,
+                config
+                    .merge_candidate
+                    .as_ref()
+                    .map_or(&config.reference, |merge| merge.reference()),
+                &config.directory,
+                &entry.path(),
+                &scope,
+                key,
+                &live,
+            )
+            .map_err(|error| {
+                if control.is_stopped() {
+                    WorkflowWatchError::StoppedBeforeReadiness
+                } else {
+                    custody(error)
+                }
+            })? {
                 return Err(WorkflowWatchError::Custody(
                     "unresolved event blocks startup; preserve original execution custody".into(),
                 ));

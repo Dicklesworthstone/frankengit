@@ -185,8 +185,13 @@ publication responsibility until a complete recovery pass clears it.
 Retain the run parent across restarts and restores. The existing 1024 retained
 event limit per scope remains enforced; no automatic deletion, identity reset,
 retry of interrupted scripts or all-events delivery queue is introduced.
-Intermediate branch tips may coalesce between polls. An unresolved event blocks
-later events and refuses service readiness on restart until reconciled.
+Intermediate branch tips may coalesce between polls. Startup can recover a
+missing final settlement from the original durable completed-dispatch handoff
+and verified closed execution/journal records before readiness. This performs
+no script execution or CI-ref publication. See
+[completed-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md) for its finite
+verification profile. An event without that verified completion boundary still
+blocks later events and refuses service readiness on restart until reconciled.
 
 Source index maintenance can run alongside CI with its existing explicit flags.
 Both workers belong to the same listener's stop/drain path; enabling CI grants

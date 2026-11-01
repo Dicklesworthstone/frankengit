@@ -217,6 +217,190 @@ fn completed_bytes_and_containment_flag_survive_lost_response() {
 }
 
 #[test]
+fn scoped_completed_read_keeps_original_binding_pin_and_containment_without_writing() {
+    for containment in [false, true] {
+        let temp = Temp::new();
+        let binding = fixture_binding();
+        let frame = b"local-observation-fixture";
+        let mut owner = FileWorkflowAttempt::create(&temp.attempt(), binding).unwrap();
+        owner.start(header_pin()).unwrap();
+        owner
+            .finish_bytes(frame, containment, header_pin())
+            .unwrap();
+        let pin = owner.pin();
+        drop(owner);
+        let before = fs::read(temp.attempt()).unwrap();
+        let recorded = FileWorkflowAttempt::read_completed_scoped(
+            &temp.attempt(),
+            scope(),
+            Some(pin),
+            frame.len(),
+            &|| true,
+        )
+        .unwrap();
+        assert_eq!(recorded.binding(), binding);
+        assert_eq!(recorded.binding().run_id(), binding.run);
+        assert_eq!(recorded.binding().attempt_id(), binding.attempt);
+        assert_eq!(recorded.frame(), frame);
+        assert_eq!(recorded.journal_pin(), header_pin());
+        assert_eq!(recorded.requires_containment(), containment);
+        assert_eq!(fs::read(temp.attempt()).unwrap(), before);
+    }
+}
+
+#[test]
+fn scoped_read_refuses_unfinished_attempts_and_other_journal_scopes() {
+    let temp = Temp::new();
+    let binding = fixture_binding();
+    let mut owner = FileWorkflowAttempt::create(&temp.attempt(), binding).unwrap();
+    for started in [false, true] {
+        if started {
+            owner.start(header_pin()).unwrap();
+        }
+        drop(owner);
+        let before = fs::read(temp.attempt()).unwrap();
+        assert_eq!(
+            FileWorkflowAttempt::read_completed_scoped(
+                &temp.attempt(),
+                scope(),
+                None,
+                1024,
+                &|| true,
+            )
+            .err(),
+            Some(WorkflowAttemptRefusal::ReconciliationRequired)
+        );
+        for other in [
+            CheckJournalScope {
+                tenant: TenantId::from_bytes([9; 16]),
+                ..scope()
+            },
+            CheckJournalScope {
+                repository: RepositoryId::from_bytes([9; 16]),
+                ..scope()
+            },
+            CheckJournalScope {
+                journal_id: Commitment::of_bytes(b"foreign"),
+                ..scope()
+            },
+        ] {
+            assert_eq!(
+                FileWorkflowAttempt::read_completed_scoped(
+                    &temp.attempt(),
+                    other,
+                    None,
+                    1024,
+                    &|| true,
+                )
+                .err(),
+                Some(WorkflowAttemptRefusal::IdentityMismatch)
+            );
+        }
+        assert_eq!(fs::read(temp.attempt()).unwrap(), before);
+        owner = FileWorkflowAttempt::open(&temp.attempt(), binding, None, &|| true).unwrap();
+    }
+}
+
+#[test]
+fn scoped_read_enforces_receipt_budget_cancellation_and_independent_pin() {
+    let temp = Temp::new();
+    let binding = fixture_binding();
+    let mut owner = FileWorkflowAttempt::create(&temp.attempt(), binding).unwrap();
+    owner.start(header_pin()).unwrap();
+    owner
+        .finish_bytes(b"bounded-observation", false, header_pin())
+        .unwrap();
+    let pin = owner.pin();
+    assert_eq!(
+        FileWorkflowAttempt::read_completed_scoped(&temp.attempt(), scope(), None, 1024, &|| true,)
+            .err(),
+        Some(WorkflowAttemptRefusal::Custody(
+            CheckDeliveryRefusal::LockUnavailable
+        ))
+    );
+    drop(owner);
+    let before = fs::read(temp.attempt()).unwrap();
+    for budget in [0, MAX_ATTEMPT_RECEIPT_BYTES + 1] {
+        assert_eq!(
+            FileWorkflowAttempt::read_completed_scoped(
+                &temp.attempt(),
+                scope(),
+                None,
+                budget,
+                &|| true,
+            )
+            .err(),
+            Some(WorkflowAttemptRefusal::Custody(
+                CheckDeliveryRefusal::InvalidLimits
+            ))
+        );
+    }
+    assert_eq!(
+        FileWorkflowAttempt::read_completed_scoped(
+            &temp.attempt(),
+            scope(),
+            None,
+            b"bounded-observation".len() - 1,
+            &|| true,
+        )
+        .err(),
+        Some(WorkflowAttemptRefusal::Custody(
+            CheckDeliveryRefusal::BatchTooLarge
+        ))
+    );
+    for live_calls in 0..6 {
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            FileWorkflowAttempt::read_completed_scoped(
+                &temp.attempt(),
+                scope(),
+                None,
+                1024,
+                &|| {
+                    let previous = calls.get();
+                    calls.set(previous + 1);
+                    previous < live_calls
+                },
+            )
+            .err(),
+            Some(WorkflowAttemptRefusal::Custody(
+                CheckDeliveryRefusal::Cancelled
+            ))
+        );
+    }
+    let wrong = WorkflowAttemptPin::new(pin.byte_len(), Commitment::of_bytes(b"wrong tail"));
+    assert_eq!(
+        FileWorkflowAttempt::read_completed_scoped(
+            &temp.attempt(),
+            scope(),
+            Some(wrong),
+            1024,
+            &|| true,
+        )
+        .err(),
+        Some(WorkflowAttemptRefusal::Custody(
+            CheckDeliveryRefusal::CorruptJournal
+        ))
+    );
+    assert_eq!(fs::read(temp.attempt()).unwrap(), before);
+    write_fixture(&temp.attempt(), &before[..before.len() - 1]);
+    assert!(
+        FileWorkflowAttempt::read_completed_scoped(
+            &temp.attempt(),
+            scope(),
+            Some(pin),
+            1024,
+            &|| true,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(temp.attempt()).unwrap(),
+        before[..before.len() - 1]
+    );
+}
+
+#[test]
 fn wrong_request_or_journal_instance_cannot_adopt_an_attempt() {
     let temp = Temp::new();
     let binding = fixture_binding();
@@ -828,7 +1012,12 @@ fn real_trusted_shell_side_effect_is_not_repeated_after_disk_reopen() {
         &|| true,
     )
     .unwrap();
-    assert_eq!(fs::read(temp.0.join("marker")).unwrap(), b"xx");
+    assert_eq!(
+        fs::read(temp.0.join("marker")).unwrap(),
+        b"xx",
+        "{}",
+        p.receipt().unwrap().report().to_json()
+    );
     drop(owner);
     drop(p);
     drop(c);
