@@ -28,7 +28,7 @@ test('read returns complete owned current state and discussion; inspector result
   view.records[0].snapshot.title = 'mutated caller';
   assert.equal((await readIssueArchive(options)).records[0].snapshot.title, 'Edited title');
 });
-test('v1 partition preserves legacy unlocked bytes and refuses locked source discussions', async t => {
+test('v2 partition normalizes only absent legacy lock flags without mutating the source view', async t => {
   const f = await setup(t), view = await readIssueArchive({ workdir: f.archiveDir, confirm: f.archive.archive_sha256 });
   assert.ok(view.records.every(row => row.snapshot.locked === false));
   const legacy = structuredClone(view);
@@ -39,14 +39,18 @@ test('v1 partition preserves legacy unlocked bytes and refuses locked source dis
     assert.deepEqual(batch.bytes, historical[i].bytes);
     assert.equal(batch.sha256, historical[i].sha256);
     const capture = parseNativeIssueCapture(batch.bytes);
-    assert.ok(capture.issues.every(row => !Object.hasOwn(row.snapshot, 'locked')));
+    assert.equal(capture.schema, 'frankengit-native-issue-capture-v2');
+    assert.ok(capture.issues.every(row => row.snapshot.locked === false));
     assert.deepEqual(nativeIssueImportSteps(capture, 100), nativeIssueImportSteps(parseNativeIssueCapture(historical[i].bytes), 100));
   }
   assert.ok(view.records.every(row => row.snapshot.locked === false), 'partition must not rewrite the source view');
-  for (const value of [true, null, 'false', 0, undefined]) {
+  const locked = structuredClone(view); locked.records[0].snapshot.locked = true;
+  const steps = nativeIssueImportSteps(parseNativeIssueCapture(partitionNativeIssueArchive(locked, 100)[0].bytes), 100);
+  assert.deepEqual(steps.filter(step => step.number === 101).map(step => step.action), ['open', 'comment', 'close', 'lock']);
+  assert.ok(locked.records[0].snapshot.locked, 'partition preserves a source lock');
+  for (const value of [null, 'false', 0, undefined]) {
     const rejected = structuredClone(view); rejected.records[0].snapshot.locked = value;
-    assert.throws(() => partitionNativeIssueArchive(rejected, 100),
-      value === true ? /native_issue_source_locked_capture_requires_v2/ : /Invalid issue lock state/);
+    assert.throws(() => partitionNativeIssueArchive(rejected, 100), /Invalid issue lock state/);
   }
 });
 test('native batch prepare/run/recovery use actual shipped client and loopback API', async t => {

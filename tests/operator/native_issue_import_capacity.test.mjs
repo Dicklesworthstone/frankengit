@@ -2,7 +2,8 @@
 // claim an HTTP/Rust archive or native publication capacity measurement.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { partitionNativeIssueArchive, parseNativeIssueCapture, nativeIssueImportSteps, nativeCaptureBytes }
+import { partitionNativeIssueArchive, parseNativeIssueCapture, nativeIssueImportSteps, nativeCaptureBytes,
+  NATIVE_CAPTURE_SCHEMA, NATIVE_CAPTURE_SCHEMA_V2 }
   from '../../scripts/lib/native-issue-source.mjs';
 import { fixtureIssues, snapshot, encode, head, actor } from './native_issue_transfer_helper.mjs';
 function view(count) {
@@ -79,4 +80,86 @@ test('provenance fencing cannot close early on source metadata and retains compl
   assert.ok(steps[0].fields.body.includes('\n~~~~~json\n'));
   assert.ok(steps[0].fields.body.endsWith(v.records[0].snapshot.body));
   assert.deepEqual(steps.map(s => s.action), ['open', 'comment', 'close']);
+});
+
+test('capture dialects have distinct strict lock fields and canonical bytes', () => {
+  const v = view(3), original = structuredClone(v);
+  v.records[0].snapshot.locked = true;
+  const part = partitionNativeIssueArchive(v)[0], capture = parseNativeIssueCapture(part.bytes);
+  assert.equal(capture.schema, NATIVE_CAPTURE_SCHEMA_V2);
+  assert.deepEqual(capture.issues.map(row => row.snapshot.locked), [true, false, false]);
+  assert.deepEqual(nativeCaptureBytes(capture), part.bytes);
+  assert.deepEqual(v.records.slice(1), original.records.slice(1));
+  assert.equal(v.records[0].snapshot.locked, true);
+  for (const bad of [null, 'true', 'false', 0, 1, undefined, [], {}]) {
+    const changed = structuredClone(capture); changed.issues[0].snapshot.locked = bad;
+    assert.throws(() => nativeCaptureBytes(changed), /Invalid issue lock state/);
+  }
+  const missing = structuredClone(capture); delete missing.issues[0].snapshot.locked;
+  assert.throws(() => nativeCaptureBytes(missing), /fields/);
+  const inherited = structuredClone(capture);
+  Object.setPrototypeOf(inherited.issues[0].snapshot, { locked: true });
+  delete inherited.issues[0].snapshot.locked;
+  assert.throws(() => nativeCaptureBytes(inherited), /fields/);
+  const reordered = structuredClone(capture), state = reordered.issues[0].snapshot;
+  reordered.issues[0].snapshot = { locked: state.locked, ...state };
+  assert.throws(() => nativeCaptureBytes(reordered), /encoding/);
+  const duplicate = part.bytes.toString().replace('"locked":true', '"locked":false,"locked":true');
+  assert.throws(() => parseNativeIssueCapture(Buffer.from(duplicate)), /encoding/);
+  for (const schema of ['frankengit-native-issue-capture-v0', 'frankengit-native-issue-capture-v3',
+    'frankengit-github-issue-capture-v1']) {
+    assert.throws(() => nativeCaptureBytes({ ...capture, schema }), /schema/);
+  }
+  const legacy = structuredClone(capture); legacy.schema = NATIVE_CAPTURE_SCHEMA;
+  assert.throws(() => nativeCaptureBytes(legacy), /fields/, 'v1 cannot carry an ignored moderation coordinate');
+  for (const issue of legacy.issues) delete issue.snapshot.locked;
+  assert.deepEqual(parseNativeIssueCapture(nativeCaptureBytes(legacy)), legacy);
+  assert.ok(nativeIssueImportSteps(legacy).every(step => step.action !== 'lock'));
+});
+
+test('locked discussions remain indivisible within every batch envelope', () => {
+  const v = view(100);
+  for (const row of v.records) {
+    row.snapshot.state = 'closed'; row.snapshot.locked = true;
+    row.snapshot.comments = 20; row.snapshot.version = 23;
+    row.comments = Array.from({ length: 20 }, (_, index) => ({ version: index + 2, actor, body: 'discussion' }));
+  }
+  const before = structuredClone(v), parts = partitionNativeIssueArchive(v, 1000);
+  assert.ok(parts.length > 1);
+  assert.equal(parts.reduce((sum, part) => sum + part.steps, 0), 2300);
+  assert.deepEqual(parts.flatMap(part => part.issues.map(row => row.number)), Array.from({ length: 100 }, (_, index) => index + 1));
+  for (const part of parts) {
+    const capture = parseNativeIssueCapture(part.bytes), steps = nativeIssueImportSteps(capture, 1000);
+    assert.ok(part.bytes.length <= 1024 * 1024);
+    assert.ok(encode(steps).length <= 1024 * 1024);
+    assert.ok(steps.length <= 2200); assert.equal(steps.length, part.steps);
+    assert.ok(capture.issues.length <= 100);
+    assert.ok(capture.issues.reduce((sum, row) => sum + row.comments.length, 0) <= 2000);
+    for (const issue of capture.issues) {
+      const commands = steps.filter(step => step.number === issue.number + 1000);
+      assert.deepEqual(commands.map(step => step.action), ['open', ...Array(20).fill('comment'), 'close', 'lock']);
+      assert.deepEqual(commands.map(step => step.expected_version), Array.from({ length: 23 }, (_, index) => index));
+      assert.deepEqual(commands.at(-1).fields, {});
+    }
+  }
+  assert.deepEqual(v, before);
+  // A standalone capture must honor the same command limit even though its
+  // small raw source fits; it cannot bypass the partitioner's child envelope.
+  const all = { ...parseNativeIssueCapture(parts[0].bytes),
+    issues: parts.flatMap(part => parseNativeIssueCapture(part.bytes).issues) };
+  assert.ok(nativeCaptureBytes(all).length <= 1024 * 1024);
+  assert.throws(() => nativeIssueImportSteps(all), /native_plan_steps/);
+});
+
+test('locks count toward the whole migration limit and never require source predecessor refresh', () => {
+  const v = discussionView(398);
+  for (const row of v.records) { row.snapshot.locked = true; row.snapshot.version++; }
+  const parts = partitionNativeIssueArchive(v);
+  assert.equal(parts.reduce((sum, part) => sum + part.steps, 0), 10000);
+  for (const part of parts) {
+    const steps = nativeIssueImportSteps(parseNativeIssueCapture(part.bytes));
+    assert.equal(steps.filter(step => step.action === 'lock').length, part.issues.length);
+  }
+  v.records[0].snapshot.state = 'closed'; v.records[0].snapshot.version++;
+  assert.throws(() => partitionNativeIssueArchive(v), /step_limit/);
 });

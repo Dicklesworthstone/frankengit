@@ -25,11 +25,12 @@ export function snapshot(row) {
   for (const event of row.events) {
     const a = event.action;
     if (a.name === 'open') state = { number: row.number, version: 0, title: a.title, body: a.body,
-      labels: a.labels ?? [], state: 'open', opened_by: event.actor, last_actor: event.actor, comments: 0, assignees: [] };
+      labels: a.labels ?? [], state: 'open', opened_by: event.actor, last_actor: event.actor, comments: 0, assignees: [], locked: false };
     if (a.name === 'edit') for (const field of ['title', 'body', 'labels']) if (field in a) state[field] = a[field];
     if (a.name === 'comment') state.comments++;
     if (a.name === 'close') state.state = 'closed';
     if (a.name === 'reopen') state.state = 'open';
+    if (a.name === 'lock' || a.name === 'unlock') state.locked = a.name === 'lock';
     if (a.name === 'assign') state.assignees = [...new Set([...state.assignees, ...a.assignees])].sort();
     if (a.name === 'unassign') state.assignees = state.assignees.filter(x => !a.assignees.includes(x));
     state.version = event.version; state.last_actor = event.actor;
@@ -83,11 +84,15 @@ export async function peer({ rows = [], tenantId = tenant, repositoryId = reposi
       const old = decisions.get(key);
       if (old) return send(old, old.outcome === 'committed' ? 200 : 409);
       const form = new URLSearchParams(body), expected = Number(form.get('expected_version')), row = source.get(number);
-      const committed = expected === (row?.events.length ?? 0) && (action === 'open') === !row;
+      const current = row ? snapshot(row) : null;
+      const permitted = action === 'comment' ? !current?.locked : action === 'lock' ? current?.locked === false
+        : action === 'unlock' ? current?.locked === true : true;
+      const committed = expected === (row?.events.length ?? 0) && (action === 'open') === !row && permitted;
       const d = { ...common, type: 'issue_publication', number, expected_version: expected, action,
         outcome: committed ? 'committed' : 'refused', delivery_acknowledged: null, principal_id: actor,
         tx_id: `fixture-tx-${++sequence}`, decision_sequence: sequence, repository_commit_id: committed ? `fixture-rcr-${sequence}` : null,
-        refusal_record_id: committed ? null : `fixture-refusal-${sequence}`, refusal_code: committed ? null : 'expected_version' };
+        refusal_record_id: committed ? null : `fixture-refusal-${sequence}`,
+        refusal_code: committed ? null : !permitted ? 'ProtectedRefTransitionDenied' : 'expected_version' };
       decisions.set(key, d);
       if (committed) {
         const a = { name: action };

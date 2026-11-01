@@ -5,7 +5,11 @@ import { IssueClient, issueState, issueLocked, issueAction, mutationRequest, nat
 import { recordDigest, operatorError } from './forge-operator-io.mjs';
 
 export const NATIVE_CAPTURE_SCHEMA = 'frankengit-native-issue-capture-v1';
+export const NATIVE_CAPTURE_SCHEMA_V2 = 'frankengit-native-issue-capture-v2';
 export const NATIVE_CAPTURE_LIMIT = 1024 * 1024;
+const MAX_STEPS = 2200;
+const SNAPSHOT_V1 = ['number', 'version', 'title', 'body', 'labels', 'state', 'opened_by', 'last_actor', 'comments', 'assignees'];
+const SNAPSHOT_V2 = [...SNAPSHOT_V1, 'locked'];
 const encode = value => Buffer.from(JSON.stringify(value) + '\n');
 const fail = code => { throw operatorError(`native_issue_source_${code}`); };
 function keys(value, names) {
@@ -19,7 +23,11 @@ function opaque(value) {
 }
 export function nativeCaptureBytes(value) {
   keys(value, ['schema', 'source', 'issues']);
-  if (value.schema !== NATIVE_CAPTURE_SCHEMA) fail('schema');
+  // V1 is frozen: its exact field set, canonical order, provenance and compiled
+  // requests must remain recoverable with the original saved plan and keys.
+  const snapshotFields = value.schema === NATIVE_CAPTURE_SCHEMA ? SNAPSHOT_V1
+    : value.schema === NATIVE_CAPTURE_SCHEMA_V2 ? SNAPSHOT_V2 : null;
+  if (!snapshotFields) fail('schema');
   const s = value.source;
   keys(s, ['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256']);
   if (typeof s.href !== 'string' || s.href.length > 4096 || new URL(s.href).href !== s.href) fail('url');
@@ -34,7 +42,7 @@ export function nativeCaptureBytes(value) {
     keys(row, ['number', 'id', 'snapshot', 'comments']);
     natural(row.number, 'source issue', previous + 1); previous = row.number;
     if (row.id !== String(row.number) || row.snapshot?.number !== row.number) fail('issue_identity');
-    keys(row.snapshot, ['number', 'version', 'title', 'body', 'labels', 'state', 'opened_by', 'last_actor', 'comments', 'assignees']);
+    keys(row.snapshot, snapshotFields);
     issueState(row.snapshot);
     if (!Array.isArray(row.comments) || row.comments.length !== row.snapshot.comments) fail('comment_count');
     commentCount += row.comments.length;
@@ -47,10 +55,10 @@ export function nativeCaptureBytes(value) {
     }
   }
   const ordered = (row, fields) => Object.fromEntries(fields.map(k => [k, row[k]]));
-  const checked = { schema: NATIVE_CAPTURE_SCHEMA,
+  const checked = { schema: value.schema,
     source: ordered(s, ['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256']),
     issues: value.issues.map(row => ({ number: row.number, id: row.id,
-      snapshot: ordered(row.snapshot, ['number', 'version', 'title', 'body', 'labels', 'state', 'opened_by', 'last_actor', 'comments', 'assignees']),
+      snapshot: ordered(row.snapshot, snapshotFields),
       comments: row.comments.map(c => ordered(c, ['version', 'actor', 'body'])) })) };
   const bytes = encode(checked);
   if (!bytes.equals(encode(value))) fail('encoding');
@@ -84,10 +92,14 @@ export function nativeIssueImportSteps(value, offset = 0) {
       const request = mutationRequest(number, version++, action, fields);
       steps.push({ source: `native:${value.source.archive_sha256}:${row.number}:${sourceVersion}`,
         number, expected_version: request.expected_version, action, fields: request.fields });
+      if (steps.length > MAX_STEPS) fail('native_plan_steps');
     };
     add('open', { title: row.snapshot.title, body: provenance(value.source, row), labels: row.snapshot.labels }, row.snapshot.version);
     for (const comment of row.comments) add('comment', { body: provenance(value.source, row, comment) }, comment.version);
     if (row.snapshot.state === 'closed') add('close', {}, row.snapshot.version);
+    // Newly opened issues are unlocked. Preserve discussion first, then apply
+    // the source's final moderation state using the destination's next version.
+    if (value.schema === NATIVE_CAPTURE_SCHEMA_V2 && row.snapshot.locked) add('lock', {}, row.snapshot.version);
   }
   if (encode(steps).length > NATIVE_CAPTURE_LIMIT) fail('native_plan_bytes');
   return steps;
@@ -102,7 +114,7 @@ export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
   natural(records.length, 'source issue count', 1, 4096); natural(offset, 'target issue offset');
   const source = Object.fromEntries(['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256']
     .map(k => [k, archive[k]]));
-  const wrap = issues => ({ schema: NATIVE_CAPTURE_SCHEMA, source, issues });
+  const wrap = issues => ({ schema: NATIVE_CAPTURE_SCHEMA_V2, source, issues });
   const overhead = encode(wrap([])).length, batches = [];
   let group = [], captureBytes = overhead, planBytes = 3, comments = 0, count = 0, totalSteps = 0, previous = 0;
   const finish = () => {
@@ -114,11 +126,12 @@ export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
     group = []; captureBytes = overhead; planBytes = 3; comments = 0; count = 0;
   };
   for (const record of records) {
-    // Capture-v1 and its prepared retry plans have no lock coordinate. Never
-    // silently import a locked discussion as unlocked or rewrite old v1 bytes.
-    if (issueLocked(record.snapshot)) fail('locked_capture_requires_v2');
+    // Normalize only the historical absence of the flag. Never coerce a
+    // malformed supplied value, mutate the verified source view or rewrite v1.
+    const locked = issueLocked(record.snapshot);
     const snapshot = structuredClone(record.snapshot);
     delete snapshot.locked;
+    snapshot.locked = locked;
     const row = { number: record.snapshot.number, id: String(record.snapshot.number),
       snapshot, comments: structuredClone(record.comments) };
     natural(row.number, 'archive issue order', previous + 1); previous = row.number;
@@ -126,7 +139,7 @@ export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
     const rowBytes = encode(row).length - 1, stepBytes = encode(steps).length - 3;
     totalSteps += steps.length;
     if (totalSteps > 10000) fail('step_limit');
-    if (group.length && (group.length === 100 || comments + row.comments.length > 2000 ||
+    if (group.length && (group.length === 100 || comments + row.comments.length > 2000 || count + steps.length > MAX_STEPS ||
         captureBytes + rowBytes + 1 > NATIVE_CAPTURE_LIMIT || planBytes + stepBytes + 1 > NATIVE_CAPTURE_LIMIT)) finish();
     captureBytes += rowBytes + Number(group.length > 0); planBytes += stepBytes + Number(count > 0);
     group.push(row); count += steps.length; comments += row.comments.length;

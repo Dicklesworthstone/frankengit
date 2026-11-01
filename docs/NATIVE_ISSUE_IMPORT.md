@@ -12,17 +12,25 @@ only after the ENTIRE archive validates. No caller callback sees a valid-looking
 prefix. The existing inspector's result and archive format are unchanged.
 
 `partitionNativeIssueArchive` compiles current issue title/body/labels, every
-comment in source-version order, and final open/closed state into normal native
-`open`, `comment`, and optional `close` commands. An explicit nonnegative number
+comment in source-version order, final open/closed state and discussion lock into
+normal native `open`, `comment`, optional `close`, and optional final `lock`
+commands. The lock is always last so it cannot block imported discussion. An explicit nonnegative number
 offset selects destination numbers. Destination expected versions start at zero;
 source versions and principals are never used as destination authority.
 
-The frozen capture-v1 schema has no lock coordinate. This importer accepts
-unlocked snapshots, including legacy archives that omit `locked`, but explicitly
-refuses a currently locked discussion with
-`native_issue_source_locked_capture_requires_v2`. It does not silently drop the
-source lock. Existing capture-v1 bytes, saved plans and retry identities remain
-unchanged.
+New partitions use capture-v2, which requires a boolean `locked` on every source
+snapshot. Legacy archives that omit the field mean false; a malformed supplied
+value refuses. A currently locked source is imported as locked, whether open or
+closed. An unlocked source needs no unlock command because its new destination
+issue starts unlocked. The destination's existing issue-write grant authorizes
+the new lock; source attribution supplies no permission or actor override.
+
+The frozen capture-v1 schema remains accepted with its original field set and
+does not gain a lock coordinate. Its bytes, generated commands, provenance,
+saved plans and retry identities remain unchanged. Native import and migration
+journal schemas also remain unchanged: their source and request commitments
+already bind the capture dialect. The new version applies only to native
+captures; GitHub capture-v1 retains its existing behavior.
 
 The opening body and each comment retain clearly labelled provenance: archive
 pin, exact source endpoint/repository/snapshot, original issue number, source
@@ -41,8 +49,11 @@ archive manifest SHA-256, not one recomputed from an untrusted replacement.
 Pass its complete result and the chosen offset to `partitionNativeIssueArchive`
 from `scripts/lib/native-issue-source.mjs`. Every returned batch owns validated
 `bytes`, `sha256`, issue membership and a step count. It uses the source-specific
-`frankengit-native-issue-capture-v1` schema; it never pretends to be a GitHub
-capture. Empty archives produce a typed refusal rather than an empty import.
+`frankengit-native-issue-capture-v2` schema; it never pretends to be a GitHub
+capture. `parseNativeIssueCapture` and `nativeIssueImportSteps` accept both native
+versions. The existing exported `NATIVE_CAPTURE_SCHEMA` continues to name v1;
+`NATIVE_CAPTURE_SCHEMA_V2` names the new schema. Empty archives produce a typed
+refusal rather than an empty import.
 
 Save each selected batch privately, then the APIs in
 `scripts/lib/native-issue-import.mjs` expose:
@@ -70,11 +81,18 @@ or its locks to obtain another execution identity.
 Complete source bounds remain 4,096 archived issues and 65,536 source events.
 The import profile permits at most 128 batches and 10,000 NEW command steps.
 Each batch permits 100 issues, 2,000 comments, a 1-MiB source package, a 1-MiB
-compiled plan and the sender's 16-MiB saved-request allowance. Partitioning counts
+compiled plan, at most 2,200 commands and the sender's 16-MiB saved-request allowance. Partitioning counts
 actual encoded bytes including attribution expansion and delimiters. One issue
 is indivisible. An oversized issue, comment or provenance-expanded body refuses;
 no body is truncated or silently split into a different discussion. An archive
 that can be exported is not guaranteed to fit the import envelope.
+
+Final lock commands count toward both the per-batch and 10,000-command total.
+A mutation-budget stop before the lock leaves the same saved lock request for
+the next run. If the lock commits but its reply is lost, recovery queries the
+original key and observes that terminal outcome without issuing a second lock.
+Whole-plan inspection checks every later batch before any destination I/O, so a
+tampered lock request cannot turn a valid earlier prefix into an executable plan.
 
 Source files must remain stable, private and owner-controlled. The output is
 create-only. These are not hostile same-UID isolation or power-loss proofs.
