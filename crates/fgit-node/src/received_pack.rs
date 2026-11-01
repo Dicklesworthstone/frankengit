@@ -4,16 +4,17 @@
 //! validator supplies every reconstructed native identity only after its normal
 //! graph validation succeeds. A serving caller must independently authorize an
 //! exact visible selection before asking for reuse. A hit contains precisely
-//! that selection, with all delta bases inside it; it cannot disclose a hidden
-//! extra object or turn physical presence into reachability.
+//! that selection. Delta bases are either inside it or independently proven
+//! client-held objects under an explicitly thin-capable request; custody cannot
+//! disclose a hidden extra object or turn physical presence into reachability.
 //!
 //! The received-pack-v1 profile preserves one sender representation. The
 //! received-pack-concat-v1 profile joins complete, disjoint entry runs after
 //! verifying their combined delta graph. Neither claims native-writer ordering
-//! or compression work. A retained thin pack cannot be served until every base
-//! is present in the independently authorized, self-contained output.
+//! or compression work. Thin profiles identify every distinct external base;
+//! a retained thin pack otherwise needs those bases in the authorized output.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -56,21 +57,29 @@ pub struct ReceivedPackReceipt {
     output_bytes: usize,
     maximum_delta_depth: usize,
     source_pack_count: usize,
+    external_base_count: usize,
 }
 
 impl ReceivedPackReceipt {
     #[must_use]
     pub const fn profile(&self) -> &'static str {
-        if self.source_pack_count == 1 {
-            "received-pack-v1"
-        } else {
-            "received-pack-concat-v1"
+        match (self.source_pack_count, self.external_base_count) {
+            (1, 0) => "received-pack-v1",
+            (_, 0) => "received-pack-concat-v1",
+            (1, _) => "received-pack-thin-v1",
+            (_, _) => "received-pack-concat-thin-v1",
         }
     }
     /// Number of complete verified sender entry runs in this representation.
     #[must_use]
     pub const fn source_pack_count(&self) -> usize {
         self.source_pack_count
+    }
+    /// Distinct client-held bases required to reconstruct this thin output.
+    /// Zero means every delta base is present in the emitted pack.
+    #[must_use]
+    pub const fn external_base_count(&self) -> usize {
+        self.external_base_count
     }
     #[must_use]
     pub const fn checksum(&self) -> GitOid {
@@ -285,6 +294,7 @@ impl ReceivedPackCache {
             output_bytes: bytes.bytes().len(),
             maximum_delta_depth: dependencies.depth,
             source_pack_count: 1,
+            external_base_count: dependencies.external_base_count,
         };
         let binding = metadata_binding(
             &metadata,
@@ -347,7 +357,86 @@ impl ReceivedPackCache {
         allow_ofs_delta: bool,
         live: &mut impl FnMut() -> bool,
     ) -> Result<Option<ReceivedPackPayload>, PackWriteError> {
-        composition::select(self, keys, limits, allow_ofs_delta, live).map_err(Into::into)
+        composition::select(self, keys, limits, allow_ofs_delta, &[], live).map_err(Into::into)
+    }
+
+    /// Reuse only the exact selected output, allowing external REF bases from
+    /// the caller's same-basis, permitted have closure. The caller must already
+    /// have established that this request admits a thin representation.
+    /// `held` is strictly ID-sorted and carries verified visible object kinds.
+    pub(crate) fn try_reuse_with_held(
+        &self,
+        keys: &[PackOrderKey],
+        limits: &PackLimits,
+        allow_ofs_delta: bool,
+        held: &[(GitOid, ObjectType)],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Option<ReceivedPackPayload>, PackWriteError> {
+        composition::select(self, keys, limits, allow_ofs_delta, held, live).map_err(Into::into)
+    }
+
+    /// Candidate base identities only: these grant no authority or kind proof.
+    /// Preparation can check the retained dependencies against its permitted
+    /// have closure without duplicating metadata for the entire client history.
+    /// Cache changes after this snapshot can only lose a reuse opportunity.
+    pub(crate) fn held_base_candidates(
+        &self,
+        held: &BTreeSet<GitOid>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<GitOid>, PackWriteError> {
+        check(live)?;
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut snapshot = Vec::new();
+        if snapshot.try_reserve_exact(MAX_ENTRIES).is_err() {
+            return Ok(Vec::new());
+        }
+        {
+            let Ok(state) = self.state.lock() else {
+                return Ok(Vec::new());
+            };
+            if state.entries.len() > MAX_ENTRIES {
+                return Ok(Vec::new());
+            }
+            snapshot.extend(state.entries.iter().map(Arc::clone));
+        }
+        let mut candidates = BTreeSet::new();
+        for entry in snapshot {
+            check(live)?;
+            // A self-contained received run cannot contribute a missing
+            // external base. Do not rescan a large full-history pack for each
+            // small incremental fetch. A false zero can only forfeit reuse.
+            if entry.receipt.external_base_count == 0 {
+                continue;
+            }
+            for parent in &entry.parents {
+                check(live)?;
+                let Some(base) = parent else {
+                    continue;
+                };
+                // Only REF parents may lie outside their original run. An
+                // OFS parent remains present whenever that complete run is sent.
+                if held.contains(base)
+                    && entry
+                        .objects
+                        .binary_search_by_key(base, |object| object.id)
+                        .is_err()
+                {
+                    candidates.insert(*base);
+                }
+            }
+        }
+        let mut result = Vec::new();
+        if result.try_reserve_exact(candidates.len()).is_err() {
+            return Ok(Vec::new());
+        }
+        for id in candidates {
+            check(live)?;
+            result.push(id);
+        }
+        check(live)?;
+        Ok(result)
     }
 }
 
@@ -509,7 +598,7 @@ fn metadata_binding(
 ) -> Result<[u8; 32], PackError> {
     check(deadline)?;
     let mut hash = Sha256Hasher::new();
-    hash.update(b"frankengit/received-pack-v2/verified-association\0");
+    hash.update(b"frankengit/received-pack-v3/verified-association\0");
     hash.update(&receipt.sha256);
     hash.update(&[receipt.checksum.as_bytes().len() as u8]);
     hash.update(receipt.checksum.as_bytes());
@@ -521,6 +610,7 @@ fn metadata_binding(
         receipt.output_bytes,
         receipt.maximum_delta_depth,
         receipt.source_pack_count,
+        receipt.external_base_count,
         maximum_object_bytes,
         total_entry_bytes,
         maximum_delta_fanout,
@@ -563,11 +653,13 @@ struct Dependencies {
     maximum_entry_bytes: usize,
     total_entry_bytes: usize,
     parents: Vec<Option<GitOid>>,
+    external_base_count: usize,
 }
 
 /// Validate the pack-local graph and retain verified external REF dependencies.
-/// External roots give only a lower bound on depth/fanout here. Serving always
-/// revalidates the complete graph and refuses an unresolved external base.
+/// External roots give only a lower bound on depth here. Serving revalidates
+/// the complete graph and requires either an emitted base or a typed proof
+/// that a thin-capable client already holds it.
 fn dependencies(
     pack: &QuarantinedPack,
     metadata: &[VerifiedReceivedObject],
@@ -596,6 +688,7 @@ fn dependencies(
     depths.resize(count, usize::MAX);
     seen.resize(count, 0u8);
     parent_ids.resize(count, None);
+    let mut external_fanout = BTreeMap::<GitOid, usize>::new();
     let mut result = Dependencies {
         ofs: 0,
         reference: 0,
@@ -604,6 +697,7 @@ fn dependencies(
         maximum_entry_bytes: 0,
         total_entry_bytes: 0,
         parents: Vec::new(),
+        external_base_count: 0,
     };
     for entry in pack.entries() {
         check(deadline)?;
@@ -673,6 +767,12 @@ fn dependencies(
             if entry.header.kind != EntryKind::RefDelta {
                 return Ok(None);
             }
+            let fanout = external_fanout.entry(*base).or_default();
+            *fanout += 1;
+            result.fanout = result.fanout.max(*fanout);
+            if result.fanout > limits.max_delta_fanout {
+                return Ok(None);
+            }
             continue;
         };
         if metadata[parent].kind != metadata[index].kind {
@@ -729,6 +829,7 @@ fn dependencies(
         }
     }
     result.parents = parent_ids;
+    result.external_base_count = external_fanout.len();
     Ok(Some(result))
 }
 

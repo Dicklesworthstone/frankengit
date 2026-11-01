@@ -1056,6 +1056,9 @@ struct PreparedUploadPack {
     /// Identity-sorted for the source's allocation-free ordering-hint lookup.
     keys: Vec<PackOrderKey>,
     held: BTreeSet<GitOid>,
+    /// Verified kinds only for retained external dependencies in `held`.
+    /// This private proof shares `basis` and never copies the whole have graph.
+    held_bases: Vec<(GitOid, ObjectType)>,
     limits: PackLimits,
     write_profile: PackWriteProfile,
 }
@@ -10155,11 +10158,35 @@ impl OneNode {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
         self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
+        let mut held_bases = Vec::new();
+        if write_profile.thin && !keys.is_empty() {
+            // Only a retained external dependency can benefit from a held-kind
+            // proof. Avoid indexing the entire client history again. A cache
+            // change after preparation can only miss this optional proof; it
+            // cannot enlarge the authenticated have closure.
+            let candidates = self
+                .received_pack_cache()
+                .held_base_candidates(&held, live)?;
+            if held_bases.try_reserve_exact(candidates.len()).is_ok() {
+                for id in candidates {
+                    if !live() {
+                        return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+                    }
+                    if let Some(kind) = disclosure.kind_of(&id) {
+                        held_bases.push((id, kind));
+                    }
+                }
+            }
+        }
+        if !live() {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
         Ok(PreparedUploadPack {
             basis: materialized.basis().clone(),
             request: request.clone(),
             keys,
             held,
+            held_bases,
             limits,
             write_profile,
         })
@@ -10186,14 +10213,27 @@ impl OneNode {
         }
         // Selection, current visibility, and work admission have already been
         // checked against this exact basis. Only an exact native-verified
-        // representation may avoid reading and recompressing the selected
-        // bodies. Local exports retain their frozen writer profile.
-        if let Some(pack) = self.received_pack_cache().try_reuse(
-            &prepared.keys,
-            &prepared.limits,
-            prepared.request.options.ofs_delta(),
-            live,
-        )? {
+        // representation may avoid reading and recompressing selected bodies.
+        // External REF bases additionally need this same private held-kind
+        // proof and the existing thin/full-history negotiation gate.
+        // Local exports retain their frozen writer profile.
+        let reused = if prepared.write_profile.thin {
+            self.received_pack_cache().try_reuse_with_held(
+                &prepared.keys,
+                &prepared.limits,
+                prepared.request.options.ofs_delta(),
+                &prepared.held_bases,
+                live,
+            )?
+        } else {
+            self.received_pack_cache().try_reuse(
+                &prepared.keys,
+                &prepared.limits,
+                prepared.request.options.ofs_delta(),
+                live,
+            )?
+        };
+        if let Some(pack) = reused {
             return Ok(AuthoritySelectedPackPayload {
                 basis: materialized.basis().clone(),
                 closure: materialized.selected_closure().clone(),

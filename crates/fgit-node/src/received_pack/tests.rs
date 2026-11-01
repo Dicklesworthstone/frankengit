@@ -683,3 +683,4 @@ fn every_lookup_checkpoint_cancels_without_losing_verified_custody() {
 }
 
 mod composition;
+mod thin;

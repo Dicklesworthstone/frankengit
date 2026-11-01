@@ -6,7 +6,8 @@ validated and placed their objects, a matching clone's pack-materialization
 step can reuse one original pack or join complete entry runs from several
 packs without re-reading expanded blob bodies, choosing new deltas, or
 recompressing them. This includes an initial full push followed by compatible
-thin incremental pushes. Normal authorization and graph
+thin incremental pushes, and incremental fetches whose client already holds
+the verified external bases. Normal authorization and graph
 selection still run first; this is not a claim of an I/O-free whole fetch.
 The HTTP, SSH, and raw Git request children share this cache through their
 service configuration.
@@ -44,11 +45,37 @@ An OFS-delta representation also requires the client's negotiated `ofs-delta`
 capability. Self-contained REF deltas do not require that capability.
 
 The composed delta graph is checked against the complete selected object set.
-Every external REF base must resolve inside that set with the same object type;
-depth and fanout limits apply across pack boundaries, and cycles refuse reuse.
-An unresolved base cannot be supplied merely because it exists in storage or
-in a pack containing other unselected objects. A failed cover does not prevent
-trying another compatible retained representation, or the ordinary native writer.
+For a self-contained response, every REF base must resolve inside that set with
+the same object type. A negotiated thin response may additionally resolve a REF
+base against the current authorized client-held proof described below. Depth
+and fanout limits apply across pack boundaries, including multiple entries that
+reference one external base; cycles refuse reuse. An unresolved base cannot be
+supplied merely because it exists in storage or in a pack containing other
+unselected objects. A failed cover does not prevent trying another compatible
+retained representation, or the ordinary native writer.
+
+### Incremental fetches with client-held bases
+
+The existing native thin-pack profile controls this path: the client must
+negotiate `thin-pack` and `ofs-delta`, supply haves, and request a full-history,
+unfiltered fetch. Shallow and filtered requests keep the existing self-contained
+policy because a have does not establish that such a client holds every object
+in its history.
+
+Preparation binds the identities and verified kinds of permitted client-held
+objects to the same authenticated basis as the outgoing selection. Hidden or
+unreachable haves cannot add an external base. Cache lookup receives this proof
+only under the thin profile, and each external REF parent must match both an
+identity and its kind. The response still contains exactly the selected objects;
+it does not emit the held base or any other support object. OFS parents remain
+inside their original complete entry run.
+
+This lets an incremental fetch reuse the original thin push even after the
+older base pack has been evicted from the server's representation cache. A
+receiver must already have the declared external bases to reconstruct it.
+Without the thin negotiation or a matching held proof, the same candidate is a
+cache miss and the ordinary writer remains available. No object-body read is
+needed to construct the held proof or verify a retained representation's graph.
 
 Composition emits one new pack header, the unchanged complete entry run from
 each selected source, and one newly computed native trailer. Keeping every run
@@ -95,9 +122,11 @@ cache lock, then comparisons, graph checks and hashing run outside that lock.
 
 The cache is process-local and disposable. A newly started service rebuilds
 outgoing packs until it receives another eligible representation. Native
-imports, selections that require splitting a cached pack, and histories whose
-needed base representations have been evicted still use the native construction
-path. This change does not claim restart-persistent reuse or completion of the large-history clone bead.
+imports and selections that require splitting a cached pack still use the
+native construction path. A self-contained clone also needs every required base
+representation to remain retained; a negotiated thin fetch can instead use its
+authorized client-held bases. This change does not claim restart-persistent
+reuse or completion of the large-history clone bead.
 
 ## Explicit representation receipt
 
@@ -112,6 +141,11 @@ path. This change does not claim restart-persistent reuse or completion of the l
   uses the distinct `received-pack-concat-v1` profile with newly computed
   checksums and aggregate counts. `source_pack_count()` identifies the number
   of complete verified sender runs in either profile.
+- Responses that require client-held bases use `received-pack-thin-v1` or
+  `received-pack-concat-thin-v1`. `external_base_count()` records the number of
+  distinct external bases actually used. A thin-capable request that produces
+  a self-contained result keeps the corresponding non-thin profile and a zero
+  external-base count.
 
 The singleton received profile preserves the sender's bytes and ordering; the
 composed profile preserves the constituent entry runs and replaces their outer
@@ -158,6 +192,15 @@ that output into a second empty node independently checks its complete native
 closure. Reduced, private, deleted and missing-base selections exercise the
 ordinary writer fallback. These tests do not establish a whole-clone speedup
 or persistence across service restarts.
+
+The authored thin-reuse regressions pair an authorized held base with omitted,
+wrong-kind and wrong-format proofs, enforce global fanout and depth through
+external roots, and preserve cancellation. Native regressions prepare a fetch
+against real client haves, remove fabric access after preparation, and require
+the retained thin representation. A separately seeded receiver checks its
+reconstruction. Non-thin, filtered, shallow and stale-basis requests retain their
+existing boundaries. These additional tests require their own execution result;
+the historical counts below do not include them.
 
 During the original single-pack implementation session, the node and CLI tests
 and stock-client campaign **were not executed**. That session's repeated node
