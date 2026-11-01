@@ -209,6 +209,28 @@ impl ReceivedPackCache {
             .min(MAX_CAPTURE_BYTES)
     }
 
+    /// Reserve optional streamed-input custody before allocating its raw
+    /// buffer. The same charge transfers into the eventual verified entry;
+    /// abandoned imports release it without making anything reusable.
+    pub(crate) fn reserve_streamed_capture(
+        &self,
+        raw_bytes: usize,
+        objects: usize,
+    ) -> Option<StreamedCaptureReservation> {
+        if raw_bytes == 0 || raw_bytes > self.capture_limit() || objects == 0 {
+            return None;
+        }
+        let charge = objects
+            .checked_mul(OBJECT_OVERHEAD)?
+            .checked_add(ENTRY_OVERHEAD)?
+            .checked_add(raw_bytes)?;
+        Some(StreamedCaptureReservation {
+            reservation: self.reserve(charge)?,
+            raw_bytes,
+            objects,
+        })
+    }
+
     fn reserve(&self, charge: usize) -> Option<Reservation> {
         if charge > self.max_bytes {
             return None;
@@ -250,6 +272,39 @@ impl ReceivedPackCache {
         limits: &PackLimits,
         deadline: &mut impl Deadline,
     ) -> Result<Option<PendingReceivedPack>, PackError> {
+        self.prepare_verified_inner(pack, objects, ids_at_offset, limits, deadline, None)
+    }
+
+    /// Complete a native-verified streamed capture under its original cache
+    /// reservation. This is not a new validation or publication boundary.
+    pub(crate) fn prepare_streamed_verified(
+        &self,
+        pack: &QuarantinedPack,
+        objects: impl ExactSizeIterator<Item = VerifiedReceivedObject>,
+        ids_at_offset: &BTreeMap<u64, GitOid>,
+        limits: &PackLimits,
+        deadline: &mut impl Deadline,
+        reservation: StreamedCaptureReservation,
+    ) -> Result<Option<PendingReceivedPack>, PackError> {
+        self.prepare_verified_inner(
+            pack,
+            objects,
+            ids_at_offset,
+            limits,
+            deadline,
+            Some(reservation),
+        )
+    }
+
+    fn prepare_verified_inner(
+        &self,
+        pack: &QuarantinedPack,
+        objects: impl ExactSizeIterator<Item = VerifiedReceivedObject>,
+        ids_at_offset: &BTreeMap<u64, GitOid>,
+        limits: &PackLimits,
+        deadline: &mut impl Deadline,
+        reserved: Option<StreamedCaptureReservation>,
+    ) -> Result<Option<PendingReceivedPack>, PackError> {
         check(deadline)?;
         let Some(bytes) = pack.retained_bytes() else {
             return Ok(None);
@@ -275,8 +330,22 @@ impl ReceivedPackCache {
         else {
             return Ok(None);
         };
-        let Some(reservation) = self.reserve(charge) else {
-            return Ok(None);
+        let reservation = match reserved {
+            Some(reserved) => {
+                if !Arc::ptr_eq(&reserved.reservation.state, &self.state)
+                    || reserved.raw_bytes != bytes.retained_capacity()
+                    || reserved.raw_bytes != bytes.bytes().len()
+                    || reserved.objects != count
+                    || reserved.reservation.charge != charge
+                {
+                    return Ok(None);
+                }
+                reserved.reservation
+            }
+            None => match self.reserve(charge) {
+                Some(reservation) => reservation,
+                None => return Ok(None),
+            },
         };
         // The public parser accepts a verifier trait, so independently require
         // the native checksum before establishing reusable custody.
@@ -502,6 +571,14 @@ struct Reservation {
     charge: usize,
 }
 
+/// A pre-allocation charge for one optional import representation. Its private
+/// fields prevent callers from widening the retained raw or metadata bounds.
+pub(crate) struct StreamedCaptureReservation {
+    reservation: Reservation,
+    raw_bytes: usize,
+    objects: usize,
+}
+
 impl Reservation {
     fn commit(mut self, entry: Entry) {
         let Ok(mut state) = self.state.lock() else {
@@ -543,6 +620,10 @@ pub struct PendingReceivedPack {
 }
 
 impl PendingReceivedPack {
+    pub(crate) fn same_representation(&self, other: &Self) -> bool {
+        self.entry.receipt == other.entry.receipt && self.entry.objects == other.entry.objects
+    }
+
     pub(crate) fn with_persistence(mut self, store: persistence::DurableStore) -> Self {
         self.persistence = Some(store);
         self

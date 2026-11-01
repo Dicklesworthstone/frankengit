@@ -286,3 +286,148 @@ fn a_corrupt_later_pack_never_installs_partial_custody() {
         scratch.cleaned();
     }
 }
+
+#[test]
+fn capture_requires_every_actual_placement_commitment_before_activation() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for mode in 0..3 {
+            let scratch = Scratch::new();
+            let bodies = [vec![1; 100], vec![2; 200]];
+            let ids = pack(&scratch, format, "captured", &bodies);
+            let cache = Arc::new(ReceivedPackCache::new(16 * 1024));
+            let mut live = || true;
+            let control = ImportControl::new(&mut live);
+            let mut sources = scratch
+                .sources(format, 1000, &control)
+                .with_received_pack_custody(Arc::clone(&cache));
+            sources.read(ids[0], &control).unwrap().unwrap();
+            let mut captured = sources
+                .finish_with_captures(&ids.iter().copied().collect(), &control)
+                .unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(cache.retained_entries(), 0);
+            let mut candidate = captured.pop().unwrap();
+            for (ordinal, body) in bodies.iter().enumerate() {
+                if mode == 0 && ordinal == 1 {
+                    continue;
+                }
+                let id = git_object_id(format, ObjectType::Blob, body);
+                let mut commitment =
+                    super::super::captured_payload_commitment(ObjectType::Blob, body).unwrap();
+                if mode == 1 && ordinal == 0 {
+                    commitment[0] ^= 1;
+                }
+                candidate.observe(id, commitment);
+            }
+            if mode == 2 {
+                candidate
+                    .complete()
+                    .expect("all exact selected bodies witnessed")
+                    .commit();
+                assert_eq!(cache.retained_entries(), 1);
+            } else {
+                assert!(
+                    candidate.complete().is_none(),
+                    "missing or contradictory strong evidence cannot become reusable"
+                );
+                assert_eq!(cache.retained_entries(), 0);
+            }
+            scratch.cleaned();
+        }
+    }
+}
+
+#[test]
+fn capture_uses_the_original_stream_even_after_source_replacement() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let body = vec![7; 1000];
+        let id = pack(&scratch, format, "original", std::slice::from_ref(&body))[0];
+        let path = scratch.0.join("source/objects/pack/original.pack");
+        let original = fs::read(&path).unwrap();
+        let cache = Arc::new(ReceivedPackCache::new(16 * 1024));
+        let mut live = || true;
+        let control = ImportControl::new(&mut live);
+        let mut sources = scratch
+            .sources(format, 2000, &control)
+            .with_received_pack_custody(Arc::clone(&cache));
+        assert_eq!(sources.read(id, &control).unwrap().unwrap().body(), body);
+        fs::write(path, b"unrelated replacement after native validation").unwrap();
+        let mut candidates = sources
+            .finish_with_captures(&[id].into(), &control)
+            .unwrap();
+        let mut candidate = candidates.pop().unwrap();
+        candidate.observe(
+            id,
+            super::super::captured_payload_commitment(ObjectType::Blob, &body).unwrap(),
+        );
+        candidate.complete().unwrap().commit();
+        let keys = [fgit_pack::PackOrderKey {
+            id,
+            object_type: ObjectType::Blob,
+            recency: 0,
+            path_hash: 0,
+        }];
+        let retained = cache
+            .try_reuse(&keys, &PackLimits::default(), true, &mut || true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.receipt().sha256(), &sha256_digest(&original));
+        assert_eq!(retained.into_bytes().unwrap(), original);
+        scratch.cleaned();
+    }
+}
+
+#[test]
+fn optional_tee_releases_its_preallocated_charge_when_inflation_disables_capture() {
+    use std::io::Read;
+    let bytes = vec![0x5a; 100];
+    let cache = ReceivedPackCache::new(100 + 1024 + 512);
+    let enabled = std::cell::Cell::new(false);
+    let mut tee = capture::Tee::new(bytes.as_slice(), Some(&cache), 100, 1, &enabled);
+    assert!(tee.is_capturing());
+    assert!(cache.reserve_streamed_capture(100, 1).is_none());
+    let mut first = [0; 40];
+    tee.read_exact(&mut first).unwrap();
+    enabled.set(false); // The same signal StreamedPack sets before oversized witness work.
+    let mut rest = Vec::new();
+    tee.read_to_end(&mut rest).unwrap();
+    assert_eq!(
+        [first.as_slice(), rest.as_slice()].concat(),
+        bytes,
+        "capture cannot change the original read"
+    );
+    assert!(!tee.is_capturing());
+    assert!(cache.reserve_streamed_capture(100, 1).is_some());
+    assert_eq!(cache.retained_entries(), 0);
+}
+
+#[test]
+fn cancellation_after_original_pack_validation_never_activates_optional_custody() {
+    let scratch = Scratch::new();
+    let id = pack(
+        &scratch,
+        GitHashAlgorithm::Sha1,
+        "cancelled",
+        &[vec![9; 100]],
+    )[0];
+    let cache = Arc::new(ReceivedPackCache::new(16 * 1024));
+    let cancelled = std::cell::Cell::new(false);
+    let mut live = || !cancelled.get();
+    let control = ImportControl::new(&mut live);
+    let mut sources = scratch
+        .sources(GitHashAlgorithm::Sha1, 1000, &control)
+        .with_received_pack_custody(Arc::clone(&cache));
+    sources.read(id, &control).unwrap().unwrap();
+    cancelled.set(true);
+    let result = sources.finish_with_captures(&[id].into(), &control);
+    assert!(matches!(
+        result,
+        Err(LooseGitImportRefusal::Interrupted {
+            code: fgit_types::RefusalCode::CancellationInProgress,
+            ..
+        })
+    ));
+    assert_eq!(cache.retained_entries(), 0);
+    scratch.cleaned();
+}

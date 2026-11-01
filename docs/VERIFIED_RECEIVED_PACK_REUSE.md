@@ -1,8 +1,8 @@
 # Reuse verified received packs for full and incremental histories
 
-The network receive and upload paths share a bounded, immutable compressed
+The network receive, native directory import, and upload paths share a bounded, immutable compressed
 representation and retain disposable compressed custody for later service
-restarts (`frankengit-1tl9`). After pushes have
+restarts (`frankengit-1tl9`). After pushes or eligible packed imports have
 validated and placed their objects, a matching clone's pack-materialization
 step can reuse one original pack, join complete entry runs from several
 packs, or select individual verified entries without re-reading expanded blob
@@ -40,6 +40,56 @@ including the final check for a conflicting existing object. Refusal, failed
 publication, or abandoned staging drops the pending candidate. Cache activation
 does not publish a ref: repository state still changes only at the ordinary
 authority-head CAS.
+
+### Capture from a native directory import
+
+Local idx-v2/pack-v2 imports can now retain the same compressed representation
+through this cache contract. The existing streaming import still validates the
+index, every encoded entry's CRC, the native trailer, every reconstructed native
+identity and kind, and the complete required-kind graph. The optional cache
+tees bytes from that original reader after reserving their entire raw allocation
+and metadata charge. It does not reopen a mutable source path after validation.
+The tee must match the original stream's EOF-authenticated full-byte SHA-256
+receipt, including for SHA-1 repositories.
+
+Only a source pack whose every entry belongs to the complete accepted import
+closure can become a candidate. A valid pack containing an unreachable member
+still imports its selected closure normally, but its representation is skipped.
+Each captured member also records its strong payload commitment. As placement
+processes the actual chosen import bodies, their canonical envelope commitments
+must match every captured member. This additional join matters when loose files
+or overlapping packs provide the same native identity: ID, kind and length alone
+must not allow a different SHA-1 payload to borrow another body's successful
+placement. Missing or contradictory strong evidence discards that candidate.
+
+Raw custody shares the existing service-wide byte and entry allowance. Its
+resident second parser pass has a separate cumulative inflation ceiling: the
+minimum of that cache allowance, the default 128 MiB pack inflation bound, and
+the selected import profile. This pass retains encoded entry programs, not
+expanded delta results. Raising a streamed import's expanded-body limit does
+not raise this resident ceiling. As soon as a source pack's entry inflation is
+known to exceed it, the importer stops optional commitment hashing and drops
+the raw tee; native verification and disk custody continue unchanged. The same
+remaining parser allowance covers all candidates in an import, including failed
+optional parses.
+
+A durable import hands all eligible candidates to its existing `ReceiveStaging`
+owner. They activate and optionally persist only after every staged object has
+passed final immutable publication and collision checks. A normal admission
+refusal abandons them with the staged objects. A standalone staging call uses
+the same boundary after its own immutable placements finish. Several selected
+source packs can be retained by one import and later composed by the unchanged
+exact-selection rules above. Full and forward REF deltas and OFS deltas retain
+their original compressed bytes; the native directory profile still requires
+all source-pack delta bases to resolve within that source pack.
+
+Allocation, capacity, optional framing, or cache filesystem failures do not
+change the native import decision. Source corruption, placement failures and
+the original request's cancellation still refuse through their existing typed
+paths. A cache miss leaves ordinary pack writing available. Source removal
+after import is harmless; cold use of retained files still performs the full
+canonical revalidation described below. This adds native-import custody, not
+a pack-proportional cold-clone or whole-repository throughput claim.
 
 Every fetch independently authenticates its basis and computes the visible
 selection. Reuse must emit each selected native identity and type exactly once.
@@ -420,11 +470,23 @@ Run the focused lanes with the pinned toolchain and sufficient build capacity:
 ```bash
 cargo test --locked -p fgit-pack -p fgit-wire --all-targets
 cargo test --locked -p fgit-node --lib received_pack
+cargo test --locked -p fgit-node --test import_pack_reuse
 cargo test --locked -p fgit-cli --all-targets
 cargo build --locked -p fgit-cli --bin fg
 FG_BIN="$PWD/target/debug/fg" bash scripts/e2e/suites/transport/received_pack_reuse.sh
 ```
 
-Full-history cold-clone measurements, native-import capture, and broader
-restart/transport qualification remain separate work. Zero cache capacity is
+The native-import fixtures in `crates/fgit-node/tests/import_pack_reuse.rs`
+exercise real public node import and raw Git serving, with newly constructed
+configuration on reopen. They cover both hash domains, OFS and forward REF
+representations, multiple packs, cache disable/over-budget fallback, unreachable
+entries, cache I/O failure, corrupt input, terminal admission refusal, and
+placement-time cancellation followed by retry. They decode every successful
+response and compare exact native inventories and bodies; reuse cases also
+compare original compressed bytes. Focused private cases cover reservation
+ownership and the strong placement witness. These are authored regressions;
+their presence is not a claim of execution or a new throughput measurement.
+
+Full-history cold-clone measurements and broader restart/transport qualification
+remain separate work. Zero cache capacity is
 the runtime rollback and requires no canonical-state migration.

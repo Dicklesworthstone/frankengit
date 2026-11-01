@@ -76,6 +76,16 @@ const MAX_IMPORT_PACKED_REFS_HEADER_BYTES: usize = 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;
 const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 
+/// The same domain-separated digest stored by immutable placement. An optional
+/// representation must match the selected body even under native-ID aliasing.
+fn captured_payload_commitment(kind: fgit_git_object::ObjectType, body: &[u8]) -> Option<[u8; 32]> {
+    fgit_crypto::git_payload_commitment(kind, body, fgit_types::CANONICAL_CODEC_VERSION)
+        .digest()
+        .as_bytes()
+        .try_into()
+        .ok()
+}
+
 /// The shared source-import metadata preflight, before candidate object staging.
 pub fn preflight_import_metadata(
     format: GitHashAlgorithm,
@@ -235,7 +245,10 @@ impl OneNode {
             self.storage_root(),
             maximum_bytes,
             control,
-        )?;
+        )?
+        .with_received_pack_custody(std::sync::Arc::clone(
+            &self.service_config.received_pack_cache,
+        ));
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs, control)?;
         let head_target = read_head_target(&git_directory, control)?;
         let mut spool = spool::Spool::create(self.storage_root(), maximum_bytes, control)?;
@@ -264,9 +277,6 @@ impl OneNode {
         )?;
         let refs = CanonicalRefState::new_with_head_target(refs, head_target)
             .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?;
-        // Release pack decoding caches before placement. The proof retains only
-        // bounded spool handles; no mutable source file is reread.
-        packed.finish()?;
         let mut closure = BTreeSet::new();
         for identity in validated.objects.keys() {
             control.checkpoint()?;
@@ -282,17 +292,33 @@ impl OneNode {
             self.authority.limits().body_bytes,
             control,
         )?;
+        // Release expanded decoder spools before placement. Optional raw
+        // custody comes only from the original verified stream and only when
+        // every entry is covered by this complete graph. Source paths are
+        // never reopened to construct a reusable representation.
+        let mut captured = packed.finish_with_captures(&closure, control)?;
         let total_object_bytes = validated.total_bytes;
         // All required local edges and object bodies have now verified. The
         // standalone API places immutable names; durable import retains only
         // private synced batches until admission prepares its first commit.
         let mut placements = placement::Placements::new(self).with_deferred(staging);
+        let has_captures = !captured.is_empty();
         let placed = (|| {
+            let mut observe = |identity, commitment| {
+                for candidate in &mut captured {
+                    candidate.observe(identity, commitment);
+                }
+            };
             for (identity, entry) in validated.objects {
                 // Flush before reading an object that would exceed the chunk budget.
                 placements.prepare(entry.length(), control)?;
                 let object = spool.read_identified(identity, entry, control)?;
-                placements.push(identity, object, control)?;
+                placements.push_observing(
+                    identity,
+                    object,
+                    control,
+                    has_captures.then_some(&mut observe),
+                )?;
             }
             placements.finish(control)
         })();
@@ -303,6 +329,26 @@ impl OneNode {
 
         spool.finish()?;
         control.checkpoint()?;
+        for candidate in captured {
+            control.checkpoint()?;
+            let Some(pending) = candidate.complete() else {
+                continue;
+            };
+            let pending = pending.with_persistence(self.durable_received_pack_store());
+            if let Some(staging) = staging {
+                staging
+                    .retain_received_pack(pending)
+                    .map_err(control::interrupted)?;
+            } else {
+                // Standalone import has completed immutable placement. A
+                // deferred import activates the same custody only when its
+                // ordinary admission projection publishes the staged bodies.
+                let _retained = pending.commit_with_deadline(&mut control.cpu_probe());
+                control.checkpoint()?;
+                // Optional custody failure cannot change an import result.
+                // The sticky original request stop above remains authoritative.
+            }
+        }
         Ok(StagedLooseGitImport {
             refs,
             object_count: closure.len(),

@@ -92,9 +92,15 @@ or have-reduced selections when their selected or proven held bases suffice.
 The combined graph and aggregate limits are rechecked, and receipts distinguish
 whole-run, selective, self-contained and thin responses. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
-its own representation receipt. This bounded process-local capability is
-described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);
-restarting the service discards it. Up to 64 received representations share the
+its own representation receipt. Native idx/pack directory imports can retain
+eligible source packs through the same contract, including several packs per
+import. Capture uses the original verified read and requires every entry to
+match the accepted closure's actual strong placement commitment. On Unix,
+optional persisted custody survives service restart; a fresh process must
+revalidate its native objects and canonical payload commitments before reuse.
+Cold validation still reads expanded canonical bodies. See the
+[received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md).
+Up to 64 received representations share the
 same byte budget, and bounded cover selection preserves disjoint incremental
 histories without enumerating every possible source combination.
 Network packs also group related versions using verified raw tree-entry

@@ -15,12 +15,44 @@ use super::{
     validate_idx_pack_count, verify_native_object,
 };
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
+
+use crate::received_pack::{PendingReceivedPack, ReceivedPackCache};
+
+mod capture;
 
 use super::control::IO_CHUNK_BYTES;
 
 pub(super) struct VerifiedPack {
     entries: BTreeMap<GitOid, spool::Entry>,
     spool: spool::Spool,
+    capture: Option<capture::Captured>,
+}
+
+/// Raw entries may duplicate a loose object or another source pack. Every
+/// captured payload must match the actual selected placement's strong digest,
+/// not merely its native ID, before receiving the ordinary publication gate.
+pub(super) struct ImportedPack {
+    pending: Option<PendingReceivedPack>,
+    commitments: BTreeMap<GitOid, [u8; 32]>,
+}
+
+impl ImportedPack {
+    pub(super) fn observe(&mut self, id: GitOid, commitment: [u8; 32]) {
+        if let Some(expected) = self.commitments.remove(&id)
+            && expected != commitment
+        {
+            self.pending.take();
+            self.commitments.clear();
+        }
+    }
+
+    pub(super) fn complete(self) -> Option<PendingReceivedPack> {
+        self.commitments
+            .is_empty()
+            .then_some(self.pending)
+            .flatten()
+    }
 }
 
 #[derive(Default)]
@@ -47,6 +79,7 @@ pub(super) struct PackedObjectSources {
     loaded_objects: usize,
     custody_root: PathBuf,
     maximum_bytes: u64,
+    capture_cache: Option<Arc<ReceivedPackCache>>,
 }
 
 impl PackedObjectSources {
@@ -196,6 +229,7 @@ impl PackedObjectSources {
             loaded_objects: 0,
             custody_root: custody_root.to_path_buf(),
             maximum_bytes,
+            capture_cache: None,
         })
     }
 
@@ -216,7 +250,15 @@ impl PackedObjectSources {
             loaded_objects: 0,
             custody_root: custody_root.to_path_buf(),
             maximum_bytes,
+            capture_cache: None,
         }
+    }
+
+    pub(super) fn with_received_pack_custody(mut self, cache: Arc<ReceivedPackCache>) -> Self {
+        if cache.max_bytes() != 0 {
+            self.capture_cache = Some(cache);
+        }
+        self
     }
 
     pub(super) fn read(
@@ -253,8 +295,9 @@ impl PackedObjectSources {
     }
 
     /// Stream one checksum-bound pack into private disk custody
-    /// (frankengit-855v). The pack is never held whole: resident memory is
-    /// one inflated member, or one delta base, program and result. Every
+    /// (frankengit-855v). Decoder resident memory is one inflated member, or
+    /// one delta base, program and result. Independently bounded optional raw
+    /// custody may tee the same input for later received-pack reuse. Every
     /// member is bound to its idx row (offset, CRC and, once reconstructed,
     /// native identity) and charged to the operation before custody, and a
     /// pack installs nothing unless all of it verifies.
@@ -325,6 +368,14 @@ impl PackedObjectSources {
             .ok_or_else(|| {
                 super::control::interrupted(fgit_types::RefusalCode::InternalInvariantBreach)
             })?;
+        let capture_enabled = std::cell::Cell::new(false);
+        let input = capture::Tee::new(
+            file,
+            self.capture_cache.as_deref(),
+            pack_length,
+            rows.len(),
+            &capture_enabled,
+        );
         let mut custody = StreamedPack {
             format,
             pack_path: &pack_path,
@@ -345,8 +396,14 @@ impl PackedObjectSources {
             by_id: BTreeMap::new(),
             pending: Vec::new(),
             fanout: BTreeMap::new(),
+            capture_commitments: input.is_capturing().then(BTreeMap::new),
+            capture_enabled: &capture_enabled,
+            capture_inflation_limit: capture::inflation_limit(
+                self.capture_cache.as_deref(),
+                &self.limits,
+            ),
         };
-        let mut reader = std::io::BufReader::with_capacity(IO_CHUNK_BYTES, file);
+        let mut reader = std::io::BufReader::with_capacity(IO_CHUNK_BYTES, input);
         let receipt = read_streamed_pack(
             &mut reader,
             format,
@@ -368,6 +425,13 @@ impl PackedObjectSources {
             ));
         }
         custody.resolve_pending(control)?;
+        let capture = reader.into_inner().verified(
+            receipt,
+            &custody.resolved,
+            custody.inflated,
+            custody.capture_commitments.take(),
+            control,
+        )?;
         let StreamedPack {
             spool,
             inflated,
@@ -391,6 +455,7 @@ impl PackedObjectSources {
         self.sources[source_index].verified_objects = Some(VerifiedPack {
             entries: verified_objects,
             spool,
+            capture,
         });
         Ok(())
     }
@@ -434,6 +499,9 @@ struct StreamedPack<'a> {
     by_id: BTreeMap<GitOid, u64>,
     pending: Vec<(u64, DeltaBase, spool::Entry)>,
     fanout: BTreeMap<DeltaBase, usize>,
+    capture_commitments: Option<BTreeMap<GitOid, [u8; 32]>>,
+    capture_enabled: &'a std::cell::Cell<bool>,
+    capture_inflation_limit: usize,
 }
 
 impl StreamedPack<'_> {
@@ -481,6 +549,14 @@ impl StreamedPack<'_> {
                 limit: self.maximum_bytes,
                 observed,
             });
+        }
+        // An import's native streamed expansion can be much larger than the
+        // optional resident reparse profile. As soon as this pack cannot fit
+        // that profile, stop extra strong hashing and release its raw tee on
+        // the next source read. Native validation/custody continue unchanged.
+        if self.inflated > self.capture_inflation_limit as u64 {
+            self.capture_commitments = None;
+            self.capture_enabled.set(false);
         }
         self.budget
             .charge_work(1, self.limits)
@@ -579,6 +655,12 @@ impl StreamedPack<'_> {
             self.parse_limits,
         );
         control.after(verified, |error| self.pack_error(error))?;
+        if let Some(commitments) = &mut self.capture_commitments {
+            if let Some(commitment) = super::captured_payload_commitment(kind, &body) {
+                commitments.insert(id, commitment);
+            }
+            control.checkpoint()?;
+        }
         self.resolved_bytes = self
             .resolved_bytes
             .checked_add(body.len() as u64)
@@ -663,6 +745,7 @@ impl PackedObjectSources {
             control,
         )
     }
+    #[cfg(test)]
     pub(super) fn finish(mut self) -> Result<(), LooseGitImportRefusal> {
         for source in &mut self.sources {
             if let Some(pack) = source.verified_objects.take() {
@@ -670,6 +753,39 @@ impl PackedObjectSources {
             }
         }
         Ok(())
+    }
+
+    /// Release every expanded decoder spool, then hand off only bounded raw
+    /// representations covered by the complete validated import closure.
+    pub(super) fn finish_with_captures(
+        mut self,
+        selected: &std::collections::BTreeSet<GitOid>,
+        control: &ImportControl<'_>,
+    ) -> Result<Vec<ImportedPack>, LooseGitImportRefusal> {
+        let mut pending = Vec::new();
+        let mut remaining_inflation =
+            capture::inflation_limit(self.capture_cache.as_deref(), &self.limits);
+        for source in &mut self.sources {
+            control.checkpoint()?;
+            if let Some(pack) = source.verified_objects.take() {
+                pack.spool.finish()?;
+                if let (Some(captured), Some(cache)) = (pack.capture, &self.capture_cache) {
+                    if let Some(candidate) = captured.prepare(
+                        cache,
+                        selected,
+                        &self.limits,
+                        &mut remaining_inflation,
+                        control,
+                    )? {
+                        if pending.try_reserve(1).is_ok() {
+                            pending.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        control.checkpoint()?;
+        Ok(pending)
     }
 }
 #[cfg(test)]
