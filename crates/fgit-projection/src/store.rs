@@ -1,6 +1,6 @@
 //! The typed schema and parameter layer.
 //!
-//! All SQL this crate ever runs is emitted here, once, deterministically, and
+//! All SQL for the decision-prefix schema is emitted here, deterministically, and
 //! golden-tested. There is no second path that formats SQL at a call site —
 //! that is what "no handwritten raw-SQL side paths" means operationally for
 //! the projection substrate.

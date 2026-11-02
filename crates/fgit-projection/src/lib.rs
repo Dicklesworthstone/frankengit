@@ -91,8 +91,13 @@
 //!
 //! # Remaining integration boundaries
 //!
-//! This crate does not traverse chronicle/authority, produce consumer-owned
-//! issue/PR/inbox/search rows, or implement a connection-pool topology. The
+//! [`inbox`] additionally provides request-owned typed SQLModel issue inbox
+//! generations. The authorized host supplies complete canonical issue and
+//! preference facts; rows and a recipient-bound exact-head complete marker
+//! publish atomically, without treating outbox delivery order as a sequence.
+//!
+//! This crate does not traverse chronicle/authority, produce PR/search rows,
+//! or implement a connection-pool topology. The
 //! caller supplies verified [`DecisionRecord`] values; the current row model
 //! indexes their sequence and digest. These APIs do not constitute an
 //! end-to-end forge or a durable forge-merge publication path.
@@ -100,6 +105,7 @@
 pub mod boundary;
 pub mod catchup;
 pub mod identity;
+pub mod inbox;
 pub mod model;
 pub mod rebuild;
 pub mod session;

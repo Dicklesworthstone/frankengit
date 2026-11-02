@@ -542,6 +542,7 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
             ForgeEventKind::PullRequestClosed { .. }
             | ForgeEventKind::IssueChanged { .. }
             | ForgeEventKind::MilestoneChanged { .. }
+            | ForgeEventKind::NotificationPreferenceChanged { .. }
             | ForgeEventKind::PullRequestCommented { .. }
             | ForgeEventKind::ReviewProtectionChanged { .. } => None,
         },

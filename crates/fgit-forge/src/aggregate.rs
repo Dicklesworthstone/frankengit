@@ -168,6 +168,11 @@ pub enum AggregateId {    /// One repository-scoped review-protection policy str
     PullRequestConversation(PullRequestNumber),
     /// A repository milestone; issue membership is owned by each issue stream.
     Milestone(MilestoneNumber),
+    /// Self-owned delivery mode and read prefix for one issue.
+    NotificationPreference {
+        principal: fgit_types::PrincipalId,
+        issue: IssueNumber,
+    },
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -186,6 +191,7 @@ pub(crate) const AGGREGATE_KIND_WORKFLOW_CHECK: u32 = 7;
 /// Conversation stream; established aggregate encodings are unchanged.
 pub(crate) const AGGREGATE_KIND_PULL_REQUEST_CONVERSATION: u32 = 8;
 pub(crate) const AGGREGATE_KIND_MILESTONE: u32 = 9;
+pub(crate) const AGGREGATE_KIND_NOTIFICATION_PREFERENCE: u32 = 10;
 impl From<MilestoneNumber> for AggregateId {
     fn from(number: MilestoneNumber) -> Self {
         Self::Milestone(number)
@@ -237,6 +243,7 @@ impl fmt::Display for AggregateId {
             Self::WorkflowCheck(id) => fmt::Display::fmt(id, formatter),
             Self::PullRequestConversation(number) => write!(formatter, "conversation/{number}"),
             Self::Milestone(number) => write!(formatter, "milestone/{number}"),
+            Self::NotificationPreference { principal, issue } => write!(formatter, "notify/{principal}/{issue}"),
         }
     }
 }

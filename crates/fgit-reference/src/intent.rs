@@ -211,6 +211,10 @@ pub enum ForgeEventKind {    /// A pull request was opened against a target ref.
     MilestoneChanged {
         milestone: ForgeEntityId,
     },
+    /// Personal metadata only; it never authorizes a ref or another recipient.
+    NotificationPreferenceChanged {
+        preference: ForgeEntityId,
+    },
 }
 
 impl ForgeEventKind {
@@ -225,6 +229,7 @@ impl ForgeEventKind {
             | Self::PullRequestReviewed { .. }
             | Self::IssueChanged { .. }
             | Self::MilestoneChanged { .. }
+            | Self::NotificationPreferenceChanged { .. }
             | Self::ReviewProtectionChanged { .. }
             | Self::WorkflowCheckObserved { .. }
             | Self::PullRequestCommented { .. }
@@ -247,6 +252,7 @@ impl ForgeEventKind {
             Self::PullRequestCommented { conversation } => *conversation,
             Self::MergeQueueChanged { queue, .. } => *queue,
             Self::MilestoneChanged { milestone } => *milestone,
+            Self::NotificationPreferenceChanged { preference } => *preference,
         }
     }
 }

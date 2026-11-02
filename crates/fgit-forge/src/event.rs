@@ -17,6 +17,7 @@ use crate::aggregate::{
 pub mod admission;
 pub mod issue;
 pub mod milestone;
+pub mod notification;
 pub mod protection;
 pub mod pull_request;
 pub mod pull_request_comment;
@@ -50,6 +51,7 @@ const KIND_QUEUE_REQUIRED_PROTECTION_CHANGED: u32 = 19;
 const KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED: u32 = 20;
 const KIND_CANDIDATE_CHECK_PROTECTION_CHANGED: u32 = 21;
 const KIND_NATIVE_MILESTONE_CHANGED: u32 = 22;
+const KIND_NATIVE_NOTIFICATION_PREFERENCE_CHANGED: u32 = 23;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -163,6 +165,7 @@ pub enum ForgeEventPayload {    /// Canonical protection replacement: historical
     /// Required issue event, retaining explicit changes rather than mutable latest state.
     IssueChangedNative(NativeIssueEvent),
     MilestoneChangedNative(milestone::NativeMilestoneEvent),
+    NotificationPreferenceChangedNative(notification::NativeNotificationEvent),
     /// Native merge queue state change event, wire kind 10.
     MergeQueueChangedNative(NativeQueueEvent),
     /// Immutable reported job evidence. Only explicit canonical protection can
@@ -189,6 +192,7 @@ impl ForgeEventPayload {
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
             Self::MilestoneChangedNative(_) => KIND_NATIVE_MILESTONE_CHANGED,
+            Self::NotificationPreferenceChangedNative(_) => KIND_NATIVE_NOTIFICATION_PREFERENCE_CHANGED,
             Self::ReviewProtectionChanged(change) => {
                 if let Some(snapshot) = &change.protection.ref_policy {
                     use fgit_policy::reference_profile::ReferencePolicyProfile;
@@ -236,6 +240,12 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::NotificationPreference { principal, issue } => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_NOTIFICATION_PREFERENCE);
+            out.write_opaque_id(principal.as_bytes());
+            out.write_scalar(issue.get());
+        }
         AggregateId::Milestone(number) => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_MILESTONE);
@@ -296,6 +306,10 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_NOTIFICATION_PREFERENCE => Ok(AggregateId::NotificationPreference {
+            principal: fgit_types::PrincipalId::from_bytes(input.read_opaque_id("aggregate.notification_principal")?),
+            issue: counter("aggregate.notification_issue", input.read_scalar::<u64>("aggregate.notification_issue")?)?,
+        }),
         crate::aggregate::AGGREGATE_KIND_MILESTONE => Ok(AggregateId::Milestone(counter(
             "aggregate.milestone", input.read_scalar::<u64>("aggregate.milestone")?,
         )?)),
@@ -410,6 +424,7 @@ fn validate_queue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
 
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
     milestone::validate_event(event)?;
+    notification::validate_event(event)?;
     validate_issue(event)?;
     validate_queue(event)?;
     workflow_check::validate_event(event)?;
@@ -464,6 +479,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         }
         ForgeEventPayload::IssueChangedNative(change) => change.write(out)?,
         ForgeEventPayload::MilestoneChangedNative(change) => change.write(out)?,
+        ForgeEventPayload::NotificationPreferenceChangedNative(change) => change.write(out)?,
         ForgeEventPayload::ReviewProtectionChanged(change) => change.write(out)?,
         ForgeEventPayload::PullRequestReviewedNative(review) => {
             validate_review(event, review)?;
@@ -518,6 +534,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         }
         KIND_NATIVE_MILESTONE_CHANGED => {
             ForgeEventPayload::MilestoneChangedNative(milestone::NativeMilestoneEvent::read(input)?)
+        }
+        KIND_NATIVE_NOTIFICATION_PREFERENCE_CHANGED => {
+            ForgeEventPayload::NotificationPreferenceChangedNative(notification::NativeNotificationEvent::read(input)?)
         }
         KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read(input, false, false, false)?,
@@ -577,6 +596,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
     };
     validate_issue(&event)?;
     milestone::validate_event(&event)?;
+    notification::validate_event(&event)?;
     validate_queue(&event)?;
     workflow_check::validate_event(&event)?;
     pull_request_comment::validate_event(&event)?;

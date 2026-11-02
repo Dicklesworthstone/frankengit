@@ -14,6 +14,9 @@ pub(super) fn require_subscription(
     }
     for event in events {
         let name = match &event.payload {
+            ForgeEventPayload::NotificationPreferenceChangedNative(_) => {
+                return Err("private notification preferences cannot be delivered by repository webhooks".into());
+            }
             ForgeEventPayload::PullRequestOpened { .. }
             | ForgeEventPayload::PullRequestHeadAdvanced { .. }
             | ForgeEventPayload::MergeCommitted { .. }
@@ -49,6 +52,98 @@ mod tests {
     };
     use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
     use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
+
+    #[test]
+    fn private_notification_preferences_refuse_every_subscription_and_complete_mixed_batch() {
+        use fgit_forge::IssueNumber;
+        use fgit_forge::event::issue::{IssueAction, IssueCommand};
+        use fgit_forge::event::notification::{
+            NotificationAction, NotificationCommand, NotificationMode,
+        };
+
+        let actor = PrincipalId::from_bytes([0x39; 16]);
+        let public = IssueCommand {
+            number: IssueNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: IssueAction::Open {
+                title: "Public issue".into(),
+                body: String::new(),
+                labels: Vec::new(),
+            },
+        }
+        .proposed_event(actor)
+        .unwrap();
+        for filter in [
+            WebhookEventFilter::Wildcard,
+            WebhookEventFilter::Selected(vec!["issue".into()]),
+            WebhookEventFilter::Selected(vec!["kind:8".into()]),
+        ] {
+            assert!(require_subscription(&filter, std::slice::from_ref(&public)).is_ok());
+        }
+
+        let mut filters = vec![
+            WebhookEventFilter::Wildcard,
+            WebhookEventFilter::Selected(Vec::new()),
+        ];
+        filters.extend(
+            [
+                "*",
+                "issue",
+                "milestone",
+                "pull_request",
+                "pull_request_review",
+                "pull_request_commented",
+                "review_protection",
+                "merge_queue",
+                "workflow_check",
+                "candidate_workflow_check",
+                "notification",
+                "notification_preference",
+                "kind:23",
+            ]
+            .into_iter()
+            .map(|name| WebhookEventFilter::Selected(vec![name.into()])),
+        );
+        filters.push(WebhookEventFilter::Selected(vec![
+            "issue".into(),
+            "kind:23".into(),
+        ]));
+        for action in [
+            NotificationAction::SetMode(NotificationMode::Participating),
+            NotificationAction::SetMode(NotificationMode::Subscribed),
+            NotificationAction::SetMode(NotificationMode::Muted),
+            NotificationAction::SetReadThrough(Some(AggregateVersion::FIRST)),
+            NotificationAction::SetReadThrough(None),
+        ] {
+            let private = NotificationCommand {
+                number: IssueNumber::FIRST,
+                expected_version: ExpectedVersion::NewStream,
+                action,
+            }
+            .proposed_event(actor)
+            .unwrap();
+            assert_eq!(private.payload.kind(), 23);
+            assert!(WebhookEventFilter::Wildcard.matches("kind:23"));
+            assert!(WebhookEventFilter::Selected(vec!["kind:23".into()]).matches("kind:23"));
+            for filter in &filters {
+                let refusal =
+                    require_subscription(filter, std::slice::from_ref(&private)).unwrap_err();
+                assert!(
+                    refusal.contains("private notification preferences"),
+                    "{refusal}"
+                );
+                for mixed in [
+                    [public.clone(), private.clone()],
+                    [private.clone(), public.clone()],
+                ] {
+                    assert!(
+                        require_subscription(filter, &mixed).is_err(),
+                        "a batch containing private preferences cannot be delivered or silently truncated"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn milestones_require_their_own_family_or_exact_kind() {

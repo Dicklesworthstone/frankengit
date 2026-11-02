@@ -31,6 +31,7 @@ pub enum ForgeOperation {    PullRequestOpen,
     IssueSetMilestone,
     IssueClearMilestone,
     MilestoneChange,
+    NotificationPreferenceChange,
     ReviewProtection,
     MergeQueueChange,
     WorkflowCheck,
@@ -88,6 +89,7 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::IssueSetMilestone
         | ForgeOperation::IssueClearMilestone
         | ForgeOperation::MilestoneChange
+        | ForgeOperation::NotificationPreferenceChange
         | ForgeOperation::ReviewProtection
         | ForgeOperation::MergeQueueChange
         | ForgeOperation::WorkflowCheck
@@ -126,6 +128,7 @@ mod tests {
             ForgeOperation::IssueSetMilestone,
             ForgeOperation::IssueClearMilestone,
             ForgeOperation::MilestoneChange,
+            ForgeOperation::NotificationPreferenceChange,
             ForgeOperation::ReviewProtection,
             ForgeOperation::MergeQueueChange,
             ForgeOperation::WorkflowCheck,

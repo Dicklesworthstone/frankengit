@@ -348,6 +348,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(11);
             write_slug(out, "ForgeEntityId", milestone.label())?;
         }
+        ForgeEventKind::NotificationPreferenceChanged { preference } => {
+            out.write_raw_byte(12);
+            write_slug(out, "ForgeEntityId", preference.label())?;
+        }
         ForgeEventKind::PullRequestReviewed { review, target } => {
             out.write_raw_byte(5);
             write_slug(out, "ForgeEntityId", review.label())?;
@@ -414,6 +418,9 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         11 => Ok(ForgeEventKind::MilestoneChanged {
             milestone: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        12 => Ok(ForgeEventKind::NotificationPreferenceChanged {
+            preference: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
         }),
         8 => Ok(ForgeEventKind::WorkflowCheckObserved {
             check: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),

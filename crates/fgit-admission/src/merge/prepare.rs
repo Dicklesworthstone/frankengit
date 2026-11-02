@@ -108,6 +108,9 @@ pub fn prepare_event(
         ForgeEventPayload::MilestoneChangedNative(_) => {
             matches!(event.aggregate, fgit_forge::AggregateId::Milestone(_))
         }
+        ForgeEventPayload::NotificationPreferenceChangedNative(change) => {
+            matches!(event.aggregate, fgit_forge::AggregateId::NotificationPreference { principal, .. } if principal == change.actor)
+        }
         ForgeEventPayload::ReviewProtectionChanged(_) => {
             event.aggregate == fgit_forge::AggregateId::ReviewProtection
         }
@@ -353,6 +356,22 @@ pub fn prepare_event(
             }
             super::native::milestones::verify_event_seal(context, event, attempt)?;
             (ForgeEventKind::MilestoneChanged { milestone: entity }, Vec::new(), None)
+        }
+        ForgeEventPayload::NotificationPreferenceChangedNative(change) => {
+            if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty() || !closure.objects.is_empty() {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            super::native::notifications::verify_event_seal(context, event, attempt)?;
+            let fgit_forge::AggregateId::NotificationPreference { issue, .. } = event.aggregate else {
+                return Err(RefusalCode::EvidenceInvalid);
+            };
+            let issue_stream = AsciiSlug::try_new("forge_stream", fgit_forge::AggregateId::Issue(issue).to_string().as_bytes())
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            let current = resolved.forge.entry(issue_stream).ok_or(RefusalCode::EvidenceMissing)?.successor_position();
+            if let fgit_forge::event::notification::NotificationAction::SetReadThrough(Some(through)) = change.action {
+                if through.get() > current { return Err(RefusalCode::EvidenceStale); }
+            }
+            (ForgeEventKind::NotificationPreferenceChanged { preference: entity }, Vec::new(), None)
         }
         ForgeEventPayload::MergeCommittedNative(merge) => {
             merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;

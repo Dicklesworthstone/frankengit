@@ -65,6 +65,7 @@ pub const fn classify_event(
                 IssueAction::ClearMilestone => ForgeOperation::IssueClearMilestone,
             },
             ForgeEventPayload::MilestoneChangedNative(_) => ForgeOperation::MilestoneChange,
+            ForgeEventPayload::NotificationPreferenceChangedNative(_) => ForgeOperation::NotificationPreferenceChange,
             ForgeEventPayload::ReviewProtectionChanged(_) => ForgeOperation::ReviewProtection,
             ForgeEventPayload::MergeQueueChangedNative(_) => ForgeOperation::MergeQueueChange,
             ForgeEventPayload::WorkflowCheckObservedNative(_)

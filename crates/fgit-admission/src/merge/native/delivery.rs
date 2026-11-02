@@ -593,7 +593,7 @@ fn validate_payload_positions_in(
 /// a final matching version alone cannot hide a gap or an extra predecessor.
 /// Return rejected stream identities so the caller reports them in original
 /// canonical frontier order, after any earlier missing or corrupt dependencies.
-fn validate_position_ranges(
+pub(super) fn validate_position_ranges(
     ranges: &mut BTreeMap<fgit_types::AsciiSlug, (&ForgePositionStateEntry, u32)>,
     batch: &ForgeEventBatch,
     cancelled: &(impl Fn() -> bool + Sync),
