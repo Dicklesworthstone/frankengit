@@ -59,6 +59,15 @@ cells; it does not establish the full live-server operator matrix in
 `x2mv.4.59`. Missing prerequisites, failed profiles and empty TAP are non-pass;
 optional oracle skips remain skips rather than native compatibility evidence.
 
+The same discovery includes
+[`operator/backup.sh`](../scripts/e2e/suites/operator/backup.sh), which drives seven
+actual signed-backup CLIs through real native verification, local replica health,
+retained checkpoint refusals, Git/forge restoration and exact cached resume in
+both hash domains. It reuses the sole Node pin and supplied prebuilt `fg`; it
+does not build another executable or substitute schema peers. The
+[revision-bound result and missing-restore-route control](LOCAL_JS_VERIFICATION.md)
+do not activate the full/release gates or complete `.4.59`'s original matrix.
+
 In the pre-implementation repository, `docs`, `constitution`, and `fast` are runnable. `full` and `release` deliberately return exit code 3 with a typed dormant-gate refusal; they must not produce a false green status. As implementation grows, each lane delegates to Rust `xtask`/checker subcommands; shell remains a thin portable dispatcher.
 
 Activation is controlled by FG-091's exact suite manifest, not by a minimum script count. For the selected profile, the independent expected IDs must equal the scripts discovered, started, completed, and passed. Each required ID also names exactly one active owning Bead, and FG-091 must reach the complete owner set through blocking dependencies; dependency rewiring cannot silently detach a campaign. Missing, duplicate, unregistered, zero-run, skipped, unsupported, filtered, ignored, timed-out, malformed-log, stale-revision, wrong-profile, or unreachable-owner required entries keep the lane non-green, and first-attempt failures remain in the evidence.

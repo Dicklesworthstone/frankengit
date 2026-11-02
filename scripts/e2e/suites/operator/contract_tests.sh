@@ -27,6 +27,11 @@ fge_context native_binary_sha256 "$(fge_digest_file "$FG_BIN")"
 # their native bundle/import/backup/recovery cases because they use another key.
 export FG_NATIVE_BIN="$FG_BIN"
 
+fge_phase action
+fge_capture operator-owner-selftests env FGE_NODE="$NODE" python3 "$E2E_ROOT/selftests/test_operator_command.py" || true
+fge_phase assert
+fge_assert_exit OPERATOR-CONTRACT-OWNER-001 0 "$FGE_LAST_EXIT" 'real-process operator owner success, refusal, interruption, timeout and forced-containment regressions complete'
+
 for scope in operator scripts; do
   fge_phase action
   test_exit=0

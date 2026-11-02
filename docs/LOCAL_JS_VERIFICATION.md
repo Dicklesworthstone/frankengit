@@ -22,6 +22,31 @@ returns an explicit `js_runtime_identity` without running tests; live native
 campaigns use this command rather than maintaining another runtime policy.
 That identity-only command earns no test coverage credit.
 
+The live [operator campaign launcher](../scripts/e2e/operator_issue_smoke.py)
+requests TERM on interruption or its unchanged 40-second execution deadline,
+then gives the Node owner four seconds to drain its native children. Repeated
+TERM/INT requests during this drain do not preempt it. Forced owner termination
+has a separate two-second reap bound and fails as
+`operator_owner_containment_failed`; it does not establish native quiescence.
+Both streams and a command-journal row survive, and interrupted native effects
+remain explicitly unknown. This closes the observed Python `subprocess.run`
+failure that killed Node before it could request shutdown of a detached child.
+It does not cover Python SIGKILL, interruption inside process creation, escaped
+hostile children or every other campaign's direct subprocess calls.
+
+The existing operator contract suite invokes
+[`selftests/test_operator_command.py`](../scripts/e2e/selftests/test_operator_command.py)
+with the same pinned Node. At `859da441da270a2aebf0f9d7bcd5441281940f1a`, its nine
+real-process cases complete with zero failures/skips: normal success/refusal,
+unexpected exit, malformed JSON, TERM, repeated signals, timeout, uncooperative
+owner and spawn failure. The cooperative executable is synthetic; these are
+process-ownership regressions, not native mutation evidence. At that same
+source, the existing backup lane completes 19 assertions, zero failures/skips,
+against the explicitly older `a9d65885` native binary identified below. Receipt:
+`/data/frankengit-targets/noble_operator_drain_backup_859da441_20261102/receipt.ndjson`,
+SHA-256 `0de21b1bcd9760e5b6fc35d132ec95ffe18d7d4c363f47e576659ff74ab20133`.
+The full operator matrix and current-source native qualification remain open.
+
 The shared GitHub pull peer and issue operator fixture allocate listeners through
 `tests/fetch-peer.mjs`. Hosts may assign ephemeral ports that Fetch refuses
 before any TCP request. The helper retires those selections before exposing a
@@ -40,6 +65,32 @@ outcome grants and complete owned service drain. Complete command streams and
 private failure artifacts are retained. This covers one operator entrypoint;
 the complete entrypoint matrix and same-revision binary qualification remain
 separate acceptance conditions in `x2mv.4.59`.
+
+The discovered [signed-backup operator lane](../scripts/e2e/suites/operator/backup.sh)
+drives seven shipped entrypoints: attest, witness, select, replicate, scrub,
+direct native verification and integrated recovery. It imports independently
+framed Git objects checked by pinned sandboxed Git, creates two native forge
+checkpoints, signs actual native exports, checks healthy/corrupt replicas and
+retained-generation refusals, then restores from local media with every original
+source/export pathname unavailable. Canonical Rust reads compare binary Git
+bytes, executable kinds, commit/tree/blob identities, issue data and history.
+Cache-only exact resume preserves the approval record and authority head;
+changed approval bytes refuse. Original sources remain retained elsewhere:
+this is not destructive power loss or independent-failure-domain evidence.
+
+At source `61842fdb41f3c729b040bed1100b350f500645c8`, the lane completes 19
+assertions across SHA-1/SHA-256, zero failures/skips, with pinned Node 26.8.1 and
+Git 2.54.0. The supplied native binary is explicitly older
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+Receipt: `/data/frankengit-targets/noble_backup_join_61842fdb_20261102/receipt.ndjson`,
+SHA-256 `39f52dffaa4d8df900ec8fbb026b7d956529ea47e174a3038fa1c96029586a28`.
+A separate test-only adapter that delegates every operation except native
+restore causes a non-pass at `recover_repository_backup.mjs`; the cache/record
+survive and no restored root exists. Its retained `restore_attempted_unknown`
+state is not rewritten as a rollback. Neither result qualifies a current-source
+native build, the remaining operator matrix, HTTPS/cloud storage, hostile-code
+isolation, forced-driver cleanup, full capsules, deployment or release.
 
 The discovered suite
 [`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh)

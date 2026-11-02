@@ -16,6 +16,8 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -32,17 +34,60 @@ class OperatorCampaign(Campaign):
         self.client_serial = 0
 
     def node_command(self, script: Path, args: list[str], expected: int = 0, *,
-                     error_reply: bool = False) -> dict[str, Any]:
+                     error_reply: bool = False, timeout: float = 40) -> dict[str, Any]:
+        if not 0 < timeout <= 40:
+            raise ValueError("operator execution timeout must be positive and at most 40 seconds")
         self.client_serial += 1
         stem = self.work / f"operator-{self.client_serial:03d}"
         command = [str(self.node), str(script), *args]
+        started = time.monotonic()
         with stem.with_suffix(".stdout").open("wb") as out, stem.with_suffix(".stderr").open("wb") as err:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                    timeout=40, check=False)
-        self.record(kind="operator", command=command, exit=result.returncode, artifacts=str(stem))
-        if result.returncode != expected:
+            owner = None
+            try:
+                owner = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                         start_new_session=os.name == "posix")
+                exit_code = owner.wait(timeout=timeout)
+            except BaseException as interruption:
+                if owner is None:
+                    self.record(kind="operator", command=command, spawn_error=type(interruption).__name__,
+                                native_effect="unknown", artifacts=str(stem))
+                    raise
+                # subprocess.run kills its direct child on interruption. That
+                # would destroy Node's owner before it drains detached native
+                # children. Request TERM and let that existing owner finalize.
+                # Repeated operator signals must not interrupt this bounded drain.
+                handlers = {}
+                shutdown, cleanup_error = "owner_reaped_after_term", None
+                try:
+                    if threading.current_thread() is threading.main_thread():
+                        for number in (signal.SIGTERM, signal.SIGINT):
+                            handlers[number] = signal.signal(number, signal.SIG_IGN)
+                    if owner.poll() is None:
+                        owner.terminate()
+                    try:
+                        owner.wait(timeout=4)
+                    except subprocess.TimeoutExpired:
+                        shutdown = "forced_owner_termination"
+                        owner.kill()
+                        owner.wait(timeout=2)
+                except BaseException as error:
+                    shutdown, cleanup_error = "owner_reap_unresolved", type(error).__name__
+                finally:
+                    for number, handler in handlers.items():
+                        signal.signal(number, handler)
+                self.record(kind="operator", command=command, exit=owner.poll(), pid=owner.pid,
+                            artifacts=str(stem), interruption=type(interruption).__name__, shutdown=shutdown,
+                            cleanup_error=cleanup_error, native_effect="unknown",
+                            duration_ms=round((time.monotonic() - started) * 1000))
+                if shutdown != "owner_reaped_after_term":
+                    # Reaping a forced Node owner says nothing about detached
+                    # native work or whether a repository mutation committed.
+                    raise RuntimeError(f"operator_owner_containment_failed: {shutdown}; see {stem}") from interruption
+                raise
+        self.record(kind="operator", command=command, exit=exit_code, artifacts=str(stem))
+        if exit_code != expected:
             sys.stderr.write(stem.with_suffix(".stderr").read_text(errors="replace"))
-            raise AssertionError(f"operator exit {result.returncode}, expected {expected}; see {stem}")
+            raise AssertionError(f"operator exit {exit_code}, expected {expected}; see {stem}")
         return json.loads(stem.with_suffix(".stderr" if error_reply else ".stdout").read_bytes())
 
 
