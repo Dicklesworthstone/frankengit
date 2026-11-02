@@ -34,7 +34,8 @@ class OperatorCampaign(Campaign):
         self.client_serial = 0
 
     def node_command(self, script: Path, args: list[str], expected: int = 0, *,
-                     error_reply: bool = False, timeout: float = 40) -> dict[str, Any]:
+                     error_reply: bool = False, timeout: float = 40,
+                     json_lines: bool = False) -> dict[str, Any] | list[dict[str, Any]]:
         if not 0 < timeout <= 40:
             raise ValueError("operator execution timeout must be positive and at most 40 seconds")
         self.client_serial += 1
@@ -88,7 +89,13 @@ class OperatorCampaign(Campaign):
         if exit_code != expected:
             sys.stderr.write(stem.with_suffix(".stderr").read_text(errors="replace"))
             raise AssertionError(f"operator exit {exit_code}, expected {expected}; see {stem}")
-        return json.loads(stem.with_suffix(".stderr" if error_reply else ".stdout").read_bytes())
+        raw = stem.with_suffix(".stderr" if error_reply else ".stdout").read_bytes()
+        if json_lines:
+            records = [json.loads(line) for line in raw.splitlines()]
+            require(bool(records) and all(isinstance(row, dict) for row in records),
+                    f"operator NDJSON must contain nonempty object records; see {stem}")
+            return records
+        return json.loads(raw)
 
 
 @contextmanager

@@ -38,6 +38,19 @@ class OperatorCommandTests(unittest.TestCase):
     def records(self):
         return [json.loads(line) for line in self.campaign.journal.read_text().splitlines()]
 
+    def test_ndjson_retains_every_record_without_changing_single_json_contract(self):
+        script = "console.log(JSON.stringify({page:1})); console.log(JSON.stringify({complete:true}));"
+        with self.assertRaises(json.JSONDecodeError):
+            self.campaign.node_command(Path("-e"), [script])
+        value = self.campaign.node_command(Path("-e"), [script], json_lines=True)
+        self.assertEqual(value, [{"page": 1}, {"complete": True}])
+
+    def test_ndjson_rejects_empty_mixed_and_nonobject_protocols(self):
+        for script in ["", "console.log('{}'); console.log('not JSON');",
+                       "console.log('{}'); console.log('');", "console.log('[]');"]:
+            with self.subTest(script=script), self.assertRaises((ValueError, AssertionError)):
+                self.campaign.node_command(Path("-e"), [script], json_lines=True)
+
     def test_success_retains_both_streams(self):
         value = self.campaign.node_command(Path("-e"), [
             "console.error('retained diagnostic'); console.log(JSON.stringify({ok:true}));"])

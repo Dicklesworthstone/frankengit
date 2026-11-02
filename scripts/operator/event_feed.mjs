@@ -130,6 +130,7 @@ export async function readEventPage(configuration, credential, options = {}) {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, { method: 'GET', agent: false,
         maxHeaderSize: 16384, rejectUnauthorized: true, ...(ca ? { ca } : {}), headers: {
           Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Encoding': 'identity',
+          'User-Agent': 'frankengit-event-consumer/1 (+https://github.com/Dicklesworthstone/frankengit)',
           'Cache-Control': 'no-store', Connection: 'close' } });
       request.once('close', () => { closed = true; if (!finished) finish(new EventFeedError('event_response_incomplete')); else deliver(); });
       request.on('error', () => finish(new EventFeedError('event_transport_unavailable')));

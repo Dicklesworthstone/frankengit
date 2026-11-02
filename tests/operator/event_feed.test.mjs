@@ -31,6 +31,7 @@ for (const format of ['sha1', 'sha256']) test(`${format}: filtered pages advance
       assert.equal(request.method, 'GET'); assert.equal(request.headers.authorization, `Bearer ${TOKEN}`);
       assert.equal(request.headers['idempotency-key'], undefined); assert.equal(request.headers.cookie, undefined);
       assert.equal(request.headers['accept-encoding'], 'identity'); assert(!request.url.includes('expected_head'));
+      assert.equal(request.headers['user-agent'], 'frankengit-event-consumer/1 (+https://github.com/Dicklesworthstone/frankengit)');
     }
   } finally { await server.close(); }
 });
