@@ -35,6 +35,7 @@ for (const format of ['sha1', 'sha256']) {
     metrics(warm);
     for (const call of f.calls) {
       assert.equal(call.headers.authorization, `Bearer ${token}`); assert.equal(call.headers['idempotency-key'], undefined);
+      assert.equal(call.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
       assert.equal(call.form.get('expected_commit'), f.repo.commit);
       if (call.operation !== 'log') assert.equal(call.form.get('expected_head'), f.repo.snapshot);
     }
