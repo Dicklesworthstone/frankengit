@@ -11,6 +11,13 @@ replacement for the server's disclosure checks.
 Defaults are 16 pages and 30 seconds. `validateEventCapture` rechecks saved JSON
 against an independently retained configuration without network access.
 
+The selected deadline includes socket closure and final capture revalidation.
+Successful completion checks monotonic elapsed time, so a delayed timer callback
+cannot admit an overdue response. Final revalidation also checks cancellation
+before returning a capture. Synchronous validation cannot be preempted, but
+crossing the original deadline refuses with `event_timeout` when it finishes;
+the timeout is never renewed for the final page.
+
 The complete configuration is explicit:
 
 ```json
@@ -77,7 +84,9 @@ complete checked-in browser validator, with no added package dependency.
 Tests cover SHA-1/SHA-256 labels, full-width cursor values, filtered progression,
 independent scope pins, refusal/no-retry behavior, exact byte limits, strict
 JSON, chunked/truncated responses, timeout/cancellation/socket drain, and TLS
-trust/hostname validation. They establish the consumer boundary only; Rust,
+trust/hostname validation. Delayed timer delivery and synchronous revalidation
+controls also check that late work cannot bypass the original deadline or a
+cancellation request. They establish the consumer boundary only; Rust,
 real-binary integration and independent batch verification remain separate.
 
 ## Restartable command and durable storage

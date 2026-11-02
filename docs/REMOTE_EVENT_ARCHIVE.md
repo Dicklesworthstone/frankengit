@@ -235,3 +235,42 @@ post-rename directory-sync failure with permitted recovery. OpenSSL is used only
 for an ephemeral TLS test certificate. No new package dependency is introduced.
 Native Rust compilation, real-fg integration, multi-host deployment and independent
 batch verification remain separate gates; this does not close the owning bead.
+
+### Live native operator lane
+
+The discovered
+[`scripts/e2e/suites/operator/events.sh`](../scripts/e2e/suites/operator/events.sh)
+runs the shipped `fg_events.mjs` against a supplied native `fg serve-http` in
+SHA-1 and SHA-256. It is also selected automatically by the canonical
+`./scripts/verify.sh operator` command. Direct invocation uses a prebuilt `FG_BIN`
+and `FGE_NODE` matching [`tests/node-version`](../tests/node-version); it performs
+no implicit compilation.
+
+The lane drives all four actions, retains a partial capture, reopens the actual
+service at the same endpoint after a native append, and compares saved opaque
+frames with Rust CLI reads. It exercises bounded quiet watch, filtered pages
+that advance without revealing issue payloads, wrong-tail and changed-credential
+refusals, changed native grants and their permitted twin, corrupt-copy inspection
+and a disabled issue-read scope. Native drain receipts account for exactly
+1/12/1 connections across the three service instances per format; local-only
+operations cannot silently add network requests. Every native request uses an
+honest FrankenGit event-consumer User-Agent. Archives, command streams, failure
+artifacts and the intentionally corrupted copy remain available for inspection.
+
+At `180a526fa7adeee30908697a263f28d2c360e5dc`, the lane records 21 assertions,
+zero failures/skips and six normally drained native service instances. Receipt:
+`/data/frankengit-targets/noble_operator_events_180a526f_20261102/receipt.ndjson`,
+SHA-256 `536265c4f6b92df0a24d7306ddfd992e6a678de228cfd02fff2f1f47672944bc`.
+The supplied native binary is explicitly older `a9d65885`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+A test-only adapter that disables issue reads while delegating every operation
+to that binary makes the positive campaign fail with a real native HTTP 403.
+Its initialized binding survives and no event page is saved; this is a
+capability-disabled control, not a route-removed build or a substitute server.
+
+Separately at that source, 67 event module tests and 11 operator process tests
+complete without failures/skips. The module peers remain distinct from native
+evidence. Rust reads establish frame parity, not an independent codec oracle,
+complete forge history, PR hidden-ref policy, TLS, destructive crash durability,
+current-source native qualification, the complete operator matrix or D10
+ratification. The original Bead and independent batch/release gates remain open.

@@ -31,6 +31,7 @@ for (const format of ['sha1', 'sha256']) test(`${format}: filtered pages advance
       assert.equal(request.method, 'GET'); assert.equal(request.headers.authorization, `Bearer ${TOKEN}`);
       assert.equal(request.headers['idempotency-key'], undefined); assert.equal(request.headers.cookie, undefined);
       assert.equal(request.headers['accept-encoding'], 'identity'); assert(!request.url.includes('expected_head'));
+      assert.equal(request.headers['user-agent'], 'frankengit-event-consumer/1 (+https://github.com/Dicklesworthstone/frankengit)');
     }
   } finally { await server.close(); }
 });
@@ -140,6 +141,72 @@ test('a chunked response succeeds, but truncation, timeout and cancellation neve
     for (let n = 0; hung.sockets.size && n < 30; n++) await sleep(5);
     assert.equal(hung.sockets.size, 0);
   } finally { await hung.close(); }
+});
+
+for (const format of ['sha1', 'sha256']) for (const capture of [false, true]) {
+  test(`${format}: ${capture ? 'capture' : 'page read'} refuses an overdue response even when its timer callback is delayed`, { timeout: 8000 }, async t => {
+    const budget = 250, originalTimeout = globalThis.setTimeout;
+    let deferred = false, timerRan = false, cfg;
+    // Only defer delivery of the parent's deadline callback. The HTTP peer uses
+    // the real timers/promises clock; its response crosses the unchanged budget.
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+      if (ms > budget) return originalTimeout(callback, ms, ...args);
+      deferred = true;
+      return originalTimeout(() => { timerRan = true; callback(...args); }, 5000);
+    });
+    const server = await peer(async (_q, r) => { await sleep(budget + 100); json(r, page(cfg)); });
+    cfg = config(server.endpoint, format);
+    try {
+      const read = capture ? captureEventPages : readEventPage;
+      await assert.rejects(read(cfg, TOKEN, { timeoutMs: budget }), code('event_timeout'));
+      assert.equal(deferred, true); assert.equal(timerRan, false, 'elapsed time must be checked without the timer callback');
+      assert.equal(server.requests.length, 1, 'no retry follows an overdue response');
+      for (let n = 0; server.sockets.size && n < 30; n++) await sleep(5);
+      assert.equal(server.sockets.size, 0, 'the failed read must still drain its socket');
+    } finally { await server.close(); }
+  });
+}
+
+for (const overdue of [false, true]) {
+  test(`capture revalidation ${overdue ? 'refuses completion past' : 'succeeds within'} its original deadline`, { timeout: 8000 }, async t => {
+    const budget = 1000, originalClone = globalThis.structuredClone;
+    let cfg, copies = 0;
+    t.mock.method(globalThis, 'structuredClone', value => {
+      const copy = originalClone(value);
+      if (value?.type === 'forge_event_page' && ++copies === 2 && overdue) {
+        // Synchronous revalidation can starve timers as well as I/O. This blocks
+        // only the test process, after the real HTTP read has already completed.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, budget + 100);
+      }
+      return copy;
+    });
+    const server = await peer((_q, r) => json(r, page(cfg))); cfg = config(server.endpoint);
+    try {
+      const result = captureEventPages(cfg, TOKEN, { timeoutMs: budget });
+      if (overdue) await assert.rejects(result, code('event_timeout'));
+      else {
+        const completed = await result;
+        assert.equal(completed.pages.length, 1); assert.equal(completed.pages[0].events[0].event_frame_hex, '00ff80');
+      }
+      assert.equal(copies, 2, 'exercise both transport validation and final capture revalidation');
+      assert.equal(server.requests.length, 1);
+    } finally { await server.close(); }
+  });
+}
+
+test('capture revalidation observes cancellation before returning its completed batch', async t => {
+  const originalClone = globalThis.structuredClone, stop = new AbortController();
+  let cfg, copies = 0;
+  t.mock.method(globalThis, 'structuredClone', value => {
+    const copy = originalClone(value);
+    if (value?.type === 'forge_event_page' && ++copies === 2) stop.abort();
+    return copy;
+  });
+  const server = await peer((_q, r) => json(r, page(cfg))); cfg = config(server.endpoint);
+  try {
+    await assert.rejects(captureEventPages(cfg, TOKEN, { signal: stop.signal }), code('event_cancelled'));
+    assert.equal(copies, 2); assert.equal(server.requests.length, 1);
+  } finally { await server.close(); }
 });
 
 test('HTTPS verifies trust and hostname with a test-only CA; no plaintext downgrade', async () => {
