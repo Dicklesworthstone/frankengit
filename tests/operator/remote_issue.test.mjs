@@ -75,6 +75,9 @@ for (const [action, version, data, pairs] of [
   ['lock', '7', {}, [['expected_version', '7']]], ['unlock', '8', {}, [['expected_version', '8']]],
   ['assign', '5', { assignees: [scope.principal_id] }, [['expected_version', '5'], ['assignee', scope.principal_id]]],
   ['unassign', '6', { assignees: [scope.principal_id] }, [['expected_version', '6'], ['assignee', scope.principal_id]]],
+  ['set-milestone', '9', { milestone: '18446744073709551615', expected_milestone_version: '9007199254740993' },
+    [['expected_version', '9'], ['milestone', '18446744073709551615'], ['expected_milestone_version', '9007199254740993']]],
+  ['clear-milestone', '10', {}, [['expected_version', '10']]],
 ]) test(`native ${action} exact form and full round trip`, async t => {
   const command = issueCommand('7', version, action, data);
   assert.deepEqual([...new URLSearchParams(command.body)], pairs);
@@ -93,6 +96,13 @@ for (const [action, version, data, pairs] of [
 });
 
 const invalidCommands = [
+  ['set-milestone', '1', { milestone: '7' }],
+  ['set-milestone', '1', { milestone: '7', expected_milestone_version: '1', principal: scope.principal_id }],
+  ['clear-milestone', '1', { milestone: '7' }],
+  ...['0', '01', '-1', '18446744073709551616', null, 7].flatMap(value => [
+    ['set-milestone', '1', { milestone: value, expected_milestone_version: '1' }],
+    ['set-milestone', '1', { milestone: '7', expected_milestone_version: value }],
+  ]),
   ['open', '1', { title: 'x', body: '' }], ['close', '0', {}], ['delete', '1', {}],
   ['edit', '1', {}], ['comment', '1', { body: '   ' }], ['close', '1', { body: 'x' }],
   ['open', '0', { title: 'x' }], ['edit', '1', { title: 'x\n' }], ['comment', '1', { body: '\ud800' }],

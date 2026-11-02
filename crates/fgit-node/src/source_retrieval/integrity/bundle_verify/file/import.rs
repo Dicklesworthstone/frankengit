@@ -16,6 +16,8 @@ use super::super::{
 use super::resolve::Inventory;
 use super::storage::{Scratch, Span, SpanReader, io_error};
 use super::{FileBundleVerification, checkpoint, verify_reader_inventory};
+use crate::received_pack::ReceivedPackCache;
+use crate::received_pack::placement::PlacementBoundPack;
 
 /// Bounded facts about a selected object. No scratch offset or caller-supplied
 /// commitment can be used to manufacture a reader.
@@ -56,6 +58,7 @@ pub struct FullBundleImportPlan {
     verification: FileBundleVerification,
     receipt: StreamPackReceipt,
     objects: RetainedBundleObjects,
+    capture: Option<PlacementBoundPack>,
 }
 
 impl FullBundleImportPlan {
@@ -75,6 +78,10 @@ impl FullBundleImportPlan {
 
     pub(crate) const fn total_selected_bytes(&self) -> u64 {
         self.objects.total_selected_bytes()
+    }
+
+    pub(crate) fn take_received_pack(&mut self) -> Option<PlacementBoundPack> {
+        self.capture.take()
     }
 
     pub(crate) fn finish(self) -> Result<(), BundleVerifyError> {
@@ -301,6 +308,7 @@ impl Drop for FullBundleImportBlobReader<'_> {
 /// file; replaced or missing paths cause a typed refusal from `finish` and are
 /// left untouched by drop. This custody profile requires Unix file identity;
 /// other platforms refuse before creating scratch or reading the source.
+#[cfg(test)]
 pub fn prepare_full_bundle_import_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
@@ -314,6 +322,7 @@ pub fn prepare_full_bundle_import_reader<R: Read + Seek>(
         scratch_path,
         None,
         limits,
+        None,
         allow_work,
     )
 }
@@ -328,6 +337,7 @@ pub fn prepare_full_bundle_import_reader<R: Read + Seek>(
 /// Callers retain the complete original header/receipt through the plan and
 /// prove those request-specific conditions before staging or publication.
 /// Scratch has the same exclusive custody rules as the all-ref import above.
+#[cfg(all(test, unix))]
 pub fn prepare_full_bundle_fetch_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
@@ -342,6 +352,29 @@ pub fn prepare_full_bundle_fetch_reader<R: Read + Seek>(
         scratch_path,
         Some(sources),
         limits,
+        None,
+        allow_work,
+    )
+}
+
+/// Node-only intake may retain optional raw custody. Standalone verification
+/// and recovery keep their existing no-capture contracts and public signatures.
+pub(crate) fn prepare_full_bundle_reader_capturing<R: Read + Seek>(
+    input: &mut R,
+    expected_format: GitHashAlgorithm,
+    scratch_path: &Path,
+    sources: Option<&[RefName]>,
+    limits: &BundleVerifyLimits,
+    cache: &ReceivedPackCache,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<FullBundleImportPlan, BundleVerifyError> {
+    prepare_reader_profile(
+        input,
+        expected_format,
+        scratch_path,
+        sources,
+        limits,
+        Some(cache),
         allow_work,
     )
 }
@@ -352,6 +385,7 @@ fn prepare_reader_profile<R: Read + Seek>(
     scratch_path: &Path,
     sources: Option<&[RefName]>,
     limits: &BundleVerifyLimits,
+    capture_cache: Option<&ReceivedPackCache>,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<FullBundleImportPlan, BundleVerifyError> {
     let mut stopped = false;
@@ -371,6 +405,7 @@ fn prepare_reader_profile<R: Read + Seek>(
             limits,
             None,
             Some(expected_format),
+            capture_cache,
             &mut live,
         )?;
         let mut workspace = Scratch::reopen(
@@ -390,9 +425,15 @@ fn prepare_reader_profile<R: Read + Seek>(
         )?;
         workspace.finish(&mut live)?;
         checkpoint(&mut live)?;
-        Ok((verified, selection))
+        let capture = match (verified.capture.take(), capture_cache) {
+            (Some(capture), Some(cache)) => {
+                capture.prepare(cache, &selection.0, &limits.pack, &mut live)?
+            }
+            _ => None,
+        };
+        Ok((verified, selection, capture))
     })();
-    let (verified, (selected, objects, total_selected_bytes)) = match prepared {
+    let (verified, (selected, objects, total_selected_bytes), capture) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             scratch.cleanup()?;
@@ -413,6 +454,7 @@ fn prepare_reader_profile<R: Read + Seek>(
         verification: verified.file,
         receipt: verified.receipt,
         objects: retained,
+        capture,
     })
 }
 

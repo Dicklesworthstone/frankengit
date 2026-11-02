@@ -393,6 +393,7 @@ fn canonical_queue_head_executes_actual_candidate_reports_checks_and_lands_atomi
                     name: target_ref(),
                     reviewers: Vec::new(),
                     required_approvals: 0,
+                    required_candidate_checks: Vec::new(),
                     require_merge_queue: true,
                     required_checks: vec![RequiredWorkflowCheck {
                         source_ref: ci_ref(),

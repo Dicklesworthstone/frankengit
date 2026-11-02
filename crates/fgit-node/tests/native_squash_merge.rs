@@ -756,6 +756,7 @@ fn protect_with_queue_requirement(node: &OneNode, require_merge_queue: bool) -> 
             ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                required_candidate_checks: Vec::new(),
                 require_merge_queue,
                 required_approvals: u16::from(!require_merge_queue),
                 required_checks: Vec::new(),

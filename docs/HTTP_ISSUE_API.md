@@ -92,6 +92,8 @@ POST {REPO_URL}/api/v1/issues/{number}/comment
 POST {REPO_URL}/api/v1/issues/{number}/append-comment
 POST {REPO_URL}/api/v1/issues/{number}/assign
 POST {REPO_URL}/api/v1/issues/{number}/unassign
+POST {REPO_URL}/api/v1/issues/{number}/set-milestone
+POST {REPO_URL}/api/v1/issues/{number}/clear-milestone
 ```
 
 The caller supplies a positive issue number; there is no implicit allocator.
@@ -102,7 +104,8 @@ trailers, incomplete framing, and buffered suffixes are refused before admission
 
 Every mutation requires an explicit `Idempotency-Key` header. Versioned actions
 require the `expected_version` form field: open requires `0` (absent stream),
-while edit, comment, close, reopen, lock, unlock, assign and unassign require the exact positive
+while edit, comment, close, reopen, lock, unlock, assign, unassign,
+set-milestone and clear-milestone require the exact positive
 predecessor. The separate `append-comment` action accepts only `body` and rejects
 `expected_version`; it binds an immutable comment intent and appends against the
 current canonical issue state. Independent appends can all commit while strict
@@ -116,6 +119,15 @@ edits or strict comments still refuse a stale predecessor.
 | `append-comment` | Required nonblank `body` only; `expected_version` is forbidden. |
 | `close`, `reopen`, `lock`, `unlock` | No fields besides `expected_version`. |
 | `assign`, `unassign` | Required repeated `assignee`: 1–16 distinct 32-character lowercase hexadecimal principal IDs. |
+| `set-milestone` | Required positive `milestone` and `expected_milestone_version`, in addition to the issue's exact `expected_version`. |
+| `clear-milestone` | No fields besides the issue's exact `expected_version`. |
+
+Milestone membership checks the selected open milestone at the same publication
+basis as the issue. Milestone lifecycle routes, same-snapshot progress counts and
+history use the existing independent issue grants. See
+[native milestones](NATIVE_MILESTONES.md#authenticated-http-and-mcp) for the full
+route and command contract. Closing a milestone preserves its members; clearing
+membership remains available afterward and does not change issue lock/state.
 
 Assignment adds or removes only the named principals, preserving all other
 assignees. The resulting set is bounded to 16. Input IDs are sorted before

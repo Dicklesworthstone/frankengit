@@ -704,3 +704,72 @@ mod composition;
 mod long_history;
 mod selective;
 mod thin;
+
+#[test]
+fn streamed_capture_transfers_one_preallocated_reservation_without_double_charging() {
+    let f = whole(b"pre-reserved original input");
+    let charge = f.raw.len() + ENTRY_OVERHEAD + OBJECT_OVERHEAD * f.objects.len();
+    let cache = ReceivedPackCache::new(charge);
+    let reservation = cache
+        .reserve_streamed_capture(f.raw.len(), f.objects.len())
+        .unwrap();
+    assert!(
+        cache
+            .reserve_streamed_capture(f.raw.len(), f.objects.len())
+            .is_none()
+    );
+    let pending = cache
+        .prepare_streamed_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || true,
+            reservation,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cache.retained_entries(),
+        0,
+        "preparation alone never activates custody"
+    );
+    let state = cache.state.lock().unwrap();
+    assert_eq!(state.reserved_bytes, charge);
+    assert_eq!(state.reservations, 1);
+    assert_eq!(state.resident_bytes, 0);
+    drop(state);
+    pending.commit();
+    let state = cache.state.lock().unwrap();
+    assert_eq!(state.reserved_bytes, 0);
+    assert_eq!(state.reservations, 0);
+    assert_eq!(state.resident_bytes, charge);
+    drop(state);
+    assert_eq!(payload(&cache, &f).unwrap().into_bytes().unwrap(), f.raw);
+}
+
+#[test]
+fn streamed_capture_cannot_transfer_another_service_caches_reservation() {
+    let f = whole(b"one shared cache owns the charge");
+    let charge = f.raw.len() + ENTRY_OVERHEAD + OBJECT_OVERHEAD * f.objects.len();
+    let original = ReceivedPackCache::new(charge);
+    let unrelated = ReceivedPackCache::new(charge);
+    let reservation = original
+        .reserve_streamed_capture(f.raw.len(), f.objects.len())
+        .unwrap();
+    let result = unrelated
+        .prepare_streamed_verified(
+            &f.pack,
+            f.objects.iter().copied(),
+            &f.offsets,
+            &PackLimits::default(),
+            &mut || true,
+            reservation,
+        )
+        .unwrap();
+    assert!(result.is_none());
+    assert_eq!(original.retained_entries(), 0);
+    assert_eq!(unrelated.retained_entries(), 0);
+    assert_eq!(original.state.lock().unwrap().reserved_bytes, 0);
+    assert_eq!(unrelated.state.lock().unwrap().reserved_bytes, 0);
+}

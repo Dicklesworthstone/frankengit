@@ -928,6 +928,73 @@ transitions and reject comments published while locked before accepting a final
 snapshot. Historical raw JSON retained in archives is never rewritten to insert
 the compatibility default.
 
+### 20.2.4 Native milestones and issue membership
+
+Milestones are repository-local canonical aggregates, independent of issue
+streams. Their lifecycle is open, edit, close and reopen. Metadata consists of a
+nonblank UTF-8 title of at most 256 bytes with no control characters, a UTF-8 body
+of at most 65,536 bytes without NUL, and an optional UTC Unix-second due date in
+`0..=253402300799`. A due date is descriptive metadata and cannot authorize an
+automatic transition. An edit preserves omitted fields; explicit empty body
+clears text, and an explicit absent date clears the due date. Empty edits refuse.
+Close and reopen require the corresponding open and closed predecessor states;
+they never close, reopen, detach or otherwise mutate member issues.
+
+The canonical owner is `fgit-forge/src/event/milestone.rs`. Required aggregate
+escape kind **9**, after the existing zero `u64`, carries the positive milestone
+number as a big-endian `u64`; its stream label is `milestone/N`. Required event
+kind **22**, `MilestoneChangedNative`, carries the raw 16-byte authenticated actor
+followed by the action. Action tags are big-endian `u32`: **1** open, **2** edit,
+**3** close, **4** reopen. Open writes the ordinary canonical length-prefixed
+title and body, then a canonical presence boolean and optional `u64` due date.
+Edit writes title presence and optional text, body presence and optional text,
+then date-edit presence and, when present, the same optional-date encoding.
+Close and reopen have no action payload. The reference/transaction append marker
+is **11**, `MilestoneChanged`, followed by its canonical forge entity string.
+Every existing aggregate, event, action, marker and sealed request keeps its
+bytes. Older readers refuse unfamiliar required kinds instead of ignoring them.
+
+Milestone commands seal their actor, number, exact predecessor and complete action
+under the `forge` scope `milestone.event-batch-root.v1`. Creation requires a new
+stream; later mutations require an exact positive version. Independent final
+preparation reconstructs the entire command and seal. The existing metadata
+admission owner publishes the milestone event, forge position and one outbox
+obligation through the ordinary authority-head CAS. These commands preserve
+preconditions after contention and never gain additive-comment replanning.
+Historical terminal recovery precedes new intake: a retry returns its original
+committed or refused outcome, and changed semantics under an existing key refuse.
+
+Within an issue event, new required action tag **10** is `SetMilestone`, followed
+by the positive milestone number and selected positive milestone version, both
+big-endian `u64`. Payloadless tag **11** is `ClearMilestone`. These actions retain
+the issue command's exact predecessor, actor and ordinary sealed issue identity.
+Set admission MUST resolve the selected milestone at the same authenticated
+publication basis as the issue and require both its selected version and open
+state. A missing or stale milestone yields `EvidenceStale`; a closed one yields
+`ProtectedRefTransitionDenied`. Set replaces the one optional membership; clear
+removes it without requiring that the former milestone remain open. Both operate
+on open, closed or locked issues, advance the issue version even when membership
+is unchanged, and preserve all other issue metadata. They neither authenticate
+nor grant authority to any principal and never alter the milestone version.
+
+Issue snapshots expose `milestone: null` or a positive number. A missing field in
+historical JSON means no membership, while malformed supplied values refuse.
+Milestone open/closed issue counts are derived by complete bounded issue replay
+at the **same selected authority head** as the milestone, not stored as another
+authoritative counter or fetched from a newer projection. Retained-snapshot
+continuations preserve both lifecycle and membership history; incomplete replay,
+missing evidence, cancellation or exhausted bounds refuse the read. Issue search
+can conjunctively select a milestone number or explicitly unassigned issues.
+
+Native HTTP and MCP adapters require their existing independent issue-read or
+issue-write grants for milestone metadata; Git read/write never implies either.
+The milestone's selected number, title, body and date cannot select the actor or
+widen capabilities. The frozen issue archive/import v1/v2 profiles do not define
+cross-repository milestone mappings: they MUST explicitly refuse milestone-bearing
+snapshots or membership history rather than drop it or rebind numbers. The
+`issues-pulls-v1` scoped event feed does not silently gain milestone aggregates;
+the granted milestone history API exposes their lifecycle directly.
+
 ### 20.3 Native protected-review quorums
 
 Repository review protection binds a sorted set of eligible reviewer principals
@@ -1043,6 +1110,87 @@ the existing authorized replacement protocol. Exact retries recover their
 original terminal decision under the original policy, including after restart
 or subsequent policy changes; an old decision is never reinterpreted as a new
 queue-authorized operation.
+
+### 20.5 Verified unpublished-candidate workflow checks
+
+The candidate-check profile binds one trusted job observation to an exact
+existing native pull request and candidate without requiring a canonical ref
+to name that candidate. Its original subject is the PR number and predecessor
+version, exact source and target ref bytes and native tips, and policy epoch.
+The candidate adds the merge-base and candidate-commit OIDs. A raw 32-byte
+SHA-256 additionally pins the supplied candidate bundle. These coordinates
+remain separate from execution provenance and from the final protected-ref
+effect. The retained execution authority head is provenance; it is not required
+to equal the current publication head.
+
+Required forge payload kind **20**, owned by
+`fgit-forge/src/event/workflow_check/candidate.rs`, encodes the authenticated
+publisher (16 bytes), PR number and version (big-endian u64), source and target
+refs, source and target native OIDs, policy epoch (u64), merge-base and candidate
+OIDs, raw bundle SHA-256, then the existing workflow-check record fields without
+a second actor. The embedded check's source ref is exactly the original target
+anchor and its source commit is exactly the candidate commit. It does not claim
+that the target currently names the candidate. The existing bounded ref, native
+OID, job, conclusion and retained-evidence encodings and validation rules apply.
+Every original kind-11 byte remains unchanged.
+
+Candidate and ordinary observations share the existing full
+publisher/run/attempt/job check identity and singleton aggregate version.
+Changing profile, subject, bundle pin, evidence or conclusion cannot mint a
+second stream for the same execution. A conflicting observation must refuse;
+a deliberate rerun has a distinct attempt identity. Canonical evidence retains
+the original job bytes. A local succeeded job becomes canonical Success only
+after verification against that actual saved execution; skipped or unsuccessful
+jobs cannot become Success through caller-selected fields.
+
+Fresh candidate-check admission authenticates the reporting principal, verifies
+the independent bundle digest and real merge/squash/fast-forward object shape,
+and validates the exact current PR, source/target tips and policy epoch at each
+selected publication basis. The statement is published through the ordinary
+sealed metadata operation and authority-head CAS. It neither stages candidate
+objects nor moves refs, records an approval, acknowledges delivery, or grants a
+merge. Exact terminal recovery uses the original principal, key, subject, pin
+and retained execution record before fresh bundle or current-eligibility
+checks. An undecided recovery lookup creates no new seal or observation.
+A losing CAS attempt revalidates at its new basis.
+
+Each protected branch may independently contain a strictly sorted unique
+`required_candidate_checks` vector. A selector contains publisher, raw 32-byte
+workflow graph commitment and exact bounded UTF-8 job name; it contains no CI
+source ref. Ordinary and candidate selector counts **combined** are at most
+32 per branch. All configured selectors remain mandatory alongside reviews,
+reviewer independence, queue requirements and any compiled ref policy.
+
+Required protection kind **21** is used exactly when at least one branch has a
+candidate selector. Each branch writes its existing name and reviewer vector,
+an explicit u16 approval count, ordinary check count and selectors, canonical
+queue boolean, then a u32 candidate-selector count and its publisher/graph/job
+entries. These fields occur on every branch. A kind-21 policy without any
+candidate selector is a redundant alternate encoding and must refuse. A
+candidate-only branch has no reviewers and zero required approvals. Empty
+candidate vectors preserve every existing byte of kinds **9**, **13**, **14**
+and **19**. Compiled-policy wrappers **16**, **17** and **18** may select base
+kind 21 with their existing profile and snapshot checks. No ForgeEvent family
+or codec version changes; unknown required kinds and inner bases fail closed.
+
+At an authenticated native PR or queue-landing basis, protection reconstructs
+the original PR subject and exact candidate from the independently validated
+merge intent. A reverse canonical-history scan requires the latest matching
+publication from each configured publisher/graph/job to be Success. Later exact
+non-success results supersede earlier success; unrelated subjects or publishers
+do not. All configured ordinary selectors retain their canonical source-ref
+lease and can be satisfied only by ordinary observations. Candidate observations
+can satisfy only candidate selectors. A generic direct ref write, candidate
+shape alone or caller assertion cannot supply the validated PR subject and
+therefore cannot satisfy candidate-check protection. Ref/PR/policy movement
+invalidates stale applicability; unrelated metadata publication does not.
+
+Old readers must be upgraded before activation. Complete policy replacements
+must deliberately preserve every requirement intended to remain. Built-in
+policy clients preserve candidate selectors during unrelated edits and expose
+their removal in the complete replacement preview. The profile does not grant
+multi-PR prefix review or atomic prefix landing authority, independent runner
+attestation, or an implicit execution/retry permission.
 
 ## 21. Graph and search generations
 

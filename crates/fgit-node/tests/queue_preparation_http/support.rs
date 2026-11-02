@@ -91,6 +91,7 @@ pub(super) fn protect(node: &OneNode, data: &PullRequestData, principal: Princip
                 reviewers: vec![REVIEWER],
                 required_approvals: 1,
                 required_checks: Vec::new(),
+                required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
             }],
         },

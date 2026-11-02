@@ -86,6 +86,7 @@ fn protect(
                 reviewers: if reviewed { vec![REVIEWER] } else { Vec::new() },
                 required_approvals: if reviewed { 1 } else { 0 },
                 required_checks: Vec::new(),
+                required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
             }],
             ref_policy: None,

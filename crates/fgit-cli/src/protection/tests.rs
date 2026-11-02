@@ -1,3 +1,5 @@
+mod candidate_checks;
+
 use super::*;
 
 #[test]

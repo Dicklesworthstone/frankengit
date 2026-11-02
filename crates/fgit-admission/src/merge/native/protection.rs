@@ -22,6 +22,7 @@ use fgit_types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod candidate_checks;
 mod checks;
 mod queue_gate;
 
@@ -291,6 +292,11 @@ where
         }
         for (name, effect) in &effects.refs {
             if let Some(rule) = policy.branch(name) {
+                if !rule.required_candidate_checks.is_empty() {
+                    return Err(ProjectionFailure::Refuse(
+                        RefusalCode::ProtectedRefTransitionDenied,
+                    ));
+                }
                 let fgit_reference::effect::RefEffect::Set(candidate) = effect else {
                     return Err(ProjectionFailure::Refuse(
                         RefusalCode::ProtectedRefTransitionDenied,
@@ -1015,13 +1021,14 @@ where
             )
             .await?;
         }
-        checks::verify_at(
+        candidate_checks::verify_at(
             store,
             cx,
             basis,
             refs,
-            merge.merge_commit,
+            intent,
             &rule.required_checks,
+            &rule.required_candidate_checks,
             cancelled,
         )
         .await?;

@@ -173,6 +173,37 @@ impl OneNode {
         .await
     }
 
+    /// Verify a candidate with the same parent visibility, envelope, pack,
+    /// native ancestry, object-closure and transport-coverage boundary as review.
+    /// The caller needs the validated input, not a human-readable diff: changed
+    /// files therefore do not acquire the independent review-rendering limits.
+    /// This stages nothing and grants neither approval nor publication authority.
+    pub(crate) async fn validate_merge_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        merge: &NativeMerge,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<(), BundleInspectionRefusal> {
+        merge
+            .validate()
+            .map_err(|_| invalid("invalid native merge coordinates"))?;
+        self.inspect_or_validate_bundle_in(
+            request,
+            &merge.target_ref,
+            merge.target_tip_before,
+            merge.merge_commit,
+            Some(merge),
+            input,
+            visibility,
+            expected_head,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn inspect_bundle_in(
         &self,
         request: &NodeRequestContext,
@@ -185,6 +216,37 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>,
         options: &ReviewOptions,
     ) -> Result<BundleInspection, BundleInspectionRefusal> {
+        self.inspect_or_validate_bundle_in(
+            request,
+            reference,
+            expected_base,
+            candidate,
+            merge,
+            input,
+            visibility,
+            expected_head,
+            Some(options),
+        )
+        .await?
+        .ok_or_else(|| invalid("inspection produced no requested review"))
+    }
+
+    async fn inspect_or_validate_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_base: GitOid,
+        candidate: GitOid,
+        merge: Option<&NativeMerge>,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        render: Option<&ReviewOptions>,
+    ) -> Result<Option<BundleInspection>, BundleInspectionRefusal> {
+        // Preserve every existing parse/closure bound in the validation-only
+        // profile. Only the final comparison and review allocation are omitted.
+        let defaults = ReviewOptions::default();
+        let options = render.unwrap_or(&defaults);
         options
             .validate()
             .map_err(|error| BundleInspectionRefusal::Review(Box::new(error)))?;
@@ -369,6 +431,10 @@ impl OneNode {
         let parents = candidate_parents;
         let transport_only_objects =
             unpacked.check_frontier_coverage(&validation.objects, &original, limits)?;
+        original.live().map_err(BundleInspectionRefusal::Source)?;
+        if render.is_none() {
+            return Ok(None);
+        }
         let comparison = compare_source(
             &source,
             self.object_format,
@@ -382,7 +448,7 @@ impl OneNode {
         let candidate_commit_body = offered.body.clone();
         let digest = sha256_digest(input);
         original.live().map_err(BundleInspectionRefusal::Source)?;
-        Ok(BundleInspection {
+        Ok(Some(BundleInspection {
             review: SourceReview {
                 repository_id: self.repository_id,
                 source_head: selected.basis().id(),
@@ -402,7 +468,7 @@ impl OneNode {
             parents,
             merge_base: merge.map(|coordinates| coordinates.base_tip),
             candidate_commit_body,
-        })
+        }))
     }
 }
 

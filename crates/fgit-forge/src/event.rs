@@ -16,6 +16,7 @@ use crate::aggregate::{
 
 pub mod admission;
 pub mod issue;
+pub mod milestone;
 pub mod protection;
 pub mod pull_request;
 pub mod pull_request_comment;
@@ -46,6 +47,9 @@ const KIND_REPOSITORY_REF_POLICY_CHANGED: u32 = 16;
 const KIND_REPOSITORY_ACTOR_REF_POLICY_CHANGED: u32 = 17;
 const KIND_REPOSITORY_AUTHENTICATED_REF_POLICY_CHANGED: u32 = 18;
 const KIND_QUEUE_REQUIRED_PROTECTION_CHANGED: u32 = 19;
+const KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED: u32 = 20;
+const KIND_CANDIDATE_CHECK_PROTECTION_CHANGED: u32 = 21;
+const KIND_NATIVE_MILESTONE_CHANGED: u32 = 22;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -127,9 +131,9 @@ const fn invalid_native(field: &'static str) -> CodecRefusal {
 /// Legacy kinds retain their original fields and bytes. Native lifecycle data
 /// remains a native typed value; it is never cast into a legacy Digest field.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ForgeEventPayload {
-    /// Canonical protection replacement: historical unanimous-review kind 9,
-    /// required-check kind 13, explicit review-quorum kind 14, or queue kind 19.
+pub enum ForgeEventPayload {    /// Canonical protection replacement: historical unanimous-review kind 9,
+    /// required-check kind 13, explicit review-quorum kind 14, queue kind 19,
+    /// or exact-candidate check kind 21.
     ReviewProtectionChanged(protection::NativeProtectionEvent),
     PullRequestOpened {
         source_ref: Vec<u8>,
@@ -158,11 +162,15 @@ pub enum ForgeEventPayload {
     PullRequestReviewedNative(NativeReviewEvent),
     /// Required issue event, retaining explicit changes rather than mutable latest state.
     IssueChangedNative(NativeIssueEvent),
+    MilestoneChangedNative(milestone::NativeMilestoneEvent),
     /// Native merge queue state change event, wire kind 10.
     MergeQueueChangedNative(NativeQueueEvent),
     /// Immutable reported job evidence. Only explicit canonical protection can
     /// grant a named publisher's exact observation authority over a ref update.
     WorkflowCheckObservedNative(workflow_check::NativeWorkflowCheck),
+    /// Exact original PR and candidate coordinates with verified job evidence.
+    /// Shares the immutable execution stream with ordinary check observations.
+    CandidateWorkflowCheckObservedNative(workflow_check::candidate::NativeCandidateWorkflowCheck),
     /// Append-only PR conversation text in its independent stream: kind 12 for
     /// plain text, kind 15 when exact immutable source coordinates are included.
     PullRequestCommentedNative(pull_request_comment::NativePullRequestComment),
@@ -180,6 +188,7 @@ impl ForgeEventPayload {
             Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
+            Self::MilestoneChangedNative(_) => KIND_NATIVE_MILESTONE_CHANGED,
             Self::ReviewProtectionChanged(change) => {
                 if let Some(snapshot) = &change.protection.ref_policy {
                     use fgit_policy::reference_profile::ReferencePolicyProfile;
@@ -192,6 +201,8 @@ impl ForgeEventPayload {
                         }
                         _ => KIND_REPOSITORY_REF_POLICY_CHANGED,
                     }
+                } else if change.protection.has_required_candidate_checks() {
+                    KIND_CANDIDATE_CHECK_PROTECTION_CHANGED
                 } else if change.protection.has_required_merge_queue() {
                     KIND_QUEUE_REQUIRED_PROTECTION_CHANGED
                 } else if change.protection.has_review_quorum() {
@@ -204,6 +215,7 @@ impl ForgeEventPayload {
             }
             Self::MergeQueueChangedNative(_) => KIND_NATIVE_MERGE_QUEUE_CHANGED,
             Self::WorkflowCheckObservedNative(_) => KIND_WORKFLOW_CHECK_OBSERVED,
+            Self::CandidateWorkflowCheckObservedNative(_) => KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED,
             Self::PullRequestCommentedNative(comment) => {
                 if comment.anchor.is_some() {
                     KIND_NATIVE_PULL_REQUEST_SOURCE_COMMENTED
@@ -224,6 +236,11 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::Milestone(number) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_MILESTONE);
+            out.write_scalar(number.get());
+        }
         AggregateId::PullRequestConversation(number) => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_CONVERSATION);
@@ -279,6 +296,9 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_MILESTONE => Ok(AggregateId::Milestone(counter(
+            "aggregate.milestone", input.read_scalar::<u64>("aggregate.milestone")?,
+        )?)),
         crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_CONVERSATION => {
             Ok(AggregateId::PullRequestConversation(counter(
                 "aggregate.conversation",
@@ -389,6 +409,7 @@ fn validate_queue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
 }
 
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
+    milestone::validate_event(event)?;
     validate_issue(event)?;
     validate_queue(event)?;
     workflow_check::validate_event(event)?;
@@ -442,6 +463,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
             change.write(out)?;
         }
         ForgeEventPayload::IssueChangedNative(change) => change.write(out)?,
+        ForgeEventPayload::MilestoneChangedNative(change) => change.write(out)?,
         ForgeEventPayload::ReviewProtectionChanged(change) => change.write(out)?,
         ForgeEventPayload::PullRequestReviewedNative(review) => {
             validate_review(event, review)?;
@@ -449,6 +471,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         }
         ForgeEventPayload::MergeQueueChangedNative(queue_event) => queue_event.write(out)?,
         ForgeEventPayload::WorkflowCheckObservedNative(change) => change.write(out)?,
+        ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => change.write(out)?,
         ForgeEventPayload::PullRequestCommentedNative(comment) => comment.write(out)?,
     }
     Ok(())
@@ -493,6 +516,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_NATIVE_ISSUE_CHANGED => {
             ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?)
         }
+        KIND_NATIVE_MILESTONE_CHANGED => {
+            ForgeEventPayload::MilestoneChangedNative(milestone::NativeMilestoneEvent::read(input)?)
+        }
         KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read(input, false, false, false)?,
         ),
@@ -504,6 +530,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         ),
         KIND_QUEUE_REQUIRED_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read(input, true, true, true)?,
+        ),
+        KIND_CANDIDATE_CHECK_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
+            protection::NativeProtectionEvent::read_with_candidate_checks(input)?,
         ),
         KIND_REPOSITORY_REF_POLICY_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read_with_policy(input)?,
@@ -519,6 +548,11 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(
             workflow_check::NativeWorkflowCheck::read(input)?,
         ),
+        KIND_CANDIDATE_WORKFLOW_CHECK_OBSERVED => {
+            ForgeEventPayload::CandidateWorkflowCheckObservedNative(
+                workflow_check::candidate::NativeCandidateWorkflowCheck::read(input)?,
+            )
+        }
         KIND_NATIVE_PULL_REQUEST_COMMENTED => ForgeEventPayload::PullRequestCommentedNative(
             pull_request_comment::NativePullRequestComment::read(input)?,
         ),
@@ -542,6 +576,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         payload,
     };
     validate_issue(&event)?;
+    milestone::validate_event(&event)?;
     validate_queue(&event)?;
     workflow_check::validate_event(&event)?;
     pull_request_comment::validate_event(&event)?;
@@ -571,6 +606,11 @@ fn counter<T: Counter>(field: &'static str, value: u64) -> Result<T, CodecRefusa
 }
 trait Counter: Sized {
     fn build(value: u64) -> Option<Self>;
+}
+impl Counter for crate::MilestoneNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
 }
 impl Counter for IssueNumber {
     fn build(value: u64) -> Option<Self> {

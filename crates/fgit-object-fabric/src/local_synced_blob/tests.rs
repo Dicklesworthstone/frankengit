@@ -153,6 +153,7 @@ fn private_reads_are_bounded_and_publication_preserves_bytes_in_both_domains() {
             let (ledger, owner) = stage(&fixture, format, &body);
             let expected = envelope(format, &body);
             assert_eq!(owner.identity(), expected.object_identity());
+            assert_eq!(owner.payload_commitment(), expected.payload_commitment());
             assert_eq!(ledger.outstanding().len(), 1);
             assert_eq!(ledger.snapshot().reserved(), ledger.snapshot().capacity());
             assert!(owner.custody.as_ref().unwrap().stage.stage.file.is_none());

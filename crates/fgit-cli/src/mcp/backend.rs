@@ -9,6 +9,7 @@ mod history;
 mod issue_writes;
 mod issues;
 mod merge_writes;
+mod milestones;
 mod mutations;
 mod outcomes;
 pub(super) mod protection;
@@ -136,6 +137,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     }
     if options.issues {
         tools.extend(issues::tools());
+        tools.extend(milestones::read_tools());
     }
     if options.pulls {
         tools.extend(pulls::tools());
@@ -152,6 +154,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     }
     if options.writes.issues {
         tools.extend(issue_writes::tools());
+        tools.extend(milestones::write_tools());
     }
     if options.writes.pulls {
         tools.extend(pull_writes::tools());
@@ -223,6 +226,7 @@ impl ReadTools for NodeTools {
     }
     fn is_mutation(&self, name: &str) -> bool {
         (self.options.writes.issues && issue_writes::is_tool(name))
+            || (self.options.writes.issues && milestones::is_write(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.pulls
                 && matches!(name, pull_comments::WRITE | pull_comments::APPEND))
@@ -248,6 +252,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.writes.issues && issue_writes::is_tool(name) {
             return issue_writes::call(self, name, args);
+        }
+        if self.options.writes.issues && milestones::is_write(name) {
+            return milestones::write(self, name, args);
         }
         if self.options.writes.pulls && pull_writes::is_tool(name) {
             return pull_writes::call(self, name, args);
@@ -279,6 +286,9 @@ impl ReadTools for NodeTools {
         if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show")
         {
             return issues::call(self, name, args);
+        }
+        if self.options.issues && milestones::is_read(name) {
+            return milestones::read(self, name, args);
         }
         if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
             return pulls::call(self, name, args);
@@ -511,11 +521,16 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 51);
+        assert_eq!(server_names.len(), 66);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
-        for name in ["frankengit_issue_lock", "frankengit_issue_unlock"] {
+        for name in [
+            "frankengit_issue_lock",
+            "frankengit_issue_unlock",
+            "frankengit_issue_set_milestone",
+            "frankengit_issue_clear_milestone",
+        ] {
             assert!(server_names.contains(&name));
             let tool = issue_writes::tools()
                 .into_iter()
@@ -600,5 +615,7 @@ mod tests {
 mod candidate_workflow_tests;
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod milestone_catalog_tests;
 #[cfg(test)]
 mod write_tests;

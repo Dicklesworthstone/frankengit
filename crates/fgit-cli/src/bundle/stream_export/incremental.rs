@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 pub(super) const USAGE: &str =
     "usage: fg bundle sync-export <storage-root> <tenant-id> <repository-id> <new-bundle-file>
   --streaming --trusted-local [--object-format sha1|sha256]
+  [--reuse-verified-packs]
   --ref <refs/name>... --prerequisite <commit-oid>...
   [--max-output-mib N] [--max-expanded-mib N] [--max-object-mib N]
   [--max-blob-mib N]
@@ -18,6 +19,9 @@ of explicit native commit prerequisites. The receiver must already possess that
 history. A prerequisite must belong to the current visible graph; a retained
 or hidden object alone never authorizes export. Maximum 64 refs and 64 unique
 prerequisites. The source head identifies the snapshot selected at the start.
+Optional --reuse-verified-packs preserves eligible received/imported compression
+and deltas under a distinct profile; a miss uses and reports the existing encoder.
+External delta bases must be in this exact verified prerequisite closure.
 
 Streaming retains bounded native metadata, a blob input chunk and compressor
 state plus bounded identity/edge metadata. Output and expanded-byte defaults
@@ -87,7 +91,10 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             target.push(value.as_str());
         } else {
             common.push(flag.into());
-            if !matches!(flag, "--streaming" | "--trusted-local") {
+            if !matches!(
+                flag,
+                "--streaming" | "--trusted-local" | "--reuse-verified-packs"
+            ) {
                 common.push(
                     args.get(at)
                         .ok_or_else(|| format!("missing value for {flag}"))?
@@ -158,6 +165,10 @@ mod tests {
     fn both_hash_domains_use_the_existing_stream_limits_and_typed_selection() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let options = super::super::parse(&args(format, &[])).unwrap();
+            assert!(!options.query.reuse_verified_packs);
+            let reuse = parse(&args(format, &["--reuse-verified-packs"])).unwrap();
+            assert!(reuse.query.reuse_verified_packs);
+            assert_eq!(reuse.query.limits, options.query.limits);
             let selection = options.incremental.as_ref().unwrap();
             assert_eq!(options.format, format);
             assert_eq!(selection.references[0].as_bytes(), b"refs/heads/main");
@@ -224,6 +235,7 @@ mod tests {
             vec!["--max-blob-mib", "1", "--max-blob-mib", "2"],
             vec!["--max-objects", "0"],
             vec!["--streaming"],
+            vec!["--reuse-verified-packs", "--reuse-verified-packs"],
             vec!["--timeout-secs", "0"],
         ] {
             assert!(parse(&args(format, &extra)).is_err(), "{extra:?}");
@@ -282,6 +294,7 @@ mod tests {
         let help = String::from_utf8(output).unwrap();
         for expected in [
             "--prerequisite",
+            "--reuse-verified-packs",
             "create-only",
             "32 MiB",
             "128 MiB input limit",

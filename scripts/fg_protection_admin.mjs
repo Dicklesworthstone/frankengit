@@ -89,6 +89,7 @@ export function intentSummary(intent) {
     branches: [...new Set([...old.keys(), ...next.keys()])].sort().map(reference_hex => {
       const before = old.get(reference_hex), after = next.get(reference_hex);
       const checks = checkChanges(before?.required_checks, after?.required_checks);
+      const candidateChecks = checkChanges(before?.required_candidate_checks, after?.required_candidate_checks);
       const beforeApprovals = before?.required_approvals ?? before?.required_reviewers.length ?? null;
       const afterApprovals = after?.required_approvals ?? after?.required_reviewers.length ?? null;
       const quorumChanged = beforeApprovals !== afterApprovals &&
@@ -96,9 +97,11 @@ export function intentSummary(intent) {
       const beforeQueue = before?.require_merge_queue ?? false, afterQueue = after?.require_merge_queue ?? false;
       return { reference_hex, ...changes(before?.required_reviewers ?? [], after?.required_reviewers ?? []),
         ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}),
+        ...(candidateChecks.checks_added.length || candidateChecks.checks_removed.length ? {
+          candidate_checks_added: candidateChecks.checks_added, candidate_checks_removed: candidateChecks.checks_removed } : {}),
         ...(quorumChanged ? { required_approvals_before: beforeApprovals, required_approvals_after: afterApprovals } : {}),
         ...(beforeQueue !== afterQueue ? { require_merge_queue_before: beforeQueue, require_merge_queue_after: afterQueue } : {}) };
-    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || Object.hasOwn(row, 'required_approvals_after') || Object.hasOwn(row, 'require_merge_queue_after')),
+    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || row.candidate_checks_added?.length || row.candidate_checks_removed?.length || Object.hasOwn(row, 'required_approvals_after') || Object.hasOwn(row, 'require_merge_queue_after')),
     ...(before.ref_policy || after.ref_policy ? { ref_policy: {
       before: before.ref_policy?.snapshot_id ?? null, after: after.ref_policy?.snapshot_id ?? null,
       changed: JSON.stringify(before.ref_policy ?? null) !== JSON.stringify(after.ref_policy ?? null),

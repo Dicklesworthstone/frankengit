@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use fgit_git_object::ObjectType;
 use fgit_pack::full_bundle::stream::{
-    StreamFullBundleError, StreamFullBundleLimits, StreamFullBundleReceipt,
-    write_full_bundle_stream, write_incremental_bundle_stream,
+    StreamFullBundleError, StreamFullBundleLimits, write_full_bundle_stream,
+    write_incremental_bundle_stream,
 };
 use fgit_pack::{BundleReference, PackError, PackWriteError};
 use fgit_runtime::Exhaustion;
@@ -35,6 +35,9 @@ pub struct StreamBundleExportQuery {
     pub expected_head: Option<RepositoryAuthorityHeadId>,
     pub limits: StreamFullBundleLimits,
     pub timeout: Duration,
+    /// Opt into verified sender representations. A miss uses the existing
+    /// deterministic encoder; a hit has a distinct receipt and may use deltas.
+    pub reuse_verified_packs: bool,
 }
 
 impl Default for StreamBundleExportQuery {
@@ -46,7 +49,16 @@ impl Default for StreamBundleExportQuery {
             expected_head: None,
             limits,
             timeout: Duration::from_secs(300),
+            reuse_verified_packs: false,
         }
+    }
+}
+
+impl StreamBundleExportQuery {
+    #[must_use]
+    pub const fn with_verified_pack_reuse(mut self, enabled: bool) -> Self {
+        self.reuse_verified_packs = enabled;
+        self
     }
 }
 
@@ -101,7 +113,8 @@ impl From<NodeWorkspaceRefusal> for StreamBundleExportRefusal {
 pub struct SelectedStreamBundleExport {
     head: RepositoryAuthorityHeadId,
     generation: HeadGeneration,
-    receipt: StreamFullBundleReceipt,
+    receipt: StreamBundleExportReceipt,
+    reuse: StreamBundleReuse,
 }
 impl SelectedStreamBundleExport {
     #[must_use]
@@ -113,8 +126,12 @@ impl SelectedStreamBundleExport {
         self.generation
     }
     #[must_use]
-    pub const fn receipt(&self) -> &StreamFullBundleReceipt {
+    pub const fn receipt(&self) -> &StreamBundleExportReceipt {
         &self.receipt
+    }
+    #[must_use]
+    pub const fn reuse(&self) -> StreamBundleReuse {
+        self.reuse
     }
 }
 
@@ -241,6 +258,9 @@ impl PermittedClosureTraversalSource for BoundedStreamSelectionSource<'_, '_> {
 }
 
 mod incremental;
+mod receipt;
+mod reuse;
+pub use receipt::{StreamBundleExportReceipt, StreamBundleReuse};
 
 #[derive(Clone, Copy)]
 enum StreamProfile<'a> {
@@ -578,6 +598,52 @@ impl OneNode {
             session_is_live: Some(&live),
         };
         let receipt = match profile {
+            StreamProfile::Full if query.reuse_verified_packs => {
+                let mut roots = Vec::new();
+                roots.try_reserve_exact(references.len()).map_err(|_| {
+                    super::bundle_error(PackError::AllocationFailed {
+                        requested: references.len(),
+                    })
+                })?;
+                roots.extend(references.iter().map(|reference| *reference.target()));
+                let prepared = incremental::prepare(
+                    &source,
+                    selected.selected_closure().closure(),
+                    &roots,
+                    &references,
+                    &[],
+                    &limits,
+                );
+                checkpoint()?;
+                let prepared = prepared?;
+                let reused = reuse::try_write(
+                    self,
+                    &selected,
+                    &references,
+                    head,
+                    &[],
+                    &prepared,
+                    &limits,
+                    &mut || live(),
+                    output,
+                );
+                checkpoint()?;
+                match reused? {
+                    Some(receipt) => Ok(receipt),
+                    None => write_full_bundle_stream(
+                        self.object_format,
+                        &references,
+                        head,
+                        &prepared.objects,
+                        &source,
+                        &limits,
+                        &mut || live(),
+                        output,
+                    )
+                    .map(StreamBundleExportReceipt::from_encoded)
+                    .map_err(StreamBundleExportRefusal::Stream),
+                }
+            }
             StreamProfile::Full => {
                 let selection_source = BoundedStreamSelectionSource {
                     source: &source,
@@ -627,6 +693,8 @@ impl OneNode {
                     &mut || live(),
                     output,
                 )
+                .map(StreamBundleExportReceipt::from_encoded)
+                .map_err(StreamBundleExportRefusal::Stream)
             }
             StreamProfile::Incremental { prerequisites, .. } => {
                 let prepared = incremental::prepare(
@@ -639,25 +707,55 @@ impl OneNode {
                 );
                 checkpoint()?;
                 let prepared = prepared?;
-                write_incremental_bundle_stream(
-                    self.object_format,
-                    &references,
-                    prerequisites,
-                    &prepared.objects,
-                    &prepared.external,
-                    &source,
-                    &limits,
-                    &mut || live(),
-                    output,
-                )
+                let reused = if query.reuse_verified_packs {
+                    let reused = reuse::try_write(
+                        self,
+                        &selected,
+                        &references,
+                        None,
+                        prerequisites,
+                        &prepared,
+                        &limits,
+                        &mut || live(),
+                        output,
+                    );
+                    checkpoint()?;
+                    reused?
+                } else {
+                    None
+                };
+                match reused {
+                    Some(receipt) => Ok(receipt),
+                    None => write_incremental_bundle_stream(
+                        self.object_format,
+                        &references,
+                        prerequisites,
+                        &prepared.objects,
+                        &prepared.external,
+                        &source,
+                        &limits,
+                        &mut || live(),
+                        output,
+                    )
+                    .map(StreamBundleExportReceipt::from_encoded)
+                    .map_err(StreamBundleExportRefusal::Stream),
+                }
             }
         };
         checkpoint()?;
-        let receipt = receipt.map_err(StreamBundleExportRefusal::Stream)?;
+        let receipt = receipt?;
+        let reuse = if receipt.received().is_some() {
+            StreamBundleReuse::Reused
+        } else if query.reuse_verified_packs {
+            StreamBundleReuse::Miss
+        } else {
+            StreamBundleReuse::NotRequested
+        };
         Ok(SelectedStreamBundleExport {
             head: selected.basis().id(),
             generation: selected.basis().generation(),
             receipt,
+            reuse,
         })
     }
 }

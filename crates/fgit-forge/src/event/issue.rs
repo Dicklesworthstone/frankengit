@@ -3,7 +3,9 @@
 //! Additive comment intents use a distinct seal profile; admission assigns their
 //! event position from each authenticated publication basis.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
-use crate::aggregate::{AggregateId, AggregateVersion, ExpectedVersion, IssueNumber};
+use crate::aggregate::{
+    AggregateId, AggregateVersion, ExpectedVersion, IssueNumber, MilestoneNumber,
+};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode};
 
@@ -33,8 +35,7 @@ pub struct IssueEdit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum IssueAction {
-    Open {
+pub enum IssueAction {    Open {
         title: String,
         body: String,
         labels: Vec<String>,
@@ -57,6 +58,13 @@ pub enum IssueAction {
     Lock,
     /// Permit new comments again without changing the open/closed state.
     Unlock,
+    /// Exact selected milestone metadata is revalidated at the same publication
+    /// basis. This relation grants no access and never advances its target.
+    SetMilestone {
+        milestone: MilestoneNumber,
+        expected_milestone_version: AggregateVersion,
+    },
+    ClearMilestone,
 }
 impl IssueAction {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
@@ -86,7 +94,8 @@ impl IssueAction {
                 Ok(())
             }
             Self::Comment { body } => validate_comment_body(body),
-            Self::Close | Self::Reopen | Self::Lock | Self::Unlock => Ok(()),
+            Self::Close | Self::Reopen | Self::Lock | Self::Unlock
+            | Self::SetMilestone { .. } | Self::ClearMilestone => Ok(()),
             Self::Assign { assignees } | Self::Unassign { assignees } => {
                 if assignees.is_empty() {
                     return Err(invalid_native("issue.empty_assignees"));
@@ -107,6 +116,8 @@ impl IssueAction {
             Self::Unassign { .. } => "unassign",
             Self::Lock => "lock",
             Self::Unlock => "unlock",
+            Self::SetMilestone { .. } => "set-milestone",
+            Self::ClearMilestone => "clear-milestone",
         }
     }
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
@@ -121,6 +132,8 @@ impl IssueAction {
             Self::Unassign { .. } => 7,
             Self::Lock => 8,
             Self::Unlock => 9,
+            Self::SetMilestone { .. } => 10,
+            Self::ClearMilestone => 11,
         });
         match self {
             Self::Open {
@@ -151,7 +164,11 @@ impl IssueAction {
                     Ok(())
                 })?;
             }
-            Self::Close | Self::Reopen | Self::Lock | Self::Unlock => {}
+            Self::SetMilestone { milestone, expected_milestone_version } => {
+                out.write_scalar(milestone.get());
+                out.write_scalar(expected_milestone_version.get());
+            }
+            Self::Close | Self::Reopen | Self::Lock | Self::Unlock | Self::ClearMilestone => {}
         }
         Ok(())
     }
@@ -193,6 +210,13 @@ impl IssueAction {
             },
             8 => Self::Lock,
             9 => Self::Unlock,
+            10 => Self::SetMilestone {
+                milestone: MilestoneNumber::try_new(input.read_scalar::<u64>("issue.milestone")?)
+                    .ok_or_else(|| invalid_native("issue.milestone"))?,
+                expected_milestone_version: AggregateVersion::try_new(input.read_scalar::<u64>("issue.milestone_version")?)
+                    .ok_or_else(|| invalid_native("issue.milestone_version"))?,
+            },
+            11 => Self::ClearMilestone,
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "issue.action",
@@ -370,6 +394,9 @@ pub struct IssueSnapshot {
     /// Independent of open/closed state. Historical streams start unlocked;
     /// only explicit Lock/Unlock events change whether new comments are allowed.
     pub locked: bool,
+    /// Current issue membership. Historical streams without membership events
+    /// derive None; the referenced milestone has its own independent version.
+    pub milestone: Option<MilestoneNumber>,
     pub opened_by: PrincipalId,
     pub last_actor: PrincipalId,
     pub comments: u64,
@@ -411,6 +438,7 @@ pub fn apply_event(
             assignees: Vec::new(),
             state: IssueState::Open,
             locked: false,
+            milestone: None,
             opened_by: change.actor,
             last_actor: change.actor,
             comments: 0,
@@ -476,6 +504,8 @@ pub fn apply_event(
             next.assignees
                 .retain(|principal| assignees.binary_search(principal).is_err());
         }
+        IssueAction::SetMilestone { milestone, .. } => next.milestone = Some(*milestone),
+        IssueAction::ClearMilestone => next.milestone = None,
     }
     next.version = event.version;
     next.last_actor = change.actor;
@@ -485,11 +515,19 @@ pub fn apply_event(
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
+mod milestone_tests;
+#[cfg(test)]
 mod tests;
 
 /// Maximum UTF-8 bytes in a literal title/body search. No regex, query language,
 /// stemming or ambient locale affects matching.
 pub const MAX_QUERY_BYTES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MilestoneFilter {
+    Unassigned,
+    Number(MilestoneNumber),
+}
 
 /// A conjunction of filters over an authority-selected issue snapshot.
 ///
@@ -505,6 +543,7 @@ pub struct IssueQuery {
     pub labels: Vec<String>,
     pub text: Option<String>,
     pub case_sensitive: bool,
+    pub milestone: Option<MilestoneFilter>,
 }
 
 impl IssueQuery {
@@ -583,6 +622,10 @@ impl CompiledIssueQuery {
             return Err(invalid_native("issue.comments"));
         }
         if self.query.state.is_some_and(|state| state != issue.state)
+            || self.query.milestone.is_some_and(|filter| match filter {
+                MilestoneFilter::Unassigned => issue.milestone.is_some(),
+                MilestoneFilter::Number(number) => issue.milestone != Some(number),
+            })
             || self
                 .query
                 .opened_by
@@ -638,6 +681,7 @@ mod query_tests {
             state: IssueState::Open,
             locked: false,
             opened_by: PrincipalId::from_bytes([1; 16]),
+            milestone: None,
             last_actor: PrincipalId::from_bytes([2; 16]),
             comments: 0,
         }
@@ -651,6 +695,7 @@ mod query_tests {
             labels: vec!["bug".into(), "urgent".into()],
             text: Some("http".into()),
             case_sensitive: false,
+            milestone: None,
         };
         let compiled = query.clone().compile().unwrap();
         assert_eq!(compiled.query(), &query);

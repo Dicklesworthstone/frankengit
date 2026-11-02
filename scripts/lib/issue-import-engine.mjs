@@ -4,21 +4,33 @@ import { constants } from 'node:fs';
 import { open, lstat, mkdir, realpath, unlink } from 'node:fs/promises';
 import { dirname, basename, join } from 'node:path';
 import { IssueClient, mutationRequest, natural, MAX_RECEIPT_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
+import { MilestoneClient, milestoneMutationRequest } from '../../crates/fgit-node/src/smart_http/server/browser/milestones.mjs';
 import { issueConnectionOptions, connectIssueToken, runIssueOperation } from './forge-issue-operator.mjs';
+import { runMilestoneOperation } from './forge-milestone-operator.mjs';
 import { operatorError, operatorPath, privateRecordPath, readPrivateOperatorFile,
   readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
 
 // Source adapters are repository code, never supplied by a custody file or CLI.
 // Both adapters share the exact native request, terminal, lock and retry path.
-export function createIssueImportEngine({ kind, parseCapture, issueImportSteps, CAPTURE_LIMIT }) {
+export function createIssueImportEngine({ kind, entity = 'issue', parseCapture, issueImportSteps, CAPTURE_LIMIT }) {
 if (!['github', 'native'].includes(kind) || typeof parseCapture !== 'function' ||
-    typeof issueImportSteps !== 'function' || CAPTURE_LIMIT !== 1024 * 1024) {
+    typeof issueImportSteps !== 'function' || CAPTURE_LIMIT !== 1024 * 1024 ||
+    !['issue', 'milestone'].includes(entity) || (entity === 'milestone' && kind !== 'native')) {
   throw operatorError('issue_import_adapter');
 }
-const SCHEMA = `frankengit-${kind}-issue-import-v1`, LIMIT = 256 * 1024;
+const milestone = entity === 'milestone';
+const Client = milestone ? MilestoneClient : IssueClient;
+const request = milestone ? milestoneMutationRequest : mutationRequest;
+const operation = milestone ? runMilestoneOperation : runIssueOperation;
+const OPERATOR_SCHEMA = `frankengit-${entity}-operator-v1`;
+const SCHEMA = `frankengit-${kind}-${entity}-import-v1`, LIMIT = 256 * 1024;
+const MAPPED_SCHEMA = 'frankengit-native-issue-import-v2';
+function captureSchema(capture) {
+  return kind === 'native' && !milestone && capture.schema === 'frankengit-native-issue-capture-v3' ? MAPPED_SCHEMA : SCHEMA;
+}
 const RECORD_BYTES_LIMIT = 16 * 1024 * 1024;
 const encode = value => Buffer.from(JSON.stringify(value) + '\n');
-const fail = code => { throw operatorError(`${kind}_import_${code}`); };
+const fail = code => { throw operatorError(`${kind}${milestone ? '_milestone' : ''}_import_${code}`); };
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const exact = (value, names) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
@@ -30,6 +42,7 @@ function options(raw, preparing) {
   o.workdir = operatorPath(raw.workdir);
   if (preparing) {
     o.captureFile = operatorPath(raw.captureFile); o.offset = natural(raw.offset ?? 0, 'number offset');
+    if (milestone && o.offset !== 0) fail('mapped_milestones_have_no_offset');
     o.maxRequestBytes = natural(raw.maxRequestBytes ?? RECORD_BYTES_LIMIT, 'request byte limit', 1, RECORD_BYTES_LIMIT);
   } else {
     if (!['run', 'status'].includes(o.operation) || !hash(o.confirm)) fail('confirmation_required');
@@ -92,7 +105,7 @@ async function prepare(raw) {
     const requests = []; let requestBytes = 0;
     for (const [index, step] of steps.entries()) {
       life.check();
-      const client = new IssueClient({ href: o.href, timeoutMs: o.timeoutMs });
+      const client = new Client({ href: o.href, timeoutMs: o.timeoutMs });
       try {
         await connectIssueToken(client, o, life.check);
         await client.stage(step.number, step.expected_version, step.action, step.fields,
@@ -101,7 +114,7 @@ async function prepare(raw) {
         if (Buffer.byteLength(exported) > MAX_RECEIPT_BYTES) fail('receipt_limit');
         const receipt = JSON.parse(exported);
         if (receipt.request.credential_fingerprint !== fingerprint) fail('native_credential_changed');
-        const record = encode({ schema: 'frankengit-issue-operator-v1', href: o.href,
+        const record = encode({ schema: OPERATOR_SCHEMA, href: o.href,
           tenant: o.tenant, repository: o.repository, receipt });
         requestBytes += record.length;
         if (requestBytes > o.maxRequestBytes) fail('request_byte_limit');
@@ -109,13 +122,16 @@ async function prepare(raw) {
         requests.push(saved.sha256);
       } finally { client.disconnect(); }
     }
-    const manifest = { schema: SCHEMA, href: o.href, tenant: o.tenant, repository: o.repository,
+    const manifest = { schema: captureSchema(source), href: o.href, tenant: o.tenant, repository: o.repository,
       credential_fingerprint: fingerprint, source_sha256: recordDigest(bytes),
       steps_sha256: recordDigest(encode(steps)), offset: o.offset, step_count: steps.length,
       request_sha256: requests, request_bytes: requestBytes };
     const saved = await saveOperatorRecord(join(workdir, 'manifest.json'), encode(manifest), life.check);
-    return { type: `${kind}_issue_import_prepared`, workdir, plan_sha256: saved.sha256,
-      source: source.source, steps: steps.length, mapping: source.issues.map(issue => ({ source: issue.number, target: issue.number + o.offset })),
+    return { type: `${kind}_${entity}_import_prepared`, workdir, plan_sha256: saved.sha256,
+      source: source.source, steps: steps.length, mapping: milestone
+        ? source.milestones.map(row => ({ source: row.source_number, target: row.destination_number }))
+        : source.issues.map(issue => ({ source: issue.number, target: issue.number + o.offset })),
+      ...(milestone ? { phase: source.phase } : {}),
       mutation_submitted: false, atomic_batch: false };
   } finally { life.close(); }
 }
@@ -124,12 +140,14 @@ async function load(o, check) {
   const bytes = await readSynchronizedOperatorRecord(join(root, 'manifest.json'), LIMIT, check);
   const digest = recordDigest(bytes), m = canonical(bytes);
   if (digest !== o.confirm || !exact(m, ['schema', 'href', 'tenant', 'repository', 'credential_fingerprint',
-    'source_sha256', 'steps_sha256', 'offset', 'step_count', 'request_sha256', 'request_bytes']) || m.schema !== SCHEMA ||
+    'source_sha256', 'steps_sha256', 'offset', 'step_count', 'request_sha256', 'request_bytes']) ||
+    !(m.schema === SCHEMA || (kind === 'native' && !milestone && m.schema === MAPPED_SCHEMA)) ||
     m.href !== o.href || m.tenant !== o.tenant || m.repository !== o.repository ||
     !hash(m.credential_fingerprint) || !hash(m.source_sha256) || !hash(m.steps_sha256)) fail('plan_mismatch');
   const sourceBytes = await readPrivateOperatorFile(join(root, 'capture.json'), CAPTURE_LIMIT, check);
   if (recordDigest(sourceBytes) !== m.source_sha256) fail('source_package_changed');
   const capture = parseCapture(sourceBytes), steps = issueImportSteps(capture, m.offset);
+  if (m.schema !== captureSchema(capture) || (milestone && m.offset !== 0)) fail('capture_profile_mismatch');
   if (steps.length !== m.step_count || recordDigest(encode(steps)) !== m.steps_sha256 ||
       !Array.isArray(m.request_sha256) || m.request_sha256.length !== steps.length ||
       m.request_sha256.some(value => !hash(value)) || !Number.isSafeInteger(m.request_bytes) ||
@@ -158,9 +176,11 @@ async function inspect(raw) {
   try {
     const selected = await load(o, life.check), m = selected.manifest;
     life.check();
-    return { type: `${kind}_issue_import_verified`, plan_sha256: selected.digest,
+    return { type: `${kind}_${entity}_import_verified`, plan_sha256: selected.digest,
       source: selected.capture.source, source_sha256: m.source_sha256, offset: m.offset,
-      issues: selected.capture.issues.map(({ number, id }) => ({ number, id })),
+      ...(milestone ? { phase: selected.capture.phase,
+        milestones: selected.capture.milestones.map(row => ({ source: row.source_number, destination: row.destination_number })) }
+        : { issues: selected.capture.issues.map(({ number, id }) => ({ number, id })) }),
       steps: selected.steps.length, request_bytes: m.request_bytes,
       network_accessed: false, mutation_submitted: false };
   } finally { life.close(); }
@@ -183,9 +203,9 @@ async function senderLock(root, digest) {
 }
 function requestRecord(bytes, selected, step) {
   const value = canonical(bytes), p = value.receipt?.request;
-  const expected = mutationRequest(step.number, step.expected_version, step.action, step.fields);
+  const expected = request(step.number, step.expected_version, step.action, step.fields);
   const m = selected.manifest;
-  if (!exact(value, ['schema', 'href', 'tenant', 'repository', 'receipt']) || value.schema !== 'frankengit-issue-operator-v1' ||
+  if (!exact(value, ['schema', 'href', 'tenant', 'repository', 'receipt']) || value.schema !== OPERATOR_SCHEMA ||
       value.href !== m.href || value.tenant !== m.tenant || value.repository !== m.repository ||
       !p || p.number !== expected.number || p.expected_version !== expected.expected_version || p.action !== expected.action ||
       p.body !== expected.body || !encode(p.fields).equals(encode(expected.fields)) ||
@@ -205,7 +225,7 @@ function terminal(value) {
 function decisionRecord(bytes, selected, index, requestDigest) {
   const value = canonical(bytes);
   if (!exact(value, ['schema', 'plan_sha256', 'index', 'request_sha256', 'result']) ||
-      value.schema !== `${SCHEMA}/terminal` || value.plan_sha256 !== selected.digest ||
+      value.schema !== `${selected.manifest.schema}/terminal` || value.plan_sha256 !== selected.digest ||
       value.index !== index || value.request_sha256 !== requestDigest ||
       !encode(value.result).equals(encode(terminal(value.result)))) fail('terminal_record_mismatch');
   return value;
@@ -213,18 +233,19 @@ function decisionRecord(bytes, selected, index, requestDigest) {
 async function run(raw) {
   const o = options(raw, false), life = lifetime(o);
   let release = null, error = null, observedTerminal = null;
-  const summary = { type: `${kind}_issue_import_progress`, plan_sha256: o.confirm, operation: o.operation,
+  const summary = { type: `${kind}_${entity}_import_progress`, plan_sha256: o.confirm, operation: o.operation,
     committed_observed: 0, mutation_calls: 0, next_step: 0, complete: false, stop_reason: null,
     atomic_batch: false, absence_proves_non_commit: false };
   try {
     const selected = await load(o, life.check);
     summary.total_steps = selected.steps.length; summary.source = selected.capture.source;
+    if (milestone) summary.phase = selected.capture.phase;
     if (o.operation === 'run') release = await senderLock(selected.root, selected.digest);
     for (const [index, step] of selected.steps.entries()) {
       life.check(); observedTerminal = null; summary.next_step = index;
       const stem = join(selected.root, `step-${String(index).padStart(6, '0')}`);
       const record = `${stem}.request.json`, decision = `${stem}.terminal.json`, started = `${stem}.started.json`;
-      const expectedStart = encode({ schema: `${SCHEMA}/started`, plan_sha256: selected.digest, index });
+      const expectedStart = encode({ schema: `${selected.manifest.schema}/started`, plan_sha256: selected.digest, index });
       const start = await optional(started, LIMIT, life.check), saved = await optional(record, MAX_RECEIPT_BYTES * 2, life.check);
       const known = await optional(decision, LIMIT, life.check);
       if (start && !start.equals(expectedStart)) fail('start_record_mismatch');
@@ -232,7 +253,7 @@ async function run(raw) {
       const requestDigest = requestRecord(saved, selected, step);
       if (requestDigest !== selected.manifest.request_sha256[index]) fail('prepared_request_changed');
       const retained = known ? decisionRecord(known, selected, index, requestDigest) : null;
-      const invoke = operation => runIssueOperation({ operation, href: o.href, tenant: o.tenant,
+      const invoke = selectedOperation => operation({ operation: selectedOperation, href: o.href, tenant: o.tenant,
         repository: o.repository, tokenFile: o.tokenFile, record, signal: life.signal, timeoutMs: o.timeoutMs });
       let result = await invoke('status');
       if (retained && (result.state !== 'terminal_observed' || !encode(terminal(result.result)).equals(encode(retained.result)))) fail('terminal_observation_regressed');
@@ -256,7 +277,7 @@ async function run(raw) {
       const current = await readSynchronizedOperatorRecord(record, MAX_RECEIPT_BYTES * 2);
       const observedDigest = requestRecord(current, selected, step);
       if (result.record_sha256 !== observedDigest || (requestDigest !== null && requestDigest !== observedDigest)) fail('request_changed_after_observation');
-      const entry = { schema: `${SCHEMA}/terminal`, plan_sha256: selected.digest, index,
+      const entry = { schema: `${selected.manifest.schema}/terminal`, plan_sha256: selected.digest, index,
         request_sha256: observedDigest, result: terminal(result.result) };
       await saveExact(decision, encode(entry));
       if (entry.result.outcome === 'refused') { summary.stop_reason = 'terminal_refusal'; summary.refusal = entry.result; break; }

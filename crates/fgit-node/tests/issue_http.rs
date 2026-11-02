@@ -777,6 +777,8 @@ fn rotating_issue_credentials_preserves_the_principals_canonical_retry() {
 mod append_comment;
 #[path = "issue_http/assignment.rs"]
 mod assignment;
+#[path = "issue_http/milestones.rs"]
+mod milestones;
 #[path = "issue_http/rendering.rs"]
 mod rendering;
 #[path = "issue_http/snapshots.rs"]

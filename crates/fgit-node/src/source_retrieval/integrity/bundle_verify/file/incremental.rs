@@ -20,6 +20,8 @@ use super::import::{
 use super::resolve::{Inventory, NativeEntryHash};
 use super::storage::Scratch;
 use super::{checkpoint, verify_reader_contents};
+use crate::received_pack::ReceivedPackCache;
+use crate::received_pack::placement::PlacementBoundPack;
 
 /// Metadata discovered within the authenticated visible prerequisite closure.
 /// These facts alone establish neither body health nor a usable delta base.
@@ -60,6 +62,7 @@ pub struct IncrementalBundleImportPlan {
     receipt: StreamPackReceipt,
     uploaded: BTreeSet<GitOid>,
     objects: RetainedBundleObjects,
+    capture: Option<PlacementBoundPack>,
 }
 
 impl IncrementalBundleImportPlan {
@@ -88,6 +91,10 @@ impl IncrementalBundleImportPlan {
     /// permits bounded ancestry work even when the incoming pack is empty.
     pub(crate) const fn original_bytes(&self) -> u64 {
         self.objects.original_bytes
+    }
+
+    pub(crate) fn take_received_pack(&mut self) -> Option<PlacementBoundPack> {
+        self.capture.take()
     }
 
     pub(crate) fn finish(self) -> Result<(), BundleVerifyError> {
@@ -135,6 +142,7 @@ impl BundleImportObjectPlan for IncrementalBundleImportPlan {
 /// closure. `max_original_bytes` includes actual discovery and capture reads;
 /// incoming pack input/expansion limits remain independent. Original scratch
 /// has the same exclusive identity and poisoned-reader rules as full import.
+#[cfg(all(test, unix))]
 pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
@@ -152,6 +160,7 @@ pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
         max_original_bytes,
         None,
         limits,
+        None,
         allow_work,
     )
 }
@@ -161,6 +170,7 @@ pub fn prepare_incremental_bundle_import_reader<R: Read + Seek>(
 /// closures and required transport bases. Fanout does not duplicate roots.
 /// Original metadata remains available for exact commit-parent inspection;
 /// uploaded IDs alone identify objects eligible for placement.
+#[cfg(all(test, unix))]
 pub fn prepare_incremental_bundle_fetch_reader<R: Read + Seek>(
     input: &mut R,
     expected_format: GitHashAlgorithm,
@@ -179,6 +189,33 @@ pub fn prepare_incremental_bundle_fetch_reader<R: Read + Seek>(
         max_original_bytes,
         Some(sources),
         limits,
+        None,
+        allow_work,
+    )
+}
+
+/// Preserve original-only prerequisite verification and selected-upload scope
+/// while allowing the node to retain a bounded, placement-gated representation.
+pub(crate) fn prepare_incremental_bundle_reader_capturing<R: Read + Seek>(
+    input: &mut R,
+    expected_format: GitHashAlgorithm,
+    scratch_path: &Path,
+    originals: &mut impl BundleOriginalSource,
+    max_original_bytes: usize,
+    sources: Option<&[RefName]>,
+    limits: &BundleVerifyLimits,
+    cache: &ReceivedPackCache,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<IncrementalBundleImportPlan, BundleVerifyError> {
+    prepare_reader_profile(
+        input,
+        expected_format,
+        scratch_path,
+        originals,
+        max_original_bytes,
+        sources,
+        limits,
+        Some(cache),
         allow_work,
     )
 }
@@ -191,6 +228,7 @@ fn prepare_reader_profile<R: Read + Seek>(
     max_original_bytes: usize,
     sources: Option<&[RefName]>,
     limits: &BundleVerifyLimits,
+    capture_cache: Option<&ReceivedPackCache>,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<IncrementalBundleImportPlan, BundleVerifyError> {
     let mut stopped = false;
@@ -211,6 +249,7 @@ fn prepare_reader_profile<R: Read + Seek>(
             Some(expected_format),
             Some(originals),
             max_original_bytes,
+            capture_cache,
             &mut live,
         )?;
         let original_bytes = verified.inventory.original_bytes() as u64;
@@ -263,9 +302,23 @@ fn prepare_reader_profile<R: Read + Seek>(
         }
         workspace.finish(&mut live)?;
         checkpoint(&mut live)?;
-        Ok((verified, original_bytes, selected, uploaded, objects, total))
+        let capture = match (verified.capture.take(), capture_cache) {
+            (Some(capture), Some(cache)) => {
+                capture.prepare(cache, &uploaded, &limits.pack, &mut live)?
+            }
+            _ => None,
+        };
+        Ok((
+            verified,
+            original_bytes,
+            selected,
+            uploaded,
+            objects,
+            total,
+            capture,
+        ))
     })();
-    let (verified, original_bytes, selected, uploaded, objects, total) = match prepared {
+    let (verified, original_bytes, selected, uploaded, objects, total, capture) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             scratch.cleanup()?;
@@ -276,6 +329,7 @@ fn prepare_reader_profile<R: Read + Seek>(
         header: verified.header,
         receipt: verified.receipt,
         uploaded,
+        capture,
         objects: RetainedBundleObjects {
             scratch,
             scratch_bytes: verified.scratch_bytes,

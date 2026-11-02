@@ -25,6 +25,7 @@ fn protection_policy(names: &[&[u8]], administrators: &[u8], reviewers: &[u8]) -
         branches: names
             .iter()
             .map(|name| ProtectedBranch {
+                required_candidate_checks: Vec::new(),
                 require_merge_queue: false,
                 required_approvals: reviewers.len() as u16,
                 required_checks: Vec::new(),

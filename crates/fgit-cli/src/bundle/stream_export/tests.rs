@@ -19,6 +19,7 @@ fn arguments(extra: &[&str]) -> Vec<String> {
 #[test]
 fn streaming_options_keep_byte_object_and_work_bounds_independent() {
     let defaults = parse(&arguments(&[])).unwrap();
+    assert!(!defaults.query.reuse_verified_packs);
     assert_eq!(defaults.format, GitHashAlgorithm::Sha1);
     assert_eq!(defaults.query.timeout, Duration::from_secs(300));
     assert_eq!(
@@ -90,6 +91,25 @@ fn streaming_options_keep_byte_object_and_work_bounds_independent() {
     assert_eq!(wide.query.limits.max_compression_work, 7);
     assert_eq!(wide.query.timeout, Duration::from_secs(3600));
     assert_eq!(wide.format, GitHashAlgorithm::Sha256);
+}
+
+#[test]
+fn verified_pack_reuse_is_explicit_valueless_and_cannot_be_repeated() {
+    let defaults = parse(&arguments(&[])).unwrap();
+    let reuse = parse(&arguments(&["--reuse-verified-packs"])).unwrap();
+    assert!(reuse.query.reuse_verified_packs);
+    assert_eq!(reuse.query.limits, defaults.query.limits);
+    assert_eq!(reuse.query.timeout, defaults.query.timeout);
+    assert!(
+        parse(&arguments(&[
+            "--reuse-verified-packs",
+            "--reuse-verified-packs"
+        ]))
+        .is_err()
+    );
+    assert!(parse(&arguments(&["--reuse-verified-packs", "false"])).is_err());
+    assert!(USAGE.contains("--reuse-verified-packs"));
+    assert!(USAGE.contains("distinct receipt profile"));
 }
 
 #[test]

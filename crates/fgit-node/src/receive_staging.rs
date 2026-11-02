@@ -56,7 +56,7 @@ struct State {
     staged: BTreeMap<GitOid, Custody>,
     /// Prepared representation custody is ineligible for serving until every
     /// staged object passes publication's final identity-collision recheck.
-    received_pack: Option<PendingReceivedPack>,
+    received_packs: Vec<PendingReceivedPack>,
     published: bool,
     /// A failed publication may have linked some batches and abandoned the
     /// rest, so no later caller may treat this receive's objects as placed.
@@ -91,7 +91,7 @@ impl std::fmt::Debug for ReceiveStaging {
             .field("batches", &state.batches.len())
             .field("streamed_blobs", &state.blobs.len())
             .field("staged", &state.staged.len())
-            .field("received_pack_pending", &state.received_pack.is_some())
+            .field("received_packs_pending", &state.received_packs.len())
             .field("published", &state.published)
             .field("failed", &state.failed.is_some())
             .finish()
@@ -106,7 +106,7 @@ impl ReceiveStaging {
             // abandoned the remaining custody. An empty list is not evidence
             // that those objects became durable. Contain this owner permanently.
             state.failed = Some(Failure::Containment);
-            state.received_pack.take();
+            state.received_packs.clear();
             state
         })
     }
@@ -163,8 +163,9 @@ impl ReceiveStaging {
     }
 
     /// Keep a verified representation under the same publication responsibility
-    /// as its objects. Speculative validation may offer the same receive twice;
-    /// retaining the first candidate avoids duplicate cache reservations.
+    /// as its objects. An imported closure may span several independently
+    /// verified packs. Speculative validation may offer one representation
+    /// twice; retain it once without duplicating cache reservations.
     pub(crate) fn retain_received_pack(
         &self,
         pending: PendingReceivedPack,
@@ -173,8 +174,15 @@ impl ReceiveStaging {
         if state.published || state.failed.is_some() {
             return Err(RefusalCode::InternalInvariantBreach);
         }
-        if state.received_pack.is_none() {
-            state.received_pack = Some(pending);
+        if !state
+            .received_packs
+            .iter()
+            .any(|held| held.same_representation(&pending))
+            && state.received_packs.try_reserve(1).is_ok()
+        {
+            // The cache's original reservations already bound their combined
+            // bytes and representation count. Allocation failure is a miss.
+            state.received_packs.push(pending);
         }
         Ok(())
     }
@@ -273,7 +281,7 @@ impl ReceiveStaging {
                 }
                 let refusal = failure.refusal();
                 state.failed = Some(failure);
-                state.received_pack.take();
+                state.received_packs.clear();
                 return Err(refusal);
             }
         }
@@ -291,12 +299,12 @@ impl ReceiveStaging {
                 }
                 let refusal = failure.refusal();
                 state.failed = Some(failure);
-                state.received_pack.take();
+                state.received_packs.clear();
                 return Err(refusal);
             }
         }
         state.published = true;
-        if let Some(pending) = state.received_pack.take() {
+        for pending in std::mem::take(&mut state.received_packs) {
             // Only now has every raw entry passed final immutable placement's
             // collision check. The optional disk record grants no authority.
             pending.commit_with_deadline(live).map_err(|_| {

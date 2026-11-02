@@ -1,10 +1,10 @@
 // Authenticated network operator over the SHIPPED issue client and native API.
 // No local node principal, database access, parallel mutation codec or authority.
 import { IssueClient, mutationRequest, MAX_RECEIPT_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
+import { MilestoneClient, milestoneMutationRequest } from '../../crates/fgit-node/src/smart_http/server/browser/milestones.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, readPrivateOperatorFile,
   readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
 
-const ACTIONS = ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock'];
 const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray(v) &&
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const fail = code => { throw operatorError(code); };
@@ -34,7 +34,19 @@ export function issueOperatorFetch(url, init, signal) {
   headers.set('User-Agent', 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
   return fetch(url, { ...init, headers, signal: AbortSignal.any([signal, init.signal]) });
 }
-export function issueOperatorOptions(raw) {
+// A closed repository-owned selection, never a route or callback from custody.
+// Both metadata families use the same private-file, cancellation and original
+// outcome path; legacy issue records and key derivation remain unchanged.
+export function createMetadataOperator(entity) {
+if (!['issue', 'milestone'].includes(entity)) throw operatorError('issue_operator_profile');
+const milestone = entity === 'milestone';
+const Client = milestone ? MilestoneClient : IssueClient;
+const request = milestone ? milestoneMutationRequest : mutationRequest;
+const schema = `frankengit-${entity}-operator-v1`;
+const ACTIONS = milestone ? ['open', 'edit', 'close', 'reopen']
+  : ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
+const fail = code => { throw operatorError(milestone ? code.replace(/^issue_operator_/, 'milestone_operator_') : code); };
+function options(raw) {
   const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))) fail('issue_operator_options');
   const o = issueConnectionOptions(raw);
@@ -42,8 +54,8 @@ export function issueOperatorOptions(raw) {
   o.tokenFile = operatorPath(o.tokenFile); o.record = operatorPath(o.record);
   if (o.tokenFile === o.record) fail('issue_operator_separate_record');
   if (ACTIONS.includes(o.operation)) {
-    const request = mutationRequest(o.number, o.expectedVersion, o.operation, o.fields ?? {});
-    o.fields = structuredClone(request.fields);
+    const checked = request(o.number, o.expectedVersion, o.operation, o.fields ?? {});
+    o.fields = structuredClone(checked.fields);
   } else if (['number', 'expectedVersion', 'fields'].some(k => raw[k] !== undefined)) fail('issue_operator_recovery_is_exact');
   return o;
 }
@@ -55,18 +67,18 @@ function readRecord(bytes, o) {
   try { v = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
   catch { fail('issue_operator_invalid_record'); }
   if (!exact(v, ['schema', 'href', 'tenant', 'repository', 'receipt']) ||
-      v.schema !== 'frankengit-issue-operator-v1' || v.href !== o.href || v.tenant !== o.tenant || v.repository !== o.repository ||
+      v.schema !== schema || v.href !== o.href || v.tenant !== o.tenant || v.repository !== o.repository ||
       !Buffer.from(JSON.stringify(v) + '\n').equals(bytes)) fail('issue_operator_record_mismatch');
   checkedBinding(v.receipt?.request?.binding, o);
   return JSON.stringify(v.receipt);
 }
-export async function runIssueOperation(raw) {
-  const o = issueOperatorOptions(raw), stop = new AbortController();
+async function run(raw) {
+  const o = options(raw), stop = new AbortController();
   const signal = o.signal ? AbortSignal.any([o.signal, stop.signal]) : stop.signal;
   const timer = setTimeout(() => stop.abort(), o.timeoutMs);
   const check = () => { if (signal.aborted) fail('issue_operator_cancelled_or_deadline'); };
   const progress = phase => { o.onProgress(Object.freeze({ phase })); check(); };
-  const client = new IssueClient({ href: o.href, timeoutMs: o.timeoutMs,
+  const client = new Client({ href: o.href, timeoutMs: o.timeoutMs,
     fetchImpl: (url, init) => issueOperatorFetch(url, init, signal) });
   let state = ACTIONS.includes(o.operation) ? 'not_submitted' : 'existing_unknown';
   let path = o.record, digest = null, bytes;
@@ -78,13 +90,13 @@ export async function runIssueOperation(raw) {
     if (ACTIONS.includes(o.operation)) {
       const observed = await client.read(o.number, { limit: 1 }); check();
       checkedBinding(observed.binding, o);
-      const version = observed.reply.found ? observed.reply.issue.version : 0;
+      const version = observed.reply.found ? observed.reply[entity].version : 0;
       if (version !== o.expectedVersion) fail('issue_operator_version_moved');
       progress('source_checked');
       await client.stage(o.number, o.expectedVersion, o.operation, o.fields); check();
       const exported = client.exportReceipt();
       if (Buffer.byteLength(exported) > MAX_RECEIPT_BYTES) fail('issue_operator_receipt_limit');
-      bytes = Buffer.from(JSON.stringify({ schema: 'frankengit-issue-operator-v1', href: o.href,
+      bytes = Buffer.from(JSON.stringify({ schema, href: o.href,
         tenant: o.tenant, repository: o.repository, receipt: JSON.parse(exported) }) + '\n');
       const saved = await saveOperatorRecord(path, bytes, check); digest = saved.sha256;
       state = 'recorded_unknown'; progress('receipt_saved');
@@ -92,7 +104,7 @@ export async function runIssueOperation(raw) {
       await client.restoreReceipt(readRecord(bytes, o)); check();
       const outcome = await client.recover();
       if (outcome.terminal || o.operation === 'status') return {
-        type: 'forge_issue_operator_result', operation: o.operation, state: outcome.terminal ? 'terminal_observed' : 'unresolved',
+        type: `forge_${entity}_operator_result`, operation: o.operation, state: outcome.terminal ? 'terminal_observed' : 'unresolved',
         record: path, record_sha256: digest, result: outcome, mutation_submitted: false, absence_proves_non_commit: false };
       progress('recovery_observed'); // Only explicit retry proceeds after lookup.
     }
@@ -104,7 +116,7 @@ export async function runIssueOperation(raw) {
     state = 'submitted_unknown';
     const result = await client.send();
     // A parsed terminal decision wins over a later cancellation or output error.
-    return { type: 'forge_issue_operator_result', operation: o.operation, state: 'terminal_observed',
+    return { type: `forge_${entity}_operator_result`, operation: o.operation, state: 'terminal_observed',
       record: path, record_sha256: digest, result, mutation_submitted: true, absence_proves_non_commit: false };
   } catch (cause) {
     const error = cause instanceof Error ? cause : operatorError('issue_operator_failed');
@@ -112,3 +124,8 @@ export async function runIssueOperation(raw) {
     throw error;
   } finally { clearTimeout(timer); client.disconnect(); }
 }
+return Object.freeze({ options, run });
+}
+const issue = createMetadataOperator('issue');
+export const issueOperatorOptions = issue.options;
+export const runIssueOperation = issue.run;

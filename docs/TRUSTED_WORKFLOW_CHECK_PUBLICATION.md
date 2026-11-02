@@ -43,8 +43,10 @@ Job names are nonempty UTF-8 without controls, at most 1,024 bytes. Evidence is
 nonempty and bounded to 1 MiB, checked before copying or encoding. Evidence
 bytes are inside the event, so a later forge publication retains them under the
 same immutable event/batch commitments instead of an untracked local file.
-This first subject profile names canonical branches; tag peeling, unpublished
-candidates, and signed independent runner attestations are separate boundaries.
+This original subject profile names canonical branches. The additive
+[unpublished PR candidate profile](UNPUBLISHED_CANDIDATE_CHECKS.md) uses required
+kind 20 and explicit candidate selectors without changing these historical bytes.
+Tag peeling and signed independent runner attestations remain separate boundaries.
 
 ## Current scope
 

@@ -13,6 +13,7 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 mod locking;
+mod milestones;
 const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"write-test","version":"1"}}}"#;
 const READY: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
 struct Fixture {

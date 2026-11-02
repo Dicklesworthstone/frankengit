@@ -57,6 +57,15 @@ impl SyncedBlob {
         self.envelope.object_identity()
     }
 
+    /// Original strong payload commitment authenticated from this stage's
+    /// actual input bytes, exact native identity, length and EOF before sync.
+    /// This proves private custody only. Publication must still reauthenticate
+    /// the owned stage and pass its final immutable collision check.
+    #[must_use]
+    pub const fn payload_commitment(&self) -> [u8; 32] {
+        self.envelope.payload_commitment()
+    }
+
     /// Read an owned candidate without publishing it, under an independent
     /// payload ceiling. None means only that this owner has another identity.
     /// Missing, changed, oversized or corrupt owned data always refuses, even

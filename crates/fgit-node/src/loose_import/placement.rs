@@ -64,11 +64,25 @@ fn node_error(error: NodeRefusal) -> LooseGitImportRefusal {
 }
 
 impl Placements<'_> {
+    #[cfg(test)]
     pub(super) fn push(
         &mut self,
         expected: GitOid,
         object: IdentifiedGitObject,
         control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
+        self.push_observing(expected, object, control, None)
+    }
+
+    /// Observe the exact strong payload proof of the selected import body.
+    /// Optional representations must agree with it even when another source
+    /// provides the same native ID. This observer has no placement authority.
+    pub(super) fn push_observing(
+        &mut self,
+        expected: GitOid,
+        object: IdentifiedGitObject,
+        control: &ImportControl<'_>,
+        mut observe: Option<&mut dyn FnMut(GitOid, [u8; 32])>,
     ) -> Result<(), LooseGitImportRefusal> {
         self.prepare(object.body().len(), control)?;
         if object.body().len() > CHUNK_BYTES {
@@ -78,10 +92,18 @@ impl Placements<'_> {
                 // a later admission refusal. Drain the earlier sync first.
                 self.settle(control)?;
                 let verified = self.verify(expected, object)?;
+                if let Some(observe) = &mut observe {
+                    observe(expected, verified.envelope().payload_commitment());
+                }
                 let result = staging.stage(self.node, &[verified], &mut || control.is_live());
                 return control.after(result, node_error);
             }
             let kind = object.kind();
+            if let Some(observe) = &mut observe
+                && let Some(commitment) = super::captured_payload_commitment(kind, object.body())
+            {
+                observe(expected, commitment);
+            }
             let stored = self
                 .node
                 .put_git_object(kind, object.into_body())
@@ -95,6 +117,9 @@ impl Placements<'_> {
             return control.checkpoint();
         }
         let verified = self.verify(expected, object)?;
+        if let Some(observe) = &mut observe {
+            observe(expected, verified.envelope().payload_commitment());
+        }
         self.bytes += verified.payload().len();
         self.objects.push(verified);
         Ok(())

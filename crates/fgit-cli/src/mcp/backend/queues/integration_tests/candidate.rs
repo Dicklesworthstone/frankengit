@@ -17,6 +17,7 @@ fn protect(backend: &NodeTools, version: u64, epoch: u64, approvals: bool) {
             administrators: vec![actor()],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
                 name: reference("refs/heads/main"),
                 reviewers: if approvals {

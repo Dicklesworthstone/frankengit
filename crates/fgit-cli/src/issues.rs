@@ -1,5 +1,5 @@
 //! Native issue lifecycle through canonical node admission, not a CLI-owned DB.
-mod options;
+pub(crate) mod options;
 mod output;
 mod search;
 #[cfg(test)]
@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 const USAGE: &str = "\
-usage: fg issue <open|edit|close|reopen|lock|unlock|comment|assign|unassign> <storage-root> <tenant-id> <repository-id> <number>
+usage: fg issue <open|edit|close|reopen|lock|unlock|comment|assign|unassign|set-milestone|clear-milestone> <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key> --expected-version <version>
   [--object-format sha1|sha256]
   open: --expected-version 0 --title <text> (--body <text> | --body-file <file>) [--label <text> ...]
@@ -23,6 +23,8 @@ usage: fg issue <open|edit|close|reopen|lock|unlock|comment|assign|unassign> <st
   comment: positive version; --body <text> or --body-file <file>
   close/reopen/lock/unlock: positive version; no title, body, label or assignee options
   assign/unassign: positive version; --assignee <principal-id> ... (1..16 IDs)
+  set-milestone: positive issue version; --milestone <number> --expected-milestone-version <version>
+  clear-milestone: positive issue version; no milestone options
 
 usage: fg issue append-comment <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key>
@@ -39,6 +41,8 @@ usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-loca
 
 Edits preserve omitted fields; --body '' clears a body; --clear-labels clears labels.
 Locking blocks strict and append comments until unlocked; other edits and close/reopen remain available.
+Milestone assignment checks both selected versions at one publication basis; the milestone must be open.
+Clearing membership is permitted even after the milestone closes. Closing a milestone preserves its issues.
 Show returns current issue state plus paged, exact actions/comments at one snapshot.
 Every mutation requires a stable retry key. Only append-comment omits the issue predecessor.
 Existing comment and other changes retain their exact-version semantics; never refresh a retry.
@@ -67,6 +71,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     | "append-comment"
                     | "assign"
                     | "unassign"
+                    | "set-milestone"
+                    | "clear-milestone"
                     | "list"
                     | "show"
             ))

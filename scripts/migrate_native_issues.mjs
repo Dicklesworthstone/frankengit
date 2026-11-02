@@ -9,6 +9,7 @@ const USAGE = `usage: node scripts/migrate_native_issues.mjs <prepare|inspect|ru
   --tenant <32-hex> --repository <32-hex> --token-file <private-native-token-file>
   --archive <private-archive-directory> --archive-sha256 <independently-retained-pin> (prepare)
   [--offset <nonnegative>] [--max-steps <1..10000>] (prepare)
+  [--milestone-map <private-canonical-json-file>] (prepare; required for archive v2)
   [--max-capture-bytes <1..67108864> --max-request-bytes <1..134217728>] (prepare)
   --confirm <original-migration-plan-sha256> (inspect/run/status)
   [--max-mutations <1..10000> --retry-unresolved] (run only)
@@ -18,6 +19,9 @@ Preparation is offline and creates original request keys. Inspect is offline.
 Run is explicit native issue mutation; status only queries original outcomes.
 Retry uses original keys, bytes, versions and credential; never reprepare to retry.
 Titles, labelled body provenance, labels, comments and final state are imported.
+Milestone archives require an explicit source-to-destination number map. All
+milestones open before issue membership is imported; source-closed milestones
+close afterward. The map is retained in the prepared plan, not needed on restart.
 Source actors/assignees are attribution only. This is NOT canonical restore,
 original audit history, assignments/permissions migration or an atomic transaction.
 Retain original custody and pins after interruption. Locks are never stolen.
@@ -25,12 +29,13 @@ Exit 0: selected local phase complete, or all native steps observed committed;
 1: canonical refusal; 2: input/read failure; 3: incomplete/uncertain work;
 4: known completed work/progress followed by an error. See docs/NATIVE_ISSUE_IMPORT.md.`;
 function options(args) {
-  if (!Array.isArray(args) || args.length > 32 || args.some(a => typeof a !== 'string' || a.length > 8192 || /[\0\r\n]/u.test(a)) ||
+  if (!Array.isArray(args) || args.length > 34 || args.some(a => typeof a !== 'string' || a.length > 8192 || /[\0\r\n]/u.test(a)) ||
       args.reduce((n, a) => n + a.length, 0) > 65536 || !['prepare', 'inspect', 'run', 'status'].includes(args[0])) throw new Error(USAGE);
   const operation = args[0], preparing = operation === 'prepare', executing = operation === 'run';
   const names = { '--workdir': 'workdir', '--url': 'href', '--tenant': 'tenant', '--repository': 'repository', '--token-file': 'tokenFile',
     '--timeout-ms': 'timeoutMs', ...(preparing ? { '--archive': 'archiveDir', '--archive-sha256': 'archiveSha256',
-      '--offset': 'offset', '--max-steps': 'maxSteps', '--max-capture-bytes': 'maxCaptureBytes', '--max-request-bytes': 'maxRequestBytes' }
+      '--offset': 'offset', '--milestone-map': 'milestoneMapFile', '--max-steps': 'maxSteps',
+      '--max-capture-bytes': 'maxCaptureBytes', '--max-request-bytes': 'maxRequestBytes' }
       : { '--confirm': 'confirm' }), ...(executing ? { '--max-mutations': 'maxMutations', '--retry-unresolved': 'retryUnresolved' } : {}) };
   const o = {};
   for (let index = 1; index < args.length;) {

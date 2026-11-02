@@ -495,6 +495,7 @@ fn stale_canonical_subject_or_ci_lease_cannot_execute_or_replace_a_candidate() {
                                 name: target_ref(),
                                 reviewers: Vec::new(),
                                 required_approvals: 0,
+                                required_candidate_checks: Vec::new(),
                                 require_merge_queue: true,
                                 required_checks: Vec::new(),
                             }],

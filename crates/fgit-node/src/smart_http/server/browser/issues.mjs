@@ -63,15 +63,20 @@ function checkedAssignees(values, canonical = false) {
 }
 export function issueAction(name, fields) {
   object(fields);
-  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock'].includes(name)) fail('Unsupported issue action.');
+  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock', 'set-milestone', 'clear-milestone'].includes(name)) fail('Unsupported issue action.');
   const assignment = name === 'assign' || name === 'unassign';
-  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees'] : [];
+  const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees']
+    : name === 'set-milestone' ? ['milestone', 'expected_milestone_version'] : [];
   if (Object.keys(fields).some(key => !allowed.includes(key))) fail('Unknown or inapplicable issue field.');
   const result = {};
   if (own(fields, 'title')) result.title = text(fields.title, 256, 'title', true);
   if (own(fields, 'body')) result.body = text(fields.body, 64 * 1024, 'body');
   if (own(fields, 'labels')) result.labels = checkedLabels(fields.labels);
   if (own(fields, 'assignees')) result.assignees = checkedAssignees(fields.assignees);
+  if (name === 'set-milestone') {
+    result.milestone = natural(fields.milestone, 'milestone number', 1);
+    result.expected_milestone_version = natural(fields.expected_milestone_version, 'expected milestone version', 1);
+  }
   if (name === 'open') {
     if (!own(result, 'title') || !own(result, 'body')) fail('Opening an issue requires title and body.');
     result.labels ??= [];
@@ -99,6 +104,7 @@ export function mutationRequest(number, version, action, fields) {
     if (action === 'edit' && !checked.labels.length) form.append('clear_labels', 'true');
   }
   if (checked.assignees) for (const id of checked.assignees) form.append('assignee', id);
+  for (const name of ['milestone', 'expected_milestone_version']) if (own(checked, name)) form.append(name, String(checked[name]));
   const body = form.toString();
   if (body.length > MAX_FORM_BYTES) fail('Encoded issue form exceeds 256 KiB.');
   return { number, expected_version: version, action, fields: checked, body };
@@ -120,6 +126,13 @@ export function issueLocked(row) {
   if (typeof row.locked !== 'boolean') fail('Invalid issue lock state.');
   return row.locked;
 }
+// Absence in an older snapshot means unassigned. Keep the original record
+// untouched so saved receipts and archive commitments retain their exact bytes.
+export function issueMilestone(row) {
+  object(row);
+  if (!own(row, 'milestone') || row.milestone === null) return null;
+  return natural(row.milestone, 'milestone number', 1);
+}
 export function issueState(row) {
   object(row);
   natural(row.number, 'issue number', 1); natural(row.version, 'issue version', 1);
@@ -129,6 +142,7 @@ export function issueState(row) {
   // the complete set; a present malformed field is never replaced with empty.
   if (own(row, 'assignees')) checkedAssignees(row.assignees, true);
   issueLocked(row);
+  issueMilestone(row);
   if (!['open', 'closed'].includes(row.state)) fail('Invalid issue state.');
   opaque(row.opened_by, 'opening principal'); opaque(row.last_actor, 'last principal');
   natural(row.comments, 'comment count', 0, row.version - 1);
@@ -168,6 +182,7 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
       fail('Incomplete issue history or invalid continuation.');
     }
     let locked = after === 0 ? false : null;
+    let milestone = after === 0 ? null : undefined;
     reply.events.forEach((event, i) => {
       object(event); object(event.action);
       if (event.version !== after + i + 1) fail('History contains a version gap.');
@@ -181,6 +196,10 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
         delete fields.body_rendered;
       }
       issueAction(name, fields);
+      if (name === 'set-milestone' || name === 'clear-milestone') {
+        if (!own(reply.issue, 'milestone')) fail('Milestone history requires an explicit membership state.');
+        milestone = name === 'set-milestone' ? fields.milestone : null;
+      }
       if (own(fields, 'assignees')) checkedAssignees(fields.assignees, true);
       if ((event.version === 1) !== (name === 'open')) fail('Invalid opening event position.');
       if (name === 'lock' || name === 'unlock') {
@@ -193,6 +212,9 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
     if (reply.next_after_version === null && locked !== null && locked !== issueLocked(reply.issue)) {
       fail('Issue lock state disagrees with its history.');
     }
+    if (reply.next_after_version === null && milestone !== undefined && milestone !== issueMilestone(reply.issue)) {
+      fail('Issue milestone disagrees with its history.');
+    }
   }
   return { reply, binding: observed, head: snapshot };
 }
@@ -200,11 +222,13 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
 // A frozen copy prevents edits to a form/array from changing an in-flight query.
 export function issueSearchQuery(input = {}) {
   object(input);
-  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive'].includes(key))) {
+  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive', 'milestone'].includes(key))) {
     fail('Unknown issue search field.');
   }
   const state = input.state ?? null, opened_by = input.opened_by ?? null;
   const needle = input.text ?? null, case_sensitive = input.case_sensitive ?? false;
+  const milestone = input.milestone ?? null;
+  if (milestone !== null && milestone !== 'none') natural(milestone, 'milestone filter', 1);
   if (state !== null && !['open', 'closed'].includes(state)) fail('Invalid issue search state.');
   if (opened_by !== null && (typeof opened_by !== 'string' || !/^[0-9a-f]{32}$/.test(opened_by))) {
     fail('Opening principal must be 32 lowercase hexadecimal characters.');
@@ -216,7 +240,7 @@ export function issueSearchQuery(input = {}) {
   if (typeof case_sensitive !== 'boolean' || (case_sensitive && needle === null)) {
     fail('Case-sensitive matching requires literal search text.');
   }
-  return Object.freeze({ state, opened_by, text: needle, case_sensitive,
+  return Object.freeze({ state, opened_by, text: needle, case_sensitive, ...(milestone === null ? {} : { milestone }),
     labels: Object.freeze(checkedLabels(input.labels ?? [])) });
 }
 function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } = {}) {
@@ -227,6 +251,7 @@ function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } 
   return { after, limit, head, maxScan };
 }
 function matchesSearch(row, query) {
+  if (query.milestone !== undefined && issueMilestone(row) !== (query.milestone === 'none' ? null : query.milestone)) return false;
   if ((query.state !== null && row.state !== query.state) ||
       (query.opened_by !== null && row.opened_by !== query.opened_by) ||
       !query.labels.every(label => row.labels.includes(label))) return false;
@@ -247,6 +272,7 @@ export function issueSearchPage(reply, input, options = {}) {
   if (reply.type !== 'issue_search_page' || reply.scope !== 'repository_issues' ||
       echo.text_scope !== 'title_or_body' || echo.state !== query.state ||
       echo.opened_by !== query.opened_by || echo.text !== query.text ||
+      (echo.milestone ?? null) !== (query.milestone ?? null) ||
       echo.case_sensitive !== query.case_sensitive || reply.refs_changed !== false ||
       reply.transaction_created !== false) fail('Issue search response changed its predicate or read-only contract.');
   checkedLabels(echo.labels, true);
@@ -281,9 +307,10 @@ export function issueSearchPage(reply, input, options = {}) {
   return { reply, binding: observed, head: snapshot, query };
 }
 
-export function publication(reply, pending, status = 200) {
+export function publication(reply, pending, status = 200, entity = 'issue') {
+  if (!['issue', 'milestone'].includes(entity)) fail('Unsupported publication profile.');
   identity(reply, pending.binding);
-  if (reply.type !== 'issue_publication' || reply.number !== pending.number ||
+  if (reply.type !== `${entity}_publication` || reply.number !== pending.number ||
       reply.expected_version !== pending.expected_version || reply.action !== pending.action ||
       !['committed', 'refused'].includes(reply.outcome) || reply.delivery_acknowledged !== null) {
     fail('Unrecognized or mismatched terminal issue reply.');
@@ -374,10 +401,20 @@ function httpError(status) {
 
 export class IssueClient {
   #root; #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #pending = null;
-  #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout;
+  #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout; #milestone;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
-  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }) {
+  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }, milestoneProfile = null) {
+    // Repository-owned MilestoneClient shares the exact custody/transport path.
+    // This closed code profile never comes from a receipt or remote response;
+    // it cannot choose an origin, route, recovery endpoint or key namespace.
+    if (milestoneProfile !== null && (!Object.isFrozen(milestoneProfile) ||
+        Object.keys(milestoneProfile).length !== 4 || !own(milestoneProfile, 'kind') || milestoneProfile.kind !== 'milestone' ||
+        !['mutationRequest', 'page', 'history'].every(key => own(milestoneProfile, key)) ||
+        !['mutationRequest', 'page', 'history'].every(key => typeof milestoneProfile[key] === 'function'))) {
+      fail('Invalid native metadata client profile.');
+    }
+    this.#milestone = milestoneProfile;
     this.#root = rootFor(href); this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = natural(timeoutMs, 'request timeout', 1, 300_000);
   }
@@ -454,9 +491,11 @@ export class IssueClient {
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
     if (render) query.set('render', 'html_safe');
-    const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
+    const family = this.#milestone ? 'milestones' : 'issues';
+    const raw = await this.#request(`${family}${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
     const options = { after, limit, head, binding: this.#binding };
-    const checked = number === null ? issuePage(raw, options) : issueHistory(raw.reply, number, options);
+    const page = this.#milestone?.page ?? issuePage, history = this.#milestone?.history ?? issueHistory;
+    const checked = number === null ? page(raw, options) : history(raw.reply, number, options);
     if (number !== null && raw.status === 404 && checked.reply.found) fail('Issue presence and HTTP status disagree.');
     this.#binding = checked.binding;
     return checked;
@@ -464,6 +503,7 @@ export class IssueClient {
   // POST is a bounded read, not a publication. It must never attach the
   // pending change's key, mark it sent, or spend mutation retry responsibility.
   async search(input = {}, options = {}) {
+    if (this.#milestone) fail('Milestone search is not supported by this native profile.');
     const query = issueSearchQuery(input), parameters = searchParameters(options);
     const { after, limit, head, maxScan } = parameters;
     const body = new URLSearchParams({ state: query.state ?? 'all',
@@ -471,6 +511,7 @@ export class IssueClient {
       limit: String(limit), max_scan: String(maxScan) });
     if (query.text !== null) body.append('query', query.text);
     if (query.opened_by !== null) body.append('opened_by', query.opened_by);
+    if (query.milestone !== undefined) body.append('milestone', String(query.milestone));
     for (const label of query.labels) body.append('label', label);
     if (head !== null) body.append('expected_head', head);
     const raw = await this.#request('issues/search', { method: 'POST', body: body.toString(), view: true });
@@ -479,15 +520,18 @@ export class IssueClient {
     return checked;
   }
   async #requestKey(request, fingerprint, nonce) {
-    const message = JSON.stringify([this.#root.origin, this.#root.route, fingerprint, nonce,
-      request.number, request.expected_version, request.action, request.body]);
+    const fields = [this.#root.origin, this.#root.route, fingerprint, nonce,
+      request.number, request.expected_version, request.action, request.body];
+    // Keep every legacy issue key byte unchanged. Milestone requests add both
+    // an independent digest domain and a distinct public key prefix.
+    const message = JSON.stringify(this.#milestone ? ['frankengit-milestone-request-v1', ...fields] : fields);
     const digest = await this.#crypto.subtle.digest('SHA-256', encoder.encode(message));
-    return `fgui-${nonce}-${asHex(new Uint8Array(digest))}`;
+    return `${this.#milestone ? 'fgmi' : 'fgui'}-${nonce}-${asHex(new Uint8Array(digest))}`;
   }
   async stage(number, version, action, fields, expectedBinding = null) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     if (this.#pending || this.#busy) fail('Resolve or discard the existing prepared change first.');
-    const request = mutationRequest(number, version, action, fields);
+    const request = (this.#milestone?.mutationRequest ?? mutationRequest)(number, version, action, fields);
     const epoch = this.#epoch, fingerprint = this.#fingerprint;
     let binding = this.binding;
     if (expectedBinding !== null) {
@@ -518,18 +562,20 @@ export class IssueClient {
     if (!this.#pending) fail('No prepared change.');
     // Once a receipt leaves this page, another session may dispatch it.
     this.#pending.exported = true;
-    return JSON.stringify({ schema: 'frankengit-issue-retry-v1', origin: this.#root.origin, route: this.#root.route,
+    return JSON.stringify({ schema: this.#milestone ? 'frankengit-milestone-retry-v1' : 'frankengit-issue-retry-v1', origin: this.#root.origin, route: this.#root.route,
       request: this.#pending }, null, 2);
   }
   async restoreReceipt(serialized) {
     if (!this.connected || this.#pending || this.#busy) fail('Connect first and resolve any existing change.');
     text(serialized, MAX_RECEIPT_BYTES, 'recovery receipt');
     const receipt = object(JSON.parse(serialized)), request = object(receipt.request);
-    if (receipt.schema !== 'frankengit-issue-retry-v1' || receipt.origin !== this.#root.origin || receipt.route !== this.#root.route ||
-        request.credential_fingerprint !== this.#fingerprint || typeof request.key !== 'string' || !/^fgui-[0-9a-f]{32}-[0-9a-f]{64}$/.test(request.key)) {
+    const schema = this.#milestone ? 'frankengit-milestone-retry-v1' : 'frankengit-issue-retry-v1';
+    const keyPattern = this.#milestone ? /^fgmi-[0-9a-f]{32}-[0-9a-f]{64}$/ : /^fgui-[0-9a-f]{32}-[0-9a-f]{64}$/;
+    if (receipt.schema !== schema || receipt.origin !== this.#root.origin || receipt.route !== this.#root.route ||
+        request.credential_fingerprint !== this.#fingerprint || typeof request.key !== 'string' || !keyPattern.test(request.key)) {
       fail('Recovery receipt does not belong to this repository and credential.');
     }
-    const checked = mutationRequest(request.number, request.expected_version, request.action, object(request.fields));
+    const checked = (this.#milestone?.mutationRequest ?? mutationRequest)(request.number, request.expected_version, request.action, object(request.fields));
     if (request.body !== checked.body) fail('Recovery receipt has a mismatched request body.');
     if (request.binding !== null) {
       object(request.binding); opaque(request.binding.tenant, 'tenant'); opaque(request.binding.repository, 'repository');
@@ -554,10 +600,10 @@ export class IssueClient {
     this.#busy = true;
     const pending = this.#pending; pending.sent = true;
     try {
-      const raw = await this.#request(`issues/${pending.number}/${pending.action}`, {
+      const raw = await this.#request(`${this.#milestone ? 'milestones' : 'issues'}/${pending.number}/${pending.action}`, {
         method: 'POST', body: pending.body, key: pending.key, maximum: 16 * 1024, terminalReply: true,
       });
-      const terminal = publication(raw.reply, pending, raw.status);
+      const terminal = publication(raw.reply, pending, raw.status, this.#milestone ? 'milestone' : 'issue');
       this.#pending = null;
       return terminal;
     } catch (error) { error.outcomeUnknown = true; throw error; }

@@ -137,6 +137,18 @@ zero or omitted `required_approvals`. `protection_show` returns the boolean
 explicitly for every branch. Preserve true when replacing other policy fields;
 omission in a complete replacement removes it.
 
+Each branch may also supply `required_candidate_checks`, an array of closed
+`{publisher, graph_root, job}` objects. It has the same principal, graph and
+job bounds as ordinary checks, with no CI source ref; entries must be strictly
+sorted and unique. Both check arrays together contain at most 32 selectors.
+An empty or omitted candidate array selects no candidate requirements. Because
+this is a complete policy replacement, **omitting it removes existing candidate
+requirements**; preserve the array returned by `protection_show` when changing
+other fields. Reads always return the array, including when empty. A candidate
+check-only branch has no reviewers and zero required approvals. See
+[unpublished candidate checks](UNPUBLISHED_CANDIDATE_CHECKS.md) for exact subject
+validation and independently mandatory protection.
+
 Each branch must explicitly include `required_checks`, even when it is empty.
 This prevents a client unaware of checks from silently dropping them while
 replacing other policy fields. Each selector is an object with exactly

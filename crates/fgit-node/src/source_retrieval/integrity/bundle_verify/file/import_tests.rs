@@ -807,3 +807,164 @@ fn mapped_selection_refuses_absent_sources_and_still_audits_unselected_uploads()
         assert!(!scratch.path().exists());
     }
 }
+
+#[test]
+fn captured_file_pack_requires_every_actual_strong_placement_witness() {
+    use crate::received_pack::ReceivedPackCache;
+    use fgit_pack::{PackLimits, PackOrderKey};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for mode in 0..3 {
+            let base = b"original transport base";
+            let body = b"original transport base plus result";
+            let base_id = git_object_id(format, ObjectKind::Blob, base);
+            let id = git_object_id(format, ObjectKind::Blob, body);
+            // The base is not a native edge of the advertised blob. The
+            // selected upload must nevertheless retain its raw REF dependency.
+            let input = bundle(
+                format,
+                &[
+                    record(7, &delta(base, body), base_id.as_bytes()),
+                    record(3, base, &[]),
+                ],
+                id,
+            );
+            let raw = super::super::super::FullBundleInput::parse(
+                &input,
+                Default::default(),
+                &mut || true,
+            )
+            .unwrap()
+            .pack_bytes()
+            .to_vec();
+            let cache = ReceivedPackCache::new(16 * 1024);
+            let scratch = ScratchPath::new();
+            let mut reader = Cursor::new(input);
+            let mut plan = super::super::prepare_full_bundle_reader_capturing(
+                &mut reader,
+                format,
+                scratch.path(),
+                None,
+                &BundleVerifyLimits::default(),
+                &cache,
+                &mut || true,
+            )
+            .unwrap();
+            assert_eq!(plan.selected_ids(), &BTreeSet::from([id, base_id]));
+            let mut capture = plan
+                .take_received_pack()
+                .expect("complete selected transport pack");
+            assert_eq!(cache.retained_entries(), 0);
+            // This is deliberately after verification. Neither retained raw
+            // custody nor its member evidence may reread the mutable source.
+            reader.get_mut().fill(0);
+            let mut keys = Vec::new();
+            for (ordinal, identity) in plan.selected_ids().clone().into_iter().enumerate() {
+                let actual = blob(&mut plan, identity);
+                keys.push(PackOrderKey {
+                    id: identity,
+                    object_type: ObjectKind::Blob,
+                    recency: 0,
+                    path_hash: 0,
+                });
+                if mode == 0 && ordinal == 0 {
+                    continue;
+                }
+                let mut commitment: [u8; 32] = fgit_crypto::git_payload_commitment(
+                    ObjectKind::Blob,
+                    &actual,
+                    fgit_types::CANONICAL_CODEC_VERSION,
+                )
+                .digest()
+                .as_bytes()
+                .try_into()
+                .unwrap();
+                if mode == 1 && ordinal == 0 {
+                    commitment[0] ^= 1;
+                }
+                capture.observe(identity, commitment);
+            }
+            plan.finish().unwrap();
+            let pending = capture.complete();
+            if mode == 2 {
+                pending.expect("every exact body was witnessed").commit();
+                let reused = cache
+                    .try_reuse(&keys, &PackLimits::default(), true, &mut || true)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(reused.receipt().sha256(), &sha256_digest(&raw));
+                assert_eq!(reused.into_bytes().unwrap(), raw);
+            } else {
+                assert!(
+                    pending.is_none(),
+                    "native IDs cannot replace missing/contradictory strong proof"
+                );
+                assert_eq!(cache.retained_entries(), 0);
+            }
+            assert!(!scratch.path().exists());
+        }
+    }
+}
+
+#[test]
+fn optional_file_capture_cannot_mask_original_source_change_or_sticky_cancellation() {
+    use crate::received_pack::ReceivedPackCache;
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let body = b"selected original payload";
+        let id = git_object_id(format, ObjectKind::Blob, body);
+        let input = bundle(
+            format,
+            &[record(3, body, &[]), record(3, b"first", &[])],
+            id,
+        );
+        let replacement = bundle(
+            format,
+            &[record(3, body, &[]), record(3, b"other", &[])],
+            id,
+        );
+        for budget in [0, 16 * 1024] {
+            let cache = ReceivedPackCache::new(budget);
+            let scratch = ScratchPath::new();
+            let mut source = MovingSource {
+                input: Cursor::new(input.clone()),
+                replacement: replacement.clone(),
+                starts: 0,
+            };
+            assert!(matches!(
+                super::super::prepare_full_bundle_reader_capturing(
+                    &mut source,
+                    format,
+                    scratch.path(),
+                    None,
+                    &BundleVerifyLimits::default(),
+                    &cache,
+                    &mut || true,
+                ),
+                Err(BundleVerifyError::SourceChanged)
+            ));
+            assert_eq!(cache.retained_entries(), 0);
+            assert!(!scratch.path().exists());
+            for stop in [1, 8, 24, 48] {
+                let mut calls = 0;
+                assert!(matches!(
+                    super::super::prepare_full_bundle_reader_capturing(
+                        &mut Cursor::new(&input),
+                        format,
+                        scratch.path(),
+                        None,
+                        &BundleVerifyLimits::default(),
+                        &cache,
+                        &mut || {
+                            calls += 1;
+                            calls != stop
+                        },
+                    ),
+                    Err(BundleVerifyError::Stopped)
+                ));
+                assert_eq!(cache.retained_entries(), 0);
+                assert!(!scratch.path().exists());
+            }
+        }
+    }
+}

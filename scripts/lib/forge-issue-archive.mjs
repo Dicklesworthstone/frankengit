@@ -3,14 +3,18 @@
 import { constants as F } from 'node:fs';
 import { mkdir, open, lstat, realpath, opendir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { IssueClient, issuePage, issueHistory, issueState, issueLocked, issueAction, natural, snapshotToken }
+import { IssueClient, issuePage, issueHistory, issueState, issueLocked, issueMilestone, issueAction, natural, snapshotToken }
   from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
+import { MilestoneClient } from '../../crates/fgit-node/src/smart_http/server/browser/milestones.mjs';
 import { operatorError, operatorPath, privateRecordPath, readPrivateOperatorFile,
   saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
+import { ISSUE_ARCHIVE_SCHEMA_V2, MilestoneArchiveWalk, milestoneArchiveState, issueArchiveState }
+  from './forge-issue-archive-v2.mjs';
 
 export const ISSUE_ARCHIVE_SCHEMA = 'frankengit-issue-read-archive-v1';
+export { ISSUE_ARCHIVE_SCHEMA_V2 };
 export const ISSUE_ARCHIVE_LIMITS = Object.freeze({ pages: 8192, issues: 4096,
-  events: 65536, bytes: 64 * 1024 * 1024, pageBytes: 1024 * 1024 });
+  milestones: 4096, events: 65536, bytes: 64 * 1024 * 1024, pageBytes: 1024 * 1024 });
 const L = ISSUE_ARCHIVE_LIMITS;
 const encode = value => Buffer.from(JSON.stringify(value) + '\n');
 const equal = (a, b) => encode(a).equals(encode(b));
@@ -57,6 +61,7 @@ async function syncDirectory(path) {
 }
 function stateView(row) {
   issueState(row);
+  if (issueMilestone(row) !== null) fail('milestones_unsupported');
   return { number: row.number, version: row.version, title: row.title, body: row.body, labels: row.labels,
     state: row.state, opened_by: row.opened_by, last_actor: row.last_actor,
     comments: row.comments, assignees: row.assignees ?? [], locked: issueLocked(row) };
@@ -92,6 +97,7 @@ class Walk {
     if (!reply.found || !equal(stateView(reply.issue), expected)) fail('list_history_disagreement');
     for (const event of reply.events) {
       const { name, body_rendered: _rendered, ...fields } = event.action;
+      if (name === 'set-milestone' || name === 'clear-milestone') fail('milestones_unsupported');
       const action = issueAction(name, fields);
       if (name === 'open') this.folded = { number, version: 0, title: action.title, body: action.body,
         labels: action.labels, state: 'open', opened_by: event.actor, last_actor: event.actor, comments: 0, assignees: [], locked: false };
@@ -125,24 +131,29 @@ class Walk {
   }
 }
 function manifest(value) {
+  const v2 = value?.schema === ISSUE_ARCHIVE_SCHEMA_V2;
   keys(value, ['schema', 'href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head',
-    'page_size', 'issue_count', 'event_count', 'data_bytes', 'pages']);
-  if (value.schema !== ISSUE_ARCHIVE_SCHEMA) fail('schema');
+    'page_size', ...(v2 ? ['milestone_count'] : []), 'issue_count', 'event_count', 'data_bytes', 'pages']);
+  if (value.schema !== ISSUE_ARCHIVE_SCHEMA && !v2) fail('schema');
   location(value.href); identifier(value.tenant_id); identifier(value.repository_id);
   snapshotToken(value.snapshot_token); sourceHead(value.source_head);
   natural(value.page_size, 'archive page size', 1, 100);
+  if (v2) natural(value.milestone_count, 'archive milestones', 0, L.milestones);
   natural(value.issue_count, 'archive issues', 0, L.issues); natural(value.event_count, 'archive events', 0, L.events);
   natural(value.data_bytes, 'archive data bytes', 1, L.bytes);
   if (!Array.isArray(value.pages)) fail('pages');
   natural(value.pages.length, 'archive pages', 1, L.pages);
   for (const row of value.pages) {
-    if (!Array.isArray(row) || row.length !== 4) fail('page_descriptor');
-    if (row[0] !== null) natural(row[0], 'archive issue number', 1);
-    natural(row[1], 'archive cursor'); digest(row[2]); natural(row[3], 'archive page bytes', 1, L.pageBytes);
+    if (!Array.isArray(row) || row.length !== (v2 ? 5 : 4)) fail('page_descriptor');
+    if (v2 && !['issue', 'milestone'].includes(row[0])) fail('page_descriptor');
+    const base = v2 ? 1 : 0;
+    if (row[base] !== null) natural(row[base], 'archive aggregate number', 1);
+    natural(row[base + 1], 'archive cursor'); digest(row[base + 2]); natural(row[base + 3], 'archive page bytes', 1, L.pageBytes);
   }
   return value;
 }
 async function validateFiles(root, m, life, identity, sealed, collect) {
+  const v2 = m.schema === ISSUE_ARCHIVE_SCHEMA_V2;
   const expectedNames = new Set(m.pages.map((_, i) => pageName(i)));
   if (sealed) expectedNames.add('archive.json');
   const dir = await opendir(root); let count = 0;
@@ -150,22 +161,24 @@ async function validateFiles(root, m, life, identity, sealed, collect) {
     life.check(); if (++count > m.pages.length + Number(sealed) || !expectedNames.delete(entry.name)) fail('unexpected_file');
   }
   if (expectedNames.size) fail('missing_file');
-  const walk = new Walk(m, m.page_size); let bytes = 0;
+  const walk = v2 ? new MilestoneArchiveWalk(m, m.page_size, L) : new Walk(m, m.page_size); let bytes = 0;
   for (const [index, row] of m.pages.entries()) {
     life.check(); await directory(root, identity);
-    if (!equal(walk.next, { number: row[0], after: row[1] })) fail('page_order');
+    const base = v2 ? 1 : 0;
+    if (!equal(walk.next, { ...(v2 ? { kind: row[0] } : {}), number: row[base], after: row[base + 1] })) fail('page_order');
     const raw = await readPrivateOperatorFile(join(root, pageName(index)), L.pageBytes, () => life.check());
     bytes += raw.length;
-    if (raw.length !== row[3] || recordDigest(raw) !== row[2] || bytes > m.data_bytes) fail('page_commitment');
+    if (raw.length !== row[base + 3] || recordDigest(raw) !== row[base + 2] || bytes > m.data_bytes) fail('page_commitment');
     const reply = canonical(raw);
     walk.accept(reply);
     collect?.(reply);
   }
-  if (walk.next !== null || walk.issues !== m.issue_count || walk.events !== m.event_count || bytes !== m.data_bytes) fail('incomplete');
+  if (walk.next !== null || walk.issues !== m.issue_count || walk.events !== m.event_count ||
+      v2 && walk.milestones !== m.milestone_count || bytes !== m.data_bytes) fail('incomplete');
   await directory(root, identity); life.check();
-  return { type: 'forge_issue_archive', schema_version: 1, archive_sha256: recordDigest(encode(m)),
+  return { type: 'forge_issue_archive', schema_version: v2 ? 2 : 1, archive_sha256: recordDigest(encode(m)),
     href: m.href, tenant_id: m.tenant_id, repository_id: m.repository_id, snapshot_token: m.snapshot_token,
-    source_head: m.source_head, issues: walk.issues, events: walk.events, pages: m.pages.length,
+    source_head: m.source_head, ...(v2 ? { milestones: walk.milestones } : {}), issues: walk.issues, events: walk.events, pages: m.pages.length,
     data_bytes: bytes, complete: true, canonical_backup: false, mutation_submitted: false };
 }
 async function readArchive(raw, includeRecords) {
@@ -177,13 +190,19 @@ async function readArchive(raw, includeRecords) {
     if (recordDigest(bytes) !== expected) fail('pin_mismatch');
     const m = manifest(canonical(bytes));
     if (m.data_bytes + bytes.length > L.bytes) fail('archive_limit');
-    const records = [], byNumber = new Map();
+    const v2 = m.schema === ISSUE_ARCHIVE_SCHEMA_V2;
+    const records = [], byNumber = new Map(), milestones = [], byMilestone = new Map();
     // Private collector only. A caller cannot observe a successful prefix or run
     // effects from pages that have not passed the COMPLETE archive traversal.
     const collect = includeRecords ? reply => {
       if (reply.type === 'issue_page') for (const row of reply.issues) {
-        const record = { snapshot: stateView(row), comments: [] };
+        const record = { snapshot: v2 ? issueArchiveState(row) : stateView(row), comments: [] };
         records.push(record); byNumber.set(row.number, record);
+      } else if (reply.type === 'milestone_page') for (const row of reply.milestones) {
+        const record = { snapshot: milestoneArchiveState(row), events: [] };
+        milestones.push(record); byMilestone.set(row.number, record);
+      } else if (reply.type === 'milestone_history') {
+        byMilestone.get(reply.milestone.number).events.push(...reply.events);
       } else for (const event of reply.events) if (event.action.name === 'comment') {
         byNumber.get(reply.issue.number).comments.push({ version: event.version,
           actor: event.actor, body: event.action.body });
@@ -191,7 +210,7 @@ async function readArchive(raw, includeRecords) {
     } : undefined;
     const archive = { ...await validateFiles(root, m, life, identity, true, collect),
       network_accessed: false, local_read_only: true };
-    return includeRecords ? { archive, records } : archive;
+    return includeRecords ? { archive, records, ...(v2 ? { milestones } : {}) } : archive;
   } finally { life.close(); }
 }
 export function inspectIssueArchive(raw) { return readArchive(raw, false); }
@@ -233,7 +252,7 @@ function transport(o, life, stats) {
 }
 export async function exportIssueArchive(raw) {
   keys(raw, ['workdir', 'href', 'tenant', 'repository', 'tokenFile', 'head', 'timeoutMs', 'signal',
-    'maxRequests', 'maxReadBytes', 'maxArchiveBytes', 'maxIssues', 'maxEvents', 'pageSize', 'fetchImpl'],
+    'maxRequests', 'maxReadBytes', 'maxArchiveBytes', 'maxIssues', 'maxMilestones', 'maxEvents', 'pageSize', 'fetchImpl', 'includeMilestones'],
   ['workdir', 'href', 'tenant', 'repository', 'tokenFile']);
   const o = { ...raw, href: location(raw.href), workdir: operatorPath(raw.workdir), tokenFile: operatorPath(raw.tokenFile),
     tenant: identifier(raw.tenant), repository: identifier(raw.repository), head: raw.head ?? null,
@@ -241,12 +260,17 @@ export async function exportIssueArchive(raw) {
     maxReadBytes: natural(raw.maxReadBytes ?? L.bytes, 'read byte budget', 1, L.bytes),
     maxArchiveBytes: natural(raw.maxArchiveBytes ?? L.bytes, 'archive byte budget', 1, L.bytes),
     maxIssues: natural(raw.maxIssues ?? L.issues, 'issue budget', 1, L.issues),
+    maxMilestones: natural(raw.maxMilestones ?? L.milestones, 'milestone budget', 1, L.milestones),
     maxEvents: natural(raw.maxEvents ?? L.events, 'event budget', 1, L.events),
     pageSize: natural(raw.pageSize ?? 10, 'page size', 1, 100), fetchImpl: raw.fetchImpl ?? globalThis.fetch };
+  if (raw.includeMilestones !== undefined && typeof raw.includeMilestones !== 'boolean') fail('milestone_mode');
+  if (raw.maxMilestones !== undefined && raw.includeMilestones !== true) fail('milestone_mode');
   if (o.head !== null) snapshotToken(o.head);
   if (typeof o.fetchImpl !== 'function') fail('fetch');
   const life = lifetime(o), stats = { requests: 0, read_bytes: 0 }; let created = false, rootAttempt = false, rootDigest = null;
   const client = new IssueClient({ href: o.href, timeoutMs: life.timeout, fetchImpl: transport(o, life, stats) });
+  const milestones = o.includeMilestones ? new MilestoneClient({ href: o.href, timeoutMs: life.timeout,
+    fetchImpl: transport(o, life, stats) }) : null;
   try {
     life.check();
     if (await privateRecordPath(o.workdir) !== o.workdir) fail('path_alias');
@@ -256,25 +280,29 @@ export async function exportIssueArchive(raw) {
     try {
       if (token.some(b => b > 127) || !/^[0-9a-f]{64}\n?$/.test(token.toString('ascii'))) fail('token');
       await client.connect(token.toString('ascii').replace(/\n$/, ''));
+      if (milestones) await milestones.connect(token.toString('ascii').replace(/\n$/, ''));
     } finally { token.fill(0); }
     life.check(); await mkdir(o.workdir, { mode: 0o700 }); created = true;
     await syncDirectory(dirname(o.workdir)); const identity = await directory(o.workdir);
-    const walk = new Walk({ tenant_id: o.tenant, repository_id: o.repository, snapshot_token: o.head, source_head: null },
-      o.pageSize, { issues: o.maxIssues, events: o.maxEvents });
+    const scope = { tenant_id: o.tenant, repository_id: o.repository, snapshot_token: o.head, source_head: null };
+    const caps = { issues: o.maxIssues, milestones: o.maxMilestones, events: o.maxEvents };
+    const walk = milestones ? new MilestoneArchiveWalk(scope, o.pageSize, caps) : new Walk(scope, o.pageSize, caps);
     const pages = []; let dataBytes = 0;
     while (walk.next !== null) {
       life.check(); await directory(o.workdir, identity);
-      const { number, after } = walk.next;
-      const value = await client.read(number, { after, limit: o.pageSize, head: walk.head, render: false });
+      const { kind, number, after } = walk.next;
+      const selected = kind === 'milestone' ? milestones : client;
+      const value = await selected.read(number, { after, limit: o.pageSize, head: walk.head, render: false });
       life.check(); walk.accept(value.reply);
       const bytes = encode(value.reply); dataBytes += bytes.length;
       if (bytes.length > L.pageBytes || dataBytes > o.maxArchiveBytes) fail('archive_limit');
       await directory(o.workdir, identity);
       const saved = await saveOperatorRecord(join(o.workdir, pageName(pages.length)), bytes, () => life.check());
-      pages.push([number, after, saved.sha256, bytes.length]);
+      pages.push([...(milestones ? [kind] : []), number, after, saved.sha256, bytes.length]);
     }
-    const m = manifest({ schema: ISSUE_ARCHIVE_SCHEMA, href: o.href, tenant_id: o.tenant, repository_id: o.repository,
-      snapshot_token: walk.head, source_head: walk.source, page_size: o.pageSize, issue_count: walk.issues,
+    const m = manifest({ schema: milestones ? ISSUE_ARCHIVE_SCHEMA_V2 : ISSUE_ARCHIVE_SCHEMA, href: o.href,
+      tenant_id: o.tenant, repository_id: o.repository, snapshot_token: walk.head, source_head: walk.source,
+      page_size: o.pageSize, ...(milestones ? { milestone_count: walk.milestones } : {}), issue_count: walk.issues,
       event_count: walk.events, data_bytes: dataBytes, pages });
     const bytes = encode(m); rootDigest = recordDigest(bytes);
     if (bytes.length > L.pageBytes || dataBytes + bytes.length > o.maxArchiveBytes) fail('archive_limit');
@@ -286,5 +314,5 @@ export async function exportIssueArchive(raw) {
     error.archive_progress = { workdir: o.workdir, directory_created: created, root_publication_attempted: rootAttempt,
       expected_archive_sha256: rootDigest, ...stats, complete: false, mutation_submitted: false };
     throw error;
-  } finally { client.disconnect(); life.close(); }
+  } finally { client.disconnect(); milestones?.disconnect(); life.close(); }
 }

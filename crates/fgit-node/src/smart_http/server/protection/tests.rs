@@ -2,6 +2,8 @@
 //! adapter. Real TCP authorization, publication, recovery, and restart coverage
 //! lives in tests/protection_http.rs.
 
+mod candidate_checks;
+
 use super::*;
 use fgit_wire::smart_http::head;
 use std::fmt::Write as _;

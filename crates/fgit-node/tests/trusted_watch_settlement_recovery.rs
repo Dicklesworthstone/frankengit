@@ -24,6 +24,9 @@ use fgit_pack::{
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, RefName};
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
+#[path = "trusted_watch_settlement_recovery/cancellation.rs"]
+mod cancellation;
+
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Ref,
@@ -98,6 +101,15 @@ fn fixture(format: GitHashAlgorithm, mode: Mode) -> Fixture {
     fixture_with_exit(format, mode, 0)
 }
 fn fixture_with_exit(format: GitHashAlgorithm, mode: Mode, exit: u8) -> Fixture {
+    fixture_with_command(format, mode, |root| {
+        format!("printf x >> '{}'; exit {exit}", root.join("executed").display())
+    })
+}
+fn fixture_with_command(
+    format: GitHashAlgorithm,
+    mode: Mode,
+    command: impl FnOnce(&std::path::Path) -> String,
+) -> Fixture {
     let mut f = Fixture::new(format, WORKFLOW);
     let mut objects = Objects(BTreeMap::new());
     let trigger = if matches!(mode, Mode::Ref) {
@@ -105,9 +117,9 @@ fn fixture_with_exit(format: GitHashAlgorithm, mode: Mode, exit: u8) -> Fixture 
     } else {
         "pull_request"
     };
+    let command = command(&f.root);
     let definition = format!(
-        "name: settlement\non: {trigger}\njobs:\n  check:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf x >> '{}'; exit {exit}\n",
-        f.root.join("executed").display(),
+        "name: settlement\non: {trigger}\njobs:\n  check:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: {command}\n",
     );
     let workflow = objects.put(format, GitObjectKind::Blob, definition.into_bytes());
     let ci = objects.put(
@@ -242,8 +254,14 @@ struct Retained {
     commit: GitOid,
 }
 fn poll(f: &Fixture, mode: Mode) -> Result<(String, Option<Retained>), TrustedWorkflowFailure> {
+    poll_with_request(f, mode, &f.node().request_context())
+}
+fn poll_with_request(
+    f: &Fixture,
+    mode: Mode,
+    request: &fgit_node::NodeRequestContext,
+) -> Result<(String, Option<Retained>), TrustedWorkflowFailure> {
     let node = f.node();
-    let request = node.request_context();
     let reference = mode.reference();
     let parent = f.parent();
     let inputs = vec![b"ci".to_vec()];
@@ -252,7 +270,7 @@ fn poll(f: &Fixture, mode: Mode) -> Result<(String, Option<Retained>), TrustedWo
         match mode {
             Mode::Ref => {
                 node.poll_trusted_ref_workflows_in(
-                    &request,
+                    request,
                     &reference,
                     b"ci",
                     &parent,
@@ -264,7 +282,7 @@ fn poll(f: &Fixture, mode: Mode) -> Result<(String, Option<Retained>), TrustedWo
             }
             Mode::PullRequest => {
                 node.poll_trusted_pull_request_merge_workflows_in(
-                    &request,
+                    request,
                     &reference,
                     1,
                     b"ci",
@@ -278,7 +296,7 @@ fn poll(f: &Fixture, mode: Mode) -> Result<(String, Option<Retained>), TrustedWo
             }
             Mode::Queue => {
                 node.poll_trusted_queue_head_merge_workflows_in(
-                    &request,
+                    request,
                     &reference,
                     1,
                     b"ci",
@@ -298,7 +316,7 @@ fn poll(f: &Fixture, mode: Mode) -> Result<(String, Option<Retained>), TrustedWo
         let pin = run.open_check_journal(None, &|| true).unwrap().pin();
         let manifest = node
             .prepare_trusted_workflow_check_set(
-                &request,
+                &node.command_request_context(None),
                 &run.run_directory,
                 run.check_journal_scope().journal_id.digest(),
                 (pin.byte_len(), pin.tail().digest()),

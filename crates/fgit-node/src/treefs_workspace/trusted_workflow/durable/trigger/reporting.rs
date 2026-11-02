@@ -298,9 +298,9 @@ pub(super) fn capture(
     event: [u8; 32],
     commit: GitOid,
     dispatch: &TrustedWorkflowDispatch,
-    request: &NodeRequestContext,
+    live: &dyn Fn() -> bool,
 ) -> Result<(), TrustedWorkflowFailure> {
-    Sources::capture(path, scope, event, commit, dispatch, request)
+    Sources::capture(path, scope, event, commit, dispatch, live)
 }
 fn bind_reporter(root: &Path, expected: &[u8; 32]) -> Result<(), TrustedWorkflowFailure> {
     bind_identity(root, "publisher", expected)

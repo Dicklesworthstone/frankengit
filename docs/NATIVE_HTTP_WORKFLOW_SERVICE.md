@@ -1,7 +1,7 @@
 # Native CI owned by the HTTP service
 
 On Linux, `fg serve-http` can own one native workflow controller alongside its
-accepted HTTP sessions. The operator selects its branch, workflow directory,
+accepted HTTP sessions. The operator selects its branch or PR collection, workflow directory,
 source inputs, private run parent and optional check publisher at startup. The
 controller uses the same canonical source selection, execution custody and check
 admission as [`fg workflow watch`](NATIVE_REF_WORKFLOW_WATCH.md).
@@ -78,6 +78,25 @@ profile. The PR must be open and its source branch must match `--workflow-ref`.
 By default it executes the current source head and retains separate PR custody.
 See [native PR workflow selection](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md).
 
+### Discover open pull requests automatically
+
+Use `--workflow-pull-requests` to discover visible open same-repository PRs
+targeting `--workflow-ref`. This mode requires `--expected-incarnation` even
+without a check publisher. It executes current source heads, rotates through
+retained PRs one member per poll, and reuses the ordinary PR execution and
+canonical check-publication paths. It cannot be combined with a fixed PR,
+merge queue or merge-candidate options.
+
+`--workflow-max-pull-requests` accepts 1–64 and defaults to 64. The limit applies
+to the durable retained inventory, including closed or hidden PRs. New members
+are persisted before their custody can acquire execution responsibility; every
+retained member's original custody is checked before restart readiness.
+Incomplete discovery or insufficient capacity refuses new admission, and
+unknown execution stops the controller. The execution acknowledgement covers
+scripts from every current and future eligible PR. See the
+[collection guide](NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md) for complete
+commands, current visibility, recovery and the bounded retention profile.
+
 ### Execute the actual merge or squash candidate
 
 Add the explicit merge-candidate option group to test the combined PR tree:
@@ -147,6 +166,91 @@ service. No target landing, queue-management grant or remote execution endpoint
 is implied. See the [queue candidate CI guide](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md)
 for complete commands, exact check/landing coordinates and recovery behavior.
 
+### File outputs and dependent jobs
+
+The owned HTTP controller can capture exact output files and deliver them to
+direct dependent jobs using the same contract as foreground `fg workflow`
+commands. For example, commit this workflow as `ci/build.yml`:
+
+```yaml
+name: build and test
+on: push
+jobs:
+  build:
+    runs-on: fgit-trusted-local
+    steps:
+      - run: printf 'build-output\n' > package.bin
+  test:
+    needs: build
+    runs-on: fgit-trusted-local
+    steps:
+      - run: test -s .fgit-artifacts/package.bin; cp .fgit-artifacts/package.bin tested.bin
+```
+
+Configure the producer output, consumer input and optional tested output when
+starting the service:
+
+```sh
+fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
+  --trusted-local --credentials-file /private/http-credentials \
+  --continuous --stop-file /private/control/http.stop \
+  --expected-incarnation INCARNATION \
+  --workflow-trusted-local --workflow-format sha256 \
+  --workflow-ref refs/heads/main --workflow-dir ci --workflow-input ci \
+  --workflow-run-parent /private/runs \
+  --workflow-publish-checks --workflow-principal CHECK_PUBLISHER \
+  --artifact-root /private/artifacts \
+  --workflow-artifact ci/build.yml:build:package.bin \
+  --workflow-artifact ci/build.yml:test:tested.bin \
+  --workflow-artifact-input ci/build.yml:test:build:package.bin:package.bin \
+  --workflow-artifact-logs
+```
+
+Create the run and artifact roots as private `0700` directories before starting.
+Output selectors are `workflow:job:output`; input selectors are
+`workflow:consumer:producer:output:destination`. They are repeatable, with at
+most 64 output selections and 64 input selections. Matrix jobs use their exact
+expanded IDs. For raw path bytes, use `--workflow-artifact-hex` and
+`--workflow-artifact-input-hex`: encode each path field as hexadecimal and keep
+the job fields as their ASCII IDs. Duplicate output selections, overlapping
+consumer destinations and invalid paths refuse before the listener starts.
+
+Every input must name an explicitly captured output from the consumer's direct
+`needs` dependency. The native dispatcher validates that relationship against
+the selected workflow before starting jobs. After a successful producer closes,
+the consumer receives verified copies in its fresh `.fgit-artifacts/` namespace.
+The original producer workspace is already gone. Source paths cannot be
+overwritten, and inputs from a failed producer or another attempt cannot supply
+successful dependency evidence. Missing, unsafe or oversized selected outputs
+prevent producer success; input verification or delivery exhaustion prevents
+the consumer from starting. Original failure/refusal conclusions remain in the
+normal canonical check publication path.
+
+| Server flag | Default | Accepted MiB |
+|---|---:|---:|
+| `--workflow-max-artifact-mib` | 16 | 1–64 |
+| `--workflow-max-artifact-total-mib` | 64 | 1–512 |
+| `--workflow-max-artifact-input-total-mib` | 64 | 1–512 |
+
+Files and logs share the capture allowance across all selected workflows in
+one dispatch. Every delivered copy charges the separate cumulative input
+allowance, including fan-out. An input limit requires explicit input selections;
+capture limits require file selectors or log capture. The combined input/output
+path limit is 64 KiB. Supplying only `--artifact-root` keeps the existing
+download-only behavior and does not enable workflow capture.
+
+Saved `report.json`, per-job artifact receipts and input receipts identify the
+original output, producing manifest, source, run and exact delivered
+destination. Their artifact IDs can be read through
+`GET /api/v1/artifacts/ID` and `GET /api/v1/artifacts/ID/content`. Each HTTP read
+verifies immutable custody and bytes and requires the independent
+`artifact-read` grant. A Git/source read grant cannot disclose artifacts, and
+configuring local capture does not add a token grant. The artifact permission
+covers the entire configured repository-incarnation namespace, including
+hidden-ref outputs. Retaining the node, run parent and artifact root permits
+restart to serve those same bytes and recover original checks without rerunning
+scripts. Artifact custody does not authorize deterministic cache reuse.
+
 ### Retained logs
 
 Optional `--workflow-artifact-logs --artifact-root /private/artifacts` captures
@@ -155,8 +259,8 @@ are 16 MiB per payload and 64 MiB cumulative payloads per dispatch. Logs may
 contain secrets printed by trusted scripts; they are not redacted. The HTTP
 artifact surface still requires the independent `artifact-read` scope. See
 [HTTP workflow artifacts](HTTP_WORKFLOW_ARTIFACTS.md) for its entire-incarnation
-disclosure boundary. The dedicated foreground workflow commands retain their
-additional explicit file-capture and artifact-input options.
+disclosure boundary. The server file-capture and artifact-input options above
+use the same native contracts as the dedicated foreground workflow commands.
 
 ## Readiness, stop and recovery
 
@@ -176,8 +280,12 @@ reports observed execution/check counts, non-green results, interruption,
 reconciliation, publication pending, and node/service failure separately.
 
 An ordinary failed build can settle and the service can execute a later source
-event. Unknown or interrupted execution, corrupt custody, incomplete publication
-or a worker failure stops the service. An idle clean stop exits 0. A requested
+event. A cooperatively cancelled build also settles when native owners prove
+process, workspace and shared-input closure: one bounded terminal handoff keeps
+its original cancelled checks for the next live publisher. Restart uses those
+same receipts and never reruns the original scripts. Unknown or unclosed
+execution, corrupt custody, incomplete publication or a worker failure stops
+the service. An idle clean stop exits 0. A requested
 shutdown that drains normally but reports non-green execution, interruption,
 unresolved custody or known pending publication exits 1. Startup, controller
 operation (including an exhausted attempt), output or cleanup failure exits 2.
@@ -195,6 +303,12 @@ no script execution or CI-ref publication. See
 [native-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md) for its finite
 verification profile.
 
+Stopped dispatch handoffs bind the original selected count, terminal reason and
+exact dispatch-plan digest. This also supports a stopped dispatch that selected
+work but terminated before its first child, when that explicit terminal record
+exists. Missing children alone do not prove a stop. An interruption during
+earlier source discovery or an unfinished execution owner remains fenced.
+
 For new merge-candidate events, startup may also defer a versioned intent whose
 original scope, candidate artifacts and complete execution configuration verify
 and whose execution-start fence and dispatch directories are absent. Such an
@@ -209,12 +323,14 @@ Source index maintenance can run alongside CI with its existing explicit flags.
 Both workers belong to the same listener's stop/drain path; enabling CI grants
 no source access and does not replace index progress ownership.
 
-## Focused candidate-service test entrypoints
+## Focused service test entrypoints
 
 ```sh
 cargo test --locked -p fgit-cli --bin fg smart_http_server::workflow
 cargo test --locked -p fgit-cli --test workflow_pull_request_merge -- --test-threads=1
+cargo test --locked -p fgit-cli --test workflow_http_artifacts -- --test-threads=1
 FG_BIN=/absolute/path/to/fg scripts/e2e/suites/workflow/pull_request_merge_service.sh
+FG_BIN=/absolute/path/to/fg scripts/e2e/suites/workflow/http_artifacts.sh
 ```
 
 The actual-process campaign covers both Git object formats and both candidate
@@ -222,3 +338,10 @@ styles, readiness-output failure before ref publication, independent HTTP grants
 canonical candidate checks through HTTP, ordered shutdown and restart without
 reexecution. These are test definitions and entrypoints; they do not claim a
 native pass for a revision that has not executed them.
+
+The artifact campaign uses actual `fg` processes in both Git hash formats. It
+covers binary producer/consumer delivery after workspace cleanup, exact original
+checks, independently authorized HTTP metadata/downloads and live credential
+revocation, fresh-server restart without execution replay, and failed, missing,
+oversized or delivery-budget-exhausted outputs. The campaign's presence and type
+checking alone do not establish a native execution result.

@@ -8,6 +8,7 @@ pub(super) fn policy() -> ReviewProtection {
         ref_policy: None,
         administrators: vec![actor(1)],
         branches: vec![ProtectedBranch {
+            required_candidate_checks: Vec::new(),
             require_merge_queue: false,
             required_checks: Vec::new(),
             name: RefName::try_new(b"refs/heads/main").unwrap(),
@@ -160,6 +161,7 @@ fn policy_order_duplicates_namespace_and_capacity_are_checked_before_use() {
     p = policy();
     p.branches = (0..MAX_PROTECTED_BRANCHES)
         .map(|i| ProtectedBranch {
+            required_candidate_checks: Vec::new(),
             require_merge_queue: false,
             required_checks: Vec::new(),
             name: RefName::try_new(format!("refs/heads/b{i:02}").as_bytes()).unwrap(),
@@ -169,6 +171,7 @@ fn policy_order_duplicates_namespace_and_capacity_are_checked_before_use() {
         .collect();
     p.validate().unwrap();
     p.branches.push(ProtectedBranch {
+        required_candidate_checks: Vec::new(),
         require_merge_queue: false,
         required_checks: Vec::new(),
         name: RefName::try_new(b"refs/heads/zz").unwrap(),

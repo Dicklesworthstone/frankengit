@@ -57,6 +57,7 @@ fn quorum_is_a_required_new_kind_and_mixed_rules_keep_all_counts_and_checks() {
     let mut settings = quorum_policy();
     settings.branches[0].required_checks.push(required_check());
     settings.branches.push(ProtectedBranch {
+        required_candidate_checks: Vec::new(),
         require_merge_queue: false,
         name: RefName::try_new(b"refs/heads/release").unwrap(),
         reviewers: vec![actor(8)],
@@ -64,6 +65,7 @@ fn quorum_is_a_required_new_kind_and_mixed_rules_keep_all_counts_and_checks() {
         required_checks: Vec::new(),
     });
     settings.branches.push(ProtectedBranch {
+        required_candidate_checks: Vec::new(),
         require_merge_queue: false,
         name: RefName::try_new(b"refs/heads/staging").unwrap(),
         reviewers: Vec::new(),

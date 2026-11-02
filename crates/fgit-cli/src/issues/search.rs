@@ -1,7 +1,7 @@
 //! Snapshot-pinned issue search using canonical issue pages, not a local index.
 use super::options::{self, Operation};
 use fgit_forge::event::issue::{
-    CompiledIssueQuery, IssueQuery, IssueState, MAX_BODY_BYTES, MAX_LABELS,
+    CompiledIssueQuery, IssueQuery, IssueState, MAX_BODY_BYTES, MAX_LABELS, MilestoneFilter,
 };
 use fgit_forge::issue_search::{self, MAX_SCAN, SearchRequest, SourcePage};
 use fgit_node::{NodeConfig, OneNode};
@@ -12,6 +12,7 @@ const USAGE: &str =
     "usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-local
   [--query <literal>] [--case-sensitive] [--state open|closed|all]
   [--opened-by <principal-id>] [--label <exact-label>]...
+  [--milestone <number|none>]
   [--limit <1..100>] [--max-scan <1..1000>]
   [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 
@@ -70,7 +71,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         }
         let filter = matches!(
             flag,
-            "--query" | "--state" | "--opened-by" | "--label" | "--max-scan"
+            "--query" | "--state" | "--opened-by" | "--label" | "--max-scan" | "--milestone"
         );
         if !filter
             && !matches!(
@@ -116,7 +117,19 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         return Err("--case-sensitive requires --query".into());
     }
     labels.sort();
-    let query = IssueQuery { state, opened_by, labels, text, case_sensitive }.compile()
+    let milestone = flags
+        .get("--milestone")
+        .map(|value| {
+            if *value == "none" {
+                Ok(MilestoneFilter::Unassigned)
+            } else {
+                fgit_forge::MilestoneNumber::try_new(options::decimal(value)?)
+                    .map(MilestoneFilter::Number)
+                    .ok_or_else(|| "milestone number must be positive".to_owned())
+            }
+        })
+        .transpose()?;
+    let query = IssueQuery { state, opened_by, labels, text, case_sensitive, milestone }.compile()
         .map_err(|_| "invalid issue search query or labels (labels must be unique; text is 1..256 UTF-8 bytes without NUL)")?;
     let max_scan = flags
         .get("--max-scan")

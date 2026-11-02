@@ -11,6 +11,8 @@ use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName, RefusalCode};
 
 use crate::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventPayload};
 
+pub mod candidate;
+
 pub const MAX_CHECK_JOB_BYTES: usize = 1024;
 pub const MAX_CHECK_EVIDENCE_BYTES: usize = 1024 * 1024;
 const ID_DOMAIN: &[u8] = b"frankengit/trusted-workflow-check/v1\0";
@@ -151,49 +153,64 @@ pub struct NativeWorkflowCheck {
 impl NativeWorkflowCheck {
     #[must_use]
     pub fn id(&self) -> WorkflowCheckId {
-        // The complete job-name digest keeps this derivation's scratch space
-        // fixed-size even for an unvalidated public value. No nonce truncation.
-        let mut out = [0_u8; ID_DOMAIN.len() + 16 + 32 + 32 + 32];
-        let mut cursor = 0;
-        let job = fgit_crypto::sha256_digest(self.record.job.as_bytes());
-        for part in [
-            ID_DOMAIN,
-            self.actor.as_bytes().as_slice(),
-            self.record.run_id.as_slice(),
-            self.record.attempt_id.as_slice(),
-            job.as_slice(),
-        ] {
-            out[cursor..cursor + part.len()].copy_from_slice(part);
-            cursor += part.len();
-        }
-        WorkflowCheckId(fgit_crypto::sha256_digest(&out))
+        execution_id(self.actor, &self.record)
     }
 
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.record.validate()?;
         out.write_opaque_id(self.actor.as_bytes());
-        out.write_bytes(
-            "workflow_check.source_ref",
-            self.record.source_ref.as_bytes(),
-        )?;
-        out.write_git_oid(&self.record.source_commit);
-        out.write_bytes("workflow_check.run", &self.record.run_id)?;
-        out.write_bytes("workflow_check.attempt", &self.record.attempt_id)?;
-        out.write_bytes("workflow_check.graph", &self.record.graph_root)?;
-        out.write_bytes("workflow_check.job", self.record.job.as_bytes())?;
-        out.write_scalar(match self.record.conclusion {
+        self.record.write(out)
+    }
+
+    pub(super) fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let actor = PrincipalId::from_bytes(input.read_opaque_id("workflow_check.actor")?);
+        Ok(Self {
+            actor,
+            record: WorkflowCheckRecord::read(input)?,
+        })
+    }
+}
+
+fn execution_id(actor: PrincipalId, record: &WorkflowCheckRecord) -> WorkflowCheckId {
+    // The complete job-name digest keeps this derivation's scratch space
+    // fixed-size even for an unvalidated public value. No nonce truncation.
+    let mut out = [0_u8; ID_DOMAIN.len() + 16 + 32 + 32 + 32];
+    let mut cursor = 0;
+    let job = fgit_crypto::sha256_digest(record.job.as_bytes());
+    for part in [
+        ID_DOMAIN,
+        actor.as_bytes().as_slice(),
+        record.run_id.as_slice(),
+        record.attempt_id.as_slice(),
+        job.as_slice(),
+    ] {
+        out[cursor..cursor + part.len()].copy_from_slice(part);
+        cursor += part.len();
+    }
+    WorkflowCheckId(fgit_crypto::sha256_digest(&out))
+}
+
+impl WorkflowCheckRecord {
+    fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        self.validate()?;
+        out.write_bytes("workflow_check.source_ref", self.source_ref.as_bytes())?;
+        out.write_git_oid(&self.source_commit);
+        out.write_bytes("workflow_check.run", &self.run_id)?;
+        out.write_bytes("workflow_check.attempt", &self.attempt_id)?;
+        out.write_bytes("workflow_check.graph", &self.graph_root)?;
+        out.write_bytes("workflow_check.job", self.job.as_bytes())?;
+        out.write_scalar(match self.conclusion {
             WorkflowCheckConclusion::ActionRequired => 1_u32,
             WorkflowCheckConclusion::Failure => 2,
             WorkflowCheckConclusion::Cancelled => 3,
             WorkflowCheckConclusion::TimedOut => 4,
             WorkflowCheckConclusion::Success => 5,
         });
-        out.write_bytes("workflow_check.evidence", &self.record.evidence)?;
+        out.write_bytes("workflow_check.evidence", &self.evidence)?;
         Ok(())
     }
 
-    pub(super) fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        let actor = PrincipalId::from_bytes(input.read_opaque_id("workflow_check.actor")?);
+    fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let source_ref = RefName::try_new(input.read_bytes("workflow_check.source_ref")?)?;
         let source_commit = input.read_git_oid()?;
         let run_id = array(input, "workflow_check.run")?;
@@ -222,19 +239,16 @@ impl NativeWorkflowCheck {
             return Err(super::invalid_native("workflow_check.evidence"));
         }
         let value = Self {
-            actor,
-            record: WorkflowCheckRecord {
-                source_ref,
-                source_commit,
-                run_id,
-                attempt_id,
-                graph_root,
-                job,
-                conclusion,
-                evidence: evidence.to_vec(),
-            },
+            source_ref,
+            source_commit,
+            run_id,
+            attempt_id,
+            graph_root,
+            job,
+            conclusion,
+            evidence: evidence.to_vec(),
         };
-        value.record.validate()?;
+        value.validate()?;
         Ok(value)
     }
 }
@@ -250,14 +264,25 @@ pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
         != matches!(
             event.payload,
             ForgeEventPayload::WorkflowCheckObservedNative(_)
+                | ForgeEventPayload::CandidateWorkflowCheckObservedNative(_)
         )
     {
         return Err(super::invalid_native("workflow_check.aggregate_kind"));
     }
-    if let ForgeEventPayload::WorkflowCheckObservedNative(change) = &event.payload {
-        change.record.validate()?;
+    let id = match &event.payload {
+        ForgeEventPayload::WorkflowCheckObservedNative(change) => {
+            change.record.validate()?;
+            Some(change.id())
+        }
+        ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => {
+            change.record.validate()?;
+            Some(change.id())
+        }
+        _ => None,
+    };
+    if let Some(id) = id {
         if event.version != AggregateVersion::FIRST
-            || event.aggregate != AggregateId::WorkflowCheck(change.id())
+            || event.aggregate != AggregateId::WorkflowCheck(id)
         {
             return Err(super::invalid_native("workflow_check.aggregate_version"));
         }

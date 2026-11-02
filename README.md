@@ -92,9 +92,15 @@ or have-reduced selections when their selected or proven held bases suffice.
 The combined graph and aggregate limits are rechecked, and receipts distinguish
 whole-run, selective, self-contained and thin responses. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
-its own representation receipt. This bounded process-local capability is
-described in the [received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md);
-restarting the service discards it. Up to 64 received representations share the
+its own representation receipt. Native idx/pack directory imports can retain
+eligible source packs through the same contract, including several packs per
+import. Capture uses the original verified read and requires every entry to
+match the accepted closure's actual strong placement commitment. On Unix,
+optional persisted custody survives service restart; a fresh process must
+revalidate its native objects and canonical payload commitments before reuse.
+Cold validation still reads expanded canonical bodies. See the
+[received-pack reuse guide](docs/VERIFIED_RECEIVED_PACK_REUSE.md).
+Up to 64 received representations share the
 same byte budget, and bounded cover selection preserves disjoint incremental
 histories without enumerating every possible source combination.
 Network packs also group related versions using verified raw tree-entry
@@ -208,6 +214,50 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_clone.sh`; the raw receive campaign is pinned separately by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
+
+### Automatic native PR checks
+
+On Linux, `fg serve-http --workflow-pull-requests` discovers visible open
+same-repository PRs targeting the fixed `--workflow-ref` and services their
+source-head workflows in rotating order. The operator supplies the execution
+inputs, trusted host acknowledgement, repository incarnation, retained-member
+limit and optional canonical check publisher. Durable membership keeps each
+PR's original execution and reporting responsibility across closure, visibility
+changes and restart. A member with unknown execution blocks the controller;
+discovery never admits a partial scan or silently drops an old member. See the
+[native PR collection guide](docs/NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md)
+for setup, trust scope, capacity and recovery. Exact merge-candidate execution
+continues through the explicit fixed-PR and queue profiles.
+
+### Reuse verified packs in bundle exports
+
+Streaming full and incremental bundle exports accept `--reuse-verified-packs`
+to preserve eligible received or imported compression and deltas. The node
+verifies the exact visible selection and declared prerequisite bases before
+copying a representation. Distinct receipts report a reuse hit or a fallback
+to the existing deterministic encoder; the default export bytes and receipts
+are unchanged. Durable custody supports revalidation after restart. See
+[verified bundle representation reuse](docs/NATIVE_GIT_BUNDLE_REUSE.md) for
+commands, output limits, incremental bases and the remaining cold-validation
+cost.
+
+### Native milestone planning
+
+`fg milestone` now opens, edits, closes and reopens repository milestones with
+descriptions and optional due dates. Issues can join, move between or leave
+milestones through explicit versioned commands. Lists and history include open
+and closed issue counts from one selected authority snapshot; continuation keeps
+that snapshot even as other writers change the repository. The authenticated
+HTTP API and MCP expose the same operations under the existing independent issue
+read/write grants. See [native milestones](docs/NATIVE_MILESTONES.md) for commands,
+membership preconditions, retry behavior and the current migration boundary.
+
+Native issue archives can also retain milestones and complete membership history
+with `archive_native_issues.mjs export --include-milestones`. The
+[migration command](docs/NATIVE_ISSUE_IMPORT.md#preserve-milestones-with-an-explicit-number-map)
+accepts an explicit milestone number map, opens the destination milestones before
+importing issues, and closes source-closed milestones afterward. Preparation is
+offline; interrupted execution recovers the original saved requests and keys.
 
 ### Native issue discussion controls
 

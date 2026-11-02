@@ -68,6 +68,7 @@ mod upload_refusal;
 #[cfg(target_os = "linux")]
 pub mod workflow_artifacts;
 pub use treefs_workspace::IssueReadRefusal;
+pub use treefs_workspace::MilestoneReadRefusal;
 pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
     BundleInspectionRefusal, PullRequestInspectionRefusal,
@@ -100,7 +101,8 @@ pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
 pub use treefs_workspace::{
-    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
+    StreamBundleExportRefusal, StreamBundleReuse,
     StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
 };
 

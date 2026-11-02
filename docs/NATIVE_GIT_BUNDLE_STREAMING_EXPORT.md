@@ -5,6 +5,11 @@ retaining a payload-bearing `PackPlan` or a complete output buffer. It supports
 bundle v2/SHA-1 and bundle v3/SHA-256 through the existing pure-Rust native object,
 hashing, pack-header and DEFLATE implementations.
 
+This remains the default deterministic profile. Streaming full and incremental
+exports can explicitly opt into [verified representation reuse](NATIVE_GIT_BUNDLE_REUSE.md)
+with `--reuse-verified-packs`; eligible native compression and deltas then use a
+distinct receipt, with a reported fallback to this encoder on a cache miss.
+
 ## Library contract
 
 `fgit_pack::full_bundle::stream::write_full_bundle_stream` accepts direct ref

@@ -105,8 +105,15 @@ pub fn prepare_event(
         ForgeEventPayload::IssueChangedNative(_) => {
             matches!(event.aggregate, fgit_forge::AggregateId::Issue(_))
         }
+        ForgeEventPayload::MilestoneChangedNative(_) => {
+            matches!(event.aggregate, fgit_forge::AggregateId::Milestone(_))
+        }
         ForgeEventPayload::ReviewProtectionChanged(_) => {
             event.aggregate == fgit_forge::AggregateId::ReviewProtection
+        }
+        ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => {
+            event.aggregate == fgit_forge::AggregateId::WorkflowCheck(change.id())
+                && event.version == fgit_forge::AggregateVersion::FIRST
         }
         ForgeEventPayload::WorkflowCheckObservedNative(change) => {
             event.aggregate == fgit_forge::AggregateId::WorkflowCheck(change.id())
@@ -218,6 +225,44 @@ pub fn prepare_event(
                 None,
             )
         }
+        ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => {
+            let (expected, sealed) =
+                super::native::workflow_checks::candidate::proposal(context, &change.record)
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if expected != *event || sealed != *attempt {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            let subject = &change.record.subject;
+            let pr = AsciiSlug::try_new(
+                "forge_stream",
+                fgit_forge::AggregateId::PullRequest(subject.pull_request)
+                    .to_string()
+                    .as_bytes(),
+            )
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if subject.policy_epoch != basis.body().policy_epoch
+                || resolved
+                    .forge
+                    .entry(pr)
+                    .map(|entry| entry.successor_position())
+                    != Some(subject.pull_request_version.get())
+            {
+                return Err(RefusalCode::EvidenceStale);
+            }
+            if resolved.refs.refs().get(&subject.source_ref) != Some(&subject.source_tip)
+                || resolved.refs.refs().get(&subject.target_ref) != Some(&subject.target_tip)
+            {
+                return Err(RefusalCode::TargetRefMoved);
+            }
+            (
+                ForgeEventKind::WorkflowCheckObserved {
+                    check: entity,
+                    source: subject.target_ref.clone(),
+                },
+                vec![subject.source_tip, subject.target_tip],
+                None,
+            )
+        }
         ForgeEventPayload::WorkflowCheckObservedNative(change) => {
             // Bind the actual event, actor and inline evidence to this exact
             // original seal, not merely to a well-formed request of any kind.
@@ -272,11 +317,42 @@ pub fn prepare_event(
                 return Err(RefusalCode::EvidenceInvalid);
             }
             verify_issue_seal(context, event, attempt)?;
+            // A selected milestone is a second exact predecessor in this same
+            // authority basis. Its open-state replay is owned by admission;
+            // this independent preparation gate also binds its frontier.
+            if let fgit_forge::event::issue::IssueAction::SetMilestone {
+                milestone,
+                expected_milestone_version,
+            } = &change.action
+            {
+                let milestone_stream = AsciiSlug::try_new(
+                    "forge_stream",
+                    fgit_forge::AggregateId::Milestone(*milestone).to_string().as_bytes(),
+                )
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                if resolved.forge.entry(milestone_stream)
+                    .map(|entry| entry.successor_position())
+                    != Some(expected_milestone_version.get())
+                {
+                    return Err(RefusalCode::EvidenceStale);
+                }
+            }
             (
                 ForgeEventKind::IssueChanged { issue: entity },
                 Vec::new(),
                 None,
             )
+        }
+        ForgeEventPayload::MilestoneChangedNative(change) => {
+            change.action.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            super::native::milestones::verify_event_seal(context, event, attempt)?;
+            (ForgeEventKind::MilestoneChanged { milestone: entity }, Vec::new(), None)
         }
         ForgeEventPayload::MergeCommittedNative(merge) => {
             merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;

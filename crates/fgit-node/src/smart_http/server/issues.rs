@@ -2,6 +2,7 @@
 //! the existing issue admission driver owns seals, policy, RCR/outbox state,
 //! exact-version decisions and retry recovery. No HTTP-local issue state exists.
 
+mod milestones;
 mod output;
 mod rendered;
 mod request;
@@ -347,7 +348,45 @@ pub(super) fn execute(
                 terminal: None,
             })
         }
-        Operation::Mutate { .. } => {
+        Operation::MilestoneList(page) => {
+            let result = drive_request_while(
+                node,
+                &context,
+                node.read_milestones_in(&context, page.after, page.limit, page.expected_head),
+                &mut live,
+            )
+            .map_err(milestones::read_error)?;
+            Ok(Reply {
+                status: Status::Success,
+                body: milestones::list(node, *page, &result, maximum)?,
+                terminal: None,
+            })
+        }
+        Operation::MilestoneShow { number, page } => {
+            let result = drive_request_while(
+                node,
+                &context,
+                node.read_milestone_history_in(
+                    &context,
+                    *number,
+                    page.after,
+                    page.limit,
+                    page.expected_head,
+                ),
+                &mut live,
+            )
+            .map_err(milestones::read_error)?;
+            Ok(Reply {
+                status: if result.milestone.is_some() {
+                    Status::Success
+                } else {
+                    Status::NotFound
+                },
+                body: milestones::history(node, *number, *page, &result, maximum)?,
+                terminal: None,
+            })
+        }
+        Operation::Mutate { .. } | Operation::MilestoneMutate { .. } => {
             let command = command.ok_or_else(|| ApiError::bad("missing_command"))?;
             let result = match &command {
                 Command::Versioned(command) => {
@@ -372,6 +411,22 @@ pub(super) fn execute(
                     ),
                     &mut live,
                 ),
+                Command::Milestone(command) => {
+                    command
+                        .proposed_event(principal)
+                        .map_err(|_| ApiError::bad("invalid_milestone_command"))?;
+                    drive_request_while(
+                        node,
+                        &context,
+                        node.admit_milestone_durable_in(
+                            &context,
+                            session,
+                            command,
+                            Default::default(),
+                        ),
+                        &mut live,
+                    )
+                }
             };
             let (tx, terminal) = result.map_err(admission_error)?;
             let body = output::mutation(node, principal, &command, tx, terminal);

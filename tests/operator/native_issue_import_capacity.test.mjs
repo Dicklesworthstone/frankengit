@@ -13,6 +13,17 @@ function view(count) {
     records: fixtureIssues(count).map(row => ({ snapshot: snapshot(row), comments: row.events.filter(e => e.action.name === 'comment')
       .map(e => ({ version: e.version, actor: e.actor, body: e.action.body })) })) };
 }
+test('null membership preserves capture bytes while native targets explicitly refuse migration', () => {
+  const original=view(3), expected=partitionNativeIssueArchive(original);
+  const unassigned=structuredClone(original);
+  for (const row of unassigned.records) row.snapshot.milestone=null;
+  assert.deepEqual(partitionNativeIssueArchive(unassigned).map(part=>part.bytes),expected.map(part=>part.bytes));
+  assert.ok(unassigned.records.every(row=>Object.hasOwn(row.snapshot,'milestone')));
+  const assigned=structuredClone(original); assigned.records[0].snapshot.milestone=7;
+  assert.throws(()=>partitionNativeIssueArchive(assigned),/milestones_unsupported/);
+  const capture=parseNativeIssueCapture(expected[0].bytes); capture.issues[0].snapshot.milestone=7;
+  assert.throws(()=>nativeCaptureBytes(capture),/milestones_unsupported/);
+});
 test('4096 issues partition completely in deterministic canonical membership order', () => {
   const v = view(4096), first = partitionNativeIssueArchive(v, 100000), second = partitionNativeIssueArchive(v, 100000);
   assert.equal(first.length, 41); assert.equal(first.at(-1).issues.length, 96);
@@ -106,10 +117,12 @@ test('capture dialects have distinct strict lock fields and canonical bytes', ()
   assert.throws(() => nativeCaptureBytes(reordered), /encoding/);
   const duplicate = part.bytes.toString().replace('"locked":true', '"locked":false,"locked":true');
   assert.throws(() => parseNativeIssueCapture(Buffer.from(duplicate)), /encoding/);
-  for (const schema of ['frankengit-native-issue-capture-v0', 'frankengit-native-issue-capture-v3',
+  for (const schema of ['frankengit-native-issue-capture-v0', 'frankengit-native-issue-capture-v4',
     'frankengit-github-issue-capture-v1']) {
     assert.throws(() => nativeCaptureBytes({ ...capture, schema }), /schema/);
   }
+  assert.throws(() => nativeCaptureBytes({ ...capture, schema: 'frankengit-native-issue-capture-v3' }),
+    /fields/, 'a v2 package cannot acquire milestone semantics by relabelling its schema');
   const legacy = structuredClone(capture); legacy.schema = NATIVE_CAPTURE_SCHEMA;
   assert.throws(() => nativeCaptureBytes(legacy), /fields/, 'v1 cannot carry an ignored moderation coordinate');
   for (const issue of legacy.issues) delete issue.snapshot.locked;

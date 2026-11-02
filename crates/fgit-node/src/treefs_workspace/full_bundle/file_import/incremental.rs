@@ -21,9 +21,9 @@ use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefName};
 
 use crate::receive_staging::ReceiveStaging;
+use crate::received_pack::placement::PlacementBoundPack;
 use crate::source_retrieval::integrity::bundle_verify::{
-    BundleOriginalSource, BundleVerifyError, prepare_incremental_bundle_fetch_reader,
-    prepare_incremental_bundle_import_reader,
+    BundleOriginalSource, BundleVerifyError, prepare_incremental_bundle_reader_capturing,
 };
 use crate::{LoopbackReceiveSession, NodeRequestContext, OneNode};
 
@@ -381,13 +381,15 @@ impl OneNode {
             std::random::random::<u128>(..),
         ));
         let mut plan = match intake {
-            IncrementalIntake::Synchronize(_) => prepare_incremental_bundle_import_reader(
+            IncrementalIntake::Synchronize(_) => prepare_incremental_bundle_reader_capturing(
                 input,
                 self.object_format,
                 &scratch,
                 &mut originals,
                 maximum_original_bytes,
+                None,
                 &query.limits,
+                self.received_pack_cache(),
                 live,
             )?,
             IncrementalIntake::Fetch(mappings) => {
@@ -395,18 +397,20 @@ impl OneNode {
                     .iter()
                     .map(|mapping| mapping.source.clone())
                     .collect();
-                prepare_incremental_bundle_fetch_reader(
+                prepare_incremental_bundle_reader_capturing(
                     input,
                     self.object_format,
                     &scratch,
                     &mut originals,
                     maximum_original_bytes,
-                    &sources,
+                    Some(&sources),
                     &query.limits,
+                    self.received_pack_cache(),
                     live,
                 )?
             }
         };
+        let mut captured = plan.take_received_pack();
         let staging = ReceiveStaging::default();
         let prepared = (|| {
             checkpoint(live)?;
@@ -455,6 +459,7 @@ impl OneNode {
                 &mut plan,
                 &staging,
                 query.limits.max_streamed_blob_bytes,
+                captured.as_mut(),
                 live,
             )?;
             let absent = match self.object_format {
@@ -523,6 +528,13 @@ impl OneNode {
             }
         };
         checkpoint(live)?;
+        if let Some(pending) = captured.and_then(PlacementBoundPack::complete) {
+            staging
+                .retain_received_pack(pending.with_persistence(self.durable_received_pack_store()))
+                .map_err(|code| {
+                    receive_error(fgit_wire::receive::ReceiveError::AuthoritativeRefusal(code))
+                })?;
+        }
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,

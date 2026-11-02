@@ -47,6 +47,13 @@ fn all_legacy_issue_actions_bind_the_exact_event_and_predecessor() {
         IssueAction::Unassign {
             assignees: vec![context.principal_id],
         },
+        IssueAction::Lock,
+        IssueAction::Unlock,
+        IssueAction::SetMilestone {
+            milestone: fgit_forge::MilestoneNumber::FIRST,
+            expected_milestone_version: AggregateVersion::FIRST,
+        },
+        IssueAction::ClearMilestone,
     ] {
         let command = IssueCommand {
             number: IssueNumber::FIRST,
@@ -68,6 +75,36 @@ fn all_legacy_issue_actions_bind_the_exact_event_and_predecessor() {
             Err(RefusalCode::EvidenceInvalid)
         );
     }
+}
+
+#[test]
+fn membership_seals_bind_the_selected_milestone_and_its_exact_version() {
+    let context = context();
+    let command = IssueCommand {
+        number: IssueNumber::FIRST,
+        expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+        action: IssueAction::SetMilestone {
+            milestone: fgit_forge::MilestoneNumber::FIRST,
+            expected_milestone_version: AggregateVersion::FIRST,
+        },
+    };
+    let (event, seal) = proposal(&context, &command).unwrap();
+    for (number, version) in [(2, 1), (1, 2)] {
+        let mut changed = command.clone();
+        changed.action = IssueAction::SetMilestone {
+            milestone: fgit_forge::MilestoneNumber::try_new(number).unwrap(),
+            expected_milestone_version: AggregateVersion::try_new(version).unwrap(),
+        };
+        assert_eq!(
+            verify_issue_seal(
+                &context,
+                &changed.proposed_event(context.principal_id).unwrap(),
+                &seal
+            ),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+    }
+    assert_eq!(verify_issue_seal(&context, &event, &seal), Ok(()));
 }
 
 #[test]

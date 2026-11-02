@@ -74,6 +74,10 @@ forge_counter!(
     "Repository-scoped issue identity, distinct from a pull request number."
 );
 forge_counter!(
+    MilestoneNumber,
+    "Repository-scoped milestone identity, distinct from an issue number."
+);
+forge_counter!(
     OrganisationNumber,
     "Tenant-scoped number identifying one organisation aggregate."
 );
@@ -139,8 +143,7 @@ impl fmt::Display for ExpectedVersion {
 /// Widening the slot to carry a tag unconditionally would have changed every
 /// one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum AggregateId {
-    /// One repository-scoped review-protection policy stream.
+pub enum AggregateId {    /// One repository-scoped review-protection policy stream.
     ReviewProtection,
     /// One pull request. Encoded bare, with no tag.
     PullRequest(PullRequestNumber),
@@ -163,6 +166,8 @@ pub enum AggregateId {
     /// Append-only PR conversation. Discussion never advances the PR content
     /// or reviewer streams, so an ordinary comment cannot invalidate a vote.
     PullRequestConversation(PullRequestNumber),
+    /// A repository milestone; issue membership is owned by each issue stream.
+    Milestone(MilestoneNumber),
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -180,6 +185,12 @@ pub(crate) const AGGREGATE_KIND_MERGE_QUEUE: u32 = 6;
 pub(crate) const AGGREGATE_KIND_WORKFLOW_CHECK: u32 = 7;
 /// Conversation stream; established aggregate encodings are unchanged.
 pub(crate) const AGGREGATE_KIND_PULL_REQUEST_CONVERSATION: u32 = 8;
+pub(crate) const AGGREGATE_KIND_MILESTONE: u32 = 9;
+impl From<MilestoneNumber> for AggregateId {
+    fn from(number: MilestoneNumber) -> Self {
+        Self::Milestone(number)
+    }
+}
 impl From<IssueNumber> for AggregateId {
     fn from(number: IssueNumber) -> Self {
         Self::Issue(number)
@@ -225,6 +236,7 @@ impl fmt::Display for AggregateId {
             Self::MergeQueue(number) => write!(formatter, "queue/{number}"),
             Self::WorkflowCheck(id) => fmt::Display::fmt(id, formatter),
             Self::PullRequestConversation(number) => write!(formatter, "conversation/{number}"),
+            Self::Milestone(number) => write!(formatter, "milestone/{number}"),
         }
     }
 }

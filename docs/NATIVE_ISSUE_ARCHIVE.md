@@ -6,6 +6,13 @@ This is the outbound issue-data path, complementary to FG-049's GitHub import.
 It consumes the existing `IssueClient` and `issues-read` HTTP endpoints. It adds
 no database, native codec, mutation, permission, or alternate runtime to `fg`.
 
+The explicit `includeMilestones: true` option, or CLI `--include-milestones`,
+selects archive v2. It retains every visible milestone, its complete lifecycle
+history, and all issue membership history at the same pinned repository head.
+Use this profile for repositories that use milestones. The default v1 archive
+keeps its original bytes and refuses membership, including a historical set
+followed by clear; it cannot silently discard that history.
+
 ## Read one retained repository snapshot
 
 Supply the exact `/REPOSITORY_ROUTE/ui/issues/` URL, explicit tenant/repository
@@ -34,6 +41,8 @@ const checked = await inspectIssueArchive({
 ```
 
 The first list page selects the head, unless an explicit `head` was supplied.
+For v2 this is the milestone list; the issue list follows the complete milestone
+walk and uses that same head.
 Every subsequent list/history request uses that exact token. Native retained
 ancestor selection allows ordinary intervening writes without mixing snapshots.
 If the source no longer supports the selected ancestor, the export refuses; it
@@ -53,6 +62,14 @@ consistency check, not an independent authority implementation or an access gran
 Raw replies are retained as canonical JSON plus a newline; source text is data,
 not executable HTML. Rendering is not requested. Historical attribution does not
 turn into a local principal or permission.
+
+Archive v2 walks all milestones, including closed and unreferenced ones. It
+checks their title, body, due date, state, versions and actors against complete
+history. Every historical issue assignment must name an archived milestone and
+an existing open version of that milestone, even when the issue later cleared
+or moved its membership. Final membership must reproduce each milestone's
+same-head open/closed issue counts. These are additional consistency checks on
+the API observation, not a substitute for canonical native audit evidence.
 
 ## Root-last custody and offline inspection
 
@@ -86,6 +103,10 @@ and 64 MiB of local page-plus-manifest data. All may be lowered. The page size i
 1–100 (default 10); each response, saved page and manifest is at most 1 MiB.
 Select smaller pages for large bodies; oversized pages fail, never truncate.
 There are no automatic HTTP retries, mutable cursor sessions or snapshot leases.
+Archive v2 additionally permits at most 4,096 milestones. Both aggregate families
+share the existing request, event, byte and deadline budgets; selecting v2 does
+not double those allowances. `maxMilestones` / `--max-milestones` may lower its
+milestone limit and requires the explicit milestone profile.
 
 The package is a complete, self-consistent **observation through the native API**
 within these bounds and the credential's visibility. It is not a canonical
@@ -116,6 +137,14 @@ node scripts/archive_native_issues.mjs inspect \
 ```
 
 `--head` constrains even the first request to an already selected native token.
+Add `--include-milestones` to the export command to create
+`frankengit-issue-read-archive-v2`. Its result includes `schema_version: 2` and
+`milestones`; its page descriptors also bind the aggregate family. Inspection
+detects either format from its pinned manifest and needs no profile flag.
+Offline `readIssueArchive` returns the existing `{ archive, records }` view for
+v1 and adds `milestones: [{ snapshot, events }]` for v2, only after every page in
+both families validates. Milestone snapshots include the checked progress counts.
+
 `--max-requests`, `--max-issues`, `--max-events`, `--max-read-bytes`, and
 `--max-archive-bytes` lower the whole-operation bounds. `--timeout-ms` covers
 network acquisition, file writes and complete readback; it is not reset per

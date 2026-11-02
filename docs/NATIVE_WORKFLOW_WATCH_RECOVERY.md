@@ -72,9 +72,9 @@ journal pins. Finally it writes and syncs `settled`.
 
 A crash between those last two writes used to leave the entire watch scope
 blocked despite a completed execution. The watcher now verifies the completion
-handoff and writes the original missing settlement acknowledgement. This applies
-to existing compatible handoffs as well as new executions; event identities,
-handoff bytes, execution receipts and check publication keys are unchanged.
+handoff and writes the original missing settlement acknowledgement. Existing
+v1 handoffs retain their exact bytes and interpretation. Event identities,
+execution receipts and check publication keys are unchanged.
 
 Recovery runs automatically while the original exclusive watch owner is held:
 
@@ -88,6 +88,38 @@ bound principal. No reset switch or new recovery identity is needed. In HTTP
 service mode, recovery and pending check publication can finish before readiness;
 new CI candidate publication and script execution still wait for successful
 listener readiness.
+
+## Cooperative cancellation after proved closure
+
+A cooperative stop can now settle an interrupted dispatch after the native
+owners have proved that its processes, workspaces and shared input cache are
+closed. The completed execution keeps its original non-green observations.
+The watcher finishes its already-owned terminal handoff under one separate
+30-second allowance, shared across every child journal and the final settlement
+write. Cancellation of execution does not discard that finalization duty.
+
+Stopped dispatches use the local `FGWCS002` handoff profile. It retains the
+original selected workflow count, a closed terminal stop reason and the SHA-256
+of the exact original `dispatch.json`, in addition to the unchanged event,
+commit, executed-child identities and journal pins. This profile is local
+operational custody; it is not canonical check evidence or permission to run
+anything. Ordinary completions continue to use `FGWCS001`.
+
+The next live owner can publish the exact retained **cancelled** checks through
+normal native admission, once, and then process later source events. It does not
+rerun the original scripts. Completed failed or successful jobs retain their
+own original conclusions; unstarted later workflow definitions receive no
+invented checks. A late stop after a completed durable handoff remains an
+interrupted service result without an unresolved-execution fence.
+
+A stop after the exact dispatch plan was persisted but before its first child
+may also settle, using the explicit v2 terminal record. Recovery requires the
+original selected count and plan digest to match, the terminal reason to be
+`request_stopped`, and no child directories. An empty directory or an old v1
+zero-child handoff cannot establish this boundary when the plan selected work.
+Cancellation during earlier source discovery, an error without a returned
+terminal dispatch, an unfinished `Started` owner, abrupt termination and
+unproved descendant containment remain unresolved.
 
 ## What is verified
 
@@ -104,8 +136,11 @@ existing identity functions. Each `execution.owner` must contain a complete
 receipt without outstanding containment, and its exact journal pin must equal
 the completion handoff. The complete original job observations must match the
 terminal job evidence in the locked journal. Every original job must be terminal.
-A selected prefix that stopped after a closed failure remains that same prefix;
-unstarted later definitions are never represented as executed.
+A selected prefix that stopped after a closed failure or v2 cooperative stop
+remains that same prefix. V2 recovery also compares the exact dispatch-plan
+digest and selected count. Unstarted later definitions are never represented as
+executed. The legacy v1 cancellation and nonempty-selection/empty-prefix
+refusals remain unchanged.
 
 Private files and directories retain their permission, inode and bounded-length
 checks. The handoff and directory identities are rechecked before the
@@ -126,7 +161,9 @@ check. Ordinary canonical check admission still decides whether original
 evidence can be published, using the unchanged original keys and identities.
 
 Missing or corrupt handoffs, unfinished owners, changed journal pins, foreign
-bindings, cancellation and unresolved process containment remain blocked.
+bindings and unresolved process containment remain blocked. Cancellation of a
+read-only recovery pass defers its remaining verification to a later live owner;
+it does not complete or erase custody.
 An uncertain CI candidate publication is eligible for the separate pre-execution
 recovery path above only when its versioned intent proves the first dispatch
 never started. A crash during execution cannot use that path. Keep the original
@@ -151,6 +188,13 @@ event, verification has these aggregate ceilings:
 | Journal bytes at retained pins | 32 MiB |
 | JSON and history metadata | 8 MiB |
 | History batches | 1,024 |
+
+Terminal handoff creation likewise checks a cumulative 32 MiB of private journal
+files before opening them, with at most 32 children and the single 30-second
+finalization allowance. It compares each verified final journal pin with the
+prechecked byte length. The handoff frame itself is bounded to 4 KiB. A failed
+or expired finalization retains the original custody; a complete handoff whose
+last settlement write was interrupted can be recovered normally.
 
 These limits are checked before bounded reads and allocations, with cancellation
 checkpoints throughout verification. The owned service uses its finite attempt

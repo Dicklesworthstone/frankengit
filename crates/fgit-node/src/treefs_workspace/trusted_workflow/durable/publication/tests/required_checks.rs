@@ -89,6 +89,7 @@ fn install_with_queue_requirement(
                     name: branch(name),
                     reviewers: Vec::new(),
                     required_checks: vec![required.clone()],
+                    required_candidate_checks: Vec::new(),
                 })
                 .collect(),
         },

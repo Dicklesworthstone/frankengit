@@ -8,4 +8,9 @@ node --test tests/operator/native_issue_import.test.mjs \
   tests/operator/native_issue_import_capacity.test.mjs \
   tests/operator/native_issue_migration.test.mjs \
   tests/operator/native_issue_migration_cli.test.mjs \
-  tests/operator/issue_import_compatibility.test.mjs
+  tests/operator/issue_import_compatibility.test.mjs \
+  tests/browser/milestones-native.test.mjs \
+  tests/operator/native_milestone_source.test.mjs \
+  tests/operator/forge_milestone_operator.test.mjs \
+  tests/operator/native_milestone_migration.test.mjs \
+  tests/operator/native_milestone_migration_cli.test.mjs

@@ -175,6 +175,10 @@ fn binary_streams_both_hash_domains_into_file_verification_and_native_recovery()
         fixture.scratch();
         let before = fixture.refs(format);
         let report = success(fixture.export(format, "stream.bundle", &[]));
+        assert!(
+            !report.contains("representation_reuse"),
+            "default receipt stays unchanged"
+        );
         // The seed bundle's pack carries five objects, one of them an
         // unreachable blob ("alpha\n"). The streaming export selects only what
         // the advertised refs reach and refuses unreachable extras
@@ -253,6 +257,118 @@ fn binary_streams_both_hash_domains_into_file_verification_and_native_recovery()
         assert!(packed.contains(&format!("{tag} refs/tags/v1")));
         assert_eq!(fixture.refs(format), before);
         assert_eq!(fs::read_dir(fixture.0.join("scratch")).unwrap().count(), 0);
+        fixture.assert_no_stages();
+    }
+}
+
+#[test]
+fn binary_opt_in_reports_cold_reuse_and_a_cache_miss_without_changing_default_bytes() {
+    for format in ["sha1", "sha256"] {
+        let fixture = Fixture::new();
+        fixture.seed(format);
+        // The original input has an unreachable entry. Export its real selected
+        // graph once, recover its native packed directory, then import that
+        // complete pack through the custody-enabled native source importer.
+        success(fixture.export(format, "complete.bundle", &[]));
+        success(fixture.run(&[
+            "bundle",
+            "recover",
+            "complete.bundle",
+            "packed-source.git",
+            "--trusted-local",
+            "--head-ref",
+            "refs/heads/main",
+        ]));
+        success(fixture.run(&["init", "receiving", TENANT, REPOSITORY, format]));
+        success(fixture.run(&[
+            "import",
+            "receiving",
+            TENANT,
+            REPOSITORY,
+            PRINCIPAL,
+            "complete-pack-custody",
+            "packed-source.git",
+            "--json",
+        ]));
+        let default = success(fixture.run(&[
+            "bundle",
+            "export",
+            "receiving",
+            TENANT,
+            REPOSITORY,
+            "default.bundle",
+            "--streaming",
+            "--trusted-local",
+            "--object-format",
+            format,
+        ]));
+        assert!(!default.contains("representation_reuse"));
+        // Every command is a separate process. A tiny compression allowance
+        // proves a hit bypasses the encoder after real cold revalidation.
+        let reused = success(fixture.run(&[
+            "bundle",
+            "export",
+            "receiving",
+            TENANT,
+            REPOSITORY,
+            "reused.bundle",
+            "--streaming",
+            "--trusted-local",
+            "--object-format",
+            format,
+            "--reuse-verified-packs",
+            "--max-compression-work",
+            "1",
+        ]));
+        for field in [
+            "\"representation_reuse\":\"reused\"",
+            "\"profile\":\"git-bundle-received-pack-v1\"",
+            "\"received_pack_profile\":\"received-pack-v1\"",
+            "\"source_pack_count\":1",
+            "\"external_base_count\":0",
+            "\"compression_work\":0",
+            "\"publication_state\":\"durable\"",
+            "\"node_closed\":true",
+        ] {
+            assert!(reused.contains(field), "{reused}");
+        }
+        let input = fs::read(fixture.0.join("complete.bundle")).unwrap();
+        let output = fs::read(fixture.0.join("reused.bundle")).unwrap();
+        let limits = fgit_pack::full_bundle::FullBundleLimits::default();
+        let original =
+            fgit_pack::full_bundle::FullBundleInput::parse(&input, limits, &mut || true).unwrap();
+        let copied =
+            fgit_pack::full_bundle::FullBundleInput::parse(&output, limits, &mut || true).unwrap();
+        assert_eq!(copied.pack_bytes(), original.pack_bytes());
+        copied
+            .verify_pack_framing(&fgit_pack::PackLimits::default(), &mut || true)
+            .unwrap();
+        let digest = fgit_crypto::lowercase_hex(&fgit_crypto::sha256_digest(&output));
+        assert!(reused.contains(&format!("\"bundle_sha256\":\"{digest}\"")));
+        fs::remove_dir_all(fixture.0.join("receiving/received-pack-cache")).unwrap();
+        let missed = success(fixture.run(&[
+            "bundle",
+            "export",
+            "receiving",
+            TENANT,
+            REPOSITORY,
+            "miss.bundle",
+            "--streaming",
+            "--trusted-local",
+            "--object-format",
+            format,
+            "--reuse-verified-packs",
+        ]));
+        assert!(
+            missed.contains("\"representation_reuse\":\"miss\""),
+            "{missed}"
+        );
+        assert!(missed.contains("\"profile\":\"git-pack-compressed-oid-no-delta-v1\""));
+        assert!(!missed.contains("received_pack_profile"));
+        assert_eq!(
+            fs::read(fixture.0.join("miss.bundle")).unwrap(),
+            fs::read(fixture.0.join("default.bundle")).unwrap()
+        );
         fixture.assert_no_stages();
     }
 }

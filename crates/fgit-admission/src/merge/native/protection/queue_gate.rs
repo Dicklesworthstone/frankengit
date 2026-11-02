@@ -126,6 +126,7 @@ mod tests {
                         reviewers: Vec::new(),
                         required_approvals: 0,
                         required_checks: Vec::new(),
+                        required_candidate_checks: Vec::new(),
                         require_merge_queue: true,
                     }],
                     ref_policy: None,

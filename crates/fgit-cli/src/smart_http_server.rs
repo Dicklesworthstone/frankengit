@@ -19,6 +19,7 @@ use fgit_types::{
 };
 
 use crate::publication_support::quote;
+use crate::workflow_command::artifacts as workflow_artifacts;
 
 use crate::service_stop as stop_file;
 
@@ -47,8 +48,15 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
-   [--workflow-pull-request <number> | --workflow-merge-queue <number>]
+   [--workflow-pull-request <number> | --workflow-merge-queue <number> |
+    --workflow-pull-requests [--workflow-max-pull-requests <1..64>]]
    [--workflow-artifact-logs]
+   [--workflow-artifact <workflow:job:output> ...]
+   [--workflow-artifact-hex <workflow-hex:job:output-hex> ...]
+   [--workflow-artifact-input <workflow:consumer:producer:output:destination> ...]
+   [--workflow-artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
+   [--workflow-max-artifact-mib <1..64>] [--workflow-max-artifact-total-mib <1..512>]
+   [--workflow-max-artifact-input-total-mib <1..512>]
    [--workflow-merge-candidate-ref <separate-ci-branch> --workflow-merge-principal <id>
     --workflow-merge-author <name-and-email> --workflow-merge-committer <name-and-email>
     --workflow-merge-timestamp <positive-unix-seconds> --workflow-merge-message <text>
@@ -85,9 +93,17 @@ all future selected scripts with host-user privileges. Select 1-64 distinct,
 non-overlapping repository input paths covering the workflow directory, and an existing absolute private run
 parent. The worker waits 1000 ms between polls and bounds each attempt to 300 seconds
 by default. --workflow-publish-checks and --workflow-principal require an explicit
---expected-incarnation; --workflow-artifact-logs requires --artifact-root. Readiness
+--expected-incarnation. Workflow file/log capture requires --artifact-root. Readiness
 follows exclusive workflow custody; execution begins after readiness is flushed.
 Stopping drains execution and reports workflow_service_drained before HTTP drain.
+Select up to 64 exact workflow/job/output files with --workflow-artifact or its
+byte-safe hex form. Logs and files share the capture allowance: 16 MiB per payload
+and 64 MiB cumulative by default. Explicit artifact inputs copy a successful
+direct dependency's captured output into .fgit-artifacts/<destination> in a fresh
+consumer workspace, with a separate 64 MiB cumulative delivery allowance. The
+entire input/output contract is checked before jobs start; delivery revalidates
+current-attempt provenance and bytes. Missing, unsafe or oversized outputs refuse
+success. Artifact downloads still require the independent artifact-read grant.
 The merge-candidate group requires --workflow-pull-request or --workflow-merge-queue,
 plus --expected-incarnation.
 It authorizes ordinary exact-old create/rewrite of the selected CI branch, then
@@ -101,6 +117,16 @@ merge-commit style. Queue custody and reporting span changes of head PR; unresol
 work blocks later execution. This runs candidate CI without landing a protected
 target or changing queue membership. The retained landing.bundle is ready for
 guarded queue landing. Queue/PR/tip/policy changes are revalidated.
+--workflow-pull-requests discovers visible open same-repository PRs targeting
+--workflow-ref and executes their source heads, one member per poll in rotating
+order. It requires --expected-incarnation and trusts scripts from every current
+and future eligible PR. It cannot be combined with a fixed PR, merge queue or
+merge-candidate options. --workflow-max-pull-requests defaults to 64 and bounds
+all retained members, including closed or hidden PRs. Durable membership and
+each member's original execution/check custody survive restart; there is no
+automatic retirement. Incomplete discovery or capacity overflow refuses new
+admission. Unknown execution in any member stops the service. See
+docs/NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md for scope and recovery.
 No workflow option enables receive, source or another HTTP permission. See
 docs/NATIVE_HTTP_WORKFLOW_SERVICE.md for retained custody and recovery limits.
 
@@ -350,6 +376,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut flags = BTreeMap::new();
     let mut index_refs = Vec::new();
     let mut workflow_inputs = Vec::new();
+    let mut workflow_artifact_selections = Vec::new();
+    let mut workflow_artifact_inputs = Vec::new();
     let mut index = 4;
     while index < arguments.len() {
         let name = arguments[index].as_str();
@@ -369,6 +397,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--continuous"
                 | "--workflow-trusted-local"
                 | "--workflow-publish-checks"
+                | "--workflow-pull-requests"
                 | "--workflow-artifact-logs"
         );
         if !boolean
@@ -410,7 +439,15 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--workflow-attempt-timeout-secs"
                     | "--workflow-principal"
                     | "--workflow-pull-request"
+                    | "--workflow-max-pull-requests"
                     | "--workflow-merge-queue"
+                    | "--workflow-artifact"
+                    | "--workflow-artifact-hex"
+                    | "--workflow-artifact-input"
+                    | "--workflow-artifact-input-hex"
+                    | "--workflow-max-artifact-mib"
+                    | "--workflow-max-artifact-total-mib"
+                    | "--workflow-max-artifact-input-total-mib"
             )
             && crate::workflow_merge_watch::server_option(name).is_none()
         {
@@ -440,6 +477,25 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 return Err("workflow service accepts at most 64 inputs".into());
             }
             workflow_inputs.push(value.as_bytes().to_vec());
+        } else if matches!(name, "--workflow-artifact" | "--workflow-artifact-hex") {
+            if workflow_artifact_selections.len() >= 64 {
+                return Err("at most 64 workflow artifact selections are permitted".into());
+            }
+            workflow_artifact_selections.push(workflow_artifacts::selection(
+                value,
+                name == "--workflow-artifact-hex",
+            )?);
+        } else if matches!(
+            name,
+            "--workflow-artifact-input" | "--workflow-artifact-input-hex"
+        ) {
+            if workflow_artifact_inputs.len() >= 64 {
+                return Err("at most 64 workflow artifact input selections are permitted".into());
+            }
+            workflow_artifact_inputs.push(workflow_artifacts::input_selection(
+                value,
+                name == "--workflow-artifact-input-hex",
+            )?);
         } else if flags.insert(name, value).is_some() {
             return Err(format!("duplicate serve-http option {name}"));
         }
@@ -600,11 +656,20 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         None
     };
     #[cfg(not(target_os = "linux"))]
-    if !workflow_inputs.is_empty() || flags.keys().any(|name| name.starts_with("--workflow-")) {
+    if !workflow_inputs.is_empty()
+        || !workflow_artifact_selections.is_empty()
+        || !workflow_artifact_inputs.is_empty()
+        || flags.keys().any(|name| name.starts_with("--workflow-"))
+    {
         return Err("native workflow service requires Linux".into());
     }
     #[cfg(target_os = "linux")]
-    let workflow_service = workflow::parse(&flags, workflow_inputs)?;
+    let workflow_service = workflow::parse(
+        &flags,
+        workflow_inputs,
+        workflow_artifact_selections,
+        workflow_artifact_inputs,
+    )?;
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
     let limits = GitDaemonServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;

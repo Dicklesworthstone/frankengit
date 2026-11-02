@@ -185,6 +185,38 @@ The bounded semantic header still has to parse. Recovery of a known decision is
 not a fresh verification of the artifact body. Stdin keys preserve exact bytes,
 including newlines, and receipts never print the key.
 
+## Preserve verified compression for later transfers
+
+Eligible full and incremental file-backed imports and mapped fetches retain the
+original verified pack in the node's existing received-pack cache. Git serving
+can reuse those compressed entries, and streaming bundle exports can request
+them with [`--reuse-verified-packs`](NATIVE_GIT_BUNDLE_REUSE.md). This is optional
+representation custody; the default deterministic export bytes and ordinary
+import decision do not change.
+
+Capture tees the actual native verification read and requires its exact EOF,
+native trailer and full-byte SHA-256 receipt. Every captured raw member must
+belong to the selected upload, and its strong payload commitment must match the
+actual staged metadata or streamed blob. A mapped subset with extra raw entries
+skips capture without placing those extras. Incremental prerequisite bodies
+remain borrowed originals, with their existing basis and visibility checks.
+
+The shared cache reserves raw bytes and metadata before allocation. The original
+pack must fit its 64 MiB per-representation ceiling and available cache budget;
+the optional resident reparse also keeps the existing object and inflation
+bounds. A larger streamed blob or any other ineligible representation still
+imports through ordinary file custody. Zero cache capacity disables capture.
+Pending representations activate only after verification scratch cleanup and
+all final immutable placement/collision checks. Failed validation, cancellation
+or pre-publication refusal releases them. Disposable cache failure is a miss;
+source, staging, cleanup and authority errors retain their normal meaning.
+
+The source file can be removed after successful import. A fresh node must
+revalidate persisted pack custody against canonical objects before reusing it;
+this does not promise pack-proportional cold-open performance. See the complete
+[received-pack contract](VERIFIED_RECEIVED_PACK_REUSE.md#capture-from-file-backed-full-and-incremental-bundles)
+for selection, thin-base, reservation and restart details.
+
 ## Focused validation targets
 
 These commands select the regression coverage; listing them is not a claim that
@@ -197,6 +229,7 @@ cargo test --locked -p fgit-object-fabric --lib local::synced_blob
 cargo test --locked -p fgit-node --lib source_retrieval::integrity::bundle_verify::file::tests::import_tests
 cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle::tests::file_import_tests
 cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle::tests::file_fetch_tests
+cargo test --locked -p fgit-node --test file_bundle_pack_reuse
 cargo test --locked -p fgit-cli --bin fg bundle::stream_import
 cargo test --locked -p fgit-cli --bin fg bundle::fetch::file_backed
 cargo test --locked -p fgit-cli --test bundle_stream_export_large_blobs -- --test-threads=1
@@ -213,3 +246,8 @@ raw-byte fanout, exact-old atomic refusal, native fast-forward refusal, and
 cross-profile terminal recovery. Node tests also cover a second-parent ancestor,
 independent header/command limits, authenticated policy evidence, source changes,
 and cancellation after private staging has begun.
+The dedicated pack-custody target additionally compares original compressed
+bytes after warm and cold serving, exercises both full and incremental/mapped
+intake, and checks fallback, cancellation/retry and source-replacement twins.
+An actual staged-payload corruption twin verifies that unchanged source evidence
+cannot authorize a changed private candidate or activate its raw pack.

@@ -10,6 +10,7 @@ const USAGE = `usage: node scripts/archive_native_issues.mjs export
   [--head <original-snapshot-token> --page-size <1..100> --timeout-ms <1..300000>]
   [--max-requests <1..8192> --max-issues <1..4096> --max-events <1..65536>]
   [--max-read-bytes <1..67108864> --max-archive-bytes <1..67108864>]
+  [--include-milestones [--max-milestones <1..4096>]]
 
 node scripts/archive_native_issues.mjs inspect
   --workdir <existing-private-archive> --confirm <independently-retained-sha256>
@@ -17,6 +18,8 @@ node scripts/archive_native_issues.mjs inspect
 
 Export pins every list/history to one native snapshot, retains all actions and
 comments, and publishes archive.json only after complete validation/readback.
+Include-milestones selects archive v2 and retains every milestone and its history
+at that same snapshot, including closed milestones and cleared issue membership.
 Inspect is offline, read-only and needs no token or source server. Neither
 operation creates a native mutation, restore grant or canonical repository backup.
 Partial exports are never resumed, overwritten or reported complete.
@@ -45,20 +48,28 @@ export function writeArchiveOutput(stream, value, timeoutMs = 10000) {
   });
 }
 function options(args) {
-  if (!Array.isArray(args) || args.length > 31 || args.some(arg => typeof arg !== 'string' || arg.length > 8192 || arg.includes('\0')) ||
-      args.reduce((n, arg) => n + arg.length, 0) > 65536 || !['export', 'inspect'].includes(args[0]) || args.length % 2 !== 1) throw new Error(USAGE);
+  if (!Array.isArray(args) || args.length > 32 || args.some(arg => typeof arg !== 'string' || arg.length > 8192 || arg.includes('\0')) ||
+      args.reduce((n, arg) => n + arg.length, 0) > 65536 || !['export', 'inspect'].includes(args[0])) throw new Error(USAGE);
   const operation = args[0], result = {}, seen = new Set();
   const fields = { '--workdir': 'workdir', '--url': 'href', '--tenant': 'tenant', '--repository': 'repository',
     '--token-file': 'tokenFile', '--confirm': 'confirm', '--head': 'head' };
   const budgets = { '--page-size': ['pageSize', 100], '--timeout-ms': ['timeoutMs', 300000],
     '--max-requests': ['maxRequests', L.pages], '--max-issues': ['maxIssues', L.issues], '--max-events': ['maxEvents', L.events],
+    '--max-milestones': ['maxMilestones', L.milestones],
     '--max-read-bytes': ['maxReadBytes', L.bytes], '--max-archive-bytes': ['maxArchiveBytes', L.bytes] };
-  for (let i = 1; i < args.length; i += 2) {
-    const flag = args[i], value = args[i + 1];
-    if (seen.has(flag) || !value || value.startsWith('--') || !(Object.hasOwn(fields, flag) || Object.hasOwn(budgets, flag)) ||
+  for (let i = 1; i < args.length;) {
+    const flag = args[i++];
+    if (seen.has(flag)) throw new Error(USAGE);
+    seen.add(flag);
+    if (flag === '--include-milestones') {
+      if (operation !== 'export') throw new Error(USAGE);
+      result.includeMilestones = true;
+      continue;
+    }
+    const value = args[i++];
+    if (!value || value.startsWith('--') || !(Object.hasOwn(fields, flag) || Object.hasOwn(budgets, flag)) ||
         (operation === 'inspect' && !['--workdir', '--confirm', '--timeout-ms'].includes(flag)) ||
         (operation === 'export' && flag === '--confirm')) throw new Error(USAGE);
-    seen.add(flag);
     if (Object.hasOwn(fields, flag)) result[fields[flag]] = value;
     else {
       const [name, max] = budgets[flag];

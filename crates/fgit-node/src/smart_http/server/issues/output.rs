@@ -116,6 +116,15 @@ fn action(value: &IssueAction, render: Option<super::rendered::Rendering>) -> St
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
         IssueAction::Lock => "{\"name\":\"lock\"}".to_owned(),
         IssueAction::Unlock => "{\"name\":\"unlock\"}".to_owned(),
+        IssueAction::SetMilestone {
+            milestone,
+            expected_milestone_version,
+        } => format!(
+            "{{\"name\":\"set-milestone\",\"milestone\":{},\"expected_milestone_version\":{}}}",
+            milestone.get(),
+            expected_milestone_version.get()
+        ),
+        IssueAction::ClearMilestone => "{\"name\":\"clear-milestone\"}".to_owned(),
         IssueAction::Assign { assignees: values } | IssueAction::Unassign { assignees: values } => {
             format!(
                 "{{\"name\":{},\"assignees\":{}}}",
@@ -158,21 +167,43 @@ pub(super) fn mutation(
                 fgit_forge::ExpectedVersion::NewStream => 0,
                 fgit_forge::ExpectedVersion::Exactly(version) => version.get(),
             };
-            (command.number, expected.to_string(), command.action.name())
+            (
+                command.number.get(),
+                expected.to_string(),
+                command.action.name(),
+            )
         }
-        Command::AppendComment(intent) => (intent.number, "null".to_owned(), "append-comment"),
+        Command::AppendComment(intent) => {
+            (intent.number.get(), "null".to_owned(), "append-comment")
+        }
+        Command::Milestone(command) => {
+            let expected = match command.expected_version {
+                fgit_forge::ExpectedVersion::NewStream => 0,
+                fgit_forge::ExpectedVersion::Exactly(version) => version.get(),
+            };
+            (
+                command.number.get(),
+                expected.to_string(),
+                command.action.name(),
+            )
+        }
     };
     format!(
         concat!(
-            "{{\"type\":\"issue_publication\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
+            "{{\"type\":{},\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
             "\"principal_id\":{},\"number\":{},\"expected_version\":{},\"action\":{},",
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"delivery_acknowledged\":null}}"
         ),
+        quote(if matches!(command, Command::Milestone(_)) {
+            "milestone_publication"
+        } else {
+            "issue_publication"
+        }),
         quote(&node.tenant_id.to_string()),
         quote(&node.repository_id.to_string()),
         quote(&principal.to_string()),
-        number.get(),
+        number,
         expected,
         quote(action),
         quote(&tx.to_string()),
@@ -202,7 +233,7 @@ fn snapshot(
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{}{},\"labels\":{},",
-            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{},\"locked\":{}}}"
+            "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{},\"assignees\":{},\"locked\":{},\"milestone\":{}}}"
         ),
         value.number.get(),
         value.version.get(),
@@ -225,7 +256,8 @@ fn snapshot(
         quote(&value.last_actor.to_string()),
         value.comments,
         assignees(&value.assignees),
-        value.locked
+        value.locked,
+        optional(value.milestone.map(|number| number.get()))
     ))
 }
 fn head_token(head: RepositoryAuthorityHeadId) -> String {
@@ -238,7 +270,11 @@ fn head_token(head: RepositoryAuthorityHeadId) -> String {
         .collect::<String>();
     format!("alg:{}:{digest}", id.algorithm().code_point())
 }
-fn header(node: &OneNode, page: Page, head: RepositoryAuthorityHeadId) -> Result<String, ApiError> {
+pub(super) fn header(
+    node: &OneNode,
+    page: Page,
+    head: RepositoryAuthorityHeadId,
+) -> Result<String, ApiError> {
     if page.expected_head.is_some_and(|expected| expected != head) {
         return Err(ApiError::snapshot_moved());
     }
@@ -254,7 +290,7 @@ fn header(node: &OneNode, page: Page, head: RepositoryAuthorityHeadId) -> Result
         quote(&head_token(head))
     ))
 }
-fn append(out: &mut String, value: &str, maximum: usize) -> Result<(), ApiError> {
+pub(super) fn append(out: &mut String, value: &str, maximum: usize) -> Result<(), ApiError> {
     if out
         .len()
         .checked_add(value.len())
@@ -267,7 +303,7 @@ fn append(out: &mut String, value: &str, maximum: usize) -> Result<(), ApiError>
     out.push_str(value);
     Ok(())
 }
-fn optional(value: Option<u64>) -> String {
+pub(super) fn optional(value: Option<u64>) -> String {
     value.map_or_else(|| "null".to_owned(), |n| n.to_string())
 }
 
@@ -548,7 +584,7 @@ fn search_body(
         &format!(
             concat!(
                 "{{\"type\":\"issue_search_page\",{},\"scope\":\"repository_issues\",",
-                "\"query\":{{\"state\":{},\"opened_by\":{},\"labels\":{},\"text\":{},",
+                "\"query\":{{\"state\":{},\"opened_by\":{},\"labels\":{},\"text\":{},\"milestone\":{},",
                 "\"case_sensitive\":{},\"text_scope\":\"title_or_body\"}},",
                 "\"after\":{},\"limit\":{},\"max_scan\":{},\"scanned\":{},\"count\":{},",
                 "\"complete\":{},\"stop_reason\":{},\"has_more_candidates\":{},\"next_after\":{},",
@@ -559,6 +595,12 @@ fn search_body(
             opener,
             labels(&predicate.labels),
             text,
+            match &predicate.milestone {
+                None => "null".into(),
+                Some(fgit_forge::event::issue::MilestoneFilter::Unassigned) => quote("none"),
+                Some(fgit_forge::event::issue::MilestoneFilter::Number(number)) =>
+                    number.get().to_string(),
+            },
             predicate.case_sensitive,
             request.after,
             request.limit,

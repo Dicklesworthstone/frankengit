@@ -11,7 +11,8 @@ use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
     MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
     MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, ProtectedBranch, ProtectionCommand,
-    RequiredWorkflowCheck, ReviewProtection, compile_ref_policy, decode_ref_policy,
+    RequiredCandidateWorkflowCheck, RequiredWorkflowCheck, ReviewProtection, compile_ref_policy,
+    decode_ref_policy,
 };
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, ForgeEventPayload};
 use fgit_types::{
@@ -274,8 +275,15 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
     let mut ref_policy = None;
     let mut administrators = BTreeSet::new();
     let mut quorums = BTreeMap::<RefName, u16>::new();
-    let mut branches =
-        BTreeMap::<RefName, (BTreeSet<PrincipalId>, BTreeSet<RequiredWorkflowCheck>, bool)>::new();
+    let mut branches = BTreeMap::<
+        RefName,
+        (
+            BTreeSet<PrincipalId>,
+            BTreeSet<RequiredWorkflowCheck>,
+            bool,
+            BTreeSet<RequiredCandidateWorkflowCheck>,
+        ),
+    >::new();
     for (name, value) in parse_form_with_field_limit(
         bytes,
         MAX_COMMAND_FIELDS,
@@ -362,11 +370,41 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
                 check
                     .validate()
                     .map_err(|_| ApiError::bad("invalid_required_check"))?;
-                let checks = &mut branches.entry(name).or_default().1;
-                if !checks.insert(check) {
+                let branch = branches.entry(name).or_default();
+                if !branch.1.insert(check) {
                     return Err(ApiError::bad("duplicate_required_check"));
                 }
-                if checks.len() > MAX_BRANCH_REQUIRED_CHECKS
+                if branch.1.len() + branch.3.len() > MAX_BRANCH_REQUIRED_CHECKS
+                    || branches.len() > MAX_PROTECTED_BRANCHES
+                {
+                    return Err(ApiError::too_large());
+                }
+            }
+            "required_candidate_check" => {
+                let parts: Vec<_> = value.split(':').collect();
+                if parts.len() != 4 {
+                    return Err(ApiError::bad("invalid_required_candidate_check"));
+                }
+                let name = reference(parts[0])?;
+                let check = RequiredCandidateWorkflowCheck {
+                    publisher: principal(parts[1])?,
+                    graph_root: hex_bytes(parts[2], 32)?
+                        .try_into()
+                        .map_err(|_| ApiError::bad("invalid_check_graph"))?,
+                    job: String::from_utf8(hex_bytes(
+                        parts[3],
+                        fgit_forge::event::workflow_check::MAX_CHECK_JOB_BYTES,
+                    )?)
+                    .map_err(|_| ApiError::bad("invalid_check_job"))?,
+                };
+                check
+                    .validate()
+                    .map_err(|_| ApiError::bad("invalid_required_candidate_check"))?;
+                let branch = branches.entry(name).or_default();
+                if !branch.3.insert(check) {
+                    return Err(ApiError::bad("duplicate_required_candidate_check"));
+                }
+                if branch.1.len() + branch.3.len() > MAX_BRANCH_REQUIRED_CHECKS
                     || branches.len() > MAX_PROTECTED_BRANCHES
                 {
                     return Err(ApiError::too_large());
@@ -421,13 +459,17 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
         branches: branches
             .into_iter()
             .map(
-                |(name, (reviewers, required_checks, require_merge_queue))| ProtectedBranch {
+                |(
+                    name,
+                    (reviewers, required_checks, require_merge_queue, required_candidate_checks),
+                )| ProtectedBranch {
                     require_merge_queue,
                     required_approvals: quorums
                         .get(&name)
                         .copied()
                         .unwrap_or(reviewers.len() as u16),
                     required_checks: required_checks.into_iter().collect(),
+                    required_candidate_checks: required_candidate_checks.into_iter().collect(),
                     name,
                     reviewers: reviewers.into_iter().collect(),
                 },
@@ -543,7 +585,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
             .iter()
             .map(|branch| {
                 format!(
-                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}]}}",
+                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}],\"required_candidate_checks\":[{}]}}",
                 quote(&hex(branch.name.as_bytes())),
                 branch
                     .reviewers
@@ -557,6 +599,10 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
                     "{{\"source_ref_hex\":{},\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                     quote(&hex(check.source_ref.as_bytes())), quote(&check.publisher.to_string()),
                     quote(&hex(&check.graph_root)), quote(&check.job)
+                )).collect::<Vec<_>>().join(","),
+                branch.required_candidate_checks.iter().map(|check| format!(
+                    "{{\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
+                    quote(&check.publisher.to_string()), quote(&hex(&check.graph_root)), quote(&check.job)
                 )).collect::<Vec<_>>().join(",")
             )
             })

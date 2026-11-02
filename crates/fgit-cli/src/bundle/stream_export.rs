@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fgit_node::{GitDaemonSessionTimeout, NodeConfig, OneNode, TerminationSignals};
-use fgit_node::{SelectedStreamBundleExport, StreamBundleExportQuery};
+use fgit_node::{SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleReuse};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
 use super::quote;
@@ -18,6 +18,7 @@ const MIB: u64 = 1024 * 1024;
 pub(super) const USAGE: &str =
     "usage: fg bundle export <storage-root> <tenant-id> <repository-id> <new-bundle-file>
   --streaming --trusted-local [--object-format sha1|sha256]
+  [--reuse-verified-packs]
   [--max-output-mib N] [--max-expanded-mib N] [--max-object-mib N]
   [--max-blob-mib N]
   [--max-objects N] [--max-refs N] [--max-edges N]
@@ -27,6 +28,12 @@ The streaming profile retains bounded native metadata, a blob input chunk and
 compressor state plus bounded object/edge metadata. It writes V2/SHA-1 or V3/SHA-256 full bundles in
 deterministic native object-ID order with whole objects and no delta window.
 Only current visible refs and their complete verified graph are exported.
+With --reuse-verified-packs, eligible verified received/imported representations
+preserve their compression and deltas under a distinct receipt profile. A miss
+uses the deterministic encoder and is reported explicitly. Reuse is optional,
+bounded and revalidated against canonical objects after restart; its bytes need
+not be identical across different available representations. Default bytes do
+not change. The same selection, output and expanded-byte limits still apply.
 
 Output and expanded-byte defaults are 128 MiB; each can be set to 1..16384 MiB.
 The buffered object-byte default and ceiling are 32 MiB. The independent blob
@@ -123,6 +130,10 @@ fn parse_full(args: &[String]) -> Result<Options, String> {
             return Err(format!("duplicate streaming export option {flag}"));
         }
         if matches!(flag, "--streaming" | "--trusted-local") {
+            continue;
+        }
+        if flag == "--reuse-verified-packs" {
+            query.reuse_verified_packs = true;
             continue;
         }
         let value = args
@@ -340,8 +351,26 @@ fn write_receipt(
     } else {
         ("git_bundle_export", String::new())
     };
+    // Preserve the existing JSON record exactly unless reuse was requested.
+    // Copied representations never claim deterministic encoder work.
+    let reuse_fields = match report.reuse() {
+        StreamBundleReuse::NotRequested => String::new(),
+        StreamBundleReuse::Miss => ",\"representation_reuse\":\"miss\"".into(),
+        StreamBundleReuse::Reused => {
+            let received = receipt.received().ok_or("missing received-pack evidence")?;
+            format!(
+                ",\"representation_reuse\":\"reused\",\"received_pack_profile\":{},\"source_pack_count\":{},\"external_base_count\":{},\"ofs_delta_count\":{},\"ref_delta_count\":{},\"maximum_delta_depth\":{}",
+                quote(received.profile()),
+                received.source_pack_count(),
+                received.external_base_count(),
+                received.ofs_delta_count(),
+                received.ref_delta_count(),
+                received.maximum_delta_depth(),
+            )
+        }
+    };
     let line = format!(
-        "{{\"type\":{},\"schema_version\":1,\"streaming\":true,\"profile\":{},\"source_head\":{},\"source_generation\":{},\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"object_count\":{},\"total_object_bytes\":{},\"pack_checksum\":{},\"pack_bytes\":{},\"header_bytes\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"compression_work\":{},\"publication_state\":\"durable\",\"bundle_created\":true,\"node_closed\":true,\"repository_changed\":false,\"includes_forge_metadata\":false{incremental_fields}}}",
+        "{{\"type\":{},\"schema_version\":1,\"streaming\":true,\"profile\":{},\"source_head\":{},\"source_generation\":{},\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"object_count\":{},\"total_object_bytes\":{},\"pack_checksum\":{},\"pack_bytes\":{},\"header_bytes\":{},\"bundle_bytes\":{},\"bundle_sha256\":{},\"compression_work\":{},\"publication_state\":\"durable\",\"bundle_created\":true,\"node_closed\":true,\"repository_changed\":false,\"includes_forge_metadata\":false{incremental_fields}{reuse_fields}}}",
         quote(kind),
         quote(receipt.profile_id()),
         quote(&report.head().to_string()),

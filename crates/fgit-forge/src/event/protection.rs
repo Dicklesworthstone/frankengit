@@ -103,6 +103,27 @@ impl RequiredWorkflowCheck {
     }
 }
 
+/// One exact candidate job from an administrator-selected publisher. Unlike an
+/// ordinary required check, this selector has no current CI-branch lease: the
+/// canonical observation must bind the original PR subject and actual candidate.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct RequiredCandidateWorkflowCheck {
+    pub publisher: PrincipalId,
+    pub graph_root: [u8; 32],
+    pub job: String,
+}
+impl RequiredCandidateWorkflowCheck {
+    pub fn validate(&self) -> Result<(), CodecRefusal> {
+        if self.job.is_empty()
+            || self.job.len() > super::workflow_check::MAX_CHECK_JOB_BYTES
+            || self.job.chars().any(char::is_control)
+        {
+            return Err(invalid_native("review_protection.required_candidate_check"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectedBranch {
     pub name: RefName,
@@ -114,6 +135,10 @@ pub struct ProtectedBranch {
     pub required_approvals: u16,
     /// Strictly sorted, unique exact selectors. Empty grants no workflow trust.
     pub required_checks: Vec<RequiredWorkflowCheck>,
+    /// Exact unpublished-candidate selectors, sorted and unique independently
+    /// of ordinary checks. Both vectors share the same total selector ceiling.
+    /// Historical policy encodings decode to an empty vector.
+    pub required_candidate_checks: Vec<RequiredCandidateWorkflowCheck>,
     /// Ref changes must come from a canonically validated landing of a queue
     /// targeting this branch. A caller-provided queue receipt is not authority.
     /// Historical policy encodings decode to false.
@@ -162,16 +187,28 @@ impl ReviewProtection {
             }
             if (branch.reviewers.is_empty()
                 && branch.required_checks.is_empty()
+                && branch.required_candidate_checks.is_empty()
                 && !branch.require_merge_queue)
-                || branch.required_checks.len() > MAX_BRANCH_REQUIRED_CHECKS
                 || branch
                     .required_checks
+                    .len()
+                    .checked_add(branch.required_candidate_checks.len())
+                    .is_none_or(|total| total > MAX_BRANCH_REQUIRED_CHECKS)
+                || branch
+                    .required_checks
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || branch
+                    .required_candidate_checks
                     .windows(2)
                     .any(|pair| pair[0] >= pair[1])
             {
                 return Err(invalid_native("review_protection.required_checks"));
             }
             for check in &branch.required_checks {
+                check.validate()?;
+            }
+            for check in &branch.required_candidate_checks {
                 check.validate()?;
             }
         }
@@ -182,6 +219,12 @@ impl ReviewProtection {
         self.branches
             .iter()
             .any(|branch| !branch.required_checks.is_empty())
+    }
+    #[must_use]
+    pub fn has_required_candidate_checks(&self) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| !branch.required_candidate_checks.is_empty())
     }
     /// Queue-bearing policies require the explicit queue wire kind. Policies
     /// without this restriction retain every historical byte and identity.
@@ -231,11 +274,14 @@ impl NativeProtectionEvent {
     }
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
-        let with_queue = self.protection.has_required_merge_queue();
+        let with_candidates = self.protection.has_required_candidate_checks();
+        let with_queue = with_candidates || self.protection.has_required_merge_queue();
         // Kinds 16 through 18 wrap an explicitly named protection encoding.
         // No queue restriction means exactly the historical base and bytes.
         if self.protection.ref_policy.is_some() {
-            out.write_scalar(if with_queue {
+            out.write_scalar(if with_candidates {
+                21_u32
+            } else if with_queue {
                 19_u32
             } else if self.protection.has_review_quorum() {
                 14_u32
@@ -277,6 +323,17 @@ impl NativeProtectionEvent {
             if with_queue {
                 out.write_bool(branch.require_merge_queue);
             }
+            if with_candidates {
+                out.write_scalar(branch.required_candidate_checks.len() as u32);
+                for check in &branch.required_candidate_checks {
+                    out.write_opaque_id(check.publisher.as_bytes());
+                    out.write_raw(&check.graph_root);
+                    out.write_bytes(
+                        "review_protection.candidate_check_job",
+                        check.job.as_bytes(),
+                    )?;
+                }
+            }
         }
         if let Some(snapshot) = &self.protection.ref_policy {
             out.write_bytes("review_protection.ref_policy", &snapshot.encode()?)?;
@@ -307,15 +364,16 @@ impl NativeProtectionEvent {
         input: &mut Decoder<'_>,
         profile: fgit_policy::reference_profile::ReferencePolicyProfile,
     ) -> Result<Self, CodecRefusal> {
-        let (checks, quorum, queue) =
+        let (checks, quorum, queue, candidates) =
             match input.read_scalar::<u32>("review_protection.base_kind")? {
-                9 => (false, false, false),
-                13 => (true, false, false),
-                14 => (true, true, false),
-                19 => (true, true, true),
+                9 => (false, false, false, false),
+                13 => (true, false, false, false),
+                14 => (true, true, false, false),
+                19 => (true, true, true, false),
+                21 => (true, true, true, true),
                 _ => return Err(invalid_native("review_protection.base_kind")),
             };
-        let mut value = Self::read(input, checks, quorum, queue)?;
+        let mut value = Self::read_profile(input, checks, quorum, queue, candidates)?;
         let frame = input.read_bytes("review_protection.ref_policy")?;
         let snapshot = decode_ref_policy_with_limits(frame, input.limits())?;
         if fgit_policy::reference_profile::classify(&snapshot).ok() != Some(profile) {
@@ -330,6 +388,20 @@ impl NativeProtectionEvent {
         with_checks: bool,
         with_quorum: bool,
         with_queue: bool,
+    ) -> Result<Self, CodecRefusal> {
+        Self::read_profile(input, with_checks, with_quorum, with_queue, false)
+    }
+    pub(super) fn read_with_candidate_checks(
+        input: &mut Decoder<'_>,
+    ) -> Result<Self, CodecRefusal> {
+        Self::read_profile(input, true, true, true, true)
+    }
+    fn read_profile(
+        input: &mut Decoder<'_>,
+        with_checks: bool,
+        with_quorum: bool,
+        with_queue: bool,
+        with_candidates: bool,
     ) -> Result<Self, CodecRefusal> {
         fn count(
             input: &mut Decoder<'_>,
@@ -402,13 +474,44 @@ impl NativeProtectionEvent {
                     });
                 }
             }
+            let require_merge_queue =
+                with_queue && input.read_bool("review_protection.require_merge_queue")?;
+            let mut required_candidate_checks = Vec::new();
+            if with_candidates {
+                let n = count(
+                    input,
+                    "review_protection.required_candidate_checks",
+                    MAX_BRANCH_REQUIRED_CHECKS - required_checks.len(),
+                )?;
+                for _ in 0..n {
+                    let publisher = PrincipalId::from_bytes(
+                        input.read_opaque_id("review_protection.candidate_check_publisher")?,
+                    );
+                    let mut graph_root = [0; 32];
+                    graph_root.copy_from_slice(
+                        input.take("review_protection.candidate_check_graph", 32)?,
+                    );
+                    let job = input.read_bytes("review_protection.candidate_check_job")?;
+                    if job.len() > super::workflow_check::MAX_CHECK_JOB_BYTES {
+                        return Err(invalid_native("review_protection.candidate_check_job"));
+                    }
+                    let job = std::str::from_utf8(job)
+                        .map_err(|_| invalid_native("review_protection.candidate_check_job"))?
+                        .to_owned();
+                    required_candidate_checks.push(RequiredCandidateWorkflowCheck {
+                        publisher,
+                        graph_root,
+                        job,
+                    });
+                }
+            }
             branches.push(ProtectedBranch {
                 name,
                 reviewers,
                 required_approvals,
                 required_checks,
-                require_merge_queue: with_queue
-                    && input.read_bool("review_protection.require_merge_queue")?,
+                required_candidate_checks,
+                require_merge_queue,
             });
         }
         let value = Self {
@@ -423,7 +526,12 @@ impl NativeProtectionEvent {
         value.validate()?;
         // Queue kind 19 always carries quorum/check fields and at least one
         // true queue flag. Historical kinds retain their smallest encoding.
-        let canonical_kind = if with_queue {
+        let canonical_kind = if with_candidates {
+            with_queue
+                && with_quorum
+                && with_checks
+                && value.protection.has_required_candidate_checks()
+        } else if with_queue {
             with_quorum && with_checks && value.protection.has_required_merge_queue()
         } else {
             value.protection.has_review_quorum() == with_quorum
@@ -526,3 +634,6 @@ mod authentication_policy_tests;
 
 #[cfg(test)]
 mod queue_tests;
+
+#[cfg(test)]
+mod candidate_check_tests;
