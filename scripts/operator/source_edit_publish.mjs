@@ -37,7 +37,10 @@ async function putRecord(path, value) {
 const FILES_V1 = 'frankengit-source-edit-files-v1', FILES_V2 = 'frankengit-source-edit-files-v2';
 const FILES_V3 = 'frankengit-source-edit-files-v3', FILES_V4 = 'frankengit-source-edit-files-v4';
 const PACKAGE_FILE = 'source-package.json', EXPECTED_FILE = 'source-expected.json';
-const evidenceReceipt = checked => checked.source_verification ? { source_verification: checked.source_verification } : {};
+const evidenceReceipt = checked => ({
+  ...(checked.source_verification ? { source_verification: checked.source_verification } : {}),
+  ...(checked.parent_tree_verification ? { parent_tree_verification: checked.parent_tree_verification } : {}),
+});
 function manifest(capture, bundle) {
   return { schema: FILES_V1, capture_sha256: hash(canonical(capture)), capture_bytes: canonical(capture).length,
     bundle_sha256: hash(bundle), bundle_bytes: bundle.length };

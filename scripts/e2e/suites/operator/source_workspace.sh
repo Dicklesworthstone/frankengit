@@ -45,7 +45,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in workspace_capture_and_binary_twin native_prepare_grant_and_exact_pack canonical_bytes_modes_and_sibling original_key_and_outcome_grant service_drained; do
+  for property in workspace_capture_and_binary_twin native_prepare_grant_and_exact_pack canonical_bytes_modes_and_sibling original_key_and_outcome_grant service_drained verified_parent_trees parent_evidence_custody; do
     fge_assert_eq "OPERATOR-WORKSPACE-$format-$property" true "$(fact "${format}_$property")" "native source workspace $property"
   done
 done

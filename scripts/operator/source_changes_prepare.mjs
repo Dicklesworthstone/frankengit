@@ -3,11 +3,22 @@
 // authorization and publication. Matching a report is not an independent proof
 // of pack closure. Independently deriving the expected tree root additionally
 // excludes unreported changes under the native Git commitment.
-import { buildSourceChanges, canonical, sha256, fail } from './source_changes.mjs';
+import { buildSourceChanges, ownSourceChangeInputs, canonical, sha256, fail } from './source_changes.mjs';
 import { editInput, captureSourceEdit, validateSourceEdit, identity, oid } from './source_edit_candidate.mjs';
 import { clock, fields } from './source_edit_wire.mjs';
 import { loadSourceEdit, stageSourceApply } from './source_edit_publish.mjs';
 import { absolute, contains } from './workflow_watch_io.mjs';
+import { parentTreeBasisFromPackage } from './source_edit_parent_trees.mjs';
+
+// Explicit profile consent is supplied by the caller. Only the existing
+// independently selected package supplies its bounded, retained parent bytes.
+export function sourceChangeRequest(selection, ownedPackage) {
+  const request = editInput(selection);
+  if (!Object.hasOwn(request, 'parent_tree_profile')) return request;
+  const basis = parentTreeBasisFromPackage(ownedPackage, request.scope.object_format, request.expected_commit, request.paths_hex);
+  if (Object.hasOwn(request, 'parent_tree_basis') && !canonical(request.parent_tree_basis).equals(canonical(basis))) fail('source_changes_parent_basis_mismatch');
+  return editInput({ ...request, parent_tree_basis: basis });
+}
 
 function lifetime(options) {
   fields(options, ['confirmDraftSha256', 'signal', 'timeoutMs', 'ca', 'maxWireBytes'], ['confirmDraftSha256']);
@@ -66,9 +77,10 @@ function matches(draft, candidate, pin) {
     bundle_objects_independently_verified: false, publication_authorized: false };
 }
 export async function prepareSourceChanges(packageBytes, expected, changes, selection, credential, options) {
-  const { pin, time } = lifetime(options), request = editInput(selection);
+  const { pin, time } = lifetime(options), owned = ownSourceChangeInputs(packageBytes, expected, changes);
+  time.check(); const request = sourceChangeRequest(selection, owned.packageBytes);
   if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('source_changes_credential');
-  const draft = await buildSourceChanges(packageBytes, expected, changes, { signal: time.signal, check: time.check });
+  const draft = await buildSourceChanges(owned.packageBytes, owned.expected, owned.changes, { signal: time.signal, check: time.check });
   time.check(); confirm(draft, pin); requestMatches(request, draft);
   const candidate = await captureSourceEdit(request, draft.bytes, credential, {
     signal: time.signal, ca: time.ca, timeoutMs: time.remaining(), maxWireBytes: time.maxWireBytes,
@@ -96,7 +108,8 @@ export async function stageVerifiedSourceChanges(journal, candidatePath, candida
     ['confirmDraftSha256', 'confirmCandidate', 'principal']);
   const { pin, time } = lifetime({ confirmDraftSha256: options.confirmDraftSha256,
     signal: options.signal, timeoutMs: options.timeoutMs });
-  const request = editInput(selection), principal = identity(options.principal);
+  const owned = ownSourceChangeInputs(packageBytes, expected, changes);
+  time.check(); const request = sourceChangeRequest(selection, owned.packageBytes), principal = identity(options.principal);
   const confirmed = oid(options.confirmCandidate, request.scope.object_format);
   absolute(journal); absolute(candidatePath);
   if (contains(journal, candidatePath) || contains(candidatePath, journal)) fail('source_changes_overlapping_custody');
@@ -104,7 +117,7 @@ export async function stageVerifiedSourceChanges(journal, candidatePath, candida
   // buildSourceChanges owns the package, independent expectations and all edit
   // primitives before its first await. Neither input mutation nor saved success
   // flags can redirect the subsequent file publication.
-  const draft = await buildSourceChanges(packageBytes, expected, changes, { signal: time.signal, check: time.check });
+  const draft = await buildSourceChanges(owned.packageBytes, owned.expected, owned.changes, { signal: time.signal, check: time.check });
   time.check(); confirm(draft, pin); requestMatches(request, draft);
   const candidate = await loadSourceEdit(candidatePath, candidateHash, time.check);
   if (confirmed !== candidate.candidate_commit) fail('source_changes_candidate_confirmation');
