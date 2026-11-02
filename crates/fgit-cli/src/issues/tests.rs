@@ -776,3 +776,137 @@ fn append_receipts_keep_intent_identity_and_known_terminal_outcomes_on_output_fa
     assert!(receipt.contains("\"expected_version\":1"));
     assert!(receipt.contains("\"name\":\"comment\""));
 }
+
+fn add_assignees_input() -> Vec<String> {
+    let mut args = input("assign");
+    args[0] = "add-assignees".into();
+    let version = args
+        .iter()
+        .position(|arg| arg == "--expected-version")
+        .unwrap();
+    args.drain(version..version + 2);
+    args.extend(["--assignee".into(), "44".repeat(16)]);
+    args
+}
+fn add_assignees_mutation(options: &Options) -> &Mutation<IssueAssigneesIntent> {
+    let Operation::AddAssignees(mutation) = &options.operation else {
+        panic!("add-assignees fixture");
+    };
+    mutation
+}
+#[test]
+fn add_assignees_is_explicit_and_version_independent_while_strict_assignment_is_preserved() {
+    for format in ["sha1", "sha256"] {
+        let mut args = add_assignees_input();
+        args.extend(["--assignee".into(), "22".repeat(16)]);
+        args.extend(["--object-format", format].map(str::to_owned));
+        let parsed = parse(&args).unwrap();
+        let mutation = add_assignees_mutation(&parsed);
+        assert_eq!(mutation.command.number.get(), 7);
+        assert_eq!(
+            mutation.command.assignees,
+            vec![
+                PrincipalId::from_bytes([0x22; 16]),
+                PrincipalId::from_bytes([0x44; 16]),
+            ]
+        );
+        assert_eq!(mutation.principal, PrincipalId::from_bytes([0x33; 16]));
+        assert_eq!(mutation.key, b"private-issue-key");
+        assert!(mutation.body_file.is_none());
+        assert_eq!(parsed.format.as_str(), format);
+        mutation.command.validate().unwrap();
+        for verb in ["assign", "unassign"] {
+            args[0] = verb.into();
+            assert!(
+                parse(&args).is_err(),
+                "strict assignment still needs its predecessor"
+            );
+        }
+    }
+}
+#[test]
+fn add_assignees_refuses_predecessors_authority_fields_and_invalid_or_unbounded_sets() {
+    for (flag, value) in [
+        ("--expected-version", "0"),
+        ("--expected-version", "1"),
+        ("--expected-head", "unselected"),
+        ("--title", "unrelated"),
+        ("--body", "unrelated"),
+        ("--body-file", "must-not-read"),
+        ("--label", "bug"),
+        ("--grant", "authority"),
+    ] {
+        let mut args = add_assignees_input();
+        args.extend([flag, value].map(str::to_owned));
+        assert!(parse(&args).is_err(), "{flag}");
+    }
+    for flag in ["--principal", "--idempotency-key", "--assignee"] {
+        let mut args = add_assignees_input();
+        let at = args.iter().position(|arg| arg == flag).unwrap();
+        args.drain(at..at + 2);
+        assert!(parse(&args).is_err(), "{flag}");
+    }
+    let mut args = add_assignees_input();
+    args.retain(|arg| arg != "--trusted-local");
+    assert!(parse(&args).is_err());
+    for value in ["", "user", "ABCDEF0123456789ABCDEF0123456789", "44"] {
+        let mut args = add_assignees_input();
+        replace(&mut args, "--assignee", value);
+        assert!(parse(&args).is_err());
+    }
+    let mut args = add_assignees_input();
+    args.extend(["--assignee".into(), "44".repeat(16)]);
+    assert!(
+        parse(&args).is_err(),
+        "duplicates must not be silently removed"
+    );
+    let mut args = add_assignees_input();
+    for value in 1..=15u8 {
+        args.extend(["--assignee".into(), format!("{value:02x}").repeat(16)]);
+    }
+    assert!(parse(&args).is_ok());
+    args.extend(["--assignee".into(), "ff".repeat(16)]);
+    assert!(parse(&args).is_err());
+}
+#[test]
+fn add_assignees_receipts_preserve_terminal_identity_even_when_output_fails() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let parsed = parse(&add_assignees_input()).unwrap();
+    let mutation = add_assignees_mutation(&parsed);
+    for committed in [true, false] {
+        let (tx, terminal) = terminal(committed);
+        let receipt = output::add_assignees(&parsed, mutation, tx, &terminal, None);
+        assert!(receipt.contains("\"command_profile\":\"issue.add-assignees.v1\""));
+        assert!(receipt.contains("\"expected_version\":null"));
+        assert!(receipt.contains("\"name\":\"add-assignees\""));
+        assert!(receipt.contains(&format!("\"assignees\":[\"{}\"]", "44".repeat(16))));
+        assert!(!receipt.contains("private-issue-key"));
+        assert_eq!(
+            finish_add_assignees(&mut Vec::new(), &parsed, mutation, tx, &terminal, None).unwrap(),
+            if committed { 0 } else { 3 }
+        );
+        let error = finish_add_assignees(
+            &mut Broken,
+            &parsed,
+            mutation,
+            tx,
+            &terminal,
+            Some("shutdown-marker"),
+        )
+        .unwrap_err();
+        assert!(error.contains(&tx.to_string()) && error.contains("shutdown-marker"));
+        assert!(error.contains(if committed {
+            "is committed"
+        } else {
+            "canonical refusal"
+        }));
+    }
+}

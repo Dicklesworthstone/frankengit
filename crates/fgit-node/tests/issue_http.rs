@@ -773,6 +773,8 @@ fn rotating_issue_credentials_preserves_the_principals_canonical_retry() {
     node.shutdown().unwrap();
 }
 
+#[path = "issue_http/add_assignees.rs"]
+mod add_assignees;
 #[path = "issue_http/append_comment.rs"]
 mod append_comment;
 #[path = "issue_http/assignment.rs"]

@@ -89,7 +89,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     let Value::Array(tools) = &reply.object().unwrap()["result"].object().unwrap()["tools"] else {
         panic!("missing discovery")
     };
-    assert_eq!(tools.len(), 73);
+    assert_eq!(tools.len(), 74);
     let names: std::collections::BTreeSet<_> = tools
         .iter()
         .map(|tool| tool.object().unwrap()["name"].text().unwrap())

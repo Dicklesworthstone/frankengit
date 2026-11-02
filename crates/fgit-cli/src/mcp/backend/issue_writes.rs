@@ -7,7 +7,8 @@ use super::{NodeTools, require_fields, string};
 use fgit_forge::{
     AggregateVersion, IssueNumber, MilestoneNumber,
     event::issue::{
-        IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_LABELS,
+        IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
+        MAX_ASSIGNEES, MAX_LABELS,
     },
 };
 use fgit_types::PrincipalId;
@@ -23,6 +24,7 @@ pub(super) fn is_tool(name: &str) -> bool {
             | "frankengit_issue_unlock"
             | "frankengit_issue_comment"
             | "frankengit_issue_append_comment"
+            | "frankengit_issue_add_assignees"
             | "frankengit_issue_assign"
             | "frankengit_issue_unassign"
             | "frankengit_issue_set_milestone"
@@ -39,6 +41,7 @@ pub(super) fn tools() -> Vec<Tool> {
         ("frankengit_issue_unlock", "Unlock comments on an open or closed issue at an exact positive version. Retry the identical command and original key after an uncertain response."),
         ("frankengit_issue_comment", "Append literal comment text at an exact positive issue version. Replaying the identical command and key never duplicates the comment."),
         ("frankengit_issue_append_comment", "Append literal comment text to an existing issue without expected_version, even after independent issue edits. Retry the identical number, body and original key to recover the same outcome without a duplicate comment."),
+        ("frankengit_issue_add_assignees", "Add 1..16 principal IDs to an existing issue without expected_version, preserving independent additions and other fields. Assignment grants no access or membership. Retry the identical issue, assignee set and original key to recover its original outcome."),
         ("frankengit_issue_assign", "Add 1..16 principal IDs to an issue's metadata assignments at an exact version, preserving other assignees. Assignment grants no access or membership."),
         ("frankengit_issue_unassign", "Remove only the named 1..16 principal IDs from issue metadata at an exact version. Retry the identical command and original key after an uncertain response."),
         ("frankengit_issue_set_milestone", "Assign an issue to an existing open milestone using exact issue and milestone versions at the same authority head. Membership is metadata, not authorization. Retry the identical command and original key."),
@@ -53,16 +56,24 @@ fn schema(name: &str) -> Value {
         properties.insert("expected_milestone_version".into(), super::decimal_schema());
         required.extend(["milestone", "expected_milestone_version"]);
     }
-    if name == "frankengit_issue_append_comment" {
+    if matches!(
+        name,
+        "frankengit_issue_append_comment" | "frankengit_issue_add_assignees"
+    ) {
         properties.remove("expected_version");
         required.retain(|field| *field != "expected_version");
         if let Some(Value::Object(key)) = properties.get_mut("idempotency_key") {
-            key.insert("description".into(), text("Stable key for this append intent. Retry the identical issue number and body with the original key; do not replace the key after an uncertain response."));
+            let description = if name == "frankengit_issue_append_comment" {
+                "Stable key for this append intent. Retry the identical issue number and body with the original key; do not replace the key after an uncertain response."
+            } else {
+                "Stable key for this additive intent. Retry the identical issue number and assignee set with the original key; do not replace the key after an uncertain response."
+            };
+            key.insert("description".into(), text(description));
         }
     }
     if matches!(
         name,
-        "frankengit_issue_assign" | "frankengit_issue_unassign"
+        "frankengit_issue_assign" | "frankengit_issue_unassign" | "frankengit_issue_add_assignees"
     ) {
         properties.insert(
             "assignees".into(),
@@ -166,7 +177,12 @@ fn assignees(args: &Object) -> Result<Vec<PrincipalId>, ToolError> {
     Ok(ids)
 }
 pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError> {
-    if !is_tool(name) || name == "frankengit_issue_append_comment" {
+    if !is_tool(name)
+        || matches!(
+            name,
+            "frankengit_issue_append_comment" | "frankengit_issue_add_assignees"
+        )
+    {
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let allowed: &[&str] = match name {
@@ -252,16 +268,32 @@ fn parse_append_comment(args: &Object) -> Result<IssueCommentIntent, ToolError> 
         .map_err(|_| ToolError::invalid("invalid_issue_comment"))?;
     Ok(intent)
 }
+fn parse_add_assignees(args: &Object) -> Result<IssueAssigneesIntent, ToolError> {
+    require_fields(args, &["number", "idempotency_key", "assignees"])?;
+    let intent = IssueAssigneesIntent {
+        number: IssueNumber::try_new(common::number(args, "number")?)
+            .ok_or(ToolError::invalid("positive_issue_number_required"))?,
+        assignees: assignees(args)?,
+    };
+    intent
+        .validate()
+        .map_err(|_| ToolError::invalid("invalid_issue_assignees"))?;
+    Ok(intent)
+}
 enum MutationCommand {
     Versioned(IssueCommand),
     Append(IssueCommentIntent),
+    AddAssignees(IssueAssigneesIntent),
 }
+
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
     if !backend.options.writes.issues {
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let command = if name == "frankengit_issue_append_comment" {
         MutationCommand::Append(parse_append_comment(args)?)
+    } else if name == "frankengit_issue_add_assignees" {
+        MutationCommand::AddAssignees(parse_add_assignees(args)?)
     } else {
         MutationCommand::Versioned(parse(name, args)?)
     };
@@ -282,6 +314,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             )
         }
         MutationCommand::Append(intent) => (intent.number, "append-comment", Value::Null),
+        MutationCommand::AddAssignees(intent) => (intent.number, "add-assignees", Value::Null),
     };
     let context = fgit_cli::command_request_context(&backend.node);
     // From here onward a failed response is not proof of non-commit. Native
@@ -308,6 +341,17 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
                         )
                         .await
                 }
+                MutationCommand::AddAssignees(intent) => {
+                    backend
+                        .node
+                        .admit_issue_assignees_durable_in(
+                            &context,
+                            &session,
+                            intent,
+                            Default::default(),
+                        )
+                        .await
+                }
             }
         })
         .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
@@ -316,6 +360,9 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     result.insert("type".into(), text("issue_publication"));
     result.insert("number".into(), text(number.get().to_string()));
     result.insert("action".into(), text(action));
+    if matches!(command, MutationCommand::AddAssignees(_)) {
+        result.insert("command_profile".into(), text("issue.add-assignees.v1"));
+    }
     result.insert("expected_version".into(), expected_version);
     result.insert("complete".into(), Value::Bool(true));
     result.insert("refs_changed".into(), Value::Bool(false));
@@ -595,5 +642,111 @@ mod append_tests {
         assert!(parse_append_comment(&args).is_ok());
         args.remove("body");
         assert!(parse_append_comment(&args).is_err());
+    }
+}
+
+#[cfg(test)]
+mod additive_assignee_tests {
+    use super::*;
+    fn args() -> Object {
+        let Value::Object(args) = object([
+            ("number", text("7")),
+            ("idempotency_key", text("add-original")),
+            (
+                "assignees",
+                Value::Array(vec![text("44".repeat(16)), text("22".repeat(16))]),
+            ),
+        ]) else {
+            unreachable!()
+        };
+        args
+    }
+    #[test]
+    fn additive_assignees_require_their_own_strict_schema_without_a_predecessor() {
+        let name = "frankengit_issue_add_assignees";
+        assert!(is_tool(name));
+        let tool = tools().into_iter().find(|tool| tool.name == name).unwrap();
+        let schema = tool.schema.object().unwrap();
+        assert_eq!(schema["additionalProperties"], Value::Bool(false));
+        let fields = schema["properties"].object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(!fields.contains_key("expected_version"));
+        assert_eq!(
+            schema["required"],
+            Value::Array(vec![
+                text("number"),
+                text("idempotency_key"),
+                text("assignees")
+            ])
+        );
+        let input = args();
+        let intent = parse_add_assignees(&input).unwrap();
+        assert_eq!(intent.number.get(), 7);
+        assert_eq!(
+            intent.assignees,
+            vec![
+                PrincipalId::from_bytes([0x22; 16]),
+                PrincipalId::from_bytes([0x44; 16])
+            ]
+        );
+        assert!(parse(name, &input).is_err());
+        assert!(parse("frankengit_issue_assign", &input).is_err());
+        let mut exact = input;
+        exact.insert("expected_version".into(), text("1"));
+        assert!(parse("frankengit_issue_assign", &exact).is_ok());
+        assert!(parse_add_assignees(&exact).is_err());
+    }
+    #[test]
+    fn additive_assignees_reject_authority_injection_bad_numbers_and_noncanonical_sets() {
+        for name in [
+            "expected_version",
+            "expected_head",
+            "principal",
+            "repository",
+            "storage",
+            "policy",
+            "title",
+            "body",
+            "labels",
+            "action",
+        ] {
+            let mut input = args();
+            input.insert(name.into(), text("untrusted"));
+            assert!(parse_add_assignees(&input).is_err(), "{name}");
+        }
+        for number in [
+            text("0"),
+            text("01"),
+            text("-1"),
+            json::number(7),
+            Value::Null,
+        ] {
+            let mut input = args();
+            input.insert("number".into(), number);
+            assert!(parse_add_assignees(&input).is_err());
+        }
+        for assignees in [
+            Value::Null,
+            text("44".repeat(16)),
+            Value::Array(vec![]),
+            Value::Array(vec![text("44".repeat(16)), text("44".repeat(16))]),
+            Value::Array(vec![text("user")]),
+            Value::Array(vec![text("ABCDEF0123456789ABCDEF0123456789")]),
+        ] {
+            let mut input = args();
+            input.insert("assignees".into(), assignees);
+            assert!(parse_add_assignees(&input).is_err());
+        }
+        let mut input = args();
+        input.remove("assignees");
+        assert!(parse_add_assignees(&input).is_err());
+        let mut maximum: Vec<_> = (1..=16u8)
+            .map(|id| text(format!("{id:02x}").repeat(16)))
+            .collect();
+        input.insert("assignees".into(), Value::Array(maximum.clone()));
+        assert!(parse_add_assignees(&input).is_ok());
+        maximum.push(text("ff".repeat(16)));
+        input.insert("assignees".into(), Value::Array(maximum));
+        assert!(parse_add_assignees(&input).is_err());
     }
 }

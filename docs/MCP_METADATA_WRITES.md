@@ -36,8 +36,9 @@ The write group exposes `frankengit_issue_open`, `frankengit_issue_edit`,
 `frankengit_issue_close`, `frankengit_issue_reopen`,
 `frankengit_issue_lock`, `frankengit_issue_unlock`,
 `frankengit_issue_comment`, `frankengit_issue_append_comment`,
-`frankengit_issue_assign` and `frankengit_issue_unassign`. Each requires a positive
-`number` and `idempotency_key`. All except the explicit append tool require an
+`frankengit_issue_assign`, `frankengit_issue_unassign` and
+`frankengit_issue_add_assignees`. Each requires a positive
+`number` and `idempotency_key`. All except the explicit append and assignee-addition tools require an
 exact `expected_version`. Numbers and versions are canonical unsigned decimal
 **strings**, not JSON numbers.
 
@@ -65,6 +66,20 @@ timelines retain payloadless `lock` and `unlock` actions. An identical retry
 returns the original terminal result even after the lock changes. Previously
 committed comments still recover their commit while locked; previously refused
 comments keep their refusal after unlocking. Read current state separately.
+
+`frankengit_issue_add_assignees` requires only `number`, `assignees`, and
+`idempotency_key`; it rejects `expected_version`. The assignee array contains
+1–16 distinct lowercase 32-hex principal IDs, sorted before sealing. Independent
+additions preserve current assignments, and a final union over 16 refuses.
+Exact retries recover the original outcome even if a later strict removal has
+changed the issue. They never repeat the addition. Its terminal receipt names
+`action: "add-assignees"`, `command_profile: "issue.add-assignees.v1"` and
+`expected_version: null`. The existing issue-write grant and launch-bound
+principal/incarnation remain mandatory; an assignment grants no access.
+
+```json
+{"jsonrpc":"2.0","id":"add-assignees-attempt-1","method":"tools/call","params":{"name":"frankengit_issue_add_assignees","arguments":{"number":"7","idempotency_key":"assign-issue-7-independent","assignees":["44444444444444444444444444444444"]}}}
+```
 
 `frankengit_issue_append_comment` requires only `number`, `body`, and
 `idempotency_key`; `expected_version` is rejected. Use it to add discussion to an

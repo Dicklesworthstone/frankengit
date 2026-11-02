@@ -4,8 +4,8 @@
 use fgit_forge::MilestoneNumber;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_forge::event::issue::{
-    IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES,
-    MAX_LABELS,
+    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES,
+    MAX_BODY_BYTES, MAX_LABELS,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
@@ -61,12 +61,13 @@ pub enum Operation<'a> {
     },
 }
 
-/// Keep versioned mutations and append-only intents distinct through admission
+/// Keep versioned mutations and additive intents distinct through admission
 /// and receipt rendering. A caller cannot silently discard an exact version.
 #[derive(Debug)]
 pub(super) enum Command {
     Versioned(IssueCommand),
     AppendComment(IssueCommentIntent),
+    AddAssignees(IssueAssigneesIntent),
     Milestone(fgit_forge::event::milestone::MilestoneCommand),
     Notification(super::notifications::BoundNotificationCommand),
 }
@@ -149,6 +150,7 @@ impl<'a> Request<'a> {
                         | "unlock"
                         | "comment"
                         | "append-comment"
+                        | "add-assignees"
                         | "assign"
                         | "unassign"
                         | "set-milestone"
@@ -206,7 +208,7 @@ impl<'a> Request<'a> {
         let (mut milestone, mut milestone_version) = (None, None);
         for (key, value) in fields {
             match key.as_str() {
-                "expected_version" if action != "append-comment" => {
+                "expected_version" if !matches!(action, "append-comment" | "add-assignees") => {
                     set_once(&mut version, decimal(&value)?)?;
                 }
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
@@ -222,7 +224,7 @@ impl<'a> Request<'a> {
                 "clear_labels" if action == "edit" && value == "true" => {
                     set_once(&mut clear_labels, true)?;
                 }
-                "assignee" if matches!(action, "assign" | "unassign") => {
+                "assignee" if matches!(action, "assign" | "unassign" | "add-assignees") => {
                     if assignees.len() == MAX_ASSIGNEES {
                         return Err(ApiError::too_large());
                     }
@@ -257,6 +259,17 @@ impl<'a> Request<'a> {
                 .validate()
                 .map_err(|_| ApiError::bad("invalid_issue_content"))?;
             return Ok(Command::AppendComment(intent));
+        }
+        if action == "add-assignees" {
+            assignees.sort();
+            if assignees.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(ApiError::bad("duplicate_assignee"));
+            }
+            let intent = IssueAssigneesIntent { number, assignees };
+            intent
+                .validate()
+                .map_err(|_| ApiError::bad("invalid_issue_content"))?;
+            return Ok(Command::AddAssignees(intent));
         }
         let version = version.ok_or_else(|| ApiError::bad("expected_version_required"))?;
         if (action == "open") != (version == 0) {
@@ -535,7 +548,10 @@ mod tests {
     fn command(action: &str, form: &[u8]) -> Result<IssueCommand, ApiError> {
         match parsed_command(action, form)? {
             Command::Versioned(command) => Ok(command),
-            Command::AppendComment(_) => panic!("expected a strict versioned command"),
+            Command::AppendComment(_)
+            | Command::AddAssignees(_)
+            | Command::Milestone(_)
+            | Command::Notification(_) => panic!("expected a strict versioned command"),
         }
     }
 
@@ -659,6 +675,66 @@ mod tests {
                 command(action, maximum.as_bytes()).unwrap_err().code,
                 "resource_limit"
             );
+        }
+    }
+
+    #[test]
+    fn additive_assignees_have_a_distinct_bounded_set_grammar_without_a_predecessor() {
+        let a = "11".repeat(16);
+        let b = "22".repeat(16);
+        let form = format!("assignee={b}&assignee={a}");
+        let Command::AddAssignees(intent) =
+            parsed_command("add-assignees", form.as_bytes()).unwrap()
+        else {
+            panic!("additive assignees");
+        };
+        assert_eq!(intent.number, IssueNumber::FIRST);
+        assert_eq!(
+            intent.assignees,
+            vec![
+                PrincipalId::from_hex(&a).unwrap(),
+                PrincipalId::from_hex(&b).unwrap()
+            ]
+        );
+        for invalid in [
+            String::new(),
+            "assignee=".into(),
+            "assignee=admin".into(),
+            "assignee=ABCDEF0123456789ABCDEF0123456789".into(),
+            format!("{form}&assignee={a}"),
+            format!("{form}&expected_version=1"),
+            format!("{form}&expected_version=0"),
+            format!("{form}&body=ignored"),
+            format!("{form}&title=ignored"),
+            format!("{form}&principal={a}"),
+            format!("{form}&clear_labels=true"),
+            format!("{form}&label=bug"),
+        ] {
+            assert!(
+                parsed_command("add-assignees", invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
+        }
+        let maximum = (1..=MAX_ASSIGNEES)
+            .map(|seed| format!("assignee={:032x}", seed))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(parsed_command("add-assignees", maximum.as_bytes()).is_ok());
+        assert_eq!(
+            parsed_command(
+                "add-assignees",
+                format!("{maximum}&assignee={b}").as_bytes()
+            )
+            .unwrap_err()
+            .code,
+            "resource_limit"
+        );
+        for strict in ["assign", "unassign"] {
+            assert_eq!(
+                command(strict, form.as_bytes()).unwrap_err().code,
+                "expected_version_required"
+            );
+            assert!(command(strict, format!("expected_version=7&{form}").as_bytes()).is_ok());
         }
     }
 

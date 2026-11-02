@@ -3,7 +3,8 @@ use super::options::{Mutation, Options, ReadOptions, expected_version, head_toke
 use crate::publication_support::quote;
 use fgit_authority::TerminalOutcome;
 use fgit_forge::event::issue::{
-    IssueAction, IssueCommentIntent, IssueSnapshot, IssueState, validate_assignees,
+    IssueAction, IssueAssigneesIntent, IssueCommentIntent, IssueSnapshot, IssueState,
+    validate_assignees,
 };
 use fgit_forge::{AggregateId, ForgeEvent, ForgeEventPayload, IssueNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
@@ -91,6 +92,7 @@ pub(super) fn mutation(
             principal: mutation.principal,
             number: mutation.command.number,
             expected_version: Some(expected_version(&mutation.command)),
+            profile: None,
             action: action(&mutation.command.action),
         },
         tx,
@@ -111,9 +113,34 @@ pub(super) fn append_comment(
             principal: mutation.principal,
             number: mutation.command.number,
             expected_version: None,
+            profile: None,
             action: format!(
                 "{{\"name\":\"append-comment\",\"body\":{}}}",
                 quote(&mutation.command.body)
+            ),
+        },
+        tx,
+        terminal,
+        cleanup,
+    )
+}
+pub(super) fn add_assignees(
+    options: &Options,
+    mutation: &Mutation<IssueAssigneesIntent>,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> String {
+    publication(
+        options,
+        ReceiptCommand {
+            principal: mutation.principal,
+            number: mutation.command.number,
+            expected_version: None,
+            profile: Some("issue.add-assignees.v1"),
+            action: format!(
+                "{{\"name\":\"add-assignees\",\"assignees\":{}}}",
+                assignees(&mutation.command.assignees)
             ),
         },
         tx,
@@ -125,6 +152,7 @@ struct ReceiptCommand {
     principal: PrincipalId,
     number: IssueNumber,
     expected_version: Option<u64>,
+    profile: Option<&'static str>,
     action: String,
 }
 fn publication(
@@ -160,7 +188,7 @@ fn publication(
             "{{\"type\":\"issue_publication\",\"schema_version\":1,\"outcome\":{},",
             "\"command_committed\":{},\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"tenant_id\":{},\"repository_id\":{},",
-            "\"principal_id\":{},\"object_format\":{},\"number\":{},\"expected_version\":{},\"action\":{},",
+            "\"principal_id\":{},\"object_format\":{},\"number\":{},\"expected_version\":{},\"action\":{},{}",
             "\"refs_changed\":false,\"delivery_acknowledged\":null,\"node_closed\":{},\"cleanup_error\":{}}}"
         ),
         quote(outcome),
@@ -179,6 +207,10 @@ fn publication(
             .expected_version
             .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         command.action,
+        command.profile.map_or_else(String::new, |profile| format!(
+            "\"command_profile\":{},",
+            quote(profile)
+        )),
         cleanup.is_none(),
         cleanup.map_or_else(|| "null".to_owned(), quote)
     )

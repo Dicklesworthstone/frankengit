@@ -475,6 +475,17 @@ pub(super) fn execute(
                     ),
                     &mut live,
                 ),
+                Command::AddAssignees(intent) => drive_request_while(
+                    node,
+                    &context,
+                    node.admit_issue_assignees_durable_in(
+                        &context,
+                        session,
+                        intent,
+                        Default::default(),
+                    ),
+                    &mut live,
+                ),
                 Command::Milestone(command) => {
                     command
                         .proposed_event(principal)

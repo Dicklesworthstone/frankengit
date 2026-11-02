@@ -176,6 +176,7 @@ pub(super) fn mutation(
         Command::AppendComment(intent) => {
             (intent.number.get(), "null".to_owned(), "append-comment")
         }
+        Command::AddAssignees(intent) => (intent.number.get(), "null".to_owned(), "add-assignees"),
         Command::Milestone(command) => {
             let expected = match command.expected_version {
                 fgit_forge::ExpectedVersion::NewStream => 0,
@@ -200,10 +201,15 @@ pub(super) fn mutation(
             )
         }
     };
+    let profile = if matches!(command, Command::AddAssignees(_)) {
+        "\"command_profile\":\"issue.add-assignees.v1\","
+    } else {
+        ""
+    };
     format!(
         concat!(
             "{{\"type\":{},\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
-            "\"principal_id\":{},\"number\":{},\"expected_version\":{},\"action\":{},",
+            "\"principal_id\":{},\"number\":{},\"expected_version\":{},{}\"action\":{},",
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"delivery_acknowledged\":null}}"
         ),
@@ -219,6 +225,7 @@ pub(super) fn mutation(
         quote(&principal.to_string()),
         number,
         expected,
+        profile,
         quote(action),
         quote(&tx.to_string()),
         quote(outcome),

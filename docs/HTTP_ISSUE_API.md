@@ -90,6 +90,7 @@ POST {REPO_URL}/api/v1/issues/{number}/lock
 POST {REPO_URL}/api/v1/issues/{number}/unlock
 POST {REPO_URL}/api/v1/issues/{number}/comment
 POST {REPO_URL}/api/v1/issues/{number}/append-comment
+POST {REPO_URL}/api/v1/issues/{number}/add-assignees
 POST {REPO_URL}/api/v1/issues/{number}/assign
 POST {REPO_URL}/api/v1/issues/{number}/unassign
 POST {REPO_URL}/api/v1/issues/{number}/set-milestone
@@ -110,6 +111,10 @@ predecessor. The separate `append-comment` action accepts only `body` and reject
 `expected_version`; it binds an immutable comment intent and appends against the
 current canonical issue state. Independent appends can all commit while strict
 edits or strict comments still refuse a stale predecessor.
+The separate `add-assignees` action also rejects `expected_version`: it unions
+the supplied principal IDs with assignments at the selected current predecessor.
+Concurrent additions can all commit when the resulting set fits the existing
+16-principal bound. This uses the same `issues-write` credential grant.
 
 | Action | Additional form fields |
 |---|---|
@@ -117,6 +122,7 @@ edits or strict comments still refuse a stale predecessor.
 | `edit` | At least one of `title`, `body`, repeated `label`, or `clear_labels=true`. Omitted fields are preserved. `body=` clears a body. |
 | `comment` | Required nonblank `body`, with the exact `expected_version`. |
 | `append-comment` | Required nonblank `body` only; `expected_version` is forbidden. |
+| `add-assignees` | 1–16 distinct repeated `assignee` IDs; `expected_version` is forbidden. |
 | `close`, `reopen`, `lock`, `unlock` | No fields besides `expected_version`. |
 | `assign`, `unassign` | Required repeated `assignee`: 1–16 distinct 32-character lowercase hexadecimal principal IDs. |
 | `set-milestone` | Required positive `milestone` and `expected_milestone_version`, in addition to the issue's exact `expected_version`. |
@@ -138,6 +144,15 @@ mechanism, account-existence assertion, access grant or notification endpoint.
 `issues-write` remains required; naming an `issues-read` principal never widens
 that principal's credentials. The wire and upgrade contract is
 [normative §20.2](NORMATIVE_PROTOCOL_CONTRACTS.md#202-native-issue-assignment-deltas).
+
+`POST .../issues/{number}/add-assignees` accepts the same repeated `assignee`
+fields as `assign`. Its receipt has `action: "add-assignees"` and
+`expected_version: null`; canonical history retains the versioned `assign`
+event. An exact retry returns its original outcome, even after later assignment
+removal, and never adds the removed principal again. A changed set or switching
+between `assign` and `add-assignees` requires a new intent/key. The complete
+[addition contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2025-native-issue-assignee-addition-intents)
+preserves the existing exact-version commands and request identities.
 
 Lock/unlock uses the same `issues-write` grant and explicit idempotency header.
 It applies independently to open and closed issues. While locked, both strict

@@ -2,8 +2,8 @@
 use fgit_authority::IdempotencyKey;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber, MilestoneNumber};
 use fgit_forge::event::issue::{
-    IssueAction, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES, MAX_BODY_BYTES,
-    MAX_LABELS,
+    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES,
+    MAX_BODY_BYTES, MAX_LABELS,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
@@ -25,6 +25,7 @@ pub(super) struct Options {
 pub(super) enum Operation {
     Mutate(Mutation),
     AppendComment(Mutation<IssueCommentIntent>),
+    AddAssignees(Mutation<IssueAssigneesIntent>),
     Read(ReadOptions),
 }
 #[derive(Debug)]
@@ -66,6 +67,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             | "unlock"
             | "comment"
             | "append-comment"
+            | "add-assignees"
             | "assign"
             | "unassign"
             | "set-milestone"
@@ -114,9 +116,11 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         let allowed = flag == "--object-format"
             || if mutate {
                 matches!(flag, "--principal" | "--idempotency-key")
-                    || (action != "append-comment" && flag == "--expected-version")
+                    || (!matches!(action, "append-comment" | "add-assignees")
+                        && flag == "--expected-version")
                     || (matches!(action, "open" | "edit") && matches!(flag, "--title" | "--label"))
-                    || (matches!(action, "assign" | "unassign") && flag == "--assignee")
+                    || (matches!(action, "assign" | "unassign" | "add-assignees")
+                        && flag == "--assignee")
                     || (action == "set-milestone"
                         && matches!(flag, "--milestone" | "--expected-milestone-version"))
                     || (matches!(action, "open" | "edit" | "comment" | "append-comment")
@@ -209,6 +213,20 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 key,
                 command,
                 body_file,
+            })
+        } else if action == "add-assignees" {
+            let command = IssueAssigneesIntent {
+                number: number.ok_or("missing issue number")?,
+                assignees,
+            };
+            command
+                .validate()
+                .map_err(|_| "invalid additive issue assignees")?;
+            Operation::AddAssignees(Mutation {
+                principal,
+                key,
+                command,
+                body_file: None,
             })
         } else {
             let version = decimal(required(&flags, "--expected-version")?)?;

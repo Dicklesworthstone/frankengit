@@ -13,7 +13,7 @@ use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
 use fgit_forge::{
     IssueNumber,
-    event::issue::{IssueCommand, IssueCommentIntent},
+    event::issue::{IssueAssigneesIntent, IssueCommand, IssueCommentIntent},
 };
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, TxId};
@@ -22,9 +22,31 @@ use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, TxId};
 enum IssueSubmission<'a> {
     Exact(&'a IssueCommand),
     AppendComment(&'a IssueCommentIntent),
+    AddAssignees(&'a IssueAssigneesIntent),
 }
 
 impl OneNode {
+    /// Add the exact assignee set without selecting an issue predecessor.
+    /// Every attempt revalidates the current issue and its bounded set union;
+    /// concurrent additions and unrelated edits retain their ordinary effects.
+    /// The actor, issue, additions and retry key stay fixed, and a known terminal
+    /// outcome is recovered before new-publication intake or quota checks.
+    pub async fn admit_issue_assignees_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        intent: &IssueAssigneesIntent,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_issue_submission_in(
+            request,
+            session,
+            IssueSubmission::AddAssignees(intent),
+            limits,
+        )
+        .await
+    }
+
     /// Publish a version-independent comment through the canonical issue owner.
     /// The issue, body, actor and idempotency key remain fixed across retries;
     /// each new publication attempt validates the current issue state and stamps
@@ -81,6 +103,7 @@ impl OneNode {
         let (_, attempt) = match submission {
             IssueSubmission::Exact(command) => issues::proposal(&context, command),
             IssueSubmission::AppendComment(intent) => issues::append_proposal(&context, intent),
+            IssueSubmission::AddAssignees(intent) => issues::assignees_proposal(&context, intent),
         }
         .map_err(error)?;
         let tx = attempt
@@ -131,6 +154,17 @@ impl OneNode {
             }
             IssueSubmission::AppendComment(intent) => {
                 Box::pin(issues::admit_issue_comment_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    intent,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+            IssueSubmission::AddAssignees(intent) => {
+                Box::pin(issues::admit_issue_assignees_async(
                     &self.authority,
                     request.authority(),
                     &context,

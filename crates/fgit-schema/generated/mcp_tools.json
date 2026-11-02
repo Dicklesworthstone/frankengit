@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 77,
-  "active_count": 73,
+  "total_count": 78,
+  "active_count": 74,
   "unsupported_count": 4,
   "tools": [
     {
@@ -538,6 +538,34 @@
       "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_issue_number_required", "invalid_preference_version", "version_exhausted", "positive_read_through_required", "invalid_notification_command", "invalid_idempotency_key", "mutation_outcome_unknown"],
       "cli_command": "fg inbox unread",
       "rest_api_path": "POST /{repository}/api/v1/notifications/{number}/unread"
+    },
+    {
+      "name": "frankengit_issue_add_assignees",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Add 1..16 distinct principal IDs to an existing issue without expected_version. Concurrent additions preserve each other's assignments; the current union stays bounded. Retry the identical issue, assignee set and original durable key to recover the original terminal outcome. Assignment grants no access or membership.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "server_selected_head",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "public_repository_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_issue_number_required", "invalid_idempotency_key", "assignees_array_required", "invalid_assignee", "invalid_assignee_count", "duplicate_assignee", "mutation_outcome_unknown"],
+      "cli_command": "fg issue add-assignees",
+      "rest_api_path": "POST /{repository}/api/v1/issues/{number}/add-assignees"
     },
     {
       "name": "frankengit_issue_append_comment",

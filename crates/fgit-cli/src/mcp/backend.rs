@@ -196,7 +196,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         tenant: fgit_types::TenantId::from_bytes([0x11; 16]),
         repository: fgit_types::RepositoryId::from_bytes([0x22; 16]),
         format: fgit_types::GitHashAlgorithm::Sha1,
-        incarnation: Some(fgit_types::RepositoryIncarnationId::from_bytes([0x33;16])),
+        incarnation: Some(fgit_types::RepositoryIncarnationId::from_bytes([0x33; 16])),
         issues: true,
         pulls: true,
         source: true,
@@ -217,7 +217,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
             merges: true,
         },
         outcomes: true,
-        principal: Some(fgit_types::PrincipalId::from_bytes([0x44;16])),
+        principal: Some(fgit_types::PrincipalId::from_bytes([0x44; 16])),
         max_messages: 1,
     };
     let mut names: Vec<&'static str> = tools_for_options(&full_options)
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 73);
+        assert_eq!(server_names.len(), 74);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
@@ -545,6 +545,7 @@ mod tests {
             "frankengit_issue_unlock",
             "frankengit_issue_set_milestone",
             "frankengit_issue_clear_milestone",
+            "frankengit_issue_add_assignees",
         ] {
             assert!(server_names.contains(&name));
             let tool = issue_writes::tools()

@@ -10,7 +10,8 @@ on the hosting GitHub repository's issue tracker.
 
 All mutations supply an explicit positive issue number, principal, and stable
 idempotency key. Exact-version actions also require an expected predecessor;
-opening uses version zero. `append-comment` explicitly omits the issue version.
+opening uses version zero. `append-comment` and `add-assignees` explicitly omit
+the issue version.
 The node decides whether an exact predecessor is still current and selects the
 append intent's predecessor inside canonical admission.
 Numbers are supplied by the caller; this interface does not allocate one by a
@@ -88,6 +89,26 @@ it does not invent a caller-selected predecessor or report a guessed current
 version. Read `fg issue show` for the canonical event and current issue state.
 
 ## Assign and unassign issue work
+
+Use `add-assignees` when independent additions should survive concurrent issue
+updates. Admission selects the current predecessor and preserves other
+assignments; it still refuses a final set larger than 16 principals.
+
+```sh
+fg issue add-assignees "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
+  --trusted-local --principal "$PRINCIPAL_ID" \
+  --idempotency-key issue-17-add-assignees-1 \
+  --assignee "$ASSIGNEE_PRINCIPAL_ID"
+```
+
+This action rejects `--expected-version`. Retry with the same issue, principal,
+assignee set and key; input order does not change the set's identity. A retry
+after someone removes an assignee returns the original outcome without adding
+that person again. Receipts name `add-assignees` and `expected_version: null`;
+the canonical history contains an ordinary versioned `assign` delta.
+
+For changes that must depend on a specific observed issue version, retain the
+existing `assign` and `unassign` commands:
 
 ```sh
 fg issue assign "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 17 \
