@@ -44,8 +44,8 @@ export async function readSourceRecord(path, optional = false) {
     }
     let matched = false, count = 0;
     await directory(dirname(path));
-    const prefix = basename(path) + '.writing-', directory = await opendir(dirname(path));
-    for await (const entry of directory) {
+    const prefix = basename(path) + '.writing-', entries = await opendir(dirname(path));
+    for await (const entry of entries) {
       if (++count > 64) fail('source_edit_record_directory_limit');
       if (!entry.name.startsWith(prefix) || !/^[0-9a-f]{32}$/.test(entry.name.slice(prefix.length))) continue;
       let temporary;
