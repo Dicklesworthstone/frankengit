@@ -307,9 +307,10 @@ export function issueSearchPage(reply, input, options = {}) {
   return { reply, binding: observed, head: snapshot, query };
 }
 
-export function publication(reply, pending, status = 200) {
+export function publication(reply, pending, status = 200, entity = 'issue') {
+  if (!['issue', 'milestone'].includes(entity)) fail('Unsupported publication profile.');
   identity(reply, pending.binding);
-  if (reply.type !== 'issue_publication' || reply.number !== pending.number ||
+  if (reply.type !== `${entity}_publication` || reply.number !== pending.number ||
       reply.expected_version !== pending.expected_version || reply.action !== pending.action ||
       !['committed', 'refused'].includes(reply.outcome) || reply.delivery_acknowledged !== null) {
     fail('Unrecognized or mismatched terminal issue reply.');
@@ -400,10 +401,20 @@ function httpError(status) {
 
 export class IssueClient {
   #root; #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #pending = null;
-  #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout;
+  #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout; #milestone;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
-  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }) {
+  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }, milestoneProfile = null) {
+    // Repository-owned MilestoneClient shares the exact custody/transport path.
+    // This closed code profile never comes from a receipt or remote response;
+    // it cannot choose an origin, route, recovery endpoint or key namespace.
+    if (milestoneProfile !== null && (!Object.isFrozen(milestoneProfile) ||
+        Object.keys(milestoneProfile).length !== 4 || !own(milestoneProfile, 'kind') || milestoneProfile.kind !== 'milestone' ||
+        !['mutationRequest', 'page', 'history'].every(key => own(milestoneProfile, key)) ||
+        !['mutationRequest', 'page', 'history'].every(key => typeof milestoneProfile[key] === 'function'))) {
+      fail('Invalid native metadata client profile.');
+    }
+    this.#milestone = milestoneProfile;
     this.#root = rootFor(href); this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = natural(timeoutMs, 'request timeout', 1, 300_000);
   }
@@ -480,9 +491,11 @@ export class IssueClient {
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
     if (render) query.set('render', 'html_safe');
-    const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
+    const family = this.#milestone ? 'milestones' : 'issues';
+    const raw = await this.#request(`${family}${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
     const options = { after, limit, head, binding: this.#binding };
-    const checked = number === null ? issuePage(raw, options) : issueHistory(raw.reply, number, options);
+    const page = this.#milestone?.page ?? issuePage, history = this.#milestone?.history ?? issueHistory;
+    const checked = number === null ? page(raw, options) : history(raw.reply, number, options);
     if (number !== null && raw.status === 404 && checked.reply.found) fail('Issue presence and HTTP status disagree.');
     this.#binding = checked.binding;
     return checked;
@@ -490,6 +503,7 @@ export class IssueClient {
   // POST is a bounded read, not a publication. It must never attach the
   // pending change's key, mark it sent, or spend mutation retry responsibility.
   async search(input = {}, options = {}) {
+    if (this.#milestone) fail('Milestone search is not supported by this native profile.');
     const query = issueSearchQuery(input), parameters = searchParameters(options);
     const { after, limit, head, maxScan } = parameters;
     const body = new URLSearchParams({ state: query.state ?? 'all',
@@ -506,15 +520,18 @@ export class IssueClient {
     return checked;
   }
   async #requestKey(request, fingerprint, nonce) {
-    const message = JSON.stringify([this.#root.origin, this.#root.route, fingerprint, nonce,
-      request.number, request.expected_version, request.action, request.body]);
+    const fields = [this.#root.origin, this.#root.route, fingerprint, nonce,
+      request.number, request.expected_version, request.action, request.body];
+    // Keep every legacy issue key byte unchanged. Milestone requests add both
+    // an independent digest domain and a distinct public key prefix.
+    const message = JSON.stringify(this.#milestone ? ['frankengit-milestone-request-v1', ...fields] : fields);
     const digest = await this.#crypto.subtle.digest('SHA-256', encoder.encode(message));
-    return `fgui-${nonce}-${asHex(new Uint8Array(digest))}`;
+    return `${this.#milestone ? 'fgmi' : 'fgui'}-${nonce}-${asHex(new Uint8Array(digest))}`;
   }
   async stage(number, version, action, fields, expectedBinding = null) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     if (this.#pending || this.#busy) fail('Resolve or discard the existing prepared change first.');
-    const request = mutationRequest(number, version, action, fields);
+    const request = (this.#milestone?.mutationRequest ?? mutationRequest)(number, version, action, fields);
     const epoch = this.#epoch, fingerprint = this.#fingerprint;
     let binding = this.binding;
     if (expectedBinding !== null) {
@@ -545,18 +562,20 @@ export class IssueClient {
     if (!this.#pending) fail('No prepared change.');
     // Once a receipt leaves this page, another session may dispatch it.
     this.#pending.exported = true;
-    return JSON.stringify({ schema: 'frankengit-issue-retry-v1', origin: this.#root.origin, route: this.#root.route,
+    return JSON.stringify({ schema: this.#milestone ? 'frankengit-milestone-retry-v1' : 'frankengit-issue-retry-v1', origin: this.#root.origin, route: this.#root.route,
       request: this.#pending }, null, 2);
   }
   async restoreReceipt(serialized) {
     if (!this.connected || this.#pending || this.#busy) fail('Connect first and resolve any existing change.');
     text(serialized, MAX_RECEIPT_BYTES, 'recovery receipt');
     const receipt = object(JSON.parse(serialized)), request = object(receipt.request);
-    if (receipt.schema !== 'frankengit-issue-retry-v1' || receipt.origin !== this.#root.origin || receipt.route !== this.#root.route ||
-        request.credential_fingerprint !== this.#fingerprint || typeof request.key !== 'string' || !/^fgui-[0-9a-f]{32}-[0-9a-f]{64}$/.test(request.key)) {
+    const schema = this.#milestone ? 'frankengit-milestone-retry-v1' : 'frankengit-issue-retry-v1';
+    const keyPattern = this.#milestone ? /^fgmi-[0-9a-f]{32}-[0-9a-f]{64}$/ : /^fgui-[0-9a-f]{32}-[0-9a-f]{64}$/;
+    if (receipt.schema !== schema || receipt.origin !== this.#root.origin || receipt.route !== this.#root.route ||
+        request.credential_fingerprint !== this.#fingerprint || typeof request.key !== 'string' || !keyPattern.test(request.key)) {
       fail('Recovery receipt does not belong to this repository and credential.');
     }
-    const checked = mutationRequest(request.number, request.expected_version, request.action, object(request.fields));
+    const checked = (this.#milestone?.mutationRequest ?? mutationRequest)(request.number, request.expected_version, request.action, object(request.fields));
     if (request.body !== checked.body) fail('Recovery receipt has a mismatched request body.');
     if (request.binding !== null) {
       object(request.binding); opaque(request.binding.tenant, 'tenant'); opaque(request.binding.repository, 'repository');
@@ -581,10 +600,10 @@ export class IssueClient {
     this.#busy = true;
     const pending = this.#pending; pending.sent = true;
     try {
-      const raw = await this.#request(`issues/${pending.number}/${pending.action}`, {
+      const raw = await this.#request(`${this.#milestone ? 'milestones' : 'issues'}/${pending.number}/${pending.action}`, {
         method: 'POST', body: pending.body, key: pending.key, maximum: 16 * 1024, terminalReply: true,
       });
-      const terminal = publication(raw.reply, pending, raw.status);
+      const terminal = publication(raw.reply, pending, raw.status, this.#milestone ? 'milestone' : 'issue');
       this.#pending = null;
       return terminal;
     } catch (error) { error.outcomeUnknown = true; throw error; }
