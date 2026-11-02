@@ -369,6 +369,32 @@ open. No Bead closure, gate relaxation or new production dependency is implied.
 
 ## 3. What has improved since October 21
 
+At **`6338449ce17a9203542be9ff27b54f8a5a8e1b48`**, the source-workspace operator
+join exposes and repairs a real client mismatch: native inspection includes
+modified parent-directory rows, while authoring matched every row as a file
+effect. The v3 validator now reconstructs and hash-checks both complete directory
+sides before matching only the validated leaves; it retains all original rows.
+Unknown or missing child evidence still refuses. This is bounded support, not
+general partial-directory inspection. Source CLI errors also retain HTTP status,
+and the shared transport supplies the required honest project identity.
+
+The discovered workspace lane completes **13 assertions, zero failures or skips**
+at that exact source against the explicitly older `a9d65885` native binary. It
+captures binary local edits, creates/deletes files, changes modes, independently
+checks the exact pack, publishes through native admission and checks Rust source
+reads, then recovers the same original key without redispatch. Root receipt
+SHA-256: `1a8fe2e01e94d38e2cdd1f74be8046d5e89d28dfb62983e8227c7ee13a21519a`;
+artifacts: `/data/frankengit-targets/noble_operator_workspace_bound_20261102`.
+The predeclared nine-file focused corpus executes **199 tests, zero failures or
+skips**, with the entire pinned Node process and verified Git 2.54.0 inside
+Bubblewrap. An initial sandbox omitted the TLS fixture's OpenSSL configuration
+and reported 196/3; adding only that read-only configuration permits the same
+unchanged corpus. The failing logs remain retained. Cancellation after a real
+apply leaves an incomplete driver, one normal service drain and no owned process
+group; it does not undo the publication. Fixture input packages, schema-peer
+tests and older-native execution remain separate evidence classes. Original
+`.4.59` full operator/current-native/independent acceptance and `.4.26` remain open.
+
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).
 - **Receive publication really batches.** [The admission microbatch driver](../crates/fgit-admission/src/microbatch.rs) is called from production receive paths. Up to 64 independent decisions and 1 MiB of batch bytes share an exact-predecessor CAS, retaining each child seal/outcome and wire-order semantics. Non-atomic recovery admits up to 16,384 commands; atomic/import transactions retain 4,096. This corrects the old one-CAS-per-ref statement. Cross-session lane/combiner/witness integration and measured contention acceptance remain open.
 - **The total-history merge cliff has been addressed in source.** [Merge preparation](../crates/fgit-forge/src/preparation.rs) uses exact frontier merge-base traversal; [native candidate admission](../crates/fgit-admission/src/merge/native/objects.rs) can validate additions above authenticated selected objects. It is obsolete to say every repository over 4,096 total commits or 100,000 total files must fail. `rffg` and `lh8z` retain historical large-repository observations and still need independent acceptance. Deep/wide ancestry, multiple bases, reviewed full-closure paths and independent tree/byte limits remain bounded. The new verified commit-metadata cache is a real consumer, not completion of all graph generations.

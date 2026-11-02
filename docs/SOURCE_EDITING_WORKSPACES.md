@@ -183,6 +183,19 @@ Errors do not echo source bytes or parser/OS diagnostics.
 
 ## Verification
 
+The existing central E2E runner also discovers
+[`suites/operator/source_workspace.sh`](../scripts/e2e/suites/operator/source_workspace.sh).
+It drives this workspace CLI, packed source authoring and the one-shot apply/
+recover CLI against a prebuilt native HTTP node in both hash domains. Its
+independently framed input package and expected Git objects cover binary capture,
+creation, deletion, mode changes, exact pack verification, separate read/outcome
+grants, canonical Rust byte/ref reads and service drain. The pinned sandboxed Git
+oracle checks the fixture and returned bundle. This is not native package
+acquisition, the complete operator matrix or same-source binary qualification.
+The v3 structural limit described in
+[source authoring](SOURCE_CHANGE_AUTHORING.md#prepare-an-exact-native-candidate)
+still applies when unchanged directory children are absent from inspection.
+
 `bash scripts/verify_source_workspaces.sh` runs complete production JavaScript
 modules against actual files and CLI child processes. It covers both Git hash
 domains, raw paths, executable/empty/binary bytes, sparse materialization,

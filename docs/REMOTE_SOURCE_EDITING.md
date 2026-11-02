@@ -64,6 +64,14 @@ numeric loopback; remote endpoints require certificate-verified HTTPS. A private
 `--ca-file` may name the explicit trust root. There are no redirects, ambient
 cookies, proxy discovery, automatic retries or credential files in the output.
 
+The shared source transport identifies the project as
+`frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)`. Error records
+from `fg_source_edit.mjs` and `fg_source_changes.mjs` preserve the bounded native
+HTTP status as `http_status`; it is `null` when no HTTP status was observed.
+That diagnostic does not establish a terminal decision or permit redispatch.
+For v3 directory inspection and its complete-child evidence limit, see
+[the authoring selection contract](SOURCE_CHANGE_AUTHORING.md#prepare-an-exact-native-candidate).
+
 The output is create-only: `capture.json`, `candidate.bundle`, and a last-written
 `manifest.json`. Retain the returned manifest hash independently. The loader
 returns the same payloads whose hashes and semantics it verified; it does not
