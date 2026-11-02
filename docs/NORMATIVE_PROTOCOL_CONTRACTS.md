@@ -837,9 +837,10 @@ restart or stopped intake. Reusing a key with a different body, issue or request
 profile cannot create another comment. Two different request identities with
 the same text remain two comments.
 
-The CALM rule table classifies this explicit profile and the PR append profile
-in §20.2.2 as eligible for additive replanning; unknown profiles, strict comments, field replacement,
-assignment, lifecycle changes and all other current forge operations preserve
+The CALM rule table classifies this explicit profile, the PR append profile
+in §20.2.2, and the assignee-addition profile in §20.2.5 as eligible for additive
+replanning; unknown profiles, strict comments, field replacement,
+exact-version assignment, lifecycle changes and all other current forge operations preserve
 their existing preconditions. Every operation remains `HeadCasRequired` for
 canonical publication. Logical comment membership grows by transaction identity;
 the serialized history, event positions, event roots, authorization and terminal
@@ -994,6 +995,49 @@ cross-repository milestone mappings: they MUST explicitly refuse milestone-beari
 snapshots or membership history rather than drop it or rebind numbers. The
 `issues-pulls-v1` scoped event feed does not silently gain milestone aggregates;
 the granted milestone history API exposes their lifecycle directly.
+
+### 20.2.5 Native issue assignee-addition intents
+
+`IssueAssigneesIntent` explicitly adds a bounded set of principals to an existing
+issue without selecting an issue predecessor. It carries the issue number and
+1–16 sorted, distinct principal IDs. Adapters canonicalize input order, reject
+duplicates, and MUST reject `expected_version` for this profile. Assignment is
+metadata: it never grants access, membership, agent authority or work execution.
+The existing exact-version `Assign` and `Unassign` commands remain unchanged.
+
+The canonical request binds the existing native `Assign` event encoding at fixed
+**version 2**, used only as an identity template. Its single-event batch root is
+the `forge` scoped entry `issue.add-assignees.v1`. The tenant, repository, object
+format, authenticated actor and original idempotency key retain the ordinary
+transaction-identity contract. The request has no ref updates or push options.
+Independent preparation MUST reconstruct the complete request from the planned
+event and compare its seal; recognizing an `Assign` payload alone cannot weaken
+an exact-version request's precondition.
+
+Each attempt selects the authenticated current issue frontier, plans its next
+checked version, and runs the existing issue validator against that same basis.
+It unions only the named principals with current assignments. The final union
+MUST fit the existing 16-assignee bound; reaching the bound is permitted, and
+exceeding it refuses with `ResourceBudgetExceeded`. Already-present principals
+do not enlarge the union. An entirely overlapping addition still records one
+ordinary assignment event for its distinct transaction. Missing issues refuse
+with `EvidenceStale`; version exhaustion refuses with `ResourceBudgetExceeded`.
+Open/closed state and discussion locks do not disable assignment metadata.
+
+A head-CAS loser may replan only the event's position, preserving its sealed
+subject, actor and assignee set. Concurrent permitted additions retain their
+union, subject to the current cardinality limit. An exact-version removal or
+other edit remains ordered by the same authority; an old terminal addition is
+never replayed to undo a later removal. The event and outbox obligation publish
+atomically. Exact retries, including after restart, recover the original terminal
+outcome before attempting a new effect. A changed issue, actor, set or profile
+cannot reuse that identity. Cancellation and storage ambiguity preserve the
+existing outcome-recovery contract rather than claiming non-commit.
+
+The CALM table admits this named profile for bounded replanning and retains
+`HeadCasRequired`. This is not a general observed-remove set, a last-writer-wins
+assignment store or a commutative canonical event order. Historical strict
+assignment bytes and saved requests retain their original meaning.
 
 ### 20.3 Native protected-review quorums
 

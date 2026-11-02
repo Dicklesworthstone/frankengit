@@ -741,14 +741,16 @@ pub(in crate::merge) fn prepare_coupled_events(
 }
 
 /// An event position may differ from the original commitment only for the
-/// explicit append-comment profile. Rebuild both supported requests exactly;
-/// a Comment payload alone cannot authorize changing a strict predecessor.
+/// explicit additive profiles. Rebuild each supported request exactly; an
+/// additive payload alone cannot authorize changing a strict predecessor.
 fn verify_issue_seal(
     context: &AdmissionContext,
     event: &ForgeEvent,
     attempt: &SealAttempt,
 ) -> Result<(), RefusalCode> {
-    use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueCommentIntent};
+    use fgit_forge::event::issue::{
+        IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent,
+    };
     use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion};
 
     let (AggregateId::Issue(number), ForgeEventPayload::IssueChangedNative(change)) =
@@ -777,18 +779,25 @@ fn verify_issue_seal(
     if strict == *attempt {
         return Ok(());
     }
-    let IssueAction::Comment { body } = &change.action else {
-        return Err(RefusalCode::EvidenceInvalid);
-    };
-    let (_, append) = super::native::issues::append_proposal(
-        context,
-        &IssueCommentIntent {
-            number,
-            body: body.clone(),
-        },
-    )
+    let (_, additive) = match &change.action {
+        IssueAction::Comment { body } => super::native::issues::append_proposal(
+            context,
+            &IssueCommentIntent {
+                number,
+                body: body.clone(),
+            },
+        ),
+        IssueAction::Assign { assignees } => super::native::issues::assignees_proposal(
+            context,
+            &IssueAssigneesIntent {
+                number,
+                assignees: assignees.clone(),
+            },
+        ),
+        _ => return Err(RefusalCode::EvidenceInvalid),
+    }
     .map_err(|_| RefusalCode::EvidenceInvalid)?;
-    if append != *attempt {
+    if additive != *attempt {
         return Err(RefusalCode::EvidenceInvalid);
     }
     Ok(())

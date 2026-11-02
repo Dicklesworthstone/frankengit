@@ -10,6 +10,7 @@ pub use fgit_calm::{ForgeAdmissionRule, ForgeOperation, ForgeReplanPolicy};
 pub enum ForgeCommandProfile {
     ExactVersion,
     AppendIssueCommentV1,
+    AddIssueAssigneesV1,
     AppendPullRequestCommentV1,
     /// Unrecognized semantics never gain append eligibility.
     Unknown,
@@ -26,6 +27,14 @@ pub const fn classify_event(
                 if matches!(change.action, IssueAction::Comment { .. }) =>
             {
                 ForgeOperation::IssueAppendComment
+            }
+            _ => ForgeOperation::Unknown,
+        },
+        ForgeCommandProfile::AddIssueAssigneesV1 => match (&event.aggregate, &event.payload) {
+            (crate::AggregateId::Issue(_), ForgeEventPayload::IssueChangedNative(change))
+                if matches!(change.action, IssueAction::Assign { .. }) =>
+            {
+                ForgeOperation::IssueAddAssignees
             }
             _ => ForgeOperation::Unknown,
         },
@@ -65,7 +74,9 @@ pub const fn classify_event(
                 IssueAction::ClearMilestone => ForgeOperation::IssueClearMilestone,
             },
             ForgeEventPayload::MilestoneChangedNative(_) => ForgeOperation::MilestoneChange,
-            ForgeEventPayload::NotificationPreferenceChangedNative(_) => ForgeOperation::NotificationPreferenceChange,
+            ForgeEventPayload::NotificationPreferenceChangedNative(_) => {
+                ForgeOperation::NotificationPreferenceChange
+            }
             ForgeEventPayload::ReviewProtectionChanged(_) => ForgeOperation::ReviewProtection,
             ForgeEventPayload::MergeQueueChangedNative(_) => ForgeOperation::MergeQueueChange,
             ForgeEventPayload::WorkflowCheckObservedNative(_)
@@ -86,7 +97,7 @@ mod tests {
     use fgit_types::PrincipalId;
 
     #[test]
-    fn only_an_explicit_comment_profile_can_replan_a_changed_event_position() {
+    fn only_an_explicit_additive_profile_can_replan_its_matching_action() {
         for action in [
             IssueAction::Open {
                 title: "issue".into(),
@@ -117,6 +128,7 @@ mod tests {
             IssueAction::ClearMilestone,
         ] {
             let is_comment = matches!(action, IssueAction::Comment { .. });
+            let is_assign = matches!(action, IssueAction::Assign { .. });
             let expected_version = if matches!(action, IssueAction::Open { .. }) {
                 ExpectedVersion::NewStream
             } else {
@@ -147,6 +159,14 @@ mod tests {
                     ForgeReplanPolicy::PreservePreconditions
                 }
             );
+            assert_eq!(
+                classify_event(&event, ForgeCommandProfile::AddIssueAssigneesV1).replan,
+                if is_assign {
+                    ForgeReplanPolicy::RevalidateAppend
+                } else {
+                    ForgeReplanPolicy::PreservePreconditions
+                }
+            );
         }
     }
 
@@ -170,6 +190,7 @@ mod tests {
             ForgeCommandProfile::ExactVersion,
             ForgeCommandProfile::Unknown,
             ForgeCommandProfile::AppendIssueCommentV1,
+            ForgeCommandProfile::AddIssueAssigneesV1,
         ] {
             assert_eq!(
                 classify_event(&event, profile).replan,
@@ -185,6 +206,31 @@ mod tests {
             wrong.aggregate = aggregate;
             assert_eq!(
                 classify_event(&wrong, ForgeCommandProfile::AppendPullRequestCommentV1).replan,
+                ForgeReplanPolicy::PreservePreconditions
+            );
+        }
+    }
+
+    #[test]
+    fn assignee_addition_eligibility_requires_an_issue_aggregate() {
+        use crate::event::issue::IssueAssigneesIntent;
+        use crate::{AggregateId, PullRequestNumber};
+
+        let event = IssueAssigneesIntent {
+            number: IssueNumber::FIRST,
+            assignees: vec![PrincipalId::from_bytes([2; 16])],
+        }
+        .commitment_event(PrincipalId::from_bytes([1; 16]))
+        .unwrap();
+        for aggregate in [
+            AggregateId::PullRequest(PullRequestNumber::FIRST),
+            AggregateId::PullRequestConversation(PullRequestNumber::FIRST),
+            AggregateId::ReviewProtection,
+        ] {
+            let mut wrong = event.clone();
+            wrong.aggregate = aggregate;
+            assert_eq!(
+                classify_event(&wrong, ForgeCommandProfile::AddIssueAssigneesV1).replan,
                 ForgeReplanPolicy::PreservePreconditions
             );
         }

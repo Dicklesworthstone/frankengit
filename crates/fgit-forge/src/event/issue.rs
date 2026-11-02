@@ -1,7 +1,7 @@
 //! Versioned issue commands and canonical events. Text is data, never authority.
 //! Exact-version commands retain explicit changes and their expected predecessor.
-//! Additive comment intents use a distinct seal profile; admission assigns their
-//! event position from each authenticated publication basis.
+//! Additive comment and assignee intents use distinct seal profiles; admission
+//! assigns their event position from each authenticated publication basis.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::aggregate::{
     AggregateId, AggregateVersion, ExpectedVersion, IssueNumber, MilestoneNumber,
@@ -10,7 +10,9 @@ use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode};
 
 mod append;
+mod assignees;
 pub use append::IssueCommentIntent;
+pub use assignees::IssueAssigneesIntent;
 
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -35,7 +37,8 @@ pub struct IssueEdit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum IssueAction {    Open {
+pub enum IssueAction {
+    Open {
         title: String,
         body: String,
         labels: Vec<String>,
@@ -94,8 +97,12 @@ impl IssueAction {
                 Ok(())
             }
             Self::Comment { body } => validate_comment_body(body),
-            Self::Close | Self::Reopen | Self::Lock | Self::Unlock
-            | Self::SetMilestone { .. } | Self::ClearMilestone => Ok(()),
+            Self::Close
+            | Self::Reopen
+            | Self::Lock
+            | Self::Unlock
+            | Self::SetMilestone { .. }
+            | Self::ClearMilestone => Ok(()),
             Self::Assign { assignees } | Self::Unassign { assignees } => {
                 if assignees.is_empty() {
                     return Err(invalid_native("issue.empty_assignees"));
@@ -164,7 +171,10 @@ impl IssueAction {
                     Ok(())
                 })?;
             }
-            Self::SetMilestone { milestone, expected_milestone_version } => {
+            Self::SetMilestone {
+                milestone,
+                expected_milestone_version,
+            } => {
                 out.write_scalar(milestone.get());
                 out.write_scalar(expected_milestone_version.get());
             }
@@ -213,8 +223,10 @@ impl IssueAction {
             10 => Self::SetMilestone {
                 milestone: MilestoneNumber::try_new(input.read_scalar::<u64>("issue.milestone")?)
                     .ok_or_else(|| invalid_native("issue.milestone"))?,
-                expected_milestone_version: AggregateVersion::try_new(input.read_scalar::<u64>("issue.milestone_version")?)
-                    .ok_or_else(|| invalid_native("issue.milestone_version"))?,
+                expected_milestone_version: AggregateVersion::try_new(
+                    input.read_scalar::<u64>("issue.milestone_version")?,
+                )
+                .ok_or_else(|| invalid_native("issue.milestone_version"))?,
             },
             11 => Self::ClearMilestone,
             observed => {

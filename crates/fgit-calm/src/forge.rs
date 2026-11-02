@@ -1,7 +1,7 @@
 //! Canonical forge publication and bounded revalidation policy.
 //!
-//! Appending content keyed by a sealed transaction can preserve its meaning
-//! across a changed issue or PR conversation frontier. Canonical sequencing,
+//! Adding content or assignees keyed by a sealed transaction can preserve its
+//! meaning across a changed issue or PR conversation frontier. Canonical sequencing,
 //! current permissions, resource limits and terminal outcomes still require
 //! the repository head CAS.
 //! Retry eligibility never grants authority or turns the head into a CRDT.
@@ -11,7 +11,8 @@ use crate::CoordinationClass;
 /// Semantic operations, distinguished before canonical events are prepared.
 /// An exact-version comment and an append intent deliberately differ here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ForgeOperation {    PullRequestOpen,
+pub enum ForgeOperation {
+    PullRequestOpen,
     PullRequestHeadAdvance,
     PullRequestMerge,
     PullRequestClose,
@@ -25,6 +26,7 @@ pub enum ForgeOperation {    PullRequestOpen,
     IssueExactComment,
     IssueAppendComment,
     IssueAssign,
+    IssueAddAssignees,
     IssueUnassign,
     IssueLock,
     IssueUnlock,
@@ -45,9 +47,9 @@ pub enum ForgeOperation {    PullRequestOpen,
 pub enum ForgeReplanPolicy {
     /// The caller's original predecessor and other preconditions remain exact.
     PreservePreconditions,
-    /// Re-evaluate current state and stamp an append's new canonical position.
-    /// The subject, actor, content, source anchor, profile and transaction
-    /// identity remain fixed.
+    /// Re-evaluate current state and stamp an addition's new canonical position.
+    /// The subject, actor, content or added set, source anchor, profile and
+    /// transaction identity remain fixed.
     RevalidateAppend,
 }
 
@@ -59,17 +61,17 @@ pub struct ForgeAdmissionRule {
 
 /// The single semantic table for canonical forge replan eligibility.
 ///
-/// Only explicit issue and PR comment append profiles have version-independent
-/// conversation intents. A PR source anchor retains its exact metadata basis.
+/// Explicit comment append and issue assignee addition profiles have
+/// version-independent intents. A PR source anchor retains its exact metadata basis.
 /// Legacy comments, replacement sets, edits, reviews and unknown operations
 /// preserve their submitted preconditions. Every row retains head-CAS authority,
-/// including append comments (CALM-013's sequencing/permission boundary).
+/// including additive intents (CALM-013's sequencing/permission boundary).
 #[must_use]
 pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRule {
     let replan = match operation {
-        ForgeOperation::IssueAppendComment | ForgeOperation::PullRequestAppendComment => {
-            ForgeReplanPolicy::RevalidateAppend
-        }
+        ForgeOperation::IssueAppendComment
+        | ForgeOperation::IssueAddAssignees
+        | ForgeOperation::PullRequestAppendComment => ForgeReplanPolicy::RevalidateAppend,
         ForgeOperation::PullRequestOpen
         | ForgeOperation::PullRequestHeadAdvance
         | ForgeOperation::PullRequestMerge
@@ -149,6 +151,7 @@ mod tests {
     fn additive_intent_may_replan_but_never_publish_without_authority() {
         for operation in [
             ForgeOperation::IssueAppendComment,
+            ForgeOperation::IssueAddAssignees,
             ForgeOperation::PullRequestAppendComment,
         ] {
             let rule = forge_admission_rule(operation);

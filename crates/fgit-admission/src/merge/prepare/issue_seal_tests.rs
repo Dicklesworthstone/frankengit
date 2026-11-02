@@ -1,7 +1,9 @@
 use super::*;
-use crate::merge::native::issues::{append_proposal, proposal};
+use crate::merge::native::issues::{append_proposal, assignees_proposal, proposal};
 use fgit_authority::{HeadKey, IdempotencyKey, SemanticRequest};
-use fgit_forge::event::issue::{IssueAction, IssueCommand, IssueCommentIntent, IssueEdit};
+use fgit_forge::event::issue::{
+    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
+};
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 
@@ -166,6 +168,94 @@ fn append_seals_cannot_substitute_actor_issue_body_action_scope_or_request_profi
     .unwrap();
     let changed = SealAttempt {
         request: unrelated,
+        ..seal
+    };
+    assert_eq!(
+        verify_issue_seal(&context, &template, &changed),
+        Err(RefusalCode::EvidenceInvalid)
+    );
+}
+
+#[test]
+fn only_explicit_addition_seals_allow_assignment_at_a_fresh_non_open_position() {
+    let context = context();
+    let intent = IssueAssigneesIntent {
+        number: IssueNumber::FIRST,
+        assignees: vec![PrincipalId::from_bytes([7; 16])],
+    };
+    let (template, seal) = assignees_proposal(&context, &intent).unwrap();
+    for version in [2, 3, 28, u64::MAX] {
+        let event = ForgeEvent {
+            version: AggregateVersion::try_new(version).unwrap(),
+            ..template.clone()
+        };
+        assert_eq!(verify_issue_seal(&context, &event, &seal), Ok(()));
+    }
+    let invalid = ForgeEvent {
+        version: AggregateVersion::FIRST,
+        ..template
+    };
+    assert_eq!(
+        verify_issue_seal(&context, &invalid, &seal),
+        Err(RefusalCode::EvidenceInvalid)
+    );
+}
+
+#[test]
+fn addition_seals_reject_substituted_sets_removals_context_keys_and_other_profiles() {
+    let context = context();
+    let intent = IssueAssigneesIntent {
+        number: IssueNumber::FIRST,
+        assignees: vec![PrincipalId::from_bytes([7; 16])],
+    };
+    let (template, seal) = assignees_proposal(&context, &intent).unwrap();
+    for field in 0..7 {
+        let mut event = template.clone();
+        let mut changed_context = context.clone();
+        let ForgeEventPayload::IssueChangedNative(change) = &mut event.payload else {
+            unreachable!()
+        };
+        match field {
+            0 => change.actor = PrincipalId::from_bytes([4; 16]),
+            1 => event.aggregate = AggregateId::Issue(IssueNumber::try_new(2).unwrap()),
+            2 => {
+                change.action = IssueAction::Assign {
+                    assignees: vec![PrincipalId::from_bytes([8; 16])],
+                };
+            }
+            3 => {
+                change.action = IssueAction::Unassign {
+                    assignees: intent.assignees.clone(),
+                };
+            }
+            4 => changed_context.repository_id = RepositoryId::from_bytes([5; 16]),
+            5 => changed_context.tenant_id = TenantId::from_bytes([6; 16]),
+            _ => {
+                changed_context.idempotency_key =
+                    IdempotencyKey::new(b"substituted-key".to_vec()).unwrap();
+            }
+        }
+        assert_eq!(
+            verify_issue_seal(&changed_context, &event, &seal),
+            Err(RefusalCode::EvidenceInvalid),
+            "field {field}"
+        );
+    }
+    let (_, comment_seal) = append_proposal(&context, &comment()).unwrap();
+    assert_eq!(
+        verify_issue_seal(&context, &template, &comment_seal),
+        Err(RefusalCode::EvidenceInvalid)
+    );
+    let changed = SealAttempt {
+        request: SemanticRequest::build(
+            fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+            context.object_format,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap(),
         ..seal
     };
     assert_eq!(

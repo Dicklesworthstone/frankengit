@@ -19,7 +19,9 @@ use fgit_types::{AsciiSlug, RefusalCode, RepositoryAuthorityHeadId, RepositoryId
 use std::collections::{BTreeMap, BTreeSet};
 
 mod append;
+mod assignees;
 pub use append::{admit_issue_comment_async, append_proposal};
+pub use assignees::{admit_issue_assignees_async, assignees_proposal};
 
 const MAX_PAGE: u16 = 100;
 // Scan work and retained query state are different budgets. Unrelated streams
