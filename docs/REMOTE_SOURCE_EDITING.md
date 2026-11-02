@@ -100,6 +100,17 @@ new candidate. A saved candidate can be stale and legitimately refused.
 
 ## Prepare only from independently verified selected source
 
+Partial-directory edits can explicitly select
+`parent_tree_profile: "verified-parent-trees-v1"` with a `patch_profile`.
+`prepare-verified` derives commit-verified parent metadata from its source package;
+ordinary `prepare` requires the matching `parent_tree_basis` in the selection.
+The resulting v4 capture binds and retains the original commit and complete parent
+tree bytes. Offline inspection, verified-evidence loading and the one-shot journal
+recheck them without the original source files. Unchanged siblings remain bound
+by native identity; their bodies are not fetched. This establishes reported tree
+effects, not patch semantics, freshness or publication authority. See
+[the exact parent-tree profile](SOURCE_EDIT_PROFILE_CAPTURE.md#explicit-parent-tree-evidence-for-partial-directory-edits).
+
 For agent-driven edits, the stronger `prepare-verified` entry point requires the
 ordinary explicit source-edit selection **plus** a portable selected-source
 package and its independently retained expected selection. The package is

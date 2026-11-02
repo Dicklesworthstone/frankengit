@@ -62,6 +62,45 @@ verification as false. Explicit full-source-evidence convenience paths remain
 separate APIs; this change qualifies the ordinary `prepare`/`inspect`/`stage`/
 `apply`/`recover` operator path, not every verified-package wrapper.
 
+## Explicit parent-tree evidence for partial-directory edits
+
+For an edit below a directory with unchanged children, select the local
+`parent_tree_profile: "verified-parent-trees-v1"` alongside an existing
+`patch_profile`. This creates `frankengit-source-edit-capture-v4`. V1–v3 captures
+retain their existing behavior; a v3 inspection without complete child rows still
+refuses. There is no automatic profile upgrade or new native request grammar.
+
+`fg_source_changes.mjs` and `fg_source_edit.mjs prepare-verified` derive the parent
+basis from their independently selected source package. Ordinary `prepare` instead
+requires `parent_tree_basis` in the selection, containing `commit: {oid, bodyHex}`
+and `trees: [{pathHex, oid, bodyHex}]`. The root tree uses `pathHex: null`;
+other paths use raw lowercase hex. Parent metadata is restricted to the ancestors
+of the exact affected paths. A supplied basis must match the package-derived basis
+when both are present.
+
+The validator reuses the existing strict commit/tree codecs, checks the original
+commit's native hash against the independently selected base, verifies each tree
+hash and parent-to-child membership, then checks every reported before-image.
+It preserves unchanged entries and rebuilds the complete after root. Unselected
+regular/executable files, raw names, symlinks, gitlinks and opaque subtrees retain
+their original identities without fetching or materializing their bodies.
+Altered/missing/unrelated trees, unknown changes and incomplete directory removal
+refuse. V4 does not permit changed symlinks/gitlinks or broader affected paths.
+
+The original limits remain: 64 KiB commit bytes, 128 parent trees, 16,384 parent
+entries and 4 MiB parent-tree bytes; reconstruction also retains its independent
+32,768-entry/8 MiB limits. The 512-row inspection and 10 MiB capture limits still
+apply. Old readers refuse v4 rather than dropping its evidence. Capture versions
+and candidate file-manifest versions are independent: existing file envelopes
+bind the exact new capture bytes by size/hash.
+
+Save, inspect, stage and the one-shot journal retain and reverify that same basis.
+No original package path is needed afterward. `parent_tree_verification` reports
+the source commit, both roots and verification of reported tree effects; it
+explicitly does not verify blob bodies, patch application or repository authority.
+Packed authoring remains the separate exact pack-object check. Captures contain
+unselected sibling names, modes and object IDs, so keep them private.
+
 ## Publication and recovery
 
 Use the existing create-only candidate directory, manifest hash and independently
@@ -72,6 +111,13 @@ not reread to repair it. Once dispatch is recorded, an absent local terminal doe
 not permit resubmission. Recovery queries the original sealed key through the
 existing outcomes endpoint and preserves its terminal decision. A saved terminal
 can be reopened offline without another HTTP mutation.
+
+Concurrent source record readers wait at most 100 ms for a recognized same-inode
+`writeNew` temporary link to disappear, then use the unchanged strict single-link
+reader. Unrelated hardlinks, changed publishers, malformed records and a stranded
+publisher refuse; neither name is deleted and no native submission is retried.
+`source_edit_record_publication_pending` is local custody uncertainty, not evidence
+of non-commit or permission to reset a journal.
 
 ## Verification boundary
 

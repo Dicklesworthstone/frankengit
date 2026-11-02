@@ -5,6 +5,7 @@ import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/
 import { deriveEditedTree, verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { editInput, oid, validateSourceEdit, captureSourceEdit } from './source_edit_candidate.mjs';
 import { fail, hash, fields, clock } from './source_edit_wire.mjs';
+import { parentTreeBasisFromPackage } from './source_edit_parent_trees.mjs';
 
 export { SOURCE_PACKAGE_BYTES };
 export const SOURCE_EXPECTED_BYTES = 128 * 1024;
@@ -120,7 +121,13 @@ async function basis(packageBytes, expected, selection, check) {
   if (!(packageBytes instanceof Uint8Array) || !packageBytes.length || packageBytes.length > SOURCE_PACKAGE_BYTES ||
       typeof check !== 'function') fail('source_edit_package_input');
   check();
-  const request = editInput(selection), expectedOwned = ownExpected(expected), bytes = Buffer.from(packageBytes);
+  let request = editInput(selection);
+  const expectedOwned = ownExpected(expected), bytes = Buffer.from(packageBytes);
+  if (request.parent_tree_profile) {
+    const parents = parentTreeBasisFromPackage(bytes, request.scope.object_format, request.expected_commit, request.paths_hex);
+    if (request.parent_tree_basis && JSON.stringify(request.parent_tree_basis) !== JSON.stringify(parents)) fail('source_edit_parent_basis_mismatch');
+    request = editInput({ ...request, parent_tree_basis: parents });
+  }
   const source = expectedOwned.source ?? expectedOwned, created = new Set(expectedOwned.create_paths_hex ?? []);
   // Mirror the existing tree-effect ceiling before any network request, not
   // only after the server has already prepared a candidate.
@@ -204,11 +211,15 @@ function textEffect(row, original, format, check) {
 }
 async function effects(checked, b, check) {
   const c = checked.capture.inspection.comparison, format = b.request.scope.object_format;
+  // The capture validator has already verified every structural ancestor.
+  // Preimage/result matching concerns its exact file effects, not those parents.
+  const entries = c.entries.filter(row => row.before?.mode !== 0o40000 && row.after?.mode !== 0o40000);
   if (oid(c.before_tree, format) !== b.loaded.verified.rootTree) fail('source_edit_preimage_tree');
   if (b.intended) {
     if (oid(c.after_tree, format) !== b.intended.afterTree) fail('source_edit_requested_result');
-    for (let i = 0; i < c.entries.length; i++) {
-      check(); const actual = c.entries[i], wanted = b.expected.after[i];
+    if (entries.length !== b.expected.after.length) fail('source_edit_requested_result');
+    for (let i = 0; i < entries.length; i++) {
+      check(); const actual = entries[i], wanted = b.expected.after[i];
       if (actual.path_hex !== wanted.pathHex || (actual.after === null ? wanted.blob !== null :
           oid(actual.after.oid, format) !== wanted.blob ||
           (actual.after.mode === 0o100755 ? 'executable' : 'file') !== wanted.kind)) fail('source_edit_requested_result');
@@ -216,7 +227,7 @@ async function effects(checked, b, check) {
   }
   const bodies = new Map(b.loaded.package.blobs.map(row => [row.oid, row.bytesHex]));
   const unverifiedAfter = [], transitions = []; let replayed = 0;
-  for (const row of c.entries) {
+  for (const row of entries) {
     check(); const file = b.selected.get(row.path_hex), before = row.before, created = b.created.has(row.path_hex);
     if (created) {
       if (before !== null || row.after === null || row.kind !== 'added') fail('source_edit_creation_effect');

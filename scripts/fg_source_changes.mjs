@@ -43,6 +43,10 @@ Inspect-candidate regenerates and checks offline; it accepts no credential.
 Stage regenerates the draft and expected tree, requires the exact independent
 native target selection plus principal/candidate consent, then creates the standard
 one-shot journal WITHOUT a token or network request. Retain its request hash.
+For partial-directory edits, selection may explicitly opt into
+parent_tree_profile:"verified-parent-trees-v1" with a patch_profile. The existing
+source package then supplies retained, commit-verified parent metadata; unchanged
+siblings remain bound without fetching their bodies. No implicit profile upgrade.
 fg_source_edit.mjs apply/recover/status consumes that journal and owns original-key
 recovery. The broader fg_source_edit.mjs stage remains available independently.
 This command never publishes repository state, invents a new base, retries,

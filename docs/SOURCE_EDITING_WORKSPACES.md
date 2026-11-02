@@ -196,6 +196,14 @@ The v3 structural limit described in
 [source authoring](SOURCE_CHANGE_AUTHORING.md#prepare-an-exact-native-candidate)
 still applies when unchanged directory children are absent from inspection.
 
+That v3 refusal has an explicit permitted twin: put
+`parent_tree_profile: "verified-parent-trees-v1"` in the independent native target
+selection alongside `patch_profile`. V4 retains the package's authenticated parent
+metadata and preserves unchanged children while verifying the entire result root.
+The native lane exercises both profiles at the same intended change, plus verified
+preparation and journal reopening after original inputs are moved aside. It adds
+no implicit reads, profile fallback or publication consent.
+
 `bash scripts/verify_source_workspaces.sh` runs complete production JavaScript
 modules against actual files and CLI child processes. It covers both Git hash
 domains, raw paths, executable/empty/binary bytes, sparse materialization,

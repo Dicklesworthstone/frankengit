@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { encodeVerifiedTreeRows, TREE_TRANSITION_LIMITS } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { SourceEditError, hash, fail, fields, integer, endpoint, parse, clock, upload, exchange } from './source_edit_wire.mjs';
+import { PARENT_TREE_PROFILE, ownParentTreeBasis, parentTreeFileRows } from './source_edit_parent_trees.mjs';
 export { SourceEditError, hash, parse } from './source_edit_wire.mjs';
 export const EDIT_CAPTURE = 'frankengit-source-edit-capture-v1';
 // An independently selected result root is retained as intent, never inferred
@@ -10,8 +11,10 @@ export const EDIT_CAPTURE = 'frankengit-source-edit-capture-v1';
 // silently dropping that constraint; ordinary v1 captures keep their bytes.
 export const EDIT_RESULT_CAPTURE = 'frankengit-source-edit-capture-v2';
 export const EDIT_PROFILE_CAPTURE = 'frankengit-source-edit-capture-v3';
+export const EDIT_PARENT_CAPTURE = 'frankengit-source-edit-capture-v4';
 const PATCH_PROFILES = Object.freeze(['exact-tree-v1', 'exact-tree-binary-v1']);
-const captureProfile = request => Object.hasOwn(request, 'patch_profile') ? EDIT_PROFILE_CAPTURE
+const captureProfile = request => Object.hasOwn(request, 'parent_tree_profile') ? EDIT_PARENT_CAPTURE
+  : Object.hasOwn(request, 'patch_profile') ? EDIT_PROFILE_CAPTURE
   : Object.hasOwn(request, 'expected_result_tree') ? EDIT_RESULT_CAPTURE : EDIT_CAPTURE;
 export const BUNDLE_LIMIT = 8 * 1024 * 1024, CAPTURE_LIMIT = 10 * 1024 * 1024;
 const PREPARE_LIMIT = BUNDLE_LIMIT + 1024 * 1024 + 16384;
@@ -38,7 +41,7 @@ function path(value) {
 }
 export function editInput(value) {
   const required = ['endpoint', 'scope', 'ref', 'expected_commit', 'metadata', 'paths_hex'];
-  fields(value, [...required, 'expected_result_tree', 'patch_profile'], required);
+  fields(value, [...required, 'expected_result_tree', 'patch_profile', 'parent_tree_profile', 'parent_tree_basis'], required);
   fields(value.scope, ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format']);
   const scope = { tenant_id: identity(value.scope.tenant_id), repository_id: identity(value.scope.repository_id),
     repository_incarnation: identity(value.scope.repository_incarnation), object_format: value.scope.object_format };
@@ -65,7 +68,13 @@ export function editInput(value) {
     if (!PATCH_PROFILES.includes(value.patch_profile)) fail('source_edit_patch_profile');
     profile.patch_profile = value.patch_profile;
   }
-  return { endpoint: endpoint(value.endpoint), scope, ref, expected_commit: oid(value.expected_commit, scope.object_format), metadata, paths_hex: paths, ...result, ...profile };
+  const expected_commit = oid(value.expected_commit, scope.object_format), parents = {};
+  if (Object.hasOwn(value, 'parent_tree_profile')) {
+    if (value.parent_tree_profile !== PARENT_TREE_PROFILE || !Object.hasOwn(profile, 'patch_profile')) fail('source_edit_parent_profile');
+    parents.parent_tree_profile = PARENT_TREE_PROFILE;
+    if (Object.hasOwn(value, 'parent_tree_basis')) parents.parent_tree_basis = ownParentTreeBasis(value.parent_tree_basis, scope.object_format, expected_commit, paths);
+  } else if (Object.hasOwn(value, 'parent_tree_basis')) fail('source_edit_parent_profile');
+  return { endpoint: endpoint(value.endpoint), scope, ref, expected_commit, metadata, paths_hex: paths, ...result, ...profile, ...parents };
 }
 // Inspection/publication coordinates NEVER carry preparation-only fields.
 // Historical v1/v2 uploads retain their bytes, including local-only result pins.
@@ -222,7 +231,9 @@ function inspection(reply, request, preparation, bundle, artifact) {
   const c = fields(reply.comparison, ['mode', 'before_tree', 'after_tree', 'entry_count', 'entries']); oid(c.before_tree, format);
   if (c.mode !== 'direct' || oid(c.after_tree, format) !== artifact.tree || !Array.isArray(c.entries) ||
       c.entries.length !== c.entry_count || c.entries.length > 512) fail('source_edit_comparison');
-  const rows = Object.hasOwn(request, 'patch_profile') ? profileFileRows(c.entries, format) : c.entries;
+  const rows = Object.hasOwn(request, 'parent_tree_profile')
+    ? parentTreeFileRows(c.entries, format, request.expected_commit, request.paths_hex, request.parent_tree_basis, c.before_tree, c.after_tree)
+    : Object.hasOwn(request, 'patch_profile') ? profileFileRows(c.entries, format) : c.entries;
   if (rows.length !== artifact.paths.size) fail('source_edit_comparison');
   let previous = '';
   for (const row of rows) {
@@ -258,19 +269,25 @@ function inspection(reply, request, preparation, bundle, artifact) {
 }
 export function validateSourceEdit(value, suppliedBundle) {
   fields(value, ['schema', 'request', 'patch_sha256', 'patch_bytes', 'preparation', 'inspection']);
-  if (![EDIT_CAPTURE, EDIT_RESULT_CAPTURE, EDIT_PROFILE_CAPTURE].includes(value.schema) || !/^[0-9a-f]{64}$/.test(value.patch_sha256)) fail('source_edit_capture');
+  if (![EDIT_CAPTURE, EDIT_RESULT_CAPTURE, EDIT_PROFILE_CAPTURE, EDIT_PARENT_CAPTURE].includes(value.schema) || !/^[0-9a-f]{64}$/.test(value.patch_sha256)) fail('source_edit_capture');
   integer(value.patch_bytes, 1, 1048576);
   if (!Buffer.isBuffer(suppliedBundle) || suppliedBundle.length > BUNDLE_LIMIT) fail('source_edit_bundle_limit');
   const request = editInput(value.request), bytes = canonical(value);
+  if (Object.hasOwn(request, 'parent_tree_profile') && !Object.hasOwn(request, 'parent_tree_basis')) fail('source_edit_parent_basis_required');
   if (value.schema !== captureProfile(request) || bytes.length > CAPTURE_LIMIT || !equal(request, value.request)) fail('source_edit_capture');
   const capture = parse(bytes, CAPTURE_LIMIT), bundle = Buffer.from(suppliedBundle);
   const artifact = prepared(capture.preparation, bundle, request, capture.patch_sha256);
   inspection(capture.inspection, request, capture.preparation, bundle, artifact);
   return { capture, bundle, candidate_commit: artifact.candidate, native_bundle_validation_observed: true,
+    ...(request.parent_tree_profile ? { parent_tree_verification: { profile: request.parent_tree_profile,
+      source_commit: request.expected_commit, before_tree: oid(capture.inspection.comparison.before_tree, request.scope.object_format),
+      after_tree: artifact.tree, reported_tree_effects_verified: true, blob_bodies_verified: false,
+      patch_application_verified: false, authority_verified: false } } : {}),
     bundle_objects_independently_verified: false, publication_authorized: false };
 }
 export async function captureSourceEdit(value, patch, credential, options = {}) {
   const request = editInput(value), time = clock(options); time.check();
+  if (Object.hasOwn(request, 'parent_tree_profile') && !Object.hasOwn(request, 'parent_tree_basis')) fail('source_edit_parent_basis_required');
   if (!Buffer.isBuffer(patch) || !patch.length || patch.length > 1048576) fail('source_edit_patch_limit');
   const bytes = Buffer.from(patch), patchHash = hash(bytes);
   const first = await exchange(request.endpoint, credential, 'prepare', upload({ ...editCoordinates(request), ...request.metadata,

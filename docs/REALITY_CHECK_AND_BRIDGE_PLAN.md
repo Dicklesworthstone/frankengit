@@ -369,6 +369,38 @@ open. No Bead closure, gate relaxation or new production dependency is implied.
 
 ## 3. What has improved since October 21
 
+**Partial-directory continuation at `c1bfefebbf776b9e4dd88ce11677b9245608c466`:**
+the known v3 unchanged-child refusal remains, with an explicit v4 permitted
+profile. It retains the already available parent metadata from the independently
+selected source package, reuses strict commit/tree codecs and native hashes,
+checks the original membership chain, preserves unchanged siblings and rebuilds
+the complete result root. Candidate save/reopen, packed authoring, verified
+preparation and the one-shot journal all reverify the same self-contained basis.
+No native wire, authority, dependency or runtime contract changes.
+
+At that exact committed source, the predeclared 15-file corpus executes **422
+tests, zero failures or skips**, in the pinned whole-process Node/Git Bubblewrap
+profile. The earlier `683bf65b` corpus was **417/418**: an existing concurrent
+recovery test observed the temporary two-link publication window. The repair
+waits only for the recognized writer to settle, preserves strict single-link
+reads and strengthens concurrent recovery from two readers to eight. Its committed
+tests caught an iterator-shadowing error at `0143504e` (**419/422**); the corrected
+source is the stated final result. Those failed outputs remain retained.
+
+The same final source completes **17 live assertions, zero failures or skips**,
+including both hash formats, the v3-refusal/v4-permit twin, unchanged nested sibling,
+exact native pack and Rust readback, verified-evidence custody, and reopening after
+original inputs are moved aside. Receipt SHA-256:
+`632e5b179d922fca56f3a7e4a3f2ddff11fb4736dde5d8962bac7c7b14135574`;
+artifacts: `/data/frankengit-targets/noble_parent_trees_final_20261102`.
+Native is still explicitly older `a9d65885`; input packages remain independently
+framed fixtures, not native acquisition. Cancellation after successful apply
+leaves an incomplete driver, one normal service drain and no owned process group,
+without undoing publication. Original current-native, full operator and independent
+acceptance remain open. PR #41 was externally merged; PR #42 was externally closed
+unmerged without comments, so the continuation uses a new owned review branch and
+does not reopen or overwrite that review.
+
 At **`6338449ce17a9203542be9ff27b54f8a5a8e1b48`**, the source-workspace operator
 join exposes and repairs a real client mismatch: native inspection includes
 modified parent-directory rows, while authoring matched every row as a file

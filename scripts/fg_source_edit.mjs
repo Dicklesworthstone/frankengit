@@ -30,6 +30,10 @@ absolute owner-private paths. Inspect the saved capture.json before stage/apply.
 plan-results commits to desired local file bytes without credentials or network.
 prepare uses native exact-patch and bundle inspection without publication.
 prepare-verified retains source evidence and checks candidate preimages/tree effects.
+An explicit parent_tree_profile:"verified-parent-trees-v1" with patch_profile
+retains commit-verified parent metadata for partial-directory edits. prepare-verified
+derives it from its verified source package; ordinary prepare requires the exact
+parent_tree_basis in the selection. Existing profiles are never upgraded implicitly.
 stage records the candidate, original principal and recovery key before apply.
 apply submits ONCE. Uncertain replies require recover, never a fresh key or base.
 recover only observes the original key; missing outcomes never permit resend.
@@ -104,6 +108,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
         candidate_commit: loaded.candidate_commit, source_commit: loaded.capture.request.expected_commit,
         paths_hex: loaded.capture.request.paths_hex, native_bundle_validation_observed: true,
         bundle_objects_independently_verified: false, publication_authorized: false, read_only: true,
+        ...(loaded.parent_tree_verification ? { parent_tree_verification: loaded.parent_tree_verification } : {}),
         ...(loaded.source_verification ? { source_verification: loaded.source_verification } : {}) };
     } else if (op === 'stage') {
       const loaded = await loadSourceEdit(f.get('--candidate'), f.get('--sha256'), time.check);

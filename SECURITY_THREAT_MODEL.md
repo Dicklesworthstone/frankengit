@@ -369,6 +369,13 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - explicit symlink/submodule/case/Unicode rules;
 - isolated overlay/cache namespaces;
 - semantic intents/export; local files have no authority;
+- explicit local source capture v4 verifies retained parent metadata against the
+  independently selected commit and reconstructs the complete result root; sibling
+  names/modes/IDs remain private, unchanged bodies are not fetched, and evidence
+  never grants publication authority or widens native affected paths;
+- source outcome readers settle only a recognized same-inode temporary link before
+  strict single-link reads; stranded or unrelated links remain refusals without
+  deletion, fresh keys or native resubmission;
 - node-owned workspace records/leases, principal and opaque-handle checks, exact sealed snapshot and candidate-tree binding, and pending publication recovery before session reuse;
 - staged/visible/durable output epochs;
 - Asupersync obligation/quiescence checks and forced containment.

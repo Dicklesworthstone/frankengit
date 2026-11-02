@@ -28,9 +28,11 @@ MESSAGE = "Publish the selected local edits\n"
 EDIT, REMOVE, MODE, CREATE = b"dir/edit", b"dir/remove", b"dir/tool", b"new/created"
 BEFORE = {EDIT: (b"100644", b"before\r\nwithout final LF"),
           REMOVE: (b"100644", b"delete exactly\n"), MODE: (b"100644", b"#!/bin/false\n"),
+          b"dir/kept": (b"100644", b"unselected\0nested sibling"),
           b"keep.bin": (b"100644", b"\0unchanged\xffsibling")}
 AFTER = {EDIT: (b"100755", b"\0\xffedited\r\nwithout final LF"),
          MODE: (b"100755", BEFORE[MODE][1]), CREATE: (b"100644", b"created\0binary\n"),
+         b"dir/kept": BEFORE[b"dir/kept"],
          b"keep.bin": BEFORE[b"keep.bin"]}
 
 
@@ -198,13 +200,24 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(denied.get("http_status") == 403 and not candidate_path.exists(),
                 "native refusal status was lost or denied preparation created a candidate")
         grants("read,receive,outcomes-read")
+        legacy = c.node_command(changes_cli, prepare, 2, error_reply=True)
+        require(legacy["code"] == "source_edit_structural_identity" and not candidate_path.exists(),
+                "v3 silently accepted incomplete modified-directory evidence")
+        selection["parent_tree_profile"] = "verified-parent-trees-v1"
+        selection_path.write_text(json.dumps(selection))
         prepared = c.node_command(changes_cli, prepare)
         require(prepared["candidate_commit"] == candidate, "native preparation changed exact intended commit")
+        saved_capture = json.loads((candidate_path / "capture.json").read_text())
+        require(saved_capture["schema"] == "frankengit-source-edit-capture-v4"
+                and saved_capture["request"]["parent_tree_basis"]["commit"]["oid"] == base,
+                "parent-tree basis is not retained in the explicit v4 capture")
+        c.facts[f"{fmt}_verified_parent_trees"] = True
         packed = bundle_objects((candidate_path / "candidate.bundle").read_bytes(), fmt, base, candidate)
         # Native export includes the explicitly changed mode-only file's
-        # existing blob. The unrelated sibling is the sole omitted after object.
+        # existing blob, but never the untouched siblings' bodies.
+        effect_blobs = {oid(fmt, "blob", AFTER[p][1]) for p in paths if p in AFTER}
         inventory = {key: value for key, value in expected_objects.items()
-                     if key != oid(fmt, "blob", BEFORE[b"keep.bin"][1])}
+                     if value[0] != "blob" or key in effect_blobs}
         require(packed == inventory and packed[candidate] == ("commit", commit_body), "candidate bundle differs from independent objects")
         (home / "candidate.bundle").write_bytes((candidate_path / "candidate.bundle").read_bytes())
         oracle("bundle", "bundle", "verify", "../candidate.bundle")
@@ -219,10 +232,29 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         c.node_command(changes_cli, wrong, 2, error_reply=True)
         require(not journal.exists(), "wrong candidate consent acquired publication custody")
         staged = c.node_command(changes_cli, stage)
+        # The other verified-evidence consumer must accept the same structural
+        # rows without treating a parent as an extra selected file.
+        result_expectation = put("result-expected.json", {"schema": "frankengit-source-edit-result-selection-v1",
+            "source": independent, "create_paths_hex": [CREATE.hex()], "after": [
+                {"pathHex": p.hex(), "blob": oid(fmt, "blob", AFTER[p][1]) if p in AFTER else None,
+                 "kind": ("executable" if AFTER[p][0] == b"100755" else "file") if p in AFTER else None} for p in paths]})
+        verified_path = home / "verified-candidate"
+        verified = c.node_command(edit_cli, ["prepare-verified", "--selection", str(selection_path),
+            "--package", str(capture / "source.json"), "--expect", str(result_expectation),
+            "--patch-file", str(capture / "patch.diff"), "--token-file", str(token_path), "--output", str(verified_path)])
+        require(verified["candidate_commit"] == candidate and verified["parent_tree_verification"]["reported_tree_effects_verified"] is True,
+                "verified evidence consumer lost the exact parent-tree capture")
+        c.node_command(edit_cli, ["inspect", "--candidate", str(verified_path), "--sha256", verified["manifest_sha256"]])
         require(c.run("at", repository, TENANT, REPOSITORY, "latest") == before and refs() == {REF: base},
                 "capture/preparation/staging published repository state")
         c.facts[f"{fmt}_native_prepare_grant_and_exact_pack"] = True
         original_request = (journal / "request.json").read_bytes()
+        for original_path in [workspace, capture, package_path, expect_path, candidate_path]:
+            original_path.rename(original_path.with_name(original_path.name + ".retained"))
+        reopened = c.node_command(edit_cli, ["inspect", "--candidate", str(journal / "candidate"), "--sha256", prepared["manifest_sha256"]])
+        require(reopened["parent_tree_verification"]["after_tree"] == result_tree,
+                "journal required an external package or trusted a saved success flag")
+        c.facts[f"{fmt}_parent_evidence_custody"] = True
         base_args = ["--journal", str(journal), "--request-sha256", staged["request_sha256"]]
         applied = c.node_command(edit_cli, ["apply", *base_args, "--token-file", str(token_path)])
         require(applied["decision"]["outcome"] == "committed" and applied["submission_retried"] is False,
@@ -237,7 +269,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
                     and page["kind"] == ("executable" if mode == b"100755" else "file"), "canonical source read differs")
         directory_page = native("tree", "--ref", REF, "--path", "dir")
         require(directory_page["node_closed"] is True and directory_page["has_more"] is False
-                and {bytes.fromhex(row["name_hex"]) for row in directory_page["entries"]} == {b"edit", b"tool"},
+                and {bytes.fromhex(row["name_hex"]) for row in directory_page["entries"]} == {b"edit", b"kept", b"tool"},
                 "deleted path survived canonical publication")
         c.facts[f"{fmt}_canonical_bytes_modes_and_sibling"] = True
         # Simulate loss of the local terminal after a known committed response.

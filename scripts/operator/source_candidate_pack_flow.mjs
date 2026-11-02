@@ -2,7 +2,7 @@
 // No new journal, admission route, decoder, automatic retry or inferred consent.
 import { ownSourceChangeInputs, canonical, fail } from './source_changes.mjs';
 import { editInput, identity, oid } from './source_edit_candidate.mjs';
-import { prepareSourceChanges, stageVerifiedSourceChanges } from './source_changes_prepare.mjs';
+import { prepareSourceChanges, stageVerifiedSourceChanges, sourceChangeRequest } from './source_changes_prepare.mjs';
 import { verifySourceCandidatePack } from './source_candidate_pack.mjs';
 import { loadSourceEdit } from './source_edit_publish.mjs';
 import { absolute, contains } from './workflow_watch_io.mjs';
@@ -59,11 +59,13 @@ export async function inspectPackedSourceChanges(candidatePath, candidateHash, p
 export async function stagePackedSourceChanges(journal, candidatePath, candidateHash,
   packageBytes, expected, changes, selection, options) {
   const context = settings(options, true), { time, pin } = context;
-  const request = editInput(selection), principal = identity(options.principal);
+  let request = editInput(selection);
+  const principal = identity(options.principal);
   const confirmed = oid(options.confirmCandidate, request.scope.object_format);
   absolute(journal); absolute(candidatePath);
   if (contains(journal, candidatePath) || contains(candidatePath, journal)) fail('source_changes_overlapping_custody');
   const owned = ownSourceChangeInputs(packageBytes, expected, changes);
+  request = sourceChangeRequest(request, owned.packageBytes);
   const candidate = await loadSourceEdit(candidatePath, candidateHash, time.check);
   if (confirmed !== candidate.candidate_commit) fail('source_changes_candidate_confirmation');
   if (!canonical(request).equals(canonical(candidate.capture.request))) fail('source_changes_target_selection');

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, readdir, chmod, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, readdir, chmod, mkdir, link, unlink, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureSourceEdit, canonical, hash } from '../../scripts/operator/source_edit_candidate.mjs';
-import { saveSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply } from '../../scripts/operator/source_edit_publish.mjs';
+import { saveSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply,
+  readSourceRecord } from '../../scripts/operator/source_edit_publish.mjs';
 import { peer, TOKEN, PRINCIPAL } from './source_edit_fixture.mjs';
 const sequence = '18446744073709551615';
 async function fixture(t, format = 'sha1') {
@@ -108,8 +109,42 @@ test('concurrent dispatch has only one wire owner and recovery safely converges'
   f.control.handler = async (_req, res, call) => { if (call.operation === 'apply') { await new Promise(r => setTimeout(r, 60)); res.destroy(); } else f.send(res, f.outcome); };
   const both = await Promise.allSettled([dispatchSourceApply(f.journal, f.staged.request_sha256, TOKEN), dispatchSourceApply(f.journal, f.staged.request_sha256, TOKEN)]);
   assert.equal(both.filter(r => r.status === 'rejected').length, 2); assert.equal(f.calls.filter(c => c.operation === 'apply').length, 1);
-  const recovered = await Promise.all([recoverSourceApply(f.journal, f.staged.request_sha256, TOKEN), recoverSourceApply(f.journal, f.staged.request_sha256, TOKEN)]);
+  const recovered = await Promise.all(Array.from({ length: 8 }, () => recoverSourceApply(f.journal, f.staged.request_sha256, TOKEN)));
   assert.deepEqual(recovered[0].decision, recovered[1].decision);
+  for (const result of recovered) assert.deepEqual(result.decision, recovered[0].decision);
+});
+
+async function linkedRecord(t, managed = true) {
+  const root = await mkdtemp(join(tmpdir(), 'fg-source-record-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'record.json'), temporary = managed ? target + '.writing-' + 'a'.repeat(32) : join(root, 'unrelated');
+  const value = { source_record: 'complete synced bytes' }, bytes = canonical(value);
+  await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 }); await link(temporary, target);
+  assert.equal((await lstat(target)).nlink, 2);
+  return { target, temporary, value, bytes };
+}
+test('source record waits for a recognized publisher, then applies the strict single-link reader', async t => {
+  const f = await linkedRecord(t), reading = readSourceRecord(f.target);
+  await new Promise(resolve => setTimeout(resolve, 15)); await unlink(f.temporary);
+  assert.deepEqual((await reading).value, f.value);
+  assert.equal((await lstat(f.target)).nlink, 1); assert.deepEqual(await readFile(f.target), f.bytes);
+});
+test('an unrelated hardlink stays refused and is never removed', async t => {
+  const f = await linkedRecord(t, false);
+  await assert.rejects(readSourceRecord(f.target), /record_link/);
+  assert.equal((await lstat(f.target)).nlink, 2); assert.deepEqual(await readFile(f.temporary), f.bytes);
+});
+test('a stranded managed publisher refuses within a finite bound and retains both names', async t => {
+  const f = await linkedRecord(t);
+  await assert.rejects(readSourceRecord(f.target), /publication_pending/);
+  assert.equal((await lstat(f.target)).nlink, 2); assert.deepEqual(await readFile(f.temporary), f.bytes);
+});
+test('malformed settled records refuse instead of entering a publication retry', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'fg-source-record-malformed-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'record.json'); await writeFile(path, '{', { mode: 0o600 });
+  await assert.rejects(readSourceRecord(path), /source_edit_json/);
+  assert.equal(await readFile(path, 'utf8'), '{');
 });
 test('dispatch marker and exact request are present before the HTTP peer sees a mutation', async t => {
   const f = await fixture(t);

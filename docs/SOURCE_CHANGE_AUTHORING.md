@@ -200,6 +200,15 @@ the client refuses with `source_edit_structural_identity`. A successful native
 preparation alone cannot bypass that check. General partial-directory inspection
 still needs complete independently verified child evidence.
 
+To provide that evidence without fetching unchanged file bodies, add
+`"parent_tree_profile": "verified-parent-trees-v1"` to this selection alongside
+the chosen `patch_profile`. The authoring client retains the verified parent
+metadata from the existing selected-source package in an explicit v4 capture.
+It checks the original commit/tree chain, preserves unchanged entries and rebuilds
+the complete resulting root. Packed preparation, offline inspection and staging
+reverify the same evidence; the original-key journal is self-contained. Ordinary
+v3 behavior remains unchanged. See [the v4 contract and limits](SOURCE_EDIT_PROFILE_CAPTURE.md#explicit-parent-tree-evidence-for-partial-directory-edits).
+
 ```bash
 node scripts/fg_source_changes.mjs prepare \
   --package /private/session/source-package.json \

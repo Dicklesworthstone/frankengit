@@ -502,3 +502,6 @@ export function mountContextMembership(document, result, { acquire, run, current
 
 // Shared synchronous encoder for already validated, bounded native tree rows.
 export { encodeTree as encodeVerifiedTreeRows };
+// Strict codecs shared with the trusted-local synchronous capture verifier.
+// Decoding alone authenticates nothing; callers must check native commitments.
+export { decodeTree as decodeTreeRows, commitRoot as decodeCommitTree };
