@@ -87,14 +87,6 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     commit_body = f"tree {result_tree}\nparent {base}\nauthor {AUTHOR} 2 +0000\ncommitter {AUTHOR} 2 +0000\n\n{MESSAGE}".encode()
     candidate = expected("commit", commit_body)
     selected = sorted([EDIT, REMOVE, MODE])
-    package = {"schema": "frankengit-selected-source-package-v1", "membership": {
-        "schema": "frankengit-context-membership-proof-v1", "objectFormat": fmt,
-        "commit": {"oid": base, "bodyHex": base_body.hex()},
-        "trees": [{"pathHex": path.hex() if path else None, "oid": identity, "bodyHex": body.hex()}
-                  for path, (identity, body) in sorted(trees.items())],
-        "files": [{"pathHex": p.hex(), "blob": oid(fmt, "blob", BEFORE[p][1]), "kind": "file"} for p in selected]},
-        "blobs": sorted([{"oid": oid(fmt, "blob", BEFORE[p][1]), "bytesHex": BEFORE[p][1].hex()}
-                         for p in selected], key=lambda row: row["oid"])}
     independent = {"format": fmt, "commit": base,
                    "files": [{"pathHex": p.hex(), "blob": oid(fmt, "blob", BEFORE[p][1])} for p in selected]}
 
@@ -104,7 +96,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
             json.dump(value, out)
         return path
 
-    package_path, expect_path = put("package.json", package), put("expected.json", independent)
+    package_path, expect_path = home / "package.json", put("expected.json", independent)
 
     def oracle(label, *arguments):
         command = [str(ROOT / "scripts/e2e/oracle/oracle.sh"), "capture", "git-2.54.0", str(oracle_run),
@@ -118,8 +110,9 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(result.returncode == 0, "pinned Git rejected the fixture or candidate bundle")
 
     oracle("fsck", "fsck", "--full", "--strict", "--no-reflogs")
-    c.run("init", repository, TENANT, REPOSITORY, fmt)
+    c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "operator-workspace-import", source)
+    initial_index = json.loads(c.run("index", repository, TENANT, REPOSITORY, fmt, REF, "build", "genesis"))
     credentials, incarnation = c.credentials(repository, home)
     header = credentials.read_text().splitlines()[0]
     token = "a" * 64
@@ -150,6 +143,79 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
 
     before = c.run("at", repository, TENANT, REPOSITORY, "latest")
     require(refs() == {REF: base}, "native import differs from independent fixture")
+    pin = native("show", "--ref", REF, "--path-hex", EDIT.hex(), "--max-bytes", "65536")
+    require(pin["node_closed"] is True and pin["source_commit"] == base and pin["root_tree"] == base_tree
+            and bytes.fromhex(pin["bytes_hex"]) == BEFORE[EDIT][1], "independent native source selection differs")
+    context_cli, package_cli = ROOT / "scripts/fg_source_context.mjs", ROOT / "scripts/fg_source_package.mjs"
+    context_bundle = home / "native-context"
+    acquisition = HttpServer(c, repository, credentials, "workspace-acquisition-" + fmt)
+    acquisition.command.append("--allow-source")
+    with acquisition:
+        query = put("context-query.json", {"schema": "frankengit-source-context-query-v1", "scope": {
+            "tenant_id": TENANT, "repository_id": REPOSITORY, "repository_incarnation": incarnation,
+            "object_format": fmt}, "reference": REF, "expected_commit": base,
+            "expected_head": pin["snapshot_token"], "terms": ["dir"],
+            "prefixes_hex": [p.hex() for p in selected], "limits": {"context_max_files": 3}})
+        context_args = ["capture", "--endpoint", acquisition.url, "--query-file", str(query),
+                        "--token-file", str(token_path), "--output", str(context_bundle), "--require-complete"]
+        grants("receive,outcomes-read")
+        denied = c.node_command(context_cli, context_args, 2, error_reply=True)
+        require(denied["status"] == 403 and not context_bundle.exists(), "context read grant denial was bypassed")
+        grants("read,receive,outcomes-read")
+        context = c.node_command(context_cli, context_args)
+        saved_context = context_bundle / "capture.json"
+        require(file_sha256(saved_context) == context["capture_sha256"], "context capture hash changed")
+        native_context = json.loads(saved_context.read_bytes())["native_response"]
+        require(sorted(bytes.fromhex(f["path_hex"]) for f in native_context["files"]) == selected,
+                "actual Initial query selected unexpected source paths")
+        for row in native_context["files"]:
+            body = BEFORE[bytes.fromhex(row["path_hex"])][1]
+            require(row["blob"] == oid(fmt, "blob", body) and row["source_bytes"] == len(body),
+                    "native context differs from independent selected object")
+            for excerpt in row["excerpts"]:
+                data = bytes.fromhex(excerpt["untrusted_bytes_hex"]); at = excerpt["byte_offset"]
+                require(body[at:at + len(data)] == data, "native context excerpt differs from original bytes")
+        c.facts[f"{fmt}_native_context_and_grant_twins"] = True
+        selection = put("package-selection.json", {"endpoint": acquisition.url, "tenant_id": TENANT,
+            "repository_id": REPOSITORY, "repository_incarnation": incarnation, "object_format": fmt,
+            "ref": REF, "expected_commit": base, "expected_head": pin["snapshot_token"]})
+        package_common = ["--selection", str(selection), "--context", str(saved_context),
+                          "--context-sha256", context["capture_sha256"], "--expect", str(expect_path)]
+        package_args = ["capture", *package_common, "--token-file", str(token_path),
+                        "--output", str(package_path), "--native-fg", str(c.fg)]
+        grants("receive,outcomes-read")
+        c.node_command(package_cli, package_args, 2, error_reply=True)
+        require(not package_path.exists(), "package published without its read grant")
+        grants("read,receive,outcomes-read")
+        chosen = json.loads(selection.read_bytes())
+        selection.write_text(json.dumps({**chosen, "expected_head": "alg:2:" + "f" * 64}))
+        c.node_command(package_cli, package_args, 2, error_reply=True)
+        require(not package_path.exists(), "changed independent head published a package")
+        selection.write_text(json.dumps(chosen))
+        acquired = c.node_command(package_cli, package_args)
+        require(acquired["native_read"]["verified_at_capture"] is True
+                and acquired["native_read"]["head"] == pin["snapshot_token"]
+                and acquired["native_read"]["binary_sha256"] == file_sha256(c.fg)
+                and acquired["native_read"]["files"] == len(selected)
+                and acquired["verified"]["authorityVerified"] is False
+                and acquired["package_sha256"] == file_sha256(package_path), "native package proof/custody differs")
+        package = json.loads(package_path.read_bytes())
+        require(package["membership"]["commit"] == {"oid": base, "bodyHex": base_body.hex()}
+                and package["membership"]["files"] == [
+                    {"pathHex": p.hex(), "blob": oid(fmt, "blob", BEFORE[p][1]), "kind": "file"} for p in selected]
+                and package["blobs"] == sorted([
+                    {"oid": oid(fmt, "blob", BEFORE[p][1]), "bytesHex": BEFORE[p][1].hex()} for p in selected], key=lambda x: x["oid"]),
+                "acquired package does not contain exact independently selected files")
+        require({t["pathHex"]: (t["oid"], t["bodyHex"]) for t in package["membership"]["trees"]}
+                == {p.hex() if p else None: (identity, body.hex()) for p, (identity, body) in trees.items()},
+                "acquired parent trees differ from independent original objects")
+    c.node_command(context_cli, ["inspect", "--bundle", str(context_bundle), "--expected-sha256", context["manifest_sha256"]])
+    c.node_command(package_cli, ["inspect", *package_common, "--package", str(package_path),
+                                 "--package-sha256", acquired["package_sha256"]])
+    c.node_command(ROOT / "scripts/fg_verify_source_package.mjs", ["--package", str(package_path), "--expect", str(expect_path)])
+    require(c.run("at", repository, TENANT, REPOSITORY, "latest") == before and refs() == {REF: base},
+            "source acquisition or proof verification published canonical state")
+    c.facts[f"{fmt}_native_package_and_proof_custody"] = True
     workspace = home / "workspace"
     args = ["create", "--package", str(package_path), "--expect", str(expect_path), "--output", str(workspace)]
     made = c.node_command(workspace_cli, args)
@@ -292,6 +358,173 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(c.run("at", repository, TENANT, REPOSITORY, "latest") == after and refs() == {REF: candidate},
                 "recovery redispatched a mutation")
         c.facts[f"{fmt}_original_key_and_outcome_grant"] = True
+        # Continue the SAME independently acquired workspace across a real native
+        # branch advance. No fixture replaces refresh, source verification or CAS.
+        old_workspace = workspace.with_name(workspace.name + ".retained")
+        local_text = b"LOCAL\r\nwithout final LF"
+        (old_workspace / "files/dir/edit").write_bytes(local_text)
+        remote = {**AFTER, EDIT: (b"100644", b"before\r\nREMOTE without LF"),
+                  REMOVE: (b"100644", b"\0upstream binary replacement\xff"),
+                  MODE: (b"100644", b"#!/bin/true\n"),
+                  b"dir/kept": (b"100644", b"upstream unselected\0sibling")}
+        # The independent bare oracle also needs C, the parent of this upstream B.
+        for identity, (kind, body) in expected_objects.items():
+            require(loose(source, fmt, kind, body) == identity, "original candidate object framing changed")
+        remote_tree, _ = file_tree(fmt, remote, lambda kind, body: loose(source, fmt, kind, body))
+        remote_body = f"tree {remote_tree}\nparent {candidate}\nauthor {AUTHOR} 3 +0000\ncommitter {AUTHOR} 3 +0000\n\nupstream\n".encode()
+        upstream = loose(source, fmt, "commit", remote_body)
+        final_files = {**remote, EDIT: (b"100755", b"LOCAL\r\nREMOTE without LF"), MODE: (b"100755", remote[MODE][1])}
+        del final_files[REMOVE]
+        final_objects = {}
+
+        def final_object(kind, body):
+            identity = oid(fmt, kind, body); final_objects[identity] = kind, body; return identity
+
+        final_tree, final_trees = file_tree(fmt, final_files, final_object)
+        final_message = "Publish refreshed local edits\n"
+        final_body = f"tree {final_tree}\nparent {upstream}\nauthor {AUTHOR} 4 +0000\ncommitter {AUTHOR} 4 +0000\n\n{final_message}".encode()
+        final_commit = final_object("commit", final_body)
+        next_expected = put("next-expected.json", {"format": fmt, "commit": upstream,
+            "files": [{"pathHex": p.hex(), "blob": oid(fmt, "blob", remote[p][1])} for p in selected]})
+        (source / REF).write_text(upstream + "\n")
+        oracle("upstream-fsck", "fsck", "--full", "--strict", "--no-reflogs")
+        oracle("upstream-bundle", "bundle", "create", "../upstream.bundle", REF)
+        c.run("bundle", "sync-import", repository, TENANT, REPOSITORY, home / "upstream.bundle",
+              "--trusted-local", "--object-format", fmt, "--principal", PRINCIPAL, "--key-stdin",
+              "--allow-ref-updates", "--expect", REF + "=" + candidate, input_bytes=b"operator-workspace-upstream")
+        require(refs() == {REF: upstream}, "upstream import did not select independent B")
+        grants("read,receive,outcomes-read")
+        refreshing = server
+        # Keep the same owned listener and immutable candidate endpoint. A new
+        # explicitly staged stale proposal must not republish the old source.
+        stale_journal = home / "stale-journal"
+        old_candidate = candidate_path.with_name(candidate_path.name + ".retained")
+        stale = c.node_command(edit_cli, ["stage", "--candidate", str(old_candidate), "--sha256", prepared["manifest_sha256"],
+            "--principal", PRINCIPAL, "--confirm-candidate", candidate, "--journal", str(stale_journal)])
+        # A retained committed C outcome is history, not the current branch tip.
+        original = c.node_command(edit_cli, ["status", *base_args])
+        require(original["decision"] == applied["decision"] and refs() == {REF: upstream}, "old outcome became current branch truth")
+        stale_args = ["--journal", str(stale_journal), "--request-sha256", stale["request_sha256"]]
+        stale_result = c.node_command(edit_cli, ["apply", *stale_args, "--token-file", str(token_path)], 2)
+        require(stale_result["decision"]["outcome"] == "refused" and refs() == {REF: upstream}, "stale source overwrote the newer ref")
+        after_refusal = c.run("at", repository, TENANT, REPOSITORY, "latest")
+        stale_recovery = c.node_command(edit_cli, ["recover", *stale_args, "--token-file", str(token_path)], 2)
+        require(stale_recovery["decision"] == stale_result["decision"] and stale_recovery["key"] == stale["key"]
+                and stale_recovery["submission_retried"] is False
+                and c.run("at", repository, TENANT, REPOSITORY, "latest") == after_refusal, "stale refusal recovery changed its outcome or republished")
+        c.facts[f"{fmt}_refresh_stale_publication"] = True
+
+        # The canonical refusal advanced authority, despite leaving B's ref
+        # unchanged. Build the exact-source index AFTER those decisions settle.
+        c.run("index", repository, TENANT, REPOSITORY, fmt, REF, "build", initial_index["index_token"])
+        next_pin = native("show", "--ref", REF, "--path-hex", EDIT.hex())
+        next_context = home / "next-context"
+        next_query = put("next-query.json", {"schema": "frankengit-source-context-query-v1", "scope": {
+            "tenant_id": TENANT, "repository_id": REPOSITORY, "repository_incarnation": incarnation,
+            "object_format": fmt}, "reference": REF, "expected_commit": upstream,
+            "expected_head": next_pin["snapshot_token"], "terms": ["dir"],
+            "prefixes_hex": [p.hex() for p in selected], "limits": {"context_max_files": 3}})
+        context = c.node_command(context_cli, ["capture", "--endpoint", refreshing.url, "--query-file", str(next_query),
+            "--token-file", str(token_path), "--output", str(next_context), "--require-complete"])
+        next_selection = put("next-selection.json", {"endpoint": refreshing.url, "tenant_id": TENANT,
+            "repository_id": REPOSITORY, "repository_incarnation": incarnation, "object_format": fmt,
+            "ref": REF, "expected_commit": upstream, "expected_head": next_pin["snapshot_token"]})
+        next_package = home / "next-package.json"
+        next_receipt = c.node_command(package_cli, ["capture", "--selection", str(next_selection),
+            "--context", str(next_context / "capture.json"), "--context-sha256", context["capture_sha256"],
+            "--expect", str(next_expected), "--token-file", str(token_path), "--output", str(next_package), "--native-fg", str(c.fg)])
+        require(next_receipt["native_read"]["head"] == next_pin["snapshot_token"]
+                and next_receipt["native_read"]["verified_at_capture"] is True
+                and next_receipt["native_read"]["files"] == len(selected)
+                and next_receipt["native_read"]["binary_sha256"] == file_sha256(c.fg)
+                and next_receipt["verified"]["authorityVerified"] is False, "refresh lost its independently selected native source")
+        refresh_args = ["--workspace", str(old_workspace), "--sha256", workspace_hash,
+                        "--package", str(next_package), "--expect", str(next_expected)]
+        plain = c.node_command(workspace_cli, ["refresh-preview", *refresh_args], 1)
+        require(plain["conflict_count"] == 2 and plain["ready"] is False, "default refresh silently merged content")
+        profile = ["--merge-profile", "bounded-line-merge-v1"]
+        conflicted = c.node_command(workspace_cli, ["refresh-preview", *refresh_args, *profile], 1)
+        entries = {row["path_hex"]: row for row in conflicted["entries"]}
+        require(conflicted["conflict_count"] == 1 and entries[EDIT.hex()]["disposition"] == "text_merged"
+                and entries[MODE.hex()]["disposition"] == "combined"
+                and entries[REMOVE.hex()]["conflict"] == "local_delete_source_modify", "bounded refresh failed independent text/mode reconciliation")
+        output = home / "refreshed-workspace"
+        def refresh(plan, extra=()):
+            return ["refresh", *refresh_args, *profile, *extra, "--approve-refresh-sha256", plan, "--output", str(output)]
+        unresolved = c.node_command(workspace_cli, refresh(conflicted["refresh_sha256"]), 2, error_reply=True)
+        require(unresolved["code"] == "source_workspace_refresh_conflict", "unresolved plan failed for an unrelated reason")
+        require(not output.exists(), "unresolved refresh acquired output custody")
+        choices = put("refresh-choices.json", {"schema": "frankengit-workspace-refresh-resolutions-v1",
+            "plan_sha256": conflicted["refresh_sha256"], "choices": [{"path_hex": REMOVE.hex(), "choice": "local"}]})
+        resolution = ["--resolutions", str(choices)]
+        resolved = c.node_command(workspace_cli, ["refresh-preview", *refresh_args, *profile, *resolution])
+        require(resolved["ready"] is True and resolved["resolved_conflict_count"] == 1, "explicit deletion choice was not reviewed")
+        old_approval = c.node_command(workspace_cli, refresh(conflicted["refresh_sha256"], resolution), 2, error_reply=True)
+        require(old_approval["code"] == "source_workspace_refresh_review_changed", "old approval was not fenced")
+        (old_workspace / "files/dir/edit").write_bytes(local_text + b"CHANGED")
+        moved_local = c.node_command(workspace_cli, refresh(resolved["refresh_sha256"], resolution), 2, error_reply=True)
+        require(moved_local["code"] == "source_workspace_refresh_resolution_plan_changed", "local editor change was not fenced")
+        require(not output.exists(), "stale refresh consent published output")
+        (old_workspace / "files/dir/edit").write_bytes(local_text)
+        refreshed = c.node_command(workspace_cli, refresh(resolved["refresh_sha256"], resolution))
+        require(refreshed["source_commit"] == upstream and (output / "files/dir/edit").read_bytes() == final_files[EDIT][1]
+                and (output / "files/dir/tool").read_bytes() == final_files[MODE][1]
+                and (output / "files/dir/tool").stat().st_mode & 0o100 != 0 and not (output / "files/dir/remove").exists()
+                and not (output / "files/new/created").exists() and (old_workspace / "files/new/created").read_bytes() == AFTER[CREATE][1]
+                and (old_workspace / "files/dir/edit").read_bytes() == local_text, "refresh lost local bytes/modes/deletion or copied unselected files")
+        c.facts[f"{fmt}_refresh_review_and_exact_result"] = True
+        refreshed_capture = home / "refreshed-capture"
+        refresh_paths = put("refresh-paths.json", {"paths_hex": [p.hex() for p in selected], "byte_profile": "binary-safe-v1"})
+        captured_refresh = c.node_command(workspace_cli, ["capture", "--workspace", str(output), "--sha256", refreshed["workspace_sha256"],
+            "--paths", str(refresh_paths), "--output", str(refreshed_capture)])
+        require(captured_refresh["expected_tree"] == final_tree and captured_refresh["changed_path_count"] == 3,
+                "refreshed capture differs from independent final tree")
+        final_selection = put("refreshed-selection.json", {"endpoint": refreshing.url, "scope": {
+            "tenant_id": TENANT, "repository_id": REPOSITORY, "repository_incarnation": incarnation, "object_format": fmt},
+            "ref": REF, "expected_commit": upstream, "metadata": {"author": AUTHOR, "committer": AUTHOR,
+            "timestamp": 4, "message": final_message}, "paths_hex": [p.hex() for p in selected],
+            "patch_profile": "exact-tree-binary-v1", "parent_tree_profile": "verified-parent-trees-v1", "expected_result_tree": final_tree})
+        fresh_candidate, fresh_journal = home / "refreshed-candidate", home / "refreshed-journal"
+        common_refresh = ["--package", str(refreshed_capture / "source.json"), "--expect", str(refreshed_capture / "expected.json"),
+            "--changes", str(refreshed_capture / "changes.json"), "--confirm-draft-sha256", captured_refresh["draft_sha256"]]
+        prepared_refresh = c.node_command(changes_cli, ["prepare-packed", *common_refresh, "--selection", str(final_selection),
+            "--token-file", str(token_path), "--output", str(fresh_candidate)])
+        require(prepared_refresh["candidate_commit"] == final_commit, "native refreshed commit differs from independent framing")
+        packed = bundle_objects((fresh_candidate / "candidate.bundle").read_bytes(), fmt, upstream, final_commit)
+        wanted_ids = {final_commit, final_tree, final_trees[b"dir"][0], oid(fmt, "blob", final_files[EDIT][1]), oid(fmt, "blob", final_files[MODE][1])}
+        require(packed == {key: final_objects[key] for key in wanted_ids}, "refreshed pack includes unselected source or omits an effect")
+        (home / "refreshed.bundle").write_bytes((fresh_candidate / "candidate.bundle").read_bytes())
+        oracle("refreshed-bundle", "bundle", "verify", "../refreshed.bundle")
+        fresh = c.node_command(changes_cli, ["stage-packed", *common_refresh, "--selection", str(final_selection),
+            "--candidate", str(fresh_candidate), "--sha256", prepared_refresh["manifest_sha256"], "--principal", PRINCIPAL,
+            "--confirm-candidate", final_commit, "--journal", str(fresh_journal)])
+        require(fresh["key"] != stale["key"] and fresh["key"] != staged["key"], "new reviewed semantics reused an old key")
+        fresh_args = ["--journal", str(fresh_journal), "--request-sha256", fresh["request_sha256"]]
+        published = c.node_command(edit_cli, ["apply", *fresh_args, "--token-file", str(token_path)])
+        require(published["decision"]["outcome"] == "committed" and refs() == {REF: final_commit}, "refreshed candidate did not publish exactly")
+        for path, (mode, body) in final_files.items():
+            row = native("show", "--ref", REF, "--path-hex", path.hex())
+            require(row["source_commit"] == final_commit and row["node_closed"] is True and bytes.fromhex(row["bytes_hex"]) == body
+                    and row["kind"] == ("executable" if mode == b"100755" else "file"), "refreshed canonical bytes/modes/siblings differ")
+        selected_tree = native("tree", "--ref", REF, "--path", "dir")
+        require({bytes.fromhex(r["name_hex"]) for r in selected_tree["entries"]} == {b"edit", b"kept", b"tool"}, "refresh resurrected a deletion")
+        after_refresh = c.run("at", repository, TENANT, REPOSITORY, "latest")
+        fresh_terminal = (fresh_journal / "terminal.json").read_bytes()
+        (fresh_journal / "terminal.json").rename(fresh_journal / "terminal.retained")
+        c.node_command(edit_cli, ["apply", *fresh_args, "--token-file", str(token_path)], 2, error_reply=True)
+        grants("outcomes-read")
+        recovered_refresh = c.node_command(edit_cli, ["recover", *fresh_args, "--token-file", str(token_path)])
+        require(recovered_refresh["decision"] == published["decision"] and recovered_refresh["submission_retried"] is False
+                and recovered_refresh["key"] == fresh["key"] and (fresh_journal / "terminal.json").read_bytes() == fresh_terminal,
+                "refreshed recovery changed its key or exact decision bytes")
+        stale_terminal = (stale_journal / "terminal.json").read_bytes()
+        (stale_journal / "terminal.json").rename(stale_journal / "terminal.retained")
+        recovered_stale = c.node_command(edit_cli, ["recover", *stale_args, "--token-file", str(token_path)], 2)
+        require(recovered_stale["decision"] == stale_result["decision"] and recovered_stale["key"] == stale["key"]
+                and recovered_stale["submission_retried"] is False and (stale_journal / "terminal.json").read_bytes() == stale_terminal
+                and c.run("at", repository, TENANT, REPOSITORY, "latest") == after_refresh and refs() == {REF: final_commit},
+                "historical refusal recovery changed canonical state or transaction identity")
+    c.facts[f"{fmt}_refresh_publication_and_drain"] = True
     c.facts[f"{fmt}_service_drained"] = True
 
 
@@ -307,10 +540,11 @@ def main() -> None:
     require(not any(args.work.iterdir()) and args.work.stat().st_mode & 0o077 == 0, "empty private work directory required")
     c = OperatorCampaign(fg, node, args.work.resolve())
     summary: dict[str, Any] = {"complete": False, "facts": c.facts, "binary_sha256": file_sha256(fg),
-        "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_workspace.mjs",
+        "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_context.mjs",
+        "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
         "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
-        "non_claim": "Independent fixture package and real authoring/publication; not native package acquisition, every operator, current-source native qualification, TLS or deployment."}
+        "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 
     def stop(_signum, _frame):
         raise InterruptedError("source workspace campaign interrupted; draining owned children")

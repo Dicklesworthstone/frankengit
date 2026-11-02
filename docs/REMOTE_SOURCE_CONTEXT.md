@@ -13,6 +13,15 @@ budgets, and excerpt layout; it never approximates the join with separate
 content/path requests. It accepts the unranked `raw-path-prefix` selection only.
 Newer ranked context APIs do not change this profile implicitly.
 
+The saved `capture.json` and its retained `capture_sha256` can feed the existing
+[source package command](SELECTED_SOURCE_PACKAGE_OPERATOR.md) directly. It
+understands the native joined source envelopes and declared excerpt lineage,
+rechecks the selected full source bytes, and optionally verifies each file through
+Rust `verify-read` at an independently retained authority head. The resulting
+portable package can create an existing sparse source workspace. Opaque context
+labels grant no effects and are not retained as authority proofs. Both Node
+acquisition clients send an explicit FrankenGit project User-Agent.
+
 ## Requirements
 
 Use Node 22.16 or later on a POSIX host with owner-private files/directories.

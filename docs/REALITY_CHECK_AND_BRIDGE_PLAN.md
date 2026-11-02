@@ -369,6 +369,47 @@ open. No Bead closure, gate relaxation or new production dependency is implied.
 
 ## 3. What has improved since October 21
 
+**Native source-acquisition join at `55b2df8be5e5115379643f6aaea6eb281f803124`:**
+the workspace campaign now reads actual Initial context from a persisted native
+lexical index, captures a complete selected package with native `verify-read`,
+inspects it offline after the acquisition listener drains, then executes the
+existing sparse-workspace/packed-authoring/publication/recovery flow. Imported
+objects and the expected path/blob selection are independently framed before
+acquisition; the context and package themselves are native reads. Both formats
+retain the original 17 assertions and add four, with canonical Rust result reads.
+
+That join exposed real package-client incompatibilities: the native joined
+response keeps its complete source envelopes in the content/path channels, and
+native excerpts carry declared lineage fields. The client now checks both
+envelopes against the joined coordinates and accepts only matching closed lineage
+metadata. Legacy input behavior, unknown-field refusals and portable non-authority
+claims remain. Both Node acquisition clients now send the required honest project
+User-Agent; socket regressions failed before the repair.
+
+At that exact committed source, the predeclared 21-file sandboxed corpus executes
+**671 tests, zero failures or skips**. Two existing native suites complete **29
+assertions, zero failures or skips**, including all six native-package test cases
+(four explicitly labelled peer/provider controls and two native scenarios).
+Artifacts: `/data/frankengit-targets/noble_native_package_final_20261102`;
+receipt SHA-256 `8c2e60f8212f8b446c9ab08bc5eb991d2b99df53c59dbd594d68ee4890fd3456`.
+The supplied binary remains older `a9d65885`, not a current Rust build.
+
+Failed evidence is retained: the initial conjunctive query correctly returned
+no selected files; actual native inputs exposed the envelope/lineage defects;
+the first committed focused run at `c85194cd` was **670/671** because the sandbox
+lacked localhost resolution for its private-CA TLS test. The native-package
+suite was **3/6** because its fixtures inherited an aliased scratch path. A
+read-only hosts bind and canonical fixture directory correct those environments
+without changing assertions or product custody checks. The first committed
+workspace result was separately **21/21**; it did not make the combined run pass.
+
+At the final source, a disabled native source route causes a typed 403 and no
+package/workspace or canonical change. SIGTERM after successful publication leaves
+an incomplete driver, two normal service drains and no owned process group;
+fresh Rust reads retain the committed executable edit and unchanged sibling.
+Full current-native, operator/frontend matrix and independent acceptance remain
+open. No Bead closure, gate waiver or owner architecture decision is inferred.
+
 **Partial-directory continuation at `c1bfefebbf776b9e4dd88ce11677b9245608c466`:**
 the known v3 unchanged-child refusal remains, with an explicit v4 permitted
 profile. It retains the already available parent metadata from the independently

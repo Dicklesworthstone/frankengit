@@ -5,6 +5,15 @@ import { input, report, peer, json, TOKEN, hex, withReadLabels } from './source_
 import { symbolInput, nativeSymbols } from './source_context_symbols_fixtures.mjs';
 import { nativeRanked } from './source_context_ranking_fixtures.mjs';
 
+test('context acquisition identifies the project on the actual HTTP request', async t => {
+  const q = input(), p = await peer(t, (_req, res) => json(res, report(q)));
+  await acquire(p.endpoint, TOKEN, q);
+  assert.equal(p.calls.length, 1);
+  assert.equal(p.calls[0].headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
+  assert.equal(p.calls[0].headers.authorization, `Bearer ${TOKEN}`);
+  assert.equal(p.calls[0].headers.cookie, undefined);
+});
+
 for (const format of ['sha1', 'sha256']) test(`${format}: declared read-result labels survive one actual HTTP acquisition as opaque evidence`, async t => {
   const q = input(format), original = report(q), raw = withReadLabels(original), before = structuredClone(raw);
   assert.equal(Object.hasOwn(original.retrieval, 'authorization'), false, 'legacy fixture stays unchanged');

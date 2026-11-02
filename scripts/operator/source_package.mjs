@@ -78,7 +78,22 @@ function contextPlan(contextBytes, contextHash, selection, expected, limits, che
   }
   const scope = { tenant: selected.tenant_id, repository: selected.repository_id,
     incarnation: selected.repository_incarnation, format: selected.object_format };
-  const observed = coordinates(source, sourceSelection(selected.ref, selected.object_format), scope);
+  const reference = sourceSelection(selected.ref, selected.object_format);
+  let observed;
+  if (!Object.hasOwn(source, 'source_head') && !Object.hasOwn(source, 'published')) {
+    // The joined Initial response owns source coordinates, while each real
+    // lexical channel carries the full read envelope. Verify both; never invent
+    // missing publication/head fields or mix an older channel into this source.
+    for (const channel of ['content', 'path']) {
+      if (source[channel]?.type !== 'source_search_index' || source[channel].profile !== 'ascii-word-postings-v1' ||
+          source[channel].channel !== channel) fail('invalid joined source envelope.');
+      const current = coordinates(source[channel], reference, scope, observed?.pin);
+      if (['tenant_id', 'repository_id', 'repository_incarnation', 'object_format', 'ref', 'ref_hex',
+        'snapshot_token', 'source_rcr', 'source_commit', 'root_tree', 'read_only', 'transaction_created']
+        .some(k => source[k] !== source[channel][k])) fail('joined source coordinates changed.');
+      observed ??= current;
+    }
+  } else observed = coordinates(source, reference, scope);
   if (observed.pin.commit !== selected.expected_commit || (selected.expected_head !== null && observed.pin.head !== selected.expected_head)) {
     fail('saved context changed the independently selected commit or snapshot.');
   }
@@ -87,10 +102,18 @@ function contextPlan(contextBytes, contextHash, selection, expected, limits, che
     check();
     const file = { pathHex: pathHex(row?.path_hex), blob: oid(row?.blob, selected.object_format),
       sourceBytes: integer(row?.source_bytes, 'complete selected file bytes', 0, FILE_LIMIT) };
+    // Native read labels are opaque source-coordinate metadata, never authority.
+    // Admit their closed excerpt shape only with the matching complete file label.
+    const labelled = ['position_domain', 'lineage_commitment', 'authorization_labels'].some(k => Object.hasOwn(row, k));
+    if (labelled && (row.position_domain !== 'source-blob-bytes' ||
+        typeof row.lineage_commitment !== 'string' || !/^[0-9a-f]{64}$/.test(row.lineage_commitment) ||
+        !Array.isArray(row.authorization_labels) || !row.authorization_labels.length || row.authorization_labels.length > 4096 ||
+        row.authorization_labels.some(label => typeof label !== 'string' || !/^[0-9a-f]{64}$/.test(label)))) fail('invalid native file lineage.');
     if (!Array.isArray(row.excerpts) || !row.excerpts.length || row.excerpts.length > 128) fail('invalid excerpt inventory.');
     let lastOffset = -1, end = 0;
     file.excerpts = row.excerpts.map(part => {
-      check(); exact(part, ['byte_offset', 'untrusted_bytes_hex']);
+      check(); exact(part, ['byte_offset', 'untrusted_bytes_hex', ...(labelled ? ['position_domain', 'lineage_commitment'] : [])]);
+      if (labelled && (part.position_domain !== 'source-blob-bytes' || part.lineage_commitment !== row.lineage_commitment)) fail('native excerpt lineage changed.');
       const offset = integer(part.byte_offset, 'excerpt offset', 0, file.sourceBytes), hex = part.untrusted_bytes_hex;
       if (typeof hex !== 'string' || hex.length > 2 * 1024 * 1024 || hex.length % 2 || /[^0-9a-f]/u.test(hex) ||
           offset <= lastOffset || offset < end || hex.length / 2 > file.sourceBytes - offset ||
@@ -143,7 +166,9 @@ export async function captureSourcePackage(contextBytes, contextHash, selected, 
   const plan = contextPlan(contextBytes, contextHash, selected, expected, limits, check);
   const native = nativeFg === undefined ? null : await prepareNativePackageRead(nativeFg, plan, limits.package.maxBlobRequests, check);
   const transport = new Transport({ href: `${plan.selected.endpoint}/ui/search/`, pageSuffix: '/ui/search/',
-    cryptoImpl: webcrypto, timeoutMs: limits.timeoutMs });
+    cryptoImpl: webcrypto, timeoutMs: limits.timeoutMs,
+    fetchImpl: (url, options) => fetch(url, { ...options, headers: { ...options.headers,
+      'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)' } }) });
   const stop = () => transport.disconnect();
   signal?.addEventListener('abort', stop, { once: true });
   const timer = setTimeout(stop, Math.max(1, deadline - performance.now()));

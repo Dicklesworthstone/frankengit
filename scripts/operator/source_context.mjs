@@ -595,6 +595,7 @@ export async function acquire(address, credential, input, options = {}) {
       req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, { method: 'POST', agent: false,
         rejectUnauthorized: true, ...(ca ? { ca } : {}), maxHeaderSize: 16384,
         headers: { Authorization: `Bearer ${credential}`, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           'Content-Length': Buffer.byteLength(prepared.body), 'Accept-Encoding': 'identity', Connection: 'close', 'Cache-Control': 'no-store' } });
       req.on('error', () => finish(new ContextError('context_transport_unavailable')));
       req.once('close', () => { closed = true; if (!settled) finish(new ContextError('context_response_incomplete')); else deliver(); });
