@@ -17,6 +17,9 @@ fge_assert_eq NATIVE-PACKAGE-002 "v$(cat "$ROOT/tests/node-version")" "$("$NODE"
 [[ "$("$NODE" --version)" = "v$(cat "$ROOT/tests/node-version")" ]] || fge_die 'Node version differs from the repository pin'
 fge_context fg_digest "$(fge_digest_file "$FG_BIN")"
 WORK="$(fge_tempdir native-package)"
+# Source-package custody deliberately refuses symlink aliases, including a
+# configured artifact root. Give its private fixtures the canonical directory.
+WORK="$(cd "$WORK" && pwd -P)"
 fge_phase action
 FGE_MAX_CAPTURE=16384 fge_capture native-package-tap fge_run_timeout 480 native-package env FG_NATIVE_BIN="$FG_BIN" TMPDIR="$WORK" \
   "$NODE" --test --test-reporter=tap "$ROOT/scripts/tests/source_package_native.test.mjs" || true
