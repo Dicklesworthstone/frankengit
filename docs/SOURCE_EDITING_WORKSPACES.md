@@ -185,13 +185,18 @@ Errors do not echo source bytes or parser/OS diagnostics.
 
 The existing central E2E runner also discovers
 [`suites/operator/source_workspace.sh`](../scripts/e2e/suites/operator/source_workspace.sh).
-It drives this workspace CLI, packed source authoring and the one-shot apply/
-recover CLI against a prebuilt native HTTP node in both hash domains. Its
-independently framed input package and expected Git objects cover binary capture,
+It first builds a native lexical index, captures actual Initial context, and
+acquires an authority-head-verified selected package through the existing source
+clients. Offline inspection and the generic package verifier consume that package
+after the acquisition service drains. It then drives this workspace CLI, packed
+source authoring and the one-shot apply/recover CLI against a prebuilt native HTTP
+node in both hash domains. Independently framed imported objects and expected
+selection are retained before acquisition. The resulting flow covers binary capture,
 creation, deletion, mode changes, exact pack verification, separate read/outcome
 grants, canonical Rust byte/ref reads and service drain. The pinned sandboxed Git
-oracle checks the fixture and returned bundle. This is not native package
-acquisition, the complete operator matrix or same-source binary qualification.
+oracle checks the fixture and returned bundle. Package acquisition is native;
+the complete operator matrix, broad search completeness, retained authority proofs
+and same-source binary qualification remain outside this lane.
 The v3 structural limit described in
 [source authoring](SOURCE_CHANGE_AUTHORING.md#prepare-an-exact-native-candidate)
 still applies when unchanged directory children are absent from inspection.

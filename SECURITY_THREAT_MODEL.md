@@ -364,6 +364,9 @@ object envelopes (`VERIFY_SPEC.md` §12).
 **Controls**
 
 - immutable source receipts and currentness modes;
+- source package acquisition binds both native joined channel envelopes to the
+  same selected coordinates and accepts only matching declared file/excerpt
+  lineage; opaque labels never become portable authority evidence;
 - quarantine/rebuild corrupt derived state;
 - descriptor-relative path capabilities and platform profiles;
 - explicit symlink/submodule/case/Unicode rules;

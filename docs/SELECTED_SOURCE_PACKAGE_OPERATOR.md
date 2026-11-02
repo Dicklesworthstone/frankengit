@@ -68,6 +68,21 @@ saving it; do not substitute a freshly changed file and silently refresh its pin
 The token file contains exactly 64 lowercase hex characters, optionally followed
 by LF or CRLF. Tokens are not command-line arguments or package fields.
 
+Native joined Initial responses carry the complete source-read envelope in their
+content and path channels. Acquisition checks both envelopes against each other
+and every shared source coordinate in the joined response; it never invents a
+missing head/publication field. Legacy saved contexts with the complete outer
+envelope remain supported. A partial outer envelope refuses rather than borrowing
+fields from another response.
+
+Declared native excerpt lineage is accepted only with a bounded file-label
+inventory, the `source-blob-bytes` position domain and an exact matching file/
+excerpt commitment. Unknown excerpt fields, missing labels and changed domains
+or commitments refuse before source reads. These labels remain opaque metadata,
+are not copied into the portable package and never supply authorization. The
+original excerpt bytes, complete native blobs and parent membership are still
+independently checked. Node acquisition requests identify FrankenGit explicitly.
+
 ## Capture and offline inspection
 
 Replace `/private/session` with an existing private directory and the shell
@@ -221,6 +236,17 @@ absent. Competing writers cannot overwrite one another. Error receipts report a
 bounded phase rather than echoing private parser inputs or server prose.
 
 ## Verification boundary
+
+The existing [workspace native lane](../scripts/e2e/suites/operator/source_workspace.sh)
+also consumes the actual native Initial context and this command's
+`capture --native-fg` output before creating a sparse workspace. Both hash domains
+exercise denied read grants, a changed independent head, exact selected bytes and
+parent trees, offline inspection after the acquisition service drains, and the
+existing packed edit/publication/original-key recovery path. Its imported object
+corpus and expected selection are independently framed before acquisition; its
+context and package are read from the native node. This does not qualify the
+supplied binary's source, retain authority proofs or establish search coverage
+beyond that selected corpus.
 
 ```sh
 bash scripts/verify_source_packages.sh
