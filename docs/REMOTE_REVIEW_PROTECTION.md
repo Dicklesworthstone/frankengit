@@ -165,6 +165,13 @@ terminal observation is already saved, `send` returns that local observation
 without transmitting another request. `outcome` still queries the server, so
 later conflicting evidence is not hidden by the cache.
 
+An unsuccessful fresh lookup does not erase validated local knowledge. If a
+terminal observation was already retained, the lookup still fails, but its error
+carries that original observation, reports `outcome_unknown: false`, and exits
+`4`. It does not pretend the fresh request succeeded. The same failed lookup
+without retained knowledge remains unknown and exits `3`. Original intent and
+terminal bytes are preserved in either case; no mutation is resubmitted.
+
 ## Local custody, interruption and results
 
 Keep the **whole private intent directory**, not only `intent.json`:
@@ -206,7 +213,7 @@ The command exit codes distinguish outcome from delivery of local evidence:
 | `0` | Inspect/prepare/show completed, or a committed outcome was observed. |
 | `2` | Explicit native refusal, or local input/permission/protocol refusal. Inspect the structured result; this exit alone never proves non-commit. |
 | `3` | Nonterminal/unknown outcome, ambiguous send, or a potentially interrupted sender still owns its lock. |
-| `4` | A terminal decision is known, but local observation, cleanup or output delivery failed. The error contains the retained observation. |
+| `4` | A terminal decision is known, but a fresh lookup, local observation, cleanup or output delivery failed. The error contains the retained observation. |
 
 Inspect/show summaries report `original_outcome: "not_queried"`; displaying an
 old intent cannot claim that its mutation never occurred. Results include
@@ -231,3 +238,40 @@ correctness, hardware power-loss durability or Cargo/full-workspace pass is
 claimed. The wider policy-integration bead remains open to its own acceptance
 gate; this operator does not complete CI attestation, organization IAM or the
 remaining core storage and runtime integration work.
+
+## Live native operator campaign
+
+The discovered [`operator/protection.sh`](../scripts/e2e/suites/operator/protection.sh)
+campaign runs all five shipped commands against a real native service in both
+hash domains. Rust `protection show` and `refs` reads check the canonical policy,
+administrator/reviewer sets, versions, epochs and unchanged empty reference set.
+It covers remote-bootstrap refusal and trusted-local installation, read-only
+preparation, stale/current twins, independent grants, administrator rotation,
+explicit clear, retained-terminal lookup failure, unknown-key recovery, cached
+terminal results and same-key POST recovery after restart and admin removal.
+The simulated lost local observation uses new private custody; the acknowledged
+original directory remains intact. Eight native services drain normally, with
+accepted transport counts `[2, 24, 3, 1]` per hash domain. Local inspection and
+cached results cannot add hidden connections.
+
+At client/harness source `4665429006083dfc36463b21fb05d3c321a12c10`, all 21
+predeclared assertions complete without failures or skips. Receipt:
+`/data/frankengit-targets/noble_operator_protection_46654290_20261102/receipt.ndjson`,
+SHA-256 `848e28292104b882489ef9823691df98fc7d7507446f2a0aeb8c9083ad29bfcb`.
+The supplied Rust binary is explicitly older source
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+The separate same-client-source control delegates to that real binary with only
+the protection deployment ceiling disabled. Its first inspection receives a
+native HTTP 403, no intent is created, and the service drains. This is a
+capability-disabled control, not a route-removed build or the full missing-route
+matrix. The focused three-file module cohort separately completes 65 cases at
+that source; those schema-peer/process tests are not native authority evidence.
+
+This is basic reviewer/administrator policy administration. Legacy native CLI
+views omit optional false queue flags and empty candidate-check arrays, matching
+the client's historical normalization; nonempty/requiring values are not silently
+discarded. Queue/candidate-check/DSL behavior, Git objects and writer enforcement,
+an independent Git oracle, TLS, hostile isolation, hardware crash durability,
+current-source native qualification, D10 and the full operator/release matrix
+remain separate. Original `x2mv.4.59` acceptance stays open.
