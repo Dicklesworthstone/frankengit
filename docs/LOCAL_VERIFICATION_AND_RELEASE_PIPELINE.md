@@ -1,10 +1,10 @@
 # Local Verification and Release Pipeline
 
 **Status:** normative operations profile  
-**Version:** 1.1
-**Last revised:** 2026-10-26
+**Version:** 1.2
+**Last revised:** 2026-11-02
 
-FrankenGit does not depend on GitHub-hosted Actions for correctness, release availability, or evidence. Repository workflows are portable lane descriptions consumed locally by Doodlestein Self-Releaser (`dsr`) and `act` where appropriate. The canonical commands, schemas, and evidence generation live inside the repository.
+FrankenGit uses Doodlestein Self-Releaser (`dsr`) directly. The GitHub Actions service must never be used, including hosted and self-hosted runners. Repository workflow definitions remain portable lane descriptions for local DSR/`act` execution. The canonical commands, schemas, and evidence generation live inside the repository.
 
 ## 1. Source of truth
 
@@ -27,6 +27,8 @@ export CARGO_TARGET_DIR=/data/frankengit-targets/verify-my-pane
 ./scripts/verify.sh docs
 ./scripts/verify.sh constitution
 ./scripts/verify.sh fast
+./scripts/verify.sh e2e
+./scripts/verify.sh operator
 ./scripts/verify.sh full
 ./scripts/verify.sh release
 ```
@@ -47,6 +49,7 @@ When `CARGO_BUILD_JOBS` is set, native tool builds pass it explicitly as Cargo
 - `docs`: Markdown links, fences, required status/contract phrases, registry schemas/rows, and workflow portability.
 - `constitution`: required files, first-party unsafe/FFI/foreign-Git source scan, manifest and Cargo.lock closed-world dependency checks, toolchain pin, and forbidden artifacts. Layering, license-compatibility, and claim-registry checks join this lane as the corresponding machinery lands; they are not implemented yet.
 - `fast`: the `docs` and `constitution` lanes plus verifier command-contract tests, `cargo fmt --check`, `cargo check`, generated-schema checks, full workspace tests, and `cargo clippy -D warnings`.
+- `operator`: the currently implemented live operator campaigns and operator/script module suites, using one native `fg` build and the shared pinned Node identity. This is not the complete every-entrypoint qualification required by `x2mv.4.59`.
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
 
@@ -59,6 +62,31 @@ cells; it does not establish the full live-server operator matrix in
 `x2mv.4.59`. Missing prerequisites, failed profiles and empty TAP are non-pass;
 optional oracle skips remain skips rather than native compatibility evidence.
 
+The dedicated `operator` command checks the existing
+[`verify_js.mjs runtime`](../scripts/verify_js.mjs) identity before native
+compilation. `FGE_NODE` selects that executable; otherwise it uses Node on PATH.
+An unavailable runtime returns a typed exit-3 refusal, and a mismatched version
+retains the shared verifier's typed refusal. There is no second version pin.
+The command builds `fg` once through the native-host/private-target/Cargo/RCH
+functions above, then supplies that returned binary and the same Node to
+[`run_all.sh`](../scripts/e2e/run_all.sh). A supplied `FG_BIN` cannot bypass the
+build. Source must be clean before compilation; a changed revision or dirty
+checkout afterwards prevents campaign dispatch. The selected source revision
+overrides a stale `FG_SIGNED_BUNDLE_SOURCE_CUT` for the signed campaign.
+
+Selection includes every regular `.sh` recursively under
+`scripts/e2e/suites/operator/`, in deterministic order, followed by the required
+[`recovery/native_signed_bundle.sh`](../scripts/e2e/suites/recovery/native_signed_bundle.sh).
+Empty discovery, non-executable campaigns and a missing signed campaign refuse
+rather than narrowing the run. The existing `FGE_E2E_TIMEOUT` is forwarded;
+build and runner failures preserve their exit status. LANE-008 records this
+implemented command; LANE-007 retains its narrower module-only entrypoint.
+Command-contract tests use explicit fake build/runner tools and establish
+dispatch behavior only. They do not establish a native build, complete
+entrypoint coverage, independent batch verification or a passing operator lane.
+The [retained large signed-bundle deadline failure](NATIVE_BUNDLE_OPERATOR_VERIFICATION.md)
+and all original `.4.59` acceptance conditions remain open until qualified.
+
 The same discovery includes
 [`operator/backup.sh`](../scripts/e2e/suites/operator/backup.sh), which drives seven
 actual signed-backup CLIs through real native verification, local replica health,
@@ -68,7 +96,7 @@ does not build another executable or substitute schema peers. The
 [revision-bound result and missing-restore-route control](LOCAL_JS_VERIFICATION.md)
 do not activate the full/release gates or complete `.4.59`'s original matrix.
 
-In the pre-implementation repository, `docs`, `constitution`, and `fast` are runnable. `full` and `release` deliberately return exit code 3 with a typed dormant-gate refusal; they must not produce a false green status. As implementation grows, each lane delegates to Rust `xtask`/checker subcommands; shell remains a thin portable dispatcher.
+The `docs`, `constitution`, `fast`, `e2e` and `operator` commands are implemented; their existence is not revision-bound evidence that they pass. `full` returns exit code 3 with a typed dormant-gate refusal. `release` first runs its mandatory license and runner-probe checks, preserving their failures, then returns the dormant refusal. Neither may produce a false green status. As implementation grows, each lane delegates to Rust `xtask`/checker subcommands; shell remains a thin portable dispatcher.
 
 Activation is controlled by FG-091's exact suite manifest, not by a minimum script count. For the selected profile, the independent expected IDs must equal the scripts discovered, started, completed, and passed. Each required ID also names exactly one active owning Bead, and FG-091 must reach the complete owner set through blocking dependencies; dependency rewiring cannot silently detach a campaign. Missing, duplicate, unregistered, zero-run, skipped, unsupported, filtered, ignored, timed-out, malformed-log, stale-revision, wrong-profile, or unreachable-owner required entries keep the lane non-green, and first-attempt failures remain in the evidence.
 
@@ -85,7 +113,7 @@ Workflow files:
 - never make remote queue completion a release precondition;
 - never mint canonical claims from a badge or workflow status alone.
 
-Workflow manifests are dispatch-only by default and are intended for local DSR/`act` execution. If an operator deliberately enables remote execution, its result has no stronger status than the equivalent repository-owned local lane receipt.
+Workflow manifests are dispatch-only and intended solely for local DSR/`act` execution. Their presence never authorizes use of the GitHub Actions service.
 
 ## 4. DSR target matrix
 

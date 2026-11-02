@@ -7,3 +7,4 @@ LANE-004	./scripts/verify.sh full	local_dsr_native_matrix	conformance_lab_fault_
 LANE-005	./scripts/verify.sh release	local_dsr_native_matrix	signed_root_last_release_manifest	yes	specified
 LANE-006	./scripts/verify.sh tier-a	local_or_dsr_act	tier_a_receipt_per_compatibility_tier_row	yes	active
 LANE-007	./scripts/e2e/run_all.sh scripts/e2e/suites/operator/contract_tests.sh	local_node_profile	operator_and_script_tap_with_native_child_cells	no	active
+LANE-008	./scripts/verify.sh operator	local_or_dsr_act	implemented_operator_campaign_receipt_and_module_tap	no	active

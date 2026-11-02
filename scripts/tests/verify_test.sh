@@ -100,6 +100,134 @@ test -x "$FG_BIN" && test -x "$FG_MCP_BIN"
         self.assertFalse(any(row["args"][0] == "run" for row in records if row["kind"] == "cargo"))
         return result, records
 
+    def operator_fixture(self):
+        # Dispatch-only doubles; the real shared runtime verifier owns the pin,
+        # and no result from these tools is native/operator acceptance evidence.
+        self.env["FGE_NODE"] = str(self.bin / "node")
+        self.command("node", '''
+record = {"kind": "node", "args": sys.argv[1:], "cwd": os.getcwd()}
+with open(os.environ["TEST_LOG"], "a") as out: out.write(json.dumps(record) + "\\n")
+if os.environ.get("TEST_NODE_EXIT"):
+    print(json.dumps({"type":"controlled_runtime_refusal", "corpus_started":False}), file=sys.stderr)
+    sys.exit(int(os.environ["TEST_NODE_EXIT"]))
+''')
+        self.command("git", '''
+args = sys.argv[1:]
+rows = [json.loads(line) for line in Path(os.environ["TEST_LOG"]).read_text().splitlines()]
+count = sum(r["kind"] == "git" and r["args"] == args for r in rows)
+with open(os.environ["TEST_LOG"], "a") as out:
+    out.write(json.dumps({"kind":"git", "args":args, "cwd":os.getcwd()}) + "\\n")
+if args == ["rev-parse", "--verify", "HEAD"]:
+    print(("b" if count and os.environ.get("TEST_SOURCE_MOVED") else "a") * 40)
+elif args == ["status", "--porcelain=v1", "--untracked-files=all"]:
+    if os.environ.get("TEST_DIRTY_SOURCE") or (count and os.environ.get("TEST_SOURCE_DIRTY_AFTER")):
+        print(" M tracked source")
+else: sys.exit(92)
+''')
+        for name in ["operator/a.sh", "operator/nested/z.sh", "recovery/native_signed_bundle.sh"]:
+            self.shell("scripts/e2e/suites/" + name, "# Explicit dispatch fixture; never executed.\n")
+        self.shell("scripts/e2e/run_all.sh", '''
+exec "$PYTHON_BIN" - "$@" <<'OPERATOR_DISPATCH'
+import json, os, sys
+from pathlib import Path
+assert os.environ["FG_BIN"] == str(Path(os.environ["TEST_TARGET"]) / "''' + HOST + '''/debug/fg")
+assert os.access(os.environ["FG_BIN"], os.X_OK)
+row = {"kind":"suite", "args":sys.argv[1:], "cwd":os.getcwd(),
+       "fg":os.environ["FG_BIN"], "node":os.environ.get("FGE_NODE"),
+       "source_cut":os.environ.get("FG_SIGNED_BUNDLE_SOURCE_CUT")}
+with open(os.environ["TEST_LOG"], "a") as out: out.write(json.dumps(row) + "\\n")
+sys.exit(int(os.environ.get("TEST_SUITE_EXIT", "0")))
+OPERATOR_DISPATCH
+''')
+
+    def test_operator_builds_once_and_runs_recursive_suites_with_signed_native_case(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", changes={"CARGO_BUILD_JOBS":"3", "FGE_E2E_TIMEOUT":"37",
+                                                   "FG_BIN":"/stale-supplied-fg",
+                                                   "FG_SIGNED_BUNDLE_SOURCE_CUT":"c" * 40})
+        self.assertEqual(rows[0]["kind"], "node")
+        self.assertEqual(rows[0]["args"], [str(self.root / "scripts/verify_js.mjs"), "runtime"])
+        builds = [r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build"]
+        self.assertEqual([r["args"] for r in builds], [["build", "--locked", "--target", HOST,
+                         "--jobs", "3", "-p", "fgit-cli", "--bin", "fg"]])
+        suite = next(r for r in rows if r["kind"] == "suite")
+        self.assertEqual(suite["node"], self.env["FGE_NODE"])
+        self.assertEqual(suite["source_cut"], "a" * 40)
+        self.assertEqual(suite["args"], ["--timeout", "37", *[str(self.root / "scripts/e2e/suites" / p)
+                         for p in ["operator/a.sh", "operator/nested/z.sh", "recovery/native_signed_bundle.sh"]]])
+
+    def test_operator_runtime_refusal_precedes_any_cargo(self):
+        self.operator_fixture()
+        result, rows = self.invoke("operator", 3, {"TEST_NODE_EXIT":"3"})
+        self.assertEqual([r["kind"] for r in rows], ["node"])
+        self.assertEqual(json.loads(result.stderr)["type"], "controlled_runtime_refusal")
+
+    def test_operator_missing_node_is_typed_and_never_builds(self):
+        self.operator_fixture()
+        for path in [self.base / "missing-node", self.base]:
+            with self.subTest(path=path):
+                result, rows = self.invoke("operator", 3, {"FGE_NODE":str(path)})
+                self.assertEqual(rows, [])
+                self.assertEqual(json.loads(result.stderr)["code"], "js_runtime_unavailable")
+
+    def test_operator_requires_a_private_target_after_runtime_check(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", 2, unset=("CARGO_TARGET_DIR",))
+        self.assertEqual([r["kind"] for r in rows], ["node"])
+
+    def test_operator_failed_build_cannot_run_a_stale_binary(self):
+        self.operator_fixture()
+        self.invoke("operator")
+        self.log.write_text("")
+        _, rows = self.invoke("operator", 42, {"TEST_BUILD_EXIT":"42"})
+        self.assertFalse(any(r["kind"] == "suite" for r in rows))
+
+    def test_operator_missing_returned_binary_never_runs_suites(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", 1, {"TEST_MISSING_BINARY":"1"})
+        self.assertFalse(any(r["kind"] == "suite" for r in rows))
+
+    def test_operator_missing_signed_native_suite_cannot_be_omitted(self):
+        self.operator_fixture()
+        (self.root / "scripts/e2e/suites/recovery/native_signed_bundle.sh").unlink()
+        _, rows = self.invoke("operator", 1)
+        self.assertEqual([r["kind"] for r in rows], ["node"])
+
+    def test_operator_empty_discovery_never_runs_only_the_signed_case(self):
+        self.operator_fixture()
+        for name in ["a.sh", "nested/z.sh"]:
+            (self.root / "scripts/e2e/suites/operator" / name).unlink()
+        result, rows = self.invoke("operator", 1)
+        self.assertIn("no operator suites discovered", result.stderr)
+        self.assertEqual([r["kind"] for r in rows], ["node"])
+
+    def test_operator_nonexecutable_suite_is_a_refusal_not_a_filter(self):
+        self.operator_fixture()
+        (self.root / "scripts/e2e/suites/operator/a.sh").chmod(0o600)
+        _, rows = self.invoke("operator", 1)
+        self.assertEqual([r["kind"] for r in rows], ["node"])
+
+    def test_operator_suite_failure_preserves_exit(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", 31, {"TEST_SUITE_EXIT":"31"})
+        self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
+
+    def test_operator_dirty_source_never_builds(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", 1, {"TEST_DIRTY_SOURCE":"1"})
+        self.assertFalse(any(r["kind"] == "cargo" and r["args"][0] == "build" for r in rows))
+        self.assertFalse(any(r["kind"] == "suite" for r in rows))
+
+    def test_operator_source_revision_change_during_build_never_runs_suites(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", 1, {"TEST_SOURCE_MOVED":"1"})
+        self.assertFalse(any(r["kind"] == "suite" for r in rows))
+
+    def test_operator_source_dirtied_during_build_never_runs_suites(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", 1, {"TEST_SOURCE_DIRTY_AFTER":"1"})
+        self.assertFalse(any(r["kind"] == "suite" for r in rows))
+
     def test_docs_builds_native_but_reads_caller_even_with_remote_manifest_environment(self):
         _, rows = self.invoke()
         build = next(r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build")
