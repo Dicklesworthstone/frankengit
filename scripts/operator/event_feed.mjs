@@ -115,9 +115,17 @@ export async function readEventPage(configuration, credential, options = {}) {
   if (signal?.aborted) eventFail('event_cancelled');
   const url = new URL(`${config.endpoint}/api/v1/events`);
   url.search = new URLSearchParams({ after, limit: String(config.page_size) }).toString();
+  const deadline = performance.now() + timeout;
   return new Promise((resolve, reject) => {
     let request, response, result, failure, timer, finished = false, closed = false, delivered = false;
-    const deliver = () => { if (!delivered) { delivered = true; failure ? reject(failure) : resolve(result); } };
+    const deliver = () => {
+      if (delivered) return;
+      delivered = true;
+      // Timers may be delayed by I/O or synchronous validation. The socket must
+      // close and the successful result must still fit the original deadline.
+      if (!failure && performance.now() >= deadline) failure = new EventFeedError('event_timeout');
+      failure ? reject(failure) : resolve(result);
+    };
     const finish = (error, value) => {
       if (finished) return;
       finished = true; failure = error; result = value;
@@ -213,5 +221,10 @@ export async function captureEventPages(configuration, credential, options = {})
     if (!received.page.has_more) break;
   }
   if (signal?.aborted) eventFail('event_cancelled');
-  return validateEventCapture({ type: 'frankengit_event_capture', schema_version: 1, configuration: config, pages }, config);
+  const capture = validateEventCapture({ type: 'frankengit_event_capture', schema_version: 1, configuration: config, pages }, config);
+  // Revalidation belongs to the same operation, even on its final page. It can
+  // consume the remaining budget or observe cancellation without yielding.
+  if (signal?.aborted) eventFail('event_cancelled');
+  if (performance.now() - started >= timeout) eventFail('event_timeout');
+  return capture;
 }
