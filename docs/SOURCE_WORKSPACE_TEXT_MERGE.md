@@ -109,3 +109,14 @@ same explicit contract fixtures as the earlier refresh tests; these tests do
 not run native membership verification, Rust fg/admission/CAS or the complete
 workspace. They do not claim native Git merge compatibility, semantic safety,
 hostile-same-user confinement or hardware power-loss durability.
+
+The separately discovered [native workspace lifecycle](../scripts/e2e/suites/operator/source_workspace.sh)
+also consumes this profile against actual native source packages. Its two-format
+case combines disjoint CRLF edits with no final newline, reconciles an independent
+executable-mode change, and keeps a deletion-versus-upstream-binary conflict
+visible until an explicit choice. The captured result has an independently
+framed complete tree and exact five-object candidate pack, checked with pinned
+sandboxed Git and canonical Rust byte/mode/ref reads. The default-profile conflict
+and stale-consent controls remain beside the permitted path. The supplied binary
+and client source are recorded separately; this is not Git merge equivalence or
+current-native qualification.

@@ -103,6 +103,26 @@ workspace. They do exercise the new reconciliation, plan consent, file custody,
 root-last output and CLI composition; there is no fixture replacement of those
 function bodies. This is not a native TreeFS or independent verification claim.
 
+The separate discovered [native workspace lane](../scripts/e2e/suites/operator/source_workspace.sh)
+now exercises this existing API with actual native source packages in both hash
+domains. An explicitly leased native bundle update advances the branch while the
+original editing workspace remains. A separately staged stale proposal receives a
+canonical refusal; its original-key recovery preserves that decision. Explicit
+index maintenance follows the refusal because an unchanged ref does not imply an
+unchanged authority head.
+
+The new source package is independently selected and read through native HTTP and
+Rust `verify-read`. Default refresh exposes both content conflicts. The explicit
+line profile combines disjoint text and mode changes, while a local deletion
+against changed upstream binary content still requires a reviewed choice. Old
+approval and changed-editor-image controls refuse before output creation. The
+fresh workspace preserves selected edits and leaves unselected local files in
+the original; the independently checked publication preserves upstream siblings.
+After local terminal records are moved aside, outcomes-only recovery reproduces
+both the new commit and historical refusal without another mutation. This adds
+native evidence for the existing API, not new refresh semantics, current-source
+binary qualification or complete operator/TreeFS acceptance.
+
 ## Resolve a conflicting file explicitly
 
 A conflict need not force you to throw away the workspace or silently overwrite

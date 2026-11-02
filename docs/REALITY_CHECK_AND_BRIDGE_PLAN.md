@@ -369,6 +369,36 @@ open. No Bead closure, gate relaxation or new production dependency is implied.
 
 ## 3. What has improved since October 21
 
+**Moving-head workspace evidence at `01c89ae7cd9ff454f803cefd00cbca21cd558034`:**
+the existing native lifecycle now retains local edits across an explicitly leased
+upstream bundle update, obtains a canonical refusal for a separately staged stale
+proposal, acquires the actual next native source package, and reviews/applies
+refresh before a fresh publication. Both hash domains exercise disjoint CRLF/no-
+final-newline merging, independent executable-mode composition, an explicit local
+deletion choice against upstream binary content, old approval/editor-image
+refusals, exact pack identity, Rust readback and historical outcomes-only recovery
+after terminal files are moved aside. Original workspace/unselected files survive;
+remote unselected siblings remain canonical.
+
+Two existing native suites execute **35 assertions, zero failures or skips**,
+retaining all prior 29 IDs and adding six refresh observations. Artifacts:
+`/data/frankengit-targets/noble_refresh_final_20261102`; receipt SHA-256
+`b641cd47c2571ed8e71878d2d32a3d4499e516a45c140520ccc252e637c7da02`.
+The supplied binary remains older `a9d65885`. Cancellation after the refreshed
+commit leaves an incomplete driver, two normal service drains and no owned group;
+fresh Rust reads retain the merged executable bytes and upstream sibling.
+
+The five-file reference suite is separately **153/153 tests** at
+`1ef71eef7853bd50f926b282b1fcff278860f0d6`, whose scripts/native inputs match the
+native-tested source. Its earlier **152/153** result failed because the Git oracle
+inherited an unavailable linked-checkout Git directory; the private explicit-format
+fixture preserves every comparison. Earlier native probes correctly refused a
+create-only import used as an update and an index built before a canonical refusal
+advanced authority. Those failed receipts remain retained. No production refresh
+defect was found or production semantics changed; this is native verification
+coverage for previously fixture-only joins. Complete current-native, whole
+operator and independent acceptance remain open.
+
 **Native source-acquisition join at `55b2df8be5e5115379643f6aaea6eb281f803124`:**
 the workspace campaign now reads actual Initial context from a persisted native
 lexical index, captures a complete selected package with native `verify-read`,
