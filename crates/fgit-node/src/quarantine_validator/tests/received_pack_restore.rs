@@ -2,6 +2,8 @@ use super::*;
 use crate::received_pack::VerifiedReceivedObject;
 use fgit_pack::{PackOrderKey, read_verified_pack_owned};
 
+mod recency;
+
 fn node_for(format: GitHashAlgorithm) -> (ScratchDirectory, OneNode) {
     let scratch = ScratchDirectory::new();
     let node = OneNode::init(
@@ -94,7 +96,8 @@ fn cold_custody_reconstructs_spooled_objects_and_preserves_sender_bytes_in_both_
             PackLimits::default(),
             ParseLimits::default(),
         )
-        .with_resident_budgets(0, 0);
+        .with_resident_budgets(0, 0)
+        .for_received_pack_restoration();
         let pending = validator
             .restore_received_pack(
                 &pack,
@@ -132,7 +135,8 @@ fn persisted_hints_do_not_authorize_identity_kind_length_or_extra_scope() {
         selected_closure(authorized.clone()),
         PackLimits::default(),
         ParseLimits::default(),
-    );
+    )
+    .for_received_pack_restoration();
     for bad in [
         VerifiedReceivedObject { id: other, ..hint },
         VerifiedReceivedObject {
@@ -174,7 +178,8 @@ fn persisted_hints_do_not_authorize_identity_kind_length_or_extra_scope() {
         empty_selected_closure(),
         PackLimits::default(),
         ParseLimits::default(),
-    );
+    )
+    .for_received_pack_restoration();
     assert!(
         unselected
             .restore_received_pack(
@@ -202,7 +207,8 @@ fn missing_or_corrupt_canonical_evidence_never_gets_repaired_from_cached_bytes()
         selected_closure(authorized.clone()),
         PackLimits::default(),
         ParseLimits::default(),
-    );
+    )
+    .for_received_pack_restoration();
     assert!(
         validator
             .restore_received_pack(
@@ -284,7 +290,8 @@ fn rejected_candidates_keep_their_resolution_charge_for_later_candidates() {
             ..PackLimits::default()
         },
         ParseLimits::default(),
-    );
+    )
+    .for_received_pack_restoration();
     let bad = VerifiedReceivedObject {
         kind: ObjectType::Tree,
         ..hint
@@ -330,7 +337,8 @@ fn cancellation_during_cold_validation_is_a_stop_and_never_installs_partial_cust
         PackLimits::default(),
         ParseLimits::default(),
     )
-    .with_resident_budgets(0, 0);
+    .with_resident_budgets(0, 0)
+    .for_received_pack_restoration();
     let mut probes = 0;
     drop(
         validator
@@ -402,7 +410,8 @@ fn external_ref_bases_require_current_selected_or_held_scope_and_canonical_paylo
         selected_closure(authorized.clone()),
         limits.clone(),
         ParseLimits::default(),
-    );
+    )
+    .for_received_pack_restoration();
     assert!(
         validator
             .restore_received_pack(
@@ -420,7 +429,8 @@ fn external_ref_bases_require_current_selected_or_held_scope_and_canonical_paylo
         selected_closure(BTreeSet::from([target_id])),
         limits.clone(),
         ParseLimits::default(),
-    );
+    )
+    .for_received_pack_restoration();
     assert!(
         unselected_base
             .restore_received_pack(

@@ -96,7 +96,7 @@ impl OneNode {
             restore_limits.clone(),
             parse_limits,
         ) {
-            Ok(validator) => validator,
+            Ok(validator) => validator.for_received_pack_restoration(),
             Err(RefusalCode::CancellationInProgress) => return Err(stopped()),
             Err(_) => return Ok(()),
         };

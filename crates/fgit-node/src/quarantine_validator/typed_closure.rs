@@ -258,6 +258,7 @@ impl ProductionQuarantineValidator<'_> {
                 reuse_admitted_blobs: self.reuse_admitted_blobs,
                 staging: self.staging,
                 resident: self.resident,
+                recent_resolver_results: self.recent_resolver_results,
             });
         }
         let validator = restricted.as_ref().unwrap_or(self);

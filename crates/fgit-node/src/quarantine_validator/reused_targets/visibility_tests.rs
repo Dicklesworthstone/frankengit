@@ -202,6 +202,7 @@ fn fixture_validator<'a>(
         reuse_admitted_blobs: false,
         staging: None,
         resident: super::super::ResidentBudgets::DEFAULT,
+        recent_resolver_results: false,
     }
 }
 fn put(node: &OneNode, objects: &[Raw]) {

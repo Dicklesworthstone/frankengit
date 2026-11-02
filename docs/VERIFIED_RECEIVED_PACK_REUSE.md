@@ -345,6 +345,28 @@ domains. This does not complete the large-history clone bead. The configured
 cache budget remains separate from total process RSS and whole-repository disk
 use.
 
+During cold native reconstruction, the delta resolver retains recent results
+instead of permanently filling its cache with the earliest file versions.
+Each successful cached read refreshes recency; admitting another fitting
+result releases the least recently used results first. The retained payload
+ceiling is the smaller of the existing resolver-cache allowance and the
+64 MiB resident resolver budget. This policy never spills resolver entries,
+and a zero allowance disables retention. Oversized results remain subject to
+ordinary bounded reconstruction. Entry metadata stays bounded by pack count;
+there is no growing access-history queue or scan of every cached result.
+
+For histories whose recent delta bases fit this allowance, replacement avoids
+reconstructing the same old chains after the cache fills. Evicted results still
+spend the shared expansion and work budget when reconstructed again, and cache
+hits still spend their copy work. Native hashing, exact hints, current upload
+scope, final dependency/depth checks and canonical EOF verification remain
+unchanged. Ordinary receive and the default resolver constructors keep their
+existing retention and spill policy. Focused regressions compare both policies
+under identical limits, including a history that exceeds cache capacity, and
+compare reconstructed bytes and both native hash identities with the scalar
+resolver. These are bounded-work and integrity checks; they do not establish
+whole-repository clone timings or close `frankengit-1tl9`.
+
 One cold pass shares its disk-inspection, inflated-program and native-resolution
 allowances across candidates, including unsuccessful candidates. The parser's
 resident inflation ceiling is the minimum of the cache allowance, receive

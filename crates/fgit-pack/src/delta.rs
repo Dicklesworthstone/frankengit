@@ -6,6 +6,8 @@ use crate::{
     Deadline, EntryKind, ObjectId, PackError, PackLimits, checkpoint, object_type_from_base_entry,
 };
 
+#[cfg(test)]
+mod resident_recency_tests;
 mod stream;
 pub use stream::{
     DeltaStreamIo, STREAM_DELTA_CHUNK_BYTES, StreamDeltaError,
@@ -589,11 +591,11 @@ impl CacheSpill for ResidentCache {
 ///
 /// Each unique pack object's expanded bytes are charged to the aggregate
 /// [`max_total_expanded_bytes`](crate::PackLimits::max_total_expanded_bytes)
-/// budget exactly once, when that object is first resolved and cached. A later
-/// cache hit re-uses those already-counted bytes and charges no further
-/// expansion, so the bomb defence bounds the *unique* inflated size of the pack
-/// rather than the number of times a shared delta base is reconstructed across
-/// a receive (frankengit-rpqx).
+/// budget when that object is resolved. A later cache hit re-uses those
+/// already-counted bytes and charges no further expansion, so retained shared
+/// bases are counted once rather than once per dependent (frankengit-rpqx).
+/// Results that did not fit, or were explicitly evicted, must be reconstructed
+/// and charged again when another resolution needs them.
 ///
 /// [`max_delta_work`](crate::PackLimits::max_delta_work) is charged the work the
 /// resolver actually performs: every byte a delta copies or inserts when an
@@ -605,11 +607,17 @@ impl CacheSpill for ResidentCache {
 /// (frankengit-z6rb). The charge stays a deterministic function of the pack and
 /// the limits: entries are cached in resolution order until
 /// [`max_cached_bytes`](crate::PackLimits::max_cached_bytes) is reached and never
-/// evicted, and an object that did not fit is re-resolved -- and its chain
-/// re-charged -- every time it is needed, which is exactly the work done.
+/// evicted by the default constructors. An object that did not fit is
+/// re-resolved -- and its chain re-charged -- every time it is needed, which
+/// is exactly the work done.
 /// Charging the copy also bounds a hot base: a base shared by many deltas is
 /// copied once per delta, and each copy counts, where the old model charged a
 /// base's hit nothing.
+///
+/// [`Self::with_resident_recency`] explicitly selects a different bounded
+/// policy: least-recently-used results are replaced in resident memory, with
+/// no spill traffic. It retains the same per-reconstruction and cached-copy
+/// accounting, including work spent reconstructing an evicted result.
 pub struct CachedResolver<'objects, 'lookup, L, S = ResidentCache> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
     /// By offset. Only ever probed by key, never iterated, so the hash order
@@ -622,11 +630,22 @@ pub struct CachedResolver<'objects, 'lookup, L, S = ResidentCache> {
     resident_budget: usize,
     resident_bytes: usize,
     spill: S,
+    recency: Option<ResidentRecency>,
 }
 
 struct CacheEntry {
     stored: StoredBytes,
     object_type: Option<ObjectType>,
+    older: Option<u64>,
+    newer: Option<u64>,
+}
+
+/// Intrusive links keep replacement deterministic and constant-time without
+/// an ever-growing access log. Entries are still bounded by the input count.
+#[derive(Default)]
+struct ResidentRecency {
+    oldest: Option<u64>,
+    newest: Option<u64>,
 }
 
 enum StoredBytes {
@@ -689,10 +708,44 @@ where
             resident_budget,
             resident_bytes: 0,
             spill,
+            recency: None,
         })
     }
 
-    /// Resolves one offset with base-result caching. The output is the scalar
+    /// Keeps recent results in at most the smaller of `resident_budget` and
+    /// [`PackLimits::max_cached_bytes`], replacing the least-recently-used
+    /// result before admitting another. Oversized results are not retained.
+    ///
+    /// The storage owner has the same type as in [`Self::with_spill`] so an
+    /// owner can select this policy without changing its resolver type, but
+    /// neither [`CacheSpill::spill`] nor [`CacheSpill::read`] is called. Evicted
+    /// bytes are released, not appended to an unbounded scratch file. Zero
+    /// capacity disables this cache, including retention of empty results.
+    ///
+    /// All reconstructed bytes and every copy on a cache hit retain the
+    /// ordinary resolver's operation-wide accounting. This changes which
+    /// work is avoided, never the caller's limits or the native result.
+    pub fn with_resident_recency(
+        objects: &'objects [PackObject],
+        external_bases: &'lookup L,
+        limits: &'objects PackLimits,
+        spill: S,
+        resident_budget: usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, PackError> {
+        let mut resolver = Self::with_spill(
+            objects,
+            external_bases,
+            limits,
+            spill,
+            resident_budget.min(limits.max_cached_bytes),
+            deadline,
+        )?;
+        resolver.recency = Some(ResidentRecency::default());
+        Ok(resolver)
+    }
+
+/// Resolves one offset with base-result caching. The output is the scalar
     /// resolver's; the budget is charged the work this resolver performs (see
     /// the type documentation), not the scalar resolver's re-resolution.
     pub fn resolve_offset(
@@ -1013,6 +1066,7 @@ where
         offset: u64,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<u8>, PackError> {
+        self.touch_recent(offset)?;
         let handle = match self.entries.get(&offset).map(|entry| &entry.stored) {
             Some(StoredBytes::Resident(bytes)) => return copy_bytes(bytes, deadline),
             Some(StoredBytes::Spilled(handle)) => *handle,
@@ -1035,6 +1089,9 @@ where
         object_type: Option<ObjectType>,
         deadline: &mut impl Deadline,
     ) -> Result<(), PackError> {
+        if self.recency.is_some() {
+            return self.cache_recent(offset, bytes, object_type, deadline);
+        }
         let required =
             self.cached_bytes
                 .checked_add(bytes.len())
@@ -1070,9 +1127,131 @@ where
             CacheEntry {
                 stored,
                 object_type,
+                older: None,
+                newer: None,
             },
         );
         self.cached_bytes = required;
+        Ok(())
+    }
+
+    fn touch_recent(&mut self, offset: u64) -> Result<(), PackError> {
+        let Some(recency) = &mut self.recency else {
+            return Ok(());
+        };
+        if recency.newest == Some(offset) {
+            return Ok(());
+        }
+        let entry = self
+            .entries
+            .get(&offset)
+            .ok_or(PackError::MissingDeltaBase)?;
+        let (older, newer) = (entry.older, entry.newer);
+        if let Some(older) = older {
+            self.entries
+                .get_mut(&older)
+                .ok_or(PackError::MissingDeltaBase)?
+                .newer = newer;
+        } else {
+            recency.oldest = newer;
+        }
+        if let Some(newer) = newer {
+            self.entries
+                .get_mut(&newer)
+                .ok_or(PackError::MissingDeltaBase)?
+                .older = older;
+        }
+        if let Some(newest) = recency.newest {
+            self.entries
+                .get_mut(&newest)
+                .ok_or(PackError::MissingDeltaBase)?
+                .newer = Some(offset);
+        } else {
+            recency.oldest = Some(offset);
+        }
+        let entry = self
+            .entries
+            .get_mut(&offset)
+            .ok_or(PackError::MissingDeltaBase)?;
+        entry.older = recency.newest;
+        entry.newer = None;
+        recency.newest = Some(offset);
+        Ok(())
+    }
+
+    fn evict_oldest_recent(&mut self) -> Result<(), PackError> {
+        let recency = self.recency.as_mut().ok_or(PackError::MissingDeltaBase)?;
+        let offset = recency.oldest.ok_or(PackError::MissingDeltaBase)?;
+        let entry = self
+            .entries
+            .remove(&offset)
+            .ok_or(PackError::MissingDeltaBase)?;
+        let length = entry.stored.len();
+        // Recency entries are exclusively resident; the logical byte count
+        // therefore also bounds all payload storage retained by this policy.
+        self.cached_bytes -= length;
+        self.resident_bytes -= length;
+        recency.oldest = entry.newer;
+        if let Some(newer) = entry.newer {
+            self.entries
+                .get_mut(&newer)
+                .ok_or(PackError::MissingDeltaBase)?
+                .older = None;
+        } else {
+            recency.newest = None;
+        }
+        Ok(())
+    }
+
+    fn cache_recent(
+        &mut self,
+        offset: u64,
+        bytes: &[u8],
+        object_type: Option<ObjectType>,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), PackError> {
+        checkpoint(deadline)?;
+        if self.resident_budget == 0 || bytes.len() > self.resident_budget {
+            return Ok(());
+        }
+        if let Some(entry) = self.entries.get_mut(&offset) {
+            if entry.object_type.is_none() {
+                entry.object_type = object_type;
+            }
+            return self.touch_recent(offset);
+        }
+        // Subtraction is safe after the per-result capacity check and avoids
+        // an overflowing tentative sum. Empty entries remain input-bounded.
+        let available_before_insert = self.resident_budget - bytes.len();
+        while self.cached_bytes > available_before_insert {
+            checkpoint(deadline)?;
+            self.evict_oldest_recent()?;
+        }
+        self.entries
+            .try_reserve(1)
+            .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+        let copy = copy_bytes(bytes, deadline)?;
+        let recency = self.recency.as_mut().ok_or(PackError::MissingDeltaBase)?;
+        if let Some(newest) = recency.newest {
+            self.entries
+                .get_mut(&newest)
+                .ok_or(PackError::MissingDeltaBase)?
+                .newer = Some(offset);
+        } else {
+            recency.oldest = Some(offset);
+        }
+        self.entries.insert(
+            offset,
+            CacheEntry {
+                stored: StoredBytes::Resident(copy),
+                object_type,
+                older: recency.newest,
+                newer: None,
+            },
+        );
+        recency.newest = Some(offset);
+        self.cached_bytes += bytes.len();
+        self.resident_bytes += bytes.len();
         Ok(())
     }
 }

@@ -179,6 +179,9 @@ pub struct ProductionQuarantineValidator<'node> {
     staging: Option<&'node ReceiveStaging>,
     /// Bytes kept in memory before spilling to the object spool.
     resident: ResidentBudgets,
+    /// Only optional cold custody replaces old resolver results in memory.
+    /// Receive validation retains its original first-results/spill policy.
+    recent_resolver_results: bool,
 }
 
 /// The visible ref roots of one materialized basis: every canonical ref the
@@ -277,6 +280,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
             reuse_admitted_blobs: false,
             staging: None,
             resident: ResidentBudgets::DEFAULT,
+            recent_resolver_results: false,
         }
     }
 
@@ -318,12 +322,22 @@ impl<'node> ProductionQuarantineValidator<'node> {
             reuse_admitted_blobs: self.reuse_admitted_blobs,
             staging: Some(staging),
             resident: self.resident,
+            recent_resolver_results: self.recent_resolver_results,
         }
     }
 }
 
 impl ProductionQuarantineValidator<'_> {
-    /// Reuse already-admitted blob commitments only after the current visible
+    /// Cold restoration may traverse a long history after its small resolver
+    /// cache fills. Replacing old resident results avoids repeated delta-chain
+    /// reconstruction without changing the shared work or expansion envelope.
+    /// Canonical EOF checks and current upload authorization remain mandatory.
+    pub(crate) const fn for_received_pack_restoration(mut self) -> Self {
+        self.recent_resolver_results = true;
+        self
+    }
+
+/// Reuse already-admitted blob commitments only after the current visible
     /// graph proves their typed native edges. This is not a payload scrub and
     /// does not bypass body verification for uploaded bytes or external deltas.
     /// Kept crate-private: untrusted commands cannot select this policy.
@@ -556,14 +570,25 @@ impl ProductionQuarantineValidator<'_> {
             checkpoint(deadline)?;
             let mut newly_resolved = Vec::new();
             {
-                let mut pack_resolver = CachedResolver::with_spill(
-                    &objects,
-                    bases,
-                    &self.pack_limits,
-                    &mut cache_spool,
-                    self.resident.resolver,
-                    deadline,
-                )
+                let mut pack_resolver = if self.recent_resolver_results {
+                    CachedResolver::with_resident_recency(
+                        &objects,
+                        bases,
+                        &self.pack_limits,
+                        &mut cache_spool,
+                        self.resident.resolver,
+                        deadline,
+                    )
+                } else {
+                    CachedResolver::with_spill(
+                        &objects,
+                        bases,
+                        &self.pack_limits,
+                        &mut cache_spool,
+                        self.resident.resolver,
+                        deadline,
+                    )
+                }
                 .map_err(pack_refusal)?;
                 for entry in pack.entries() {
                     checkpoint(deadline)?;
@@ -832,6 +857,7 @@ impl OneNode {
             reuse_admitted_blobs: false,
             staging: None,
             resident: ResidentBudgets::DEFAULT,
+            recent_resolver_results: false,
         })
     }
 }
