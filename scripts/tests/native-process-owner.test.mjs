@@ -189,6 +189,21 @@ test('import adapter retains string keys and its established result shape', asyn
   const result = await runImportProcess(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)'], importLifetime(5000), 'original-key');
   assert.deepEqual(Object.keys(result), ['code', 'stdout', 'stderr']); assert.equal(result.stdout.toString(), 'original-key');
 });
+for (const exitCode of [0, 7]) test(`import adapter retains drained exit ${exitCode} when cancellation arrives during finalization`, async t => {
+  const controller = new AbortController(), signal = controller.signal;
+  const remove = signal.removeEventListener.bind(signal);
+  // Inject only the stop timing, after the real owner has observed close and
+  // quiescence and removed its listener. The child, output and drain are real.
+  t.mock.method(signal, 'removeEventListener', (name, listener, ...options) => {
+    remove(name, listener, ...options);
+    if (name === 'abort') controller.abort();
+  });
+  const result = await runImportProcess(process.execPath,
+    ['-e', `process.stdout.write('original receipt'); process.stderr.write('original diagnostic'); process.exitCode = ${exitCode};`],
+    importLifetime(5000, signal));
+  assert.equal(signal.aborted, true); assert.equal(getEventListeners(signal, 'abort').length, 0);
+  assert.deepEqual(result, { code: exitCode, stdout: Buffer.from('original receipt'), stderr: Buffer.from('original diagnostic') });
+});
 for (const [source, expected] of [
   ['process.stdout.write(Buffer.alloc(65537))', 'native_import_report_limit'],
   ['process.stderr.write(Buffer.alloc(65537))', 'native_import_diagnostic_limit'],

@@ -62,9 +62,20 @@ export function configuration(value) {
   pathBytes(result.ref_hex, true); pathBytes(result.workflow_directory_hex);
   const prefixes = result.input_prefixes_hex;
   if (!Array.isArray(prefixes) || !prefixes.length || prefixes.length > 1024) fail('Choose explicit bounded workflow inputs.');
+  let prefixBytes = 0;
   result.input_prefixes_hex = prefixes.map(value => {
-    pathBytes(value); if (bytes(value).includes(47)) fail('Workflow inputs must be top-level native paths.'); return value;
+    pathBytes(value); const raw = bytes(value), components = raw.toString('latin1').split('/');
+    if (components.length > 64 || components.some(part => part.length > 255)) fail('Workflow input path exceeds native component bounds.');
+    if ((prefixBytes += raw.length) > 64 * 1024) fail('Workflow source input paths exceed 64 KiB.');
+    return value;
   }).sort();
+  const selectedPrefixes = new Set(result.input_prefixes_hex);
+  for (const value of result.input_prefixes_hex) {
+    const raw = bytes(value);
+    for (let at = 0; at < raw.length; at++) if (raw[at] === 47 && selectedPrefixes.has(raw.subarray(0, at).toString('hex'))) {
+      fail('Workflow source input prefixes overlap.');
+    }
+  }
   if (new Set(prefixes).size !== prefixes.length || !prefixes.some(prefix =>
       result.workflow_directory_hex === prefix || result.workflow_directory_hex.startsWith(`${prefix}2f`))) fail('Workflow directory must be included exactly once in selected inputs.');
   if (Object.hasOwn(value, 'artifacts')) result.artifacts = artifactConfiguration(value.artifacts, pathBytes, result.workflow_directory_hex);

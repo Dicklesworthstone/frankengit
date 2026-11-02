@@ -52,6 +52,14 @@ can narrow this selection. Prefixes must not overlap. Hex preserves native byte 
 turning them into shell syntax. SHA-256 native repositories are also supported.
 Only `push` and `workflow_dispatch` are native event-selection keys here.
 
+The watcher accepts bounded nested prefixes without broadening them: at most
+1024 selections and 64 KiB of decoded path bytes, with native 4096-byte path,
+255-byte component and 64-component depth limits. Overlap is checked at decoded
+slash boundaries; `src/input` and `src/input-old` remain distinct selections.
+Changing a retained configuration's input selection requires a separate empty
+namespace. An older native executable can still refuse nested inputs; the
+watcher retains that attempt rather than falling back to broader directories.
+
 ### Capture outputs and feed dependent jobs automatically
 
 Add an optional `artifacts` field to run the same explicit artifact pipeline on
@@ -257,3 +265,16 @@ scope/custody refusals, immutable retries, offline reconciliation, and automatic
 publication with artifact-bearing reports. These use the same explicitly labeled
 schema peers. The native `fg` build-to-test, retained-export and offline-recovery
 tests remain `cargo test --locked -p fgit-cli --test workflow_run`.
+
+The separate [real-node operator lane](../scripts/e2e/suites/operator/workflow.sh)
+runs the shipped watcher and check publisher with a supplied `FG_BIN` and pinned
+`FGE_NODE`. At `9714e183d99ec6ea69842585e6180196cd502232`, its top-level input
+profile completes 15 assertions across SHA-1/SHA-256 against the explicitly older
+`a9d65885` native binary. It checks selected file bytes and absent unselected
+inputs, success/failure/dependent-skip execution, deduplication, reconciliation,
+canonical PR checks and original-key outcome recovery with grant refusals.
+See [check automation](TRUSTED_WORKFLOW_CHECK_AUTOMATION.md#verification-boundary)
+for the exact receipt and remaining qualification limits. Set
+`FGE_WORKFLOW_NESTED_INPUTS=1` to require the narrower native profile; it never
+falls back. The available older binary refuses that profile, so native nested
+qualification remains open.

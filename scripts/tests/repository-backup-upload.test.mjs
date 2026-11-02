@@ -48,6 +48,13 @@ async function code(promise, expected) {
 }
 function puts(f) { return f.events.filter(e => e.method === 'PUT'); }
 
+test('backup publication identifies FrankenGit on every actual TLS GET and PUT', async t => {
+  const f = await fixture(t), result = await uploadRepositoryBackup(f.options);
+  assert.equal(result.state, 'complete'); assert.equal(f.events.length, 6);
+  assert.deepEqual(f.events.map(event => event.headers['user-agent']),
+    Array(6).fill('frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)'));
+});
+
 for (const object_format of ['sha1', 'sha256']) test(`publish and re-read original signed archive (${object_format})`, async t => {
   const f = await fixture(t); await f.sign(DATA, { object_format });
   f.options.policy = { ...f.options.policy, object_format };

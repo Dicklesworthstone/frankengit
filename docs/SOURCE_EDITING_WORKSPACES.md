@@ -209,6 +209,15 @@ The native lane exercises both profiles at the same intended change, plus verifi
 preparation and journal reopening after original inputs are moved aside. It adds
 no implicit reads, profile fallback or publication consent.
 
+The same native lane continues across an explicitly leased upstream branch
+advance. It checks canonical stale-publication refusal, a newly acquired native
+source package, reviewed [refresh and conflict choices](SOURCE_WORKSPACE_REFRESH.md),
+and [bounded text reconciliation](SOURCE_WORKSPACE_TEXT_MERGE.md). The new candidate
+uses fresh review and transaction identity. Canonical Rust reads verify the exact
+merged bytes, modes, deletion and unchanged upstream siblings. Missing local
+terminals recover the original committed/refused decisions through outcomes-only
+credentials. The original workspace and its unselected files remain available.
+
 `bash scripts/verify_source_workspaces.sh` runs complete production JavaScript
 modules against actual files and CLI child processes. It covers both Git hash
 domains, raw paths, executable/empty/binary bytes, sparse materialization,

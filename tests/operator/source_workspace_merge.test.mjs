@@ -63,12 +63,17 @@ test('installed Git agrees on separated text edits (test oracle, not pinned conf
   const dir = mkdtempSync(join(tmpdir(), 'fg-text-merge-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const version = spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 3000 });
   assert.equal(version.status, 0, version.stderr); t.diagnostic(version.stdout.trim());
+  const oracleEnv = { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  // Keep repository-format discovery inside the private oracle fixture, even
+  // when the caller is a linked checkout whose Git metadata is not mounted.
+  const initialized = spawnSync('git', ['init', '-q', '--template=', '--object-format=sha1'], { cwd: dir, env: oracleEnv, timeout: 3000 });
+  assert.equal(initialized.status, 0, initialized.stderr.toString());
   for (const eol of ['\n', '\r\n']) for (const finalNewline of [false, true]) {
     const base = Array.from({ length: 30 }, (_, i) => `line${i}${i < 29 || finalNewline ? eol : ''}`);
     const local = base.slice(), next = base.slice(); local[3] = `local${eol}`; next[25] = `source${eol}`;
     const files = ['local', 'base', 'selected'].map(name => join(dir, name));
     [local, base, next].forEach((value, i) => writeFileSync(files[i], value.join('')));
-    const oracle = spawnSync('git', ['merge-file', '-p', ...files], { timeout: 3000, maxBuffer: 1048576, env: { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: '1' } });
+    const oracle = spawnSync('git', ['merge-file', '-p', ...files], { cwd: dir, timeout: 3000, maxBuffer: 1048576, env: oracleEnv });
     assert.equal(oracle.status, 0, oracle.stderr.toString());
     clean(base.join(''), local.join(''), next.join(''), oracle.stdout);
   }

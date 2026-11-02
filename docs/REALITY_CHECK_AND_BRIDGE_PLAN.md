@@ -8,6 +8,22 @@ FrankenGit has a substantial native Git node and increasingly useful forge paths
 
 ## 1. Direct answers
 
+**Workflow join, November 2:** source
+`9714e183d99ec6ea69842585e6180196cd502232` removes the watcher's stale top-level-only
+input guard and fixes real check-publication rejection of native post-run
+`shared_inputs` statistics. Immutable start-marker/source/compiled-plan checks
+remain intact; cache observations require the closed native profile and zero
+resident state. A new discovered lane runs the actual JS watcher and publisher,
+checks canonical Rust PR observations for success/failure/dependent skip, and
+recovers original outcomes through denied/permitted grants without re-execution
+or authority movement. Its explicitly older `a9d65885` native receipt completes
+15 assertions across both formats, zero failures or skips; the separate
+17-file Node process/schema-peer corpus completes 522 tests at the same source.
+The old binary explicitly refuses the narrower nested-input profile, which stays
+unqualified; the watcher retains the unresolved attempt without broadening or
+replay. See [exact workflow evidence and limits](TRUSTED_WORKFLOW_CHECK_AUTOMATION.md#verification-boundary).
+Original `.4.59` whole-matrix/current-native/independent acceptance remains open.
+
 1. **What is real?** Native SHA-1/SHA-256 objects, pack/delta/DEFLATE, import/export, quarantined receive, upload-pack, three Git carriers, embedded authority, sealed transactions, native PR/review/protection/merge paths, issue operations, indexed retrieval, trusted workflows, sparse host workspaces, backup components, verified reads and historical queries. These have substantial implementations and checked-in tests. The audit's fresh execution is narrower than that source inventory.
 2. **What is incomplete?** A supported authenticated team deployment; full current protected-PR/CI acceptance; sustained history scaling; canonical agent execution through ECC; hostile-code isolation; composed GC/repair/RaptorQ/compaction; an off-node authority/fabric deployment; broader graph/ATP consumers; a qualified native release; and the hosted, enterprise, package and federation scope.
 3. **What controls progress?** Independent verification and the executable build path, unresolved owner decisions, then completing the team-day, agent-day and destroy/restore outcomes. Verification debt reached its configured hard limit during this assessment; the one later spare slot was claimed for the concrete harness cleanup defect described below. Adding feature slices without draining that debt increases the gap between source and accepted capability.
@@ -368,6 +384,36 @@ default fast/full/release, independent review and old custody conditions remain
 open. No Bead closure, gate relaxation or new production dependency is implied.
 
 ## 3. What has improved since October 21
+
+**Moving-head workspace evidence at `01c89ae7cd9ff454f803cefd00cbca21cd558034`:**
+the existing native lifecycle now retains local edits across an explicitly leased
+upstream bundle update, obtains a canonical refusal for a separately staged stale
+proposal, acquires the actual next native source package, and reviews/applies
+refresh before a fresh publication. Both hash domains exercise disjoint CRLF/no-
+final-newline merging, independent executable-mode composition, an explicit local
+deletion choice against upstream binary content, old approval/editor-image
+refusals, exact pack identity, Rust readback and historical outcomes-only recovery
+after terminal files are moved aside. Original workspace/unselected files survive;
+remote unselected siblings remain canonical.
+
+Two existing native suites execute **35 assertions, zero failures or skips**,
+retaining all prior 29 IDs and adding six refresh observations. Artifacts:
+`/data/frankengit-targets/noble_refresh_final_20261102`; receipt SHA-256
+`b641cd47c2571ed8e71878d2d32a3d4499e516a45c140520ccc252e637c7da02`.
+The supplied binary remains older `a9d65885`. Cancellation after the refreshed
+commit leaves an incomplete driver, two normal service drains and no owned group;
+fresh Rust reads retain the merged executable bytes and upstream sibling.
+
+The five-file reference suite is separately **153/153 tests** at
+`1ef71eef7853bd50f926b282b1fcff278860f0d6`, whose scripts/native inputs match the
+native-tested source. Its earlier **152/153** result failed because the Git oracle
+inherited an unavailable linked-checkout Git directory; the private explicit-format
+fixture preserves every comparison. Earlier native probes correctly refused a
+create-only import used as an update and an index built before a canonical refusal
+advanced authority. Those failed receipts remain retained. No production refresh
+defect was found or production semantics changed; this is native verification
+coverage for previously fixture-only joins. Complete current-native, whole
+operator and independent acceptance remain open.
 
 **Native source-acquisition join at `55b2df8be5e5115379643f6aaea6eb281f803124`:**
 the workspace campaign now reads actual Initial context from a persisted native

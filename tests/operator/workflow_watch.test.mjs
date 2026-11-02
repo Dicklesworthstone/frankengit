@@ -208,6 +208,40 @@ test('config trust, byte paths and independent directory bounds are mandatory', 
     { unknown: true }]) assert.throws(() => configuration({ ...f.config, ...patch }));
 });
 
+for (const format of ['sha1', 'sha256']) test(`${format}: nested workflow inputs pass unchanged to native dispatch and retain their namespace`, async t => {
+  const prefixes = [hex('.github/workflows'), hex('src/input'), hex('src/input-old')];
+  const f = await fixture(t, format, {}, { input_prefixes_hex: prefixes });
+  const observed = await once(f.config), calls = await f.lines('calls.ndjson');
+  const args = calls.at(-1), selected = args.flatMap((value, at) => value === '--input-hex' ? [args[at + 1]] : []);
+  assert.deepEqual(selected, [...prefixes].sort());
+  assert.equal(observed.outcome, 'observed_succeeded');
+  assert.equal((await once(f.config)).reason, 'commit_already_observed');
+  await assert.rejects(once({ ...f.config, input_prefixes_hex: [hex('.github'), hex('src')] }), /configuration changed/);
+  assert.equal((await f.lines('effects.ndjson')).length, 1);
+});
+
+test('input prefix ancestors are byte aligned and separated siblings remain permitted', async t => {
+  const f = await fixture(t), select = values => configuration({ ...f.config, input_prefixes_hex: [hex('.github'), ...values] });
+  assert.doesNotThrow(() => select([hex('src/input'), hex('src/input-old')]));
+  assert.doesNotThrow(() => select(['f2', 'f2f1']));
+  for (const paths of [[hex('src'), hex('src/input')], [hex('src'), hex('src-old'), hex('src/input')],
+    ['f2f1', 'f2f12f61'], [hex('src/input'), hex('src/input')]]) assert.throws(() => select(paths));
+});
+
+test('native input count, component, depth and byte bounds apply before dispatch', async t => {
+  const f = await fixture(t), select = values => configuration({ ...f.config, input_prefixes_hex: [hex('.github'), ...values.map(hex)] });
+  assert.doesNotThrow(() => select(['x'.repeat(255), Array(64).fill('d').join('/')]));
+  assert.throws(() => select(['x'.repeat(256)]));
+  assert.throws(() => select([Array(65).fill('d').join('/')]));
+  const maximumPath = [...Array(15).fill('x'.repeat(255)), 'y'.repeat(254), 'z'].join('/');
+  assert.equal(Buffer.byteLength(maximumPath), 4096); assert.doesNotThrow(() => select([maximumPath]));
+  assert.throws(() => select([maximumPath + 'x']));
+  assert.doesNotThrow(() => select(Array.from({ length: 1023 }, (_, i) => `p${i}`)));
+  assert.throws(() => select(Array.from({ length: 1024 }, (_, i) => `p${i}`)));
+  const tooManyBytes = Array.from({ length: 258 }, (_, i) => `p${String(i).padStart(3, '0')}${'x'.repeat(251)}`);
+  assert.throws(() => select(tooManyBytes), /source input paths exceed 64 KiB/);
+});
+
 test('actual CLI emits a machine-readable result and requires explicit trusted-local invocation', async t => {
   const f = await fixture(t);
   const bad = await child(['once', '--config', f.configFile]).done; assert.equal(bad.code, 2);

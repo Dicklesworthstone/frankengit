@@ -41,6 +41,10 @@ URLs are supported; refreshing an expired URL is an explicit operator action.
 Normal HTTP 200 fixed-length and chunked responses are supported. Transformed
 content, partial-content responses, trailers and protocol upgrades are refused.
 
+Every request identifies the project with
+`User-Agent: frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)`.
+The header contains no source URL, signed query capability or repository secret.
+
 System TLS roots and hostname verification are enabled. An optional `--ca-file`
 selects one independent CA certificate for private storage. There is no insecure
 mode. The request explicitly requires verification even when the process has
