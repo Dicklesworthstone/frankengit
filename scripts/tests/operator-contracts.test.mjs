@@ -26,7 +26,9 @@ async function fixture(t, failOperator = false) {
   }
   for (const path of [suite, 'scripts/verify_js.mjs', 'scripts/lib/native-process-owner.mjs',
     'scripts/e2e/selftests/test_operator_command.py', 'scripts/e2e/operator_issue_smoke.py',
-    'scripts/e2e/scoped_events_smoke.py']) {
+    'scripts/e2e/scoped_events_smoke.py', 'scripts/e2e/operator_workflow_smoke.py',
+    'scripts/e2e/operator_workspace_smoke.py', 'scripts/e2e/patch_smoke.py',
+    'scripts/e2e/source_browse_smoke.py']) {
     await copyFile(join(repository, path), join(root, path));
   }
   await writeFile(join(root, 'tests/node-version'), process.versions.node + '\n');

@@ -77,7 +77,7 @@ class OperatorCommandTests(unittest.TestCase):
         self.assertEqual(self.records()[0]["exit"], 0)
         self.assertEqual((self.work / "operator-001.stdout").read_text(), "not JSON\n")
 
-    def driver(self, owner, *arguments, timeout=None):
+    def driver(self, owner, *arguments, timeout=None, workflow=False):
         driver = self.work / "driver.py"
         driver.write_text("""import signal, sys
 from pathlib import Path
@@ -87,8 +87,10 @@ def stop(number, frame): raise InterruptedError('original interrupt ' + str(numb
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 campaign = OperatorCampaign(Path('/unused-native'), Path(sys.argv[1]), Path(sys.argv[2]))
-campaign.node_command(Path(sys.argv[3]), sys.argv[4:], """ +
-            ("timeout=" + repr(timeout) if timeout is not None else "") + ")\n")
+""" + ("from operator_workflow_smoke import node_rows\n" if workflow else "") +
+            ("node_rows(campaign, Path(sys.argv[3]), sys.argv[4:])\n" if workflow else
+             "campaign.node_command(Path(sys.argv[3]), sys.argv[4:], " +
+             ("timeout=" + repr(timeout) if timeout is not None else "") + ")\n"))
         with (self.work / "driver.stdout").open("wb") as out, (self.work / "driver.stderr").open("wb") as err:
             process = subprocess.Popen([sys.executable, str(driver), str(self.node), str(self.work),
                                         str(owner), *map(str, arguments)], stdout=out, stderr=err)
@@ -113,7 +115,7 @@ campaign.node_command(Path(sys.argv[3]), sys.argv[4:], """ +
             time.sleep(.01)
         self.fail(f"readiness timed out; artifacts: {self.work}")
 
-    def cooperative(self, *, interruption=None, repeated=False, timeout=None):
+    def cooperative(self, *, interruption=None, repeated=False, timeout=None, workflow=False):
         pidfile, stopping, drained = [self.work / name for name in ("worker.pid", "stopping", "drained")]
         worker = self.work / "worker.mjs"
         worker.write_text("""import {writeFileSync} from 'node:fs';
@@ -132,7 +134,7 @@ process.on('SIGTERM', () => abort.abort());
 try {await runNativeProcess(process.execPath, process.argv.slice(2), {timeoutMs:10000, signal:abort.signal});}
 catch(error) {console.error(JSON.stringify({code:error.code})); process.exitCode=2;}
 """)
-        process = self.driver(owner, worker, pidfile, stopping, drained, timeout=timeout)
+        process = self.driver(owner, worker, pidfile, stopping, drained, timeout=timeout, workflow=workflow)
         self.wait_file(pidfile, process)
         pid = int(pidfile.read_text())
         owned = [True]
@@ -168,6 +170,23 @@ catch(error) {console.error(JSON.stringify({code:error.code})); process.exitCode
 
     def test_sigterm_drains_detached_native_child(self):
         self.assertIn("original interrupt 15", self.cooperative(interruption=signal.SIGTERM))
+
+    def test_workflow_ndjson_adapter_drains_detached_native_child(self):
+        self.assertIn("original interrupt 15", self.cooperative(interruption=signal.SIGTERM, workflow=True))
+
+    def test_workflow_ndjson_adapter_preserves_stream_and_exact_refusal(self):
+        from operator_workflow_smoke import node_rows
+        rows = node_rows(self.campaign, Path("-e"), ["console.log('{}'); console.log('{\"complete\":true}');"])
+        self.assertEqual(rows, [{}, {"complete": True}])
+        self.assertEqual(node_rows(self.campaign, Path("-e"), [
+            "console.error('{\"code\":\"refusal\"}'); process.exitCode=2;"], 2, error_reply=True), [{"code": "refusal"}])
+        self.assertEqual(self.records()[-1]["exit"], 2)
+
+    def test_workflow_ndjson_adapter_rejects_empty_and_nonobject_records(self):
+        from operator_workflow_smoke import node_rows
+        for script in ["", "console.log('[]');", "console.log('{}'); console.log('null');"]:
+            with self.subTest(script=script), self.assertRaises((ValueError, AssertionError)):
+                node_rows(self.campaign, Path("-e"), [script])
 
     def test_repeated_interrupts_do_not_preempt_drain(self):
         self.assertIn("original interrupt 2", self.cooperative(interruption=signal.SIGINT, repeated=True))
