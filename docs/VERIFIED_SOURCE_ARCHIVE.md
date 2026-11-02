@@ -204,4 +204,36 @@ concurrent writer and broken-output cases. Python's standard tar reader checks
 interoperability separately from the production inspector. An isolated negative
 control removing tree hash checks makes the missing-entry refusal test fail;
 fixtures with individually valid blobs cannot establish a complete tree alone.
-These are still explicit native-schema HTTP fixtures, not a live Rust-node test.
+Those focused module cases remain explicit native-schema HTTP fixtures. They
+are separate from the live native campaign below.
+
+## Live native archive consumer
+
+The existing [`operator/source_workspace.sh`](../scripts/e2e/suites/operator/source_workspace.sh)
+campaign now drives the shipped archive CLI as its seventh source entrypoint.
+In both hash domains it checks read-grant refusal and permitted capture, compares
+the complete commit/tree/file bytes and modes with the independently constructed,
+pinned-Git-checked fixture, reuses verified payloads with zero blob transfers,
+and inspects the retained archive after the native service drains. A wrong local
+archive hash refuses without changing either retained file. The native repository
+head and refs remain unchanged throughout acquisition. No extraction, backup,
+authority-signature, TLS or current-source native claim follows from this fixture.
+
+At client/harness source `0443db339050eec18ceb7a5857c7d4031e0200fa`, all 31 workspace
+assertions complete, including the four new archive assertions. Raw script log:
+`/data/frankengit-targets/noble_transport_archive_0443db33_20261102/scripts/source_workspace/attempt-1/e2e.ndjson`,
+SHA-256 `fc419773de1dd94508543cf38ce5a50fc82844ff1f06d8740e2795700bb5f2b5`.
+The supplied Rust binary is older source `a9d65885fde8a996c229827b3a86e136b2583bba`,
+SHA-256 `95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+The parent four-suite union remains failed at the unchanged issue-search HTTP 400;
+these 31 assertions do not establish the full operator matrix.
+
+A separate control executes the actual pinned Node, shipped archive CLI and Rust
+service, changing only the selected head in a new private input copy. The earlier
+context steps and archive read-grant refusal complete; restored read permission
+then reaches the archive's native HTTP 409, with no archive published and normal
+service drain. Its receipt is
+`/data/frankengit-targets/noble_archive_stale_head_0443db33_20261102/receipt.ndjson`,
+SHA-256 `9c6b05966ee149b31c5b5f37aa627730386bef434ff9341c0e04627d00d45554`.
+This is a stale-head input control, not a route-removed build or the complete
+negative matrix. Original `x2mv.4.59` acceptance remains open.

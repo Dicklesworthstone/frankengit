@@ -175,6 +175,14 @@ in addition to the 20 MiB plan. No history is evicted. Each sweep handles at mos
 update; recovery makes lookups only. Network responses and aggregate discovery
 bytes are bounded before further accumulation. Control-file/storage calls remain
 subject to filesystem latency; deadlines are not a hardware real-time guarantee.
+The transport checks its monotonic deadline before sending, when headers and body
+arrive, and after JSON decoding. Delayed timer callbacks or synchronous decoding
+cannot renew that budget. A late update response can follow a real remote commit
+or refusal: its original started marker remains unresolved until an explicit
+original-key lookup observes the decision. It does not authorize a new key or
+automatic resend. A valid decision selected within budget still survives
+cancellation during socket cleanup and local receipt publication. Sync and source
+read transports identify the project honestly in their User-Agent headers.
 No credentials are persisted, and parser diagnostics do not quote malformed server
 bytes that could reflect a credential.
 
