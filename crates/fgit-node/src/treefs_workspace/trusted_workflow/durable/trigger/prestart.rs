@@ -16,6 +16,17 @@ mod intent;
 mod metadata;
 use intent::Intent;
 
+/// Shared exact execution configuration binding for durable collection custody.
+/// This is a local responsibility identity, never a canonical check receipt.
+pub(super) fn execution_identity(
+    directory: &[u8],
+    inputs: &[Vec<u8>],
+    limits: WorkflowLimits,
+    artifacts: Option<&TrustedWorkflowArtifactConfig>,
+) -> [u8; 32] {
+    configuration::identity(directory, inputs, limits, artifacts)
+}
+
 type Execution<'a> = (
     &'a [Vec<u8>],
     WorkflowLimits,

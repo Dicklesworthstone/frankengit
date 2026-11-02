@@ -48,7 +48,8 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
-   [--workflow-pull-request <number> | --workflow-merge-queue <number>]
+   [--workflow-pull-request <number> | --workflow-merge-queue <number> |
+    --workflow-pull-requests [--workflow-max-pull-requests <1..64>]]
    [--workflow-artifact-logs]
    [--workflow-artifact <workflow:job:output> ...]
    [--workflow-artifact-hex <workflow-hex:job:output-hex> ...]
@@ -116,6 +117,16 @@ merge-commit style. Queue custody and reporting span changes of head PR; unresol
 work blocks later execution. This runs candidate CI without landing a protected
 target or changing queue membership. The retained landing.bundle is ready for
 guarded queue landing. Queue/PR/tip/policy changes are revalidated.
+--workflow-pull-requests discovers visible open same-repository PRs targeting
+--workflow-ref and executes their source heads, one member per poll in rotating
+order. It requires --expected-incarnation and trusts scripts from every current
+and future eligible PR. It cannot be combined with a fixed PR, merge queue or
+merge-candidate options. --workflow-max-pull-requests defaults to 64 and bounds
+all retained members, including closed or hidden PRs. Durable membership and
+each member's original execution/check custody survive restart; there is no
+automatic retirement. Incomplete discovery or capacity overflow refuses new
+admission. Unknown execution in any member stops the service. See
+docs/NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md for scope and recovery.
 No workflow option enables receive, source or another HTTP permission. See
 docs/NATIVE_HTTP_WORKFLOW_SERVICE.md for retained custody and recovery limits.
 
@@ -386,6 +397,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--continuous"
                 | "--workflow-trusted-local"
                 | "--workflow-publish-checks"
+                | "--workflow-pull-requests"
                 | "--workflow-artifact-logs"
         );
         if !boolean
@@ -427,6 +439,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--workflow-attempt-timeout-secs"
                     | "--workflow-principal"
                     | "--workflow-pull-request"
+                    | "--workflow-max-pull-requests"
                     | "--workflow-merge-queue"
                     | "--workflow-artifact"
                     | "--workflow-artifact-hex"

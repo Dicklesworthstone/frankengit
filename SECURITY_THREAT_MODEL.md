@@ -489,6 +489,15 @@ This read path grants no durable agent credential, effect or publication right.
 - cancellation/reaping/containment campaign;
 - artifact/provenance/signature policy before canonical check/publication.
 
+The native HTTP PR-collection controller is an explicit trusted-host profile.
+Its execution acknowledgement covers every current and future visible
+same-repository PR targeting the configured branch. Neither an HTTP token nor
+workflow text can enable discovery or change its execution contract. A durable
+grow-only inventory retains closed and hidden members' original responsibility;
+missing execution custody or unknown closure stops the controller. Ordinary
+head movement defers discovery without admitting a partial set. Source-head
+results do not supply exact merge-candidate evidence or hostile-code isolation.
+
 The Linux sparse-directory candidate in `fgit-runner::sparse_workspace`
 uses a broker-owned private parent descriptor, no-symlink/no-cross-mount
 resolution, exclusive creates and workspace leases, and manifest-directed

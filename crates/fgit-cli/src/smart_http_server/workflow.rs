@@ -70,11 +70,29 @@ pub(super) fn parse(
             PrincipalId::from_hex(publisher).map_err(|_| "invalid workflow check publisher")?,
         );
     }
-    if flags.contains_key("--workflow-pull-request") && flags.contains_key("--workflow-merge-queue")
+    if [
+        "--workflow-pull-request",
+        "--workflow-merge-queue",
+        "--workflow-pull-requests",
+    ]
+    .iter()
+    .filter(|name| flags.contains_key(**name))
+    .count()
+        > 1
     {
-        return Err(
-            "--workflow-pull-request and --workflow-merge-queue are mutually exclusive".into(),
-        );
+        return Err("--workflow-pull-request, --workflow-merge-queue and --workflow-pull-requests are mutually exclusive".into());
+    }
+    if flags.contains_key("--workflow-max-pull-requests")
+        && !flags.contains_key("--workflow-pull-requests")
+    {
+        return Err("--workflow-max-pull-requests requires --workflow-pull-requests".into());
+    }
+    if flags.contains_key("--workflow-pull-requests") {
+        required("--expected-incarnation")?;
+        let max_members = number(flags, "--workflow-max-pull-requests", 64, 64)?;
+        config = config
+            .with_pull_requests(usize::try_from(max_members).map_err(|_| "invalid PR capacity")?)
+            .map_err(|error| error.to_string())?;
     }
     if flags.contains_key("--workflow-pull-request") {
         config = config
@@ -92,6 +110,9 @@ pub(super) fn parse(
             crate::workflow_merge_watch::server_option(name).map(|name| (name, *value))
         })
         .collect();
+    if config.pull_requests().is_some() && !merge_fields.is_empty() {
+        return Err("--workflow-pull-requests selects source heads and cannot be combined with workflow merge-candidate options".into());
+    }
     let merge = crate::workflow_merge_watch::parse(&merge_fields)?;
     if config.merge_queue().is_some() && merge.is_none() {
         return Err(
@@ -169,6 +190,7 @@ mod tests {
     }
 
     mod artifacts;
+    mod collection;
 
     fn flags() -> BTreeMap<&'static str, &'static str> {
         BTreeMap::from([

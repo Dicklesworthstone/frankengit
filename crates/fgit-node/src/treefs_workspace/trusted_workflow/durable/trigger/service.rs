@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const STOP_POLL: Duration = Duration::from_millis(10);
+mod pull_requests;
 
 /// Immutable operator selection for one trusted branch or same-repository PR.
 ///
@@ -40,6 +41,7 @@ pub struct WorkflowWatchConfig {
     attempt_timeout: GitDaemonSessionTimeout,
     publisher: Option<PrincipalId>,
     pull_request: Option<u64>,
+    pull_requests: Option<usize>,
     merge_queue: Option<u64>,
     merge_candidate: Option<PullRequestMergeWatchConfig>,
     limits: WorkflowLimits,
@@ -79,6 +81,7 @@ impl WorkflowWatchConfig {
             attempt_timeout: GitDaemonSessionTimeout::DEFAULT,
             publisher: None,
             pull_request: None,
+            pull_requests: None,
             merge_queue: None,
             merge_candidate: None,
             limits: WorkflowLimits::default(),
@@ -108,7 +111,7 @@ impl WorkflowWatchConfig {
     }
 
     pub fn with_pull_request(mut self, number: u64) -> io::Result<Self> {
-        if number == 0 || self.merge_queue.is_some() {
+        if number == 0 || self.merge_queue.is_some() || self.pull_requests.is_some() {
             return Err(invalid(
                 "workflow service requires a positive PR number and excludes a queue selector",
             ));
@@ -117,12 +120,30 @@ impl WorkflowWatchConfig {
         Ok(self)
     }
 
+    /// Discover visible open native PRs targeting the fixed `reference`.
+    /// Every retained PR, including closed or hidden members, counts toward
+    /// this lifetime custody bound and is reconciled before new execution.
+    /// This is source-head-only trusted host execution, never a merge profile.
+    pub fn with_pull_requests(mut self, max_members: usize) -> io::Result<Self> {
+        if !(1..=64).contains(&max_members)
+            || self.pull_request.is_some()
+            || self.merge_queue.is_some()
+            || self.merge_candidate.is_some()
+        {
+            return Err(invalid(
+                "PR collection requires 1..64 retained members and excludes fixed PR, queue and merge-candidate selectors",
+            ));
+        }
+        self.pull_requests = Some(max_members);
+        Ok(self)
+    }
+
     /// Follow the current head of one canonical queue bound to `reference`,
     /// which is the fixed target branch in this mode. A two-parent candidate
     /// configuration is mandatory before this service can start. Queue changes
     /// do not change its permanent custody scope or grant target publication.
     pub fn with_merge_queue(mut self, number: u64) -> io::Result<Self> {
-        if number == 0 || self.pull_request.is_some() {
+        if number == 0 || self.pull_request.is_some() || self.pull_requests.is_some() {
             return Err(invalid(
                 "workflow service requires a positive queue number and excludes a PR selector",
             ));
@@ -142,7 +163,8 @@ impl WorkflowWatchConfig {
     /// The fixed CI ref must differ from the source; its target is checked when
     /// the current PR is selected. This authorizes ordinary exact-old rewrites.
     pub fn with_merge_candidate(mut self, config: PullRequestMergeWatchConfig) -> io::Result<Self> {
-        if (self.pull_request.is_none() && self.merge_queue.is_none())
+        if self.pull_requests.is_some()
+            || (self.pull_request.is_none() && self.merge_queue.is_none())
             || config.reference() == &self.reference
         {
             return Err(invalid(
@@ -211,12 +233,20 @@ impl WorkflowWatchConfig {
         self.pull_request
     }
     #[must_use]
+    pub const fn pull_requests(&self) -> Option<usize> {
+        self.pull_requests
+    }
+    #[must_use]
     pub const fn merge_queue(&self) -> Option<u64> {
         self.merge_queue
     }
     #[must_use]
     pub const fn merge_candidate(&self) -> Option<&PullRequestMergeWatchConfig> {
         self.merge_candidate.as_ref()
+    }
+    #[must_use]
+    pub const fn artifacts(&self) -> Option<&TrustedWorkflowArtifactConfig> {
+        self.artifacts.as_ref()
     }
 }
 
@@ -288,6 +318,8 @@ pub enum WorkflowWatchError {
     Authority(String),
     Custody(String),
     StoppedBeforeReadiness,
+    /// Internal bounded discovery/metadata checkpoint, before new execution.
+    CollectionSelectionStopped,
     Ready(io::Error),
     Attempt(String),
     Shutdown {
@@ -332,6 +364,10 @@ impl std::fmt::Display for WorkflowWatchError {
             Self::Authority(error) => write!(f, "authenticate workflow service: {error}"),
             Self::Custody(error) => write!(f, "workflow service custody: {error}"),
             Self::StoppedBeforeReadiness => write!(f, "workflow service stopped before readiness"),
+            Self::CollectionSelectionStopped => write!(
+                f,
+                "workflow collection request stopped before further admission"
+            ),
             Self::Ready(error) => write!(f, "workflow service readiness: {error}"),
             Self::Attempt(error) => write!(
                 f,
@@ -385,12 +421,16 @@ pub fn run_service_with_ready(
             .map_err(|error| WorkflowWatchError::Authority(error.to_string()))?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|error| WorkflowWatchError::Authority(error.to_string()))?;
-        custody = Some(Custody::open(&node, &config, &control)?);
-        receipt.pending_execution = custody.as_ref().expect("opened custody").pending_execution;
+        custody = Some(ServiceCustody::open(
+            &node,
+            &config,
+            &control,
+            &mut receipt,
+        )?);
         if control.is_stopped() {
             return Err(WorkflowWatchError::StoppedBeforeReadiness);
         }
-        if config.publisher.is_some() {
+        if config.publisher.is_some() && config.pull_requests.is_none() {
             controlled(&node, &config, &control, &mut receipt, false)?;
         }
         if control.is_stopped() || receipt.interrupted {
@@ -400,8 +440,12 @@ pub fn run_service_with_ready(
             .unwrap_or_else(|_| Err(io::Error::other("workflow readiness callback panicked")))
             .map_err(WorkflowWatchError::Ready)?;
         while !control.is_stopped() {
-            custody.as_ref().expect("opened custody").check()?;
-            controlled(&node, &config, &control, &mut receipt, true)?;
+            custody.as_mut().expect("opened custody").poll(
+                &node,
+                &config,
+                &control,
+                &mut receipt,
+            )?;
             if control.is_stopped() {
                 break;
             }
@@ -449,6 +493,19 @@ fn controlled(
     receipt: &mut WorkflowWatchReceipt,
     execute: bool,
 ) -> Result<(), WorkflowWatchError> {
+    controlled_operation(node, config, control, |request| {
+        attempt(node, request, config, control, receipt, execute)
+    })
+}
+
+/// All collection discovery, member reconciliation and one selected dispatch
+/// share this exact same finite request and drained stop observer.
+fn controlled_operation<T>(
+    node: &OneNode,
+    config: &WorkflowWatchConfig,
+    control: &WorkflowWatchControl,
+    work: impl FnOnce(&NodeRequestContext) -> Result<T, WorkflowWatchError>,
+) -> Result<T, WorkflowWatchError> {
     let parent = node.command_request_context(Some(config.attempt_timeout));
     let stopping = control.clone();
     let (result, cleanup) = parent
@@ -456,7 +513,7 @@ fn controlled(
             node.runtime(),
             move || stopping.is_stopped(),
             |request| {
-                let result = attempt(node, request, config, control, receipt, execute);
+                let result = work(request);
                 // Idle source/custody observation and completed publication
                 // share the same finite attempt. Check its final boundary even
                 // without a dispatch or publisher before admitting another one.
@@ -470,9 +527,9 @@ fn controlled(
         )
         .map_err(|error| WorkflowWatchError::Attempt(error.to_string()))?;
     match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(result), Ok(())) => Ok(result),
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(WorkflowWatchError::Attempt(format!(
+        (Ok(_), Err(error)) => Err(WorkflowWatchError::Attempt(format!(
             "stop observer did not drain: {error}"
         ))),
         (Err(error), Err(cleanup)) => Err(WorkflowWatchError::Attempt(format!(
@@ -741,6 +798,43 @@ fn add(value: &mut u64, amount: usize) -> Result<(), WorkflowWatchError> {
 /// The service lock is separate from the existing event lock, which every
 /// native poll/publication continues to acquire. Its inode is never replaced.
 /// This excludes competing service owners while retaining old CLI custody.
+enum ServiceCustody {
+    Single(Custody),
+    PullRequests(pull_requests::Controller),
+}
+
+impl ServiceCustody {
+    fn open(
+        node: &OneNode,
+        config: &WorkflowWatchConfig,
+        control: &WorkflowWatchControl,
+        receipt: &mut WorkflowWatchReceipt,
+    ) -> Result<Self, WorkflowWatchError> {
+        if config.pull_requests.is_some() {
+            pull_requests::Controller::open(node, config, control, receipt).map(Self::PullRequests)
+        } else {
+            let custody = Custody::open(node, config, control)?;
+            receipt.pending_execution = custody.pending_execution;
+            Ok(Self::Single(custody))
+        }
+    }
+    fn poll(
+        &mut self,
+        node: &OneNode,
+        config: &WorkflowWatchConfig,
+        control: &WorkflowWatchControl,
+        receipt: &mut WorkflowWatchReceipt,
+    ) -> Result<(), WorkflowWatchError> {
+        match self {
+            Self::Single(custody) => {
+                custody.check()?;
+                controlled(node, config, control, receipt, true)
+            }
+            Self::PullRequests(controller) => controller.poll(node, config, control, receipt),
+        }
+    }
+}
+
 struct Custody {
     parent: PathBuf,
     parent_metadata: fs::Metadata,
@@ -757,6 +851,16 @@ impl Custody {
         node: &OneNode,
         config: &WorkflowWatchConfig,
         control: &WorkflowWatchControl,
+    ) -> Result<Self, WorkflowWatchError> {
+        let request = node.command_request_context(Some(config.attempt_timeout));
+        Self::open_in(node, config, control, &request)
+    }
+
+    fn open_in(
+        node: &OneNode,
+        config: &WorkflowWatchConfig,
+        control: &WorkflowWatchControl,
+        request: &NodeRequestContext,
     ) -> Result<Self, WorkflowWatchError> {
         let custody =
             |error: super::TrustedWorkflowFailure| WorkflowWatchError::Custody(error.to_string());
@@ -808,7 +912,42 @@ impl Custody {
             pending_execution: 0,
         };
         result.check()?;
-        let request = node.command_request_context(Some(config.attempt_timeout));
+        drop(_event_owner);
+        result.reconcile_execution(node, config, control, request)?;
+        Ok(result)
+    }
+
+    /// Caller owns this member's service lock. The event lock also excludes
+    /// a competing one-shot poll while original execution evidence is checked.
+    fn reconcile_execution(
+        &mut self,
+        node: &OneNode,
+        config: &WorkflowWatchConfig,
+        control: &WorkflowWatchControl,
+        request: &NodeRequestContext,
+    ) -> Result<(), WorkflowWatchError> {
+        self.check()?;
+        let custody =
+            |error: super::TrustedWorkflowFailure| WorkflowWatchError::Custody(error.to_string());
+        let events = &self.watch_root;
+        let _event_owner = Owner::open(events).map_err(custody)?;
+        let scope = match (
+            config.pull_request,
+            config.merge_queue,
+            config.merge_candidate.as_ref(),
+        ) {
+            (_, Some(number), _) => {
+                merge_queue::scope(node, &config.reference, &config.directory, number)
+            }
+            (Some(number), None, Some(_)) => {
+                pull_request_merge::scope(node, &config.reference, &config.directory, number)
+            }
+            (Some(number), None, None) => {
+                pull_request::scope(node, &config.reference, &config.directory, number)
+            }
+            (None, None, _) => reporting::scope(node, &config.reference, &config.directory),
+        };
+        self.pending_execution = 0;
         let live = || !control.is_stopped() && request.checkpoint_is_live();
         for entry in reporting::event_entries(&events).map_err(custody)? {
             if control.is_stopped() {
@@ -860,8 +999,8 @@ impl Custody {
                         }
                     })?
                 {
-                    result.pending_execution =
-                        result.pending_execution.checked_add(1).ok_or_else(|| {
+                    self.pending_execution =
+                        self.pending_execution.checked_add(1).ok_or_else(|| {
                             WorkflowWatchError::Custody(
                                 "pending workflow observation counter exhausted".into(),
                             )
@@ -873,7 +1012,7 @@ impl Custody {
                 ));
             }
         }
-        Ok(result)
+        self.check()
     }
 
     fn check(&self) -> Result<(), WorkflowWatchError> {

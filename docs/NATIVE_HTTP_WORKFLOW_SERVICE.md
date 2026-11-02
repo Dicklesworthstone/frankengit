@@ -1,7 +1,7 @@
 # Native CI owned by the HTTP service
 
 On Linux, `fg serve-http` can own one native workflow controller alongside its
-accepted HTTP sessions. The operator selects its branch, workflow directory,
+accepted HTTP sessions. The operator selects its branch or PR collection, workflow directory,
 source inputs, private run parent and optional check publisher at startup. The
 controller uses the same canonical source selection, execution custody and check
 admission as [`fg workflow watch`](NATIVE_REF_WORKFLOW_WATCH.md).
@@ -77,6 +77,25 @@ Optional `--workflow-pull-request NUMBER` selects the native same-repository PR
 profile. The PR must be open and its source branch must match `--workflow-ref`.
 By default it executes the current source head and retains separate PR custody.
 See [native PR workflow selection](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md).
+
+### Discover open pull requests automatically
+
+Use `--workflow-pull-requests` to discover visible open same-repository PRs
+targeting `--workflow-ref`. This mode requires `--expected-incarnation` even
+without a check publisher. It executes current source heads, rotates through
+retained PRs one member per poll, and reuses the ordinary PR execution and
+canonical check-publication paths. It cannot be combined with a fixed PR,
+merge queue or merge-candidate options.
+
+`--workflow-max-pull-requests` accepts 1–64 and defaults to 64. The limit applies
+to the durable retained inventory, including closed or hidden PRs. New members
+are persisted before their custody can acquire execution responsibility; every
+retained member's original custody is checked before restart readiness.
+Incomplete discovery or insufficient capacity refuses new admission, and
+unknown execution stops the controller. The execution acknowledgement covers
+scripts from every current and future eligible PR. See the
+[collection guide](NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md) for complete
+commands, current visibility, recovery and the bounded retention profile.
 
 ### Execute the actual merge or squash candidate
 
