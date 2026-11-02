@@ -22,6 +22,31 @@ returns an explicit `js_runtime_identity` without running tests; live native
 campaigns use this command rather than maintaining another runtime policy.
 That identity-only command earns no test coverage credit.
 
+The live [operator campaign launcher](../scripts/e2e/operator_issue_smoke.py)
+requests TERM on interruption or its unchanged 40-second execution deadline,
+then gives the Node owner four seconds to drain its native children. Repeated
+TERM/INT requests during this drain do not preempt it. Forced owner termination
+has a separate two-second reap bound and fails as
+`operator_owner_containment_failed`; it does not establish native quiescence.
+Both streams and a command-journal row survive, and interrupted native effects
+remain explicitly unknown. This closes the observed Python `subprocess.run`
+failure that killed Node before it could request shutdown of a detached child.
+It does not cover Python SIGKILL, interruption inside process creation, escaped
+hostile children or every other campaign's direct subprocess calls.
+
+The existing operator contract suite invokes
+[`selftests/test_operator_command.py`](../scripts/e2e/selftests/test_operator_command.py)
+with the same pinned Node. At `859da441da270a2aebf0f9d7bcd5441281940f1a`, its nine
+real-process cases complete with zero failures/skips: normal success/refusal,
+unexpected exit, malformed JSON, TERM, repeated signals, timeout, uncooperative
+owner and spawn failure. The cooperative executable is synthetic; these are
+process-ownership regressions, not native mutation evidence. At that same
+source, the existing backup lane completes 19 assertions, zero failures/skips,
+against the explicitly older `a9d65885` native binary identified below. Receipt:
+`/data/frankengit-targets/noble_operator_drain_backup_859da441_20261102/receipt.ndjson`,
+SHA-256 `0de21b1bcd9760e5b6fc35d132ec95ffe18d7d4c363f47e576659ff74ab20133`.
+The full operator matrix and current-source native qualification remain open.
+
 The shared GitHub pull peer and issue operator fixture allocate listeners through
 `tests/fetch-peer.mjs`. Hosts may assign ephemeral ports that Fetch refuses
 before any TCP request. The helper retires those selections before exposing a
