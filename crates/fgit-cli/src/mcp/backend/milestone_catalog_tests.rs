@@ -50,6 +50,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     full.outcomes = true;
     full.writes = crate::mcp::WriteGrants {
         issues: true,
+        notifications: true,
         pulls: true,
         source: true,
         reviews: true,
@@ -88,7 +89,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     let Value::Array(tools) = &reply.object().unwrap()["result"].object().unwrap()["tools"] else {
         panic!("missing discovery")
     };
-    assert_eq!(tools.len(), 66);
+    assert_eq!(tools.len(), 73);
     let names: std::collections::BTreeSet<_> = tools
         .iter()
         .map(|tool| tool.object().unwrap()["name"].text().unwrap())
@@ -98,6 +99,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
         let fields = tool.object().unwrap();
         let name = fields["name"].text().unwrap();
         if milestones::is_write(name)
+            || notifications::is_write(name)
             || matches!(
                 name,
                 "frankengit_issue_set_milestone" | "frankengit_issue_clear_milestone"

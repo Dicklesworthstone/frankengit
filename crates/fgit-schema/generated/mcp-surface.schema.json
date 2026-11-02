@@ -510,6 +510,264 @@
       },
       "additionalProperties": false
     },
+    "frankengit_inbox_automatic": {
+      "title": "frankengit_inbox_automatic",
+      "description": "Restore author/participant/assignee selection while preserving your read prefix, under notification-write plus issue-read.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor of your preference stream, zero when absent. Never refresh on retry.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key for this exact self-preference command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_inbox_list": {
+      "title": "frankengit_inbox_list",
+      "description": "Read your issue inbox from one exact canonical source through the typed SQLModel projection. Requires issue-read and launch-bound principal/incarnation; keep snapshot and filters fixed across pages.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "after": {
+              "type": "string",
+              "description": "Numeric issue cursor, zero by default. Keep snapshot, recipient and filters fixed across pages.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum 1..100 rows, default 20.",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Exact snapshot token from the first page, required with a nonzero after cursor.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "unread_only": {
+              "type": "boolean",
+              "description": "Only threads with other-actor activity after your read prefix, default false.",
+              "x-classification": "selector_position"
+            },
+            "include_muted": {
+              "type": "boolean",
+              "description": "Include your explicitly muted threads, default false.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_inbox_mute": {
+      "title": "frankengit_inbox_mute",
+      "description": "Mute your issue thread while preserving its read prefix, under independent notification-write plus issue-read.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor of your preference stream, zero when absent. Never refresh on retry.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key for this exact self-preference command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_inbox_read": {
+      "title": "frankengit_inbox_read",
+      "description": "Mark the explicit observed issue prefix read at your exact preference version. Future activity stays unread. Requires notification-write plus issue-read; preserve the original read prefix and durable key on retry.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor of your preference stream, zero when absent. Never refresh on retry.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key for this exact self-preference command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "read_through": {
+              "type": "string",
+              "description": "Explicit observed positive issue version. Later activity stays unread; future versions refuse.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "read_through"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_inbox_show": {
+      "title": "frankengit_inbox_show",
+      "description": "Read your canonical preferences and latest activity for one issue, including an unfollowed issue. Requires issue-read and launch-bound principal/incarnation. No read acknowledgement occurs.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Exact snapshot token from the first page, required with a nonzero after cursor.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_inbox_subscribe": {
+      "title": "frankengit_inbox_subscribe",
+      "description": "Subscribe your issue thread at its exact preference version. Requires independent notification-write plus issue-read and launch-bound principal/incarnation; issue-write grants no preference authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor of your preference stream, zero when absent. Never refresh on retry.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key for this exact self-preference command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_inbox_unread": {
+      "title": "frankengit_inbox_unread",
+      "description": "Clear your read prefix without changing delivery mode, under notification-write plus issue-read and an exact preference version.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor of your preference stream, zero when absent. Never refresh on retry.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key for this exact self-preference command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_issue_append_comment": {
       "title": "frankengit_issue_append_comment",
       "description": "Append literal comment text to an existing issue without expected_version. Admission selects the exact predecessor at each head-CAS attempt; retry the identical issue number, body and original durable key to recover one terminal outcome without a duplicate comment.",

@@ -72,6 +72,7 @@ enum Scope {
     QueuesRead,
     QueuesWrite,
     QueuesLand,
+    NotificationsWrite,
 }
 
 impl Scope {
@@ -95,6 +96,7 @@ impl Scope {
             "queues-read" => Ok(Self::QueuesRead),
             "queues-write" => Ok(Self::QueuesWrite),
             "queues-land" => Ok(Self::QueuesLand),
+            "notifications-write" => Ok(Self::NotificationsWrite),
             _ => Err(CredentialFailure::InvalidFile),
         }
     }
@@ -140,6 +142,12 @@ impl Grant {
         } else {
             self.scopes.contains(Scope::IssuesRead)
         }
+    }
+    /// Self-owned preferences require disclosure plus their own write scope.
+    /// Neither issue editing nor Git publication implies this grant.
+    pub const fn permits_notifications(&self, mutation: bool) -> bool {
+        self.scopes.contains(Scope::IssuesRead)
+            && (!mutation || self.scopes.contains(Scope::NotificationsWrite))
     }
     /// PR metadata authority is separate from code publication and reviews.
     pub const fn permits_pulls(&self, mutation: bool) -> bool {

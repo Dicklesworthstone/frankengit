@@ -251,9 +251,9 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    // 37 plus five h3f4 agent reads and the explicit issue append-comment tool,
-    // plus the pull append-comment tool and two exact-version issue lock tools.
-    assert_eq!(backend.tools().len(), 46);
+    // The 73-tool catalog minus queues (7), agent context (1), artifacts (2),
+    // separate protection tools (2), and ungranted notification writes (5).
+    assert_eq!(backend.tools().len(), 56);
     assert!(
         backend
             .tools()

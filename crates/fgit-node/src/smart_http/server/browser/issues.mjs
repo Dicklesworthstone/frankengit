@@ -308,8 +308,9 @@ export function issueSearchPage(reply, input, options = {}) {
 }
 
 export function publication(reply, pending, status = 200, entity = 'issue') {
-  if (!['issue', 'milestone'].includes(entity)) fail('Unsupported publication profile.');
+  if (!['issue', 'milestone', 'notification'].includes(entity)) fail('Unsupported publication profile.');
   identity(reply, pending.binding);
+  if (entity === 'notification' && pending.binding?.principal && reply.principal_id !== pending.binding.principal) fail('Notification principal changed.');
   if (reply.type !== `${entity}_publication` || reply.number !== pending.number ||
       reply.expected_version !== pending.expected_version || reply.action !== pending.action ||
       !['committed', 'refused'].includes(reply.outcome) || reply.delivery_acknowledged !== null) {
@@ -333,6 +334,7 @@ export function recoveredOutcome(reply, pending) {
       reply.read_only !== true || reply.request_reexecuted !== false || reply.absence_proves_non_commit !== false ||
       reply.session_completeness_established !== false || typeof reply.terminal !== 'boolean') fail('Invalid recovery response.');
   opaque(reply.repository_incarnation, 'repository incarnation'); opaque(reply.principal_id, 'principal');
+  if (pending.binding?.principal && (reply.principal_id !== pending.binding.principal || reply.repository_incarnation !== pending.binding.incarnation)) fail('Notification recovery identity changed.');
   if (!['key_not_observed', 'seal_not_observed', 'undecided', 'committed', 'refused'].includes(reply.state) ||
       reply.terminal !== ['committed', 'refused'].includes(reply.state)) fail('Invalid recovery state.');
   if (reply.transaction !== null) opaque(object(reply.transaction).tx_id, 'transaction');
@@ -375,11 +377,11 @@ export async function readJson(response, signal, maximum = MAX_REPLY_BYTES) {
     await reader.cancel().catch(() => {}); reader.releaseLock();
   }
 }
-function rootFor(href) {
+function rootFor(href, kind = 'issue') {
   const page = new URL(href);
-  const suffix = '/ui/issues/';
+  const suffix = kind === 'notification' ? '/ui/notifications/' : '/ui/issues/';
   if (page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix) ||
-      !['https:', 'http:'].includes(page.protocol)) fail('Open the exact repository /ui/issues/ endpoint.');
+      !['https:', 'http:'].includes(page.protocol)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['127.0.0.1', '[::1]', 'localhost'].includes(page.hostname)) {
     fail('Use HTTPS, except on a trusted loopback host.');
   }
@@ -401,23 +403,26 @@ function httpError(status) {
 
 export class IssueClient {
   #root; #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #pending = null;
-  #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout; #milestone;
+  #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout; #profile;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
-  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }, milestoneProfile = null) {
-    // Repository-owned MilestoneClient shares the exact custody/transport path.
+  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }, metadataProfile = null) {
+    // Repository-owned metadata clients share the exact custody/transport path.
     // This closed code profile never comes from a receipt or remote response;
     // it cannot choose an origin, route, recovery endpoint or key namespace.
-    if (milestoneProfile !== null && (!Object.isFrozen(milestoneProfile) ||
-        Object.keys(milestoneProfile).length !== 4 || !own(milestoneProfile, 'kind') || milestoneProfile.kind !== 'milestone' ||
-        !['mutationRequest', 'page', 'history'].every(key => own(milestoneProfile, key)) ||
-        !['mutationRequest', 'page', 'history'].every(key => typeof milestoneProfile[key] === 'function'))) {
+    if (metadataProfile !== null && (!Object.isFrozen(metadataProfile) ||
+        Object.keys(metadataProfile).length !== 4 || !own(metadataProfile, 'kind') || !['milestone', 'notification'].includes(metadataProfile.kind) ||
+        !['mutationRequest', 'page', 'history'].every(key => own(metadataProfile, key)) ||
+        !['mutationRequest', 'page', 'history'].every(key => typeof metadataProfile[key] === 'function'))) {
       fail('Invalid native metadata client profile.');
     }
-    this.#milestone = milestoneProfile;
-    this.#root = rootFor(href); this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
+    this.#profile = metadataProfile;
+    this.#root = rootFor(href, this.#profile?.kind); this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = natural(timeoutMs, 'request timeout', 1, 300_000);
   }
+  get #kind() { return this.#profile?.kind ?? 'issue'; }
+  get #family() { return this.#kind === 'notification' ? 'notifications' : this.#kind === 'milestone' ? 'milestones' : 'issues'; }
+  get #keyPrefix() { return this.#kind === 'notification' ? 'fgni' : this.#kind === 'milestone' ? 'fgmi' : 'fgui'; }
   get connected() { return Boolean(this.#token); }
   get busy() { return this.#busy; }
   get pending() {
@@ -482,7 +487,10 @@ export class IssueClient {
       if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
     }
   }
-  async read(number = null, { after = 0, limit = 20, head = null, render = false } = {}) {
+  async read(number = null, { after = 0, limit = 20, head = null, render = false, unreadOnly = false, includeMuted = false } = {}) {
+    if (typeof unreadOnly !== 'boolean' || typeof includeMuted !== 'boolean' ||
+        (this.#kind !== 'notification' && (unreadOnly || includeMuted)) ||
+        (this.#kind === 'notification' && (render || (number !== null && (after !== 0 || unreadOnly || includeMuted))))) fail('Invalid inbox read options.');
     if (typeof render !== 'boolean') fail('Rendering must be explicitly enabled or disabled.');
     natural(after, 'page cursor'); natural(limit, 'page limit', 1, 100);
     if (number !== null) natural(number, 'issue number', 1);
@@ -491,10 +499,13 @@ export class IssueClient {
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
     if (render) query.set('render', 'html_safe');
-    const family = this.#milestone ? 'milestones' : 'issues';
+    if (this.#kind === 'notification' && number === null) {
+      query.set('unread_only', String(unreadOnly)); query.set('include_muted', String(includeMuted));
+    }
+    const family = this.#family;
     const raw = await this.#request(`${family}${number === null ? '' : `/${number}`}?${query}`, { view: true, historyReply: number !== null });
-    const options = { after, limit, head, binding: this.#binding };
-    const page = this.#milestone?.page ?? issuePage, history = this.#milestone?.history ?? issueHistory;
+    const options = { after, limit, head, binding: this.#binding, unreadOnly, includeMuted };
+    const page = this.#profile?.page ?? issuePage, history = this.#profile?.history ?? issueHistory;
     const checked = number === null ? page(raw, options) : history(raw.reply, number, options);
     if (number !== null && raw.status === 404 && checked.reply.found) fail('Issue presence and HTTP status disagree.');
     this.#binding = checked.binding;
@@ -503,7 +514,7 @@ export class IssueClient {
   // POST is a bounded read, not a publication. It must never attach the
   // pending change's key, mark it sent, or spend mutation retry responsibility.
   async search(input = {}, options = {}) {
-    if (this.#milestone) fail('Milestone search is not supported by this native profile.');
+    if (this.#profile) fail('Milestone search is not supported by this native profile.');
     const query = issueSearchQuery(input), parameters = searchParameters(options);
     const { after, limit, head, maxScan } = parameters;
     const body = new URLSearchParams({ state: query.state ?? 'all',
@@ -524,16 +535,16 @@ export class IssueClient {
       request.number, request.expected_version, request.action, request.body];
     // Keep every legacy issue key byte unchanged. Milestone requests add both
     // an independent digest domain and a distinct public key prefix.
-    const message = JSON.stringify(this.#milestone ? ['frankengit-milestone-request-v1', ...fields] : fields);
+    const message = JSON.stringify(this.#profile ? [`frankengit-${this.#kind}-request-v1`, ...fields] : fields);
     const digest = await this.#crypto.subtle.digest('SHA-256', encoder.encode(message));
-    return `${this.#milestone ? 'fgmi' : 'fgui'}-${nonce}-${asHex(new Uint8Array(digest))}`;
+    return `${this.#keyPrefix}-${nonce}-${asHex(new Uint8Array(digest))}`;
   }
   async stage(number, version, action, fields, expectedBinding = null) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     if (this.#pending || this.#busy) fail('Resolve or discard the existing prepared change first.');
-    const request = (this.#milestone?.mutationRequest ?? mutationRequest)(number, version, action, fields);
     const epoch = this.#epoch, fingerprint = this.#fingerprint;
     let binding = this.binding;
+    if (this.#kind === 'notification' && (!binding || expectedBinding !== null)) fail('Read your notification identity before preparing a preference change.');
     if (expectedBinding !== null) {
       // An offline intent may constrain its expected destination without a read.
       // This is not an observed repository or a grant: it only tightens reply
@@ -545,6 +556,7 @@ export class IssueClient {
       if (binding && (binding.tenant !== expectedBinding.tenant || binding.repository !== expectedBinding.repository)) fail('Expected issue repository differs from the observed binding.');
       binding = clone(expectedBinding);
     }
+    const request = (this.#profile?.mutationRequest ?? mutationRequest)(number, version, action, fields, binding);
     this.#busy = true;
     try {
       const nonce = asHex(this.#crypto.getRandomValues(new Uint8Array(16)));
@@ -562,20 +574,27 @@ export class IssueClient {
     if (!this.#pending) fail('No prepared change.');
     // Once a receipt leaves this page, another session may dispatch it.
     this.#pending.exported = true;
-    return JSON.stringify({ schema: this.#milestone ? 'frankengit-milestone-retry-v1' : 'frankengit-issue-retry-v1', origin: this.#root.origin, route: this.#root.route,
+    return JSON.stringify({ schema: `frankengit-${this.#kind}-retry-v1`, origin: this.#root.origin, route: this.#root.route,
       request: this.#pending }, null, 2);
   }
   async restoreReceipt(serialized) {
     if (!this.connected || this.#pending || this.#busy) fail('Connect first and resolve any existing change.');
     text(serialized, MAX_RECEIPT_BYTES, 'recovery receipt');
     const receipt = object(JSON.parse(serialized)), request = object(receipt.request);
-    const schema = this.#milestone ? 'frankengit-milestone-retry-v1' : 'frankengit-issue-retry-v1';
-    const keyPattern = this.#milestone ? /^fgmi-[0-9a-f]{32}-[0-9a-f]{64}$/ : /^fgui-[0-9a-f]{32}-[0-9a-f]{64}$/;
+    const schema = `frankengit-${this.#kind}-retry-v1`;
+    const keyPattern = new RegExp(`^${this.#keyPrefix}-[0-9a-f]{32}-[0-9a-f]{64}$`);
     if (receipt.schema !== schema || receipt.origin !== this.#root.origin || receipt.route !== this.#root.route ||
         request.credential_fingerprint !== this.#fingerprint || typeof request.key !== 'string' || !keyPattern.test(request.key)) {
       fail('Recovery receipt does not belong to this repository and credential.');
     }
-    const checked = (this.#milestone?.mutationRequest ?? mutationRequest)(request.number, request.expected_version, request.action, object(request.fields));
+    if (this.#kind === 'notification') {
+      object(request.binding);
+      const keys = ['tenant', 'repository', 'principal', 'incarnation'];
+      if (Object.keys(request.binding).length !== keys.length || keys.some(key =>
+          typeof request.binding[key] !== 'string' || !/^[0-9a-f]{32}$/.test(request.binding[key]) ||
+          (this.#binding && this.#binding[key] !== request.binding[key]))) fail('Notification recovery identity changed.');
+    }
+    const checked = (this.#profile?.mutationRequest ?? mutationRequest)(request.number, request.expected_version, request.action, object(request.fields), request.binding);
     if (request.body !== checked.body) fail('Recovery receipt has a mismatched request body.');
     if (request.binding !== null) {
       object(request.binding); opaque(request.binding.tenant, 'tenant'); opaque(request.binding.repository, 'repository');
@@ -600,10 +619,10 @@ export class IssueClient {
     this.#busy = true;
     const pending = this.#pending; pending.sent = true;
     try {
-      const raw = await this.#request(`${this.#milestone ? 'milestones' : 'issues'}/${pending.number}/${pending.action}`, {
+      const raw = await this.#request(`${this.#family}/${pending.number}/${pending.action}`, {
         method: 'POST', body: pending.body, key: pending.key, maximum: 16 * 1024, terminalReply: true,
       });
-      const terminal = publication(raw.reply, pending, raw.status, this.#milestone ? 'milestone' : 'issue');
+      const terminal = publication(raw.reply, pending, raw.status, this.#kind);
       this.#pending = null;
       return terminal;
     } catch (error) { error.outcomeUnknown = true; throw error; }

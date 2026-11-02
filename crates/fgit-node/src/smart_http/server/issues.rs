@@ -3,6 +3,7 @@
 //! exact-version decisions and retry recovery. No HTTP-local issue state exists.
 
 mod milestones;
+mod notifications;
 mod output;
 mod rendered;
 mod request;
@@ -221,7 +222,17 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    if !profile.allow_issues() || !grant.permits_issues(request.is_mutation()) {
+    let allowed = if matches!(
+        request.operation,
+        Operation::NotificationList { .. }
+            | Operation::NotificationShow { .. }
+            | Operation::NotificationMutate { .. }
+    ) {
+        grant.permits_notifications(request.is_mutation())
+    } else {
+        grant.permits_issues(request.is_mutation())
+    };
+    if !profile.allow_issues() || !allowed {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
@@ -386,7 +397,60 @@ pub(super) fn execute(
                 terminal: None,
             })
         }
-        Operation::Mutate { .. } | Operation::MilestoneMutate { .. } => {
+        Operation::NotificationList {
+            page,
+            unread_only,
+            include_muted,
+        } => {
+            let result = drive_request_while(
+                node,
+                &context,
+                node.read_notification_inbox_in(
+                    &context,
+                    session,
+                    page.after,
+                    page.limit,
+                    page.expected_head,
+                    *unread_only,
+                    *include_muted,
+                ),
+                &mut live,
+            )
+            .map_err(notifications::read_error)?;
+            Ok(Reply {
+                status: Status::Success,
+                body: notifications::list(
+                    node,
+                    *page,
+                    *unread_only,
+                    *include_muted,
+                    &result,
+                    maximum,
+                )?,
+                terminal: None,
+            })
+        }
+        Operation::NotificationShow { number, page } => {
+            let result = drive_request_while(
+                node,
+                &context,
+                node.read_notification_thread_in(&context, session, *number, page.expected_head),
+                &mut live,
+            )
+            .map_err(notifications::read_error)?;
+            Ok(Reply {
+                status: if result.threads.is_empty() {
+                    Status::NotFound
+                } else {
+                    Status::Success
+                },
+                body: notifications::show(node, *number, *page, &result, maximum)?,
+                terminal: None,
+            })
+        }
+        Operation::Mutate { .. }
+        | Operation::MilestoneMutate { .. }
+        | Operation::NotificationMutate { .. } => {
             let command = command.ok_or_else(|| ApiError::bad("missing_command"))?;
             let result = match &command {
                 Command::Versioned(command) => {
@@ -422,6 +486,33 @@ pub(super) fn execute(
                             &context,
                             session,
                             command,
+                            Default::default(),
+                        ),
+                        &mut live,
+                    )
+                }
+                Command::Notification(command) => {
+                    // Equality guards constrain the authenticated identity;
+                    // neither field can select another recipient.
+                    if command.expected_principal != principal
+                        || command.expected_incarnation != node.repository_incarnation_id
+                    {
+                        return Err(ApiError::new(
+                            Status::Conflict,
+                            "notification_identity_changed",
+                        ));
+                    }
+                    command
+                        .canonical
+                        .proposed_event(principal)
+                        .map_err(|_| ApiError::bad("invalid_notification_command"))?;
+                    drive_request_while(
+                        node,
+                        &context,
+                        node.admit_notification_durable_in(
+                            &context,
+                            session,
+                            &command.canonical,
                             Default::default(),
                         ),
                         &mut live,
