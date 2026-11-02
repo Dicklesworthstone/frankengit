@@ -144,6 +144,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     await emit(stdout, result); return exit(result);
   } catch (error) {
     try { await emit(stderr, { type: 'source_edit_error', code: error.code ?? 'source_edit_operation_failed', location: location ?? null,
+      http_status: Number.isInteger(error.status) && error.status >= 100 && error.status <= 599 ? error.status : null,
       ...(result ? { retained_result: result } : {}), ...(error.retained_request ? { retained_request: error.retained_request } : {}),
       ...(error.publication_unconfirmed ? { publication_unconfirmed: error.publication_unconfirmed } : {}), submission_retried: false }); }
     catch { /* Original files and independently retained hashes still identify custody. */ }
