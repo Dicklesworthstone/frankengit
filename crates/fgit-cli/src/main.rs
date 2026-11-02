@@ -11,9 +11,10 @@ mod fsck;
 mod guarded_git_server;
 mod import_command;
 mod issues;
-mod milestones;
 mod mcp;
 mod merge_apply;
+mod milestones;
+mod notification_commands;
 mod patch_command;
 mod protection;
 mod publication_support;
@@ -458,6 +459,18 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
     }
     if arguments
         .first()
+        .is_some_and(|argument| argument == "inbox")
+    {
+        return match notification_commands::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "issue")
     {
         return match issues::run(&arguments[1..]) {
@@ -788,6 +801,32 @@ mod operator_subcommand_dispatch_tests {
 
     fn vec_args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn inbox_dispatches_its_complete_native_command_family() {
+        assert_eq!(
+            run_subcommand(&vec_args(&["inbox", "--help"])),
+            ExitCode::SUCCESS
+        );
+        for action in [
+            "list",
+            "show",
+            "subscribe",
+            "mute",
+            "automatic",
+            "read",
+            "unread",
+        ] {
+            assert_eq!(
+                run_subcommand(&vec_args(&["inbox", action, "--help"])),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(
+                run_subcommand(&vec_args(&["inbox", action])),
+                ExitCode::from(2)
+            );
+        }
     }
 
     #[test]

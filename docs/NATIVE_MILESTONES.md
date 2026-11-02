@@ -178,8 +178,10 @@ uses an explicit source/destination map, issue capture v3 and a versioned phased
 migration plan. It creates all mapped milestones, imports current issue
 membership, and then closes source-closed milestones. Original source actors and
 versions remain attribution; the destination admits new ordinary commands.
-Dedicated browser milestone controls, standalone discussions,
-notification preferences and inbox delivery are separate remaining product work.
+Dedicated browser milestone controls and standalone discussions remain separate
+product work. [Native issue notifications](NATIVE_NOTIFICATIONS.md) now provide
+principal-owned preferences and a selected-source issue inbox; email delivery
+and PR notifications remain outside that profile.
 
 The `native_milestones` CLI integration target and discovered
 `scripts/e2e/suites/forge/milestones.sh` campaign run actual `fg` processes for both

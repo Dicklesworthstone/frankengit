@@ -276,6 +276,20 @@ and MCP retain their existing independent issue-write grants. Retrying an
 identical command recovers its original terminal outcome even if the issue is
 subsequently locked or unlocked.
 
+### Native issue notifications
+
+Each principal can subscribe to, mute, or follow issue participation, and mark an
+explicit observed prefix read or unread. The browser, authenticated HTTP API,
+`fg inbox` and MCP use canonical preference events and the same selected-source
+inbox. Pages retain their authenticated snapshot across intervening writes;
+marking version N read leaves later activity unread. HTTP preference writes need
+both issue disclosure and the independent notification-write grant, plus exact
+principal/incarnation guards. Preferences remain private to their recipient and
+are excluded from shared repository event feeds and webhook delivery. See
+[native notifications](docs/NATIVE_NOTIFICATIONS.md) for commands, recovery,
+source limits and validation scope. This implements issue inboxes; email delivery
+and PR notifications remain separate work.
+
 ### Native merge queues
 
 `fg queue enqueue|dequeue|reorder|show|list` manages durable queue membership and

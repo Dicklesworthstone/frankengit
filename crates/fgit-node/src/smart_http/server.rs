@@ -1389,6 +1389,8 @@ fn serve_connection(
             || source_api
             || pull_api
             || milestone_api
+            || envelope.target.split('?').next()
+                .is_some_and(|path| path.contains("/api/v1/notifications"))
             || envelope
                 .target
                 .split('?')

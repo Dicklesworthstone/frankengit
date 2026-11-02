@@ -14,6 +14,7 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 mod locking;
 mod milestones;
+mod notifications;
 const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"write-test","version":"1"}}}"#;
 const READY: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
 struct Fixture {
@@ -322,7 +323,7 @@ fn canonical_issue_lifecycle_retries_refusals_and_recovery_survive_reopen_in_bot
 fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     let f = Fixture::new(GitHashAlgorithm::Sha256);
     let mut writer = NodeTools::open(f.options(true, false, false, 0xa3)).unwrap();
-    assert_eq!(writer.tools().len(), 10);
+    assert_eq!(writer.tools().len(), 16); // twelve issue and four milestone writes; no read grants
     for name in [
         "frankengit_issue_assign",
         "frankengit_issue_unassign",

@@ -127,11 +127,13 @@ impl CapabilityRequirement {
     pub const PREPARE_PUBLICATION: Self = Self("prepare_publication");
     pub const SUBMIT_EVIDENCE: Self = Self("submit_evidence");
     pub const MUTATE_FORGE_ENTITY: Self = Self("mutate_forge_entity");
+    /// Independent self-preference MCP grant; grants no issue or native agent write class.
+    pub const MUTATE_NOTIFICATION_PREFERENCE: Self = Self("mutate_notification_preference");
     pub const DELEGATE_SUB_INTENT: Self = Self("delegate_sub_intent");
     pub const CONSUME_BUDGET: Self = Self("consume_budget");
 
     /// All valid capability strings.
-    pub const ALL_VALID: [&'static str; 15] = [
+    pub const ALL_VALID: [&'static str; 16] = [
         "read_canonical_object",
         "read_derived_generation",
         "read_agent_context",
@@ -145,6 +147,7 @@ impl CapabilityRequirement {
         "prepare_publication",
         "submit_evidence",
         "mutate_forge_entity",
+        "mutate_notification_preference",
         "delegate_sub_intent",
         "consume_budget",
     ];

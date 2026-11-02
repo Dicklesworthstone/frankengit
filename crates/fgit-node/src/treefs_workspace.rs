@@ -21,12 +21,14 @@ pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
 mod events;
 mod issues;
 mod milestones;
+mod notifications;
 mod protection;
 mod publication;
 mod pull_request;
 mod queue;
 pub use issues::IssueReadRefusal;
 pub use milestones::MilestoneReadRefusal;
+pub use notifications::{NotificationInboxPage, NotificationReadRefusal, NotificationThreadView};
 pub use pull_request::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,

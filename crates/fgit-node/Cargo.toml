@@ -23,6 +23,7 @@ fgit-graph.workspace = true
 fgit-identity.workspace = true
 fgit-object-fabric.workspace = true
 fgit-pack.workspace = true
+fgit-projection.workspace = true
 fgit-resource.workspace = true
 fgit-schema.workspace = true
 fgit-runtime.workspace = true

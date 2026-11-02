@@ -187,6 +187,18 @@ pub(super) fn mutation(
                 command.action.name(),
             )
         }
+        Command::Notification(command) => {
+            let command = &command.canonical;
+            let expected = match command.expected_version {
+                fgit_forge::ExpectedVersion::NewStream => 0,
+                fgit_forge::ExpectedVersion::Exactly(version) => version.get(),
+            };
+            (
+                command.number.get(),
+                expected.to_string(),
+                super::notifications::action_name(&command.action),
+            )
+        }
     };
     format!(
         concat!(
@@ -195,7 +207,9 @@ pub(super) fn mutation(
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"delivery_acknowledged\":null}}"
         ),
-        quote(if matches!(command, Command::Milestone(_)) {
+        quote(if matches!(command, Command::Notification(_)) {
+            "notification_publication"
+        } else if matches!(command, Command::Milestone(_)) {
             "milestone_publication"
         } else {
             "issue_publication"

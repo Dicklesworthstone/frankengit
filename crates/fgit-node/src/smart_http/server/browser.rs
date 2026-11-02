@@ -27,6 +27,9 @@ const STYLE: &str = include_str!("browser/browser.css");
 const ISSUES_HTML: &str = include_str!("browser/issues.html");
 const ISSUES_CLIENT: &str = include_str!("browser/issues.mjs");
 const ISSUES_VIEW: &str = include_str!("browser/issues-view.mjs");
+const NOTIFICATIONS_HTML: &str = include_str!("browser/notifications.html");
+const NOTIFICATIONS_CLIENT: &str = include_str!("browser/notifications.mjs");
+const NOTIFICATIONS_VIEW: &str = include_str!("browser/notifications-view.mjs");
 
 #[derive(Clone, Copy)]
 enum AssetScope {
@@ -50,6 +53,9 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str, Asse
         b"/ui/browser.mjs" => Some(("text/javascript; charset=utf-8", SCRIPT, AssetScope::Source)),
         b"/ui/browser.css" => Some(("text/css; charset=utf-8", STYLE, AssetScope::Shared)),
         b"/ui/issues/" => Some(("text/html; charset=utf-8", ISSUES_HTML, AssetScope::Issues)),
+        b"/ui/notifications/" => Some(("text/html; charset=utf-8", NOTIFICATIONS_HTML, AssetScope::Issues)),
+        b"/ui/notifications.mjs" => Some(("text/javascript; charset=utf-8", NOTIFICATIONS_CLIENT, AssetScope::Issues)),
+        b"/ui/notifications-view.mjs" => Some(("text/javascript; charset=utf-8", NOTIFICATIONS_VIEW, AssetScope::Issues)),
         b"/ui/issues.mjs" => Some((
             "text/javascript; charset=utf-8",
             ISSUES_CLIENT,

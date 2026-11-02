@@ -898,6 +898,7 @@ dependencies = [
  "fgit-lab",
  "fgit-object-fabric",
  "fgit-pack",
+ "fgit-projection",
  "fgit-reference",
  "fgit-resource",
  "fgit-runner",

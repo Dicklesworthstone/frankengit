@@ -11,6 +11,7 @@ mod issues;
 mod merge_writes;
 mod milestones;
 mod mutations;
+mod notifications;
 mod outcomes;
 pub(super) mod protection;
 mod pull_comments;
@@ -128,6 +129,12 @@ impl NodeTools {
 
 pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     let mut tools = Vec::new();
+    if notifications::read_permitted(options) {
+        tools.extend(notifications::read_tools());
+    }
+    if notifications::write_permitted(options) {
+        tools.extend(notifications::write_tools());
+    }
     tools.extend(queues::tools(options.queues));
     if options.agent_context {
         tools.push(agent_context::tool());
@@ -189,7 +196,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         tenant: fgit_types::TenantId::from_bytes([0x11; 16]),
         repository: fgit_types::RepositoryId::from_bytes([0x22; 16]),
         format: fgit_types::GitHashAlgorithm::Sha1,
-        incarnation: None,
+        incarnation: Some(fgit_types::RepositoryIncarnationId::from_bytes([0x33;16])),
         issues: true,
         pulls: true,
         source: true,
@@ -203,13 +210,14 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         artifact_root: None,
         writes: super::WriteGrants {
             issues: true,
+            notifications: true,
             pulls: true,
             source: true,
             reviews: true,
             merges: true,
         },
         outcomes: true,
-        principal: None,
+        principal: Some(fgit_types::PrincipalId::from_bytes([0x44;16])),
         max_messages: 1,
     };
     let mut names: Vec<&'static str> = tools_for_options(&full_options)
@@ -225,7 +233,8 @@ impl ReadTools for NodeTools {
         tools_for_options(&self.options)
     }
     fn is_mutation(&self, name: &str) -> bool {
-        (self.options.writes.issues && issue_writes::is_tool(name))
+        (notifications::write_permitted(&self.options) && notifications::is_write(name))
+            || (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.issues && milestones::is_write(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.pulls
@@ -244,6 +253,12 @@ impl ReadTools for NodeTools {
                 == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        if notifications::read_permitted(&self.options) && notifications::is_read(name) {
+            return notifications::read(self, name, args);
+        }
+        if notifications::write_permitted(&self.options) && notifications::is_write(name) {
+            return notifications::write(self, name, args);
+        }
         if queues::permitted(self.options.queues, name) {
             return queues::call(self, name, args);
         }
@@ -521,7 +536,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 66);
+        assert_eq!(server_names.len(), 73);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));

@@ -88,6 +88,9 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
+pub use treefs_workspace::{
+    NotificationInboxPage, NotificationReadRefusal, NotificationThreadView,
+};
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{
     PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
@@ -102,8 +105,8 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
-    StreamBundleExportRefusal, StreamBundleReuse,
-    StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
+    StreamBundleExportRefusal, StreamBundleImportQuery, StreamBundleImportRefusal,
+    StreamBundleReuse, StreamIncrementalBundleImportQuery,
 };
 
 use fgit_authority::{

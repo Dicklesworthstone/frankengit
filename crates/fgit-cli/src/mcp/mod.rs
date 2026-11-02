@@ -6,12 +6,13 @@ use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnat
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes --allow-issues]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require --allow-issues\nplus the launch-bound principal and incarnation. Notification writes additionally\nrequire --allow-notification-writes; issue-write permission does not grant them.\nRead acknowledgements supply an explicit observed issue prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
 /// Independent launch-time mutation ceilings. None implies a read/recovery grant.
 #[derive(Clone, Copy, Debug, Default)]
 struct WriteGrants {
     issues: bool,
+    notifications: bool,
     pulls: bool,
     source: bool,
     reviews: bool,
@@ -19,7 +20,12 @@ struct WriteGrants {
 }
 impl WriteGrants {
     const fn any(self) -> bool {
-        self.issues || self.pulls || self.source || self.reviews || self.merges
+        self.issues
+            || self.notifications
+            || self.pulls
+            || self.source
+            || self.reviews
+            || self.merges
     }
 }
 
@@ -94,17 +100,23 @@ impl Options {
                 );
             }
         }
-        let principal_scoped =
-            self.writes.any() || self.queues.mutation() || self.outcomes || self.agent_context;
+        if self.writes.notifications && !self.issues {
+            return Err("--allow-notification-writes also requires --allow-issues for current issue disclosure".into());
+        }
+        let principal_scoped = self.writes.any()
+            || self.queues.mutation()
+            || self.outcomes
+            || self.agent_context
+            || (self.issues && self.principal.is_some());
         if principal_scoped && (self.principal.is_none() || self.incarnation.is_none()) {
             return Err(
-                "writes, recovery and agent context require --principal and --expected-incarnation"
+                "writes, recovery, agent context and personal inbox reads require --principal and --expected-incarnation"
                     .into(),
             );
         }
         if !principal_scoped && self.principal.is_some() {
             return Err(
-                "--principal requires an explicit write, outcome or agent-context grant".into(),
+                "--principal requires an explicit write, outcome, issue-read or agent-context grant".into(),
             );
         }
         Ok(())
@@ -163,6 +175,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             | "--allow-queue-landings"
             | "--allow-agent-context"
             | "--allow-issue-writes"
+            | "--allow-notification-writes"
             | "--allow-pull-writes"
             | "--allow-source-writes"
             | "--allow-review-writes"
@@ -229,6 +242,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             .map(|value| PathBuf::from(*value)),
         writes: WriteGrants {
             issues: flags.contains_key("--allow-issue-writes"),
+            notifications: flags.contains_key("--allow-notification-writes"),
             pulls: flags.contains_key("--allow-pull-writes"),
             source: flags.contains_key("--allow-source-writes"),
             reviews: flags.contains_key("--allow-review-writes"),

@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 70,
+  "total_tools": 77,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -124,6 +124,76 @@
       "capability": "prepare_publication",
       "cli_command": "",
       "rest_api_path": ""
+    },
+    {
+      "tool": "frankengit_inbox_automatic",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_notification_preference",
+      "cli_command": "fg inbox automatic",
+      "rest_api_path": "POST /{repository}/api/v1/notifications/{number}/automatic"
+    },
+    {
+      "tool": "frankengit_inbox_list",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg inbox list",
+      "rest_api_path": "GET /{repository}/api/v1/notifications"
+    },
+    {
+      "tool": "frankengit_inbox_mute",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_notification_preference",
+      "cli_command": "fg inbox mute",
+      "rest_api_path": "POST /{repository}/api/v1/notifications/{number}/mute"
+    },
+    {
+      "tool": "frankengit_inbox_read",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_notification_preference",
+      "cli_command": "fg inbox read",
+      "rest_api_path": "POST /{repository}/api/v1/notifications/{number}/read"
+    },
+    {
+      "tool": "frankengit_inbox_show",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg inbox show",
+      "rest_api_path": "GET /{repository}/api/v1/notifications/{number}"
+    },
+    {
+      "tool": "frankengit_inbox_subscribe",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_notification_preference",
+      "cli_command": "fg inbox subscribe",
+      "rest_api_path": "POST /{repository}/api/v1/notifications/{number}/subscribe"
+    },
+    {
+      "tool": "frankengit_inbox_unread",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_notification_preference",
+      "cli_command": "fg inbox unread",
+      "rest_api_path": "POST /{repository}/api/v1/notifications/{number}/unread"
     },
     {
       "tool": "frankengit_issue_append_comment",

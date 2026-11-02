@@ -46,6 +46,19 @@ pub enum Operation<'a> {
         number: MilestoneNumber,
         action: &'a str,
     },
+    NotificationList {
+        page: Page,
+        unread_only: bool,
+        include_muted: bool,
+    },
+    NotificationShow {
+        number: IssueNumber,
+        page: Page,
+    },
+    NotificationMutate {
+        number: IssueNumber,
+        action: &'a str,
+    },
 }
 
 /// Keep versioned mutations and append-only intents distinct through admission
@@ -55,6 +68,7 @@ pub(super) enum Command {
     Versioned(IssueCommand),
     AppendComment(IssueCommentIntent),
     Milestone(fgit_forge::event::milestone::MilestoneCommand),
+    Notification(super::notifications::BoundNotificationCommand),
 }
 
 #[derive(Debug)]
@@ -70,7 +84,10 @@ impl<'a> Request<'a> {
             .split_once('?')
             .map_or((head.target, None), |(p, q)| (p, Some(q)));
         let Some((repository_route, suffix)) = path.split_once("/api/v1/issues") else {
-            return super::milestones::parse(head);
+            return match super::milestones::parse(head)? {
+                Some(request) => Ok(Some(request)),
+                None => super::notifications::parse(head),
+            };
         };
         if repository_route.len() < 2
             || !repository_route.starts_with('/')
@@ -156,18 +173,26 @@ impl<'a> Request<'a> {
     pub(crate) const fn is_mutation(&self) -> bool {
         matches!(
             self.operation,
-            Operation::Mutate { .. } | Operation::MilestoneMutate { .. }
+            Operation::Mutate { .. }
+                | Operation::MilestoneMutate { .. }
+                | Operation::NotificationMutate { .. }
         )
     }
 
     pub(crate) const fn accepts_body(&self) -> bool {
         matches!(
             self.operation,
-            Operation::Search | Operation::Mutate { .. } | Operation::MilestoneMutate { .. }
+            Operation::Search
+                | Operation::Mutate { .. }
+                | Operation::MilestoneMutate { .. }
+                | Operation::NotificationMutate { .. }
         )
     }
 
     pub(super) fn command(&self, body: &[u8]) -> Result<Command, ApiError> {
+        if let Operation::NotificationMutate { number, action } = self.operation {
+            return super::notifications::command(number, action, body).map(Command::Notification);
+        }
         if let Operation::MilestoneMutate { number, action } = self.operation {
             return super::milestones::command(number, action, body).map(Command::Milestone);
         }

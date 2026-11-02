@@ -779,6 +779,8 @@ mod append_comment;
 mod assignment;
 #[path = "issue_http/milestones.rs"]
 mod milestones;
+#[path = "issue_http/notifications.rs"]
+mod notifications;
 #[path = "issue_http/rendering.rs"]
 mod rendering;
 #[path = "issue_http/snapshots.rs"]
