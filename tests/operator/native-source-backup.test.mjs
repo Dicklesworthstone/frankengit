@@ -25,7 +25,7 @@ async function fixture(t) {
   // Copy the exact entry point and production helpers. The legacy backend is
   // an import sentinel, so a native run must not load or retry that decoder.
   for (const file of ['scripts/verify_git_bundle.mjs', 'scripts/lib/native-bundle-verifier.mjs',
-    'scripts/lib/source-attestation.mjs', 'scripts/lib/source-attestation-options.mjs']) {
+    'scripts/lib/native-process-owner.mjs', 'scripts/lib/source-attestation.mjs', 'scripts/lib/source-attestation-options.mjs']) {
     const output = join(path, file); await mkdir(dirname(output), { recursive: true }); await copyFile(join(root, file), output);
   }
   const legacy = join(path, 'crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs');
