@@ -13,8 +13,9 @@ Outcome recovery additionally requires its existing endpoint switch.
 List issues and page their canonical event history at one explicit snapshot.
 Open an issue with an explicit number and version zero. Select an existing issue
 to prepare a comment without an expected version; the browser uses the explicit
-`append-comment` intent so concurrent commenters can all publish. Field edits,
-assignment changes, close, reopen, lock and unlock still require the exact displayed version.
+`append-comment` intent so concurrent commenters can all publish. Adding
+assignees also uses a version-independent intent. Field edits, assignee removal,
+close, reopen, lock and unlock still require the exact displayed version.
 Title, body and labels can be replaced independently; an explicitly selected
 empty label replacement clears the set. Preparation makes no HTTP mutation.
 Inspect the prepared request, save its private recovery receipt, and send it
@@ -22,10 +23,13 @@ explicitly. Later editor changes cannot change the prepared body or retry key.
 Native text is inert, not executable HTML or rendered Markdown. UTF-8 limits,
 exact safe integers, response byte budgets and snapshot continuity are checked.
 
-Issue details display the assigned principal IDs. **Add assignees** and
-**Remove assignees** prepare an exact-version metadata delta. Enter one
-32-character lowercase hexadecimal principal ID per line, up to 16 distinct
-IDs. Adding preserves other assignments; removing changes only the named IDs.
+Issue details display the assigned principal IDs. **Add assignees** prepares an
+`add-assignees` request without an expected version. Independent additions
+preserve each other's assignments and unrelated edits. The current union must
+still fit the 16-assignee bound; a competing addition can consume the last slot
+before publication. **Remove assignees** prepares an exact-version metadata
+delta. Enter one 32-character lowercase hexadecimal principal ID per line, up
+to 16 distinct IDs. Removing changes only the named IDs.
 The removal editor is prefilled with the current set so it can be narrowed
 before preparation. Assignments confer no repository access or membership.
 As with comments, preparing, saving a receipt and explicitly sending are
@@ -61,8 +65,15 @@ exported or restored request cannot be discarded as definitely unsent. Recovery
 requires the original token; operators must not reassign it to another principal.
 Existing saved `comment` receipts retain their exact version, original route,
 body and key. Restoring or retrying them never converts them to `append-comment`.
-New append receipts have `expected_version: null`; changing either profile in a
-saved receipt fails the original request commitment check.
+Existing saved `assign` and `unassign` receipts likewise keep their exact version,
+original route, body and key. They are never converted to `add-assignees`.
+New append and additive-assignee receipts have `expected_version: null`;
+changing a profile in a saved receipt fails the original request commitment
+check. Additive-assignee terminal replies must identify
+`command_profile: "issue.add-assignees.v1"`. Retrying an old successful addition
+after a later removal recovers the original result and does not add the removed
+principal again. A capacity refusal also remains the original refusal after
+capacity is freed; a new attempt requires a new prepared request and key.
 
 Tokens live only in page memory. Disconnect clears tokens, visible data and
 editors while retaining an unresolved token-free request for recovery. No
@@ -71,10 +82,12 @@ requests are used. HTTPS is required except on trusted loopback origins.
 
 ## Validation
 
-Run `node --test tests/browser/issues-native.test.mjs tests/browser/issues-view.test.mjs`.
-The 27 tests passed locally when landing the initial workflow; they use explicit
-DOM/fetch doubles, not a live authority service. Added Rust asset tests cover
-independent profile switches, exact routes, framing refusals and response bounds.
-Rust/Cargo was unavailable in the implementation environment, so Rust compilation,
-workspace gates, actual browser rendering and live-node acceptance remain unverified.
+Run `node --test tests/browser/issues-native.test.mjs tests/browser/issues-assignees.test.mjs tests/browser/issues-view.test.mjs`.
+These focused client/controller tests cover saved legacy request identity,
+additive intent preparation, typed terminal replies and response-loss recovery
+after a later removal. They use explicit DOM/fetch doubles and do not establish
+live-browser interoperability. Rust asset tests separately cover independent
+profile switches, exact routes, framing refusals and response bounds. The native
+`scripts/e2e/suites/node/issue_assignees.sh` campaign exercises concurrent HTTP
+additions and persisted recovery with a prebuilt `FG_BIN`.
 Related integration bridge: `frankengit-asa3`.

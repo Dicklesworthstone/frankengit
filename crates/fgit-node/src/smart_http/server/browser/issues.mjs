@@ -88,16 +88,17 @@ export function issueAction(name, fields) {
 export function mutationRequest(number, version, action, fields) {
   natural(number, 'issue number', 1);
   const append = action === 'append-comment';
-  if (append) {
-    if (version !== null) fail('Appending a comment has no expected version.');
+  const addAssignees = action === 'add-assignees';
+  if (append || addAssignees) {
+    if (version !== null) fail(append ? 'Appending a comment has no expected version.' : 'Adding assignees has no expected version.');
   } else {
     natural(version, 'expected issue version', 0, Number.MAX_SAFE_INTEGER - 1);
     if ((action === 'open') !== (version === 0)) fail('Only a new issue uses expected version zero.');
   }
-  // Append is an intent profile; canonical history still contains Comment
-  // events. Legacy exact-version comment receipts retain their original bytes.
-  const checked = issueAction(append ? 'comment' : action, fields);
-  const form = new URLSearchParams(append ? {} : { expected_version: String(version) });
+  // These intent profiles still publish canonical Comment and Assign events.
+  // Legacy exact-version receipts retain their original request and key bytes.
+  const checked = issueAction(append ? 'comment' : addAssignees ? 'assign' : action, fields);
+  const form = new URLSearchParams(append || addAssignees ? {} : { expected_version: String(version) });
   for (const name of ['title', 'body']) if (own(checked, name)) form.append(name, checked[name]);
   if (checked.labels) {
     for (const label of checked.labels) form.append('label', label);
@@ -311,6 +312,10 @@ export function publication(reply, pending, status = 200, entity = 'issue') {
   if (!['issue', 'milestone', 'notification'].includes(entity)) fail('Unsupported publication profile.');
   identity(reply, pending.binding);
   if (entity === 'notification' && pending.binding?.principal && reply.principal_id !== pending.binding.principal) fail('Notification principal changed.');
+  if (entity === 'issue' && pending.action === 'add-assignees' &&
+      (pending.expected_version !== null || reply.command_profile !== 'issue.add-assignees.v1')) {
+    fail('Unrecognized additive assignee publication profile.');
+  }
   if (reply.type !== `${entity}_publication` || reply.number !== pending.number ||
       reply.expected_version !== pending.expected_version || reply.action !== pending.action ||
       !['committed', 'refused'].includes(reply.outcome) || reply.delivery_acknowledged !== null) {

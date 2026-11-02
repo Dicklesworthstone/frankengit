@@ -187,27 +187,59 @@ test('edit checkboxes preserve omitted fields and explicitly clear empty labels'
   await h.prepare('edit'); const form = new URLSearchParams(h.client.pending.body);
   assert.equal(form.has('title'), false); assert.equal(form.has('body'), false); assert.equal(form.get('clear_labels'), 'true');
 });
-test('assignment controls display principals and publish the prepared exact-version delta', async () => {
+test('assignment controls add principals without an expected version and keep removals strict', async () => {
   const a = '11'.repeat(16), b = '22'.repeat(16);
   const detail = history({ issue: state(1, { assignees: [a] }) });
-  const h = harness(call => json(call.method === 'POST' ? committed({ action: 'assign', expected_version: 1 }) : call.url.includes('/issues?') ? page() : detail));
+  const h = harness(call => json(call.method === 'POST' ? committed({ action: 'add-assignees', command_profile: 'issue.add-assignees.v1' })
+    : call.url.includes('/issues?') ? page() : detail));
   await h.connect(); click(h.elements['issue-content'], '#1 <img onerror=alert(1)>'); await settled();
   assert.ok(h.elements['issue-content'].textContent.includes(`Assigned principals: ${a}`));
   click(h.elements['issue-content'], 'Remove assignees');
   assert.equal(h.elements['change-assignees'].value, a);
+  assert.equal(h.elements['change-version'].value, '1');
+  assert.equal(h.elements['change-version'].disabled, false); assert.equal(h.elements['change-version'].required, true);
+  await h.elements['issue-change'].fire('submit');
+  assert.equal(h.client.pending.action, 'unassign'); assert.equal(h.client.pending.body, `expected_version=1&assignee=${a}`);
+  h.elements['discard-change'].fire('click'); assert.equal(h.client.pending, null);
   click(h.elements['issue-content'], 'Add assignees');
+  assert.equal(h.elements['change-action'].value, 'add-assignees');
   assert.equal(h.elements['change-assignees'].value, '');
   assert.equal(h.elements['assignees-field'].hidden, false);
   assert.equal(h.elements['body-field'].hidden, true);
-  assert.equal(h.elements['change-version'].value, '1');
-  assert.equal(h.elements['change-version'].disabled, false); assert.equal(h.elements['change-version'].required, true);
+  assert.equal(h.elements['change-version'].value, '');
+  assert.equal(h.elements['change-version'].disabled, true); assert.equal(h.elements['change-version'].required, false);
+  h.elements['change-version'].value = 'a stale version must not constrain additions';
   h.elements['change-assignees'].value = `${b}\n${a}`;
   await h.elements['issue-change'].fire('submit');
   assert.equal(h.calls.length, 2);
+  assert.equal(h.client.pending.expected_version, null);
+  assert.match(h.elements['prepared-summary'].textContent, /add-assignees · no expected version/);
   h.elements['change-assignees'].value = 'ff'.repeat(16);
   h.elements['send-change'].fire('click'); await settled();
   assert.deepEqual(new URLSearchParams(h.calls[2].body).getAll('assignee'), [a, b]);
-  assert.ok(h.calls[2].url.endsWith('/issues/1/assign'));
+  assert.equal(new URLSearchParams(h.calls[2].body).has('expected_version'), false);
+  assert.ok(h.calls[2].url.endsWith('/issues/1/add-assignees'));
+  assert.match(h.elements['issue-status'].textContent, /^Committed/);
+});
+for (const lifecycle of ['open', 'closed']) test(`locked ${lifecycle} issue still permits version-independent assignee additions`, async () => {
+  const events = [...history().events, { version: 2, actor, action: { name: 'lock' } }];
+  if (lifecycle === 'closed') events.push({ version: 3, actor, action: { name: 'close' } });
+  const issue = state(1, { version: events.length, state: lifecycle, locked: true });
+  const h = harness(call => json(call.method === 'POST'
+    ? committed({ action: 'add-assignees', command_profile: 'issue.add-assignees.v1' })
+    : call.url.includes('/issues?') ? page({ issues: [issue] }) : history({ issue, events })));
+  await h.connect(); await h.read(1);
+  assert.equal(buttons(h.elements['issue-content']).find(button => button.textContent === 'Comment').disabled, true);
+  assert.equal(buttons(h.elements['issue-content']).find(button => button.textContent === 'Add assignees').disabled, false);
+  click(h.elements['issue-content'], 'Add assignees');
+  assert.equal(h.elements['prepare-change'].disabled, false); assert.equal(h.elements['change-version'].disabled, true);
+  assert.equal(h.elements['assignees-field'].hidden, false);
+  h.elements['change-assignees'].value = actor;
+  await h.elements['issue-change'].fire('submit');
+  assert.equal(h.client.pending.action, 'add-assignees'); assert.equal(h.client.pending.body, `assignee=${actor}`);
+  assert.equal(h.calls.length, 2);
+  h.elements['send-change'].fire('click'); await settled();
+  assert.ok(h.calls[2].url.endsWith('/issues/1/add-assignees')); assert.equal(h.client.pending, null);
   assert.match(h.elements['issue-status'].textContent, /^Committed/);
 });
 test('close and reopen prepare no title, body or label replacements', async () => {

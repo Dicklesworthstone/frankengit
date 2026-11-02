@@ -10,7 +10,7 @@
   <header><strong>FrankenGit</strong><span>Issue collaboration</span><a href="../notifications/">Inbox</a><a href="../">Source browser</a></header>
   <main>
     <h1>Repository issues</h1>
-    <p>Read issue history at one snapshot. Every change names an exact previous version and is published only by the existing canonical admission service.</p>
+    <p>Read issue history at one snapshot. Prepare comments and assignee additions independently, or name an exact previous version for other changes. The canonical admission service publishes every change.</p>
     <form id="issue-connection">
       <label>Access token<input id="issue-token" type="password" maxlength="64" autocomplete="off" spellcheck="false" required></label>
       <button type="submit">Connect</button><button type="button" id="issue-disconnect">Disconnect</button>
@@ -36,11 +36,11 @@
 
     <section aria-labelledby="change-heading">
       <h2 id="change-heading">Prepare an issue change</h2>
-      <p class="hint">Choose an explicit issue number and version 0 to open a new issue. Comments append without an expected version, so other people can comment while you write. Locked discussions refuse comments until unlocked. Editing fields, changing assignees, closing, reopening, locking, and unlocking require the exact issue version. Locking is independent of whether the issue is open or closed.</p>
+      <p class="hint">Choose an explicit issue number and version 0 to open a new issue. Comments and assignee additions need no expected version, so other people can update the issue while you prepare them. Locked discussions refuse comments until unlocked; assignee additions remain available. Editing fields, removing assignees, closing, reopening, locking, and unlocking require the exact issue version. Locking is independent of whether the issue is open or closed.</p>
       <form id="issue-change" class="issue-editor">
         <label>Issue number<input id="change-number" inputmode="numeric" autocomplete="off" required></label>
-        <label>Expected version (not used for comments)<input id="change-version" inputmode="numeric" autocomplete="off" required></label>
-        <label>Action<select id="change-action"><option value="open">Open new issue</option><option value="edit">Edit fields</option><option value="append-comment">Comment</option><option value="close">Close issue</option><option value="reopen">Reopen issue</option><option value="assign">Add assignees</option><option value="unassign">Remove assignees</option><option value="lock">Lock discussion</option><option value="unlock">Unlock discussion</option></select></label>
+        <label>Expected version (not used for comments or adding assignees)<input id="change-version" inputmode="numeric" autocomplete="off" required></label>
+        <label>Action<select id="change-action"><option value="open">Open new issue</option><option value="edit">Edit fields</option><option value="append-comment">Comment</option><option value="close">Close issue</option><option value="reopen">Reopen issue</option><option value="add-assignees">Add assignees</option><option value="unassign">Remove assignees</option><option value="lock">Lock discussion</option><option value="unlock">Unlock discussion</option></select></label>
         <fieldset id="title-field"><legend>Title (256 UTF-8 bytes maximum)</legend><label><input type="checkbox" id="replace-title" checked>Replace title when editing</label><input id="change-title" maxlength="256" autocomplete="off"></fieldset>
         <fieldset id="body-field"><legend>Body or comment (64 KiB maximum)</legend><label id="replace-body-label"><input type="checkbox" id="replace-body" checked>Replace body when editing</label><textarea id="change-body" rows="8" maxlength="65536"></textarea></fieldset>
         <fieldset id="labels-field"><legend>Labels (one per line; at most 32, each 64 UTF-8 bytes)</legend><label><input type="checkbox" id="replace-labels" checked>Replace labels when editing (empty clears all)</label><textarea id="change-labels" rows="3" maxlength="4096"></textarea></fieldset>

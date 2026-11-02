@@ -39,9 +39,10 @@ are shown with the results so later edits to the form cannot mislabel the page.
 The continuation button captures the original predicate, exact snapshot,
 last-examined cursor and scan bound, rather than reading the edited form.
 Selecting a matching issue opens its canonical history at the same snapshot;
-new comments use `append-comment` without an expected version. Edit, assignment,
-close and reopen preparation still use the displayed version. Existing pending
-versioned comment receipts remain unchanged and recover through their original key.
+new comments use `append-comment` and new assignee additions use `add-assignees`,
+both without an expected version. Edit, assignee removal, close and reopen
+preparation still use the displayed version. Existing pending versioned comment
+and assignment receipts remain unchanged and recover through their original key.
 
 Scan and result limits are visibly distinguished from exhausting the remaining
 snapshot suffix. A page containing no matches does not hide an available scan
