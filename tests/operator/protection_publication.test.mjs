@@ -178,6 +178,48 @@ test('outcome revocation, wrong principal and response failure retain pending re
     assert.deepEqual(await readFile(join(f.intent, 'intent.json')), original); assert.deepEqual(await readdir(f.intent), ['intent.json']);
   }
 });
+for (const terminal of ['committed', 'refused']) for (const status of [403, 503]) {
+  test(`${terminal}: retained terminal survives an unavailable ${status} lookup without a false fresh success`, async t => {
+    let available = false;
+    const { f, p, intent } = await prepared(t, (call, response, intent) => {
+      if (call.url.endsWith('/outcomes')) {
+        json(response, available ? recovered(intent, terminal) : {}, available ? 200 : status);
+      } else json(response, terminal === 'committed' ? publish(intent) : refused(intent), terminal === 'committed' ? 200 : 409);
+    });
+    const sent = await sendSavedIntent(f.intent, TOKEN, options(intent));
+    const original = await readFile(join(f.intent, 'intent.json'));
+    const retained = await readFile(join(f.intent, 'terminal.json'));
+    await assert.rejects(recoverSavedIntent(f.intent, TOKEN, { expectedEndpoint: intent.endpoint }), error => {
+      assert.equal(error.code, 'http_request_refused'); assert.equal(error.status, status);
+      assert.equal(error.outcomeUnknown, false);
+      assert.deepEqual(error.observation.summary, sent.summary);
+      return true;
+    });
+    const failed = await child(outcomeArgs(f, intent)).done;
+    assert.equal(failed.code, 4); assert.equal(failed.stdout, '');
+    const diagnostic = JSON.parse(failed.stderr);
+    assert.equal(diagnostic.code, 'http_request_refused'); assert.equal(diagnostic.outcome_unknown, false);
+    assert.deepEqual(diagnostic.observation.summary, sent.summary);
+    assert.equal(p.calls.filter(call => call.url.endsWith('/protection')).length, 1);
+    assert(p.calls.filter(call => call.url.endsWith('/outcomes')).every(call => call.body === '' && call.headers['idempotency-key'] === intent.request.key));
+    assert.deepEqual(await readFile(join(f.intent, 'intent.json')), original);
+    assert.deepEqual(await readFile(join(f.intent, 'terminal.json')), retained);
+    available = true;
+    const refreshed = await recoverSavedIntent(f.intent, TOKEN, { expectedEndpoint: intent.endpoint });
+    assert.deepEqual(refreshed.summary, sent.summary); assert.equal(refreshed.request_reexecuted, false);
+  });
+}
+for (const status of [403, 503]) test(`unavailable lookup without retained knowledge stays unknown (${status})`, async t => {
+  const { f, p, intent } = await prepared(t, (_call, response) => json(response, {}, status));
+  await assert.rejects(recoverSavedIntent(f.intent, TOKEN, { expectedEndpoint: intent.endpoint }), error => {
+    assert.equal(error.outcomeUnknown, true); assert.equal(error.observation, undefined); return true;
+  });
+  const failed = await child(outcomeArgs(f, intent)).done;
+  assert.equal(failed.code, 3); assert.equal(JSON.parse(failed.stderr).outcome_unknown, true);
+  assert(p.calls.every(call => call.url.endsWith('/outcomes') && call.body === ''));
+  assert.deepEqual(await readdir(f.intent), ['intent.json']);
+});
+
 test('pre-send cancellation and intent substitution stop dispatch without deleting the marker', async t => {
   const { f, p, intent } = await prepared(t), controller = new AbortController();
   await assert.rejects(sendSavedIntent(f.intent, TOKEN, { ...options(intent), signal: controller.signal, observe: async stage => { if (stage === 'before_send') controller.abort(); } }), /cancelled/);
