@@ -1,8 +1,9 @@
 # Reuse verified received packs for full and incremental histories
 
-The network receive, native directory import, and upload paths share a bounded, immutable compressed
-representation and retain disposable compressed custody for later service
-restarts (`frankengit-1tl9`). After pushes or eligible packed imports have
+The network receive, native directory import, file-backed bundle intake, and
+upload paths share a bounded, immutable compressed representation and retain
+disposable compressed custody for later service restarts (`frankengit-1tl9`).
+After pushes or eligible packed imports have
 validated and placed their objects, a matching clone's pack-materialization
 step can reuse one original pack, join complete entry runs from several
 packs, or select individual verified entries without re-reading expanded blob
@@ -90,6 +91,62 @@ paths. A cache miss leaves ordinary pack writing available. Source removal
 after import is harmless; cold use of retained files still performs the full
 canonical revalidation described below. This adds native-import custody, not
 a pack-proportional cold-clone or whole-repository throughput claim.
+
+### Capture from file-backed full and incremental bundles
+
+Full file-backed import, mapped full fetch, incremental synchronization, and
+mapped incremental fetch now preserve eligible raw pack representations through
+the same cache. No new intake flag is required. Later Git serving can reuse
+them under its ordinary selected-object rules; streaming bundle export opts in
+with [`--reuse-verified-packs`](NATIVE_GIT_BUNDLE_REUSE.md). The default export
+encoder and canonical import receipts remain unchanged.
+
+The tee reads at the pack boundary during the original native verification
+pass. It reserves the complete raw allocation and object metadata before
+allocating that buffer. A bounded stack prefix supplies the actual header count;
+the native reader consumes that same prefix and the remaining original bytes.
+Capture must match the returned `StreamPackReceipt` in native format, header,
+trailer, exact byte count, and full-byte SHA-256 after authenticated EOF. The
+preflight source digest and verification-pass digest must still agree. Reopening
+a mutable bundle after validation cannot supply replacement custody.
+
+The existing graph verification pass also records each uploaded raw member's
+registered strong Git payload commitment from its authenticated scratch span.
+Metadata uses the same bytes checked by the typed graph; blobs hash bounded
+chunks through the native and scratch verifiers. Placement must independently
+match every commitment against the actual selected `VerifiedObject` or the
+successful `SyncedBlob` stage. Native ID, kind and length alone cannot discharge
+this witness, including in SHA-1 repositories. These commitments do not grant
+publication: the original stage is reauthenticated and all final collision
+checks still run before the pending pack becomes reusable.
+
+Every raw member must be in the final **uploaded** set, including required
+transport-only delta bases. A mapped fetch that leaves raw entries unselected
+simply skips whole-pack custody and places its exact selected closure. For an
+incremental bundle, borrowed prerequisite objects do not count as uploaded
+placements. Their verified identities may support a retained external REF base,
+but later full serving must include a usable representation of that base, or
+the current incremental/thin request must independently prove it is held.
+
+One bundle contains one raw pack. Its optional second parse retains entry
+programs under the minimum of the cache allowance, the default 128 MiB aggregate
+inflation bound, and the selected native input profile. Known excess entry
+inflation or an object outside the resident object bound disables the tee and
+extra commitment work early, while the original file-backed verification
+continues. Reconstructed-result commitment hashing follows the native import's
+expanded-work bounds; the entry-program cap is not a total expanded-work or
+process-memory claim. Large streamed blobs remain importable under their own
+limits even when their representation is ineligible for this cache.
+
+After selected staging succeeds and verification scratch is removed, completed
+candidates transfer to the existing `ReceiveStaging` publication owner.
+Capacity/allocation misses, optional reparse failure, and disposable cache I/O
+do not alter the ordinary intake decision. Original source errors, stopped work,
+corruption, cleanup failure and immutable collision failure remain fatal through
+their existing paths. A refusal before publication abandons raw reservations
+with private object custody. As elsewhere, successful cache activation is not
+an authority-head commit receipt, and cold reuse still revalidates canonical
+objects before serving.
 
 Every fetch independently authenticates its basis and computes the visible
 selection. Reuse must emit each selected native identity and type exactly once.
@@ -227,7 +284,7 @@ Selective search scratch is bounded by retained object membership, including
 alternative representations, under the same conservative metadata charge.
 Reader descriptors retain source allocations rather than duplicate zlib data.
 
-Native imports still use the native construction path. A self-contained clone
+Native imports still use their original validation and placement path. A self-contained clone
 needs a usable retained representation for every required base; a negotiated
 thin fetch can instead use its authorized client-held bases. Persistence does
 not remove that dependency or the current selection and output limits.
@@ -471,6 +528,7 @@ Run the focused lanes with the pinned toolchain and sufficient build capacity:
 cargo test --locked -p fgit-pack -p fgit-wire --all-targets
 cargo test --locked -p fgit-node --lib received_pack
 cargo test --locked -p fgit-node --test import_pack_reuse
+cargo test --locked -p fgit-node --test file_bundle_pack_reuse
 cargo test --locked -p fgit-cli --all-targets
 cargo build --locked -p fgit-cli --bin fg
 FG_BIN="$PWD/target/debug/fg" bash scripts/e2e/suites/transport/received_pack_reuse.sh
@@ -486,6 +544,19 @@ response and compare exact native inventories and bodies; reuse cases also
 compare original compressed bytes. Focused private cases cover reservation
 ownership and the strong placement witness. These are authored regressions;
 their presence is not a claim of execution or a new throughput measurement.
+
+The public `file_bundle_pack_reuse` target covers full file-backed intake with
+OFS and forward REF entries in both hash domains, warm and fresh-configuration
+cold clone/export, thin incremental import and mapped fetch, composition with
+previously imported originals, exact mapped subsets, capacity and streamed-body
+fallback, unselected raw members, corrupt input, atomic ref refusal, private
+blob cancellation with same-key retry, and mutable-source replacement after
+verification. A separate fault changes a real private blob's stored payload and
+requires both refs and reusable custody to remain unpublished. Private verifier
+cases require every exact strong placement
+witness and retain original source-change/cancellation failures with capture
+enabled or disabled. These are authored regressions; execution status must be
+reported separately.
 
 Full-history cold-clone measurements and broader restart/transport qualification
 remain separate work. Zero cache capacity is

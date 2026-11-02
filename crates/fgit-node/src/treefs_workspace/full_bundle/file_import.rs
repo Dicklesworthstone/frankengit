@@ -24,9 +24,10 @@ use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 
 use crate::receive_staging::ReceiveStaging;
+use crate::received_pack::placement::PlacementBoundPack;
 use crate::source_retrieval::integrity::bundle_verify::{
     BundleImportObjectPlan, BundleVerifyError, BundleVerifyLimits,
-    prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
+    prepare_full_bundle_reader_capturing,
 };
 use crate::{LoopbackReceiveSession, NodeRefusal, NodeRequestContext, OneNode};
 
@@ -459,23 +460,27 @@ impl OneNode {
                 .iter()
                 .map(|mapping| mapping.source.clone())
                 .collect();
-            prepare_full_bundle_fetch_reader(
+            prepare_full_bundle_reader_capturing(
                 input,
                 self.object_format,
                 &scratch,
-                &sources,
+                Some(&sources),
                 &query.limits,
+                self.received_pack_cache(),
                 live,
             )?
         } else {
-            prepare_full_bundle_import_reader(
+            prepare_full_bundle_reader_capturing(
                 input,
                 self.object_format,
                 &scratch,
+                None,
                 &query.limits,
+                self.received_pack_cache(),
                 live,
             )?
         };
+        let mut captured = plan.take_received_pack();
         let staging = ReceiveStaging::default();
         let prepared = (|| {
             checkpoint(live)?;
@@ -524,6 +529,7 @@ impl OneNode {
                 &mut plan,
                 &staging,
                 query.limits.max_streamed_blob_bytes,
+                captured.as_mut(),
                 live,
             )?;
             let absent = match self.object_format {
@@ -591,6 +597,13 @@ impl OneNode {
             }
         };
         checkpoint(live)?;
+        if let Some(pending) = captured.and_then(PlacementBoundPack::complete) {
+            staging
+                .retain_received_pack(pending.with_persistence(self.durable_received_pack_store()))
+                .map_err(|code| {
+                    receive_error(fgit_wire::receive::ReceiveError::AuthoritativeRefusal(code))
+                })?;
+        }
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,
@@ -622,6 +635,7 @@ fn stage_selected<P: BundleImportObjectPlan>(
     plan: &mut P,
     staging: &ReceiveStaging,
     maximum_blob_bytes: usize,
+    mut captured: Option<&mut PlacementBoundPack>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), StreamBundleImportRefusal> {
     let ids = plan.uploaded_ids().clone();
@@ -647,6 +661,9 @@ fn stage_selected<P: BundleImportObjectPlan>(
                 &mut stage_live,
             )?;
             drop(reader);
+            if let Some(captured) = &mut captured {
+                captured.observe(staged.1.identity(), staged.1.payload_commitment());
+            }
             staging.retain_synced_blob(staged)?;
         } else {
             if !pending.is_empty()
@@ -661,6 +678,9 @@ fn stage_selected<P: BundleImportObjectPlan>(
             let verified = node.verified_git_object(object.kind, body)?;
             if verified.envelope().object_identity() != id {
                 return Err(BundleVerifyError::SourceChanged.into());
+            }
+            if let Some(captured) = &mut captured {
+                captured.observe(id, verified.envelope().payload_commitment());
             }
             pending_bytes = pending_bytes.checked_add(object.length).ok_or(
                 StreamBundleImportRefusal::InvalidQuery("metadata batch overflow"),

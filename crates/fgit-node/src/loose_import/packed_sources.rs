@@ -17,7 +17,8 @@ use super::{
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-use crate::received_pack::{PendingReceivedPack, ReceivedPackCache};
+use crate::received_pack::ReceivedPackCache;
+use crate::received_pack::placement::PlacementBoundPack as ImportedPack;
 
 mod capture;
 
@@ -27,32 +28,6 @@ pub(super) struct VerifiedPack {
     entries: BTreeMap<GitOid, spool::Entry>,
     spool: spool::Spool,
     capture: Option<capture::Captured>,
-}
-
-/// Raw entries may duplicate a loose object or another source pack. Every
-/// captured payload must match the actual selected placement's strong digest,
-/// not merely its native ID, before receiving the ordinary publication gate.
-pub(super) struct ImportedPack {
-    pending: Option<PendingReceivedPack>,
-    commitments: BTreeMap<GitOid, [u8; 32]>,
-}
-
-impl ImportedPack {
-    pub(super) fn observe(&mut self, id: GitOid, commitment: [u8; 32]) {
-        if let Some(expected) = self.commitments.remove(&id)
-            && expected != commitment
-        {
-            self.pending.take();
-            self.commitments.clear();
-        }
-    }
-
-    pub(super) fn complete(self) -> Option<PendingReceivedPack> {
-        self.commitments
-            .is_empty()
-            .then_some(self.pending)
-            .flatten()
-    }
 }
 
 #[derive(Default)]

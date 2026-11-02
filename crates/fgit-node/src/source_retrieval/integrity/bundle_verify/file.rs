@@ -1,27 +1,33 @@
 //! File-backed native verification. Object bodies live in caller-owned scratch;
 //! the in-memory inventory and graph remain explicitly count/edge bounded.
 
+mod capture;
 mod import;
 mod incremental;
 mod resolve;
 mod storage;
 
 pub use import::BundleImportObjectPlan;
-pub use import::{prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader};
+#[cfg(all(test, unix))]
+pub use import::prepare_full_bundle_fetch_reader;
+#[cfg(test)]
+pub use import::prepare_full_bundle_import_reader;
+pub(crate) use import::prepare_full_bundle_reader_capturing;
+pub(crate) use incremental::prepare_incremental_bundle_reader_capturing;
+pub use incremental::{BundleOriginalObject, BundleOriginalSource};
+#[cfg(all(test, unix))]
 pub use incremental::{
-    BundleOriginalObject, BundleOriginalSource, prepare_incremental_bundle_fetch_reader,
-    prepare_incremental_bundle_import_reader,
+    prepare_incremental_bundle_fetch_reader, prepare_incremental_bundle_import_reader,
 };
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
+use crate::received_pack::ReceivedPackCache;
+use fgit_crypto::DigestHasher;
 use fgit_pack::full_bundle::{FullBundleHeader, StreamBundleHeaderError};
-use fgit_pack::{
-    StreamPackError, StreamPackIndexEntry, StreamPackReceipt, build_streamed_pack_index_v2,
-    read_streamed_pack_chunks,
-};
+use fgit_pack::{StreamPackIndexEntry, StreamPackReceipt, build_streamed_pack_index_v2};
 use fgit_treefs::integrity::{BlobGraphError, GraphReport, ObjectKind};
 use fgit_types::{GitHashAlgorithm, RefName};
 
@@ -204,7 +210,7 @@ fn verify_reader_inner<R: Read + Seek, W: Read + Write + Seek>(
     expectations: Option<&BundleExpectations>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<FileBundleVerification, BundleVerifyError> {
-    verify_reader_inventory(input, workspace, limits, expectations, None, live)
+    verify_reader_inventory(input, workspace, limits, expectations, None, None, live)
         .map(|verified| verified.file)
 }
 
@@ -214,6 +220,7 @@ struct VerifiedReaderInventory {
     file: FileBundleVerification,
     inventory: Inventory,
     receipt: StreamPackReceipt,
+    capture: Option<capture::VerifiedCapture>,
 }
 
 fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
@@ -222,6 +229,7 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
     limits: &BundleVerifyLimits,
     expectations: Option<&BundleExpectations>,
     expected_format: Option<GitHashAlgorithm>,
+    capture_cache: Option<&ReceivedPackCache>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<VerifiedReaderInventory, BundleVerifyError> {
     let verified = verify_reader_contents(
@@ -232,6 +240,7 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
         expected_format,
         None,
         0,
+        capture_cache,
         live,
     )?;
     let references = verified
@@ -264,6 +273,7 @@ fn verify_reader_inventory<R: Read + Seek, W: Read + Write + Seek>(
         },
         inventory: verified.inventory,
         receipt: verified.receipt,
+        capture: verified.capture,
     })
 }
 
@@ -282,6 +292,7 @@ struct VerifiedReaderContents {
     scratch_bytes: u64,
     graph: GraphReport,
     resolution_passes: usize,
+    capture: Option<capture::VerifiedCapture>,
 }
 
 fn read_header(
@@ -307,6 +318,7 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
     expected_format: Option<GitHashAlgorithm>,
     originals: Option<&mut dyn BundleOriginalSource>,
     max_original_bytes: usize,
+    capture_cache: Option<&ReceivedPackCache>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<VerifiedReaderContents, BundleVerifyError> {
     checkpoint(live)?;
@@ -378,7 +390,7 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
     )?;
     let mut hashing = HashingReader::new(&mut *input);
     let mut inventory = Inventory::new(limits);
-    let receipt = {
+    let (receipt, mut captured_input) = {
         let mut reader = BufReader::with_capacity(CHUNK_BYTES, &mut hashing);
         let selected = read_header(&mut reader, limits, incremental, live)?;
         if selected.raw_bytes() != first.raw_bytes() {
@@ -392,11 +404,13 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
         // shared callback owner avoids minting a separate cancellation budget.
         let gate = RefCell::new(&mut *live);
         let mut pack_live = || (gate.borrow_mut())();
-        let result = read_streamed_pack_chunks(
+        let result = capture::read(
             &mut reader,
             first.format(),
+            pack_length,
             &pack_limits,
             limits.max_streamed_blob_bytes,
+            capture_cache,
             &mut pack_live,
             |entry| {
                 let mut sink_live = || (gate.borrow_mut())();
@@ -404,11 +418,7 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
             },
         );
         checkpoint(&mut pack_live)?;
-        result.map_err(|error| match error {
-            StreamPackError::Io(error) => io_error("read bundle pack", error),
-            StreamPackError::Pack(error) => BundleVerifyError::Pack(error),
-            StreamPackError::Sink(error) => error,
-        })?
+        result?
     };
     let (sha256, consumed) = hashing.finish();
     checkpoint(live)?;
@@ -444,6 +454,12 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
         )?;
     }
     let resolution_passes = inventory.resolve(first.format(), &mut scratch, limits, live)?;
+    if let Some(captured) = &captured_input
+        && !captured.eligible(&inventory, limits, live)?
+    {
+        captured_input = None;
+    }
+    let mut commitments = captured_input.as_ref().map(|_| BTreeMap::new());
     let mut ids = BTreeSet::new();
     for &identity in inventory.by_id.keys().chain(inventory.originals.keys()) {
         checkpoint(live)?;
@@ -471,6 +487,13 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
     for &id in &ids {
         checkpoint(live)?;
         let resolved = inventory.object(id)?;
+        // Only uploaded entries can acquire transport custody. Borrowed
+        // originals prove resolution/graph facts but are never staged uploads.
+        let mut strong = if commitments.is_some() && inventory.by_id.contains_key(&id) {
+            capture::strong_hasher(resolved.kind, resolved.span.length())
+        } else {
+            None
+        };
         if resolved.kind == ObjectKind::Blob {
             if resolved.span.length() > limits.max_streamed_blob_bytes {
                 return Err(BundleVerifyError::Graph(super::GraphRefusal::Limit(
@@ -482,7 +505,13 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
             // sticky cancellation owner. Neither callback outlives this read.
             let gate = RefCell::new(&mut *live);
             let mut graph_live = || (gate.borrow_mut())();
-            let mut read = |output: &mut [u8]| reader.read(output, &mut || (gate.borrow_mut())());
+            let mut read = |output: &mut [u8]| {
+                let count = reader.read(output, &mut || (gate.borrow_mut())())?;
+                if let Some(hash) = &mut strong {
+                    hash.update(&output[..count]);
+                }
+                Ok(count)
+            };
             let result = graph.observe_blob_stream(
                 id,
                 resolved.span.length(),
@@ -500,6 +529,15 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
             let result = graph.observe(id, resolved.kind, &body, live);
             checkpoint(live)?;
             result.map_err(BundleVerifyError::Graph)?;
+            if let Some(hash) = &mut strong {
+                for chunk in body.chunks(CHUNK_BYTES) {
+                    checkpoint(live)?;
+                    hash.update(chunk);
+                }
+            }
+        }
+        if let (Some(commitments), Some(hash)) = (&mut commitments, strong) {
+            commitments.insert(id, hash.finish());
         }
         if let Some(&at) = inventory.by_id.get(&id) {
             let entry = &inventory.entries[at];
@@ -519,6 +557,10 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
     let index = result.map_err(BundleVerifyError::Pack)?;
     scratch.finish(live)?;
     checkpoint(live)?;
+    let capture = match (captured_input, commitments) {
+        (Some(input), Some(commitments)) => input.verified(&inventory, commitments, live)?,
+        _ => None,
+    };
     Ok(VerifiedReaderContents {
         header: first,
         inventory,
@@ -531,6 +573,7 @@ fn verify_reader_contents<R: Read + Seek, W: Read + Write + Seek>(
         scratch_bytes: scratch.bytes(),
         graph,
         resolution_passes,
+        capture,
     })
 }
 

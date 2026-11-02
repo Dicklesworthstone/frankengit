@@ -29,6 +29,7 @@ use fgit_types::GitOid;
 
 mod composition;
 pub(crate) mod persistence;
+pub(crate) mod placement;
 mod selective;
 mod spans;
 

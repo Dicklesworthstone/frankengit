@@ -227,9 +227,9 @@ impl Captured {
         control.checkpoint()?;
         // Shape/allocation/capacity failures are optional misses. A checkpoint
         // above propagates the import's sticky original cancellation/budget.
-        Ok(pending.ok().flatten().map(|pending| ImportedPack {
-            pending: Some(pending),
-            commitments: self.commitments,
-        }))
+        Ok(pending
+            .ok()
+            .flatten()
+            .map(|pending| ImportedPack::new(pending, self.commitments)))
     }
 }

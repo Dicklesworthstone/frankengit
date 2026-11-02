@@ -16,8 +16,7 @@ pub use expectations::{
 };
 pub(crate) use file::{
     BundleImportObjectPlan, BundleOriginalObject, BundleOriginalSource,
-    prepare_full_bundle_fetch_reader, prepare_full_bundle_import_reader,
-    prepare_incremental_bundle_fetch_reader, prepare_incremental_bundle_import_reader,
+    prepare_full_bundle_reader_capturing, prepare_incremental_bundle_reader_capturing,
 };
 pub use file::{
     FileBundleVerification, FileGitBundleRecovery, prepare_git_bundle_recovery_reader,
