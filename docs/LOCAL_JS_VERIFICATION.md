@@ -105,6 +105,15 @@ Most cases still use explicit module or HTTP-schema peers. This wiring does
 not complete `x2mv.4.59`'s required live-server coverage of every production
 operator entrypoint, or replace its original acceptance conditions.
 
+The miniature suite-controller fixture includes the real Python ownership
+selftests and their shipped imports. Its positive case and planted module
+failures require the ownership gate to pass. The empty-TAP control delegates
+runtime and ownership calls to actual Node, returning empty success only for
+the module-profile commands. A missing-selftest control fails only the ownership
+gate while both module scopes still execute. These are controller/process
+regressions with Node as an explicit executable-handoff sentinel, not native
+forge or Git compatibility evidence.
+
 Each invocation discovers all `.test.mjs` files in the selected directory. The
 `scripts` scope includes both `scripts/tests/` and the root `scripts/` directory,
 where the workflow-supervisor entrypoint tests live. Each invocation
