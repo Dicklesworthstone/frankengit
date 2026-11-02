@@ -33,7 +33,7 @@ VERIFY_TARGET_DIRECTORY=''
 echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
-  printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|full|release}\n' "$0" >&2
+  printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|operator|full|release}\n' "$0" >&2
   printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|authenticated-publication|native-rebase-check|native-rebase-test|pull-request-checks|continuous-serve|tier-a\n' >&2
 }
 refuse_dormant() {
@@ -189,6 +189,56 @@ run_e2e() {
     --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
 }
 
+# Current operator campaigns, not the complete every-entrypoint qualification
+# required by x2mv.4.59. Keep the signed native campaign in this selection even
+# when it fails; dispatcher wiring must not narrow away its existing gate.
+run_operator() {
+  local node="${FGE_NODE:-$(command -v node || true)}"
+  if [[ -z "$node" || ! -f "$node" || ! -x "$node" ]]; then
+    printf '%s\n' '{"type":"js_verification_refusal","code":"js_runtime_unavailable","scope":"operator","corpus_started":false}' >&2
+    return 3
+  fi
+  "$node" "$ROOT/scripts/verify_js.mjs" runtime
+
+  local discovered suite source_cut current_cut source_state fg_binary
+  local operator_dir="$ROOT/scripts/e2e/suites/operator"
+  local signed_suite="$ROOT/scripts/e2e/suites/recovery/native_signed_bundle.sh"
+  local -a suites=()
+  [[ -d "$operator_dir" ]] || { printf 'verify: operator suite directory missing\n' >&2; return 1; }
+  discovered="$(find "$operator_dir" -type f -name '*.sh' -print)" || return
+  [[ -n "$discovered" ]] || { printf 'verify: no operator suites discovered\n' >&2; return 1; }
+  while IFS= read -r suite; do
+    [[ -x "$suite" ]] || { printf 'verify: operator suite is not executable: %s\n' "$suite" >&2; return 1; }
+    suites+=("$suite")
+  done < <(printf '%s\n' "$discovered" | LC_ALL=C sort)
+  [[ -f "$signed_suite" && -x "$signed_suite" ]] || {
+    printf 'verify: required signed native operator suite missing: %s\n' "$signed_suite" >&2
+    return 1
+  }
+  suites+=("$signed_suite")
+
+  prepare_native_tools
+  source_cut="$(git rev-parse --verify HEAD)" || return
+  source_state="$(git status --porcelain=v1 --untracked-files=all)" || return
+  if ! [[ "$source_cut" =~ ^[0-9a-f]{40}$ ]] || [[ -n "$source_state" ]]; then
+    printf 'verify: operator requires a clean, revision-bound source checkout\n' >&2
+    return 1
+  fi
+  echo_step "Building fg once for the current operator campaigns"
+  build_native_tools -p fgit-cli --bin fg
+  current_cut="$(git rev-parse --verify HEAD)" || return
+  source_state="$(git status --porcelain=v1 --untracked-files=all)" || return
+  if [[ "$current_cut" != "$source_cut" || -n "$source_state" ]]; then
+    printf 'verify: operator source changed during the native build\n' >&2
+    return 1
+  fi
+  fg_binary="$(native_binary_path fg)"
+  [[ -x "$fg_binary" ]] || { printf 'verify: no returned native executable at %s\n' "$fg_binary" >&2; return 1; }
+  echo_step "Running ${#suites[@]} current operator suites; the full entrypoint matrix remains separate"
+  FGE_NODE="$node" FG_BIN="$fg_binary" FG_SIGNED_BUNDLE_SOURCE_CUT="$source_cut" \
+    "$ROOT/scripts/e2e/run_all.sh" --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
+}
+
 run_full() {
   refuse_dormant "Full conformance/lab/fault/fuzz/corpus lane is not implemented yet"
 }
@@ -220,6 +270,7 @@ run_lane() {
     constitution) run_constitution ;;
     fast) run_fast ;;
     e2e) run_e2e ;;
+    operator) run_operator ;;
     full) run_full ;;
     release) run_release ;;
     # Feature lanes: thin dispatch to repository-owned verification scripts so
