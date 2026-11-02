@@ -20,6 +20,31 @@ function prepare(f) {
   markerMatches(f.marker, f.report.runs[0]);
   return result;
 }
+const sharedInputs = () => ({ profile: 'verified-reflink-or-copy-v1', cache_closed: true, reflink_supported: false,
+  resident_bytes: 0, resident_entries: 0, seeded_bytes: 0, seeded_entries: 0, probe_entries: 2,
+  cloned_bytes: 0, clone_operations: 0, fallback_bytes: 1622, fallback_files: 4, unsupported_files: 4, capacity_files: 0 });
+for (const format of ['sha1', 'sha256']) test(`${format}: drained shared-input statistics do not change immutable attempt identity`, () => {
+  const f = fixture(format), original = encode(f.marker);
+  f.report.runs[0].shared_inputs = sharedInputs();
+  assert.equal(Object.hasOwn(f.marker, 'shared_inputs'), false);
+  assert.equal(prepare(f).outcome, 'observed_succeeded');
+  assert.deepEqual(encode(f.marker), original);
+  f.marker.source_tree = `${format}:${'d'.repeat(format === 'sha1' ? 40 : 64)}`;
+  assert.throws(() => prepare(f), /Original workflow marker/);
+});
+test('shared-input observations require the closed native profile and bounded counters', () => {
+  for (const mutate of [s => { s.cache_closed = false; }, s => { s.resident_bytes = 1; },
+    s => { s.resident_entries = 1; }, s => { s.profile = 'unknown'; }, s => { s.reflink_supported = 'false'; },
+    s => { s.fallback_bytes = -1; }, s => { s.probe_entries = Number.MAX_SAFE_INTEGER + 1; },
+    s => { s.unbound_future_field = true; }, s => { delete s.fallback_files; }]) {
+    const f = fixture(); f.report.runs[0].shared_inputs = sharedInputs(); mutate(f.report.runs[0].shared_inputs);
+    assert.throws(() => prepare(f));
+  }
+});
+test('shared-input completion statistics cannot be inserted into the original start marker', () => {
+  const f = fixture(); f.report.runs[0].shared_inputs = sharedInputs(); f.marker.shared_inputs = sharedInputs();
+  assert.throws(() => prepare(f));
+});
 for (const format of ['sha1', 'sha256']) test(`${format}: logs are post-execution observations, not missing start-marker inputs`, () => {
   const f = fixture(format), bytes = encode(f.marker), journal = sha256(bytes);
   assert.equal(Object.hasOwn(f.marker, 'artifact_logs'), false);
