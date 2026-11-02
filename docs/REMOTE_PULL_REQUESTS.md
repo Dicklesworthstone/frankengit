@@ -126,12 +126,20 @@ retained manifest pins are checked before the inspected package becomes a saved
 sender request. Staging does not publish repository state. Only the separately
 confirmed sender requests native publication, followed by Rust PR/ref readback.
 
+Four additional cases construct a real content conflict, retain its noncandidate
+package, and resolve it to explicit binary bytes with executable mode. SHA-1 and
+SHA-256 each exercise merge-commit and squash. A revoked source-read grant must
+refuse resolution; restoring it permits the same original package. Independent
+expected Git objects and canonical Rust file reads check the resolved bytes,
+mode, unchanged sibling, commit/tree/parents and complete ref map. Independent
+review and original-key publication/recovery remain mandatory.
+
 The Git oracle checks fixture integrity and both ancestry predicates inside its
 repository-owned sandbox; it is not a production Git dependency or a universal
 compatibility result. Campaign summaries identify the supplied executable by
 digest. An older executable supplies diagnostic evidence, not qualification of
-later Rust changes. Conflict resolution, successful native squash, every
-operator entrypoint, TLS and deployment acceptance remain separate.
+later Rust changes. These bounded conflict/method cases do not establish every
+operator entrypoint, general merge compatibility, TLS or deployment acceptance.
 
 ## Durable command-line workflow
 

@@ -138,7 +138,7 @@ function span(value, hex, total) {
   const bytes = Buffer.from(hex, 'hex'), lines = bytes.reduce((n, b) => n + Number(b === 10), 0) + Number(bytes.length > 0 && bytes.at(-1) !== 10);
   if (lines !== value.line_count) fail('source_edit_span');
 }
-// Native review includes whole created/deleted directories as well as leaves.
+// Native review includes modified/created/deleted directories as well as leaves.
 // V3 admits ONLY those structural ancestors whose complete native tree bytes
 // reconstruct from the checked leaf identities. Never drop arbitrary extra rows.
 function profileFileRows(rows, format) {
@@ -154,12 +154,16 @@ function profileFileRows(rows, format) {
     fields(row,['path_hex','kind','before','after','content']); const where=coordinates(row.path_hex);
     if (row.path_hex <= previous) fail('source_edit_comparison'); previous=row.path_hex;
     if (row.before?.mode !== 0o40000 && row.after?.mode !== 0o40000) { files.push({row,where}); continue; }
-    const side = row.before === null && row.after?.mode === 0o40000 ? 'after'
-      : row.after === null && row.before?.mode === 0o40000 ? 'before' : null;
-    if (!side || row.kind !== (side === 'after' ? 'added' : 'deleted')) fail('source_edit_structural_kind');
-    fields(row[side],['mode','oid']); fields(row.content,['type','content_read']);
+    const sides = row.before === null && row.after?.mode === 0o40000 && row.kind === 'added' ? ['after']
+      : row.after === null && row.before?.mode === 0o40000 && row.kind === 'deleted' ? ['before']
+      : row.before?.mode === 0o40000 && row.after?.mode === 0o40000 && row.kind === 'modified' ? ['before','after'] : null;
+    if (!sides) fail('source_edit_structural_kind');
+    const ids = {};
+    for (const side of sides) { fields(row[side],['mode','oid']); ids[side] = oid(row[side].oid,format); }
+    if (sides.length === 2 && ids.before === ids.after) fail('source_edit_structural_kind');
+    fields(row.content,['type','content_read']);
     if (row.content.type !== 'object_only' || row.content.content_read !== false) fail('source_edit_structural_content');
-    directories.set(row.path_hex,{where,side,oid:oid(row[side].oid,format),children:[]});
+    directories.set(row.path_hex,{where,sides,ids,children:{before:[],after:[]}});
   }
   const parent = where => {
     let seen=false;
@@ -169,28 +173,32 @@ function profileFileRows(rows, format) {
     }
     return directories.get(where.parent);
   };
-  const add = (directory,name,kind,id) => {
+  const add = (directory,side,name,kind,id) => {
     if (++entries > TREE_TRANSITION_LIMITS.maxEntries) fail('source_edit_structural_budget');
     const bytes=new Uint8Array(name),order=new Uint8Array(bytes.length+1);order.set(bytes);order[bytes.length]=kind==='directory'?47:0;
     treeBytes += (kind==='directory'?5:6)+2+bytes.length+id.length/2;
     if (treeBytes > TREE_TRANSITION_LIMITS.maxTreeBytes) fail('source_edit_structural_budget');
-    directory.children.push({kind,bytes,order,object_id:id});
+    directory.children[side].push({kind,bytes,order,object_id:id});
   };
   for (const {row,where} of files) {
     const directory=parent(where); if (!directory) continue;
-    const absent=directory.side==='after'?'before':'after', present=entry(row[directory.side],format);
-    if (row[absent] !== null || !present) fail('source_edit_structural_effect');
-    add(directory,where.name,present.mode===0o100755?'executable':'file',present.oid);
+    for (const side of directory.sides) {
+      const absent=side==='after'?'before':'after', present=entry(row[side],format);
+      if (directory.sides.length === 1 && (row[absent] !== null || !present)) fail('source_edit_structural_effect');
+      if (present) add(directory,side,where.name,present.mode===0o100755?'executable':'file',present.oid);
+    }
   }
   for (const [key,directory] of [...directories].sort((a,b)=>b[0].length-a[0].length)) {
-    if (!directory.children.length) fail('source_edit_structural_empty');
-    const body=encodeVerifiedTreeRows(directory.children,()=>{});
-    const id=createHash(format).update(`tree ${body.length}\0`).update(body).digest('hex');
-    if (id !== directory.oid) fail('source_edit_structural_identity');
     const owner=parent(directory.where);
-    if (owner) {
-      if (owner.side !== directory.side) fail('source_edit_structural_effect');
-      add(owner,directory.where.name,'directory',id);
+    for (const side of directory.sides) {
+      if (!directory.children[side].length) fail('source_edit_structural_empty');
+      const body=encodeVerifiedTreeRows(directory.children[side],()=>{});
+      const id=createHash(format).update(`tree ${body.length}\0`).update(body).digest('hex');
+      if (id !== directory.ids[side]) fail('source_edit_structural_identity');
+      if (owner) {
+        if (!owner.sides.includes(side)) fail('source_edit_structural_effect');
+        add(owner,side,directory.where.name,'directory',id);
+      }
     }
   }
   return files.map(value=>value.row);

@@ -108,6 +108,7 @@ export async function exchange(address, credential, operation, body, time, maxim
     const abort = () => finish(new SourceEditError('source_edit_cancelled'));
     try {
       const headers = { Authorization: `Bearer ${credential}`, Accept: operation === 'prepare' ? 'multipart/mixed' : 'application/json',
+        'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
         'Accept-Encoding': 'identity', 'Cache-Control': 'no-store', Connection: 'close', 'Content-Length': String(body?.bytes.length ?? 0) };
       if (body) headers['Content-Type'] = body.contentType;
       if (key !== null) headers['Idempotency-Key'] = key;

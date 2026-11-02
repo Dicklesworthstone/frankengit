@@ -288,8 +288,13 @@ send the required project User-Agent; actual socket assertions failed before
 the repair. No Rust wire, public API, dependency or gate change is involved.
 
 At clean `841861be`, the predeclared twelve-file focused corpus completes
-**533 passed / zero failed or skipped** under Node 26.8.1 and sandboxed pinned
-Git 2.54.0. Separately, the existing central E2E runner completes **27 assertions,
+**533 passed / zero failed or skipped** under Node 26.8.1. **Oracle-profile
+correction (November 1, 23:46 UTC):** the candidate fixture honored the pinned
+sandbox override, but the resolution fixture hard-coded host Git and ignored
+it. The earlier statement that the entire corpus used sandboxed Git 2.54.0 is
+withdrawn; the observed focused-test counters remain. Original Bead correction
+**5832** and the corrected PR #40 description preserve this reporting error.
+Separately, the existing central E2E runner completes **27 assertions,
 zero failures or skips**, both hash formats, all three entrypoints and normal
 native drain. The binary remains **older native `a9d65885`**, SHA-256
 `95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
@@ -306,8 +311,9 @@ before repair. First-run campaign mistakes are retained: invalid credential
 scope order, an incorrect merge-actor expectation for `last_metadata_actor`,
 and an incorrect qualified-OID expectation for the native candidate report.
 The first focused header run used the fixture's default host Git; it earns no
-pinned-Git credit. Accepted focused evidence instead uses the supported oracle
-override with verified Git 2.54.0 inside Bubblewrap. Removing `--allow-source`
+pinned-Git credit. The attempted correction through the override covered the
+candidate fixture, but missed the hard-coded resolution fixture; the whole-run
+profile claim was therefore still incorrect, as recorded above. Removing `--allow-source`
 proved an ineffective candidate-route negative: the complete lane still passed,
 and this earns no negative credit. Corrected native deployment controls remove
 `--allow-pulls`: both read entrypoints refuse 403, while restored permitted twins
@@ -323,7 +329,71 @@ independent batch lane; no implementer Cargo build or test was started. Original
 resolution/squash breadth, same-source native execution and independent review;
 `.4.26` retains its complete original fast/native/custody requirements.
 
+**Resolved-content and oracle follow-through — November 1, 23:38 UTC:**
+`ca7e90a7` connects genuine conflict resolution to the existing discovered
+operator lane. At clean `cf2f1a174198d84ab25cd5b07d30ffa19cc5bd91`, its final
+**43 assertions complete with zero failures or skips**, containment OK and no
+outstanding obligations. All prior 27 assertions remain. Four new hash/method
+cases resolve an actual content conflict to explicit binary bytes and executable
+mode, independently check every new Git object and commit/tree/parent identity,
+preserve the sibling and original conflict package, and require complete ordered
+unique Rust ref reads. Revoked source-read grants refuse 403; restoring them
+permits the same package. Missing approval refuses before independently reviewed
+merge-commit/squash publication and original-key recovery. Canonical Rust file
+reads confirm the exact published binary bytes and mode. Root receipt SHA-256:
+`677e02a7ccc64c08edb58ab42819dbd42cd345a4dc551551f0552914359d8844`;
+artifacts: `/data/frankengit-targets/noble_operator_resolution_grant_bound_20261101`.
+The binary is still older native `a9d65885` with the digest recorded above; this
+does not qualify newer peer Rust code or general merge compatibility.
+
+`94ed91251f55f0e348d9b39cb8bce71512873395` repairs the fixture integration that
+caused the earlier oracle-profile reporting error. Both candidate and resolution
+fixtures now verify the existing repository `git-2.54.0` pin/receipt and invoke
+only that binary inside Bubblewrap, with private fixture bytes and explicit
+commit metadata. Ambient Git and executable overrides are removed; original
+per-command deadlines and output bounds remain. Two missing-oracle tests first
+fail against an inert ambient-command sentinel, then require refusal before that
+sentinel and cleanup of owned temporary directories. At clean `94ed9125`, the
+predeclared **15-file corpus completes 654 tests, zero failures or skips**. This
+is the enforced fixture profile; it does not retroactively qualify the earlier
+533-test run. Raw output and the file/hash input list are retained under
+`/data/tmp/frankengit-gap-work-20261030/enforced-oracle-focused*`.
+
+Cancellation at `94ed9125` after successful native resolution leaves an incomplete
+driver, two normal native service drains and no owned process group. No production
+adapter defect surfaced in the new resolution cases. PR #40 was externally
+merged at `351dfd2c987baf5483d5964401d8eb679013a92d`; the extension follows on a
+separate branch. The original full operator, same-source current native,
+default fast/full/release, independent review and old custody conditions remain
+open. No Bead closure, gate relaxation or new production dependency is implied.
+
 ## 3. What has improved since October 21
+
+At **`6338449ce17a9203542be9ff27b54f8a5a8e1b48`**, the source-workspace operator
+join exposes and repairs a real client mismatch: native inspection includes
+modified parent-directory rows, while authoring matched every row as a file
+effect. The v3 validator now reconstructs and hash-checks both complete directory
+sides before matching only the validated leaves; it retains all original rows.
+Unknown or missing child evidence still refuses. This is bounded support, not
+general partial-directory inspection. Source CLI errors also retain HTTP status,
+and the shared transport supplies the required honest project identity.
+
+The discovered workspace lane completes **13 assertions, zero failures or skips**
+at that exact source against the explicitly older `a9d65885` native binary. It
+captures binary local edits, creates/deletes files, changes modes, independently
+checks the exact pack, publishes through native admission and checks Rust source
+reads, then recovers the same original key without redispatch. Root receipt
+SHA-256: `1a8fe2e01e94d38e2cdd1f74be8046d5e89d28dfb62983e8227c7ee13a21519a`;
+artifacts: `/data/frankengit-targets/noble_operator_workspace_bound_20261102`.
+The predeclared nine-file focused corpus executes **199 tests, zero failures or
+skips**, with the entire pinned Node process and verified Git 2.54.0 inside
+Bubblewrap. An initial sandbox omitted the TLS fixture's OpenSSL configuration
+and reported 196/3; adding only that read-only configuration permits the same
+unchanged corpus. The failing logs remain retained. Cancellation after a real
+apply leaves an incomplete driver, one normal service drain and no owned process
+group; it does not undo the publication. Fixture input packages, schema-peer
+tests and older-native execution remain separate evidence classes. Original
+`.4.59` full operator/current-native/independent acceptance and `.4.26` remain open.
 
 - **Agent context now has consumers.** The earlier “uncalled bridge” conclusion is obsolete. `context_packet_for_run` is used by native retrieval and the shared document adapter. `fg agent context`, authenticated HTTP `source/agent-context`, and independently granted MCP `frankengit_agent_context` reach that implementation. They bind an authenticated source position and preserve untrusted excerpts and omissions. They remain read-only invocation-local runs. Native run/effect journals and the concrete Beads task adapter also exist; journal creation/recovery does not constitute a resumed executing agent controller. See [agent context](AGENT_CONTEXT_COMMAND.md) and [the node journal](../crates/fgit-node/src/agent_journal.rs).
 - **Receive publication really batches.** [The admission microbatch driver](../crates/fgit-admission/src/microbatch.rs) is called from production receive paths. Up to 64 independent decisions and 1 MiB of batch bytes share an exact-predecessor CAS, retaining each child seal/outcome and wire-order semantics. Non-atomic recovery admits up to 16,384 commands; atomic/import transactions retain 4,096. This corrects the old one-CAS-per-ref statement. Cross-session lane/combiner/witness integration and measured contention acceptance remain open.

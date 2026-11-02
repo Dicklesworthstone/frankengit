@@ -184,6 +184,22 @@ paths, excluding its `no_op_paths_hex`. The native object format and expected ba
 must equal the independently verified package. An endpoint, namespace, or branch
 is an explicit operator selection, not an authority claim derived from a package.
 
+For structural directory inspection, explicitly select the existing
+`patch_profile: "exact-tree-v1"` or `"exact-tree-binary-v1"` and retain the
+independently derived `expected_result_tree` in the selection. Native inspection
+also reports changed parent directories. The v3 capture validator reconstructs
+each admitted directory's complete before and after trees from its reported
+children and checks both native hashes before matching the exact file effects.
+These verified ancestor rows remain in the saved capture. They do not count as
+additional file effects or widen `paths_hex`. Legacy captures keep their existing
+refusals and bytes; the client never selects a newer profile automatically.
+
+This remains bounded: if a modified directory contains unchanged children absent
+from the inspection, its full hash cannot be reconstructed from those rows and
+the client refuses with `source_edit_structural_identity`. A successful native
+preparation alone cannot bypass that check. General partial-directory inspection
+still needs complete independently verified child evidence.
+
 ```bash
 node scripts/fg_source_changes.mjs prepare \
   --package /private/session/source-package.json \

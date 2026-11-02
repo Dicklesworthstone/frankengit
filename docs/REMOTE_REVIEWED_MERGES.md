@@ -12,8 +12,11 @@ canonical Rust review/PR/ref reads. It includes independent review grants,
 reviewer-stream stale/current twins, withdrawal, missing approval, wrong-method
 refusal, exact merge-commit publication and bundle-independent outcome recovery.
 It retains native read snapshots and inspected candidate packages before offline
-staging. Supplying an older `FG_BIN` gives diagnostic evidence for that binary;
-it does not qualify newer Rust code, native squash success or deployment.
+staging. Additional genuine-conflict cases resolve explicit binary bytes/mode,
+review and publish the exact result with both merge-commit and squash in both
+hash domains, and check canonical file bytes and sibling preservation. Supplying
+an older `FG_BIN` gives diagnostic evidence for that binary; it does not qualify
+newer Rust code, general merge compatibility or deployment.
 
 ## Select an exact existing candidate
 

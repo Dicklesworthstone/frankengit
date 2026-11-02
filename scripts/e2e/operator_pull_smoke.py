@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 from operator_issue_smoke import OperatorCampaign
+from operator_candidate_smoke import run_resolution_case
 from pull_request_smoke import fixture, SOURCE, TARGET
 from scoped_events_smoke import HttpServer, PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 
@@ -446,7 +447,7 @@ def main() -> None:
         "node_sha256": file_sha256(node), "entrypoint": "scripts/remote_pull.mjs",
         "entrypoints": ["scripts/remote_pull.mjs", "scripts/fg_pull_review.mjs", "scripts/fg_pull_candidate.mjs"], "oracle_pin": PIN,
         "oracle_run": str(oracle_run), "artifacts": str(campaign.work),
-        "non_claim": "Ten PR actions with a merge-commit candidate; not native squash success, full operator matrix, same-source qualification, TLS or deployment acceptance."}
+        "non_claim": "Ten PR actions and explicit binary-conflict resolution with both merge methods; not full operator matrix, same-source qualification, TLS or deployment acceptance."}
 
     def stop(_signum: int, _frame: Any) -> None:
         raise InterruptedError("operator PR campaign interrupted; draining owned children")
@@ -459,6 +460,8 @@ def main() -> None:
         summary["node_version"] = identity["node"]
         for fmt in ("sha1", "sha256"):
             run_case(campaign, oracle_run, fmt)
+            for method in ("merge-commit", "squash"):
+                run_resolution_case(campaign, oracle_run, fmt, method)
         summary["complete"] = True
     except BaseException as error:
         summary["failure"] = f"{type(error).__name__}: {error}"

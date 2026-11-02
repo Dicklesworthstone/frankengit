@@ -32,7 +32,12 @@ function matches(draft, candidate, pin) {
   if (c.patch_sha256 !== m.patch_sha256 || c.patch_bytes !== m.patch_bytes ||
       oid(c.inspection.comparison.before_tree, format) !== m.root_tree) fail('source_changes_candidate_basis');
   const prepared = new Map(c.preparation.paths.map(row => [row.path_hex, row]));
-  const actual = new Map(c.inspection.comparison.entries.map(row => [row.path_hex, row]));
+  // validateSourceEdit already reconstructed every admitted structural row
+  // from its complete child commitments. Those ancestors are not extra file
+  // effects; retain them in the capture while matching the exact leaf set.
+  const actual = new Map(c.inspection.comparison.entries
+    .filter(row => row.before?.mode !== 0o40000 && row.after?.mode !== 0o40000)
+    .map(row => [row.path_hex, row]));
   if (prepared.size !== m.effects.length || actual.size !== m.effects.length) fail('source_changes_candidate_effects');
   for (const effect of m.effects) {
     const p = prepared.get(effect.path_hex), a = actual.get(effect.path_hex);

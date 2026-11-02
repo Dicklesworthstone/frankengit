@@ -1,6 +1,6 @@
 // Contract HTTP peer, not Rust fg. Test-only Git constructs a genuinely
 // conflicted graph and the selected result; production invokes no Git process.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { pinnedFixtureGit } from './pinned_git_fixture.mjs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,9 +21,9 @@ export async function conflictFixture(algorithm = 'sha1', method = 'merge-commit
     const env = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', TZ: 'UTC', GIT_AUTHOR_NAME: 'Alice', GIT_AUTHOR_EMAIL: 'alice@example.invalid',
       GIT_COMMITTER_NAME: 'Bob', GIT_COMMITTER_EMAIL: 'bob@example.invalid', GIT_AUTHOR_DATE: '@1700000000 +0000', GIT_COMMITTER_DATE: '@1700000000 +0000' };
-    const git = (args, input) => execFileSync('git', ['-C', root, ...args], { env, input, timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
-    const id = (args, input) => git(args, input).toString('utf8').trim();
     try {
+      const git = pinnedFixtureGit(root, env, 4 * 1024 * 1024);
+      const id = (args, input) => git(args, input).toString('utf8').trim();
       git(['init', '--bare', '--quiet', `--object-format=${algorithm}`]);
       const path = Buffer.from([102, 105, 108, 101, 255]), before = Buffer.from('ours\n');
       const bodies = { base: Buffer.from('base\n'), ours: before, theirs: Buffer.from('theirs\n'), file: Buffer.from(bytes) };
@@ -33,7 +33,7 @@ export async function conflictFixture(algorithm = 'sha1', method = 'merge-commit
       const baseTree = tree(blobs.base), oldTree = tree(blobs.ours), sourceTree = tree(blobs.theirs);
       const base = id(['commit-tree', baseTree], 'base\n');
       const target = id(['commit-tree', oldTree, '-p', base], 'target\n'), source = id(['commit-tree', sourceTree, '-p', base], 'source\n');
-      const conflict = spawnSync('git', ['-C', root, 'merge-tree', '--write-tree', target, source], { env, timeout: 10000, maxBuffer: 1024 * 1024 });
+      const conflict = git.result(['merge-tree', '--write-tree', target, source], undefined, 1024 * 1024);
       assert.equal(conflict.status, 1, 'Git independently reports a content conflict');
       const removed = choice === 'delete', after = removed ? Buffer.alloc(0) : bodies[choice];
       const newBlob = removed ? null : blobs[choice], newTree = tree(newBlob, choice === 'file' ? mode : '100644');

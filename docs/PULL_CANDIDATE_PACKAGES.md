@@ -78,17 +78,23 @@ node --test tests/operator/pull_candidate_files.test.mjs
 
 Tests use complete unchanged capture/MIME/inspection validators, actual private
 files and HTTP sockets, and the existing test-only Git oracle for real SHA-1 and
-SHA-256 bundles. HTTP reports remain explicit native-schema fixtures, not an
+SHA-256 bundles. The shared candidate/resolution fixture executor first verifies
+the repository's `git-2.54.0` pin and receipt, then runs only that binary inside
+Bubblewrap with private fixture bytes and explicit commit metadata. The verified
+oracle and Bubblewrap must already be installed; no ambient `git` or arbitrary
+executable override is accepted. Missing-oracle sentinel tests require refusal
+and temporary-directory cleanup. HTTP reports remain explicit native-schema fixtures, not an
 executed Rust `fg` server. This does not establish native admission/ancestry,
 real deployment, or full-workspace verification. It adds no production dependency
 and does not close `frankengit-root-doctrine-x2mv.4.13` or `.4.20`.
 
 ## Command-line workflow
 
-`node scripts/fg_pull_candidate.mjs --help` exposes `capture`, `inspect`, and
-`draft`. Only `capture` accepts credentials or contacts the native node. None of
-these commands publishes repository state. The existing `remote_pull.mjs`
-remains the separately confirmed sender.
+`node scripts/fg_pull_candidate.mjs --help` exposes `capture`, `resolve`,
+`inspect`, `draft`, and `stage`. Capture and resolution contact the native node;
+staging reads an explicit credential offline to save an exact sender request.
+None publishes repository state. The existing `remote_pull.mjs` remains the
+separately confirmed sender.
 
 Create an owner-private directory outside a Git worktree, with mode-0600 JSON
 and token files. The acquisition input is the existing `capturePullCandidate`
@@ -183,7 +189,7 @@ on stderr when possible, while the synced output remains available. SIGTERM and
 SIGINT cancel the owned request; SIGKILL can leave an incomplete slot, which is
 not a completed package. There are no network retries or automatic publications.
 
-Exit codes: **0** for completed clean capture, offline inspection or draft;
+Exit codes: **0** for completed clean capture/resolution, offline inspection, draft or staging;
 **1** for a captured conflict/up-to-date noncandidate; **2** for local input,
 file, hash or drafting refusal; **3** for acquisition/save/output failure after
 work began. A saved noncandidate can be inspected, but never drafted as a clean

@@ -190,7 +190,9 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
   } catch (error) {
     const code = typeof error.code === 'string' && /^source_(?:changes|edit|pack)_[a-z0-9_]{1,80}$/.test(error.code)
       ? error.code : 'source_changes_cli_refused';
-    try { await emit(stderr, { type: 'source_changes_error', code, remote_mutation_attempted: false,
+    try { await emit(stderr, { type: 'source_changes_error', code,
+      http_status: Number.isInteger(error.status) && error.status >= 100 && error.status <= 599 ? error.status : null,
+      remote_mutation_attempted: false,
       ...(result ? { retained_result: result } : error.publication_unconfirmed ? { publication_unconfirmed: error.publication_unconfirmed } : {}) }); }
     catch { /* Keep any owned output and its original identities. */ }
     return result || error.publication_unconfirmed ? 4 : stop.signal.aborted ? 3 : 2;
