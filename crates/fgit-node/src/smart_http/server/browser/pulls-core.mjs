@@ -188,7 +188,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -247,6 +247,7 @@ export function apiError(status) {
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+    /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(route) ||
     (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments(?:\/append)?$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
@@ -266,12 +267,13 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
     if (typeof checkEvidenceOnly !== 'boolean' || (checkEvidenceOnly && pageSuffix !== '/ui/pulls/')) fail('Invalid workflow evidence browser profile.');
     this.#checkEvidence = checkEvidenceOnly;
+    this.#queues = pageSuffix === '/ui/queues/';
     this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#rebase = pageSuffix === '/ui/rebase/'; this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
@@ -312,6 +314,33 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#queues) {
+      const list = /^queues(?:\?[^#]*)?$/.test(path);
+      const selected = /^(?:queues|pulls)\/[1-9][0-9]*(?:\?[^#]*)?$/.test(path);
+      const publication = /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(path);
+      const outcome = path === 'outcomes';
+      if (binary || contentType !== 'application/x-www-form-urlencoded' || headerNames.length ||
+          !(list || selected || publication || outcome)) fail('Invalid queue-profile route.');
+      if (list || selected) {
+        if (method !== 'GET' || body !== undefined || key !== undefined || !read ||
+            statuses.length !== (list ? 1 : 2) || statuses[0] !== 200 || (selected && statuses[1] !== 404)) fail('Queue and PR observations are read-only.');
+        const seen = new Set();
+        for (const [name, value] of url.searchParams) {
+          if (seen.has(name) || !(name === 'expected_head' || (list && ['after', 'limit'].includes(name)))) fail('Invalid queue read query.');
+          seen.add(name);
+          if (name === 'expected_head') snapshot(value);
+          else { const n = decimal(value, name, name === 'limit' ? 1 : 0); if (name === 'limit' && n > 100) fail('Invalid queue page size.'); }
+        }
+        if (Number(url.searchParams.get('after') ?? 0) > 0 && !seen.has('expected_head')) fail('Queue continuation requires its original snapshot.');
+        integer(maximum, 'queue response limit', 1, REPLY_LIMIT);
+      } else {
+        if (method !== 'POST' || read || typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key) ||
+            statuses.length !== (outcome ? 1 : 2) || statuses[0] !== 200 || (publication && statuses[1] !== 409) ||
+            (outcome ? body !== undefined : !((typeof body === 'string' && utf8.encode(body).length <= 64 * 1024) ||
+              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= 64 * 1024)))) fail('Queue publication needs the exact form and original recovery key.');
+        integer(maximum, 'queue terminal response limit', 1, REPLY_LIMIT);
+      }
+    }
     if (this.#checkEvidence) {
       if (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
           statuses.length !== 1 || statuses[0] !== 200) fail('Workflow evidence is a closed read-only profile.');
@@ -360,7 +389,9 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#checkEvidence
+    const allowed = this.#queues
+      ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\?[^#]*)?|outcomes)$/.test(path)
+      : this.#checkEvidence
       ? /^pulls\/[1-9][0-9]*\/checks\/evidence\?[^#]+$/.test(path)
       : this.#rebase
       ? /^(?:source\/(?:tree|rebase\/(?:prepare|resolve|inspect|apply))|outcomes)$/.test(path)

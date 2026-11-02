@@ -4,6 +4,7 @@
 
 mod protection;
 mod pulls;
+mod queues;
 
 mod activity;
 mod branches;
@@ -53,9 +54,21 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str, Asse
         b"/ui/browser.mjs" => Some(("text/javascript; charset=utf-8", SCRIPT, AssetScope::Source)),
         b"/ui/browser.css" => Some(("text/css; charset=utf-8", STYLE, AssetScope::Shared)),
         b"/ui/issues/" => Some(("text/html; charset=utf-8", ISSUES_HTML, AssetScope::Issues)),
-        b"/ui/notifications/" => Some(("text/html; charset=utf-8", NOTIFICATIONS_HTML, AssetScope::Issues)),
-        b"/ui/notifications.mjs" => Some(("text/javascript; charset=utf-8", NOTIFICATIONS_CLIENT, AssetScope::Issues)),
-        b"/ui/notifications-view.mjs" => Some(("text/javascript; charset=utf-8", NOTIFICATIONS_VIEW, AssetScope::Issues)),
+        b"/ui/notifications/" => Some((
+            "text/html; charset=utf-8",
+            NOTIFICATIONS_HTML,
+            AssetScope::Issues,
+        )),
+        b"/ui/notifications.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            NOTIFICATIONS_CLIENT,
+            AssetScope::Issues,
+        )),
+        b"/ui/notifications-view.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            NOTIFICATIONS_VIEW,
+            AssetScope::Issues,
+        )),
         b"/ui/issues.mjs" => Some((
             "text/javascript; charset=utf-8",
             ISSUES_CLIENT,
@@ -115,6 +128,9 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if queues::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
     if protection::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }

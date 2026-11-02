@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Merge queues · FrankenGit</title>
+  <link rel="stylesheet" href="./browser.css">
+  <script type="module" src="./queues-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Merge queues</span><a href="../pulls/">Pull requests</a><a href="../">Source browser</a></header>
+  <main>
+    <h1>Repository merge queues</h1>
+    <p>Inspect the recorded queue order and prepare exact changes. Enqueueing, reordering, and reviewing a PR leave its target branch unchanged. A separate committed landing updates the target and merges the PR.</p>
+    <form id="connection">
+      <label>Access token<input id="token" type="password" autocomplete="off" maxlength="64" spellcheck="false" required></label>
+      <label><input id="recovery-only" type="checkbox">Connect for outcome recovery only</label>
+      <label>Original principal for recovery<input id="original-principal" autocomplete="off" maxlength="32" spellcheck="false" disabled></label>
+      <button id="connect" type="submit">Connect</button><button id="disconnect" type="button">Disconnect</button>
+    </form>
+    <p id="connection-mode" class="hint"></p>
+    <p class="hint">Queue reads, queue management, PR reads, and queue landing have independent grants. Recovery-only mode accepts a credential for looking up the original principal's outcome; it permits no reads, preparations, or sends. Credentials stay in memory.</p>
+    <p id="status" role="status" aria-live="polite">Connect an explicitly scoped token to begin.</p>
+    <pre id="snapshot"></pre>
+
+    <section aria-labelledby="queues-heading">
+      <h2 id="queues-heading">Queues at one snapshot</h2>
+      <form id="list-form">
+        <label>Queues per page<select id="page-limit"><option value="20">20</option><option value="5">5</option><option value="100">100</option></select></label>
+        <button id="refresh" type="submit">Load latest queues</button><button id="cancel-read" type="button">Cancel read</button>
+      </form>
+      <div id="queue-list"></div><div id="paging"></div>
+      <form id="show-form">
+        <label>Queue number<input id="show-number" inputmode="numeric" autocomplete="off" required></label>
+        <button id="show-load" type="submit">Load latest queue</button>
+      </form>
+      <div id="selected"></div>
+    </section>
+
+    <section aria-labelledby="change-heading">
+      <h2 id="change-heading">Prepare a queue change</h2>
+      <p>Load a queue to use its exact version and target. To create one, choose an unused queue number and version 0, then enqueue an open PR. Loading a PR fills its recorded coordinates; exact manual coordinates also work when your credential lacks PR-read access.</p>
+      <form id="queue-change">
+        <label>Queue number<input id="queue-number" inputmode="numeric" autocomplete="off" required></label>
+        <label>Expected queue version<input id="queue-version" inputmode="numeric" autocomplete="off" required></label>
+        <label>Target reference format<select id="target-kind"><option value="text">Text</option><option value="hex">Native bytes as lowercase hex</option></select></label>
+        <label>Full target branch reference<input id="target-ref" autocomplete="off" maxlength="2048" spellcheck="false" required placeholder="refs/heads/main"></label>
+        <label>Action<select id="queue-action"><option value="enqueue">Enqueue PR</option><option value="dequeue">Dequeue PR</option><option value="reorder">Replace complete queue order</option><option value="land">Land queue head by fast-forward</option></select></label>
+
+        <fieldset id="pr-fields">
+          <legend>Exact pull request coordinates</legend>
+          <label>Pull request number<input id="pull-number" inputmode="numeric" autocomplete="off" required></label>
+          <button id="load-pull" type="button">Load PR coordinates at this snapshot</button>
+          <p id="pull-observation" class="hint"></p>
+          <label>Expected PR version<input id="pull-version" inputmode="numeric" autocomplete="off" required></label>
+          <label>Source reference format<select id="source-kind"><option value="text">Text</option><option value="hex">Native bytes as lowercase hex</option></select></label>
+          <label>Full source branch reference<input id="source-ref" autocomplete="off" maxlength="2048" spellcheck="false" required placeholder="refs/heads/topic"></label>
+          <label>Expected source commit<input id="source-tip" autocomplete="off" maxlength="71" spellcheck="false" required></label>
+          <label>Expected target commit<input id="target-tip" autocomplete="off" maxlength="71" spellcheck="false" required></label>
+          <label id="priority-field">Priority (0–4294967295)<input id="priority" value="0" inputmode="numeric" autocomplete="off" required></label>
+        </fieldset>
+        <fieldset id="dequeue-fields" hidden disabled>
+          <legend>Remove one queued PR</legend>
+          <label>Queued PR number<input id="dequeue-number" inputmode="numeric" autocomplete="off" required></label>
+          <label>Explicit reason<select id="dequeue-reason" required><option value="">Choose a reason</option><option value="withdrawn">Withdrawn</option><option value="conflict">Conflict</option><option value="check-failed">Check failed</option><option value="base-moved">Base moved</option><option value="evicted">Evicted</option><option value="admin-override">Administrator override</option></select></label>
+        </fieldset>
+        <fieldset id="reorder-fields" hidden disabled>
+          <legend>Complete order from the selected queue</legend>
+          <label>Every queued PR number, one per line, first to last<textarea id="queue-order" rows="8" maxlength="17408" autocomplete="off" spellcheck="false" required></textarea></label>
+          <p class="hint">Include every current member exactly once. This request reorders the queue; it does not add or remove members.</p>
+        </fieldset>
+        <fieldset id="landing-fields" hidden disabled>
+          <legend>Explicit queue-head landing</legend>
+          <label>Expected policy epoch<input id="policy-epoch" inputmode="numeric" autocomplete="off" required></label>
+          <p>This page submits a fast-forward-only landing of the selected head. The node checks the queue and PR versions, both branch tips, ancestry, current policy, independent reviews, and required checks. A failed gate does not move the branch or remove the queued PR.</p>
+        </fieldset>
+        <button id="prepare" type="submit">Prepare exact request — do not send</button>
+      </form>
+    </section>
+
+    <section id="pending-section" aria-labelledby="pending-heading" hidden>
+      <h2 id="pending-heading">Prepared request and recovery</h2>
+      <pre id="pending"></pre>
+      <p class="hint">Save this private receipt before sending. It contains the exact request and recovery identity, but no token. An exported or dispatched request remains your responsibility until its canonical outcome is known.</p>
+      <button id="receipt-download" type="button">Save private recovery receipt</button>
+      <label><input id="confirm" type="checkbox">I reviewed the exact prepared request and want to send it</label>
+      <button id="send" type="button">Send prepared request</button>
+      <button id="recover" type="button">Look up canonical outcome</button>
+      <button id="discard" type="button">Discard never-sent preparation</button>
+    </section>
+    <section aria-labelledby="restore-heading">
+      <h2 id="restore-heading">Restore the original request</h2>
+      <p>Connect the original credential, or explicitly choose recovery-only mode with the original principal. Importing never sends a request. Unknown outcomes retain the original body and key for recovery or an explicit identical retry.</p>
+      <form id="receipt-import">
+        <label>Private recovery receipt (256 KiB maximum)<input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
+        <button id="receipt-import-submit" type="submit">Restore without sending</button>
+      </form>
+    </section>
+  </main>
+  <footer>Snapshots and receipts describe recorded state. Reload explicitly to observe later queue changes. HTTP success alone is not a canonical publication decision.</footer>
+</body>
+</html>
