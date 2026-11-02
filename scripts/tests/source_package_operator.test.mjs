@@ -8,6 +8,73 @@ const capture = (p, options = {}) => captureSourcePackage(p.context, p.contextHa
 const inspect = (p, result, options = {}) => inspectSourcePackage(result.bytes, result.receipt.package_sha256, p.context, p.contextHash, p.selected, p.expected, options);
 const updateContext = (p, change) => { const value = JSON.parse(p.context); change(value.native_response); p.context = Buffer.from(JSON.stringify(value)); p.contextHash = sha256(p.context); };
 
+test('package source reads identify the project on every actual HTTP page', async t => {
+  const p = await peer(t, fixture('sha1', { paged: true }));
+  await capture(p);
+  assert.ok(p.requests.length > 3);
+  for (const { req } of p.requests) {
+    assert.equal(req.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
+    assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+    assert.equal(req.headers.cookie, undefined);
+  }
+});
+
+function labelledContext(p) {
+  updateContext(p, context => {
+    for (const row of context.files) {
+      row.position_domain = 'source-blob-bytes'; row.lineage_commitment = 'a'.repeat(64);
+      row.authorization_labels = ['b'.repeat(64)];
+      for (const part of row.excerpts) Object.assign(part, {
+        position_domain: row.position_domain, lineage_commitment: row.lineage_commitment });
+    }
+  });
+}
+function joinedContext(p) {
+  labelledContext(p);
+  updateContext(p, context => {
+    const source = { ...context.retrieval };
+    delete context.retrieval.source_head; delete context.retrieval.published;
+    for (const channel of ['content', 'path']) context.retrieval[channel] = {
+      ...source, type: 'source_search_index', profile: 'ascii-word-postings-v1', channel };
+  });
+}
+for (const format of ['sha1', 'sha256']) test(`${format}: actual joined retrieval envelope supplies matching channel source coordinates`, async t => {
+  const p = await peer(t, fixture(format)); joinedContext(p);
+  const result = await capture(p); assert.equal((await inspect(p, result)).verified.commit, p.f.commitId);
+});
+for (const [name, mutate] of [
+  ['root snapshot', r => r.snapshot_token = 'alg:1:bb'],
+  ['root read flag', r => r.read_only = false],
+  ['root RCR', r => r.source_rcr = 'different-rcr'],
+  ['path source head', r => r.path.source_head = 'different-head'],
+  ['path snapshot', r => r.path.snapshot_token = 'alg:1:bb'],
+  ['content profile', r => r.content.profile = 'different-profile'],
+  ['missing content', r => delete r.content],
+  ['partial legacy envelope', r => r.source_head = r.content.source_head],
+]) test(`joined ${name} cannot be repaired by another envelope`, async t => {
+  const p = await peer(t); joinedContext(p); updateContext(p, c => mutate(c.retrieval));
+  await assert.rejects(capture(p)); assert.equal(p.requests.length, 0);
+});
+for (const format of ['sha1', 'sha256']) test(`${format}: declared native excerpt lineage survives package acquisition without becoming authority`, async t => {
+  const p = await peer(t, fixture(format)); labelledContext(p);
+  const acquired = await capture(p), replay = await inspect(p, acquired);
+  assert.equal(replay.verified.authorityVerified, false);
+  assert.equal(replay.context_excerpt_bytes_verified, true);
+  assert.equal(acquired.bytes.includes(Buffer.from('lineage_commitment')), false);
+});
+for (const [name, change] of [
+  ['excerpt domain', row => row.excerpts[0].position_domain = 'raw-path-bytes'],
+  ['excerpt commitment', row => row.excerpts[0].lineage_commitment = 'c'.repeat(64)],
+  ['missing excerpt commitment', row => delete row.excerpts[0].lineage_commitment],
+  ['file domain', row => row.position_domain = 'raw-path-bytes'],
+  ['file commitment', row => row.lineage_commitment = 'not-a-label'],
+  ['authorization label', row => row.authorization_labels[0] = 'bad'],
+  ['unknown labelled excerpt field', row => row.excerpts[0].trusted = true],
+]) test(`declared native ${name} refuses before source reads`, async t => {
+  const p = await peer(t); labelledContext(p); updateContext(p, c => change(c.files[0]));
+  await assert.rejects(capture(p)); assert.equal(p.requests.length, 0);
+});
+
 for (const format of ['sha1', 'sha256']) test(`${format}: native paginated capture, independent offline replay and deterministic package`, async t => {
   const p = await peer(t, fixture(format, { paged: true }));
   const result = await capture(p), value = JSON.parse(result.bytes), expectedPaths = p.expected.files.map(row => row.pathHex);

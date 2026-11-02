@@ -87,14 +87,6 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     commit_body = f"tree {result_tree}\nparent {base}\nauthor {AUTHOR} 2 +0000\ncommitter {AUTHOR} 2 +0000\n\n{MESSAGE}".encode()
     candidate = expected("commit", commit_body)
     selected = sorted([EDIT, REMOVE, MODE])
-    package = {"schema": "frankengit-selected-source-package-v1", "membership": {
-        "schema": "frankengit-context-membership-proof-v1", "objectFormat": fmt,
-        "commit": {"oid": base, "bodyHex": base_body.hex()},
-        "trees": [{"pathHex": path.hex() if path else None, "oid": identity, "bodyHex": body.hex()}
-                  for path, (identity, body) in sorted(trees.items())],
-        "files": [{"pathHex": p.hex(), "blob": oid(fmt, "blob", BEFORE[p][1]), "kind": "file"} for p in selected]},
-        "blobs": sorted([{"oid": oid(fmt, "blob", BEFORE[p][1]), "bytesHex": BEFORE[p][1].hex()}
-                         for p in selected], key=lambda row: row["oid"])}
     independent = {"format": fmt, "commit": base,
                    "files": [{"pathHex": p.hex(), "blob": oid(fmt, "blob", BEFORE[p][1])} for p in selected]}
 
@@ -104,7 +96,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
             json.dump(value, out)
         return path
 
-    package_path, expect_path = put("package.json", package), put("expected.json", independent)
+    package_path, expect_path = home / "package.json", put("expected.json", independent)
 
     def oracle(label, *arguments):
         command = [str(ROOT / "scripts/e2e/oracle/oracle.sh"), "capture", "git-2.54.0", str(oracle_run),
@@ -118,8 +110,9 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(result.returncode == 0, "pinned Git rejected the fixture or candidate bundle")
 
     oracle("fsck", "fsck", "--full", "--strict", "--no-reflogs")
-    c.run("init", repository, TENANT, REPOSITORY, fmt)
+    c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "operator-workspace-import", source)
+    c.run("index", repository, TENANT, REPOSITORY, fmt, REF, "build", "genesis")
     credentials, incarnation = c.credentials(repository, home)
     header = credentials.read_text().splitlines()[0]
     token = "a" * 64
@@ -150,6 +143,79 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
 
     before = c.run("at", repository, TENANT, REPOSITORY, "latest")
     require(refs() == {REF: base}, "native import differs from independent fixture")
+    pin = native("show", "--ref", REF, "--path-hex", EDIT.hex(), "--max-bytes", "65536")
+    require(pin["node_closed"] is True and pin["source_commit"] == base and pin["root_tree"] == base_tree
+            and bytes.fromhex(pin["bytes_hex"]) == BEFORE[EDIT][1], "independent native source selection differs")
+    context_cli, package_cli = ROOT / "scripts/fg_source_context.mjs", ROOT / "scripts/fg_source_package.mjs"
+    context_bundle = home / "native-context"
+    acquisition = HttpServer(c, repository, credentials, "workspace-acquisition-" + fmt)
+    acquisition.command.append("--allow-source")
+    with acquisition:
+        query = put("context-query.json", {"schema": "frankengit-source-context-query-v1", "scope": {
+            "tenant_id": TENANT, "repository_id": REPOSITORY, "repository_incarnation": incarnation,
+            "object_format": fmt}, "reference": REF, "expected_commit": base,
+            "expected_head": pin["snapshot_token"], "terms": ["dir"],
+            "prefixes_hex": [p.hex() for p in selected], "limits": {"context_max_files": 3}})
+        context_args = ["capture", "--endpoint", acquisition.url, "--query-file", str(query),
+                        "--token-file", str(token_path), "--output", str(context_bundle), "--require-complete"]
+        grants("receive,outcomes-read")
+        denied = c.node_command(context_cli, context_args, 2, error_reply=True)
+        require(denied["status"] == 403 and not context_bundle.exists(), "context read grant denial was bypassed")
+        grants("read,receive,outcomes-read")
+        context = c.node_command(context_cli, context_args)
+        saved_context = context_bundle / "capture.json"
+        require(file_sha256(saved_context) == context["capture_sha256"], "context capture hash changed")
+        native_context = json.loads(saved_context.read_bytes())["native_response"]
+        require(sorted(bytes.fromhex(f["path_hex"]) for f in native_context["files"]) == selected,
+                "actual Initial query selected unexpected source paths")
+        for row in native_context["files"]:
+            body = BEFORE[bytes.fromhex(row["path_hex"])][1]
+            require(row["blob"] == oid(fmt, "blob", body) and row["source_bytes"] == len(body),
+                    "native context differs from independent selected object")
+            for excerpt in row["excerpts"]:
+                data = bytes.fromhex(excerpt["untrusted_bytes_hex"]); at = excerpt["byte_offset"]
+                require(body[at:at + len(data)] == data, "native context excerpt differs from original bytes")
+        c.facts[f"{fmt}_native_context_and_grant_twins"] = True
+        selection = put("package-selection.json", {"endpoint": acquisition.url, "tenant_id": TENANT,
+            "repository_id": REPOSITORY, "repository_incarnation": incarnation, "object_format": fmt,
+            "ref": REF, "expected_commit": base, "expected_head": pin["snapshot_token"]})
+        package_common = ["--selection", str(selection), "--context", str(saved_context),
+                          "--context-sha256", context["capture_sha256"], "--expect", str(expect_path)]
+        package_args = ["capture", *package_common, "--token-file", str(token_path),
+                        "--output", str(package_path), "--native-fg", str(c.fg)]
+        grants("receive,outcomes-read")
+        c.node_command(package_cli, package_args, 2, error_reply=True)
+        require(not package_path.exists(), "package published without its read grant")
+        grants("read,receive,outcomes-read")
+        chosen = json.loads(selection.read_bytes())
+        selection.write_text(json.dumps({**chosen, "expected_head": "alg:2:" + "f" * 64}))
+        c.node_command(package_cli, package_args, 2, error_reply=True)
+        require(not package_path.exists(), "changed independent head published a package")
+        selection.write_text(json.dumps(chosen))
+        acquired = c.node_command(package_cli, package_args)
+        require(acquired["native_read"]["verified_at_capture"] is True
+                and acquired["native_read"]["head"] == pin["snapshot_token"]
+                and acquired["native_read"]["binary_sha256"] == file_sha256(c.fg)
+                and acquired["native_read"]["files"] == len(selected)
+                and acquired["verified"]["authorityVerified"] is False
+                and acquired["package_sha256"] == file_sha256(package_path), "native package proof/custody differs")
+        package = json.loads(package_path.read_bytes())
+        require(package["membership"]["commit"] == {"oid": base, "bodyHex": base_body.hex()}
+                and package["membership"]["files"] == [
+                    {"pathHex": p.hex(), "blob": oid(fmt, "blob", BEFORE[p][1]), "kind": "file"} for p in selected]
+                and package["blobs"] == sorted([
+                    {"oid": oid(fmt, "blob", BEFORE[p][1]), "bytesHex": BEFORE[p][1].hex()} for p in selected], key=lambda x: x["oid"]),
+                "acquired package does not contain exact independently selected files")
+        require({t["pathHex"]: (t["oid"], t["bodyHex"]) for t in package["membership"]["trees"]}
+                == {p.hex() if p else None: (identity, body.hex()) for p, (identity, body) in trees.items()},
+                "acquired parent trees differ from independent original objects")
+    c.node_command(context_cli, ["inspect", "--bundle", str(context_bundle), "--expected-sha256", context["manifest_sha256"]])
+    c.node_command(package_cli, ["inspect", *package_common, "--package", str(package_path),
+                                 "--package-sha256", acquired["package_sha256"]])
+    c.node_command(ROOT / "scripts/fg_verify_source_package.mjs", ["--package", str(package_path), "--expect", str(expect_path)])
+    require(c.run("at", repository, TENANT, REPOSITORY, "latest") == before and refs() == {REF: base},
+            "source acquisition or proof verification published canonical state")
+    c.facts[f"{fmt}_native_package_and_proof_custody"] = True
     workspace = home / "workspace"
     args = ["create", "--package", str(package_path), "--expect", str(expect_path), "--output", str(workspace)]
     made = c.node_command(workspace_cli, args)
@@ -307,10 +373,11 @@ def main() -> None:
     require(not any(args.work.iterdir()) and args.work.stat().st_mode & 0o077 == 0, "empty private work directory required")
     c = OperatorCampaign(fg, node, args.work.resolve())
     summary: dict[str, Any] = {"complete": False, "facts": c.facts, "binary_sha256": file_sha256(fg),
-        "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_workspace.mjs",
+        "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_context.mjs",
+        "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
         "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
-        "non_claim": "Independent fixture package and real authoring/publication; not native package acquisition, every operator, current-source native qualification, TLS or deployment."}
+        "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 
     def stop(_signum, _frame):
         raise InterruptedError("source workspace campaign interrupted; draining owned children")
