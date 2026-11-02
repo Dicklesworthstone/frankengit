@@ -159,3 +159,44 @@ an injected watcher/publisher boundary. They test orchestration, branch isolatio
 backpressure, cancellation, custody fencing, bounded parallel scheduling,
 service quarantine, reporting backpressure and CLI validation. They do not
 replace the existing native workflow execution/publication integration gates.
+
+The discovered [`operator/workflow_supervisor.sh`](../scripts/e2e/suites/operator/workflow_supervisor.sh)
+campaign now exercises the shipped `once`, `status`, `serve` and `reconcile`
+commands through the existing native workflow fixture in both hash domains.
+A failing workflow still publishes exact success/failure/skipped observations;
+independent Rust PR-check reads verify their IDs, evidence and conclusions.
+Restarting the operator preserves deduplication. A distinct permitted revision
+advances through native bundle synchronization with an explicit expected old
+tip; two service cycles execute it once and retain six original job decisions.
+The original failed input and conclusions are preserved. Relocating the private
+source store and retaining one completed summary outside its original pathname
+demonstrates read-side reconciliation from native reports without execution,
+publication, lock deletion or a canonical-head change. The source store and
+original summary bytes remain retained; this is not a hardware-crash drill.
+
+At client/harness source `649394e06290b49d126b30d37000e9502d903baa`, this campaign's
+17 assertions and the existing watcher/publisher campaign's 15 assertions all
+complete without failures or skips. Their union receipt is
+`/data/frankengit-targets/noble_operator_supervisor_649394e0_20261102/receipt.ndjson`,
+SHA-256 `e5907b6dc9e6a265e0d75714cd8415928bf1135706c9190c223c07cf7d2089ef`.
+The supplied Rust binary is explicitly older source
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+Pinned sandboxed Git 2.54.0 checks the fixture objects and creates the permitted
+bundle; these operations are not a full Git differential campaign.
+
+A separate control delegates every command to that same Rust binary while
+removing explicit host-execution consent only from workflow dispatch. The
+supervisor reports native exit `2`, preserves unresolved start custody and
+performs no retry; no job marker or publication plan appears. This is a
+consent-disabled control, not a route-removed build or the full negative matrix.
+The workflow driver's NDJSON calls now use the existing request/drain owner:
+interruption lets Node drain its detached child, and array/null observations
+refuse. Fourteen actual-process owner cases and 53 module/controller cases
+complete separately at the same client source; the owner workers are synthetic
+cooperative executables, not native-forge evidence.
+
+This is a single selected lane with fixed secret-free trusted-host scripts.
+Native multi-lane contention, artifacts, hostile isolation, required-check
+authority, current-source native qualification, D10 and the full operator/release
+matrix remain separate. Original `x2mv.4.59` acceptance remains open.
