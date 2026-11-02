@@ -54,6 +54,14 @@ fresh whole-operation budget after preflight. Once the child has closed, only
 the two owned control files are removed. Unexpected files and native diagnostic
 scratch are never recursively erased by the adapter.
 
+The shared process adapter retains the original exit status, stdout and stderr
+after its owner has observed close and quiescence, even if cancellation arrives
+during that finalization. It does not perform another lifetime check that could
+discard the settled result. Receipt validation still decides what the result
+means, and cancellation/deadline checks still precede any subsequent effect.
+An in-flight stop, abnormal exit, output limit or containment failure remains
+a refusal or uncertain result; none proves rollback.
+
 If child containment fails, the control files remain available for diagnosis,
 while the operator closes its own file descriptors. Errors expose
 `approval_scratch` and `cleanup_error` where applicable. Cleanup failure after a
@@ -76,3 +84,15 @@ The same target includes an opt-in real-`fg` export, signed restore and exact
 resume test, enabled by `FG_NATIVE_BIN=/absolute/path/to/fg`. Without that binary
 it is explicitly skipped. Native integration and the broader recovery acceptance
 must be evaluated separately; this operator increment does not close the bead.
+
+At `9aeebf017ac44239e32b33fe2edd985a90f2259e`, the two existing
+`scripts/tests/repository-backup-export.test.mjs` real-native cases complete for
+SHA-1 and SHA-256: native issue creation and independently pinned export, operator
+export/verify/sign, signed native restore, then canonical Rust issue and doctor
+reads. Node is pinned to 26.8.1; the explicitly older supplied native binary is
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+Raw output remains under
+`/data/tmp/frankengit-gap-work-20261030/review-backup-native-9aeebf01.*`.
+These two cases are distinct from process/schema-peer tests and do not establish
+current-source native, all-operator, physical crash or hostile-code qualification.

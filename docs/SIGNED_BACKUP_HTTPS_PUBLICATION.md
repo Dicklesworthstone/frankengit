@@ -56,6 +56,10 @@ URL user/password fields, fragments, or insecure TLS mode are supported. System
 TLS roots and hostname verification remain required even if the process has
 `NODE_TLS_REJECT_UNAUTHORIZED=0`; an independent CA file may be selected.
 
+Every GET and PUT identifies the project with
+`User-Agent: frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)`.
+It does not put signed URL capabilities or repository secrets into that header.
+
 ## Command
 
 ```sh
