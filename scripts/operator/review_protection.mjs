@@ -235,6 +235,7 @@ export async function jsonRequest(address, token, { path = 'protection', method 
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('invalid_abort_signal');
   if (signal?.aborted) fail('cancelled');
   const url = new URL(`${base}/api/v1/${path}`), headers = { Authorization: `Bearer ${token}`, Accept: 'application/json',
+    'User-Agent': 'frankengit-protection-operator/1 (+https://github.com/Dicklesworthstone/frankengit)',
     'Accept-Encoding': 'identity', 'Cache-Control': 'no-store', Connection: 'close' };
   if (key !== undefined) headers['Idempotency-Key'] = key;
   if (method === 'POST') headers['Content-Length'] = String(body === undefined ? 0 : Buffer.byteLength(body));

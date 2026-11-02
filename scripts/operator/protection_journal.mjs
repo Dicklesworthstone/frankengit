@@ -115,6 +115,9 @@ export async function recoverSavedIntent(path, token, { expectedEndpoint, signal
   let selected = null;
   try {
     const old = await retained(directory, intent);
+    // A failed fresh lookup cannot erase validated local knowledge. Keep its
+    // provenance in the error; only a successful reply is a fresh observation.
+    selected = old.terminal ?? old.known;
     selected = await recoverIntent(intent, token, { expectedEndpoint, known: (old.terminal ?? old.known)?.record ?? null, timeoutMs, signal });
     await observe('outcome_observed', { intent_sha256: intent.intent_sha256, state: selected.summary.state });
     await remember(directory, intent, selected);
