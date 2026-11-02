@@ -1,8 +1,8 @@
 // Durable local ownership of ONE native source publication. Local files are
 // custody, not repository authority. A dispatched request is never resent.
-import { mkdir, lstat, open } from 'node:fs/promises';
+import { mkdir, lstat, open, opendir } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
 import { validateOutcomeReply } from './transaction_outcome.mjs';
@@ -21,13 +21,56 @@ async function syncFile(path) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { await handle.sync(); } finally { await handle.close(); }
 }
-async function readRecord(path, optional = false) {
+// writeNew publishes complete, synced bytes with link(), then drops its private
+// temporary name. Readers may observe nlink=2 in that interval. Wait only for
+// that exact managed inode to settle; never read a multi-link file, delete a
+// stranded publisher, retry malformed JSON, or authorize another submission.
+export async function readSourceRecord(path, optional = false) {
+  absolute(path);
+  const deadline = performance.now() + 100;
+  let publisher;
+  while (true) {
+    let stat;
+    try { stat = await lstat(path); }
+    catch (error) {
+      if (publisher && error.code === 'ENOENT') fail('source_edit_record_publisher_changed');
+      if (optional && error.code === 'ENOENT') return null;
+      throw error;
+    }
+    if (publisher && ['dev', 'ino', 'uid', 'mode', 'size', 'mtimeMs'].some(key => stat[key] !== publisher[key])) fail('source_edit_record_publisher_changed');
+    if (stat.nlink === 1) break;
+    if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0 || stat.size > RECORD_LIMIT || stat.nlink !== 2) {
+      fail('source_edit_record_link');
+    }
+    let matched = false, count = 0;
+    await directory(dirname(path));
+    const prefix = basename(path) + '.writing-', directory = await opendir(dirname(path));
+    for await (const entry of directory) {
+      if (++count > 64) fail('source_edit_record_directory_limit');
+      if (!entry.name.startsWith(prefix) || !/^[0-9a-f]{32}$/.test(entry.name.slice(prefix.length))) continue;
+      let temporary;
+      try { temporary = await lstat(join(dirname(path), entry.name)); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      if (temporary.isFile() && temporary.dev === stat.dev && temporary.ino === stat.ino && temporary.nlink === 2 &&
+          temporary.uid === stat.uid && temporary.mode === stat.mode && temporary.size === stat.size) matched = true;
+    }
+    // The temporary name can disappear while enumerating. Recheck that one
+    // observed inode before distinguishing a completed publisher from a link.
+    const current = await lstat(path);
+    if (current.dev !== stat.dev || current.ino !== stat.ino) fail('source_edit_record_publisher_changed');
+    if (current.nlink === 1) break;
+    if (!matched) fail('source_edit_record_link');
+    publisher = stat;
+    if (performance.now() >= deadline) fail('source_edit_record_publication_pending');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
   const bytes = await readPrivate(path, RECORD_LIMIT, optional);
   if (bytes === null) return null;
   const value = parse(bytes, RECORD_LIMIT);
   if (!canonical(value).equals(bytes)) fail('source_edit_record_encoding');
   return { value, sha256: hash(bytes) };
 }
+const readRecord = readSourceRecord;
 async function putRecord(path, value) {
   const bytes = canonical(value); if (bytes.length > RECORD_LIMIT) fail('source_edit_record_limit');
   await writeNew(path, bytes);
