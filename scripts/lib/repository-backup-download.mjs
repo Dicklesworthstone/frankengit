@@ -98,7 +98,8 @@ async function transfer(source, ca, expected, file, gate, live, consume, progres
     const incoming = new Promise((resolve, reject) => {
       try { req = request(source.url, { agent, method: 'GET', rejectUnauthorized: true, minVersion: 'TLSv1.2',
         ...(ca === undefined ? {} : { ca }), maxHeaderSize: MAX_HEADERS, highWaterMark: CHUNK,
-        headers: { accept: 'application/octet-stream', 'accept-encoding': 'identity', connection: 'close' } }); }
+        headers: { accept: 'application/octet-stream', 'accept-encoding': 'identity', connection: 'close',
+          'user-agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)' } }); }
       catch (error) { reject(networkFailure(error)); return; }
       requestClosed = new Promise(resolve => req.once('close', resolve));
       req.once('socket', owned => {

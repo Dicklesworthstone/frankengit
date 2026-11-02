@@ -7,6 +7,14 @@ import { downloadRepositoryBackup, repositoryBackupDownloadOptions } from '../li
 import { selectRepositoryBackup } from '../lib/repository-backup-selection.mjs';
 import { tlsFixture, DATA, NOW, ID, digest } from './backup-download-fixture.mjs';
 
+test('backup acquisition identifies FrankenGit on the actual TLS request', async t => {
+  const f = await tlsFixture(t), agents = [];
+  f.setHandler((req, res) => { agents.push(req.headers['user-agent']); res.end(DATA); });
+  const result = await downloadRepositoryBackup(f.options);
+  assert.equal(result.state, 'complete');
+  assert.deepEqual(agents, ['frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)']);
+});
+
 const code = expected => error => { assert.equal(error.code, expected); return true; };
 async function empty(f) { assert.deepEqual(await readdir(f.destination), []); }
 async function noSockets(f) { for (let i = 0; i < 50 && f.sockets.size; i++) await delay(5); assert.equal(f.sockets.size, 0); }

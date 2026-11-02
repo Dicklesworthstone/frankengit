@@ -39,9 +39,10 @@ export async function runImportProcess(fg, args, live, key) {
     };
     throw importError(codes[error.code] ?? 'native_import_process_interrupted', error.details);
   }
-  // A stopped/abnormal child is not evidence that its repository effect was
-  // rolled back. The caller retains the exact identity for read-only lookup.
-  live.check();
+  // The owner already enforced the child's execution lifetime and observed
+  // close/quiescence. A stop arriving after that boundary must not discard its
+  // original result. Callers still validate the receipt and gate any NEXT effect.
+  // An abnormal child never proves that its repository effect was rolled back.
   if (result.signal !== null || !Number.isInteger(result.code)) throw importError('native_import_process_interrupted');
   return { code: result.code, stdout: result.stdout, stderr: result.stderr };
 }

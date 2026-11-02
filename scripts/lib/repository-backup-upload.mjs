@@ -87,6 +87,7 @@ async function exchange(url, method, expected, produce, ctx, payload) {
       try { req = request(url, { method, agent, rejectUnauthorized: true, minVersion: 'TLSv1.2',
         ...(ctx.ca === undefined ? {} : { ca: ctx.ca }), highWaterMark: CHUNK, maxHeaderSize: 16384,
         headers: { 'accept-encoding': 'identity', connection: 'close',
+          'user-agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           ...(method === 'PUT' ? { expect: '100-continue', 'if-none-match': '*', 'content-length': expected.bytes, 'content-type': 'application/octet-stream' } : {}) } }); }
       catch { reject(transportError()); return; }
       requestClosed = new Promise(resolve => req.once('close', resolve));
