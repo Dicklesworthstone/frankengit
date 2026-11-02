@@ -168,11 +168,17 @@ adds required aggregate kind 9, event kind 22, and issue action tags 10/11. Old
 encodings and request identities remain unchanged. Older readers refuse new
 required kinds. Legacy issue JSON without `milestone` means no membership.
 
-The frozen issue archive/import v1/v2 formats do not map milestones between
-repositories. They explicitly refuse active milestone membership or membership
-history, including a set followed by clear, rather than discard history or
-reinterpret the destination's same-numbered milestone. Native history remains
-complete. Dedicated browser milestone controls, standalone discussions,
+The frozen issue archive v1 and issue capture v1/v2 formats keep their original
+behavior: they refuse active membership or membership history rather than
+reinterpret another repository's milestone number. The explicit
+[`--include-milestones` archive profile](NATIVE_ISSUE_ARCHIVE.md) adds archive v2
+with complete pinned milestone and issue histories. The
+[native migration command](NATIVE_ISSUE_IMPORT.md#preserve-milestones-with-an-explicit-number-map)
+uses an explicit source/destination map, issue capture v3 and a versioned phased
+migration plan. It creates all mapped milestones, imports current issue
+membership, and then closes source-closed milestones. Original source actors and
+versions remain attribution; the destination admits new ordinary commands.
+Dedicated browser milestone controls, standalone discussions,
 notification preferences and inbox delivery are separate remaining product work.
 
 The `native_milestones` CLI integration target and discovered

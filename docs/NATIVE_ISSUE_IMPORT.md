@@ -9,7 +9,8 @@ The bounded archive reader shares the complete traversal, page commitments,
 state/history consistency checks and original independent manifest pin with
 `inspectIssueArchive`. It returns owned current snapshots and discussion comments
 only after the ENTIRE archive validates. No caller callback sees a valid-looking
-prefix. The existing inspector's result and archive format are unchanged.
+prefix. Existing archive v1 bytes and results remain unchanged. The explicit
+milestone profile adds a versioned archive and migration path described below.
 
 `partitionNativeIssueArchive` compiles current issue title/body/labels, every
 comment in source-version order, final open/closed state and discussion lock into
@@ -18,7 +19,7 @@ commands. The lock is always last so it cannot block imported discussion. An exp
 offset selects destination numbers. Destination expected versions start at zero;
 source versions and principals are never used as destination authority.
 
-New partitions use capture-v2, which requires a boolean `locked` on every source
+Partitions from archive v1 use capture-v2, which requires a boolean `locked` on every source
 snapshot. Legacy archives that omit the field mean false; a malformed supplied
 value refuses. A currently locked source is imported as locked, whether open or
 closed. An unlocked source needs no unlock command because its new destination
@@ -27,9 +28,9 @@ the new lock; source attribution supplies no permission or actor override.
 
 The frozen capture-v1 schema remains accepted with its original field set and
 does not gain a lock coordinate. Its bytes, generated commands, provenance,
-saved plans and retry identities remain unchanged. Native import and migration
-journal schemas also remain unchanged: their source and request commitments
-already bind the capture dialect. The new version applies only to native
+saved plans and retry identities remain unchanged. Existing issue-only import
+and migration journals also remain unchanged: their source and request
+commitments already bind the capture dialect. These versions apply only to native
 captures; GitHub capture-v1 retains its existing behavior.
 
 The opening body and each comment retain clearly labelled provenance: archive
@@ -50,8 +51,9 @@ Pass its complete result and the chosen offset to `partitionNativeIssueArchive`
 from `scripts/lib/native-issue-source.mjs`. Every returned batch owns validated
 `bytes`, `sha256`, issue membership and a step count. It uses the source-specific
 `frankengit-native-issue-capture-v2` schema; it never pretends to be a GitHub
-capture. `parseNativeIssueCapture` and `nativeIssueImportSteps` accept both native
-versions. The existing exported `NATIVE_CAPTURE_SCHEMA` continues to name v1;
+capture. `parseNativeIssueCapture` and `nativeIssueImportSteps` accept the frozen
+issue-only versions and the explicit milestone-aware v3 described below.
+The existing exported `NATIVE_CAPTURE_SCHEMA` continues to name v1;
 `NATIVE_CAPTURE_SCHEMA_V2` names the new schema. Empty archives produce a typed
 refusal rather than an empty import.
 
@@ -253,3 +255,112 @@ whole-workspace pass, canonical restore or filesystem power-loss evidence. No
 Rust source or dependency changed. The broader import/compatibility work remains
 partial; Git objects, PRs, reviews, permissions and original native audit identity
 are not recreated by this issue-data migration.
+
+## Preserve milestones with an explicit number map
+
+Export with `--include-milestones` to select archive v2. This includes every
+visible milestone and its complete history, all issue histories including set
+and clear actions, and final membership counts at one retained repository head.
+The source needs only `issues-read`. Keep the original independently retained
+archive pin and the archive itself when historical evidence matters.
+
+```sh
+node scripts/archive_native_issues.mjs export \
+  --url https://source.example/project/ui/issues/ \
+  --tenant 11111111111111111111111111111111 \
+  --repository 22222222222222222222222222222222 \
+  --token-file /srv/operator/source-read-token \
+  --workdir /srv/migration/source-archive --include-milestones
+```
+
+Migration of a v2 archive requires a private canonical JSON map file. The exact
+schema is `frankengit-native-milestone-map-v1`; the file is compact JSON in the
+shown key order followed by one newline. Rows must be sorted by source number.
+Source and destination numbers must be unique positive JavaScript safe integers.
+There must be exactly one row for **every archived milestone**, including closed
+and unreferenced milestones. A map with `mappings: []` is valid only when the
+archive contains zero milestones.
+
+```json
+{"schema":"frankengit-native-milestone-map-v1","mappings":[{"source":7,"destination":107},{"source":9,"destination":109}]}
+```
+
+Save that example as a private file only if source milestones 7 and 9 are the
+complete intended source population. There is no default same-number mapping,
+title-based matching or merge into an existing milestone. The existing issue
+`--offset` applies only to issue numbers and is independent of this map.
+
+```sh
+node scripts/migrate_native_issues.mjs prepare \
+  --archive /srv/migration/source-archive --archive-sha256 "$ARCHIVE_SHA" \
+  --milestone-map /srv/migration/milestone-map.json \
+  --workdir /srv/migration/native-prepared \
+  --url https://destination.example/project/ui/issues/ \
+  --tenant 33333333333333333333333333333333 \
+  --repository 44444444444444444444444444444444 \
+  --token-file /srv/operator/destination-token --offset 1000
+```
+
+The destination URL still ends in `/ui/issues/`. The closed milestone client
+uses the native milestone routes in that same repository and credential scope;
+the map cannot provide a new endpoint or permission. Execution needs the
+destination's `issues-write` and `outcomes-read` grants under `--allow-issues`
+and `--allow-outcomes`. Any reads it performs also require `issues-read`.
+
+The versioned plan owns three ordered phases:
+
+1. Open every mapped milestone at destination version zero, with its current
+   title, body, due date and labelled source provenance. Even a source-closed
+   milestone starts open so its issues can be assigned through normal admission.
+2. Import issues and comments, set current membership using the mapped number
+   and exact destination milestone version one, and apply each issue's final
+   close and discussion lock. A source issue whose membership was cleared stays
+   unassigned; the original archive retains that historical set/clear sequence.
+3. Close the milestones whose final source state was closed, at exact version
+   one, after all issue imports are observed committed. Milestone closure keeps
+   membership and native progress counts.
+
+A collision, concurrent edit or close receives the normal native refusal and
+stops later mutations. The importer never refreshes an expected version or
+chooses a different number to evade a refusal. One plan may migrate milestones
+without any issues. A wholly empty source refuses explicitly.
+
+The coordinator publishes `frankengit-native-issue-migration-v2` only after all
+phase captures and original prepared requests pass complete readback. Its
+prepared and verified reports retain the existing `native_issue_migration_*`
+types and add `schema_version: 2`, `milestones` and the retained `milestone_map`.
+Batch descriptions identify their aggregate kind and phase. Issue batches use
+`frankengit-native-issue-capture-v3`; milestone batches use
+`frankengit-native-milestone-capture-v1` and the same exact-key sender machinery.
+The v3 issue captures require `frankengit-native-issue-import-v2` child manifests
+and their corresponding start/terminal records; a legacy import-v1 manifest
+cannot reinterpret a mapped source package.
+The complete mapping is committed in the root and the relevant source captures.
+Legacy archive v1, captures v1/v2 and issue-only saved plans remain recoverable
+with their original bytes, keys and schemas.
+
+Use the same `inspect`, `run`, `status`, `--confirm`, `--max-mutations` and
+`--retry-unresolved` commands described above. The map is accepted only during
+preparation; restart reads the retained map from the pinned plan. The source
+server, external map file and external archive directory are no longer needed.
+Every phase shares the existing whole-operation step, byte, request, time and
+mutation budgets. Inspection checks **all phases** before any destination I/O,
+including milestone closes that would run after the issues. An unresolved
+original request prevents later phases from starting. A budget stop leaves the
+same request identities for the next run; a completed status/run only observes
+their original terminal outcomes.
+
+This migrates final data and attribution. It does not recreate source milestone
+versions, source actors as destination principals, original lifecycle events,
+or an atomic transaction covering the whole migration. Keep both the original
+archive and the prepared request directory for their different recovery roles.
+
+The focused milestone archive, source compiler, client, migration and CLI tests
+use real loopback HTTP response-schema peers with the production code. The
+discovered `scripts/e2e/suites/operator/native_milestone_migration.sh` campaign
+uses an actual prebuilt `fg`, the pinned Node runtime, native HTTP, and independent
+canonical Rust readback in both object formats. It covers closed and unreferenced
+milestones, cleared historical membership, comments and locked issues, explicit
+mapping, stopped-source offline inspection, budget-stop/resume and unchanged
+request keys. Checked-in coverage is not an executed result; qualification must
+identify the tested revision and binary.

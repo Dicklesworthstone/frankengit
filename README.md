@@ -252,6 +252,13 @@ HTTP API and MCP expose the same operations under the existing independent issue
 read/write grants. See [native milestones](docs/NATIVE_MILESTONES.md) for commands,
 membership preconditions, retry behavior and the current migration boundary.
 
+Native issue archives can also retain milestones and complete membership history
+with `archive_native_issues.mjs export --include-milestones`. The
+[migration command](docs/NATIVE_ISSUE_IMPORT.md#preserve-milestones-with-an-explicit-number-map)
+accepts an explicit milestone number map, opens the destination milestones before
+importing issues, and closes source-closed milestones afterward. Preparation is
+offline; interrupted execution recovers the original saved requests and keys.
+
 ### Native issue discussion controls
 
 `fg issue` exposes canonical open, edit, comment, assignment, close/reopen and

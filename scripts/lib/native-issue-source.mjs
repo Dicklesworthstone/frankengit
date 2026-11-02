@@ -6,10 +6,13 @@ import { recordDigest, operatorError } from './forge-operator-io.mjs';
 
 export const NATIVE_CAPTURE_SCHEMA = 'frankengit-native-issue-capture-v1';
 export const NATIVE_CAPTURE_SCHEMA_V2 = 'frankengit-native-issue-capture-v2';
+export const NATIVE_CAPTURE_SCHEMA_V3 = 'frankengit-native-issue-capture-v3';
 export const NATIVE_CAPTURE_LIMIT = 1024 * 1024;
 const MAX_STEPS = 2200;
 const SNAPSHOT_V1 = ['number', 'version', 'title', 'body', 'labels', 'state', 'opened_by', 'last_actor', 'comments', 'assignees'];
 const SNAPSHOT_V2 = [...SNAPSHOT_V1, 'locked'];
+const SNAPSHOT_V3 = [...SNAPSHOT_V2, 'milestone'];
+const SOURCE_FIELDS = ['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256'];
 const encode = value => Buffer.from(JSON.stringify(value) + '\n');
 const fail = code => { throw operatorError(`native_issue_source_${code}`); };
 function keys(value, names) {
@@ -21,20 +24,38 @@ function opaque(value) {
       /[\x00-\x1f\x7f-\x9f\uD800-\uDFFF]/u.test(value)) fail('identity');
   return value;
 }
-export function nativeCaptureBytes(value) {
-  keys(value, ['schema', 'source', 'issues']);
-  // V1 is frozen: its exact field set, canonical order, provenance and compiled
-  // requests must remain recoverable with the original saved plan and keys.
-  const snapshotFields = value.schema === NATIVE_CAPTURE_SCHEMA ? SNAPSHOT_V1
-    : value.schema === NATIVE_CAPTURE_SCHEMA_V2 ? SNAPSHOT_V2 : null;
-  if (!snapshotFields) fail('schema');
-  const s = value.source;
-  keys(s, ['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256']);
+export function nativeSourceIdentity(s) {
+  keys(s, SOURCE_FIELDS);
   if (typeof s.href !== 'string' || s.href.length > 4096 || new URL(s.href).href !== s.href) fail('url');
   new IssueClient({ href: s.href });
   for (const k of ['tenant_id', 'repository_id']) if (typeof s[k] !== 'string' || !/^[0-9a-f]{32}$/.test(s[k])) fail('identity');
   snapshotToken(s.snapshot_token); opaque(s.source_head);
   if (typeof s.archive_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(s.archive_sha256)) fail('archive_pin');
+  return Object.fromEntries(SOURCE_FIELDS.map(key => [key, s[key]]));
+}
+export function nativeMilestoneMapRows(rows) {
+  if (!Array.isArray(rows) || rows.length > 4096) fail('milestone_map');
+  let previous = 0; const destinations = new Set();
+  return rows.map(row => {
+    keys(row, ['source', 'destination']);
+    natural(row.source, 'source milestone number', previous + 1); previous = row.source;
+    natural(row.destination, 'destination milestone number', 1);
+    if (destinations.has(row.destination)) fail('milestone_map_destination');
+    destinations.add(row.destination);
+    return { source: row.source, destination: row.destination };
+  });
+}
+export function nativeCaptureBytes(value) {
+  const v3 = value?.schema === NATIVE_CAPTURE_SCHEMA_V3;
+  keys(value, ['schema', 'source', ...(v3 ? ['milestone_map'] : []), 'issues']);
+  // V1 and V2 are frozen: their exact fields, canonical order, provenance and
+  // compiled requests remain recoverable with the original saved plan and keys.
+  const snapshotFields = value.schema === NATIVE_CAPTURE_SCHEMA ? SNAPSHOT_V1
+    : value.schema === NATIVE_CAPTURE_SCHEMA_V2 ? SNAPSHOT_V2 : v3 ? SNAPSHOT_V3 : null;
+  if (!snapshotFields) fail('schema');
+  const source = nativeSourceIdentity(value.source);
+  const mapping = v3 ? nativeMilestoneMapRows(value.milestone_map) : null;
+  const targets = new Map(mapping?.map(row => [row.source, row.destination]) ?? []);
   if (!Array.isArray(value.issues)) fail('issues');
   natural(value.issues.length, 'native capture issues', 1, 100);
   let previous = 0, commentCount = 0;
@@ -42,7 +63,9 @@ export function nativeCaptureBytes(value) {
     keys(row, ['number', 'id', 'snapshot', 'comments']);
     natural(row.number, 'source issue', previous + 1); previous = row.number;
     if (row.id !== String(row.number) || row.snapshot?.number !== row.number) fail('issue_identity');
-    if (issueMilestone(row.snapshot) !== null) fail('milestones_unsupported');
+    const milestone = issueMilestone(row.snapshot);
+    if (milestone !== null && !v3) fail('milestones_unsupported');
+    if (milestone !== null && !targets.has(milestone)) fail('milestone_mapping_missing');
     keys(row.snapshot, snapshotFields);
     issueState(row.snapshot);
     if (!Array.isArray(row.comments) || row.comments.length !== row.snapshot.comments) fail('comment_count');
@@ -56,8 +79,7 @@ export function nativeCaptureBytes(value) {
     }
   }
   const ordered = (row, fields) => Object.fromEntries(fields.map(k => [k, row[k]]));
-  const checked = { schema: value.schema,
-    source: ordered(s, ['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256']),
+  const checked = { schema: value.schema, source, ...(v3 ? { milestone_map: mapping } : {}),
     issues: value.issues.map(row => ({ number: row.number, id: row.id,
       snapshot: ordered(row.snapshot, snapshotFields),
       comments: row.comments.map(c => ordered(c, ['version', 'actor', 'body'])) })) };
@@ -78,13 +100,15 @@ function provenance(source, row, comment) {
   const metadata = { ...source, issue_number: row.number, source_version: row.snapshot.version,
     ...(comment ? { comment_version: comment.version, source_actor: comment.actor }
       : { source_opened_by: row.snapshot.opened_by, source_last_actor: row.snapshot.last_actor,
-        source_assignees: row.snapshot.assignees }) };
+        source_assignees: row.snapshot.assignees,
+        ...(Object.hasOwn(row.snapshot, 'milestone') ? { source_milestone: row.snapshot.milestone } : {}) }) };
   const json = JSON.stringify(metadata), runs = json.match(/~+/g) ?? [];
   const fence = '~'.repeat(runs.reduce((n, run) => Math.max(n, run.length + 1), 3));
   return `Imported native issue snapshot. Source identities below are attribution only, not destination principals, assignments, permissions or audit events.\n\n${fence}json\n${json}\n${fence}\n\n${comment ? comment.body : row.snapshot.body}`;
 }
 export function nativeIssueImportSteps(value, offset = 0) {
   nativeCaptureBytes(value); natural(offset, 'target issue offset');
+  const targets = new Map(value.milestone_map?.map(row => [row.source, row.destination]) ?? []);
   const steps = [];
   for (const row of value.issues) {
     const number = natural(row.number + offset, 'target issue number', 1);
@@ -97,10 +121,13 @@ export function nativeIssueImportSteps(value, offset = 0) {
     };
     add('open', { title: row.snapshot.title, body: provenance(value.source, row), labels: row.snapshot.labels }, row.snapshot.version);
     for (const comment of row.comments) add('comment', { body: provenance(value.source, row, comment) }, comment.version);
+    if (value.schema === NATIVE_CAPTURE_SCHEMA_V3 && row.snapshot.milestone !== null) {
+      add('set-milestone', { milestone: targets.get(row.snapshot.milestone), expected_milestone_version: 1 }, row.snapshot.version);
+    }
     if (row.snapshot.state === 'closed') add('close', {}, row.snapshot.version);
     // Newly opened issues are unlocked. Preserve discussion first, then apply
     // the source's final moderation state using the destination's next version.
-    if (value.schema === NATIVE_CAPTURE_SCHEMA_V2 && row.snapshot.locked) add('lock', {}, row.snapshot.version);
+    if (value.schema !== NATIVE_CAPTURE_SCHEMA && row.snapshot.locked) add('lock', {}, row.snapshot.version);
   }
   if (encode(steps).length > NATIVE_CAPTURE_LIMIT) fail('native_plan_bytes');
   return steps;
@@ -110,12 +137,24 @@ export function nativeIssueImportSteps(value, offset = 0) {
 // the same destination number in another batch. Every byte bound includes JSON
 // delimiters and provenance expansion, not just raw user text.
 export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
+  if (archive?.schema_version === 2) fail('milestone_profile_required');
+  return partition({ archive, records }, offset, null);
+}
+// Only the v2 migration coordinator uses this explicitly versioned compiler.
+// The full milestone mapping is frozen in every issue child capture.
+export function partitionNativeIssueArchiveV3(view, { offset = 0, milestoneMap } = {}) {
+  if (view.archive?.schema_version !== 2) fail('milestone_archive_required');
+  return partition(view, offset, nativeMilestoneMapRows(milestoneMap));
+}
+function partition({ archive, records }, offset, milestoneMap) {
+  const v3 = milestoneMap !== null;
   if (archive?.complete !== true || archive.canonical_backup !== false ||
       !Array.isArray(records) || records.length !== archive.issues) fail('archive_view');
-  natural(records.length, 'source issue count', 1, 4096); natural(offset, 'target issue offset');
+  natural(records.length, 'source issue count', v3 ? 0 : 1, 4096); natural(offset, 'target issue offset');
   const source = Object.fromEntries(['href', 'tenant_id', 'repository_id', 'snapshot_token', 'source_head', 'archive_sha256']
     .map(k => [k, archive[k]]));
-  const wrap = issues => ({ schema: NATIVE_CAPTURE_SCHEMA_V2, source, issues });
+  const wrap = issues => ({ schema: v3 ? NATIVE_CAPTURE_SCHEMA_V3 : NATIVE_CAPTURE_SCHEMA_V2,
+    source, ...(v3 ? { milestone_map: milestoneMap } : {}), issues });
   const overhead = encode(wrap([])).length, batches = [];
   let group = [], captureBytes = overhead, planBytes = 3, comments = 0, count = 0, totalSteps = 0, previous = 0;
   const finish = () => {
@@ -130,11 +169,13 @@ export function partitionNativeIssueArchive({ archive, records }, offset = 0) {
     // Normalize only the historical absence of the flag. Never coerce a
     // malformed supplied value, mutate the verified source view or rewrite v1.
     const locked = issueLocked(record.snapshot);
-    if (issueMilestone(record.snapshot) !== null) fail('milestones_unsupported');
+    const milestone = issueMilestone(record.snapshot);
+    if (milestone !== null && !v3) fail('milestones_unsupported');
     const snapshot = structuredClone(record.snapshot);
     delete snapshot.milestone;
     delete snapshot.locked;
     snapshot.locked = locked;
+    if (v3) snapshot.milestone = milestone;
     const row = { number: record.snapshot.number, id: String(record.snapshot.number),
       snapshot, comments: structuredClone(record.comments) };
     natural(row.number, 'archive issue order', previous + 1); previous = row.number;

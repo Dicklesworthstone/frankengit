@@ -95,11 +95,16 @@ function inspection(value, confirm) {
   if (value?.type !== `${kind}_issue_migration_verified` || value.plan_sha256 !== confirm ||
       value.network_accessed !== false || value.mutation_submitted !== false || value.atomic_migration !== false ||
       !Array.isArray(value.batches)) fail('inspection_result');
+  const mapped = kind === 'native' && value.schema_version === 2;
+  if (value.schema_version !== undefined && value.schema_version !== 1 && !mapped) fail('inspection_profile');
   integer(value.batches.length, 1, MAX_BATCHES, 'batch_count');
   integer(value.steps, 1, MAX_STEPS, 'step_count');
   const owned = structuredClone(value); let steps = 0, bytes = 0;
   for (const [index, row] of owned.batches.entries()) {
     if (row.batch !== index + 1) fail('batch_coverage');
+    if (mapped ? !['milestone', 'issue'].includes(row.kind) ||
+      (row.kind === 'milestone' ? !['open', 'close'].includes(row.phase) : row.phase !== 'issues')
+      : row.kind !== undefined || row.phase !== undefined) fail('batch_profile');
     pin(row.plan_sha256); pin(row.capture_sha256);
     steps += integer(row.steps, 1, 2200, 'step_count');
     bytes += integer(row.request_bytes, 1, 16 * 1024 * 1024, 'request_bytes');
@@ -108,11 +113,13 @@ function inspection(value, confirm) {
   return owned;
 }
 function childProgress(value, row, operation, allowance, partial = false) {
-  if (value?.type !== `${kind}_issue_import_progress` || value.plan_sha256 !== row.plan_sha256 ||
+  const milestone = row.kind === 'milestone';
+  if (value?.type !== `${kind}_${milestone ? 'milestone' : 'issue'}_import_progress` || value.plan_sha256 !== row.plan_sha256 ||
       value.operation !== operation || value.atomic_batch !== false || value.absence_proves_non_commit !== false) fail('batch_result');
   const committed = integer(value.committed_observed, 0, row.steps, 'batch_committed');
   const calls = integer(value.mutation_calls, 0, operation === 'status' ? 0 : Math.min(allowance, row.steps), 'batch_mutations');
   const next = integer(value.next_step, 0, row.steps, 'batch_next_step');
+  if (milestone && value.phase !== row.phase && !(partial && value.phase === undefined && !committed && !calls && !next)) fail('batch_phase');
   if (value.total_steps !== row.steps && !(partial && value.total_steps === undefined && !committed && !calls && !next)) fail('batch_total');
   if (next !== committed || typeof value.complete !== 'boolean' ||
       value.complete !== (committed === row.steps) ||
@@ -123,7 +130,8 @@ function childProgress(value, row, operation, allowance, partial = false) {
   if (value.stop_reason === 'terminal_refusal' && (value.refusal?.outcome !== 'refused' ||
       typeof value.refusal.tx !== 'string' || !value.refusal.tx || value.refusal.tx.length > 256 ||
       value.refusal.rcr !== null || typeof value.refusal.refusal !== 'string' || !value.refusal.refusal || value.refusal.refusal.length > 256)) fail('batch_refusal');
-  return { batch: row.batch, plan_sha256: row.plan_sha256, total_steps: row.steps,
+  return { batch: row.batch, ...(row.kind ? { kind: row.kind, phase: row.phase } : {}),
+    plan_sha256: row.plan_sha256, total_steps: row.steps,
     committed_observed: committed, mutation_calls: calls, next_step: next,
     complete: value.complete, stop_reason: value.stop_reason,
     ...(value.refusal ? { refusal: structuredClone(value.refusal) } : {}) };
@@ -175,6 +183,11 @@ function buildExecutor(backend) {
       if (o.operation === 'run') release = await senderLock(o.workdir, identity, o.confirm);
       verified = inspection(await backend.inspect({ ...connection(), workdir: o.workdir, confirm: o.confirm }), o.confirm);
       summary.total_batches = verified.batches.length; summary.total_steps = verified.steps;
+      if (verified.schema_version === 2) {
+        if (typeof backend.runMilestoneBatch !== 'function') fail('milestone_backend');
+        summary.schema_version = 2; summary.milestones = verified.milestones;
+        summary.milestone_map = structuredClone(verified.milestone_map);
+      }
       // Pin every child directory before any outcome query or mutation. Request,
       // credential and complete population validation belong to the real inspector.
       const children = new Map();
@@ -190,12 +203,16 @@ function buildExecutor(backend) {
         // completion. It must not turn a zero allowance into a child's default.
         childOperation = o.operation === 'run' && allowance > 0 ? 'run' : 'status';
         active = row;
-        const result = await backend.runBatch({ ...connection(), workdir, confirm: row.plan_sha256,
+        // The inspector validated the complete closed phase/map profile before
+        // this selection. No custody field can supply an executable callback.
+        const runBatch = row.kind === 'milestone' ? backend.runMilestoneBatch : backend.runBatch;
+        const result = await runBatch({ ...connection(), workdir, confirm: row.plan_sha256,
           operation: childOperation, ...(childOperation === 'run' ? { maxMutations: Math.min(allowance, 2200), retryUnresolved: o.retryUnresolved } : {}),
           onProgress: event => {
             if (event?.outcome !== 'committed') fail('step_progress');
             integer(event.index, 0, row.steps - 1, 'step_index');
-            notify(o.onProgress, { ...event, phase: 'step_committed', batch: row.batch, plan_sha256: o.confirm });
+            notify(o.onProgress, { ...event, phase: 'step_committed', batch: row.batch, plan_sha256: o.confirm,
+              ...(row.kind ? { kind: row.kind, batch_phase: row.phase } : {}) });
           } });
         const observed = childProgress(result, row, childOperation, Math.min(allowance, 2200));
         summary.batches.push(observed); active = null; summarize();
@@ -219,7 +236,8 @@ function buildExecutor(backend) {
       }
       if (active && !failure.import_progress) summary.mutation_count_complete = false;
       summary.stop_reason ??= 'operation_failed';
-      if (active && failure.observed_terminal) failure.migration_observed_terminal = { batch: active.batch, ...failure.observed_terminal };
+      if (active && failure.observed_terminal) failure.migration_observed_terminal = { batch: active.batch,
+        ...(active.kind ? { kind: active.kind, phase: active.phase } : {}), ...failure.observed_terminal };
     } finally {
       summarize();
       if (release) try { await release(); } catch (error) {

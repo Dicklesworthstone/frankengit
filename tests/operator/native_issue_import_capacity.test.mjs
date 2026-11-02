@@ -117,10 +117,12 @@ test('capture dialects have distinct strict lock fields and canonical bytes', ()
   assert.throws(() => nativeCaptureBytes(reordered), /encoding/);
   const duplicate = part.bytes.toString().replace('"locked":true', '"locked":false,"locked":true');
   assert.throws(() => parseNativeIssueCapture(Buffer.from(duplicate)), /encoding/);
-  for (const schema of ['frankengit-native-issue-capture-v0', 'frankengit-native-issue-capture-v3',
+  for (const schema of ['frankengit-native-issue-capture-v0', 'frankengit-native-issue-capture-v4',
     'frankengit-github-issue-capture-v1']) {
     assert.throws(() => nativeCaptureBytes({ ...capture, schema }), /schema/);
   }
+  assert.throws(() => nativeCaptureBytes({ ...capture, schema: 'frankengit-native-issue-capture-v3' }),
+    /fields/, 'a v2 package cannot acquire milestone semantics by relabelling its schema');
   const legacy = structuredClone(capture); legacy.schema = NATIVE_CAPTURE_SCHEMA;
   assert.throws(() => nativeCaptureBytes(legacy), /fields/, 'v1 cannot carry an ignored moderation coordinate');
   for (const issue of legacy.issues) delete issue.snapshot.locked;
