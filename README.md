@@ -229,6 +229,18 @@ discovery never admits a partial scan or silently drops an old member. See the
 for setup, trust scope, capacity and recovery. Exact merge-candidate execution
 continues through the explicit fixed-PR and queue profiles.
 
+### Reuse verified packs in bundle exports
+
+Streaming full and incremental bundle exports accept `--reuse-verified-packs`
+to preserve eligible received or imported compression and deltas. The node
+verifies the exact visible selection and declared prerequisite bases before
+copying a representation. Distinct receipts report a reuse hit or a fallback
+to the existing deterministic encoder; the default export bytes and receipts
+are unchanged. Durable custody supports revalidation after restart. See
+[verified bundle representation reuse](docs/NATIVE_GIT_BUNDLE_REUSE.md) for
+commands, output limits, incremental bases and the remaining cold-validation
+cost.
+
 ### Native milestone planning
 
 `fg milestone` now opens, edits, closes and reopens repository milestones with

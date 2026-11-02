@@ -5,6 +5,8 @@
 //! the caller's source/runtime obligations close. Neither a successful write
 //! nor a pack trailer by itself publishes an artifact.
 
+pub mod existing;
+
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::ops::Range;

@@ -2,10 +2,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::{AdmissionLimits, PermittedObjectClosure};
-use fgit_git_object::ObjectType;
+use fgit_git_object::{ObjectType, required_ref_target_kind};
 use fgit_pack::full_bundle::stream::{MAX_INCREMENTAL_EXTERNAL_OBJECTS, StreamFullBundleLimits};
 use fgit_pack::full_bundle::{FullBundleError, MAX_BUNDLE_PREREQUISITES};
-use fgit_pack::{BundleReference, PackError};
+use fgit_pack::{BundleReference, PackError, PackOrderKey};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 
 use super::super::bundle_error;
@@ -74,7 +74,9 @@ pub(super) fn validate_frontier<'a>(
 
 pub(super) struct Selection {
     pub(super) objects: Vec<GitOid>,
+    pub(super) keys: Vec<PackOrderKey>,
     pub(super) external: BTreeMap<GitOid, ObjectType>,
+    pub(super) total_object_bytes: usize,
 }
 
 /// One visible native-metadata walk owns all durable discovery reads. Both
@@ -91,14 +93,39 @@ pub(super) fn prepare(
     limits: &StreamFullBundleLimits,
 ) -> Result<Selection, NodeWorkspaceRefusal> {
     let graph_error = |error| NodeWorkspaceRefusal::BundleGraph(Box::new(error));
-    let graph = crate::upload_visibility::bundle_visible_graph_bounded(
-        source,
-        admitted,
-        visible_roots.iter().copied(),
-        &limits.pack,
-        limits.max_graph_edges,
-    )
+    let graph = if prerequisites.is_empty() {
+        crate::upload_visibility::bundle_stream_visible_graph_bounded(
+            source,
+            admitted,
+            visible_roots.iter().copied(),
+            &limits.pack,
+            limits.max_graph_edges,
+        )
+    } else {
+        crate::upload_visibility::bundle_visible_graph_bounded(
+            source,
+            admitted,
+            visible_roots.iter().copied(),
+            &limits.pack,
+            limits.max_graph_edges,
+        )
+    }
     .map_err(graph_error)?;
+    // The streaming encoder also checks advertised root kinds. A representation
+    // copy must establish that fact here, before it can skip the encoder.
+    for reference in references {
+        source.session_checkpoint().map_err(bundle_error)?;
+        if let Some(required) = required_ref_target_kind(reference.name().as_bytes())
+            && graph
+                .object_metadata(reference.target())
+                .map(|(kind, _)| kind)
+                != Some(required)
+        {
+            return Err(bundle_error(FullBundleError::Invalid(
+                "reference target kind",
+            )));
+        }
+    }
     // Check ALL requested prerequisites against the authenticated visible
     // projection before inspecting any one prerequisite's kind.
     for id in prerequisites {
@@ -113,10 +140,12 @@ pub(super) fn prepare(
             return Err(NodeWorkspaceRefusal::CommitRequired);
         }
     }
-    let maximum = usize::try_from(limits.pack.max_entries)
+    let mut maximum = usize::try_from(limits.pack.max_entries)
         .unwrap_or(usize::MAX)
-        .min(limits.pack.max_index_entries)
-        .min(MAX_INCREMENTAL_EXTERNAL_OBJECTS);
+        .min(limits.pack.max_index_entries);
+    if !prerequisites.is_empty() {
+        maximum = maximum.min(MAX_INCREMENTAL_EXTERNAL_OBJECTS);
+    }
     let traversal = ClosureTraversalLimits {
         unique_nodes: maximum,
         inspected_edges: limits.max_graph_edges,
@@ -163,6 +192,12 @@ pub(super) fn prepare(
         })
     })?;
     let mut selected_bytes = 0usize;
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(wanted.len()).map_err(|_| {
+        bundle_error(PackError::AllocationFailed {
+            requested: wanted.len(),
+        })
+    })?;
     for id in wanted {
         source.session_checkpoint().map_err(bundle_error)?;
         if external.contains_key(&id) {
@@ -194,7 +229,18 @@ pub(super) fn prepare(
             }));
         }
         objects.push(id);
+        keys.push(PackOrderKey {
+            id,
+            object_type: kind,
+            recency: 0,
+            path_hash: 0,
+        });
     }
     source.session_checkpoint().map_err(bundle_error)?;
-    Ok(Selection { objects, external })
+    Ok(Selection {
+        objects,
+        keys,
+        external,
+        total_object_bytes: selected_bytes,
+    })
 }

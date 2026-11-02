@@ -1077,6 +1077,31 @@ pub fn bundle_visible_graph_bounded(
         )
         .unwrap_or(u32::MAX),
     );
+    bundle_stream_visible_graph_bounded(
+        source,
+        admitted,
+        roots,
+        &bounded,
+        maximum_edges.min(MAX_DISCLOSURE_EDGES),
+    )
+}
+
+/// The full streaming profile already owns independent object/index/edge
+/// ceilings. Retain its typed facts under those same ceilings rather than
+/// silently importing the incremental omitted-closure or upload edge caps.
+/// Root membership, native metadata verification and required edge kinds use
+/// the identical disclosure walker; this does not grant additional roots.
+pub(crate) fn bundle_stream_visible_graph_bounded(
+    source: &VerifiedFabricPackSource<'_>,
+    admitted: &PermittedObjectClosure,
+    roots: impl IntoIterator<Item = GitOid>,
+    limits: &PackLimits,
+    maximum_edges: usize,
+) -> Result<BundleVisibleGraph, NodePackMaterializationRefusal> {
+    let mut bounded = limits.clone();
+    bounded.max_entries = bounded
+        .max_entries
+        .min(u32::try_from(bounded.max_index_entries).unwrap_or(u32::MAX));
     let bounded_source = VerifiedFabricPackSource {
         fabric: source.fabric,
         object_format: source.object_format,
@@ -1090,7 +1115,7 @@ pub fn bundle_visible_graph_bounded(
         admitted,
         roots,
         &bounded,
-        maximum_edges.min(MAX_DISCLOSURE_EDGES),
+        maximum_edges,
         None,
         true,
     )

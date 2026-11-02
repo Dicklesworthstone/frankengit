@@ -5,7 +5,8 @@ mod candidate;
 pub mod candidate_inspection;
 mod full_bundle;
 pub use full_bundle::{
-    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
+    StreamBundleExportRefusal, StreamBundleReuse,
     StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
 };
 mod initial_commit;

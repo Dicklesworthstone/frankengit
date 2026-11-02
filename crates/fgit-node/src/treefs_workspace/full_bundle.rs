@@ -41,7 +41,8 @@ pub use file_import::{
     StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
 };
 pub use streaming::{
-    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportRefusal,
+    SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
+    StreamBundleExportRefusal, StreamBundleReuse,
 };
 
 fn bundle_error(error: impl Into<FullBundleError>) -> NodeWorkspaceRefusal {
