@@ -70,6 +70,14 @@ matches each executed child's original `attempt.json` to the selected source,
 workflow and empty execution plan. The exact raw marker SHA-256 becomes the
 retained native journal ID.
 
+Native `shared_inputs` statistics describe the cache after it drains; they are
+absent from the original start marker and cannot change its journal identity.
+When present in the completed report they must use the exact
+`verified-reflink-or-copy-v1` profile, report a closed cache with zero resident
+bytes/entries, and carry bounded nonnegative counters. Source, read selection,
+capture contract and compiled-plan comparisons remain mandatory. Unknown input
+extensions still refuse.
+
 The existing native recovery command enumerates the saved proposal history.
 Pagination carries one exact journal snapshot, including already acknowledged
 batches. Every completed job must have exactly one matching completed fact with
@@ -198,3 +206,40 @@ failure. Their native executable peers are explicitly **contract fixtures**, not
 Rust `fg`. They do not establish real-node Git selection, evidence decoding,
 authorization/CAS, hardware power-loss, live deployment or a full-workspace pass.
 The broader `frankengit-root-doctrine-x2mv.4.12` CI product loop remains partial.
+
+The separately discovered native lane runs both actual JavaScript entrypoints:
+
+```sh
+FG_BIN=/absolute/path/to/fg FGE_NODE=/absolute/path/to/pinned/node \
+  ./scripts/e2e/run_all.sh --out /private/workflow-evidence --timeout 480 \
+  scripts/e2e/suites/operator/workflow.sh
+```
+
+At source **`9714e183d99ec6ea69842585e6180196cd502232`**, it completes **15
+assertions, zero failures or skips**, using the explicitly older native
+`a9d65885fde8a996c229827b3a86e136b2583bba`, binary SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`, and pinned
+Node 26.8.1. Pinned sandboxed Git 2.54.0 checks independently encoded fixture
+objects. Fixed, secret-free trusted-host jobs produce actual success, failure
+and dependent-skip observations; Rust PR reads verify their exact check IDs,
+publisher, run/attempt/graph, source and evidence commitments. Execution alone
+leaves authority unchanged. Repeated publication does not dispatch again.
+Removing only private fixture terminal receipts tests denied outcome access
+followed by permitted original-key recovery; scripts and repository authority
+remain unchanged and both HTTP services drain normally.
+
+Receipt: `/data/frankengit-targets/noble_workflow_9714e183_20261102/receipt.ndjson`,
+SHA-256 `60f3dcd97664ce7bae9c9366711cdf371f3c0346f28b3247982e1a6dc219e921`.
+The separate predeclared 17-file Node corpus executes **522 tests, zero failures
+or skips**, at the same source in a read-only-source Bubblewrap process with
+private temporary files and no external network. Those process/schema-peer
+tests remain a different proof class from the native lane.
+
+This native receipt selects top-level inputs. Requiring nested inputs with
+`FGE_WORKFLOW_NESTED_INPUTS=1` fails on the older binary's explicit top-level-only
+refusal. The watcher retains `execution_unknown`, does not execute jobs, change
+authority, broaden selection or automatically replay. That negative receipt is
+not a positive native nested result. Original `.4.59` current-source binary,
+every-entrypoint matrix, route/stand-in negatives, historical runtime triage and
+independent acceptance remain open; so do hostile-code isolation, required-check
+policy, TLS, full-workspace and release qualification.

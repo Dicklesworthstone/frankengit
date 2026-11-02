@@ -8,6 +8,22 @@ FrankenGit has a substantial native Git node and increasingly useful forge paths
 
 ## 1. Direct answers
 
+**Workflow join, November 2:** source
+`9714e183d99ec6ea69842585e6180196cd502232` removes the watcher's stale top-level-only
+input guard and fixes real check-publication rejection of native post-run
+`shared_inputs` statistics. Immutable start-marker/source/compiled-plan checks
+remain intact; cache observations require the closed native profile and zero
+resident state. A new discovered lane runs the actual JS watcher and publisher,
+checks canonical Rust PR observations for success/failure/dependent skip, and
+recovers original outcomes through denied/permitted grants without re-execution
+or authority movement. Its explicitly older `a9d65885` native receipt completes
+15 assertions across both formats, zero failures or skips; the separate
+17-file Node process/schema-peer corpus completes 522 tests at the same source.
+The old binary explicitly refuses the narrower nested-input profile, which stays
+unqualified; the watcher retains the unresolved attempt without broadening or
+replay. See [exact workflow evidence and limits](TRUSTED_WORKFLOW_CHECK_AUTOMATION.md#verification-boundary).
+Original `.4.59` whole-matrix/current-native/independent acceptance remains open.
+
 1. **What is real?** Native SHA-1/SHA-256 objects, pack/delta/DEFLATE, import/export, quarantined receive, upload-pack, three Git carriers, embedded authority, sealed transactions, native PR/review/protection/merge paths, issue operations, indexed retrieval, trusted workflows, sparse host workspaces, backup components, verified reads and historical queries. These have substantial implementations and checked-in tests. The audit's fresh execution is narrower than that source inventory.
 2. **What is incomplete?** A supported authenticated team deployment; full current protected-PR/CI acceptance; sustained history scaling; canonical agent execution through ECC; hostile-code isolation; composed GC/repair/RaptorQ/compaction; an off-node authority/fabric deployment; broader graph/ATP consumers; a qualified native release; and the hosted, enterprise, package and federation scope.
 3. **What controls progress?** Independent verification and the executable build path, unresolved owner decisions, then completing the team-day, agent-day and destroy/restore outcomes. Verification debt reached its configured hard limit during this assessment; the one later spare slot was claimed for the concrete harness cleanup defect described below. Adding feature slices without draining that debt increases the gap between source and accepted capability.
