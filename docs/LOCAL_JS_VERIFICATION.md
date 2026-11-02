@@ -41,6 +41,32 @@ private failure artifacts are retained. This covers one operator entrypoint;
 the complete entrypoint matrix and same-revision binary qualification remain
 separate acceptance conditions in `x2mv.4.59`.
 
+The discovered [signed-backup operator lane](../scripts/e2e/suites/operator/backup.sh)
+drives seven shipped entrypoints: attest, witness, select, replicate, scrub,
+direct native verification and integrated recovery. It imports independently
+framed Git objects checked by pinned sandboxed Git, creates two native forge
+checkpoints, signs actual native exports, checks healthy/corrupt replicas and
+retained-generation refusals, then restores from local media with every original
+source/export pathname unavailable. Canonical Rust reads compare binary Git
+bytes, executable kinds, commit/tree/blob identities, issue data and history.
+Cache-only exact resume preserves the approval record and authority head;
+changed approval bytes refuse. Original sources remain retained elsewhere:
+this is not destructive power loss or independent-failure-domain evidence.
+
+At source `61842fdb41f3c729b040bed1100b350f500645c8`, the lane completes 19
+assertions across SHA-1/SHA-256, zero failures/skips, with pinned Node 26.8.1 and
+Git 2.54.0. The supplied native binary is explicitly older
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+Receipt: `/data/frankengit-targets/noble_backup_join_61842fdb_20261102/receipt.ndjson`,
+SHA-256 `39f52dffaa4d8df900ec8fbb026b7d956529ea47e174a3038fa1c96029586a28`.
+A separate test-only adapter that delegates every operation except native
+restore causes a non-pass at `recover_repository_backup.mjs`; the cache/record
+survive and no restored root exists. Its retained `restore_attempted_unknown`
+state is not rewritten as a rollback. Neither result qualifies a current-source
+native build, the remaining operator matrix, HTTPS/cloud storage, hostile-code
+isolation, forced-driver cleanup, full capsules, deployment or release.
+
 The discovered suite
 [`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh)
 calls the existing `operator` and `scripts` profiles. `./scripts/verify.sh e2e`

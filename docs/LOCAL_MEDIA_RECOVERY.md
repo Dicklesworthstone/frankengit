@@ -105,3 +105,20 @@ Their native executable is explicitly not Rust `fg`; payloads are opaque test
 bytes. They do not establish native archive/forge restoration, authority/CAS,
 Rust compilation, whole-workspace acceptance, independent failure domains or
 hardware power-loss survival.
+
+The separate discovered
+[`operator/backup.sh`](../scripts/e2e/suites/operator/backup.sh) lane now exercises
+the actual shipped recovery CLI with real signed Rust archives in both formats.
+It rejects a corrupt copy beside a healthy copy, restores Git and issue/history
+state after the original source/export paths become unavailable, and resumes
+from the verified cache after the local input paths also become unavailable.
+Changing the envelope serialization cannot reuse the original restore identity.
+It also drives attest, witness, select, replica publication, scrub and direct
+native verification with permitted/refused or healthy/degraded twins.
+
+See [the exact source, binary and receipt](LOCAL_JS_VERIFICATION.md) for the
+19-assertion result at `61842fdb`. Original source bytes are retained outside
+the command inputs, rather than physically destroyed. The supplied native
+binary is older than that JavaScript source. Native current-source acceptance,
+destructive failure/forced-driver cleanup, independent media domains, chunk/HTTPS
+acquisition and complete service recovery remain separate obligations.
