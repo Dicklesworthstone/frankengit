@@ -60,6 +60,17 @@ if (mode === 'file-residue' || mode === 'hang-residue') {
 if (mode === 'refuse') { console.error('typed native refusal'); process.exit(2); }
 if (mode === 'signal') process.kill(process.pid, 'SIGTERM');
 else if (mode === 'hang' || mode === 'hang-residue') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); }
+else if (mode === 'joined-child' || mode === 'held-pipes') {
+  // Same-group cooperative worker. The leader waits and reaps it, but only a
+  // group-wide stop reaches the worker before its independent watchdog.
+  const worker = require('node:child_process').spawn(process.execPath, ['-e',
+    "const fs=require('node:fs'); process.on('SIGTERM',()=>process.exit(0)); " +
+    "fs.writeFileSync(process.argv[1],JSON.stringify({pid:process.pid})); " +
+    "setTimeout(()=>process.exit(0)," + (mode === 'joined-child' ? 150 : 15000) + ");",
+    ${JSON.stringify(log + '.worker')}], { stdio: ['ignore', 1, 2] });
+  process.on('SIGTERM', () => {});
+  worker.once('exit', () => { if (mode === 'joined-child') process.stdout.write(JSON.stringify(report) + '\\n'); });
+}
 else if (mode === 'large') process.stdout.write('x'.repeat(8192));
 else if (mode === 'stderr') process.stderr.write('x'.repeat(70000));
 else if (mode === 'utf8') process.stdout.write(Buffer.from([255]));
@@ -203,6 +214,64 @@ test('one deadline terminates and reaps the child rather than only racing a Prom
   await assert.rejects(verifyNativeGitBundle(opaque, { fg: mock.fg, timeoutMs: 600 }), { code: 'native_verification_deadline' });
   const log = JSON.parse(await readFile(mock.log)); assert.throws(() => process.kill(log.pid, 0), { code: 'ESRCH' });
   await absent(dirname(log.input));
+});
+
+test('a verifier that joins its cooperative worker preserves the original report', async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory, 'joined-child');
+  const report = await verifyNativeGitBundle(opaque, { fg: mock.fg });
+  const leader = await waitFor(mock.log), worker = await waitFor(mock.log + '.worker');
+  assert.equal(report.artifact_sha256, sha(opaque));
+  assert.throws(() => process.kill(leader.pid, 0), { code: 'ESRCH' });
+  assert.throws(() => process.kill(worker.pid, 0), { code: 'ESRCH' });
+  await absent(dirname(leader.input));
+});
+
+test('cancellation drains a cooperative worker holding inherited pipes', { timeout: 15000 }, async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory, 'held-pipes');
+  const controller = new AbortController();
+  const pending = verifyNativeGitBundle(opaque, { fg: mock.fg, signal: controller.signal });
+  const outcome = pending.then(value => ({ value }), error => ({ error }));
+  const leader = await waitFor(mock.log), worker = await waitFor(mock.log + '.worker');
+  let timer, timely;
+  try {
+    controller.abort();
+    timely = await Promise.race([outcome.then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), 3000); })]);
+  } finally {
+    clearTimeout(timer);
+    // Bound even the original broken adapter without hiding its failed drain.
+    // No group signal here: the old adapter shares the test runner's group.
+    try { process.kill(worker.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  }
+  const result = await outcome;
+  assert.equal(timely, true, 'cancellation remained pending after the entire shared-owner drain bound');
+  assert.equal(result.error?.code, 'native_verification_cancelled');
+  assert.throws(() => process.kill(leader.pid, 0), { code: 'ESRCH' });
+  assert.throws(() => process.kill(worker.pid, 0), { code: 'ESRCH' });
+  await absent(dirname(leader.input));
+});
+
+test('unknown process-group quiescence retains the exact snapshot and refuses consumption', { timeout: 8000 }, async t => {
+  const directory = await sandbox(t), mock = await fakeFg(directory);
+  const input = join(directory, 'bundle'); await writeFile(input, opaque);
+  let consumed = false;
+  const kill = process.kill.bind(process);
+  t.mock.method(process, 'kill', (pid, number) => {
+    if (pid < 0 && number === 0) { const error = new Error('observation denied'); error.code = 'EPERM'; throw error; }
+    return kill(pid, number);
+  });
+  const result = await withVerifiedNativeGitBundleFile(input, { fg: mock.fg, fileBacked: true },
+    async () => { consumed = true; return 'consumer-executed'; })
+    .then(value => ({ value }), error => ({ error }));
+  const leader = await waitFor(mock.log);
+  t.after(() => rm(dirname(leader.input), { recursive: true, force: true }));
+  assert.equal(result.error?.code, 'native_verifier_containment_failed');
+  assert.equal(consumed, false);
+  assert.equal(result.error.details.directory, dirname(leader.input));
+  assert.equal(result.error.details.snapshot_retained, true);
+  assert.equal(result.error.details.descriptor_closed, true);
+  assert.deepEqual(await readFile(leader.input), opaque);
+  assert.throws(() => kill(leader.pid, 0), { code: 'ESRCH' });
 });
 
 test('rejects unsuccessful, malformed, over-budget and contradictory native reports', async t => {

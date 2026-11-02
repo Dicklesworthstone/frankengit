@@ -82,9 +82,15 @@ a verified block index and bounded scratch chunks. Metadata and delta programs
 retain separate memory bounds. Limits do not reserve or promise available space.
 
 Cancellation/deadline covers source reads, snapshot staging and child execution.
-The adapter requests termination and escalates to a kill after 500 milliseconds,
-then waits for process/pipe closure before cleanup. This is ownership of the
-trusted `fg` process, not isolation or containment of arbitrary hostile programs.
+The adapter uses the shared native-process owner: a private POSIX process group,
+TERM followed by KILL after 500 milliseconds, and a separate two-second bound
+for process/pipe quiescence. Windows owns only the direct child. A successful
+leader that leaves workers cannot produce an accepted report. Unknown group
+quiescence returns `native_verifier_containment_failed`; the parent closes its
+descriptor but retains the exact snapshot and reports `directory`,
+`snapshot_retained` and `descriptor_closed`. It does not unlink an input that
+may still belong to unresolved native work. These boundaries own a trusted
+local executable; they do not contain hostile children that escape the group.
 Filesystem calls cannot be forcibly interrupted. Only the identified snapshot
 and empty owned directories are removed. Native scratch leftovers, unexpected
 children or observed substitutions refuse cleanup; there is no recursive
@@ -116,6 +122,19 @@ test, explicitly skipped unless `FG_NATIVE_BIN` names an available built binary.
 No repository-wide, native-build, durability or bead-closure claim follows from
 adapter-test success.
 
+The process regressions include a normally joined worker beside a cancelled
+worker holding inherited output pipes. A denied group observation must retain
+the exact snapshot, close the parent's descriptor and refuse the scoped read
+consumer. At `bacec6472e1f7e8c765666d28d167fd9bbfbf553`, the focused seven-file
+adapter/process-owner/import/recovery corpus records 246 tests: 242 pass,
+zero failures and four explicit skips because Git 2.47.3 is unavailable. The
+supplied native executable is older `a9d65885`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+TAP: `/data/tmp/frankengit-gap-work-20261030/native-verifier-corpus-bacec647.stdout`,
+SHA-256 `01d378218157c3b5c21f41ba164d60827ba4d574689c66a7e9a37946bb1af7d0`.
+Synthetic adapter/process tests remain distinct from the enabled native cells;
+neither qualifies a current-source Rust build.
+
 The discovered live suite exercises the signed operator command with a prebuilt
 Rust verifier, including valid bundles larger than 16 MiB in both hash domains:
 
@@ -141,6 +160,18 @@ cleanup. Raw command streams and a summary remain under the E2E artifact root.
 This establishes one signed-bundle entrypoint, not the complete `.4.59` operator
 lane. Generated packs are test inputs; no upstream-Git differential, signature
 key-management, memory benchmark or forge-recovery claim follows.
+
+That live lane remains failing with the supplied older debug binary: both
+`42d4c28f` and the unchanged predecessor `cd3bc4e7` reach the existing 30-second
+deadline in the first explicit SHA-1 file-backed verification. Both record four
+passing and eighteen failing assertions out of 22. The timeout and assertions
+are unchanged. Retained receipts are
+`/data/frankengit-targets/noble_signed_bundle_42d4c28f_20261102/receipt.ndjson`
+(SHA-256 `f4c82054b514f6c54d48ee6e9ffe1bbda2d56152a115820c12d13612d74f0dd0`)
+and `/data/frankengit-targets/noble_signed_bundle_control_cd3bc4e7_20261102/receipt.ndjson`
+(SHA-256 `79ea355a8afed883a9ef09d0b8f76fabe5069b3cb088209bffffe20b79409fb1`).
+The process repair does not turn this native gate, the whole operator matrix or
+release qualification green.
 
 ## Signed backup verification through the existing command
 

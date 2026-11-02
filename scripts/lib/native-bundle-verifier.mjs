@@ -1,12 +1,12 @@
 // Trusted-local adapter to the existing Rust verifier, not another Git engine.
 // A pathname is never used as a substitute for the owned bytes being verified.
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, opendir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { runNativeProcess } from './native-process-owner.mjs';
 
 export const NATIVE_BUNDLE_LIMITS = Object.freeze({
   maxInputMiB: 128, maxExpandedMiB: 128, maxBlobMiB: 32, maxObjects: 100000, maxRefs: 4096,
@@ -183,50 +183,29 @@ function argumentsFor(path, digest, options, live, scratchDirectory) {
 async function runNative(path, digest, options, live, scratchDirectory) {
   live.check();
   const args = argumentsFor(path, digest, options, live, scratchDirectory);
-  return await new Promise((resolve, reject) => {
-    let child;
-    try { child = spawn(options.fg, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
-    catch { reject(fail('native_verifier_start_failed')); return; }
-    const output = [], diagnostic = [];
-    let outputBytes = 0, diagnosticBytes = 0, failure = null, escalation = null;
-    const stop = error => {
-      if (failure !== null) return;
-      failure = error;
-      child.kill('SIGTERM');
-      escalation = setTimeout(() => child.kill('SIGKILL'), 500);
+  let result;
+  try {
+    result = await runNativeProcess(options.fg, args, { timeoutMs: live.remaining(), signal: options.signal,
+      stdoutLimit: options.maxReportBytes, stderrLimit: MAX_STDERR });
+  } catch (error) {
+    const codes = {
+      native_process_spawn_failed: 'native_verifier_start_failed',
+      native_process_output_failed: 'native_verifier_output_failed',
+      native_process_stdout_limit: 'native_report_too_large',
+      native_process_stderr_limit: 'native_diagnostic_too_large',
+      native_process_cancelled: 'native_verification_cancelled',
+      native_process_deadline: 'native_verification_deadline',
+      native_process_descendants_remaining: 'native_verifier_descendants_remaining',
+      native_process_containment_failed: 'native_verifier_containment_failed',
     };
-    const abort = () => stop(fail('native_verification_cancelled'));
-    options.signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => stop(fail('native_verification_deadline')), live.remaining());
-    child.once('error', () => stop(fail('native_verifier_start_failed')));
-    child.stdout.on('error', () => stop(fail('native_verifier_output_failed')));
-    child.stderr.on('error', () => stop(fail('native_verifier_output_failed')));
-    child.stdout.on('data', chunk => {
-      if (failure !== null) return;
-      outputBytes += chunk.length;
-      if (outputBytes > options.maxReportBytes) { stop(fail('native_report_too_large')); return; }
-      output.push(chunk);
-    });
-    child.stderr.on('data', chunk => {
-      if (failure !== null) return;
-      diagnosticBytes += chunk.length;
-      if (diagnosticBytes > MAX_STDERR) { stop(fail('native_diagnostic_too_large')); return; }
-      diagnostic.push(chunk);
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer); clearTimeout(escalation);
-      options.signal?.removeEventListener('abort', abort);
-      if (failure !== null) { reject(failure); return; }
-      try { live.check(); } catch (error) { reject(error); return; }
-      if (code !== 0 || signal !== null) {
-        reject(fail('native_verification_refused', { exit_code: code, signal,
-          diagnostic: Buffer.concat(diagnostic).subarray(0, 4096).toString('utf8') })); return;
-      }
-      resolve(Buffer.concat(output));
-    });
-    // Abort can arrive between the pre-spawn checkpoint and listener install.
-    if (options.signal?.aborted) abort();
-  });
+    throw fail(codes[error.code] ?? 'native_verifier_process_failed', error.details);
+  }
+  live.check();
+  if (result.code !== 0 || result.signal !== null) {
+    throw fail('native_verification_refused', { exit_code: result.code, signal: result.signal,
+      diagnostic: result.stderr.subarray(0, 4096).toString('utf8') });
+  }
+  return result.stdout;
 }
 function validateReferences(refs, format, maximum) {
   if (!Array.isArray(refs) || refs.length > maximum) throw fail('native_invalid_report');
@@ -440,6 +419,14 @@ async function verifySnapshot(options, live, stage, consume = undefined) {
       // point and finished responsibility despite cancellation or expiry.
     }
   } catch (error) { failed = true; failure = error; }
+  if (failed && failure?.code === 'native_verifier_containment_failed') {
+    // Unknown process quiescence is not permission to unlink its input. Close
+    // our descriptor, retain the owned snapshot and report its exact custody.
+    failure.details = { ...failure.details, directory, snapshot_retained: true, descriptor_closed: false };
+    try { if (file !== undefined) await file.close(); failure.details.descriptor_closed = true; }
+    catch (error) { failure.details.cleanup_error = String(error.code ?? error.message).slice(0, 256); }
+    throw failure;
+  }
   try { await cleanupSnapshot(directory, directoryIdentity, path, fileIdentity, file); }
   catch (error) {
     error.details ??= { directory };
