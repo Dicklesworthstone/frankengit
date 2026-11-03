@@ -11,7 +11,7 @@ export function mountDiscussions(document, location, options = {}) {
   const node = (tag, value = '') => { const element = document.createElement(tag); element.textContent = visible(value); return element; };
   const button = (label, action) => { const element = node('button', label); element.type = 'button'; element.addEventListener('click', () => run(action)); return element; };
   const status = value => { get('discussion-status').textContent = visible(value); };
-  let epoch = 0, selected = null;
+  let epoch = 0, session = 0, selected = null;
   const locked = () => get('change-action').value === 'comment' && selected?.locked === true && String(selected.number) === get('change-number').value;
   function pending() {
     const request = client.pending;
@@ -31,8 +31,13 @@ export function mountDiscussions(document, location, options = {}) {
     ].join('\n')) : '';
   }
   async function run(action) {
+    const current = session;
     try { await action(); }
-    catch (error) { status(error.outcomeUnknown ? `Outcome unknown: ${error.message} Check the outcome or retry the original request.` : error.message); }
+    catch (error) {
+      if (current !== session) return;
+      if (!client.connected) disconnect();
+      status(error.outcomeUnknown ? `Outcome unknown: ${error.message} Check the outcome or retry the original request.` : error.message);
+    }
     finally { pending(); }
   }
   function configure() {
@@ -57,6 +62,13 @@ export function mountDiscussions(document, location, options = {}) {
     for (const id of ['discussion-content', 'discussion-paging', 'discussion-snapshot']) get(id).replaceChildren();
   }
   function cancel() { epoch += 1; client.cancelReads(); }
+  function disconnect() {
+    session += 1;
+    cancel(); client.disconnect(); clear();
+    for (const id of ['discussion-token', 'change-title-text', 'change-body', 'change-number',
+      'change-version', 'show-number', 'restore-receipt']) get(id).value = '';
+    pending();
+  }
   async function read(number = null, after = 0, head = null) {
     cancel(); const current = epoch;
     clear(); status('Reading discussions…');
@@ -106,12 +118,13 @@ export function mountDiscussions(document, location, options = {}) {
   async function terminal(result) {
     status(`${result.outcome === 'committed' ? 'Committed' : 'Refused'}${result.refusal ? `: ${result.refusal}` : ''}. Reload explicitly to see the current discussion.`);
   }
-  get('discussion-connect').addEventListener('submit', event => { event.preventDefault(); return run(async () => {
-    cancel(); client.disconnect(); clear();
-    const token = get('discussion-token').value; get('discussion-token').value = '';
-    await client.connect(token); await read();
-  }); });
-  get('discussion-disconnect').addEventListener('click', () => { cancel(); client.disconnect(); clear(); get('discussion-token').value = ''; status('Disconnected.'); pending(); });
+  get('discussion-connect').addEventListener('submit', event => {
+    event.preventDefault();
+    const token = get('discussion-token').value;
+    disconnect();
+    return run(async () => { await client.connect(token); await read(); });
+  });
+  get('discussion-disconnect').addEventListener('click', () => { disconnect(); status('Disconnected.'); });
   get('discussion-list').addEventListener('click', () => run(() => read()));
   get('discussion-cancel').addEventListener('click', () => { cancel(); status('Read cancelled.'); });
   get('discussion-show').addEventListener('submit', event => { event.preventDefault(); return run(() => read(decimal(get('show-number').value, 'discussion number', 1))); });
@@ -139,12 +152,20 @@ export function mountDiscussions(document, location, options = {}) {
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }));
   get('restore-receipt').addEventListener('change', () => run(async () => {
+    const current = session;
     const file = get('restore-receipt').files?.[0]; get('restore-receipt').value = '';
     if (!file) return;
     if (file.size > MAX_RECEIPT_BYTES) throw new Error('Recovery receipt is too large.');
-    await client.restoreReceipt(await file.text()); status('Original request restored; nothing sent.');
+    const bytes = await file.arrayBuffer();
+    if (current !== session) return;
+    if (bytes.byteLength > MAX_RECEIPT_BYTES) throw new Error('Recovery receipt is too large.');
+    await client.restoreReceipt(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+    if (current === session) status('Original request restored; nothing sent.');
   }));
-  document.defaultView?.addEventListener('pagehide', () => { cancel(); client.disconnect(); clear(); pending(); });
+  document.defaultView?.addEventListener('pagehide', disconnect);
+  document.defaultView?.addEventListener('beforeunload', event => {
+    if (client.pending) { event.preventDefault(); event.returnValue = ''; }
+  });
   configure();
   return { client, read, choose, cancel };
 }

@@ -133,6 +133,11 @@ The browser retains an unresolved request when disconnected. Save its recovery
 receipt before closing the tab, then restore it using the same repository and
 credential. A receipt contains the private draft and original retry identity,
 not the bearer token. An absent or undecided outcome keeps the request pending.
+Disconnect, credential expiry and page hiding clear displayed private editor
+data while preserving that recovery request. The page requests a navigation
+warning while a request remains unresolved; keep a saved receipt before leaving.
+Receipt files are bounded UTF-8, decoded without replacement characters. A file
+selected before disconnect or reconnect cannot restore into the later session.
 Explicit retries resend the original bytes, and terminal replies are checked
 against the discussion request family before clearing recovery responsibility.
 

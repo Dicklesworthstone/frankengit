@@ -27,14 +27,14 @@ const terminal = { ...ids, type: 'discussion_publication', principal_id: actor, 
 async function settled() { for (let i = 0; i < 10; i += 1) await new Promise(setImmediate); }
 function buttons(root) { return root.children.flatMap(child => [...(child.tagName === 'button' ? [child] : []), ...buttons(child)]); }
 function click(root, name) { const found = buttons(root).find(child => child.textContent === name); assert.ok(found, `button ${name}`); return found.fire('click'); }
-function harness(respond = call => json(call.url.includes('/discussions?') ? page() : history())) {
+function harness(respond = call => json(call.url.includes('/discussions?') ? page() : history()), cryptoImpl = webcrypto) {
   const names = [...readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/discussions.html', import.meta.url), 'utf8').matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const elements = Object.fromEntries(names.map(name => [name, new Element()])); elements['change-action'].value = 'open';
   const lifecycle = new Element(), document = { getElementById: id => elements[id], createElement: tag => new Element(tag), defaultView: lifecycle };
   const calls = [], receipts = [];
   const mounted = mountDiscussions(document, new URL('https://forge.example/repo.git/ui/discussions/'), {
     fetchImpl: (url, options) => { const call = { url: String(url), ...options }; calls.push(call); return respond(call, calls.length); },
-    cryptoImpl: webcrypto, saveReceipt: value => receipts.push(value),
+    cryptoImpl, saveReceipt: value => receipts.push(value),
   });
   return { elements, lifecycle, calls, receipts, ...mounted,
     async connect() { elements['discussion-token'].value = token; await elements['discussion-connect'].fire('submit'); },
@@ -97,4 +97,147 @@ test('a late read cannot restore private content after disconnection', async () 
   h.elements['discussion-disconnect'].fire('click'); resolve(json(history())); await pending;
   assert.equal(h.elements['discussion-content'].textContent, '');
   assert.equal(h.elements['discussion-snapshot'].textContent, '');
+});
+
+for (const boundary of ['disconnect', 'pagehide', 'reconnect']) test(`${boundary} clears private discussion editors and retains the original unresolved request`, async () => {
+  const h = harness(call => { if (call.method === 'POST') throw new Error('lost'); return json(page()); });
+  await h.connect(); h.choose(row, 'comment');
+  h.elements['change-body'].value = 'Private unresolved reply';
+  await h.elements['discussion-change'].fire('submit');
+  await h.elements['send-change'].fire('click');
+  const original = h.client.pending;
+  assert.equal(original.sent, true);
+  h.elements['change-title-text'].value = 'Private title';
+  h.elements['show-number'].value = '7';
+  h.elements['restore-receipt'].value = 'private-retry.json';
+  if (boundary === 'reconnect') await h.connect();
+  else if (boundary === 'pagehide') h.lifecycle.fire('pagehide');
+  else h.elements['discussion-disconnect'].fire('click');
+  for (const id of ['discussion-token', 'change-title-text', 'change-body', 'change-number',
+    'change-version', 'show-number', 'restore-receipt']) assert.equal(h.elements[id].value, '', id);
+  assert.equal(h.client.pending.key, original.key);
+  assert.equal(h.client.pending.body, original.body);
+  assert.equal(h.client.pending.sent, true);
+  if (!h.client.connected) {
+    assert.equal(h.elements['discussion-content'].textContent, '');
+    assert.equal(h.elements['prepared-summary'].textContent.includes('Private unresolved reply'), false);
+  }
+  await h.elements['save-receipt'].fire('click');
+  const saved = JSON.parse(h.receipts[0]);
+  assert.equal(saved.request.key, original.key);
+  assert.equal(saved.request.body, original.body);
+  assert.equal(h.receipts[0].includes(token), false);
+});
+
+test('expired credentials clear displayed discussion text without discarding an uncertain mutation', async () => {
+  const h = harness(call => call.method === 'POST' ? new Response('', { status: 401 }) : json(page()));
+  await h.connect(); h.choose(row, 'comment');
+  h.elements['change-body'].value = 'Private reply after credential expiry';
+  await h.elements['discussion-change'].fire('submit');
+  const original = h.client.pending;
+  await h.elements['send-change'].fire('click');
+  assert.equal(h.client.connected, false);
+  assert.equal(h.elements['discussion-content'].textContent, '');
+  for (const id of ['change-title-text', 'change-body', 'change-number', 'change-version']) assert.equal(h.elements[id].value, '', id);
+  assert.equal(h.client.pending.key, original.key);
+  assert.equal(h.client.pending.body, original.body);
+  assert.equal(h.client.pending.sent, true);
+  assert.equal(h.elements['discard-change'].disabled, true);
+});
+
+test('leaving warns only while a discussion request remains unresolved', async () => {
+  const h = harness(); await h.connect();
+  const unload = () => {
+    let warned = false;
+    const event = { preventDefault() { warned = true; } };
+    h.lifecycle.fire('beforeunload', event);
+    return { warned, returnValue: event.returnValue };
+  };
+  assert.equal(unload().warned, false);
+  h.choose(row, 'comment'); h.elements['change-body'].value = 'Keep this retry identity';
+  await h.elements['discussion-change'].fire('submit');
+  const original = h.client.pending, calls = h.calls.length;
+  assert.deepEqual(unload(), { warned: true, returnValue: '' });
+  assert.equal(h.client.pending.key, original.key);
+  assert.equal(h.calls.length, calls, 'unload protection must not send the prepared request');
+  h.client.discardUnsent();
+  assert.equal(unload().warned, false);
+});
+
+test('read permission refusal retains the connected write-only discussion editor', async () => {
+  const h = harness(call => call.method === 'GET' ? new Response('', { status: 403 }) : json(terminal));
+  await h.connect();
+  assert.equal(h.client.connected, true);
+  assert.equal(h.elements['prepare-change'].disabled, false);
+  h.choose(row, 'comment'); h.elements['change-body'].value = 'Permitted write-only reply';
+  await h.elements['discussion-change'].fire('submit');
+  await h.elements['send-change'].fire('click');
+  assert.match(h.elements['discussion-status'].textContent, /^Committed/);
+  assert.equal(h.client.pending, null);
+});
+
+async function savedDiscussion(body = 'Original recovery draft') {
+  const h = harness(); await h.connect(); h.choose(row, 'comment'); h.elements['change-body'].value = body;
+  await h.elements['discussion-change'].fire('submit');
+  const serialized = h.client.exportReceipt();
+  return { serialized, bytes: new TextEncoder().encode(serialized), request: h.client.pending };
+}
+
+test('valid UTF-8 discussion receipt import preserves exact custody without sending', async () => {
+  const saved = await savedDiscussion(), h = harness(); await h.connect();
+  h.elements['restore-receipt'].files = [new File([saved.bytes], 'retry.json')];
+  await h.elements['restore-receipt'].fire('change');
+  assert.equal(h.client.pending.key, saved.request.key);
+  assert.equal(h.client.pending.body, saved.request.body);
+  assert.equal(h.calls.length, 1);
+});
+
+test('a discussion receipt selected before reconnect cannot restore into the new session', async () => {
+  const saved = await savedDiscussion(), h = harness(); await h.connect();
+  let finish;
+  h.elements['restore-receipt'].files = [{ size: saved.bytes.length,
+    text: () => new Promise(resolve => { finish = () => resolve(saved.serialized); }),
+    arrayBuffer: () => new Promise(resolve => { finish = () => resolve(saved.bytes.buffer); }),
+  }];
+  const importing = h.elements['restore-receipt'].fire('change');
+  await settled(); assert.equal(typeof finish, 'function');
+  h.elements['discussion-disconnect'].fire('click'); await h.connect();
+  finish(); await importing;
+  assert.equal(h.client.pending, null);
+  assert.equal(h.calls.length, 2, 'stale import must not send any request');
+});
+
+test('malformed UTF-8 receipt bytes refuse even when lossy decoding would recover a valid draft', async () => {
+  const saved = await savedDiscussion('Original \ufffd recovery draft');
+  const at = saved.bytes.findIndex((byte, index) => byte === 0xef && saved.bytes[index + 1] === 0xbf && saved.bytes[index + 2] === 0xbd);
+  assert(at >= 0);
+  const bytes = new Uint8Array(saved.bytes.length - 2);
+  bytes.set(saved.bytes.subarray(0, at)); bytes[at] = 0xff; bytes.set(saved.bytes.subarray(at + 3), at + 1);
+  const h = harness(); await h.connect();
+  h.elements['restore-receipt'].files = [new File([bytes], 'malformed.json')];
+  await h.elements['restore-receipt'].fire('change');
+  assert.equal(h.client.pending, null);
+  assert.match(h.elements['discussion-status'].textContent, /UTF|encoded|valid/i);
+  assert.equal(h.calls.length, 1);
+});
+
+test('a superseded read cannot disconnect a reconnect awaiting its real credential hash', async () => {
+  const started = Promise.withResolvers(), digest = Promise.withResolvers();
+  let hold = false, reply;
+  const cryptoImpl = { getRandomValues: value => webcrypto.getRandomValues(value), subtle: {
+    async digest(...args) {
+      const result = await webcrypto.subtle.digest(...args);
+      if (hold) { started.resolve(); await digest.promise; }
+      return result;
+    },
+  } };
+  const h = harness((_call, count) => count === 2 ? new Promise(resolve => { reply = resolve; }) : json(page()), cryptoImpl);
+  await h.connect(); h.elements['show-number'].value = '7';
+  const reading = h.elements['discussion-show'].fire('submit');
+  await settled(); assert.equal(typeof reply, 'function');
+  hold = true; const connecting = h.connect(); await started.promise;
+  reply(json(history())); await reading;
+  digest.resolve(); await connecting;
+  assert.equal(h.client.connected, true);
+  assert.match(h.elements['discussion-status'].textContent, /discussions shown/);
 });
