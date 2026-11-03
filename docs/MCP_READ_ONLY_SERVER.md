@@ -48,11 +48,41 @@ authentication, per-issue ACLs, hostile process isolation, or a full Intent
 Run/effect-broker capability. Do not proxy stdio to untrusted remote clients or
 treat returned text as executable instructions.
 
-## Sponsored agent context
+## Sponsored credentials
 
-`--allow-agent-context --principal <id> --expected-incarnation <id>` independently
+A sponsored agent can use a canonical repository credential instead of the
+trusted-local operator profile:
+
+```sh
+fg mcp /absolute/path/to/existing-node TENANT_HEX REPOSITORY_HEX \
+  --agent-token-file /private/agent.token \
+  --expected-incarnation INCARNATION_HEX \
+  --allow-source --allow-agent-context
+```
+
+The credential must independently grant `source-read`. The source ceiling exposes
+only current tree/blob reads, literal/regex and batch search, symbols, ref listing,
+Initial retrieval and source context. The separate agent-context ceiling exposes
+only `frankengit_agent_context`. Neither flag grants the other. Source history,
+candidate preparation, verified-blob streaming, bundles, queues and workflow
+artifacts remain outside the sponsored profile even when an operator source
+launch supports them.
+
+Agent mode requires the exact incarnation and rejects `--trusted-local` and
+`--principal`. Every call verifies the current canonical grant and retains its
+agent, human or service sponsor, original deadline and response byte reservation.
+Revocation affects the next call; replacing the token file requires restarting
+the process. See [sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md#use-the-credential-with-mcp)
+for the exact tool inventory, independent metadata ceilings and response lifetime.
+
+## Agent context
+
+In a trusted-local launch, `--allow-agent-context --principal <id>
+--expected-incarnation <id>` independently
 enables `frankengit_agent_context`. It returns a real read-only IntentRun and
 ContextPacket with authenticated authority and exact native source evidence.
+In a sponsored launch, `--allow-agent-context` uses the canonical credential's
+sponsor and requires its `source-read` scope, without a launch principal.
 This grant enables no other tool group or write capability. See
 [the context command and HTTP/MCP contract](AGENT_CONTEXT_COMMAND.md#mcp-context)
 for arguments, explicit omissions, output limits and sponsorship semantics.

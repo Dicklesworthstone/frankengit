@@ -1,7 +1,9 @@
-//! Clock and provenance contract checks. The HTTP integration tests authenticate
+//! Clock and provenance contract checks. HTTP and MCP integration tests authenticate
 //! real canonical credentials and retrieve real persisted source/index objects.
 use super::*;
-use crate::source_retrieval::authorization::{model_agent_context, model_context};
+use crate::source_retrieval::authorization::{
+    model_agent_context, model_context, model_mcp_agent_context,
+};
 use fgit_admission::evidence::AgentAuthentication;
 use fgit_crypto::{IdentityDomain, internal_object_id};
 use fgit_forge::event::agent_credential::{AgentCredentialId, SponsorKind};
@@ -170,5 +172,82 @@ fn context_intent_commits_agent_and_sponsor_as_distinct_verified_identities() {
             .object()
             .unwrap()
             .contains_key("agent_authentication")
+    );
+}
+
+#[test]
+fn mcp_document_binds_its_actual_host_without_extending_the_credential() {
+    let authentication = authentication();
+    let origin = Instant::now();
+    let deadline = origin + Duration::from_secs(2);
+    let http = model_agent_context(namespace(), authentication, deadline);
+    let mcp = model_mcp_agent_context(namespace(), authentication, deadline);
+    assert!(check_sponsor(&mcp, authentication.sponsor()).is_ok());
+    assert!(matches!(
+        check_sponsor(&mcp, authentication.agent()),
+        Err(AgentContextDocumentError::SponsorAuthorization)
+    ));
+    let clock = Clock::start_at(MAX_LIFETIME, &mcp, origin, Duration::from_secs(150)).unwrap();
+    assert_eq!(clock.expiry.value(), 152_000_000_000);
+    let near_expiry =
+        Clock::start_at(MAX_LIFETIME, &mcp, origin, Duration::from_millis(199_500)).unwrap();
+    assert_eq!(near_expiry.expiry.value(), 200_000_000_000);
+    for (monotonic, wall) in [
+        (deadline, Duration::from_secs(150)),
+        (origin, Duration::from_secs(200)),
+        (origin, Duration::from_secs(99)),
+    ] {
+        assert!(matches!(
+            Clock::start_at(MAX_LIFETIME, &mcp, monotonic, wall),
+            Err(AgentContextDocumentError::Expired)
+        ));
+    }
+
+    let reference = RefName::try_new(b"refs/heads/main").unwrap();
+    let query = InitialQuery::new(&[b"needle".to_vec()], &[]).unwrap();
+    let checkpoints = Checkpoints::default();
+    let input = AgentContextRequest {
+        authorization: &http,
+        reference: &reference,
+        query: &query,
+        checkpoints: &checkpoints,
+        retrieval_limits: Default::default(),
+        context_limits: Default::default(),
+        sponsor: authentication.sponsor(),
+        expected_head: None,
+        expires_after: MAX_LIFETIME,
+        max_output_bytes: 1024 * 1024,
+    };
+    let http_intent = render::intent(&input);
+    let mcp_intent = render::intent(&AgentContextRequest {
+        authorization: &mcp,
+        ..input
+    });
+    assert_eq!(
+        field(&http_intent, "profile").text(),
+        Some(HTTP_AGENT_PROFILE)
+    );
+    assert_eq!(
+        field(&mcp_intent, "profile").text(),
+        Some(MCP_AGENT_PROFILE)
+    );
+    assert_eq!(
+        field(&mcp_intent, "authorization_host").text(),
+        Some("mcp-sponsored-agent-source-read-credential")
+    );
+    assert_eq!(
+        field(&mcp_intent, "sponsor_authentication").text(),
+        Some("canonical-agent-credential")
+    );
+    assert_eq!(
+        field(&mcp_intent, "agent_authentication"),
+        field(&http_intent, "agent_authentication")
+    );
+    // The exact same canonical provenance cannot relabel an HTTP context as
+    // MCP: host/profile changes are part of the committed request intent.
+    let domain = b"frankengit/agent-context-request/v1\0";
+    assert_ne!(
+        commitment(domain, mcp_intent.encode(128 * 1024).unwrap().as_bytes()),
+        commitment(domain, http_intent.encode(128 * 1024).unwrap().as_bytes())
     );
 }

@@ -71,7 +71,7 @@ fn declared_agent_context_inputs_match_the_served_schema() {
     assert_eq!(served, declared);
     assert_eq!(
         contract.principal,
-        fgit_schema::mcp::PrincipalRequirement::OperatorBound
+        fgit_schema::mcp::PrincipalRequirement::HostBound
     );
     assert_eq!(
         contract.capability,

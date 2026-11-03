@@ -23,9 +23,14 @@ pub(super) fn tools() -> Vec<Tool> {
     ]
 }
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
+    if !backend.options.source
+        || !matches!(name, "frankengit_source_tree" | "frankengit_source_blob")
+    {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
     let file = name == "frankengit_source_blob";
     let (reference, query) = parse(args, file, backend.options.format)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let report = backend
         .node
         .runtime()

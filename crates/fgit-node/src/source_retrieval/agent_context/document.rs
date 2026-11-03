@@ -1,5 +1,5 @@
 //! Shared bounded Agent Protocol document for native, CLI, MCP and HTTP hosts.
-//! Hosts supply independent source-read authorization. HTTP sponsorship is
+//! Hosts supply independent source-read authorization. Credential sponsorship is
 //! bound to that read credential, while trusted-local sponsorship is explicit
 //! operator attribution. These profiles create no durable run or write right.
 mod render;
@@ -24,6 +24,9 @@ pub const HTTP_PROFILE: &str = "agent-context-http-credential-v1";
 /// Canonical sponsored agent authentication, retaining the original request's
 /// principal, sponsor and finite lifetime through this read-only context.
 pub const HTTP_AGENT_PROFILE: &str = "agent-context-http-sponsored-agent-v1";
+/// Canonical sponsored MCP authentication, distinct from trusted-local MCP
+/// attribution and retaining the verified request's original finite lifetime.
+pub const MCP_AGENT_PROFILE: &str = "agent-context-mcp-sponsored-agent-v1";
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_LIFETIME: Duration = Duration::from_secs(300);
 const VERIFIER: &[u8] = b"frankengit/native-agent-context/authenticated-head/v1\0";
@@ -75,7 +78,9 @@ impl From<&'static str> for AgentContextDocumentError {
 }
 
 const fn profile(input: &AgentContextRequest<'_>) -> &'static str {
-    if input.authorization.agent_authentication().is_some() {
+    if input.authorization.is_mcp_agent_credential() {
+        MCP_AGENT_PROFILE
+    } else if input.authorization.agent_authentication().is_some() {
         HTTP_AGENT_PROFILE
     } else if input.authorization.principal().is_some() {
         HTTP_PROFILE

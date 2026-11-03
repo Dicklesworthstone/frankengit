@@ -136,8 +136,10 @@ The read-only run permits only `read_canonical_object` and
 The shared Rust implementation is
 `fgit_node::source_retrieval::agent_context::document::read_agent_context_in`.
 Hosts supply an independently obtained `SourceReadContext`, a sponsor, and one
-bounded `NodeRequestContext`. An HTTP source-read context requires the sponsor
-to equal its authenticated principal. The existing
+bounded `NodeRequestContext`. An ordinary HTTP source-read context requires the
+sponsor to equal its authenticated principal. A canonical sponsored HTTP or MCP
+context instead requires the grant's verified sponsor while retaining the agent
+as the independently authenticated principal. The existing
 `fgit_cli::agent_context::read_agent_context_in` API remains a trusted-local
 wrapper, and `bounded_request_context` supplies that command's deadline.
 Neither entry point accepts a bearer token or widens a source grant.
@@ -146,16 +148,26 @@ Neither entry point accepts a bearer token or widens a source grant.
 
 `POST <repository-route>/api/v1/source/agent-context` returns the same native
 Agent Protocol document through the source-read gateway. It requires the
-server's source API switch and the current credential's `read` service grant.
+server's source API switch and the current ordinary credential's `read` service
+grant or a canonical agent credential's independent `source-read` scope.
 A receive-only credential cannot acquire source context. Credentials are read
 again for each request, so revocation affects the next request.
 
-The response profile is `agent-context-http-credential-v1`. Its sponsor is the
+For an ordinary credential, the response profile is
+`agent-context-http-credential-v1`. Its sponsor is the
 principal selected by the authenticated repository source-read credential;
 `sponsor.authentication` is `http-repository-read-credential`. The request cannot
 choose a sponsor, principal, or run ID. This records the existing HTTP host's
 credential mapping. It does not claim a canonical agent credential, sponsor
 delegation chain, persistent run, or publication authority.
+
+A canonical sponsored credential uses
+`agent-context-http-sponsored-agent-v1` and `canonical-agent-credential`
+authentication. Its sponsor is the grant's human or service sponsor. The separate
+`agent_authentication` witness names the actual agent, sponsor kind, credential,
+grant root, request-run commitment and original finite lifetime. The same witness
+is committed into `request.agent_authentication`. Metadata-only credentials do
+not grant source context, and neither profile accepts caller-selected identities.
 
 Requests use `application/x-www-form-urlencoded`, with these fields:
 
@@ -224,6 +236,26 @@ grants do not enable agent context. The sponsor remains the launch principal;
 request arguments cannot replace it. The MCP host records
 `agent-context-trusted-local-v1` and `operator-asserted` sponsorship, with
 `trusted-local-mcp` source authorization.
+
+Alternatively, launch with a canonical agent credential whose operation mask
+includes `source-read`:
+
+```sh
+fg-mcp /srv/frankengit/repository "$TENANT_ID" "$REPOSITORY_ID" \
+  --agent-token-file /private/agent.token --allow-agent-context \
+  --expected-incarnation "$INCARNATION_ID"
+```
+
+This mode rejects `--principal` and `--trusted-local`. It independently intersects
+the launch context ceiling with the current canonical grant on every call. The
+document records `agent-context-mcp-sponsored-agent-v1`,
+`canonical-agent-credential` sponsorship and
+`mcp-sponsored-agent-source-read-credential` source authorization. Top-level and
+request-bound `agent_authentication` witnesses preserve the actual agent and
+sponsor rather than attributing the read to a local operator. An expired request
+cannot obtain a fresh source context or renew its lifetime during retrieval;
+response encoding and output retain that original deadline. Revocation and
+credential rotation use the same canonical checks as the HTTP profile.
 
 After the normal initialization handshake, a tool request is:
 

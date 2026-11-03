@@ -4,6 +4,7 @@
 //! holders receive finite metadata and explicit source-read scopes, never source
 //! publication, review, merge, process execution, or administration authority.
 
+use crate::source_retrieval::authorization::SourceReadContext;
 use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
 use fgit_admission::evidence::{AdmissionAuthentication, AgentAuthentication};
@@ -12,6 +13,7 @@ use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_agent::{AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime, OperationClass, RunId};
 use fgit_authority::{IdempotencyKey, OutcomeLookup, TerminalOutcome};
 use fgit_crypto::sha256_digest;
+use fgit_graph::lexical::LexicalNamespace;
 use fgit_identity::agent::{ALL_OPERATIONS, AgentCredentialCommand, AgentCredentialId};
 use fgit_resource::{ResourceVector, algebra::Grade};
 use fgit_types::{RefusalCode, TxId};
@@ -305,6 +307,12 @@ impl OneNode {
             run,
             authentication,
             operation,
+            namespace: LexicalNamespace {
+                tenant: state.grant.tenant,
+                repository: state.grant.repository,
+                incarnation: state.grant.incarnation,
+                object_format: self.object_format,
+            },
             key: key.clone(),
             deadline: origin
                 + std::time::Duration::from_secs(expiry)
@@ -325,6 +333,7 @@ pub struct AgentRequest {
     pub(crate) authentication: AgentAuthentication,
     run: IntentRun,
     pub(crate) operation: u16,
+    namespace: LexicalNamespace,
     key: IdempotencyKey,
     deadline: Instant,
 }
@@ -338,6 +347,38 @@ impl AgentRequest {
     /// A host may shorten this ceiling but cannot extend the verified grant.
     pub fn constrain_deadline(&mut self, deadline: Instant) {
         self.deadline = self.deadline.min(deadline);
+    }
+
+    /// Retain this request's verified source-read authority for one MCP tool
+    /// invocation. The host must independently enable the tool, enforce this
+    /// reservation's byte ceilings, check it before disclosure, and discard both
+    /// the request and context afterward. A metadata scope or public provenance
+    /// record alone cannot construct this authenticated read context.
+    ///
+    /// The context keeps the original agent, sponsor, repository namespace and
+    /// deadline. It never refreshes the credential or substitutes local operator
+    /// attribution. Canonical authentication must run again for the next tool.
+    pub fn mcp_source_read_context(
+        &self,
+        node: &OneNode,
+    ) -> Result<SourceReadContext, NodeReceiveTransportRefusal> {
+        if self.operation != fgit_identity::agent::SOURCE_READ
+            || self.namespace
+                != (LexicalNamespace {
+                    tenant: node.tenant_id,
+                    repository: node.repository_id,
+                    incarnation: node.repository_incarnation_id,
+                    object_format: node.object_format,
+                })
+        {
+            return Err(refused(RefusalCode::CapabilityScopeViolation));
+        }
+        self.check(0, 0)?;
+        Ok(SourceReadContext::mcp_agent_credential(
+            node,
+            self.authentication,
+            self.deadline,
+        ))
     }
 
     /// Carry the verified principal, sponsor, original retry key and monotonic

@@ -7,10 +7,11 @@ use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId};
 use support::*;
 
 mod lifecycle;
+mod source;
 mod support;
 
 #[test]
-fn metadata_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
+fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha1);
     let mut options = fixture.options.clone();
     // Defense in depth: even bypassing launch validation cannot widen either
@@ -27,7 +28,7 @@ fn metadata_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 43);
     for tool in &tools {
         assert!(operation(&options, tool.name).is_some());
     }
@@ -40,11 +41,14 @@ fn metadata_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         "frankengit_notifications",
         "frankengit_pull_checks",
         "frankengit_pull_reviews",
-        "frankengit_source_tree",
-        "frankengit_source_initial",
+        "frankengit_source_candidate",
+        "frankengit_source_log",
+        "frankengit_source_blame",
+        "frankengit_source_publish",
+        "frankengit_branch_transaction",
+        "frankengit_branch_create",
         "frankengit_protection_show",
         "frankengit_protection_set",
-        "frankengit_agent_context",
         "shell",
         "unknown_metadata_tool",
     ] {

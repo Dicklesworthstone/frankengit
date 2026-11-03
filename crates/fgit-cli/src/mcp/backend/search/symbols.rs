@@ -98,7 +98,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let (selected, query) = parse(args, backend.options.format)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let (head, report) = backend
         .node
         .runtime()

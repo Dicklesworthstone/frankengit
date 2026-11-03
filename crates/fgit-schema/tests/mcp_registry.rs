@@ -79,7 +79,7 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 79);
+    assert_eq!(REGISTRY.len(), 88);
     // Milestone edits expose an explicit null date clear as a real JSON Schema
     // union; a literal "string|null" type would not describe callable input.
     assert!(fgit_schema::emit::mcp_schema().contains("\"type\": [\"string\", \"null\"]"));
@@ -400,8 +400,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 79"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 75"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 88"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 84"));
     assert!(
         mcp_tools
             .contents
@@ -419,7 +419,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 79"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 88"));
 }
 
 #[test]
@@ -429,7 +429,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 75);
+    assert_eq!(active_names.len(), 84);
     assert!(active_names.contains(&"frankengit_issue_add_assignees"));
     assert!(active_names.contains(&"frankengit_issue_add_labels"));
     assert!(active_names.contains(&"frankengit_pull_append_comment"));

@@ -1,4 +1,4 @@
-//! Canonical sponsored credentials for the closed MCP metadata profile.
+//! Canonical sponsored credentials for closed MCP source and metadata tools.
 //!
 //! Launch flags only attenuate. The current authenticated repository frontier
 //! authorizes each call independently; neither discovery nor a prior call grants
@@ -10,7 +10,7 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE,
+    PULLS_WRITE, SOURCE_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -27,7 +27,7 @@ pub(super) struct Profile {
     bearer: Vec<u8>,
     pub(super) request: Option<AgentRequest>,
     // A completed request can authorize only its response, never another
-    // metadata operation or session. The protocol clears it after emission.
+    // operation or session. The protocol clears it after emission.
     pub(super) response: Option<AgentRequest>,
 }
 
@@ -49,7 +49,7 @@ impl Profile {
 
 /// One exhaustive list owns both discovery and dispatch. Do not derive this
 /// from broad operator groups: those also grant milestones, notifications,
-/// checks, reviews and event feeds that agent metadata credentials do not cover.
+/// checks, reviews, history, candidates and events not covered by these grants.
 pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     match name {
         "frankengit_issue_list" | "frankengit_issue_show" if options.issues => Some(ISSUES_READ),
@@ -100,6 +100,19 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
             Some(DISCUSSIONS_WRITE)
         }
         "frankengit_transaction_outcome" if options.outcomes => Some(OUTCOMES_READ),
+        "frankengit_source_tree"
+        | "frankengit_source_blob"
+        | "frankengit_source_search"
+        | "frankengit_source_search_batch"
+        | "frankengit_source_symbols"
+        | "frankengit_ref_list"
+        | "frankengit_source_initial"
+        | "frankengit_source_context"
+            if options.source =>
+        {
+            Some(SOURCE_READ)
+        }
+        "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
         _ => None,
     }
 }
@@ -235,6 +248,21 @@ pub(super) fn session(
         return Err(ToolError::invalid("agent_request_key_mismatch"));
     }
     Ok(session)
+}
+
+/// Structured source results must retain the verified request's sponsorship
+/// and original deadline. A configured agent without an active call never
+/// acquires the trusted-local source authority of an ordinary MCP launch.
+pub(super) fn source_read_context(
+    backend: &NodeTools,
+) -> Result<fgit_node::source_retrieval::authorization::SourceReadContext, ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .mcp_source_read_context(&backend.node)
+        .map_err(auth_error)
 }
 
 #[cfg(test)]

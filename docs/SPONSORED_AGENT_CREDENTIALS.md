@@ -4,7 +4,7 @@ This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP current-source browsing and context, issue, pull-request metadata and
 conversation, standalone discussion, and single-transaction outcome endpoints,
-plus the explicit MCP metadata profile. Each request creates a real bounded
+plus the explicit MCP source and metadata profile. Each request creates a real bounded
 `IntentRun`; the bearer alone is not an execution or publication capability.
 
 ## Issue and use a credential
@@ -88,8 +88,9 @@ observation schema. This grants no agent source-import capability.
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
-Source reads require an explicit `source-read` grant and the server's existing
-source-read feature switch. Metadata scopes, including all seven previously
+Source reads require an explicit `source-read` grant and the HTTP server's
+source-read feature switch or the MCP launch ceilings described below.
+Metadata scopes, including all seven previously
 available flags, grant no source access. The HTTP adapter admits a closed set of
 current-source read routes; it does not interpret arbitrary GET requests or the
 ordinary token's broader `read` scope as agent permission. Source selection and
@@ -99,9 +100,10 @@ Git upload-pack/receive-pack, commit history and historical source snapshots,
 verified-blob streaming, bundles, candidate preparation or inspection, diffs,
 reviews, checks, merges, queue operations, milestones, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
-external effects are outside this profile. MCP offers its independent sponsored
-metadata profile described below and keeps its existing trusted-local profile.
-Sponsored source reads currently use HTTP.
+external effects are outside this profile. MCP offers the closed sponsored
+source and metadata tools described below and keeps its existing trusted-local
+profile. Its source ceiling does not include the operator profile's history,
+candidate or bundle tools.
 
 A separate source-only credential can be issued with `--operations source-read`.
 Combine it with a metadata scope only when both capabilities are intended. Source
@@ -148,7 +150,7 @@ credentials retain the existing `agent-context-http-credential-v1` profile.
 ## Use the credential with MCP
 
 Launch either `fg mcp` or the standalone `fg-mcp` with the private credential
-file and the exact repository incarnation. Select each desired metadata ceiling
+file and the exact repository incarnation. Select each desired tool ceiling
 explicitly:
 
 ```sh
@@ -175,6 +177,41 @@ additional milestone, notification, check, review, event-feed, source, queue,
 artifact, agent-context or administration tools. An unknown or unsupported tool
 is refused before credential or repository lookup.
 
+For source access, issue a credential with `--operations source-read` and select
+one or both independent source ceilings:
+
+```sh
+fg mcp ./repository TENANT_ID REPOSITORY_ID \
+  --agent-token-file ./agent.token --expected-incarnation INCARNATION_ID \
+  --allow-source --allow-agent-context
+```
+
+| MCP launch ceiling | Exact sponsored tools |
+| --- | --- |
+| `--allow-source` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
+| `--allow-agent-context` | `frankengit_agent_context` |
+
+Both ceilings require canonical `source-read` on every call. Neither launch flag
+implies the other, and a metadata-only credential cannot use either. Source
+search retains its existing bounded literal and regex operations. Structured
+Initial, source-context and agent-context retrieval require existing current
+indexes; reads do not create or rebuild them. Current visible-source filtering
+and exact snapshot preconditions remain enforced by the native readers.
+Credential issuance, revocation or other metadata changes advance the selected
+authority head, so these strict indexed tools return `source_index_stale` until
+indexes cover that head, even when the Git commit is unchanged.
+
+Sponsored MCP agent-context documents use
+`agent-context-mcp-sponsored-agent-v1` with
+`mcp-sponsored-agent-source-read-credential` authorization. The sponsor remains
+the canonical grant's human or service sponsor. The top-level and request-bound
+`agent_authentication` witnesses retain the actual agent, credential, grant root,
+request-run commitment and original lifetime. A caller cannot substitute a
+principal, sponsor or run ID. The host bridge verifies tenant, repository,
+incarnation and Git object format before attaching source authority, and refuses
+an expired or missing active request. Trusted-local MCP retains its existing
+operator-asserted document profile and encoding.
+
 Each call authenticates the current canonical grant and constructs a fresh
 `IntentRun` bound to the complete canonical MCP tool name and arguments, its
 single operation scope, and the original durable key. JSON-RPC IDs are transport
@@ -184,7 +221,7 @@ recovery receive the verified agent session, original key and monotonic deadline
 no caller field can replace them. Native admission still revalidates the grant
 at publication. Own-principal outcome recovery retains the original decision
 and sponsored principal evidence after rotation; another agent cannot read that
-key. MCP response schemas are unchanged.
+key. Existing metadata response schemas are unchanged.
 
 The request reserves the transport's 256 KiB framing ceiling and 8 MiB response
 ceiling plus its final LF; ordinary metadata JSON still has the existing 64 KiB
@@ -315,6 +352,16 @@ own-principal recovery, and retained sponsor evidence in both Git object formats
 Deterministic protocol writers cover expiry before disclosure, partial writes,
 interrupted writes, flush, byte ceilings, and response-reservation cleanup. Their
 presence is a coverage inventory, not a passing test result.
+
+The sponsored MCP source tests use real persisted native source and lexical and
+symbol indexes in both Git object formats. They cover the complete nine-tool
+allowlist, independent launch ceilings, source-only and metadata-only scope
+isolation, exact sponsor provenance, missing indexes without implicit rebuilding,
+snapshot mismatch, revocation and rotation in the same process and after reopen,
+and original request expiry through response disclosure. Node bridge tests
+separately reject namespace, object-format, operation and lifetime substitution.
+Existing trusted-local document fields remain absent where no canonical agent
+witness exists; they are not replaced with synthetic null provenance.
 
 Source-read regressions additionally freeze the historical seven-bit grant,
 exercise source-only and combined operation masks, preserve issue/revoke codec

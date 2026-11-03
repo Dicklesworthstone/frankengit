@@ -146,11 +146,24 @@ impl NodeTools {
         }
         let context = fgit_cli::command_request_context(&self.node);
         if self.options.agent_token_file.is_some() {
-            // A metadata adapter reached outside its authenticated call cannot
+            // An adapter reached outside its authenticated call cannot
             // acquire the trusted-local command budget as a fallback.
             context.cancel();
         }
         context
+    }
+
+    fn source_read_context(
+        &self,
+    ) -> Result<fgit_node::source_retrieval::authorization::SourceReadContext, ToolError> {
+        if self.options.agent_token_file.is_some() {
+            return agent::source_read_context(self);
+        }
+        Ok(
+            fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_mcp(
+                &self.node,
+            ),
+        )
     }
 }
 

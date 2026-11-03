@@ -28,7 +28,7 @@
     },
     "frankengit_agent_context": {
       "title": "frankengit_agent_context",
-      "description": "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Returns authority, run and packet commitments, index generations and explicit omissions under a launch-bound operator sponsor. Requires an independent agent-context read grant; grants no publication, process execution or durable run.",
+      "description": "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Returns authority, run and packet commitments, index generations and explicit omissions under a trusted-local operator or canonically authenticated agent sponsor. Requires an independent agent-context read grant; canonical agent credentials additionally require source-read. Grants no publication, process execution or durable run.",
       "type": "object",
       "properties": {
         "parameters": {

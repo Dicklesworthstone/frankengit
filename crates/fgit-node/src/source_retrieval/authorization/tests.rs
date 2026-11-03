@@ -341,32 +341,70 @@ fn sponsored_labels_bind_the_actual_sponsor_credential_and_original_request() {
 }
 
 #[test]
+fn mcp_agent_labels_preserve_sponsorship_without_reusing_http_or_local_authority() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (local, report) = fixture(format);
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let authentication =
+            agent_authentication(report.source().forge_position_root, 7, 8, 9, 1, u64::MAX);
+        let http = model_agent_context(local.namespace, authentication, deadline);
+        let mcp = model_mcp_agent_context(local.namespace, authentication, deadline);
+        let mut source = report.clone();
+        let labels = bind(&mcp, &mut source, 4096, &mut || Ok(())).unwrap();
+        assert_eq!(labels.host(), "mcp-sponsored-agent-source-read-credential");
+        assert_eq!(labels.principal(), Some(authentication.agent()));
+        assert_eq!(labels.sponsor(), Some(authentication.sponsor()));
+        assert_eq!(labels.agent_authentication(), Some(authentication));
+        labels.validate(&mcp, &source, &mut || Ok(())).unwrap();
+        for other_host in [http, local] {
+            let mut same_rows = report.clone();
+            let other = bind(&other_host, &mut same_rows, 4096, &mut || Ok(())).unwrap();
+            assert_ne!(labels.binding(), other.binding());
+            assert!(
+                labels
+                    .validate(&other_host, &source, &mut || Ok(()))
+                    .is_err()
+            );
+            assert!(other.validate(&mcp, &same_rows, &mut || Ok(())).is_err());
+        }
+    }
+}
+
+#[test]
 fn sponsored_source_lifetime_cannot_outlast_either_original_clock() {
     let (base, report) = fixture(GitHashAlgorithm::Sha256);
     let origin = Instant::now();
     let authentication = agent_authentication(report.source().forge_position_root, 7, 8, 9, 10, 20);
-    let read = model_agent_context(
-        base.namespace,
-        authentication,
-        origin + Duration::from_secs(10),
-    );
     let wall = Some(Duration::from_secs(15));
-    assert_eq!(
-        read.remaining_at(origin, wall),
-        Some(Duration::from_secs(5))
-    );
-    assert_eq!(
-        read.remaining_at(origin + Duration::from_secs(8), wall),
-        Some(Duration::from_secs(2))
-    );
-    for (monotonic, wall) in [
-        (origin + Duration::from_secs(10), wall),
-        (origin, Some(Duration::from_secs(20))),
-        (origin, Some(Duration::from_secs(21))),
-        (origin, Some(Duration::from_secs(9))),
-        (origin, None),
+    for read in [
+        model_agent_context(
+            base.namespace,
+            authentication,
+            origin + Duration::from_secs(10),
+        ),
+        model_mcp_agent_context(
+            base.namespace,
+            authentication,
+            origin + Duration::from_secs(10),
+        ),
     ] {
-        assert_eq!(read.remaining_at(monotonic, wall), Some(Duration::ZERO));
+        assert_eq!(
+            read.remaining_at(origin, wall),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            read.remaining_at(origin + Duration::from_secs(8), wall),
+            Some(Duration::from_secs(2))
+        );
+        for (monotonic, wall) in [
+            (origin + Duration::from_secs(10), wall),
+            (origin, Some(Duration::from_secs(20))),
+            (origin, Some(Duration::from_secs(21))),
+            (origin, Some(Duration::from_secs(9))),
+            (origin, None),
+        ] {
+            assert_eq!(read.remaining_at(monotonic, wall), Some(Duration::ZERO));
+        }
     }
     assert_eq!(base.remaining_at(origin, None), None);
 

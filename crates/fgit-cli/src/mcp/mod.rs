@@ -8,10 +8,11 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes (--allow-issues|--allow-discussions)]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Discussion reads and writes each require their own\nexplicit grant; issue access never implies discussion access.\nRead groups, issue/discussion/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require the selected kind's --allow-issues or --allow-discussions\ngrant plus the launch-bound principal and incarnation; kind defaults to issue.\nNotification writes additionally require --allow-notification-writes; content-write\npermission does not grant them. Read acknowledgements supply an explicit observed\nthread prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
-const AGENT_USAGE: &str = "Sponsored-agent metadata profile:
+const AGENT_USAGE: &str = "Sponsored-agent source and metadata profile:
   fg-mcp <storage-root> <tenant-id> <repository-id>
     --agent-token-file <private-file> --expected-incarnation <id>
-    [--allow-issues] [--allow-discussions] [--allow-pulls]
+    [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]
+    [--allow-agent-context]
     [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes]
     [--allow-outcomes] [--object-format sha1|sha256] [--max-messages <1..100000>]
 
@@ -19,9 +20,16 @@ Choose this profile instead of --trusted-local. --principal is forbidden: the
 canonical credential supplies the agent and sponsor. Every selected read, write
 and recovery group is an independent ceiling, checked against the current grant
 for every call. At least one is required. Write never implies read or recovery.
-Only issue, PR metadata/conversation, discussion and own-principal outcome tools
-are exposed. The broader operator groups (milestones, notifications, checks,
-reviews, source, queues, events and administration) remain unavailable.
+Current source browsing, search, reference listing and initial/context retrieval
+require --allow-source and the canonical source-read scope. --allow-agent-context
+independently exposes the authenticated Agent Protocol context document under
+that same canonical scope; neither launch flag grants the other tool group.
+These source reads preserve the credential's real agent, sponsor and request
+deadline, and create no durable execution run. Source writes, history, candidate
+preparation/inspection, diffs, Git transport and bundles remain unavailable.
+Issue, PR metadata/conversation, discussion and own-principal outcome tools keep
+their independent grants. Milestones, notifications, checks, reviews, artifacts,
+queues, events and administration remain unavailable.
 The token file is private, regular and bounded; its contents are never arguments
 or receipts. Each call binds the complete tool name/arguments and original key
 to a bounded IntentRun. Expiry/revocation is checked again on the next request;
@@ -112,9 +120,7 @@ impl Options {
             if self.principal.is_some() {
                 return Err("agent MCP identity comes only from its canonical credential; --principal is forbidden".into());
             }
-            if self.source
-                || self.queues.any()
-                || self.agent_context
+            if self.queues.any()
                 || self.artifacts
                 || self.artifact_root.is_some()
                 || self.writes.notifications
@@ -122,7 +128,7 @@ impl Options {
                 || self.writes.reviews
                 || self.writes.merges
             {
-                return Err("agent MCP permits only independent issue, discussion, pull metadata and outcome grants".into());
+                return Err("agent MCP permits only independent current-source, agent-context, issue, discussion, pull metadata and outcome grants".into());
             }
             return Ok(());
         }

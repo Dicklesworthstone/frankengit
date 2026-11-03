@@ -9,7 +9,7 @@ use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
 use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialGrant, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-    PULLS_WRITE, SponsorKind, agent_credential_id,
+    PULLS_WRITE, SOURCE_READ, SponsorKind, agent_credential_id,
 };
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId,
@@ -649,4 +649,84 @@ fn adapter_api_keeps_the_original_key_and_only_shortens_request_authority() {
     assert!(!run.context(&node).is_live());
     assert!(run.check(0, 0).is_err());
     node.shutdown().unwrap();
+}
+
+#[test]
+fn mcp_source_bridge_keeps_verified_scope_namespace_sponsorship_and_deadline() {
+    fn scope_denied(result: Result<SourceReadContext, NodeReceiveTransportRefusal>) {
+        assert!(matches!(
+            result,
+            Err(NodeReceiveTransportRefusal::Admission(error))
+                if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::CapabilityScopeViolation))
+        ));
+    }
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let mut node = scratch.node(format);
+        let token = bearer('a');
+        committed(credential(
+            &node,
+            &issue_command(
+                &token,
+                AgentCredentialGrant {
+                    operations: SOURCE_READ | ISSUES_READ,
+                    ..grant(&node)
+                },
+            ),
+            actor(1),
+            "mcp-source-credential",
+        ));
+        let metadata = authentication(&node, &token, "mcp-metadata", ISSUES_READ);
+        scope_denied(metadata.mcp_source_read_context(&node));
+
+        let mut source = authentication(&node, &token, "mcp-source", SOURCE_READ);
+        source.constrain_deadline(Instant::now() + std::time::Duration::from_secs(60));
+        let read = source.mcp_source_read_context(&node).unwrap();
+        assert_eq!(read.host(), "mcp-sponsored-agent-source-read-credential");
+        assert_eq!(read.principal(), Some(actor(2)));
+        assert_eq!(read.sponsor(), Some(actor(1)));
+        assert_eq!(read.agent_authentication(), Some(source.authentication));
+        assert_eq!(read.agent_deadline(), Some(source.deadline()));
+        assert!(read.is_live());
+        read.check_node(&node).unwrap();
+
+        // A real independent node shares the configured tenant/repository but
+        // has its own incarnation. The reservation must not cross that bound.
+        let other_root = Scratch::new();
+        let other = other_root.node(format);
+        assert_eq!(node.tenant_id, other.tenant_id);
+        assert_eq!(node.repository_id, other.repository_id);
+        assert_ne!(
+            node.repository_incarnation_id,
+            other.repository_incarnation_id
+        );
+        scope_denied(source.mcp_source_read_context(&other));
+        assert!(read.check_node(&other).is_err());
+        other.shutdown().unwrap();
+
+        // Isolate each remaining namespace dimension at the adapter boundary.
+        // No native work may start while any verified field is substituted.
+        let original = source.namespace;
+        node.tenant_id = TenantId::from_bytes([0xb1; 16]);
+        scope_denied(source.mcp_source_read_context(&node));
+        node.tenant_id = original.tenant;
+        node.repository_id = RepositoryId::from_bytes([0xb2; 16]);
+        scope_denied(source.mcp_source_read_context(&node));
+        node.repository_id = original.repository;
+        node.object_format = match format {
+            GitHashAlgorithm::Sha1 => GitHashAlgorithm::Sha256,
+            GitHashAlgorithm::Sha256 => GitHashAlgorithm::Sha1,
+        };
+        scope_denied(source.mcp_source_read_context(&node));
+        node.object_format = original.object_format;
+        source.mcp_source_read_context(&node).unwrap();
+
+        source.constrain_deadline(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(matches!(
+            source.mcp_source_read_context(&node),
+            Err(NodeReceiveTransportRefusal::Admission(error))
+                if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::CapabilityExpired))
+        ));
+        node.shutdown().unwrap();
+    }
 }

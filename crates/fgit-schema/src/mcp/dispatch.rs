@@ -15,7 +15,8 @@ pub struct AdmittedCall<'a> {
     pub tool: &'a McpToolEntry,
     /// The validated parameters.
     pub arguments: &'a str,
-    /// Verified operator principal, if required.
+    /// Principal independently bound by the caller's host, if required.
+    /// This descriptor gate checks presence, not credential authenticity.
     pub principal: Option<&'a str>,
 }
 
@@ -33,8 +34,12 @@ pub fn discover_tools() -> &'static [McpToolEntry] {
 /// 2. Support profile check: if `Unsupported`, immediately returns typed refusal.
 /// 3. Deprecation check: if `Deprecated`, returns typed refusal with migration.
 /// 4. Capability check: ensures the caller holds the exact narrow capability class.
-/// 5. Principal check: ensures operator-bound principal is attached if required.
+/// 5. Principal check: ensures a host-bound principal is attached if required.
 /// 6. Budget check: enforces max input byte length.
+///
+/// The host must establish the principal independently before calling this
+/// descriptor gate. A string in this parameter is not authentication evidence;
+/// canonical agent credentials still require native per-call verification.
 pub fn admit_call<'a>(
     name: &str,
     version: u32,
@@ -84,7 +89,11 @@ pub fn admit_call<'a>(
     }
 
     // 4. Principal check
-    if tool.principal == PrincipalRequirement::OperatorBound && principal.is_none() {
+    if matches!(
+        tool.principal,
+        PrincipalRequirement::OperatorBound | PrincipalRequirement::HostBound
+    ) && principal.is_none()
+    {
         return Err(McpRefusal::PrincipalRequired { tool: tool.name });
     }
 

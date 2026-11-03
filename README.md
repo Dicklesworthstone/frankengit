@@ -330,6 +330,10 @@ and run under finite operation scopes, byte envelopes and expiry. An independent
 and authority-bound context with the actual agent and sponsor retained. Issue, PR
 metadata/conversation, discussion and individual outcome operations are supported;
 Git publication, reviews, merges and administration remain outside this profile.
+`fg mcp --agent-token-file ... --expected-incarnation ...` uses the same canonical
+credentials. Its independent `--allow-source` and `--allow-agent-context` ceilings
+expose current source retrieval and authenticated context while preserving the
+actual agent/sponsor and original request lifetime through response output.
 Revocation is rechecked at the publication CAS basis, and outcome receipts retain
 the original agent/sponsor evidence across rotation and restart. See
 [sponsored agent credentials](docs/SPONSORED_AGENT_CREDENTIALS.md) for private token

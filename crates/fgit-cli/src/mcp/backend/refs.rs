@@ -78,8 +78,11 @@ fn parse(args: &Object) -> Result<Query, ToolError> {
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    if !backend.options.source {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
     let query = parse(args)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let visibility = Default::default();
     let node = &backend.node;
     let (head, rows, next) = node

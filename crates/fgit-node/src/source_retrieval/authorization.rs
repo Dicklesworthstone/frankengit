@@ -29,6 +29,10 @@ enum Host {
         authentication: AgentAuthentication,
         deadline: Instant,
     },
+    McpAgentCredential {
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    },
 }
 
 /// A host attestation for one node's whole-repository read boundary. The local
@@ -89,6 +93,21 @@ impl SourceReadContext {
             },
         )
     }
+    // Only AgentRequest's namespace/scope/lifetime-checked MCP bridge may mint
+    // this host attestation. AgentAuthentication by itself is only provenance.
+    pub(crate) const fn mcp_agent_credential(
+        node: &OneNode,
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    ) -> Self {
+        Self::new(
+            node,
+            Host::McpAgentCredential {
+                authentication,
+                deadline,
+            },
+        )
+    }
     pub(crate) fn check_node(&self, node: &OneNode) -> Result<(), RetrievalError> {
         if self.namespace != Self::new(node, self.host.clone()).namespace {
             return Err(RetrievalError::Invalid("source read context namespace"));
@@ -103,24 +122,27 @@ impl SourceReadContext {
             Host::TrustedLocalMcp => "trusted-local-mcp",
             Host::HttpCredential(_) => "http-repository-read-credential",
             Host::HttpAgentCredential { .. } => "http-sponsored-agent-source-read-credential",
+            Host::McpAgentCredential { .. } => "mcp-sponsored-agent-source-read-credential",
         }
     }
     #[must_use]
     pub const fn principal(&self) -> Option<PrincipalId> {
         match self.host {
             Host::HttpCredential(principal) => Some(principal),
-            Host::HttpAgentCredential { authentication, .. } => Some(authentication.agent()),
+            Host::HttpAgentCredential { authentication, .. }
+            | Host::McpAgentCredential { authentication, .. } => Some(authentication.agent()),
             _ => None,
         }
     }
-    /// Authenticated sponsorship, when supplied by a remote read host. An
+    /// Authenticated sponsorship, when supplied by a credential-backed host. An
     /// ordinary HTTP credential attributes the read to its own principal;
     /// an agent credential retains the independently authenticated sponsor.
     #[must_use]
     pub const fn sponsor(&self) -> Option<PrincipalId> {
         match self.host {
             Host::HttpCredential(principal) => Some(principal),
-            Host::HttpAgentCredential { authentication, .. } => Some(authentication.sponsor()),
+            Host::HttpAgentCredential { authentication, .. }
+            | Host::McpAgentCredential { authentication, .. } => Some(authentication.sponsor()),
             _ => None,
         }
     }
@@ -128,24 +150,24 @@ impl SourceReadContext {
     #[must_use]
     pub const fn agent_authentication(&self) -> Option<AgentAuthentication> {
         match self.host {
-            Host::HttpAgentCredential { authentication, .. } => Some(authentication),
+            Host::HttpAgentCredential { authentication, .. }
+            | Host::McpAgentCredential { authentication, .. } => Some(authentication),
             _ => None,
         }
     }
     pub(crate) const fn agent_deadline(&self) -> Option<Instant> {
         match self.host {
-            Host::HttpAgentCredential { deadline, .. } => Some(deadline),
+            Host::HttpAgentCredential { deadline, .. }
+            | Host::McpAgentCredential { deadline, .. } => Some(deadline),
             _ => None,
         }
     }
+    pub(crate) const fn is_mcp_agent_credential(&self) -> bool {
+        matches!(self.host, Host::McpAgentCredential { .. })
+    }
     fn remaining_at(&self, monotonic: Instant, wall: Option<Duration>) -> Option<Duration> {
-        let Host::HttpAgentCredential {
-            authentication,
-            deadline,
-        } = self.host
-        else {
-            return None;
-        };
+        let authentication = self.agent_authentication()?;
+        let deadline = self.agent_deadline()?;
         let remaining = wall
             .filter(|now| *now >= Duration::from_secs(authentication.authenticated_at()))
             .and_then(|now| Duration::from_secs(authentication.expires_at()).checked_sub(now))
@@ -642,6 +664,20 @@ pub(super) const fn model_agent_context(
     SourceReadContext {
         namespace,
         host: Host::HttpAgentCredential {
+            authentication,
+            deadline,
+        },
+    }
+}
+#[cfg(test)]
+pub(super) const fn model_mcp_agent_context(
+    namespace: LexicalNamespace,
+    authentication: AgentAuthentication,
+    deadline: Instant,
+) -> SourceReadContext {
+    SourceReadContext {
+        namespace,
+        host: Host::McpAgentCredential {
             authentication,
             deadline,
         },
