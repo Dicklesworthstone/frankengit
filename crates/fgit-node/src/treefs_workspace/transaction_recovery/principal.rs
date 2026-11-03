@@ -86,7 +86,7 @@ impl OneNode {
                 crate::capsule_history::HistoryStep::Genesis => {
                     return Err(invalid("original decision not retained"));
                 }
-                crate::capsule_history::HistoryStep::Checkpoint { predecessor } => {
+                crate::capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                     successor = predecessor.body().clone();
                     continue;
                 }

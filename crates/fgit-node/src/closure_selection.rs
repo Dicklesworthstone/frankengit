@@ -3,8 +3,12 @@
 //! A cached prefix is useful only after the ordinary head-edge verifier has
 //! reached its exact authenticated basis. A matching generation, ref root, or
 //! latest commit alone cannot prove that two heads share a history. Cold reads
-//! and histories which do not reach the prefix retain the bounded genesis
-//! walk; this cache is neither durable checkpointing nor a second authority.
+//! may terminate at an exact, verified capsule which explicitly declares a
+//! cumulative admitted-membership closure. Legacy capsule profiles retain the
+//! bounded genesis walk; an opaque backup root is never a serving prefix.
+
+use fgit_chronicle::BackupProfile;
+use fgit_types::RepositoryCapsuleId;
 
 use super::{
     ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, Arc, AsyncAuthorityStore,
@@ -182,12 +186,22 @@ where
                 // verifier, including refusal-only and configuration transitions.
                 let pending = roots.difference(&cached.roots).copied().collect();
                 roots.extend(cached.roots.iter().copied());
-                let latest = latest_record.or(match cached.selected.source {
-                    ClosureSelectionSource::EmptyGenesis => None,
+                let (cached_latest, checkpoint) = match cached.selected.source {
+                    ClosureSelectionSource::EmptyGenesis => (None, None),
                     ClosureSelectionSource::RepositoryCommit(latest)
-                    | ClosureSelectionSource::CumulativeHistory { latest, .. } => Some(latest),
-                });
-                let source = selection_source(latest, roots.len(), current_refs)?;
+                    | ClosureSelectionSource::CumulativeHistory { latest, .. } => {
+                        (Some(latest), None)
+                    }
+                    ClosureSelectionSource::CapsuleCheckpoint {
+                        capsule, latest, ..
+                    } => (latest, Some(capsule)),
+                };
+                let source = selection_source(
+                    latest_record.or(cached_latest),
+                    roots.len(),
+                    current_refs,
+                    checkpoint,
+                )?;
                 ensure_materializer_catch_up_live(is_cancelled)?;
                 return Ok(ClosureSelection {
                     roots,
@@ -208,7 +222,7 @@ where
         .await?
         {
             capsule_history::HistoryStep::Genesis => {
-                let source = selection_source(latest_record, roots.len(), current_refs)?;
+                let source = selection_source(latest_record, roots.len(), current_refs, None)?;
                 return Ok(ClosureSelection {
                     pending: roots.clone(),
                     roots,
@@ -216,7 +230,44 @@ where
                     source,
                 });
             }
-            capsule_history::HistoryStep::Checkpoint { predecessor } => {
+            capsule_history::HistoryStep::Checkpoint {
+                predecessor,
+                capsule,
+            } => {
+                if capsule.backup_profile == BackupProfile::DecisionHistoryWithAdmissionClosureV1 {
+                    // The exact checkpoint-only transition authenticated this
+                    // declaration. Legacy profiles, even those with retained
+                    // outcomes or full payloads, never declare cumulative
+                    // admission membership and cannot terminate this walk.
+                    if capsule.latest_committed_rcr_id.is_none()
+                        && capsule.object_closure_root
+                            != permitted_object_closure_root(&PermittedObjectClosure::default())
+                                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+                    {
+                        return Err(
+                            AdmissionMaterializationRefusal::SelectedCommitStateMismatch {
+                                field: "checkpoint_object_closure_root",
+                            },
+                        );
+                    }
+                    let capsule_id = successor
+                        .last_checkpoint_id
+                        .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
+                    roots.insert(capsule.object_closure_root);
+                    let source = selection_source(
+                        latest_record.or(capsule.latest_committed_rcr_id),
+                        roots.len(),
+                        current_refs,
+                        Some(capsule_id),
+                    )?;
+                    ensure_materializer_catch_up_live(is_cancelled)?;
+                    return Ok(ClosureSelection {
+                        pending: roots.clone(),
+                        roots,
+                        inherited: BTreeSet::new(),
+                        source,
+                    });
+                }
                 successor_id = predecessor.id();
                 successor = predecessor.body().clone();
                 continue;
@@ -278,7 +329,21 @@ fn selection_source(
     latest: Option<RepositoryCommitId>,
     roots: usize,
     refs: &CanonicalRefState,
+    checkpoint: Option<RepositoryCapsuleId>,
 ) -> Result<ClosureSelectionSource, AdmissionMaterializationRefusal> {
+    if let Some(capsule) = checkpoint {
+        if roots == 0 {
+            return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
+        }
+        if latest.is_none() && !refs.refs().is_empty() {
+            return Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure);
+        }
+        return Ok(ClosureSelectionSource::CapsuleCheckpoint {
+            capsule,
+            latest,
+            united_roots: roots,
+        });
+    }
     match (latest, roots) {
         (None, 0) if refs.refs().is_empty() => Ok(ClosureSelectionSource::EmptyGenesis),
         (None, 0) => Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure),

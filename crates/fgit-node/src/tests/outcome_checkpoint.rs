@@ -347,7 +347,10 @@ fn native_source_forge_refusals_and_retries_survive_checkpoint_in_both_formats()
 
         let body = capsule(&node, receipt.capsule_id);
         assert_eq!(body.head_id, before.basis().id());
-        assert_eq!(body.backup_profile, BackupProfile::DecisionHistoryOnly);
+        assert_eq!(
+            body.backup_profile,
+            BackupProfile::DecisionHistoryWithAdmissionClosureV1
+        );
         assert_eq!(
             body.outcome_index_checkpoint_root,
             Some(receipt.checkpoint_root)
@@ -604,6 +607,89 @@ fn generic_intervening_capsule_rebinds_the_same_verified_checkpoint() {
     assert!(!repeated.published);
     assert_eq!(repeated.published_head, rebound.published_head);
     assert_decisions(&node, &expected);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn legacy_exact_outcome_checkpoint_is_upgraded_without_repacking_or_truncating_membership() {
+    let scratch = ScratchDirectory::new();
+    let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    add_tag(&node, 0);
+    add_tag(&node, 1);
+    let first = checkpoint(&node);
+    let (retained_body, decisions) = retained(&node, first.checkpoint_root);
+    let before_legacy = selected(&node);
+    let pointer =
+        CapsulePointer::restored_root(first.capsule_id, &capsule(&node, first.capsule_id));
+    let request = node.request_context();
+    let frozen = node
+        .runtime()
+        .block_on(
+            fgit_chronicle::freeze_capsule_with_outcome_index_checkpoint_async(
+                &node.authority,
+                request.authority(),
+                &node.outcome_checkpoint_fabric,
+                &CryptoBodyIdentity,
+                before_legacy.authenticated().receipt(),
+                Some(&pointer),
+                CapsuleClosure {
+                    // Generic legacy publishers never promised admitted membership,
+                    // even when their outcome checkpoint covered the exact head.
+                    object_closure_root: permitted_object_closure_root(
+                        &PermittedObjectClosure::default(),
+                    )
+                    .unwrap(),
+                    segment_manifest_root: capsule(&node, first.capsule_id).segment_manifest_root,
+                    backup_profile: BackupProfile::DecisionHistoryOnly,
+                },
+                &retained_body,
+            ),
+        )
+        .unwrap();
+    let legacy = node
+        .runtime()
+        .block_on(activate_frozen_capsule_async(
+            &node.authority,
+            request.authority(),
+            before_legacy.authenticated().receipt(),
+            &frozen,
+        ))
+        .unwrap();
+    let before = selected(&node);
+    assert_eq!(
+        before.selected_closure().closure(),
+        before_legacy.selected_closure().closure()
+    );
+    let upgraded = checkpoint(&node);
+    let after = selected(&node);
+    assert_only_checkpoint_changed(&before, &after, &upgraded);
+    assert_eq!(upgraded.checkpoint_root, first.checkpoint_root);
+    assert_eq!(upgraded.leaf_objects, first.leaf_objects);
+    assert_eq!(upgraded.leaf_bytes, first.leaf_bytes);
+    assert_eq!(
+        retained(&node, upgraded.checkpoint_root),
+        (retained_body, decisions)
+    );
+    let body = capsule(&node, upgraded.capsule_id);
+    assert_eq!(
+        body.backup_profile,
+        BackupProfile::DecisionHistoryWithAdmissionClosureV1
+    );
+    assert_eq!(upgraded.backup_profile, body.backup_profile.as_str());
+    assert_eq!(
+        body.predecessor_capsule_id,
+        Some(legacy.pointer().capsule_id())
+    );
+    assert_eq!(body.object_closure_root, before.selected_closure().root());
+    assert_ne!(
+        body.object_closure_root,
+        frozen.capsule().object_closure_root
+    );
+    let repeated = checkpoint(&node);
+    assert!(!repeated.published);
+    assert_eq!(repeated.capsule_id, upgraded.capsule_id);
+    assert_eq!(repeated.published_head, upgraded.published_head);
+    assert_eq!(repeated.backup_profile, upgraded.backup_profile);
     node.shutdown().unwrap();
 }
 
@@ -1037,7 +1123,7 @@ fn reused_checkpoint_receipts_and_byte_limits_follow_the_actual_archive_chunks()
                 CapsuleClosure {
                     object_closure_root,
                     segment_manifest_root,
-                    backup_profile: BackupProfile::DecisionHistoryOnly,
+                    backup_profile: BackupProfile::DecisionHistoryWithAdmissionClosureV1,
                 },
                 &body,
             ),

@@ -256,9 +256,8 @@ where
         .map_err(storage::history_step_refusal)?
         {
             HistoryStep::Genesis => break,
-            HistoryStep::Checkpoint { predecessor } | HistoryStep::Decision { predecessor, .. } => {
-                predecessor
-            }
+            HistoryStep::Checkpoint { predecessor, .. }
+            | HistoryStep::Decision { predecessor, .. } => predecessor,
         };
         if predecessor.body().outbox_root != selected_root || successor.outbox_root != selected_root
         {

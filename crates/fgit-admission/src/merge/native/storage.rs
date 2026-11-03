@@ -147,7 +147,7 @@ pub async fn load_forge_positions<S: AsyncAuthorityStore + ?Sized>(
         .map_err(history_step_refusal)?
         {
             HistoryStep::Genesis => break,
-            HistoryStep::Checkpoint { predecessor } => {
+            HistoryStep::Checkpoint { predecessor, .. } => {
                 // A verified checkpoint carries the exact same roots and
                 // contributes no events. It still consumes one history step.
                 successor = predecessor.body().clone();

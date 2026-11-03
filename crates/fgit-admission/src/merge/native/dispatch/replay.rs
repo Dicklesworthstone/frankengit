@@ -653,7 +653,7 @@ where
                 .map_err(storage::history_step_refusal)?
             {
                 HistoryStep::Genesis => return Err(bad()),
-                HistoryStep::Checkpoint { predecessor } => {
+                HistoryStep::Checkpoint { predecessor, .. } => {
                     successor = predecessor.body().clone();
                     continue;
                 }

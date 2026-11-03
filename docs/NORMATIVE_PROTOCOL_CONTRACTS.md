@@ -224,7 +224,9 @@ struct RepositoryCommitRecord {
 the transaction admits, plus already-selected objects it names. It is not the
 repository's complete reachable closure. The authority-selected (serving)
 closure at a head is the union of the closures of every committed RCR back to
-genesis, so naming an already-selected object leaves that union unchanged.
+genesis, so naming an already-selected object leaves that union unchanged. An
+explicit admitted-membership capsule profile (§23) may checkpoint a complete
+prefix of that same union; it does not change this per-decision commitment.
 - Receive names its uploaded objects and every reused ref root.
 - A merge, squash or fast-forward names the objects it adds above the selected
   closure, plus its base, both parents and its candidate.
@@ -1431,6 +1433,44 @@ A built directory is not active merely because it exists locally.
 ## 23. Repository capsules, backup, and restore
 
 A capsule body binds exact authority head/RCR, decision-log position, ref/forge/object/segment/retention roots, policy/configuration/format epochs, and backup profile. Capsule ID hashes the unsigned body; signatures, placements, and repair-symbol locations attest to it but do not participate in identity.
+
+The backup-profile discriminants are additive and identity-bound:
+
+| Codepoint | Profile | Coverage and admission-prefix meaning |
+|---|---|---|
+| 1 | `DecisionHistoryOnly` | Decision history and refs; no cumulative admitted-membership declaration. |
+| 2 | `FullClosure` | Decision history and referenced object payloads; no cumulative admitted-membership declaration. |
+| 3 | `FullClosureWithRepair` | Full closure plus declared repair material; no cumulative admitted-membership declaration. |
+| 4 | `DecisionHistoryWithAdmissionClosureV1` | Decision history plus the exact cumulative admitted-object membership at the capsule head; native payloads still require another source. |
+
+For profile 4, `object_closure_root` MUST identify the existing canonical
+`PermittedObjectClosure` containing exactly the union specified in §7 at the
+capsule's exact head. Deleted or no-longer-reachable objects remain members;
+unpublished, refused and physically present unrelated objects do not. A
+publisher MUST derive this set from authenticated history or an already verified
+eligible prefix, stage its immutable body under the repository-scoped admission
+closure key, and verify its identity and equality before exact-head capsule
+activation. A head without any committed RCR MUST declare the canonical empty
+closure. Generic capsule-freeze APIs authenticate the position and preserve the
+caller's declaration; they do not independently derive application membership.
+
+An admission reader may replace prefix replay only after reaching a profile-4
+capsule through verified authority transitions and checking its exact checkpoint
+activation, capsule identity, repository, predecessor and complete head binding.
+It then reads and verifies that selected membership body and unions every later
+committed RCR closure. Missing, malformed or wrong-digest selected membership
+fails closed, including when an older valid prefix exists. Cancellation returns
+no partial selection. Existing tail-work, codec and resource bounds remain in
+force. Provenance records the capsule and number of selected closure bodies;
+one aggregate root must not be reported as one original RCR closure.
+
+Profiles 1–3 keep their existing bytes and meanings. Their roots, including a
+legacy capsule with an outcome-index checkpoint, MUST NOT truncate admitted
+membership replay. Readers continue through verified legacy checkpoint edges.
+Unknown discriminants refuse; every reader must support profile 4 before a
+publisher activates it. Profile 4 retains history-only archive/recovery
+completeness: membership IDs are not object payloads, repair material, complete
+restore evidence or a pruning/GC authorization.
 
 `RepositoryCapsuleBody` also binds `outcome_index_checkpoint_root`: the
 identity digest of the immutable `OutcomeIndexCheckpointBody` selected for that

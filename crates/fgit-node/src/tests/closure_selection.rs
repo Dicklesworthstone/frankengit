@@ -17,6 +17,8 @@ use fgit_crypto::IdentityDomain;
 use fgit_types::HeadGeneration;
 use std::sync::{Arc, Mutex, mpsc};
 
+mod checkpoints;
+
 fn cache() -> DurableAdmissionMaterializer {
     DurableAdmissionMaterializer::new(admission_cache_scope().unwrap())
 }
@@ -197,7 +199,9 @@ fn original_walk(node: &OneNode, selected: &MaterializedAdmission) -> AuthorityS
 #[derive(Clone, Copy)]
 enum Fault {
     None,
+    Missing,
     Corrupt,
+    WrongClosure,
     Cancel,
 }
 
@@ -266,8 +270,14 @@ impl AsyncAuthorityStore for Observe<'_> {
             }
             match self.fault {
                 Fault::None => {}
+                Fault::Missing => return Ok(ImmutableRead::Absent),
                 Fault::Corrupt => {
                     return Ok(ImmutableRead::Present(b"invalid history bytes".to_vec()));
+                }
+                Fault::WrongClosure => {
+                    return Ok(ImmutableRead::Present(
+                        fgit_codec::encode_body(&PermittedObjectClosure::default()).unwrap(),
+                    ));
                 }
                 Fault::Cancel => cx.cancel(),
             }
@@ -779,7 +789,7 @@ fn cancelled_or_corrupt_suffix_reads_never_install_a_partial_prefix() {
                 error,
                 AdmissionMaterializationRefusal::DecisionHistory(_)
             )),
-            Fault::None => unreachable!(),
+            Fault::None | Fault::Missing | Fault::WrongClosure => unreachable!(),
         }
         assert_eq!(
             materializer

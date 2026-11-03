@@ -1057,7 +1057,10 @@ fn validate_artifacts(
 
 const fn required_artifacts(profile: BackupProfile) -> &'static [PortableArchiveArtifactKind] {
     match profile {
-        BackupProfile::DecisionHistoryOnly => &[PortableArchiveArtifactKind::DecisionSuffix],
+        BackupProfile::DecisionHistoryOnly
+        | BackupProfile::DecisionHistoryWithAdmissionClosureV1 => {
+            &[PortableArchiveArtifactKind::DecisionSuffix]
+        }
         BackupProfile::FullClosure => &[
             PortableArchiveArtifactKind::DecisionSuffix,
             PortableArchiveArtifactKind::ObjectClosure,
@@ -1074,7 +1077,10 @@ const fn required_artifacts(profile: BackupProfile) -> &'static [PortableArchive
 
 const fn completeness_for(profile: BackupProfile) -> ReplayCompleteness {
     match profile {
-        BackupProfile::DecisionHistoryOnly => ReplayCompleteness::VerifiableIfArtifactsSupplied,
+        BackupProfile::DecisionHistoryOnly
+        | BackupProfile::DecisionHistoryWithAdmissionClosureV1 => {
+            ReplayCompleteness::VerifiableIfArtifactsSupplied
+        }
         BackupProfile::FullClosure | BackupProfile::FullClosureWithRepair => {
             ReplayCompleteness::StructuralReplay
         }

@@ -121,6 +121,48 @@ fn archive() -> (SignedPortableCapsuleArchive, TrustedCapsuleArchivePolicy) {
 }
 
 #[test]
+fn admission_membership_profile_does_not_claim_full_payload_or_repair_coverage() {
+    let (mut capsule, head) = source();
+    capsule.backup_profile = BackupProfile::DecisionHistoryWithAdmissionClosureV1;
+    let (signer, policy, trusted) = signer_and_policy();
+    let archive = SignedPortableCapsuleArchive::sign(
+        &capsule,
+        &head,
+        vec![
+            PortableArchiveArtifact::new(
+                PortableArchiveArtifactKind::DecisionSuffix,
+                b"decision-suffix".to_vec(),
+            )
+            .unwrap(),
+        ],
+        b"fgit-chronicle verifier 0.0.1".to_vec(),
+        digest(0x63),
+        policy,
+        &signer,
+    )
+    .unwrap();
+    let transferred =
+        SignedPortableCapsuleArchive::from_bytes(&archive.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        transferred.verify(&trusted).unwrap().replay_completeness(),
+        ReplayCompleteness::VerifiableIfArtifactsSupplied,
+        "a membership commitment does not supply the named native object payloads"
+    );
+    assert_eq!(
+        fgit_chronicle::RestoreClassification::classify(
+            &capsule,
+            &[fgit_chronicle::CapsuleDefect::ObjectBodyMissing {
+                closure_root: capsule.object_closure_root,
+                missing: 1,
+            }],
+        )
+        .outcome(),
+        fgit_chronicle::RestoreOutcome::FailClosed,
+        "membership alone cannot repair absent payloads"
+    );
+}
+
+#[test]
 fn signed_archive_round_trips_transfer_verification_and_authority_restore() {
     let (archive, trusted) = archive();
     let exported = archive

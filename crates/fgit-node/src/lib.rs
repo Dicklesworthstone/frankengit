@@ -862,8 +862,9 @@ struct MaterializedAdmissionState {
     cache_permit: CachePermit,
     ref_state: CanonicalRefState,
     selected_closure: Arc<AuthoritySelectedClosure>,
-    /// Distinct committed roots in the verified prefix, not object authority
-    /// independently of `basis` and the cache permit.
+    /// Distinct closure roots in the verified prefix: individual RCR roots or
+    /// an explicitly declared cumulative checkpoint plus its suffix. They are
+    /// not object authority independently of `basis` and the cache permit.
     closure_roots: Arc<BTreeSet<Digest>>,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
@@ -905,12 +906,25 @@ pub enum ClosureSelectionSource {
         /// Distinct closure roots united, for audit.
         united_roots: usize,
     },
+    /// A cumulative admitted-membership checkpoint reached through verified
+    /// authority edges, plus the closures of every later committed RCR.
+    /// Legacy capsule profiles never select this source.
+    CapsuleCheckpoint {
+        /// The exact authority-selected capsule declaring the retained union.
+        capsule: fgit_types::RepositoryCapsuleId,
+        /// The newest committed record, absent for genesis/refusal-only history.
+        latest: Option<RepositoryCommitId>,
+        /// Distinct selected closure bodies united, including the checkpoint.
+        /// This is not the number of original RCR roots in the retained prefix.
+        united_roots: usize,
+    },
 }
 
 /// A permitted object set selected from authenticated authority history.
 ///
 /// This is not a local reachability cache: `root` is re-derived from `closure`,
-/// and `source` names the genesis rule or exact RCR that selected it.
+/// and `source` names the genesis rule, exact RCR history or authenticated
+/// cumulative checkpoint that selected it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthoritySelectedClosure {
     root: Digest,
@@ -3301,7 +3315,7 @@ where
                     RefusalCode::EvidenceInvalid,
                 ));
             }
-            capsule_history::HistoryStep::Checkpoint { predecessor } => {
+            capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                 successor = predecessor.body().clone();
                 continue;
             }
@@ -3511,7 +3525,7 @@ where
                     )),
                 };
             }
-            capsule_history::HistoryStep::Checkpoint { predecessor } => {
+            capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                 successor = predecessor.body().clone();
                 continue;
             }
@@ -9492,7 +9506,7 @@ impl OneNode {
             .await?
             {
                 capsule_history::HistoryStep::Genesis => break,
-                capsule_history::HistoryStep::Checkpoint { predecessor } => {
+                capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                     // The verified edge preserves ref/forge state. Retain the
                     // real predecessor's identity for the actual batch below;
                     // the checkpoint does not create a historical batch row.

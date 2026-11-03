@@ -9,9 +9,9 @@ use fgit_authority::{
 use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
 use fgit_types::RepositoryCapsuleId;
 
-use crate::{ChronicleRefusal, PublicationBasis, verify_pair};
+use crate::{ChronicleRefusal, PublicationBasis, RepositoryCapsuleBody, verify_pair};
 
-use super::{CheckpointTransitionRefusal, verify_checkpoint_successor};
+use super::{CheckpointTransitionRefusal, verified_checkpoint_successor};
 
 /// The predecessor of an authenticated head, after verifying its transition.
 /// A checkpoint preserves decision state and must never manufacture a batch.
@@ -20,7 +20,13 @@ pub enum HistoryStep {
     /// A head without predecessor or decision tail.
     Genesis,
     /// The exact capsule activation of the returned predecessor.
-    Checkpoint { predecessor: PublicationBasis },
+    Checkpoint {
+        predecessor: PublicationBasis,
+        /// Original capsule authenticated against this exact predecessor and
+        /// its checkpoint-only successor. Its profile determines which, if
+        /// any, historical material a consumer may replace with its roots.
+        capsule: Box<RepositoryCapsuleBody>,
+    },
     /// A new decision batch verified against the returned predecessor.
     Decision {
         predecessor: PublicationBasis,
@@ -137,10 +143,13 @@ where
         let ImmutableRead::Present(bytes) = read.map_err(HistoryStepRefusal::Authority)? else {
             return Err(HistoryStepRefusal::CapsuleAbsent(capsule_id));
         };
-        verify_checkpoint_successor(&basis, successor, &bytes)
+        let capsule = verified_checkpoint_successor(&basis, successor, &bytes)
             .map_err(|error| HistoryStepRefusal::Checkpoint(Box::new(error)))?;
         live(is_cancelled)?;
-        return Ok(HistoryStep::Checkpoint { predecessor: basis });
+        return Ok(HistoryStep::Checkpoint {
+            predecessor: basis,
+            capsule: Box::new(capsule),
+        });
     }
 
     let batch_id = successor

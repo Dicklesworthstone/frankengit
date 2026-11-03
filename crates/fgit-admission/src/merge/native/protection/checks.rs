@@ -117,7 +117,7 @@ where
         .map_err(infrastructure)?
         {
             HistoryStep::Genesis => return Err(denied()),
-            HistoryStep::Checkpoint { predecessor } => {
+            HistoryStep::Checkpoint { predecessor, .. } => {
                 successor = predecessor.body().clone();
                 continue;
             }

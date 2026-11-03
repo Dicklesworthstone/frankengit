@@ -49,7 +49,7 @@ where
                         Err(unavailable(RefusalCode::EvidenceMissing))
                     };
                 }
-                HistoryStep::Checkpoint { predecessor } => {
+                HistoryStep::Checkpoint { predecessor, .. } => {
                     successor = predecessor.body().clone();
                     continue;
                 }
@@ -277,7 +277,7 @@ where
                 .map_err(storage::history_step_refusal)?
             {
                 HistoryStep::Genesis => return Ok(None),
-                HistoryStep::Checkpoint { predecessor } => {
+                HistoryStep::Checkpoint { predecessor, .. } => {
                     successor = predecessor.body().clone();
                     continue;
                 }

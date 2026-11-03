@@ -32,6 +32,12 @@ use crate::{
 
 /// Inputs naming immutable closure material that the object-fabric owner has
 /// already verified. This crate never infers a closure from directory listing.
+///
+/// For [`BackupProfile::DecisionHistoryWithAdmissionClosureV1`], the caller
+/// must derive and verify the complete cumulative admitted-object membership
+/// at the frozen head, including objects whose refs were deleted. The generic
+/// freeze functions verify the head binding, not this application's union;
+/// declaring that profile is part of the trusted publisher's contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapsuleClosure {
     /// Validated object closure root.
