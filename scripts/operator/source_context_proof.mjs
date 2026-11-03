@@ -43,10 +43,19 @@ function contextPlan(bytes, hash, selected) {
   let count = 0, total = 0;
   const files = value.files.map(row => {
     const size = integer(row.source_bytes, 0, ARCHIVE_LIMITS.maxBlobBytes, 'context file size');
+    // Current native excerpts carry a byte-position domain and a file lineage
+    // label. Require their closed, matching projection without treating those
+    // untrusted labels as authorization or replacing the independent byte proof.
+    const labelled = Object.hasOwn(row, 'position_domain') || Object.hasOwn(row, 'lineage_commitment');
+    if (labelled && (row.position_domain !== 'source-blob-bytes' || typeof row.lineage_commitment !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(row.lineage_commitment))) fail('Invalid context excerpt lineage.');
     if (!Array.isArray(row.excerpts) || !row.excerpts.length || row.excerpts.length > 128) fail('Invalid context excerpt inventory.');
     let end = -1;
     const excerpts = row.excerpts.map(part => {
-      fields(part, ['byte_offset', 'untrusted_bytes_hex']);
+      fields(part, ['byte_offset', 'untrusted_bytes_hex', ...(labelled ? ['position_domain', 'lineage_commitment'] : [])]);
+      if (labelled && (part.position_domain !== row.position_domain || part.lineage_commitment !== row.lineage_commitment)) {
+        fail('Context excerpt lineage differs from its file.');
+      }
       const bytes = hexBytes(part.untrusted_bytes_hex, 1024 * 1024, true);
       const offset = integer(part.byte_offset, 0, size, 'excerpt offset');
       if (offset <= end || bytes.length > size - offset || ++count > 128 || (total += bytes.length) > 1024 * 1024) fail('Invalid context excerpt extent or budget.');

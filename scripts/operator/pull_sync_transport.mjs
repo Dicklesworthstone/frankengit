@@ -79,7 +79,7 @@ export async function syncRequest(address, token, operation, options = {}) {
   const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length && options.ca.length <= 128 * 1024
     ? Buffer.from(options.ca) : fail('invalid_sync_ca');
   signal?.throwIfAborted();
-  const url = new URL(`${base}/api/v1/${selected.path}`);
+  const url = new URL(`${base}/api/v1/${selected.path}`), deadline = performance.now() + timeout;
   return new Promise((resolve, reject) => {
     let request, response, result, failure, finished = false, closed = false, timer;
     const deliver = () => failure ? reject(failure) : resolve(result);
@@ -91,8 +91,15 @@ export async function syncRequest(address, token, operation, options = {}) {
       if (closed || !request) deliver();
     };
     const abort = () => finish(new PullSyncError('sync_request_cancelled'));
+    const checkpoint = () => {
+      if (finished) return false;
+      if (signal?.aborted) { abort(); return false; }
+      if (performance.now() >= deadline) { finish(new PullSyncError('sync_request_timeout')); return false; }
+      return true;
+    };
     try {
       const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Encoding': 'identity',
+        'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
         'Cache-Control': 'no-store', Connection: 'close' };
       if (selected.body !== undefined) {
         headers['Content-Type'] = 'application/x-www-form-urlencoded'; headers['Content-Length'] = String(Buffer.byteLength(selected.body));
@@ -104,6 +111,7 @@ export async function syncRequest(address, token, operation, options = {}) {
       request.on('error', () => finish(new PullSyncError('sync_transport_unavailable')));
       request.once('response', incoming => {
         response = incoming;
+        if (!checkpoint()) return;
         if (!selected.statuses.includes(incoming.statusCode)) { finish(new PullSyncError('sync_http_refused', incoming.statusCode)); return; }
         const names = incoming.rawHeaders.filter((_, i) => i % 2 === 0).map(name => name.toLowerCase())
           .filter(name => ['content-type', 'content-length', 'content-encoding'].includes(name));
@@ -116,21 +124,24 @@ export async function syncRequest(address, token, operation, options = {}) {
         const chunks = []; let size = 0;
         incoming.on('error', () => finish(new PullSyncError('sync_response_incomplete')));
         incoming.on('data', chunk => {
-          if (finished) return;
+          if (!checkpoint()) return;
           size += chunk.length;
           if (size > maximum || chunks.length >= 16384) finish(new PullSyncError('sync_response_byte_limit'));
           else chunks.push(chunk);
         });
         incoming.once('end', () => {
-          if (finished) return;
+          if (!checkpoint()) return;
           if (!incoming.complete || (length !== undefined && BigInt(length) !== BigInt(size))) { finish(new PullSyncError('sync_response_incomplete')); return; }
-          try { finish(null, { status: incoming.statusCode, bytes: size, value: parseSyncJson(Buffer.concat(chunks, size), maximum) }); }
+          try {
+            const value = parseSyncJson(Buffer.concat(chunks, size), maximum);
+            if (checkpoint()) finish(null, { status: incoming.statusCode, bytes: size, value });
+          }
           catch (error) { finish(error); }
         });
       });
       signal?.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(() => finish(new PullSyncError('sync_request_timeout')), timeout);
-      if (signal?.aborted) abort(); else request.end(selected.body);
+      timer = setTimeout(() => finish(new PullSyncError('sync_request_timeout')), Math.max(1, Math.ceil(deadline - performance.now())));
+      if (checkpoint()) request.end(selected.body);
     } catch { finish(new PullSyncError('sync_transport_unavailable')); }
   });
 }

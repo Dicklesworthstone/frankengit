@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 import { discover, destination, freezePlan, validatePlan, encode, LIMITS } from '../../scripts/operator/pull_sync_plan.mjs';
 import { syncRequest, parseSyncJson } from '../../scripts/operator/pull_sync_transport.mjs';
 import { fixture, TOKEN, ROTATED, row } from './fixtures/pull_sync_native.mjs';
@@ -17,6 +18,7 @@ for (const format of ['sha1', 'sha256']) {
       assert.equal(change.fields.source_tip, 'd'.repeat(format === 'sha1' ? 40 : 64));
     }
     assert.ok(f.calls.slice(1).every(call => (call.query.get('expected_head') ?? call.form.get('expected_head')) === f.state.head));
+    assert.ok(f.calls.every(call => call.headers['user-agent'] === 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)'));
     const plan = freezePlan(result, TOKEN, nonce);
     assert.deepEqual(validatePlan(plan), plan); assert.equal(plan.requests.length, 2);
     assert.ok(!encode(plan).includes(Buffer.from(TOKEN))); assert.notEqual(plan.requests[0].key, plan.requests[1].key);
@@ -117,4 +119,43 @@ test('a caller can tighten, never enlarge, each closed response allocation bound
   const count = f.calls.length;
   await assert.rejects(syncRequest(f.dest.endpoint, TOKEN, { kind: 'show', number: 1, head: null }, { maximum: 0 }));
   assert.equal(f.calls.length, count);
+});
+for (const kind of ['show', 'refs']) for (const overdue of [false, true]) {
+  test(`${kind}: sync respects elapsed time when its deadline callback is delayed (${overdue})`, { timeout: 8000 }, async t => {
+    const f = await fixture(t), budget = 250, originalTimeout = globalThis.setTimeout;
+    let deferred = false, timerRan = false;
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+      if (ms > budget) return originalTimeout(callback, ms, ...args);
+      deferred = true; return originalTimeout(() => { timerRan = true; callback(...args); }, 5000);
+    });
+    f.state.mutate = async () => { if (overdue) await delay(budget + 100); };
+    const operation = kind === 'show' ? { kind, number: 1, head: null }
+      : { kind, after: null, head: f.state.head, format: f.dest.object_format };
+    const pending = syncRequest(f.dest.endpoint, TOKEN, operation, { timeoutMs: budget });
+    if (overdue) await assert.rejects(pending, error => error.code === 'sync_request_timeout');
+    else assert.equal((await pending).status, 200);
+    assert.equal(deferred, true); assert.equal(timerRan, false); assert.equal(f.calls.length, 1);
+    assert.equal(f.decisions.size, 0);
+  });
+}
+test('sync body respects elapsed time after in-budget headers and a delayed deadline callback', { timeout: 8000 }, async t => {
+  const f = await fixture(t), budget = 250, originalTimeout = globalThis.setTimeout; let timerRan = false;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => ms > budget ? originalTimeout(callback, ms, ...args)
+    : originalTimeout(() => { timerRan = true; callback(...args); }, 5000));
+  f.state.hook = async (_call, _req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.flushHeaders(); await delay(budget + 100);
+    res.end(JSON.stringify({ ...f.header(), type: 'pull_request', number: 1, found: true, pull_request: f.state.rows[0] })); return true;
+  };
+  await assert.rejects(syncRequest(f.dest.endpoint, TOKEN, { kind: 'show', number: 1, head: null }, { timeoutMs: budget }), /sync_request_timeout/);
+  assert.equal(timerRan, false); assert.equal(f.calls.length, 1); assert.equal(f.decisions.size, 0);
+});
+test('sync validation time spends the same deadline before selecting a result', { timeout: 8000 }, async t => {
+  const f = await fixture(t), budget = 250, originalParse = JSON.parse; let parsed = false;
+  t.mock.method(JSON, 'parse', (...args) => {
+    const value = originalParse(...args);
+    if (value?.type === 'pull_request') { parsed = true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, budget + 100); }
+    return value;
+  });
+  await assert.rejects(syncRequest(f.dest.endpoint, TOKEN, { kind: 'show', number: 1, head: null }, { timeoutMs: budget }), /sync_request_timeout/);
+  assert.equal(parsed, true); assert.equal(f.calls.length, 1);
 });

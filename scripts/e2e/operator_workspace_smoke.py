@@ -17,6 +17,7 @@ import sys
 from typing import Any
 
 from operator_issue_smoke import OperatorCampaign
+from operator_context_smoke import acquire_context_cases, inspect_context_cases, workspace_scan_case
 from patch_smoke import loose, oid, bundle_objects
 from scoped_events_smoke import HttpServer, PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 from source_browse_smoke import tree
@@ -179,6 +180,46 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         selection = put("package-selection.json", {"endpoint": acquisition.url, "tenant_id": TENANT,
             "repository_id": REPOSITORY, "repository_incarnation": incarnation, "object_format": fmt,
             "ref": REF, "expected_commit": base, "expected_head": pin["snapshot_token"]})
+        context_cases = acquire_context_cases(c, home, fmt, context_bundle, context, selection,
+                                              token_path, grants, BEFORE, selected)
+        archive_cli = ROOT / "scripts/fg_source_archive.mjs"
+        archive, reused_archive = home / "source.tar", home / "reused-source.tar"
+        archive_args = ["capture", "--selection", str(selection), "--token-file", str(token_path),
+                        "--layout", "objects", "--output", str(archive)]
+        grants("receive,outcomes-read")
+        denied_archive = c.node_command(archive_cli, archive_args, 2, error_reply=True)
+        require(denied_archive["type"] == "source_archive_error" and "HTTP 403" in denied_archive["message"]
+                and not archive.exists(), "archive read denial produced a partial visible file")
+        grants("read,receive,outcomes-read")
+        archived = c.node_command(archive_cli, archive_args)
+        require(archived["source_commit"] == base and archived["root_tree"] == base_tree
+                and archived["files"] == len(BEFORE) and archived["archive_sha256"] == file_sha256(archive)
+                and archived["native_content_and_paths_verified"] is True
+                and archived["authority_signatures_verified"] is archived["repository_backup"] is False,
+                "native archive changed exact source selection or authority class")
+        decode = """const {readFileSync}=require('node:fs');
+import(process.argv[1]).then(({restoreSourceCapture})=>{
+const c=restoreSourceCapture(readFileSync(process.argv[2]),process.argv[3]);
+console.log(JSON.stringify({commit:c.commit,trees:c.trees,files:c.files.map(f=>({path_hex:f.path_hex,
+object_id:f.object_id,kind:f.kind,body_hex:Buffer.from(f.bytes).toString('hex')}))}));});"""
+        unpacked = c.node_command(Path("-e"), [decode, (ROOT / "scripts/operator/source_archive_tar.mjs").as_uri(),
+                                             str(archive), archived["archive_sha256"]])
+        require(unpacked["commit"] == {"object_id": base, "body_hex": base_body.hex()}
+                and {row["path_hex"]: (row["object_id"], row["body_hex"]) for row in unpacked["trees"]}
+                    == {p.hex() if p else None: (identity, body.hex()) for p, (identity, body) in trees.items()}
+                and len(unpacked["files"]) == len(BEFORE)
+                and {bytes.fromhex(row["path_hex"]): (row["object_id"], row["kind"], row["body_hex"]) for row in unpacked["files"]}
+                    == {p: (oid(fmt, "blob", body), "executable" if mode == b"100755" else "file", body.hex())
+                        for p, (mode, body) in BEFORE.items()}, "archive bytes/modes/complete membership differ from independent Git fixture")
+        c.facts[f"{fmt}_native_archive_and_grant_twins"] = True
+        reused_args = [*archive_args[:-1], str(reused_archive), "--reuse-archive", str(archive),
+                       "--reuse-sha256", archived["archive_sha256"]]
+        reused = c.node_command(archive_cli, reused_args)
+        require(reused["source_commit"] == base and reused["archive_sha256"] == file_sha256(reused_archive)
+                and reused["reuse_archive_sha256"] == archived["archive_sha256"]
+                and reused["read_metrics"]["reused_files"] == len(BEFORE)
+                and reused["read_metrics"]["blob_requests"] == reused["read_metrics"]["downloaded_blob_bytes"] == 0,
+                "archive reuse skipped fresh membership verification or redownloaded payloads")
         package_common = ["--selection", str(selection), "--context", str(saved_context),
                           "--context-sha256", context["capture_sha256"], "--expect", str(expect_path)]
         package_args = ["capture", *package_common, "--token-file", str(token_path),
@@ -209,6 +250,14 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require({t["pathHex"]: (t["oid"], t["bodyHex"]) for t in package["membership"]["trees"]}
                 == {p.hex() if p else None: (identity, body.hex()) for p, (identity, body) in trees.items()},
                 "acquired parent trees differ from independent original objects")
+    inspect_context_cases(c, home, fmt, context_cases)
+    inspected_archive = c.node_command(archive_cli, ["inspect", "--archive", str(reused_archive), "--sha256", reused["archive_sha256"]])
+    require(inspected_archive["source_commit"] == base and inspected_archive["files"] == len(BEFORE),
+            "offline archive inspection lost complete native source")
+    c.node_command(archive_cli, ["inspect", "--archive", str(reused_archive), "--sha256", "0" * 64], 2, error_reply=True)
+    require(file_sha256(archive) == archived["archive_sha256"] and file_sha256(reused_archive) == reused["archive_sha256"],
+            "offline wrong-pin refusal changed retained archives")
+    c.facts[f"{fmt}_native_archive_reuse_and_offline_verification"] = True
     c.node_command(context_cli, ["inspect", "--bundle", str(context_bundle), "--expected-sha256", context["manifest_sha256"]])
     c.node_command(package_cli, ["inspect", *package_common, "--package", str(package_path),
                                  "--package-sha256", acquired["package_sha256"]])
@@ -246,6 +295,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
             and captured["repository_changed"] is False, "captured intent differs from independently computed tree")
     c.node_command(workspace_cli, ["inspect-capture", "--capture", str(capture), "--sha256", captured["capture_sha256"]])
     c.facts[f"{fmt}_workspace_capture_and_binary_twin"] = True
+    workspace_scan_case(c, home, fmt, workspace, workspace_hash, capture, captured, BEFORE, AFTER, paths, result_tree)
 
     server = HttpServer(c, repository, credentials, "workspace-" + fmt)
     server.command.extend(["--allow-source", "--allow-receive", "--allow-outcomes"])
@@ -542,7 +592,8 @@ def main() -> None:
     summary: dict[str, Any] = {"complete": False, "facts": c.facts, "binary_sha256": file_sha256(fg),
         "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_context.mjs",
         "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
-        "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs",
+        "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 

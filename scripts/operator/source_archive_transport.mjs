@@ -65,6 +65,7 @@ export class SourceReader {
           method: 'POST', agent: false, maxHeaderSize: 16384, rejectUnauthorized: true,
           ...(this.#ca ? { ca: this.#ca } : {}), headers: {
             Authorization: `Bearer ${this.#token}`, Accept: 'application/json', 'Accept-Encoding': 'identity',
+            'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
             'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body),
             'Cache-Control': 'no-store', Connection: 'close',
           },

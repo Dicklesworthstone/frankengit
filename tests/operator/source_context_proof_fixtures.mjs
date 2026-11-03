@@ -23,3 +23,16 @@ export async function setup(t, format = 'sha1', defs = definitions) {
   return { ...f, context };
 }
 export const bytes = value => Buffer.from(`${JSON.stringify(value)}\n`);
+// Native wire shape only; these labels are untrusted test data, not authority
+// or a reconstruction of the Rust lineage-commitment algorithm.
+export function labelledContext(value) {
+  const context = structuredClone(value);
+  for (const [index, file] of context.files.entries()) {
+    file.position_domain = 'source-blob-bytes'; file.lineage_commitment = String(index + 1).repeat(64);
+    file.authorization_labels = ['a'.repeat(64)];
+    for (const excerpt of file.excerpts) {
+      excerpt.position_domain = file.position_domain; excerpt.lineage_commitment = file.lineage_commitment;
+    }
+  }
+  return context;
+}

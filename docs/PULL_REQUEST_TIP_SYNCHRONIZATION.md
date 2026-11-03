@@ -175,6 +175,14 @@ in addition to the 20 MiB plan. No history is evicted. Each sweep handles at mos
 update; recovery makes lookups only. Network responses and aggregate discovery
 bytes are bounded before further accumulation. Control-file/storage calls remain
 subject to filesystem latency; deadlines are not a hardware real-time guarantee.
+The transport checks its monotonic deadline before sending, when headers and body
+arrive, and after JSON decoding. Delayed timer callbacks or synchronous decoding
+cannot renew that budget. A late update response can follow a real remote commit
+or refusal: its original started marker remains unresolved until an explicit
+original-key lookup observes the decision. It does not authorize a new key or
+automatic resend. A valid decision selected within budget still survives
+cancellation during socket cleanup and local receipt publication. Sync and source
+read transports identify the project honestly in their User-Agent headers.
 No credentials are persisted, and parser diagnostics do not quote malformed server
 bytes that could reflect a credential.
 
@@ -211,6 +219,39 @@ peer is a native-schema contract fixture, NOT Rust `fg`. Native authorization/CA
 review freshness, deployment correctness, and a full Rust workspace pass require
 separate real-node validation. No automatic per-push subscription, CI trigger,
 approval survival policy, or broad PR-product completeness is claimed.
+
+## Native operator campaign
+
+The discovered [`operator/pr_sync.sh`](../scripts/e2e/suites/operator/pr_sync.sh)
+campaign executes all six manual actions and all three watcher actions against
+actual Rust HTTP services in SHA-1 and SHA-256. Pinned sandboxed Git 2.54.0 checks
+the source fixture and creates the explicit expected-tip bundle advances. Rust
+PR and reference reads establish the resulting versions, tips, original title
+and body, and unchanged code refs during metadata synchronization.
+
+The campaign covers independent source-read, PR-write and outcome-read denial
+twins, immutable independently keyed plans, wrong confirmation, unknown
+publication, explicit same-key retry, stale-version refusal, and rotated-token
+read-only recovery. A separate private copy models missing observations while
+the acknowledged original custody remains intact. The watcher requires consent,
+updates a fresh pushed tip once, then completes two bounded idle polls. Offline
+status/show run after the native service drains.
+
+At client/harness source `027aaef70f82377cba32ce487d1fa621c8c53dcf`, all 19
+predeclared assertions complete without failures or skips. Together with the
+existing protection campaign, this is 40 native assertions. Receipt:
+`/data/frankengit-targets/noble_operator_sync_027aaef7_20261103/receipt.ndjson`.
+The supplied Rust binary is older source
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+These are mixed-source integration results, not current-source native qualification.
+
+The separate capability-disabled control delegates every command to that same
+Rust binary and removes only `--allow-pulls` from the HTTP deployment. The
+expected-success inspection then fails, with no plan created and a normal native
+service drain. This is not a route-removed build or the full negative matrix.
+Review freshness, hostile execution isolation, TLS, deployment, the full Rust
+workspace and original `x2mv.4.59` acceptance remain open.
 
 
 ### Concurrent receipt readers

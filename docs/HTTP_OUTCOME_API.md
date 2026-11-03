@@ -189,3 +189,28 @@ cargo test -p fgit-cli --bin fg smart_http_server::tests
 
 These commands are verification entry points, not a claim that they passed.
 Existing Smart HTTP and issue integration suites remain necessary regressions.
+
+## Operator lookup deadline
+
+The shared operator `lookupOutcome` client spends one monotonic request budget
+through response headers, body consumption, JSON decoding and outcome validation.
+It checks elapsed time directly as well as arming a timer, so delayed timer
+delivery cannot turn an overdue response or synchronous validation into success.
+Expiration returns the existing `outcome_timeout` error and preserves uncertainty;
+it never manufactures an absent key or retries a mutation. Socket ownership still
+drains before the promise settles. A result validated within budget is selected
+before cleanup, so cancellation racing that cleanup does not erase a known
+terminal decision. This is cooperative budgeting, not a hard real-time guarantee.
+
+At client source `0443db339050eec18ceb7a5857c7d4031e0200fa`, the declared dependent
+module cohort completes 802 cases without failure or skip. Its actual HTTP fault
+tests delay deadline-callback delivery or synchronous parsing while keeping the
+clock and budget unchanged; those schema peers are not native authority proof.
+TAP: `/data/tmp/frankengit-gap-work-20261030/review6-dependent-final-0443db33.stdout`,
+SHA-256 `adc8abcf7f2008a3f0cf2881116b1c02e5ec8e93fc260e1d903e7699dbe1ecb3`.
+The separate four-suite native union remains red: source-workspace/archive,
+protection and workflow pass, while issue search returns HTTP 400 with the supplied
+older binary. An unchanged predecessor control reproduces that failure. Native
+source `a9d65885` lacks the already-present read-only search-body repair
+`aefb787f`; current-source native qualification and full operator acceptance remain
+open. These module counts do not override the native result.

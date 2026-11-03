@@ -1,11 +1,13 @@
 // Actual HTTP, filesystem and CLI boundaries; the remote node is a contract fixture.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, unlink, symlink, rename, link, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Writable } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fixture, TOKEN, ROTATED } from './fixtures/pull_sync_native.mjs';
 import { discover, freezePlan, encode, hash } from '../../scripts/operator/pull_sync_plan.mjs';
 import { savePlan } from '../../scripts/operator/pull_sync_custody.mjs';
@@ -31,6 +33,40 @@ function child(f, operation, extra = []) {
   const done = new Promise((resolve, reject) => { p.once('error', reject); p.once('close', (code, signal) => resolve({ code, signal, out, err })); });
   return { p, done, get out() { return out; } };
 }
+for (const refused of [false, true]) test(`late ${refused ? 'refused' : 'committed'} sync response keeps uncertainty and recovers the original key`, { timeout: 8000 }, async t => {
+  const f = await setup(t, 'sha1', 1), budget = 250, originalTimeout = globalThis.setTimeout;
+  const plan = await readFile(join(f.stateDir, 'plan.json'));
+  let deferred = false, timerRan = false;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+    if (ms > budget) return originalTimeout(callback, ms, ...args);
+    deferred = true; return originalTimeout(() => { timerRan = true; callback(...args); }, 5000);
+  });
+  f.state.refuse = refused;
+  f.state.mutate = async (_reply, call) => { if (call.path.endsWith('/update')) await delay(budget + 100); };
+  await assert.rejects(send(f.stateDir, TOKEN, { ...f.controls, timeoutMs: budget }), error =>
+    error.code === 'sync_request_timeout' && error.publication_unknown === true);
+  assert.equal(deferred, true); assert.equal(timerRan, false);
+  assert.equal(f.decisions.size, 1); assert.equal(writes(f).length, 1);
+  assert.equal((await status(f.stateDir)).jobs[0].state, 'unknown');
+  const originalKey = writes(f)[0].headers['idempotency-key'];
+  const recovered = await recover(f.stateDir, ROTATED, { endpoint: f.dest.endpoint });
+  assert.equal(recovered.jobs[0].state, refused ? 'refused' : 'committed');
+  assert.equal(reads(f).length, 1); assert.equal(reads(f)[0].headers['idempotency-key'], originalKey);
+  assert.equal(writes(f).length, 1); assert.deepEqual(await readFile(join(f.stateDir, 'plan.json')), plan);
+});
+for (const refused of [false, true]) test(`cleanup cancellation preserves a validated ${refused ? 'refused' : 'committed'} sync decision`, async t => {
+  const f = await setup(t, 'sha1', 1), stop = new AbortController(), destroy = http.ClientRequest.prototype.destroy;
+  f.state.refuse = refused;
+  t.mock.method(http.ClientRequest.prototype, 'destroy', function (...args) {
+    if (this.path.endsWith('/update')) stop.abort();
+    return destroy.apply(this, args);
+  });
+  const result = await send(f.stateDir, TOKEN, { ...f.controls, signal: stop.signal });
+  assert.equal(stop.signal.aborted, true); assert.equal(result.stopped, true);
+  assert.equal(result.jobs[0].state, refused ? 'refused' : 'committed');
+  assert.equal(writes(f).length, 1); assert.equal(f.decisions.size, 1);
+  assert.ok((await readdir(f.stateDir)).includes('terminal-000.json'));
+});
 for (const format of ['sha1', 'sha256']) {
   test(`${format}: confirmed batch refreshes only tips and records exact full-u64 decisions`, async t => {
     const f = await setup(t, format), before = structuredClone(f.state.rows), events = [];

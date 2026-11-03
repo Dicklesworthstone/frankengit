@@ -197,6 +197,13 @@ cleanup. A terminal receipt validated before late cancellation remains terminal
 and is retained. A failure syncing that observation, cleaning up the lock, or
 writing stdout reports the known receipt rather than inventing rollback.
 
+Each request also checks its original monotonic deadline before sending, on
+headers and body arrival, and after JSON decoding. A delayed timer callback or
+synchronous decoding cannot extend that budget. A late publication reply leaves
+the original attempt unresolved until original-key recovery observes a decision;
+it never proves rollback or permits an automatic resend. A valid reply selected
+within budget remains selected during socket cleanup and receipt persistence.
+
 A SIGKILL can leave `.send-lock` behind. A later sender refuses that lock instead
 of trusting a stale PID or guessing whether publication occurred. The read-only
 `outcome` command does not acquire or steal the send lock and remains usable for
@@ -275,3 +282,11 @@ discarded. Queue/candidate-check/DSL behavior, Git objects and writer enforcemen
 an independent Git oracle, TLS, hostile isolation, hardware crash durability,
 current-source native qualification, D10 and the full operator/release matrix
 remain separate. Original `x2mv.4.59` acceptance stays open.
+
+At client/harness source `027aaef70f82377cba32ce487d1fa621c8c53dcf`, the
+protection campaign again completes its unchanged 21 assertions. The combined
+protection/PR-sync module cohort completes 198 cases, including 12 new protection
+deadline and terminal-custody cases. The native run still uses the explicitly
+older binary above; it does not qualify a native build of this client revision.
+Combined native receipt:
+`/data/frankengit-targets/noble_operator_sync_027aaef7_20261103/receipt.ndjson`.

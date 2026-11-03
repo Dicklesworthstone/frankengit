@@ -2,7 +2,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sha256 } from '../../scripts/operator/source_archive.mjs';
 import { captureContextProof, inspectContextProof } from '../../scripts/operator/source_context_proof.mjs';
-import { setup, bytes, token, hex } from './source_context_proof_fixtures.mjs';
+import { setup, bytes, token, hex, labelledContext } from './source_context_proof_fixtures.mjs';
+for (const format of ['sha1', 'sha256']) {
+  test(`${format}: native labelled excerpts retain byte membership without granting authority`, async t => {
+    const f = await setup(t, format), labelled = labelledContext(f.context), source = bytes(labelled);
+    const result = await captureContextProof(source, sha256(source), f.selection, token);
+    const receipt = inspectContextProof(result.bytes, result.receipt.proof_sha256, source, sha256(source), f.selection);
+    assert.equal(receipt.excerpt_bytes_verified, true); assert.equal(receipt.verified_files.length, labelled.files.length);
+    assert.equal(receipt.authority_verified, false); assert.equal(receipt.search_evidence_verified, false);
+    assert.equal(receipt.freshness_verified, false); assert.deepEqual(bytes(labelled), source);
+  });
+  test(`${format}: native excerpt lineage profiles reject malformed or inconsistent labels before I/O`, async t => {
+    const f = await setup(t, format);
+    for (const mutate of [
+      file => delete file.position_domain,
+      file => delete file.lineage_commitment,
+      file => file.lineage_commitment = 'bad',
+      file => file.position_domain = 'raw-path-bytes',
+      file => file.excerpts[0].lineage_commitment = 'f'.repeat(64),
+      file => delete file.excerpts[0].lineage_commitment,
+      file => delete file.excerpts[0].position_domain,
+      file => file.excerpts[0].position_domain = 'raw-path-bytes',
+      file => file.excerpts[0].unrecognized = true,
+    ]) {
+      const context = labelledContext(f.context); mutate(context.files[0]); const data = bytes(context);
+      await assert.rejects(captureContextProof(data, sha256(data), f.selection, token));
+    }
+    const partial = structuredClone(f.context);
+    partial.files[0].excerpts[0].position_domain = 'source-blob-bytes';
+    const data = bytes(partial);
+    await assert.rejects(captureContextProof(data, sha256(data), f.selection, token));
+    assert.equal(f.calls.length, 0);
+  });
+  test(`${format}: native lineage labels cannot substitute for committed excerpt bytes`, async t => {
+    const f = await setup(t, format), context = labelledContext(f.context);
+    const excerpt = context.files[0].excerpts[0];
+    excerpt.untrusted_bytes_hex = (excerpt.untrusted_bytes_hex.startsWith('00') ? 'ff' : '00') + excerpt.untrusted_bytes_hex.slice(2);
+    const data = bytes(context);
+    await assert.rejects(captureContextProof(data, sha256(data), f.selection, token), /Context excerpt differs from committed source bytes/);
+    assert.ok(f.calls.length > 0, 'well-formed untrusted labels must still reach independent byte verification');
+  });
+}
 for (const format of ['sha1', 'sha256']) {
   test(`${format}: partial context bytes gain portable commit/path proof without unrelated source reads`, async t => {
     const f = await setup(t, format), context = bytes(f.context), hash = sha256(context);

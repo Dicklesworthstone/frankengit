@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { lookupOutcome, validateOutcomeReply, parseOutcomeJson, outcomeEndpoint, OUTCOME_BYTES } from '../../scripts/operator/transaction_outcome.mjs';
 
 const scope = { tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32), principal_id: '4'.repeat(32) };
@@ -157,6 +158,52 @@ test('abort cancels outstanding reads and pre-abort sends no request', async t =
   await waiting; controller.abort(); await assert.rejects(result, /cancelled/);
   await assert.rejects(lookupOutcome(peer.address, token, selection(), { signal: controller.signal }), /cancelled/);
   assert.equal(peer.requests.length, 1);
+});
+for (const state of ['committed', 'refused', 'undecided']) for (const overdue of [false, true]) {
+  test(`${state}: outcome respects elapsed time when its deadline callback is delayed (${overdue})`, { timeout: 8000 }, async t => {
+    const budget = 250, originalTimeout = globalThis.setTimeout;
+    let deferred = false, timerRan = false;
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+      if (ms > budget) return originalTimeout(callback, ms, ...args);
+      deferred = true; return originalTimeout(() => { timerRan = true; callback(...args); }, 5000);
+    });
+    const peer = await server(t, async (_req, res) => { if (overdue) await delay(budget + 100); send(res, reply(state)); });
+    const pending = lookupOutcome(peer.address, token, selection(), { timeoutMs: budget });
+    if (overdue) await assert.rejects(pending, error => error.code === 'outcome_timeout' && error.outcomeUnknown === true);
+    else assert.deepEqual(await pending, reply(state));
+    assert.equal(deferred, true); assert.equal(timerRan, false);
+    assert.equal(peer.requests.length, 1); assert.equal(peer.requests[0].headers['idempotency-key'], key);
+    for (let n = 0; peer.sockets.size && n < 30; n++) await delay(5);
+    assert.equal(peer.sockets.size, 0, 'deadline failure still closes its owned transport');
+  });
+}
+test('outcome body respects elapsed time after in-budget headers and a delayed deadline callback', { timeout: 8000 }, async t => {
+  const budget = 250, originalTimeout = globalThis.setTimeout; let timerRan = false;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => ms > budget ? originalTimeout(callback, ms, ...args)
+    : originalTimeout(() => { timerRan = true; callback(...args); }, 5000));
+  const peer = await server(t, async (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.flushHeaders(); await delay(budget + 100); res.end(wire(reply()));
+  });
+  await assert.rejects(lookupOutcome(peer.address, token, selection(), { timeoutMs: budget }), /outcome_timeout/);
+  assert.equal(timerRan, false); assert.equal(peer.requests.length, 1);
+});
+test('outcome validation time spends the same deadline before selecting a result', { timeout: 8000 }, async t => {
+  const budget = 250, originalParse = JSON.parse; let parsed = false;
+  t.mock.method(JSON, 'parse', (...args) => {
+    const value = originalParse(...args);
+    if (value?.type === 'transaction_outcome') { parsed = true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, budget + 100); }
+    return value;
+  });
+  const peer = await server(t, (_req, res) => send(res));
+  await assert.rejects(lookupOutcome(peer.address, token, selection(), { timeoutMs: budget }), /outcome_timeout/);
+  assert.equal(parsed, true); assert.equal(peer.requests.length, 1);
+});
+for (const state of ['committed', 'refused']) test(`${state}: cleanup cancellation preserves an already validated terminal`, async t => {
+  const stop = new AbortController(), destroy = http.ClientRequest.prototype.destroy;
+  t.mock.method(http.ClientRequest.prototype, 'destroy', function (...args) { stop.abort(); return destroy.apply(this, args); });
+  const peer = await server(t, (_req, res) => send(res, reply(state)));
+  assert.deepEqual(await lookupOutcome(peer.address, token, selection(), { signal: stop.signal }), reply(state));
+  assert.equal(stop.signal.aborted, true); assert.equal(peer.requests.length, 1);
 });
 test('verified private-CA TLS works while an untrusted certificate refuses', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'fg-outcome-tls-')); t.after(() => rm(dir, { recursive: true, force: true }));

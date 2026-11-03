@@ -122,7 +122,7 @@ export async function lookupOutcome(address, token, selected, options = {}) {
   const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length > 0 && options.ca.length <= 128 * 1024
     ? Buffer.from(options.ca) : fail('invalid_outcome_tls_ca');
   if (signal?.aborted) fail('outcome_cancelled');
-  const url = new URL(`${base}/api/v1/outcomes`);
+  const url = new URL(`${base}/api/v1/outcomes`), deadline = performance.now() + timeout;
   const reply = await new Promise((resolve, reject) => {
     let request, response, result, error, finishing = false, closed = false, timer, delivered = false;
     const deliver = () => { if (delivered) return; delivered = true; if (error) reject(error); else resolve(result); };
@@ -134,6 +134,12 @@ export async function lookupOutcome(address, token, selected, options = {}) {
       if (closed || !request) deliver();
     };
     const abort = () => finish(new OutcomeError('outcome_cancelled'));
+    const checkpoint = () => {
+      if (finishing) return false;
+      if (signal?.aborted) { abort(); return false; }
+      if (performance.now() >= deadline) { finish(new OutcomeError('outcome_timeout')); return false; }
+      return true;
+    };
     try {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, maxHeaderSize: 16 * 1024, rejectUnauthorized: true, ...(ca ? { ca } : {}),
@@ -145,6 +151,7 @@ export async function lookupOutcome(address, token, selected, options = {}) {
       request.on('error', () => finish(new OutcomeError('outcome_transport_unavailable')));
       request.once('response', incoming => {
         response = incoming;
+        if (!checkpoint()) return;
         if (incoming.statusCode !== 200) { finish(new OutcomeError('outcome_http_refused', incoming.statusCode)); return; }
         const headers = incoming.rawHeaders.filter((_, i) => i % 2 === 0).map(name => name.toLowerCase())
           .filter(name => ['content-type', 'content-length', 'content-encoding'].includes(name));
@@ -159,23 +166,26 @@ export async function lookupOutcome(address, token, selected, options = {}) {
         const chunks = []; let size = 0;
         incoming.on('error', () => finish(new OutcomeError('outcome_response_incomplete')));
         incoming.on('data', chunk => {
-          if (finishing) return;
+          if (!checkpoint()) return;
           size += chunk.length;
           if (size > OUTCOME_BYTES || chunks.length >= OUTCOME_BYTES) finish(new OutcomeError('outcome_byte_limit'));
           else chunks.push(chunk);
         });
         incoming.once('end', () => {
-          if (finishing) return;
+          if (!checkpoint()) return;
           if (!incoming.complete || (declared !== undefined && BigInt(declared) !== BigInt(size))) {
             finish(new OutcomeError('outcome_response_incomplete')); return;
           }
-          try { finish(null, validateOutcomeReply(parseOutcomeJson(Buffer.concat(chunks, size)), scope, known)); }
+          try {
+            const checked = validateOutcomeReply(parseOutcomeJson(Buffer.concat(chunks, size)), scope, known);
+            if (checkpoint()) finish(null, checked);
+          }
           catch (failure) { finish(failure); }
         });
       });
       signal?.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(() => finish(new OutcomeError('outcome_timeout')), timeout);
-      if (signal?.aborted) abort(); else request.end();
+      timer = setTimeout(() => finish(new OutcomeError('outcome_timeout')), Math.max(1, Math.ceil(deadline - performance.now())));
+      if (checkpoint()) request.end();
     } catch { finish(new OutcomeError('outcome_transport_unavailable')); }
   });
   // A fully validated terminal wins over cancellation racing socket cleanup.
