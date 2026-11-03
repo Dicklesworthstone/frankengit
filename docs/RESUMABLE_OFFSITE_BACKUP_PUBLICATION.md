@@ -302,3 +302,20 @@ remote effects, resource limits, cancellation and truthful completion receipts.
 Their payloads are opaque operator test bytes. Native archive verification,
 public-provider interoperability, Rust/full-workspace acceptance and hardware
 faults require separate evidence.
+
+The separate `scripts/e2e/suites/operator/backup_https.sh` campaign uses actual
+signed native SHA-1 and SHA-256 archives. It seals without network access,
+removes all original source/control paths, refuses changed logical targets,
+insufficient budgets and unmet floors before remote access, then exercises a
+lost second-target approval response with the first completion retained.
+Renewed query capabilities and reordered targets resume the exact intent through
+GET-only readback while preserving local controls and remote file identities.
+The recovered bytes enter actual native signed restore and separate Rust reads
+of exact Git identities/binary bytes/modes and canonical issue history. Its
+disk-backed loopback TLS service supplies transport semantics only; it does not
+prove public-provider interoperability, physical durability or independent
+failure domains. The campaign binds a separately qualified prebuilt `FG_BIN`
+digest and requires pinned Node, sandboxed Git 2.54.0, Python and test-only
+OpenSSL. Retained diagnostic originals, author execution and local TLS tests do
+not establish destructive/hardware faults, full-capsule recovery, independent
+review, a fresh-current-main build or full-workspace acceptance.
