@@ -1,4 +1,5 @@
 use super::*;
+mod discussions;
 use fgit_forge::event::issue::{IssueAction, IssueCommand};
 use fgit_forge::event::notification::{NotificationAction, NotificationMode};
 use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
@@ -152,7 +153,7 @@ fn continuation_binds_the_exact_snapshot_and_rejects_inapplicable_flags() {
     else {
         panic!()
     };
-    assert_eq!((read.after, read.limit, read.number), (7, 1, None));
+    assert_eq!((read.after, read.limit, read.target), (7, 1, None));
     assert!(read.expected_head.is_some() && read.unread_only && read.include_muted);
     for extra in [
         vec!["--after", "7"],

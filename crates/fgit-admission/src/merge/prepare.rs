@@ -112,7 +112,10 @@ pub fn prepare_event(
             matches!(event.aggregate, fgit_forge::AggregateId::Milestone(_))
         }
         ForgeEventPayload::NotificationPreferenceChangedNative(change) => {
-            matches!(event.aggregate, fgit_forge::AggregateId::NotificationPreference { principal, .. } if principal == change.actor)
+            fgit_forge::event::notification::NotificationTarget::from_preference_aggregate(
+                event.aggregate,
+            )
+            .is_some_and(|(principal, _)| principal == change.actor)
         }
         ForgeEventPayload::ReviewProtectionChanged(_) => {
             event.aggregate == fgit_forge::AggregateId::ReviewProtection
@@ -397,18 +400,19 @@ pub fn prepare_event(
                 return Err(RefusalCode::EvidenceInvalid);
             }
             super::native::notifications::verify_event_seal(context, event, attempt)?;
-            let fgit_forge::AggregateId::NotificationPreference { issue, .. } = event.aggregate
+            let Some((_, target)) =
+                fgit_forge::event::notification::NotificationTarget::from_preference_aggregate(
+                    event.aggregate,
+                )
             else {
                 return Err(RefusalCode::EvidenceInvalid);
             };
-            let issue_stream = AsciiSlug::try_new(
-                "forge_stream",
-                fgit_forge::AggregateId::Issue(issue).to_string().as_bytes(),
-            )
-            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            let subject_stream =
+                AsciiSlug::try_new("forge_stream", target.aggregate().to_string().as_bytes())
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
             let current = resolved
                 .forge
-                .entry(issue_stream)
+                .entry(subject_stream)
                 .ok_or(RefusalCode::EvidenceMissing)?
                 .successor_position();
             if let fgit_forge::event::notification::NotificationAction::SetReadThrough(Some(

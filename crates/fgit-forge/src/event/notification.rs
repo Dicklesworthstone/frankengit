@@ -1,9 +1,71 @@
-//! Canonical self-owned issue subscription, mute and read-prefix commands.
+//! Canonical self-owned issue/discussion subscription, mute and read-prefix commands.
 //! Defaults and inbox membership are derived; only explicit preferences persist.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
-use crate::{AggregateId, AggregateVersion, ExpectedVersion, IssueNumber};
+use crate::{AggregateId, AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum NotificationTargetKind {
+    Issue,
+    Discussion,
+}
+impl NotificationTargetKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Issue => "issue",
+            Self::Discussion => "discussion",
+        }
+    }
+}
+
+/// The subject kind is identity material, including when numbers coincide.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum NotificationTarget {
+    Issue(IssueNumber),
+    Discussion(DiscussionNumber),
+}
+impl NotificationTarget {
+    pub const fn kind(self) -> NotificationTargetKind {
+        match self {
+            Self::Issue(_) => NotificationTargetKind::Issue,
+            Self::Discussion(_) => NotificationTargetKind::Discussion,
+        }
+    }
+    pub const fn number(self) -> u64 {
+        match self {
+            Self::Issue(number) => number.get(),
+            Self::Discussion(number) => number.get(),
+        }
+    }
+    pub const fn aggregate(self) -> AggregateId {
+        match self {
+            Self::Issue(number) => AggregateId::Issue(number),
+            Self::Discussion(number) => AggregateId::Discussion(number),
+        }
+    }
+    pub const fn preference_aggregate(self, principal: PrincipalId) -> AggregateId {
+        match self {
+            Self::Issue(issue) => AggregateId::NotificationPreference { principal, issue },
+            Self::Discussion(discussion) => AggregateId::DiscussionNotificationPreference {
+                principal,
+                discussion,
+            },
+        }
+    }
+    pub const fn from_preference_aggregate(aggregate: AggregateId) -> Option<(PrincipalId, Self)> {
+        match aggregate {
+            AggregateId::NotificationPreference { principal, issue } => {
+                Some((principal, Self::Issue(issue)))
+            }
+            AggregateId::DiscussionNotificationPreference {
+                principal,
+                discussion,
+            } => Some((principal, Self::Discussion(discussion))),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationMode {
@@ -24,7 +86,7 @@ impl NotificationMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationAction {
     SetMode(NotificationMode),
-    /// Acknowledges only an explicitly observed issue prefix. None clears it.
+    /// Acknowledges only an explicitly observed subject prefix. None clears it.
     SetReadThrough(Option<AggregateVersion>),
 }
 impl NotificationAction {
@@ -115,7 +177,7 @@ impl NativeNotificationEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NotificationCommand {
-    pub number: IssueNumber,
+    pub target: NotificationTarget,
     pub expected_version: ExpectedVersion,
     pub action: NotificationAction,
 }
@@ -128,10 +190,7 @@ impl NotificationCommand {
                 .map_err(|_| RefusalCode::ResourceBudgetExceeded)?,
         };
         Ok(ForgeEvent {
-            aggregate: AggregateId::NotificationPreference {
-                principal: actor,
-                issue: self.number,
-            },
+            aggregate: self.target.preference_aggregate(actor),
             version,
             payload: ForgeEventPayload::NotificationPreferenceChangedNative(
                 NativeNotificationEvent {
@@ -146,14 +205,14 @@ impl NotificationCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NotificationPreferenceSnapshot {
     pub principal: PrincipalId,
-    pub number: IssueNumber,
+    pub target: NotificationTarget,
     pub version: AggregateVersion,
     pub mode: NotificationMode,
     pub read_through: Option<AggregateVersion>,
 }
 
 pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
-    if matches!(event.aggregate, AggregateId::NotificationPreference { .. })
+    if NotificationTarget::from_preference_aggregate(event.aggregate).is_some()
         != matches!(
             event.payload,
             ForgeEventPayload::NotificationPreferenceChangedNative(_)
@@ -161,11 +220,10 @@ pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
     {
         return Err(invalid_native("notification.aggregate_kind"));
     }
-    if let (
-        AggregateId::NotificationPreference { principal, .. },
-        ForgeEventPayload::NotificationPreferenceChangedNative(change),
-    ) = (event.aggregate, &event.payload)
-    {
+    if let (Some((principal, _)), ForgeEventPayload::NotificationPreferenceChangedNative(change)) = (
+        NotificationTarget::from_preference_aggregate(event.aggregate),
+        &event.payload,
+    ) {
         if principal != change.actor {
             return Err(invalid_native("notification.actor"));
         }
@@ -178,17 +236,16 @@ pub fn apply_event(
     event: &ForgeEvent,
 ) -> Result<NotificationPreferenceSnapshot, RefusalCode> {
     validate_event(event).map_err(|_| RefusalCode::EvidenceInvalid)?;
-    let (
-        AggregateId::NotificationPreference { principal, issue },
-        ForgeEventPayload::NotificationPreferenceChangedNative(change),
-    ) = (event.aggregate, &event.payload)
-    else {
+    let (Some((principal, target)), ForgeEventPayload::NotificationPreferenceChangedNative(change)) = (
+        NotificationTarget::from_preference_aggregate(event.aggregate),
+        &event.payload,
+    ) else {
         return Err(RefusalCode::EvidenceInvalid);
     };
     let mut next = match previous {
         Some(previous) => {
             if previous.principal != principal
-                || previous.number != issue
+                || previous.target != target
                 || !previous.version.is_immediate_predecessor_of(event.version)
             {
                 return Err(RefusalCode::EvidenceStale);
@@ -201,7 +258,7 @@ pub fn apply_event(
             }
             NotificationPreferenceSnapshot {
                 principal,
-                number: issue,
+                target,
                 version: event.version,
                 mode: NotificationMode::Participating,
                 read_through: None,

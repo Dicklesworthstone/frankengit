@@ -30,6 +30,19 @@ fn commands_keep_exact_versions_and_never_accept_another_recipient() {
         ),
     ] {
         let command = parse_command(name, &args()).unwrap();
+        assert_eq!(
+            command.target,
+            NotificationTarget::Issue(IssueNumber::try_new(7).unwrap())
+        );
+        assert_eq!(command.expected_version, ExpectedVersion::NewStream);
+        assert_eq!(command.action, action);
+        let mut discussion = args();
+        discussion.insert("kind".into(), text("discussion"));
+        let command = parse_command(name, &discussion).unwrap();
+        assert_eq!(
+            command.target,
+            NotificationTarget::Discussion(DiscussionNumber::try_new(7).unwrap())
+        );
         assert_eq!(command.expected_version, ExpectedVersion::NewStream);
         assert_eq!(command.action, action);
         for field in [
@@ -136,7 +149,7 @@ fn bound(mut args: Vec<String>) -> Vec<String> {
     args
 }
 #[test]
-fn personal_grants_require_issue_disclosure_and_launch_identity() {
+fn personal_grants_require_selected_domain_disclosure_and_launch_identity() {
     let ordinary = crate::mcp::parse_options(&launch(&["--allow-issues"])).unwrap();
     assert!(!read_permitted(&ordinary) && !write_permitted(&ordinary));
     let personal = crate::mcp::parse_options(&bound(launch(&["--allow-issues"]))).unwrap();
@@ -176,4 +189,72 @@ fn personal_grants_require_issue_disclosure_and_launch_identity() {
         }
         assert!(!read_permitted(&inconsistent) && !write_permitted(&inconsistent));
     }
+    for (grant, allowed, denied) in [
+        (
+            "--allow-issues",
+            NotificationTargetKind::Issue,
+            NotificationTargetKind::Discussion,
+        ),
+        (
+            "--allow-discussions",
+            NotificationTargetKind::Discussion,
+            NotificationTargetKind::Issue,
+        ),
+    ] {
+        let ordinary = crate::mcp::parse_options(&launch(&[grant])).unwrap();
+        assert!(!read_permitted(&ordinary));
+        let personal = crate::mcp::parse_options(&bound(launch(&[grant]))).unwrap();
+        assert!(read_kind_permitted(&personal, allowed));
+        assert!(!read_kind_permitted(&personal, denied));
+        assert!(!write_permitted(&personal));
+        let writer =
+            crate::mcp::parse_options(&bound(launch(&[grant, "--allow-notification-writes"])))
+                .unwrap();
+        assert!(write_permitted(&writer));
+        assert!(read_kind_permitted(&writer, allowed));
+        assert!(!read_kind_permitted(&writer, denied));
+        assert!(
+            crate::mcp::parse_options(&launch(&[grant, "--allow-notification-writes"])).is_err()
+        );
+        let mut no_pin = bound(launch(&[grant]));
+        no_pin.truncate(no_pin.len() - 2);
+        assert!(crate::mcp::parse_options(&no_pin).is_err());
+    }
+}
+
+#[test]
+fn thread_kind_is_explicitly_bounded_and_never_coerced() {
+    assert_eq!(kind(&args()).unwrap(), NotificationTargetKind::Issue);
+    for invalid in [
+        text(""),
+        text("Discussion"),
+        text("pull"),
+        Value::Null,
+        json::number(1),
+        Value::Bool(true),
+    ] {
+        let mut bad = args();
+        bad.insert("kind".into(), invalid);
+        assert!(kind(&bad).is_err());
+        assert!(parse_command("frankengit_inbox_subscribe", &bad).is_err());
+    }
+    let mut discussion = args();
+    discussion.insert("kind".into(), text("discussion"));
+    discussion.insert("number".into(), text("9007199254740993"));
+    assert_eq!(
+        parse_command("frankengit_inbox_subscribe", &discussion)
+            .unwrap()
+            .target
+            .number(),
+        9_007_199_254_740_993
+    );
+    discussion.insert("read_through".into(), text("2"));
+    assert_eq!(
+        parse_command("frankengit_inbox_read", &discussion)
+            .unwrap()
+            .action,
+        NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(2).unwrap()))
+    );
+    discussion.insert("number".into(), text("0"));
+    assert!(parse_command("frankengit_inbox_read", &discussion).is_err());
 }

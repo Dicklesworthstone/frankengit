@@ -1,5 +1,6 @@
 //! Real MCP calls through reopened authority-backed node operations.
 use super::*;
+mod discussions;
 fn options(fixture: &Fixture, principal: u8, writes: bool) -> Options {
     let mut options = fixture.options(false, false, true, principal);
     options.principal = Some(PrincipalId::from_bytes([principal; 16]));

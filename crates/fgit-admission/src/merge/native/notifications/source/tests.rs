@@ -9,10 +9,10 @@ use fgit_authority::{
 use fgit_codec::harness::{genesis_head, tx_id};
 use fgit_codec::{CanonicalBody, CanonicalOutboxEffectState, CanonicalOutboxStateEntry};
 use fgit_forge::ExpectedVersion;
-use fgit_forge::ForgeEventBatch;
 use fgit_forge::IssueNumber;
 use fgit_forge::event::issue::{IssueAction, IssueCommand};
 use fgit_forge::event::notification::{NotificationAction, NotificationCommand, NotificationMode};
+use fgit_forge::{ForgeEventBatch, ForgeEventPayload};
 use fgit_types::AsciiSlug;
 use fgit_types::PrincipalId;
 use std::future::Future;
@@ -154,7 +154,28 @@ impl Fixture {
             &|| false,
         ))
     }
+    fn source_kind(
+        &self,
+        principal: u8,
+        kind: NotificationTargetKind,
+    ) -> Result<NotificationSourceSnapshot, AdmissionError> {
+        run(read_source_for_kind_at(
+            &self.store,
+            &(),
+            &self.basis,
+            actor(principal),
+            kind,
+            &|| false,
+        ))
+    }
     fn replay(&self, principal: u8) -> Result<Vec<NotificationThread>, AdmissionError> {
+        self.replay_kind(principal, NotificationTargetKind::Issue)
+    }
+    fn replay_kind(
+        &self,
+        principal: u8,
+        kind: NotificationTargetKind,
+    ) -> Result<Vec<NotificationThread>, AdmissionError> {
         run(super::replay(
             &self.store,
             &(),
@@ -162,6 +183,7 @@ impl Fixture {
             &self.forge,
             &self.outbox,
             actor(principal),
+            kind,
             &|| false,
         ))
     }
@@ -233,7 +255,7 @@ fn opened(number: u64, who: u8) -> ForgeEvent {
 }
 fn preference(number: u64, before: u64, who: u8, action: NotificationAction) -> ForgeEvent {
     NotificationCommand {
-        number: IssueNumber::try_new(number).unwrap(),
+        target: NotificationTarget::Issue(IssueNumber::try_new(number).unwrap()),
         expected_version: if before == 0 {
             ExpectedVersion::NewStream
         } else {
@@ -298,14 +320,14 @@ fn real_source_fold_is_self_scoped_numeric_and_preserves_latest_other_activity()
     assert_eq!(
         own.threads
             .iter()
-            .map(|t| t.issue.number.get())
+            .map(|t| t.subject.target().number())
             .collect::<Vec<_>>(),
         [2, 10]
     );
     assert!(own.threads[0].latest_other_version.is_none());
     assert!(own.threads[0].participated);
     let thread = &own.threads[1];
-    assert_eq!(thread.issue.title, "Current title");
+    assert_eq!(thread.subject.title(), "Current title");
     assert_eq!(thread.latest_other_version.unwrap().get(), 3);
     assert!(thread.participated);
     let prefs = thread.preference.as_ref().unwrap();
@@ -431,3 +453,6 @@ fn orphan_or_future_preferences_bad_head_identity_and_cancellation_never_produce
     );
     assert_eq!(fixture.source(1).unwrap().threads.len(), 1);
 }
+
+#[path = "discussion_tests.rs"]
+mod discussion_tests;

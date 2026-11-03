@@ -781,6 +781,8 @@ mod add_labels;
 mod append_comment;
 #[path = "issue_http/assignment.rs"]
 mod assignment;
+#[path = "issue_http/discussion_notifications.rs"]
+mod discussion_notifications;
 #[path = "issue_http/discussions.rs"]
 mod discussions;
 #[path = "issue_http/milestones.rs"]

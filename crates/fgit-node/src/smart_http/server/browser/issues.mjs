@@ -313,9 +313,11 @@ export function issueSearchPage(reply, input, options = {}) {
 }
 
 export function publication(reply, pending, status = 200, entity = 'issue') {
-  if (!['issue', 'milestone', 'notification', 'discussion'].includes(entity)) fail('Unsupported publication profile.');
+  if (!['issue', 'milestone', 'notification', 'discussion', 'discussion_notification'].includes(entity)) fail('Unsupported publication profile.');
   identity(reply, pending.binding);
-  if (entity === 'notification' && pending.binding?.principal && reply.principal_id !== pending.binding.principal) fail('Notification principal changed.');
+  if (['notification', 'discussion_notification'].includes(entity) && pending.binding?.principal && reply.principal_id !== pending.binding.principal) fail('Notification principal changed.');
+  if (entity === 'discussion_notification' && reply.target_kind !== 'discussion') fail('Notification target kind changed.');
+  if (entity === 'notification' && reply.target_kind !== undefined) fail('Notification target kind changed.');
   if (entity === 'issue' && pending.action === 'add-assignees' &&
       (pending.expected_version !== null || reply.command_profile !== 'issue.add-assignees.v1')) {
     fail('Unrecognized additive assignee publication profile.');
@@ -392,7 +394,7 @@ export async function readJson(response, signal, maximum = MAX_REPLY_BYTES) {
 }
 function rootFor(href, kind = 'issue') {
   const page = new URL(href);
-  const suffix = kind === 'discussion' ? '/ui/discussions/' : kind === 'notification' ? '/ui/notifications/' : '/ui/issues/';
+  const suffix = kind === 'discussion_notification' ? '/ui/discussion-notifications/' : kind === 'discussion' ? '/ui/discussions/' : kind === 'notification' ? '/ui/notifications/' : '/ui/issues/';
   if (page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix) ||
       !['https:', 'http:'].includes(page.protocol)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['127.0.0.1', '[::1]', 'localhost'].includes(page.hostname)) {
@@ -424,7 +426,7 @@ export class IssueClient {
     // This closed code profile never comes from a receipt or remote response;
     // it cannot choose an origin, route, recovery endpoint or key namespace.
     if (metadataProfile !== null && (!Object.isFrozen(metadataProfile) ||
-        Object.keys(metadataProfile).length !== 4 || !own(metadataProfile, 'kind') || !['milestone', 'notification', 'discussion'].includes(metadataProfile.kind) ||
+        Object.keys(metadataProfile).length !== 4 || !own(metadataProfile, 'kind') || !['milestone', 'notification', 'discussion', 'discussion_notification'].includes(metadataProfile.kind) ||
         !['mutationRequest', 'page', 'history'].every(key => own(metadataProfile, key)) ||
         !['mutationRequest', 'page', 'history'].every(key => typeof metadataProfile[key] === 'function'))) {
       fail('Invalid native metadata client profile.');
@@ -434,8 +436,9 @@ export class IssueClient {
     this.#timeout = natural(timeoutMs, 'request timeout', 1, 300_000);
   }
   get #kind() { return this.#profile?.kind ?? 'issue'; }
-  get #family() { return this.#kind === 'discussion' ? 'discussions' : this.#kind === 'notification' ? 'notifications' : this.#kind === 'milestone' ? 'milestones' : 'issues'; }
-  get #keyPrefix() { return this.#kind === 'discussion' ? 'fgdi' : this.#kind === 'notification' ? 'fgni' : this.#kind === 'milestone' ? 'fgmi' : 'fgui'; }
+  get #notification() { return ['notification', 'discussion_notification'].includes(this.#kind); }
+  get #family() { return this.#kind === 'discussion_notification' ? 'notifications/discussions' : this.#kind === 'discussion' ? 'discussions' : this.#kind === 'notification' ? 'notifications' : this.#kind === 'milestone' ? 'milestones' : 'issues'; }
+  get #keyPrefix() { return this.#kind === 'discussion_notification' ? 'fgdn' : this.#kind === 'discussion' ? 'fgdi' : this.#kind === 'notification' ? 'fgni' : this.#kind === 'milestone' ? 'fgmi' : 'fgui'; }
   get connected() { return Boolean(this.#token); }
   get busy() { return this.#busy; }
   get pending() {
@@ -502,8 +505,8 @@ export class IssueClient {
   }
   async read(number = null, { after = 0, limit = 20, head = null, render = false, unreadOnly = false, includeMuted = false } = {}) {
     if (typeof unreadOnly !== 'boolean' || typeof includeMuted !== 'boolean' ||
-        (this.#kind !== 'notification' && (unreadOnly || includeMuted)) ||
-        (this.#kind === 'notification' && (render || (number !== null && (after !== 0 || unreadOnly || includeMuted))))) fail('Invalid inbox read options.');
+        (!this.#notification && (unreadOnly || includeMuted)) ||
+        (this.#notification && (render || (number !== null && (after !== 0 || unreadOnly || includeMuted))))) fail('Invalid inbox read options.');
     if (typeof render !== 'boolean') fail('Rendering must be explicitly enabled or disabled.');
     natural(after, 'page cursor'); natural(limit, 'page limit', 1, 100);
     if (number !== null) natural(number, 'issue number', 1);
@@ -512,7 +515,7 @@ export class IssueClient {
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
     if (render) query.set('render', 'html_safe');
-    if (this.#kind === 'notification' && number === null) {
+    if (this.#notification && number === null) {
       query.set('unread_only', String(unreadOnly)); query.set('include_muted', String(includeMuted));
     }
     const family = this.#family;
@@ -557,7 +560,7 @@ export class IssueClient {
     if (this.#pending || this.#busy) fail('Resolve or discard the existing prepared change first.');
     const epoch = this.#epoch, fingerprint = this.#fingerprint;
     let binding = this.binding;
-    if (this.#kind === 'notification' && (!binding || expectedBinding !== null)) fail('Read your notification identity before preparing a preference change.');
+    if (this.#notification && (!binding || expectedBinding !== null)) fail('Read your notification identity before preparing a preference change.');
     if (expectedBinding !== null) {
       // An offline intent may constrain its expected destination without a read.
       // This is not an observed repository or a grant: it only tightens reply
@@ -600,7 +603,7 @@ export class IssueClient {
         request.credential_fingerprint !== this.#fingerprint || typeof request.key !== 'string' || !keyPattern.test(request.key)) {
       fail('Recovery receipt does not belong to this repository and credential.');
     }
-    if (this.#kind === 'notification') {
+    if (this.#notification) {
       object(request.binding);
       const keys = ['tenant', 'repository', 'principal', 'incarnation'];
       if (Object.keys(request.binding).length !== keys.length || keys.some(key =>

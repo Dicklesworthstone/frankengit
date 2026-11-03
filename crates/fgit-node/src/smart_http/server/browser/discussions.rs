@@ -6,6 +6,24 @@ use std::io::Write;
 
 fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
     match target.split('?').next()?.as_bytes().strip_prefix(route)? {
+        b"/ui/discussion-notifications/" => Some((
+            "text/html; charset=utf-8",
+            include_str!("discussion-notifications.html"),
+        )),
+        b"/ui/discussion-notifications/notifications.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("notifications.mjs"),
+        )),
+        b"/ui/discussion-notifications/notifications-view.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("notifications-view.mjs"),
+        )),
+        b"/ui/discussion-notifications/issues.mjs" => {
+            Some(("text/javascript; charset=utf-8", include_str!("issues.mjs")))
+        }
+        b"/ui/discussion-notifications/browser.css" => {
+            Some(("text/css; charset=utf-8", include_str!("browser.css")))
+        }
         b"/ui/discussions/" => Some(("text/html; charset=utf-8", include_str!("discussions.html"))),
         b"/ui/discussions/discussions.mjs" => Some((
             "text/javascript; charset=utf-8",
@@ -100,14 +118,19 @@ mod tests {
     #[test]
     fn every_discussion_asset_requires_its_independent_profile_and_bounded_get() {
         for suffix in [
-            "",
-            "discussions.mjs",
-            "discussions-view.mjs",
-            "issues.mjs",
-            "markdown.mjs",
-            "browser.css",
+            "discussions/",
+            "discussions/discussions.mjs",
+            "discussions/discussions-view.mjs",
+            "discussions/issues.mjs",
+            "discussions/markdown.mjs",
+            "discussions/browser.css",
+            "discussion-notifications/",
+            "discussion-notifications/notifications.mjs",
+            "discussion-notifications/notifications-view.mjs",
+            "discussion-notifications/issues.mjs",
+            "discussion-notifications/browser.css",
         ] {
-            let target = format!("/repo.git/ui/discussions/{suffix}");
+            let target = format!("/repo.git/ui/{suffix}");
             let bytes =
                 format!("GET {target} HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n");
             let request = head::parse(bytes.as_bytes(), HttpLimits::default())

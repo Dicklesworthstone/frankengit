@@ -4,10 +4,14 @@ use super::{
     output::{append, header, optional, quote},
     request::{self, Operation, Page, Request},
 };
-use crate::{NotificationInboxPage, NotificationReadRefusal, NotificationThreadView};
-use fgit_forge::event::issue::IssueState;
-use fgit_forge::event::notification::{NotificationAction, NotificationCommand, NotificationMode};
-use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
+use crate::{
+    NotificationInboxPage, NotificationReadRefusal, NotificationThreadState, NotificationThreadView,
+};
+use fgit_forge::event::notification::{
+    NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
+    NotificationTargetKind,
+};
+use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
 use fgit_types::{PrincipalId, RepositoryIncarnationId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
@@ -42,6 +46,17 @@ pub(super) fn parse<'a>(head: &Envelope<'a>) -> Result<Option<Request<'a>>, ApiE
     {
         return Err(ApiError::not_found());
     }
+    let (kind, suffix) = if suffix == "/discussions" {
+        (NotificationTargetKind::Discussion, "")
+    } else if let Some(suffix) = suffix.strip_prefix("/discussions/") {
+        // Keep the leading slash expected by the closed number/action parser.
+        (
+            NotificationTargetKind::Discussion,
+            &path[path.len() - suffix.len() - 1..],
+        )
+    } else {
+        (NotificationTargetKind::Issue, suffix)
+    };
     let operation = if head.method == "GET" {
         if !matches!(
             head.body,
@@ -53,6 +68,7 @@ pub(super) fn parse<'a>(head: &Envelope<'a>) -> Result<Option<Request<'a>>, ApiE
         if suffix.is_empty() {
             let (page, unread_only, include_muted) = inbox_page(query)?;
             Operation::NotificationList {
+                kind,
                 page,
                 unread_only,
                 include_muted,
@@ -63,7 +79,10 @@ pub(super) fn parse<'a>(head: &Envelope<'a>) -> Result<Option<Request<'a>>, ApiE
                 return Err(ApiError::bad("invalid_thread_query"));
             }
             Operation::NotificationShow {
-                number: number(suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?)?,
+                target: target(
+                    kind,
+                    suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?,
+                )?,
                 page,
             }
         }
@@ -92,7 +111,7 @@ pub(super) fn parse<'a>(head: &Envelope<'a>) -> Result<Option<Request<'a>>, ApiE
             return Err(ApiError::not_found());
         }
         Operation::NotificationMutate {
-            number: number(id)?,
+            target: target(kind, id)?,
             action,
         }
     } else {
@@ -103,10 +122,19 @@ pub(super) fn parse<'a>(head: &Envelope<'a>) -> Result<Option<Request<'a>>, ApiE
         operation,
     }))
 }
-fn number(value: &str) -> Result<IssueNumber, ApiError> {
-    IssueNumber::try_new(request::decimal(value)?)
-        .ok_or_else(|| ApiError::bad("invalid_issue_number"))
+fn target(kind: NotificationTargetKind, value: &str) -> Result<NotificationTarget, ApiError> {
+    let number = request::decimal(value)?;
+    match kind {
+        NotificationTargetKind::Issue => {
+            IssueNumber::try_new(number).map(NotificationTarget::Issue)
+        }
+        NotificationTargetKind::Discussion => {
+            DiscussionNumber::try_new(number).map(NotificationTarget::Discussion)
+        }
+    }
+    .ok_or_else(|| ApiError::bad("invalid_notification_target"))
 }
+
 fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), ApiError> {
     if slot.replace(value).is_some() {
         Err(ApiError::bad("duplicate_field"))
@@ -162,7 +190,7 @@ pub(super) struct BoundNotificationCommand {
     pub expected_incarnation: RepositoryIncarnationId,
 }
 pub(super) fn command(
-    number: IssueNumber,
+    target: NotificationTarget,
     name: &str,
     body: &[u8],
 ) -> Result<BoundNotificationCommand, ApiError> {
@@ -209,7 +237,7 @@ pub(super) fn command(
     };
     Ok(BoundNotificationCommand {
         canonical: NotificationCommand {
-            number,
+            target,
             expected_version,
             action,
         },
@@ -237,15 +265,19 @@ fn thread(row: &NotificationThreadView) -> String {
         .join(",");
     format!(
         concat!(
-            "{{\"number\":{},\"issue_version\":{},\"title\":{},\"state\":{},",
+            "{{\"number\":{},{}:{},\"title\":{},\"state\":{},",
             "\"preference_version\":{},\"mode\":{},\"read_through\":{},\"latest_other_version\":{},\"unread\":{},\"reasons\":[{}]}}"
         ),
-        row.number.get(),
-        row.issue_version.get(),
+        row.target.number(),
+        quote(match row.target.kind() {
+            NotificationTargetKind::Issue => "issue_version",
+            NotificationTargetKind::Discussion => "discussion_version",
+        }),
+        row.thread_version.get(),
         quote(&row.title),
         quote(match row.state {
-            IssueState::Open => "open",
-            IssueState::Closed => "closed",
+            NotificationThreadState::Open => "open",
+            NotificationThreadState::Closed => "closed",
         }),
         optional(row.preference_version.map(AggregateVersion::get)),
         quote(match row.mode {
@@ -282,17 +314,18 @@ pub(super) fn list(
 ) -> Result<String, ApiError> {
     if result.threads.len() > usize::from(page.limit)
         || result.threads.iter().any(|r| {
-            r.number.get() <= page.after
+            r.target.kind() != result.kind
+                || r.target.number() <= page.after
                 || (unread_only && !r.unread)
                 || (!include_muted && r.mode == NotificationMode::Muted)
         })
         || result
             .threads
             .windows(2)
-            .any(|p| p[0].number >= p[1].number)
+            .any(|p| p[0].target >= p[1].target)
         || result.next_after.is_some_and(|next| {
             result.threads.len() != usize::from(page.limit)
-                || result.threads.last().map(|r| r.number.get()) != Some(next)
+                || result.threads.last().map(|r| r.target.number()) != Some(next)
         })
     {
         return Err(ApiError::unavailable());
@@ -302,11 +335,17 @@ pub(super) fn list(
         &mut out,
         &format!(
             concat!(
-                "{{\"type\":\"notification_page\",{},{},\"after\":{},\"limit\":{},",
+                "{{\"type\":{},{},{},{}\"after\":{},\"limit\":{},",
                 "\"unread_only\":{},\"include_muted\":{},\"next_after\":{},\"threads\":["
             ),
+            quote(if result.kind == NotificationTargetKind::Issue {
+                "notification_page"
+            } else {
+                "discussion_notification_page"
+            }),
             header(node, page, result.binding.authority_head)?,
             source(result),
+            kind_field(result.kind),
             page.after,
             page.limit,
             unread_only,
@@ -326,13 +365,14 @@ pub(super) fn list(
 }
 pub(super) fn show(
     node: &OneNode,
-    number: IssueNumber,
+    target: NotificationTarget,
     page: Page,
     result: &NotificationInboxPage,
     maximum: usize,
 ) -> Result<String, ApiError> {
-    if result.threads.len() > 1
-        || result.threads.iter().any(|r| r.number != number)
+    if result.kind != target.kind()
+        || result.threads.len() > 1
+        || result.threads.iter().any(|r| r.target != target)
         || result.next_after.is_some()
     {
         return Err(ApiError::unavailable());
@@ -341,15 +381,27 @@ pub(super) fn show(
     append(
         &mut out,
         &format!(
-            "{{\"type\":\"notification_thread\",{},{},\"found\":{},\"thread\":{}}}",
+            "{{\"type\":{},{},{},{}\"found\":{},\"thread\":{}}}",
+            quote(if result.kind == NotificationTargetKind::Issue {
+                "notification_thread"
+            } else {
+                "discussion_notification_thread"
+            }),
             header(node, page, result.binding.authority_head)?,
             source(result),
+            kind_field(result.kind),
             !result.threads.is_empty(),
             result.threads.first().map_or_else(|| "null".into(), thread)
         ),
         maximum,
     )?;
     Ok(out)
+}
+pub(super) const fn kind_field(kind: NotificationTargetKind) -> &'static str {
+    match kind {
+        NotificationTargetKind::Issue => "",
+        NotificationTargetKind::Discussion => "\"target_kind\":\"discussion\",",
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -362,11 +414,18 @@ mod tests {
             "expected_version=0&expected_version=0",
             "read_through=1",
         ] {
-            assert!(command(IssueNumber::FIRST, "read", body.as_bytes()).is_err());
+            assert!(
+                command(
+                    NotificationTarget::Issue(IssueNumber::FIRST),
+                    "read",
+                    body.as_bytes()
+                )
+                .is_err()
+            );
         }
         assert!(
             command(
-                IssueNumber::FIRST,
+                NotificationTarget::Issue(IssueNumber::FIRST),
                 "unread",
                 b"expected_version=1&read_through=1"
             )
@@ -378,10 +437,14 @@ mod tests {
             "22".repeat(16)
         );
         assert_eq!(
-            command(IssueNumber::FIRST, "read", form.as_bytes())
-                .unwrap()
-                .canonical
-                .action,
+            command(
+                NotificationTarget::Issue(IssueNumber::FIRST),
+                "read",
+                form.as_bytes()
+            )
+            .unwrap()
+            .canonical
+            .action,
             NotificationAction::SetReadThrough(AggregateVersion::try_new(3))
         );
         assert!(inbox_page(Some("after=2")).is_err());

@@ -1,6 +1,6 @@
-//! Request-owned, exact-source issue notification inboxes.
+//! Request-owned, exact-source issue and discussion notification inboxes.
 //!
-//! Canonical issue histories and recipient-owned preferences remain outside
+//! Canonical thread histories and recipient-owned preferences remain outside
 //! this crate. The host authenticates the recipient, reads one verified source
 //! snapshot, derives the rows, and installs them here. SQLite is a disposable
 //! read model: its complete marker binds the exact head, forge/outbox roots and
@@ -13,7 +13,7 @@
 //! The host checks current disclosure grants and any retained-snapshot policy;
 //! an older head is never an authorization cache. Hosts hydrate display fields
 //! from the same canonical source, matching issue number and version, and await
-//! [`IssueInboxSession::close`] on every completed request path.
+//! [`InboxSession::close`] on every completed request path.
 
 use std::num::NonZeroU16;
 
@@ -33,15 +33,32 @@ mod tests;
 
 use model::{StoredInbox, StoredThread};
 
-/// Maximum complete issue rows accepted from one bounded canonical source.
+/// Maximum complete thread rows accepted from one bounded canonical source.
 pub const MAX_INBOX_ROWS: usize = 16_384;
 /// Maximum page size, matching the native forge HTTP profile.
 pub const MAX_INBOX_PAGE_SIZE: u16 = 100;
+
+/// A complete inbox covers one explicit thread namespace. Numbers are local to
+/// that namespace; a discussion and an issue may have the same number.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboxKind {
+    Issue,
+    Discussion,
+}
+impl InboxKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Issue => "issue",
+            Self::Discussion => "discussion",
+        }
+    }
+}
 
 /// Complete source and recipient identity. This is an observation supplied by
 /// the authorized host, not a capability minted by the projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InboxSnapshotBinding {
+    pub kind: InboxKind,
     pub tenant: TenantId,
     pub repository: RepositoryId,
     pub incarnation: RepositoryIncarnationId,
@@ -85,9 +102,9 @@ impl InboxReason {
 /// One thread, with source issue and preference versions kept separately.
 /// A preference mutation does not create new issue activity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IssueInboxRow {
-    pub issue_number: u64,
-    pub issue_version: u64,
+pub struct InboxRow {
+    pub thread_number: u64,
+    pub thread_version: u64,
     pub preference_version: Option<u64>,
     pub read_through: Option<u64>,
     pub latest_other_version: Option<u64>,
@@ -95,7 +112,7 @@ pub struct IssueInboxRow {
     pub muted: bool,
 }
 
-impl IssueInboxRow {
+impl InboxRow {
     /// A recipient's own activity does not produce an unread notification.
     /// Clearing the read cursor makes previously seen activity unread again.
     #[must_use]
@@ -104,8 +121,8 @@ impl IssueInboxRow {
     }
 
     fn normalize(&mut self) -> Result<(), InboxError> {
-        checked_positive("issue_number", self.issue_number)?;
-        checked_positive("issue_version", self.issue_version)?;
+        checked_positive("thread_number", self.thread_number)?;
+        checked_positive("thread_version", self.thread_version)?;
         if let Some(version) = self.preference_version {
             checked_positive("preference_version", version)?;
         }
@@ -115,7 +132,7 @@ impl IssueInboxRow {
         ] {
             if let Some(version) = version {
                 checked_positive(field, version)?;
-                if version > self.issue_version {
+                if version > self.thread_version {
                     return Err(InboxRefusal::InvalidField(field).into());
                 }
             }
@@ -145,25 +162,25 @@ impl IssueInboxRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboxSnapshot {
     pub binding: InboxSnapshotBinding,
-    pub rows: Vec<IssueInboxRow>,
+    pub rows: Vec<InboxRow>,
 }
 
 /// An issue-number cursor is stable within this exact source; it is not an
 /// event sequence, freshness receipt, principal selector or capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InboxQuery {
-    pub after_issue: Option<u64>,
+    pub after_thread: Option<u64>,
     pub limit: NonZeroU16,
     pub unread_only: bool,
     pub include_muted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IssueInboxPage {
+pub struct InboxPage {
     pub binding: InboxSnapshotBinding,
-    pub rows: Vec<IssueInboxRow>,
+    pub rows: Vec<InboxRow>,
     /// Last returned issue when a further matching row exists.
-    pub next_issue: Option<u64>,
+    pub next_thread: Option<u64>,
 }
 
 /// Refusals carry field names and bounds, never another recipient's rows.
@@ -172,7 +189,7 @@ pub enum InboxRefusal {
     InvalidField(&'static str),
     RowLimit { observed: usize, maximum: usize },
     PageLimit { observed: u16, maximum: u16 },
-    DuplicateIssue(u64),
+    DuplicateThread(u64),
     SourceMismatch,
     SnapshotConflict,
     SnapshotMissing,
@@ -190,7 +207,7 @@ impl std::fmt::Display for InboxRefusal {
             Self::PageLimit { observed, maximum } => {
                 write!(out, "inbox page size {observed} exceeds {maximum}")
             }
-            Self::DuplicateIssue(issue) => write!(out, "duplicate inbox issue {issue}"),
+            Self::DuplicateThread(issue) => write!(out, "duplicate inbox thread {issue}"),
             Self::SourceMismatch => out.write_str("inbox source or recipient does not match"),
             Self::SnapshotConflict => {
                 out.write_str("inbox source was already installed with different rows")
@@ -263,12 +280,12 @@ impl From<InboxRefusal> for InboxError {
 
 /// One owned SQLite connection and an exact source generation. No public raw
 /// connection accessor permits a consumer to bypass the typed model boundary.
-pub struct IssueInboxSession<C: Connection = FrankenConnection> {
+pub struct InboxSession<C: Connection = FrankenConnection> {
     connection: C,
     installed: Option<InboxSnapshotBinding>,
 }
 
-impl IssueInboxSession<FrankenConnection> {
+impl InboxSession<FrankenConnection> {
     pub fn open_memory() -> Result<Self, InboxError> {
         FrankenConnection::open_memory()
             .map(Self::new)
@@ -276,7 +293,7 @@ impl IssueInboxSession<FrankenConnection> {
     }
 }
 
-impl<C: Connection> IssueInboxSession<C> {
+impl<C: Connection> InboxSession<C> {
     #[must_use]
     pub const fn new(connection: C) -> Self {
         Self {
@@ -312,13 +329,13 @@ impl<C: Connection> IssueInboxSession<C> {
         for row in &mut snapshot.rows {
             row.normalize()?;
         }
-        snapshot.rows.sort_unstable_by_key(|row| row.issue_number);
+        snapshot.rows.sort_unstable_by_key(|row| row.thread_number);
         if let Some(pair) = snapshot
             .rows
             .windows(2)
-            .find(|pair| pair[0].issue_number == pair[1].issue_number)
+            .find(|pair| pair[0].thread_number == pair[1].thread_number)
         {
-            return Err(InboxRefusal::DuplicateIssue(pair[0].issue_number).into());
+            return Err(InboxRefusal::DuplicateThread(pair[0].thread_number).into());
         }
         let marker = StoredInbox::from_snapshot(&snapshot)?;
         let tx = flatten(self.connection.begin(cx).await, "inbox_begin_install")?;
@@ -420,7 +437,7 @@ impl<C: Connection> IssueInboxSession<C> {
         cx: &Cx,
         expected: &InboxSnapshotBinding,
         query: InboxQuery,
-    ) -> Result<IssueInboxPage, InboxError> {
+    ) -> Result<InboxPage, InboxError> {
         match self.installed {
             None => return Err(InboxRefusal::SnapshotMissing.into()),
             Some(binding) if &binding != expected => {
@@ -435,7 +452,7 @@ impl<C: Connection> IssueInboxSession<C> {
             }
             .into());
         }
-        checked_counter("after_issue", query.after_issue.unwrap_or(0))?;
+        checked_counter("after_thread", query.after_thread.unwrap_or(0))?;
         let tx = flatten(self.connection.begin(cx).await, "inbox_begin_read")?;
         macro_rules! checked {
             ($result:expr) => {{
@@ -474,25 +491,25 @@ impl<C: Connection> IssueInboxSession<C> {
             return Err(rollback(tx, cx, Some(InboxRefusal::CorruptRow.into())).await);
         }
         let mut rows = Vec::with_capacity(stored.len());
-        let mut last = query.after_issue.unwrap_or(0);
+        let mut last = query.after_thread.unwrap_or(0);
         for row in &stored {
             let row = checked!(StoredThread::from_row(row).map_err(ProjectionError::Sql));
             let row = checked!(row.into_output());
-            if row.issue_number <= last
+            if row.thread_number <= last
                 || (!query.include_muted && row.muted)
                 || (query.unread_only && !row.unread())
             {
                 return Err(rollback(tx, cx, Some(InboxRefusal::CorruptRow.into())).await);
             }
-            last = row.issue_number;
+            last = row.thread_number;
             rows.push(row);
         }
         let has_more = rows.len() > usize::from(query.limit.get());
         if has_more {
             rows.pop();
         }
-        let next_issue = if has_more {
-            rows.last().map(|row| row.issue_number)
+        let next_thread = if has_more {
+            rows.last().map(|row| row.thread_number)
         } else {
             None
         };
@@ -504,10 +521,10 @@ impl<C: Connection> IssueInboxSession<C> {
                 failure: Box::new(failure),
             });
         }
-        Ok(IssueInboxPage {
+        Ok(InboxPage {
             binding: *expected,
             rows,
-            next_issue,
+            next_thread,
         })
     }
 

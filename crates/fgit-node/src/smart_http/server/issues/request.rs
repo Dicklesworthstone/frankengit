@@ -7,6 +7,7 @@ use fgit_forge::event::issue::{
     IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
     IssueLabelsIntent, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
 };
+use fgit_forge::event::notification::{NotificationTarget, NotificationTargetKind};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
@@ -47,16 +48,17 @@ pub enum Operation<'a> {
         action: &'a str,
     },
     NotificationList {
+        kind: NotificationTargetKind,
         page: Page,
         unread_only: bool,
         include_muted: bool,
     },
     NotificationShow {
-        number: IssueNumber,
+        target: NotificationTarget,
         page: Page,
     },
     NotificationMutate {
-        number: IssueNumber,
+        target: NotificationTarget,
         action: &'a str,
     },
 }
@@ -194,8 +196,8 @@ impl<'a> Request<'a> {
     }
 
     pub(super) fn command(&self, body: &[u8]) -> Result<Command, ApiError> {
-        if let Operation::NotificationMutate { number, action } = self.operation {
-            return super::notifications::command(number, action, body).map(Command::Notification);
+        if let Operation::NotificationMutate { target, action } = self.operation {
+            return super::notifications::command(target, action, body).map(Command::Notification);
         }
         if let Operation::MilestoneMutate { number, action } = self.operation {
             return super::milestones::command(number, action, body).map(Command::Milestone);

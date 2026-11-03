@@ -1154,8 +1154,58 @@ writes independently of issue grants; mutation authorship comes from the
 launch-bound principal. Trusted-local CLI calls require explicit acknowledgement
 of operator-asserted identity. Rendered document presentations are derived and
 accompany unchanged raw text. Discussion categories, accepted answers, typed
-cross-references, migration, and discussion-specific notification preferences
-are outside this initial lifecycle profile.
+cross-references and migration are outside this initial lifecycle profile.
+Discussion-specific notification preferences follow §20.2.8.
+
+### 20.2.8 Self-owned discussion notification preferences
+
+Notification commands select a typed target: `Issue(IssueNumber)` or
+`Discussion(DiscussionNumber)`. The canonical preference owner is the
+authenticated principal. A target's kind is part of its identity; equal numeric
+issue and discussion identifiers MUST NOT alias preference state, activity,
+predecessors, source bindings or sealed commands.
+
+Existing issue preferences retain aggregate escape **10**, stream
+`notify/{principal}/{issue}`, and their exact canonical encoding. Discussion
+preferences use required aggregate escape **12**, after the zero `u64` escape,
+followed by a 16-byte principal and positive big-endian `u64` discussion number.
+Their stream label is `dnotify/{principal}/{discussion}`. Both use existing
+required payload kind **23**, with the actor equal to the preference owner.
+The existing mode/read-prefix action encoding and
+`notification.event-batch-root.v1` seal domain remain unchanged; the event root
+commits the distinct aggregate. Readers lacking escape 12 MUST refuse it.
+
+Every preference mutation requires its exact independent predecessor, or zero
+for an absent stream. It validates the existence and complete canonical history
+of the selected target. A read acknowledgement supplies a positive observed
+target version no greater than the current canonical target version. Admission
+MUST NOT substitute the version at arrival: later activity remains unread.
+`unread` clears only the read prefix; mode changes preserve it. The strict
+notification CALM profile and metadata effect trace tag **12** remain in force;
+the full preference stream identity distinguishes each effect and predecessor.
+Publication uses the ordinary exact authority-head CAS, with immutable original
+key recovery before fresh intake and quota checks.
+
+A discussion opener is an author and participant; accepted comments establish
+participation. Other metadata edits do not. Explicit subscription adds its own
+selection reason. Muting removes the thread from the default inbox without
+discarding its read state. Unread state compares the latest version authored by
+another principal with the caller's read prefix. Own activity and preference
+changes do not fabricate other-actor activity. Discussion state and locks do not
+erase preferences, and discussion threads have no issue-assignment reason.
+
+Inbox reconstruction selects one explicit target kind and only the authenticated
+principal's preferences at one authenticated current or retained head. It retains
+the existing complete-source scan limits. The disposable sqlmodel projection
+binds tenant, repository, incarnation, principal, target kind, authority
+head/generation and forge/outbox roots in its complete marker. It is never a
+publication or authorization source. Current disclosure checks precede reads of
+both current and retained state. Discussion HTTP reads require the independent
+discussion service and `discussions-read`; preference writes additionally
+require `notifications-write`. MCP enforces the corresponding selected-kind
+launch grant on each call. Issue grants never imply discussion disclosure.
+Both private preference aggregates remain excluded from shared event feeds and
+repository webhook batches, including wildcard subscriptions.
 
 ### 20.3 Native protected-review quorums
 

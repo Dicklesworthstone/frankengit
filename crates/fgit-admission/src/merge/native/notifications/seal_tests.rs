@@ -1,7 +1,7 @@
 use super::*;
 use fgit_authority::{HeadKey, IdempotencyKey};
-use fgit_forge::IssueNumber;
 use fgit_forge::event::notification::NotificationMode;
+use fgit_forge::{AggregateId, DiscussionNumber, IssueNumber};
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 
 fn context() -> AdmissionContext {
@@ -16,7 +16,7 @@ fn context() -> AdmissionContext {
 }
 fn command(action: NotificationAction, version: u64) -> NotificationCommand {
     NotificationCommand {
-        number: IssueNumber::FIRST,
+        target: NotificationTarget::Issue(IssueNumber::FIRST),
         expected_version: if version == 0 {
             ExpectedVersion::NewStream
         } else {
@@ -144,5 +144,58 @@ fn read_clear_prefixes_and_delivery_modes_never_alias_one_seal() {
             verify_event_seal(&context, event, &changed),
             Err(RefusalCode::EvidenceInvalid)
         );
+    }
+}
+
+#[test]
+fn discussion_seals_bind_kind_number_owner_predecessor_and_action() {
+    let context = context();
+    for action in [
+        NotificationAction::SetMode(NotificationMode::Participating),
+        NotificationAction::SetMode(NotificationMode::Subscribed),
+        NotificationAction::SetMode(NotificationMode::Muted),
+        NotificationAction::SetReadThrough(None),
+        NotificationAction::SetReadThrough(Some(AggregateVersion::FIRST)),
+    ] {
+        for before in [0, 7] {
+            let mut discussion = command(action, before);
+            discussion.target = NotificationTarget::Discussion(DiscussionNumber::FIRST);
+            let (event, attempt) = proposal(&context, &discussion).unwrap();
+            assert_eq!(verify_event_seal(&context, &event, &attempt), Ok(()));
+            let (issue, issue_attempt) = proposal(&context, &command(action, before)).unwrap();
+            assert_ne!(attempt, issue_attempt);
+            assert_eq!(
+                verify_event_seal(&context, &issue, &attempt),
+                Err(RefusalCode::EvidenceInvalid)
+            );
+            assert_eq!(
+                verify_event_seal(&context, &event, &issue_attempt),
+                Err(RefusalCode::EvidenceInvalid)
+            );
+            for changed in 0..4 {
+                let mut different = discussion.clone();
+                let mut scope = context.clone();
+                match changed {
+                    0 => {
+                        different.target =
+                            NotificationTarget::Discussion(DiscussionNumber::try_new(2).unwrap())
+                    }
+                    1 => scope.principal_id = PrincipalId::from_bytes([4; 16]),
+                    2 => different.expected_version = ExpectedVersion::Exactly(event.version),
+                    _ => {
+                        different.action = if action == NotificationAction::SetReadThrough(None) {
+                            NotificationAction::SetMode(NotificationMode::Subscribed)
+                        } else {
+                            NotificationAction::SetReadThrough(None)
+                        }
+                    }
+                }
+                let (forged, _) = proposal(&scope, &different).unwrap();
+                assert_eq!(
+                    verify_event_seal(&context, &forged, &attempt),
+                    Err(RefusalCode::EvidenceInvalid)
+                );
+            }
+        }
     }
 }

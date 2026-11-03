@@ -172,76 +172,83 @@ fn private_notification_preferences_never_enter_the_shared_feed_even_with_both_g
     };
 
     let recipient = PrincipalId::from_bytes([0x39; 16]);
-    let private = NotificationCommand {
-        number: IssueNumber::FIRST,
-        expected_version: ExpectedVersion::NewStream,
-        action: NotificationAction::SetMode(NotificationMode::Muted),
+    for target in [
+        fgit_forge::event::notification::NotificationTarget::Issue(IssueNumber::FIRST),
+        fgit_forge::event::notification::NotificationTarget::Discussion(
+            fgit_forge::DiscussionNumber::FIRST,
+        ),
+    ] {
+        let private = NotificationCommand {
+            target,
+            expected_version: ExpectedVersion::NewStream,
+            action: NotificationAction::SetMode(NotificationMode::Muted),
+        }
+        .proposed_event(recipient)
+        .unwrap();
+        assert_eq!(private.payload.kind(), 23);
+        let private_frame = hex(&encode_body(&private).unwrap()).unwrap();
+        let disclosed = selected(
+            page(
+                vec![
+                    envelope(1, issue("public issue")),
+                    envelope(2, private.clone()),
+                    envelope(3, pull()),
+                ],
+                false,
+            ),
+            true,
+            true,
+            None,
+        );
+        assert_eq!(disclosed.events().len(), 2);
+        assert_eq!(disclosed.events()[0].kind(), 8);
+        assert_eq!(disclosed.events()[1].kind(), 6);
+        assert_eq!(disclosed.resume_after(), Some((3, 0)));
+        let wire = disclosed.to_json().unwrap();
+        assert!(!wire.contains(&private_frame));
+        assert!(!wire.contains(&recipient.to_string()));
+        assert!(!wire.contains("\"kind\":23"));
+
+        // A preference-only page advances the source cursor without disclosing
+        // its private aggregate or requiring access to its canonical encoding.
+        let hidden = selected(
+            page(vec![envelope(4, private.clone())], true),
+            true,
+            true,
+            Some((3, 0)),
+        );
+        assert!(hidden.events().is_empty());
+        assert_eq!(hidden.next_after(), Some((4, 0)));
+        assert_eq!(hidden.resume_after(), Some((4, 0)));
+
+        let mut malformed_private = private;
+        let ForgeEventPayload::NotificationPreferenceChangedNative(change) =
+            &mut malformed_private.payload
+        else {
+            unreachable!();
+        };
+        change.actor = PrincipalId::from_bytes([0x3a; 16]);
+        assert!(encode_body(&malformed_private).is_err());
+        let valid_public_twin = selected(
+            page(
+                vec![
+                    envelope(5, malformed_private),
+                    envelope(6, issue("still public")),
+                ],
+                false,
+            ),
+            true,
+            true,
+            Some((4, 0)),
+        );
+        assert_eq!(
+            valid_public_twin.events().len(),
+            1,
+            "private frames must be rejected before encoding"
+        );
+        assert_eq!(valid_public_twin.events()[0].kind(), 8);
+        assert_eq!(valid_public_twin.resume_after(), Some((6, 0)));
     }
-    .proposed_event(recipient)
-    .unwrap();
-    assert_eq!(private.payload.kind(), 23);
-    let private_frame = hex(&encode_body(&private).unwrap()).unwrap();
-    let disclosed = selected(
-        page(
-            vec![
-                envelope(1, issue("public issue")),
-                envelope(2, private.clone()),
-                envelope(3, pull()),
-            ],
-            false,
-        ),
-        true,
-        true,
-        None,
-    );
-    assert_eq!(disclosed.events().len(), 2);
-    assert_eq!(disclosed.events()[0].kind(), 8);
-    assert_eq!(disclosed.events()[1].kind(), 6);
-    assert_eq!(disclosed.resume_after(), Some((3, 0)));
-    let wire = disclosed.to_json().unwrap();
-    assert!(!wire.contains(&private_frame));
-    assert!(!wire.contains(&recipient.to_string()));
-    assert!(!wire.contains("\"kind\":23"));
-
-    // A preference-only page advances the source cursor without disclosing
-    // its private aggregate or requiring access to its canonical encoding.
-    let hidden = selected(
-        page(vec![envelope(4, private.clone())], true),
-        true,
-        true,
-        Some((3, 0)),
-    );
-    assert!(hidden.events().is_empty());
-    assert_eq!(hidden.next_after(), Some((4, 0)));
-    assert_eq!(hidden.resume_after(), Some((4, 0)));
-
-    let mut malformed_private = private;
-    let ForgeEventPayload::NotificationPreferenceChangedNative(change) =
-        &mut malformed_private.payload
-    else {
-        unreachable!();
-    };
-    change.actor = PrincipalId::from_bytes([0x3a; 16]);
-    assert!(encode_body(&malformed_private).is_err());
-    let valid_public_twin = selected(
-        page(
-            vec![
-                envelope(5, malformed_private),
-                envelope(6, issue("still public")),
-            ],
-            false,
-        ),
-        true,
-        true,
-        Some((4, 0)),
-    );
-    assert_eq!(
-        valid_public_twin.events().len(),
-        1,
-        "private frames must be rejected before encoding"
-    );
-    assert_eq!(valid_public_twin.events()[0].kind(), 8);
-    assert_eq!(valid_public_twin.resume_after(), Some((6, 0)));
 }
 
 #[test]

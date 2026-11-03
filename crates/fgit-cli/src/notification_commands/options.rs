@@ -1,8 +1,11 @@
 //! Complete bounded parsing before repository I/O. No command selects a recipient.
 use crate::issues::options::{decimal, parse_head};
 use fgit_authority::IdempotencyKey;
-use fgit_forge::event::notification::{NotificationAction, NotificationCommand, NotificationMode};
-use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
+use fgit_forge::event::notification::{
+    NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
+    NotificationTargetKind,
+};
+use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
 use fgit_types::{
     GitHashAlgorithm, PrincipalId, RepositoryAuthorityHeadId, RepositoryId,
     RepositoryIncarnationId, TenantId,
@@ -17,6 +20,7 @@ pub(super) struct Options {
     pub format: GitHashAlgorithm,
     pub principal: PrincipalId,
     pub incarnation: Option<RepositoryIncarnationId>,
+    pub kind: NotificationTargetKind,
     pub operation: Operation,
 }
 pub(super) enum Operation {
@@ -28,7 +32,7 @@ pub(super) struct Mutation {
     pub command: NotificationCommand,
 }
 pub(super) struct ReadOptions {
-    pub number: Option<IssueNumber>,
+    pub target: Option<NotificationTarget>,
     pub after: u64,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
@@ -45,7 +49,7 @@ pub(super) fn action_name(action: NotificationAction) -> &'static str {
     }
 }
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 4 || args.len() > 32 {
+    if args.len() < 4 || args.len() > 34 {
         return Err(super::USAGE.into());
     }
     if args.iter().any(|a| a.len() > 4096)
@@ -70,10 +74,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let number = if operation == "list" {
         None
     } else {
-        Some(
-            IssueNumber::try_new(decimal(args.get(4).ok_or("issue number required")?)?)
-                .ok_or("issue number must be positive")?,
-        )
+        Some(decimal(args.get(4).ok_or("thread number required")?)?)
     };
     let mut at = if operation == "list" { 4 } else { 5 };
     let mut flags = BTreeMap::new();
@@ -85,7 +86,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         let allowed = boolean
             || matches!(
                 flag,
-                "--principal" | "--object-format" | "--expected-incarnation"
+                "--principal" | "--object-format" | "--expected-incarnation" | "--kind"
             )
             || (mutate && matches!(flag, "--expected-version" | "--idempotency-key"))
             || (!mutate && flag == "--expected-head")
@@ -127,6 +128,21 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         "sha256" => GitHashAlgorithm::Sha256,
         _ => return Err("--object-format must be sha1 or sha256".into()),
     };
+    let kind = match flags.get("--kind").copied().unwrap_or("issue") {
+        "issue" => NotificationTargetKind::Issue,
+        "discussion" => NotificationTargetKind::Discussion,
+        _ => return Err("--kind must be issue or discussion".into()),
+    };
+    let target = number
+        .map(|number| match kind {
+            NotificationTargetKind::Issue => IssueNumber::try_new(number)
+                .map(NotificationTarget::Issue)
+                .ok_or("issue number must be positive"),
+            NotificationTargetKind::Discussion => DiscussionNumber::try_new(number)
+                .map(NotificationTarget::Discussion)
+                .ok_or("discussion number must be positive"),
+        })
+        .transpose()?;
     let operation = if mutate {
         let before = decimal(required("--expected-version")?)?;
         let expected_version = if before == 0 {
@@ -146,13 +162,13 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             "automatic" => NotificationAction::SetMode(NotificationMode::Participating),
             "read" => NotificationAction::SetReadThrough(Some(
                 AggregateVersion::try_new(decimal(required("--read-through")?)?)
-                    .ok_or("--read-through must be a positive observed issue version")?,
+                    .ok_or("--read-through must be a positive observed thread version")?,
             )),
             "unread" => NotificationAction::SetReadThrough(None),
             _ => return Err(super::USAGE.into()),
         };
         let command = NotificationCommand {
-            number: number.ok_or("issue number required")?,
+            target: target.ok_or("thread number required")?,
             expected_version,
             action,
         };
@@ -182,7 +198,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             return Err("nonzero --after requires --expected-head".into());
         }
         Operation::Read(ReadOptions {
-            number,
+            target,
             after,
             limit: limit as u16,
             expected_head,
@@ -197,6 +213,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         format,
         principal,
         incarnation,
+        kind,
         operation,
     })
 }

@@ -239,17 +239,32 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    let allowed = if matches!(
-        request.operation,
-        Operation::NotificationList { .. }
-            | Operation::NotificationShow { .. }
-            | Operation::NotificationMutate { .. }
-    ) {
-        grant.permits_notifications(request.is_mutation())
-    } else {
-        grant.permits_issues(request.is_mutation())
+    let notification_kind = match request.operation {
+        Operation::NotificationList { kind, .. } => Some(kind),
+        Operation::NotificationShow { target, .. }
+        | Operation::NotificationMutate { target, .. } => Some(target.kind()),
+        _ => None,
     };
-    if !profile.allow_issues() || !allowed {
+    let (enabled, allowed) = if let Some(kind) = notification_kind {
+        let enabled = match kind {
+            fgit_forge::event::notification::NotificationTargetKind::Issue => {
+                profile.allow_issues()
+            }
+            fgit_forge::event::notification::NotificationTargetKind::Discussion => {
+                profile.config.http_discussions_enabled()
+            }
+        };
+        (
+            enabled,
+            grant.permits_notifications_for(kind, request.is_mutation()),
+        )
+    } else {
+        (
+            profile.allow_issues(),
+            grant.permits_issues(request.is_mutation()),
+        )
+    };
+    if !enabled || !allowed {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
@@ -415,6 +430,7 @@ pub(super) fn execute(
             })
         }
         Operation::NotificationList {
+            kind,
             page,
             unread_only,
             include_muted,
@@ -422,9 +438,10 @@ pub(super) fn execute(
             let result = drive_request_while(
                 node,
                 &context,
-                node.read_notification_inbox_in(
+                node.read_notification_inbox_for_kind_in(
                     &context,
                     session,
+                    *kind,
                     page.after,
                     page.limit,
                     page.expected_head,
@@ -447,11 +464,11 @@ pub(super) fn execute(
                 terminal: None,
             })
         }
-        Operation::NotificationShow { number, page } => {
+        Operation::NotificationShow { target, page } => {
             let result = drive_request_while(
                 node,
                 &context,
-                node.read_notification_thread_in(&context, session, *number, page.expected_head),
+                node.read_notification_target_in(&context, session, *target, page.expected_head),
                 &mut live,
             )
             .map_err(notifications::read_error)?;
@@ -461,7 +478,7 @@ pub(super) fn execute(
                 } else {
                     Status::Success
                 },
-                body: notifications::show(node, *number, *page, &result, maximum)?,
+                body: notifications::show(node, *target, *page, &result, maximum)?,
                 terminal: None,
             })
         }

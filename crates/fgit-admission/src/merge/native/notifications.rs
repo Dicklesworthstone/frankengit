@@ -10,15 +10,20 @@ use fgit_authority::{
     TerminalOutcome,
 };
 use fgit_chronicle::PublicationBasis;
-use fgit_forge::event::notification::{NotificationAction, NotificationCommand, apply_event};
+use fgit_forge::event::notification::{
+    NotificationAction, NotificationCommand, NotificationTarget, apply_event,
+};
 use fgit_forge::{
-    AggregateId, AggregateVersion, ExpectedVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload,
+    AggregateVersion, ExpectedVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload,
 };
 use fgit_types::{AsciiSlug, RefusalCode};
 use std::collections::BTreeSet;
 
 mod source;
-pub use source::{NotificationSourceSnapshot, NotificationThread, read_source_at};
+pub use source::{
+    NotificationSourceSnapshot, NotificationSubjectSnapshot, NotificationThread, read_source_at,
+    read_source_for_kind_at,
+};
 
 pub fn proposal(
     context: &AdmissionContext,
@@ -57,11 +62,10 @@ pub(in crate::merge) fn verify_event_seal(
     event: &ForgeEvent,
     attempt: &SealAttempt,
 ) -> Result<(), RefusalCode> {
-    let (
-        AggregateId::NotificationPreference { principal, issue },
-        ForgeEventPayload::NotificationPreferenceChangedNative(change),
-    ) = (event.aggregate, &event.payload)
-    else {
+    let (Some((principal, target)), ForgeEventPayload::NotificationPreferenceChangedNative(change)) = (
+        NotificationTarget::from_preference_aggregate(event.aggregate),
+        &event.payload,
+    ) else {
         return Err(RefusalCode::EvidenceInvalid);
     };
     if principal != context.principal_id || change.actor != principal {
@@ -76,7 +80,7 @@ pub(in crate::merge) fn verify_event_seal(
         )
     };
     let command = NotificationCommand {
-        number: issue,
+        target,
         expected_version,
         action: change.action,
     };
@@ -121,18 +125,17 @@ fn validate_current_thread(
     let Some(thread) = thread else {
         return Err(RefusalCode::EvidenceMissing);
     };
-    let (
-        AggregateId::NotificationPreference { issue, .. },
-        ForgeEventPayload::NotificationPreferenceChangedNative(change),
-    ) = (event.aggregate, &event.payload)
-    else {
+    let (Some((principal, target)), ForgeEventPayload::NotificationPreferenceChangedNative(change)) = (
+        NotificationTarget::from_preference_aggregate(event.aggregate),
+        &event.payload,
+    ) else {
         return Err(RefusalCode::EvidenceInvalid);
     };
-    if issue != thread.issue.number {
+    if target != thread.subject.target() || principal != change.actor {
         return Err(RefusalCode::EvidenceInvalid);
     }
     if let NotificationAction::SetReadThrough(Some(through)) = change.action {
-        if through > thread.issue.version {
+        if through > thread.subject.version() {
             return Err(RefusalCode::EvidenceStale);
         }
     }
@@ -160,10 +163,12 @@ where
         event: &ForgeEvent,
         projection: &P,
     ) -> Result<ValidatedClosure, PreparationFailure> {
-        let AggregateId::NotificationPreference { principal, issue } = event.aggregate else {
+        let Some((principal, target)) =
+            NotificationTarget::from_preference_aggregate(event.aggregate)
+        else {
             return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
         };
-        let source = read_source_at(store, cx, basis, principal, &|| {
+        let source = read_source_for_kind_at(store, cx, basis, principal, target.kind(), &|| {
             projection.merge_checkpoint(cx).is_err()
         })
         .await?;
@@ -171,7 +176,7 @@ where
             source
                 .threads
                 .iter()
-                .find(|thread| thread.issue.number == issue),
+                .find(|thread| thread.subject.target() == target),
             event,
         )
         .map_err(ProjectionFailure::Refuse)?;

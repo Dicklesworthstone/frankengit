@@ -2,9 +2,9 @@
 use super::options::{Mutation, Options, ReadOptions, action_name};
 use crate::issues::options::head_token;
 use fgit_authority::TerminalOutcome;
-use fgit_forge::event::{issue::IssueState, notification::NotificationAction};
+use fgit_forge::event::notification::{NotificationAction, NotificationTargetKind};
 use fgit_forge::{AggregateVersion, ExpectedVersion};
-use fgit_node::{NotificationInboxPage, NotificationThreadView};
+use fgit_node::{NotificationInboxPage, NotificationThreadState, NotificationThreadView};
 use fgit_schema::json::{self, Object, Value, object, text};
 use fgit_types::{DecisionOutcome, RepositoryIncarnationId, TxId};
 const MAX_REPLY_BYTES: usize = 1024 * 1024;
@@ -19,14 +19,20 @@ fn fields(value: Value) -> Object {
 }
 fn thread(value: &NotificationThreadView) -> Value {
     object([
-        ("number", text(value.number.get().to_string())),
-        ("issue_version", text(value.issue_version.get().to_string())),
+        ("number", text(value.target.number().to_string())),
+        (
+            match value.target.kind() {
+                NotificationTargetKind::Issue => "issue_version",
+                NotificationTargetKind::Discussion => "discussion_version",
+            },
+            text(value.thread_version.get().to_string()),
+        ),
         ("title", text(value.title.clone())),
         (
             "state",
             text(match value.state {
-                IssueState::Open => "open",
-                IssueState::Closed => "closed",
+                NotificationThreadState::Open => "open",
+                NotificationThreadState::Closed => "closed",
             }),
         ),
         (
@@ -64,33 +70,42 @@ pub(super) fn page(
     if binding.tenant != options.tenant
         || binding.repository != options.repository
         || binding.principal != options.principal
+        || binding.kind.name() != options.kind.name()
         || options
             .incarnation
             .is_some_and(|id| id != binding.incarnation)
         || read
             .expected_head
             .is_some_and(|head| head != binding.authority_head)
-        || page.threads.windows(2).any(|p| p[0].number >= p[1].number)
+        || page.kind != options.kind
+        || page
+            .threads
+            .iter()
+            .any(|thread| thread.target.kind() != options.kind)
+        || page
+            .threads
+            .windows(2)
+            .any(|p| p[0].target.number() >= p[1].target.number())
     {
         return Err("inbox response does not match its identity or snapshot binding".into());
     }
-    if let Some(number) = read.number {
+    if let Some(target) = read.target {
         if page.threads.len() > 1
-            || page.threads.iter().any(|t| t.number != number)
+            || page.threads.iter().any(|t| t.target != target)
             || page.next_after.is_some()
         {
-            return Err("inbox thread lookup returned another issue or a continuation".into());
+            return Err("inbox thread lookup returned another target or a continuation".into());
         }
     } else if page.threads.len() > usize::from(read.limit)
         || page.threads.iter().any(|t| {
-            t.number.get() <= read.after
+            t.target.number() <= read.after
                 || (read.unread_only && !t.unread)
                 || (!read.include_muted
                     && t.mode == fgit_forge::event::notification::NotificationMode::Muted)
         })
         || page.next_after.is_some_and(|next| {
             page.threads.len() != usize::from(read.limit)
-                || page.threads.last().map(|t| t.number.get()) != Some(next)
+                || page.threads.last().map(|t| t.target.number()) != Some(next)
         })
     {
         return Err("inbox response violates its requested page or filters".into());
@@ -98,10 +113,11 @@ pub(super) fn page(
     let mut out = fields(object([
         (
             "type",
-            text(if read.number.is_some() {
-                "notification_thread"
-            } else {
-                "notification_inbox"
+            text(match (options.kind, read.target.is_some()) {
+                (NotificationTargetKind::Issue, true) => "notification_thread",
+                (NotificationTargetKind::Issue, false) => "notification_inbox",
+                (NotificationTargetKind::Discussion, true) => "discussion_notification_thread",
+                (NotificationTargetKind::Discussion, false) => "discussion_notification_inbox",
             }),
         ),
         ("schema_version", json::number(1)),
@@ -133,8 +149,11 @@ pub(super) fn page(
         ("read_only", Value::Bool(true)),
         ("node_closed", Value::Bool(true)),
     ]));
-    if let Some(number) = read.number {
-        out.insert("number".into(), text(number.get().to_string()));
+    if options.kind == NotificationTargetKind::Discussion {
+        out.insert("target_kind".into(), text("discussion"));
+    }
+    if let Some(target) = read.target {
+        out.insert("number".into(), text(target.number().to_string()));
         out.insert("found".into(), Value::Bool(!page.threads.is_empty()));
     } else {
         out.insert("after".into(), text(read.after.to_string()));
@@ -146,7 +165,7 @@ pub(super) fn page(
         Value::Object(out)
             .encode(MAX_REPLY_BYTES)
             .map_err(str::to_owned)?,
-        if read.number.is_some() && page.threads.is_empty() {
+        if read.target.is_some() && page.threads.is_empty() {
             4
         } else {
             0
@@ -187,14 +206,20 @@ pub(super) fn mutation(
         ExpectedVersion::Exactly(v) => v.get(),
     };
     let mut out = fields(object([
-        ("type", text("notification_publication")),
+        (
+            "type",
+            text(match mutation.command.target.kind() {
+                NotificationTargetKind::Issue => "notification_publication",
+                NotificationTargetKind::Discussion => "discussion_notification_publication",
+            }),
+        ),
         ("schema_version", json::number(1)),
         ("tenant_id", text(options.tenant.to_string())),
         ("repository_id", text(options.repository.to_string())),
         ("repository_incarnation", text(incarnation.to_string())),
         ("principal_id", text(options.principal.to_string())),
         ("object_format", text(options.format.as_str())),
-        ("number", text(mutation.command.number.get().to_string())),
+        ("number", text(mutation.command.target.number().to_string())),
         ("expected_version", text(before.to_string())),
         ("action", text(action_name(mutation.command.action))),
         ("tx_id", text(tx.to_string())),
@@ -216,6 +241,9 @@ pub(super) fn mutation(
         ("node_closed", Value::Bool(cleanup.is_none())),
         ("cleanup_error", cleanup.map_or(Value::Null, text)),
     ]));
+    if mutation.command.target.kind() == NotificationTargetKind::Discussion {
+        out.insert("target_kind".into(), text("discussion"));
+    }
     match mutation.command.action {
         NotificationAction::SetMode(mode) => {
             out.insert("requested_mode".into(), text(mode.name()));
