@@ -51,6 +51,10 @@ inspection, send and original-key recovery commands. The PR operator accepts an
 agent credential for `open`, `update`, `close`, `reopen` and `comment`; it refuses
 code-publication and review actions with that credential before networking.
 Browser forms retain their existing ordinary-token profile.
+The protection-admin operator and browser protection client accept optional
+ordinary principal evidence in native recovery replies without changing their
+policy-administration grants, exact saved keys or seal checks. Agent credentials
+remain unavailable for policy administration.
 
 Preparation fingerprints every token byte, including `fgagent_`. Sending still
 requires the original token and saved key. Recovery may use a newly authorized
@@ -185,6 +189,15 @@ limit. Serial metadata-only compilation, disabled debug symbols, bounded compile
 threads, and allocator-retention controls were attempted without changing
 dependency source. The forge/identity/admission/node/CLI integration therefore
 still requires a successful native compile and execution of its new tests.
+
+A later strict remote release build at
+`bafa9a87d4dfa43350c09ccaf9abd00a2964847e` reached first-party diagnostics and
+failed with `E0004` in `fgit-txn::write_forge_event`: the new credential event
+was missing from transaction canonicalization. The repair adds the already
+specified tag 14 and exact entity encoding, with a literal shared by the
+independent reference-trace regression, deterministic folding and entity
+separation checks. The failed build produced no native image or operator-suite
+result; the added transaction test still requires compiled execution.
 
 On a host with sufficient build memory, the focused follow-up is:
 
