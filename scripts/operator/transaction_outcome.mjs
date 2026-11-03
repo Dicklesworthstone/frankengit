@@ -2,6 +2,7 @@
 // This module has no publication method, native command body or retry generator.
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { isCredentialToken } from './credential_token.mjs';
 
 export const OUTCOME_BYTES = 16 * 1024;
 const U64_MAX = 18446744073709551615n;
@@ -36,6 +37,48 @@ function sequence(value) {
   if (typeof value !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > U64_MAX) fail('invalid_outcome_sequence');
   return value;
 }
+function provenanceCounter(value) {
+  if (typeof value === 'number') value = String(integer(value, 1, Number.MAX_SAFE_INTEGER));
+  if (typeof value !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > U64_MAX) fail('invalid_outcome_provenance');
+  return value;
+}
+function principalProvenance(value, scope, terminal, error) {
+  if (value?.state === 'unavailable') {
+    fields(value, ['state']);
+    if (!['original_principal_evidence_unavailable', 'response_limit'].includes(error)) fail('invalid_outcome_provenance');
+    return { state: 'unavailable' };
+  }
+  if (error !== null) fail('invalid_outcome_provenance');
+  if (value?.state === 'not_terminal') {
+    fields(value, ['state']); if (terminal) fail('invalid_outcome_provenance');
+    return { state: 'not_terminal' };
+  }
+  fields(value, ['state', 'principal_id', 'authentication', 'agent_provenance']);
+  if (!terminal || value.principal_id !== scope.principal_id ||
+      !['recorded', 'legacy_unknown'].includes(value.state)) fail('invalid_outcome_provenance');
+  const authentication = value.authentication;
+  if (value.state === 'legacy_unknown' ? authentication !== null
+    : !['operator_assertion', 'http_token', 'ssh_deploy_key', 'agent_credential'].includes(authentication)) fail('invalid_outcome_provenance');
+  let witness = null;
+  if (authentication === 'agent_credential') {
+    const agent = fields(value.agent_provenance, ['agent', 'sponsor', 'sponsor_kind', 'credential_id',
+      'grant_root', 'run_commitment', 'authenticated_at', 'expires_at']);
+    const nonzero = text => typeof text === 'string' && /^[0-9a-f]{64}$/.test(text) && !/^0+$/.test(text);
+    const sponsor = identity(agent.sponsor);
+    if (agent.agent !== scope.principal_id || /^0+$/.test(agent.agent) || /^0+$/.test(sponsor) ||
+        sponsor === agent.agent || !['human', 'service'].includes(agent.sponsor_kind) ||
+        !nonzero(agent.credential_id) || !nonzero(agent.run_commitment)) fail('invalid_outcome_provenance');
+    const root = fields(agent.grant_root, ['algorithm', 'hex']);
+    integer(root.algorithm, 1, 65535);
+    if (typeof root.hex !== 'string' || !/^(?:[0-9a-f]{2}){1,64}$/.test(root.hex) || /^0+$/.test(root.hex)) fail('invalid_outcome_provenance');
+    const authenticated = provenanceCounter(agent.authenticated_at), expires = provenanceCounter(agent.expires_at);
+    if (BigInt(authenticated) >= BigInt(expires)) fail('invalid_outcome_provenance');
+    witness = { agent: agent.agent, sponsor, sponsor_kind: agent.sponsor_kind, credential_id: agent.credential_id,
+      grant_root: { algorithm: root.algorithm, hex: root.hex }, run_commitment: agent.run_commitment,
+      authenticated_at: authenticated, expires_at: expires };
+  } else if (value.agent_provenance !== null) fail('invalid_outcome_provenance');
+  return { state: value.state, principal_id: value.principal_id, authentication, agent_provenance: witness };
+}
 export function outcomeScope(value) {
   fields(value, SCOPE);
   return Object.fromEntries(SCOPE.map(key => [key, identity(value[key])]));
@@ -58,6 +101,7 @@ export function parseOutcomeJson(bytes) {
       // lexical value, not the rounded JS number, owns every one of those bits.
       if (!/^(0|[1-9][0-9]*)$/.test(context?.source ?? '')) fail('invalid_outcome_json_number');
       if (key === 'decision_sequence') return sequence(context.source);
+      if (['authenticated_at', 'expires_at'].includes(key)) return provenanceCounter(context.source);
       return integer(value, 0, Number.MAX_SAFE_INTEGER);
     });
   } catch (error) { if (error instanceof OutcomeError) throw error; fail('invalid_outcome_json'); }
@@ -66,8 +110,11 @@ export function parseOutcomeJson(bytes) {
 // these checks bind an observation to the caller's independently retained scope.
 export function validateOutcomeReply(value, expected, known = null) {
   const scope = outcomeScope(expected);
+  const provenanceFields = value !== null && typeof value === 'object'
+    && ['principal_provenance', 'provenance_error'].some(key => Object.hasOwn(value, key))
+    ? ['principal_provenance', 'provenance_error'] : [];
   fields(value, ['type', 'schema_version', ...SCOPE, 'selector', 'command_index', 'state', 'terminal',
-    'transaction', 'decision', 'read_only', 'request_reexecuted', 'absence_proves_non_commit', 'session_completeness_established']);
+    'transaction', 'decision', 'read_only', 'request_reexecuted', 'absence_proves_non_commit', 'session_completeness_established', ...provenanceFields]);
   if (SCOPE.some(key => value[key] !== scope[key]) || value.type !== 'transaction_outcome' || value.schema_version !== 1 ||
       value.selector !== 'transaction' || value.command_index !== null || value.read_only !== true ||
       value.request_reexecuted !== false || value.absence_proves_non_commit !== false || value.session_completeness_established !== false ||
@@ -97,11 +144,20 @@ export function validateOutcomeReply(value, expected, known = null) {
   const checked = { type: 'transaction_outcome', schema_version: 1, ...scope, selector: 'transaction', command_index: null,
     state: value.state, terminal: value.terminal, transaction, decision, read_only: true, request_reexecuted: false,
     absence_proves_non_commit: false, session_completeness_established: false };
+  if (provenanceFields.length) {
+    checked.principal_provenance = principalProvenance(value.principal_provenance, scope, value.terminal, value.provenance_error);
+    checked.provenance_error = value.provenance_error;
+  }
   if (known !== null) {
     const previous = validateOutcomeReply(known, scope);
     if ((previous.transaction !== null && JSON.stringify(previous.transaction) !== JSON.stringify(transaction)) ||
         (previous.terminal && JSON.stringify(previous.decision) !== JSON.stringify(decision)) ||
         (previous.state !== 'key_not_observed' && checked.state === 'key_not_observed')) fail('outcome_regressed_or_conflicted');
+    // Optional read availability does not replace the established decision.
+    // When both observations carry original principal facts, those are just
+    // as immutable as the seal, even after rotating the current credential.
+    if (previous.principal_provenance?.principal_id && checked.principal_provenance?.principal_id &&
+        JSON.stringify(previous.principal_provenance) !== JSON.stringify(checked.principal_provenance)) fail('outcome_provenance_changed');
   }
   return checked;
 }
@@ -112,7 +168,7 @@ export async function lookupOutcome(address, token, selected, options = {}) {
   fields(selected, [...SCOPE, 'key']);
   const scope = outcomeScope(Object.fromEntries(SCOPE.map(key => [key, selected[key]]))), key = selected.key;
   const base = outcomeEndpoint(address);
-  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('invalid_outcome_credential');
+  if (!isCredentialToken(token)) fail('invalid_outcome_credential');
   if (typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key)) fail('invalid_original_outcome_key');
   if (!options || typeof options !== 'object' || Array.isArray(options) ||
       Object.keys(options).some(key => !['timeoutMs', 'signal', 'known', 'ca'].includes(key))) fail('invalid_outcome_options');

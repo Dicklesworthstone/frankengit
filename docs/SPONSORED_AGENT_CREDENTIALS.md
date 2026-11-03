@@ -43,6 +43,24 @@ and idempotency-key requirements continue to apply. There is no additional
 credential-file row to configure for an issued agent. The server reads the
 canonical grant for every request, without a cached-grant fallback.
 
+The Node operators `scripts/remote_issue.mjs` and `scripts/remote_pull.mjs` also
+accept this private token file. Use the agent ID as `scope.principal_id` and the
+grant's exact repository incarnation in the saved input. Follow the existing
+[issue](REMOTE_ISSUES.md) and [pull-request](REMOTE_PULL_REQUESTS.md) preparation,
+inspection, send and original-key recovery commands. The PR operator accepts an
+agent credential for `open`, `update`, `close`, `reopen` and `comment`; it refuses
+code-publication and review actions with that credential before networking.
+Browser forms retain their existing ordinary-token profile.
+
+Preparation fingerprints every token byte, including `fgagent_`. Sending still
+requires the original token and saved key. Recovery may use a newly authorized
+credential for the same agent after rotation or revocation. The shared outcome
+reader retains and checks the native optional principal-provenance fields,
+including the original sponsor, credential and run witness. It does not replace
+that witness with the credential used for recovery. Optional evidence
+unavailability does not erase an established terminal decision. Legacy
+64-hexadecimal-token inputs and retained outcomes remain readable.
+
 | Explicit scope | Available operations |
 | --- | --- |
 | `issues-read` | Issue listing, history and search |
@@ -152,6 +170,12 @@ The implementation adds canonical codec/lifecycle, authentication, policy replay
 legacy-method downgrade, real-node restart/revocation, private-token CLI, and real
 TCP HTTP regression tests. Their presence is a coverage inventory, not a passing
 test result.
+
+`tests/operator/sponsored_metadata_credentials.test.mjs` covers both private
+token spellings, exact fingerprints, closed provenance shapes and u64 times,
+witness substitution, and real Node CLI send/rotated-recovery flows against a
+controlled HTTP schema peer. That peer is not the native Rust server and does
+not qualify native issuance, revocation or authorization.
 
 During the implementation session, the reference/CALM suites completed with
 176 passes, no failures, and one existing ignored test. Pinned rustfmt and
