@@ -234,6 +234,8 @@ run_operator() {
   fi
   fg_binary="$(native_binary_path fg)"
   [[ -x "$fg_binary" ]] || { printf 'verify: no returned native executable at %s\n' "$fg_binary" >&2; return 1; }
+  fg_binary="$("${PYTHON_BIN:-python3}" "$ROOT/scripts/prepare_operator_native.py" \
+    "$fg_binary" "$VERIFY_TARGET_DIRECTORY")" || return
   echo_step "Running ${#suites[@]} current operator suites; the full entrypoint matrix remains separate"
   FGE_NODE="$node" FG_BIN="$fg_binary" FG_SIGNED_BUNDLE_SOURCE_CUT="$source_cut" \
     "$ROOT/scripts/e2e/run_all.sh" --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"

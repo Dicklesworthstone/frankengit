@@ -68,11 +68,22 @@ compilation. `FGE_NODE` selects that executable; otherwise it uses Node on PATH.
 An unavailable runtime returns a typed exit-3 refusal, and a mismatched version
 retains the shared verifier's typed refusal. There is no second version pin.
 The command builds `fg` once through the native-host/private-target/Cargo/RCH
-functions above, then supplies that returned binary and the same Node to
+functions above, installs an identical private executable snapshot, then supplies
+it and the same Node to
 [`run_all.sh`](../scripts/e2e/run_all.sh). A supplied `FG_BIN` cannot bypass the
 build. Source must be clean before compilation; a changed revision or dirty
 checkout afterwards prevents campaign dispatch. The selected source revision
 overrides a stale `FG_SIGNED_BUNDLE_SOURCE_CUT` for the signed campaign.
+The [native installer](../scripts/prepare_operator_native.py) leaves the Cargo/RCH
+delivery unchanged, checks stable source identity and matching SHA-256 bytes,
+and retains a canonical path under a private target subdirectory with mode
+`0500`. Its streaming copy bounds an executable to 2 GiB. This accommodates a
+worker's group-writable build output while retaining
+the operator's executable ownership checks. Incomplete copies stay non-executable;
+an installation failure prevents dispatch and retains its files for inspection.
+The build remains the trust boundary;
+installation does not authenticate an arbitrary executable. Retained snapshots
+support replay and stay outside source control.
 
 Selection includes every regular `.sh` recursively under
 `scripts/e2e/suites/operator/`, in deterministic order, followed by the required

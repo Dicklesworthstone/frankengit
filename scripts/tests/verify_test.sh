@@ -32,7 +32,7 @@ class NativeVerificationTools(unittest.TestCase):
                     "CARGO_MANIFEST_DIR": str(self.base / "remote checkout/tools/registry-check")}
         self.env.pop("RCH_CARGO_WRAPPER_BYPASS", None)
         self.env.pop("CARGO_BUILD_JOBS", None)
-        for name in ["scripts/verify.sh", "scripts/check_toolchain_bootstrap_links.sh",
+        for name in ["scripts/verify.sh", "scripts/prepare_operator_native.py", "scripts/check_toolchain_bootstrap_links.sh",
                      "rust-toolchain.toml", "tooling-rust-bootstrap-links.md"]:
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -56,7 +56,11 @@ elif args[0] == "build":
         if arg != "--bin": continue
         binary = directory / args[i + 1]
         binary.write_text("#!" + sys.executable + "\\n" + os.environ["TEST_NATIVE_BODY"])
-        binary.chmod(0o700)
+        binary.chmod(int(os.environ.get("TEST_BINARY_MODE", "700"), 8))
+        if os.environ.get("TEST_BINARY_SYMLINK"):
+            actual = binary.with_suffix(".returned")
+            binary.rename(actual)
+            binary.symlink_to(actual)
 elif args[0] not in ["fmt", "check", "test", "clippy"]:
     print("unexpected Cargo command", args, file=sys.stderr); sys.exit(91)
 ''')
@@ -130,8 +134,14 @@ else: sys.exit(92)
 exec "$PYTHON_BIN" - "$@" <<'OPERATOR_DISPATCH'
 import json, os, sys
 from pathlib import Path
-assert os.environ["FG_BIN"] == str(Path(os.environ["TEST_TARGET"]) / "''' + HOST + '''/debug/fg")
-assert os.access(os.environ["FG_BIN"], os.X_OK)
+original = Path(os.environ["TEST_TARGET"]) / "''' + HOST + '''/debug/fg"
+selected = Path(os.environ["FG_BIN"])
+assert selected != original and selected.resolve() == selected
+assert selected.name == "fg" and selected.parent.name.startswith(".operator-native-")
+assert selected.parent.parent == Path(os.environ["TEST_TARGET"]).resolve()
+assert selected.parent.stat().st_mode & 0o777 == 0o700
+assert selected.stat().st_mode & 0o777 == 0o500
+assert selected.read_bytes() == original.read_bytes() and os.access(selected, os.X_OK)
 row = {"kind":"suite", "args":sys.argv[1:], "cwd":os.getcwd(),
        "fg":os.environ["FG_BIN"], "node":os.environ.get("FGE_NODE"),
        "source_cut":os.environ.get("FG_SIGNED_BUNDLE_SOURCE_CUT")}
@@ -156,11 +166,27 @@ OPERATOR_DISPATCH
         self.assertEqual(suite["args"], ["--timeout", "37", *[str(self.root / "scripts/e2e/suites" / p)
                          for p in ["operator/a.sh", "operator/nested/z.sh", "recovery/native_signed_bundle.sh"]]])
 
+    def test_operator_installs_group_writable_build_output_without_modifying_it(self):
+        self.operator_fixture()
+        _, rows = self.invoke("operator", changes={"TEST_BINARY_MODE": "775"})
+        selected = Path(next(r for r in rows if r["kind"] == "suite")["fg"])
+        original = self.target / HOST / "debug/fg"
+        self.assertEqual(original.stat().st_mode & 0o777, 0o775)
+        self.assertEqual(selected.stat().st_mode & 0o777, 0o500)
+        self.assertEqual(selected.read_bytes(), original.read_bytes())
+
     def test_operator_runtime_refusal_precedes_any_cargo(self):
         self.operator_fixture()
         result, rows = self.invoke("operator", 3, {"TEST_NODE_EXIT":"3"})
         self.assertEqual([r["kind"] for r in rows], ["node"])
         self.assertEqual(json.loads(result.stderr)["type"], "controlled_runtime_refusal")
+
+    def test_operator_invalid_install_cannot_select_an_old_snapshot(self):
+        self.operator_fixture()
+        self.invoke("operator")
+        self.log.write_text("")
+        _, rows = self.invoke("operator", 2, {"TEST_BINARY_SYMLINK": "1"})
+        self.assertFalse(any(r["kind"] == "suite" for r in rows))
 
     def test_operator_missing_node_is_typed_and_never_builds(self):
         self.operator_fixture()
@@ -337,3 +363,4 @@ OPERATOR_DISPATCH
 unittest.main()
 PY
 "${PYTHON_BIN:-python3}" "${ROOT}/scripts/tests/test_host_integration_test.py"
+"${PYTHON_BIN:-python3}" "${ROOT}/scripts/tests/test_prepare_operator_native.py"
