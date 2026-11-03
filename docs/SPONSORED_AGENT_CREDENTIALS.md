@@ -43,6 +43,10 @@ and idempotency-key requirements continue to apply. There is no additional
 credential-file row to configure for an issued agent. The server reads the
 canonical grant for every request, without a cached-grant fallback.
 
+Authentication and scope refusals retain each native API's JSON error contract
+and Bearer-only challenge. Recovery refusals explicitly preserve unknown outcome
+status; a rejected lookup never proves that the original mutation failed.
+
 | Explicit scope | Available operations |
 | --- | --- |
 | `issues-read` | Issue listing, history and search |
@@ -83,6 +87,10 @@ and sponsor kind. Agents and sponsors cannot exchange roles, including after
 revocation. The bounded registry retains at most 256 grants, including revoked
 ones, and refuses further issuance at that limit. This initial profile does not
 garbage-collect identity declarations.
+
+Credential declarations stay out of scoped HTTP/MCP event feeds and repository
+webhook deliveries, including wildcard and explicit event-kind subscriptions.
+The trusted-local complete-history reader remains available to the operator.
 
 ## Publication and retry guarantees
 
@@ -153,9 +161,9 @@ legacy-method downgrade, real-node restart/revocation, private-token CLI, and re
 TCP HTTP regression tests. Their presence is a coverage inventory, not a passing
 test result.
 
-During the implementation session, the reference/CALM suites completed with
-176 passes, no failures, and one existing ignored test. Pinned rustfmt and
-whitespace checks passed. Compilation of dependent crates was blocked before
+At source revision `a5808f474637f68d5182f5d8c08da804beeb34c7`, the reference/CALM
+suites completed with 176 passes, no failures, and one existing ignored test.
+Compilation of dependent crates was blocked before
 first-party diagnostics by Asupersync being killed under the shared 8 GiB memory
 limit. Serial metadata-only compilation, disabled debug symbols, bounded compiler
 threads, and allocator-retention controls were attempted without changing

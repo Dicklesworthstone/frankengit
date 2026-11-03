@@ -142,7 +142,10 @@ pub(super) struct Grant {
 }
 impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
-        use fgit_identity::agent::{DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE};
+        use fgit_identity::agent::{
+            DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
+            PULLS_READ, PULLS_WRITE,
+        };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
             ISSUES_READ => Scope::IssuesRead,

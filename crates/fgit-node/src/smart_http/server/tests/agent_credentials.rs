@@ -131,6 +131,58 @@ fn status(response: &str, expected: u16) {
         "{response}"
     );
 }
+fn api_error(response: &str, expected: u16, family: &str, code: &str) {
+    status(response, expected);
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(
+        head.contains("Content-Type: application/json; charset=utf-8"),
+        "{response}"
+    );
+    assert!(
+        head.contains(&format!("Content-Length: {}\r\n", body.len())),
+        "{response}"
+    );
+    assert!(!head.contains("WWW-Authenticate: Basic"), "{response}");
+    if expected == 401 {
+        assert!(head.contains("WWW-Authenticate: Bearer"), "{response}");
+    }
+    assert!(
+        body.contains(&format!("\"type\":\"{family}\"")),
+        "{response}"
+    );
+    assert!(body.contains(&format!("\"code\":\"{code}\"")), "{response}");
+    if family == "outcome_error" {
+        for fact in [
+            "\"outcome_unknown\":true",
+            "\"read_only\":true",
+            "\"request_reexecuted\":false",
+            "\"absence_proves_non_commit\":false",
+        ] {
+            assert!(body.contains(fact), "{response}");
+        }
+    }
+}
+
+#[test]
+fn malformed_agent_bearers_keep_native_error_contracts() {
+    let selected = profile();
+    for (method, target, family) in [
+        ("GET", "/repo.git/api/v1/issues", "issue_error"),
+        ("GET", "/repo.git/api/v1/pulls", "pull_request_error"),
+        ("GET", "/repo.git/api/v1/discussions", "discussion_error"),
+        ("GET", "/repo.git/api/v1/source", "source_error"),
+        ("GET", "/repo.git/api/v1/protection", "protection_error"),
+        ("POST", "/repo.git/api/v1/outcomes", "outcome_error"),
+    ] {
+        api_error(
+            &exchange(&selected, "fgagent_invalid", method, target, "", None),
+            401,
+            family,
+            "unauthorized",
+        );
+    }
+}
+
 fn committed(response: &str) {
     status(response, 200);
     assert!(response.contains("\"outcome\":\"committed\""), "{response}");
@@ -308,7 +360,7 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
         &request(&read_only, "GET", "/api/v1/issues/1", "", None),
         200,
     );
-    status(
+    api_error(
         &request(
             &read_only,
             "POST",
@@ -317,6 +369,8 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
             Some("read-cannot-write"),
         ),
         403,
+        "issue_error",
+        "forbidden",
     );
     committed(&request(
         &write_only,
@@ -332,7 +386,7 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
     for suffix in ["/api/v1/pulls", "/api/v1/discussions"] {
         status(&request(&read_only, "GET", suffix, "", None), 403);
     }
-    status(
+    api_error(
         &request(
             &read_only,
             "POST",
@@ -341,6 +395,8 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
             Some("http-agent-open-issue"),
         ),
         403,
+        "outcome_error",
+        "forbidden",
     );
 
     // Even a grant containing every supported metadata operation never
@@ -435,9 +491,11 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
         "issue-http-rotated",
     );
     node.shutdown().unwrap();
-    status(
+    api_error(
         &request(&original, "GET", "/api/v1/issues/1", "", None),
         401,
+        "issue_error",
+        "unauthorized",
     );
     status(
         &request(
@@ -449,7 +507,7 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
         ),
         401,
     );
-    status(
+    api_error(
         &request(
             &original,
             "POST",
@@ -458,6 +516,8 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
             Some("http-agent-open-issue"),
         ),
         401,
+        "outcome_error",
+        "unauthorized",
     );
     let recovered = request(
         &rotated,

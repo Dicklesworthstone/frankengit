@@ -767,10 +767,15 @@ fn exact_minor_dispatch_refuses_future_schema_truncation_suffix_and_tight_bounds
     let mut future = frame.clone();
     let (_, header) = read_frame_header(&future, DecodeLimits::DEFAULT).unwrap();
     let minor = header.offset() as usize - 2;
-    future[minor..minor + 2].copy_from_slice(&5_u16.to_be_bytes());
+    // The supported agent receipt cannot be forged by relabelling a historical
+    // body: it requires the complete newer grant/run witness.
+    let mut relabelled_agent = frame.clone();
+    relabelled_agent[minor..minor + 2].copy_from_slice(&5_u16.to_be_bytes());
+    assert!(PolicyDecisionRecord::decode(&relabelled_agent, DecodeLimits::DEFAULT).is_err());
+    future[minor..minor + 2].copy_from_slice(&6_u16.to_be_bytes());
     assert!(matches!(
         PolicyDecisionRecord::decode(&future, DecodeLimits::DEFAULT),
-        Err(CodecRefusal::SchemaMinorUnsupported { observed: 5, .. })
+        Err(CodecRefusal::SchemaMinorUnsupported { observed: 6, .. })
     ));
     PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
 }

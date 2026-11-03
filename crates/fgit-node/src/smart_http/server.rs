@@ -1334,6 +1334,49 @@ fn serve_connection(
         if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
         }
+        // Select the response contract before canonical bearer verification.
+        // Rejected agent credentials must preserve native JSON errors and the
+        // Bearer-only challenge, including outcome-recovery uncertainty.
+        recovery = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/outcomes"));
+        protection_api = protection::is_route(envelope.target);
+        queue_api = queues::is_route(envelope.target);
+        discussion_api = discussions::is_route(envelope.target);
+        source_api = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/source"));
+        pull_api = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/pulls"));
+        milestone_api = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/milestones"));
+        native = protection_api
+            || queue_api
+            || discussion_api
+            || source_api
+            || pull_api
+            || milestone_api
+            || envelope
+                .target
+                .split('?')
+                .next()
+                .is_some_and(|path| path.contains("/api/v1/notifications"))
+            || envelope
+                .target
+                .split('?')
+                .next()
+                .is_some_and(|path| path.contains("/api/v1/issues"));
+        native_mutation = native && envelope.method == "POST" && !source_api;
         let agent_profile = agent::authenticate(profile, &envelope, &bytes[..envelope.consumed])?;
         let agent_profile = agent_profile.map(|(profile, request)| {
             reader.cap_deadline(request.deadline());
@@ -1373,11 +1416,6 @@ fn serve_connection(
             // cleanup. It never enters Git receive or takes a writer slot.
             return events::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer);
         }
-        recovery = envelope
-            .target
-            .split('?')
-            .next()
-            .is_some_and(|path| path.contains("/api/v1/outcomes"));
         if recovery {
             // This read-only child has no mutation intake/Serving transition.
             // It uses its own scoped quota and always closes before returning.
@@ -1393,41 +1431,6 @@ fn serve_connection(
                 error.status
             });
         }
-        protection_api = protection::is_route(envelope.target);
-        queue_api = queues::is_route(envelope.target);
-        discussion_api = discussions::is_route(envelope.target);
-        source_api = envelope
-            .target
-            .split('?')
-            .next()
-            .is_some_and(|path| path.contains("/api/v1/source"));
-        pull_api = envelope
-            .target
-            .split('?')
-            .next()
-            .is_some_and(|path| path.contains("/api/v1/pulls"));
-        milestone_api = envelope
-            .target
-            .split('?')
-            .next()
-            .is_some_and(|path| path.contains("/api/v1/milestones"));
-        native = protection_api
-            || queue_api
-            || discussion_api
-            || source_api
-            || pull_api
-            || milestone_api
-            || envelope
-                .target
-                .split('?')
-                .next()
-                .is_some_and(|path| path.contains("/api/v1/notifications"))
-            || envelope
-                .target
-                .split('?')
-                .next()
-                .is_some_and(|path| path.contains("/api/v1/issues"));
-        native_mutation = native && envelope.method == "POST" && !source_api;
         let protection_request = if protection_api {
             Some(protection::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
