@@ -1,6 +1,6 @@
 //! Versioned issue commands and canonical events. Text is data, never authority.
 //! Exact-version commands retain explicit changes and their expected predecessor.
-//! Additive comment and assignee intents use distinct seal profiles; admission
+//! Additive comment, assignee and label intents use distinct seal profiles; admission
 //! assigns their event position from each authenticated publication basis.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::aggregate::{
@@ -11,8 +11,10 @@ use fgit_types::{PrincipalId, RefusalCode};
 
 mod append;
 mod assignees;
+mod labels;
 pub use append::IssueCommentIntent;
 pub use assignees::IssueAssigneesIntent;
+pub use labels::IssueLabelsIntent;
 
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -68,6 +70,10 @@ pub enum IssueAction {
         expected_milestone_version: AggregateVersion,
     },
     ClearMilestone,
+    /// Add only the named labels, preserving every other label and issue field.
+    AddLabels {
+        labels: Vec<String>,
+    },
 }
 impl IssueAction {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
@@ -97,6 +103,12 @@ impl IssueAction {
                 Ok(())
             }
             Self::Comment { body } => validate_comment_body(body),
+            Self::AddLabels { labels } => {
+                if labels.is_empty() {
+                    return Err(invalid_native("issue.empty_labels"));
+                }
+                validate_labels(labels)
+            }
             Self::Close
             | Self::Reopen
             | Self::Lock
@@ -125,6 +137,7 @@ impl IssueAction {
             Self::Unlock => "unlock",
             Self::SetMilestone { .. } => "set-milestone",
             Self::ClearMilestone => "clear-milestone",
+            Self::AddLabels { .. } => "add-labels",
         }
     }
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
@@ -141,6 +154,7 @@ impl IssueAction {
             Self::Unlock => 9,
             Self::SetMilestone { .. } => 10,
             Self::ClearMilestone => 11,
+            Self::AddLabels { .. } => 12,
         });
         match self {
             Self::Open {
@@ -165,6 +179,7 @@ impl IssueAction {
                 }
             }
             Self::Comment { body } => out.write_bytes("issue.comment", body.as_bytes())?,
+            Self::AddLabels { labels } => write_labels(out, labels)?,
             Self::Assign { assignees } | Self::Unassign { assignees } => {
                 out.write_sequence("issue.assignees", assignees, |out, assignee| {
                     out.write_opaque_id(assignee.as_bytes());
@@ -229,6 +244,9 @@ impl IssueAction {
                 .ok_or_else(|| invalid_native("issue.milestone_version"))?,
             },
             11 => Self::ClearMilestone,
+            12 => Self::AddLabels {
+                labels: read_labels(input)?,
+            },
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "issue.action",
@@ -323,16 +341,17 @@ fn write_labels(out: &mut Encoder, labels: &[String]) -> Result<(), CodecRefusal
     })
 }
 fn read_labels(input: &mut Decoder<'_>) -> Result<Vec<String>, CodecRefusal> {
-    // The codec's sequence bound is checked before allocation; the issue bound
-    // is applied as each element is read, before retaining another label.
-    let mut count = 0usize;
+    // Check the issue-specific count before the generic decoder reserves storage.
+    let declared = u64::from(input.clone().read_scalar::<u32>("issue.labels")?);
+    let limit = input.limits().elements.min(MAX_LABELS as u64);
+    if declared > limit {
+        return Err(CodecRefusal::CountBoundExceeded {
+            field: "issue.labels",
+            observed: declared,
+            limit,
+        });
+    }
     let labels = input.read_sequence("issue.labels", |input| {
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| invalid_native("issue.labels"))?;
-        if count > MAX_LABELS {
-            return Err(invalid_native("issue.labels"));
-        }
         text(input, "issue.label", MAX_LABEL_BYTES)
     })?;
     validate_labels(&labels)?;
@@ -460,6 +479,7 @@ pub fn apply_event(
         return Err(RefusalCode::EvidenceStale);
     }
     validate_assignees(&previous.assignees).map_err(|_| RefusalCode::EvidenceInvalid)?;
+    validate_labels(&previous.labels).map_err(|_| RefusalCode::EvidenceInvalid)?;
     let mut next = previous.clone();
     match &change.action {
         IssueAction::Open { .. } => return Err(RefusalCode::ProtectedRefTransitionDenied),
@@ -518,6 +538,20 @@ pub fn apply_event(
         }
         IssueAction::SetMilestone { milestone, .. } => next.milestone = Some(*milestone),
         IssueAction::ClearMilestone => next.milestone = None,
+        IssueAction::AddLabels { labels } => {
+            let added = labels
+                .iter()
+                .filter(|label| previous.labels.binary_search(label).is_err())
+                .count();
+            if previous.labels.len() + added > MAX_LABELS {
+                return Err(RefusalCode::ResourceBudgetExceeded);
+            }
+            for label in labels {
+                if let Err(index) = next.labels.binary_search(label) {
+                    next.labels.insert(index, label.clone());
+                }
+            }
+        }
     }
     next.version = event.version;
     next.last_actor = change.actor;

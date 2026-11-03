@@ -6,6 +6,8 @@
 
 #[path = "native_merge_delivery_faults/issue_append.rs"]
 mod issue_append;
+#[path = "native_merge_delivery_faults/issue_labels.rs"]
+mod issue_labels;
 #[path = "native_merge_delivery_faults/metadata_authentication.rs"]
 mod metadata_authentication;
 #[path = "native_merge_delivery_faults/object_publication.rs"]

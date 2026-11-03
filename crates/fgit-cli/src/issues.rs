@@ -6,7 +6,9 @@ mod search;
 mod tests;
 use crate::publication_support::{describe, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
-use fgit_forge::event::issue::{IssueAssigneesIntent, IssueCommentIntent, MAX_BODY_BYTES};
+use fgit_forge::event::issue::{
+    IssueAssigneesIntent, IssueCommentIntent, IssueLabelsIntent, MAX_BODY_BYTES,
+};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{DecisionOutcome, HeadGeneration, TxId};
 use options::{Mutation, Operation, Options};
@@ -37,6 +39,12 @@ usage: fg issue add-assignees <storage-root> <tenant-id> <repository-id> <number
   Adds metadata assignees without an expected version, preserving independent additions.
   Assignments grant no access or membership; an exact retry recovers its original outcome.
 
+usage: fg issue add-labels <storage-root> <tenant-id> <repository-id> <number>
+  --trusted-local --principal <id> --idempotency-key <key>
+  --label <text> ... (1..32 labels) [--object-format sha1|sha256]
+  Adds labels without an expected version, preserving independent additions and other fields.
+  The resulting set remains bounded to 32 labels; an exact retry recovers its original outcome.
+
 usage: fg issue list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--limit <1..100>] [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 usage: fg issue show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
@@ -50,7 +58,7 @@ Locking blocks strict and append comments until unlocked; other edits and close/
 Milestone assignment checks both selected versions at one publication basis; the milestone must be open.
 Clearing membership is permitted even after the milestone closes. Closing a milestone preserves its issues.
 Show returns current issue state plus paged, exact actions/comments at one snapshot.
-Every mutation requires a stable retry key. Append-comment and add-assignees omit the issue predecessor.
+Every mutation requires a stable retry key. Append-comment, add-assignees and add-labels omit the issue predecessor.
 Existing comment and other changes retain their exact-version semantics; never refresh a retry.
 Exit 0: committed/read; 3: canonical refusal; 4: missing issue; 2: input/infrastructure/output error.
 This is a trusted local repository interface, not remote authentication or an issue ACL.";
@@ -76,6 +84,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     | "comment"
                     | "append-comment"
                     | "add-assignees"
+                    | "add-labels"
                     | "assign"
                     | "unassign"
                     | "set-milestone"
@@ -113,6 +122,12 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                 .validate()
                 .map_err(|_| "invalid additive issue assignees")?;
         }
+        Operation::AddLabels(mutation) => {
+            mutation
+                .command
+                .validate()
+                .map_err(|_| "invalid additive issue labels")?;
+        }
         Operation::Read(_) => {}
     }
     let mut node = OneNode::open_existing(
@@ -126,7 +141,10 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             .map_err(|error| error.to_string());
         let request = fgit_cli::command_request_context(&node);
         match &options.operation {
-            Operation::Mutate(_) | Operation::AppendComment(_) | Operation::AddAssignees(_) => {
+            Operation::Mutate(_)
+            | Operation::AppendComment(_)
+            | Operation::AddAssignees(_)
+            | Operation::AddLabels(_) => {
                 // A historical decision precedes new-publication eligibility
                 // inside the node API. Do not discard it because service intake
                 // now refuses. Unknown commands still hit that same intake gate.
@@ -134,6 +152,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     Operation::Mutate(mutation) => (mutation.principal, &mutation.key),
                     Operation::AppendComment(mutation) => (mutation.principal, &mutation.key),
                     Operation::AddAssignees(mutation) => (mutation.principal, &mutation.key),
+                    Operation::AddLabels(mutation) => (mutation.principal, &mutation.key),
                     Operation::Read(_) => unreachable!("mutation branch"),
                 };
                 let session = LoopbackReceiveSession::authenticated(
@@ -163,6 +182,15 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                             }
                             Operation::AddAssignees(mutation) => {
                                 node.admit_issue_assignees_durable_in(
+                                    &request,
+                                    &session,
+                                    &mutation.command,
+                                    Default::default(),
+                                )
+                                .await
+                            }
+                            Operation::AddLabels(mutation) => {
+                                node.admit_issue_labels_durable_in(
                                     &request,
                                     &session,
                                     &mutation.command,
@@ -252,6 +280,16 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                 cleanup.as_deref(),
             )
         }
+        (Operation::AddLabels(mutation), Ok(Completed::Mutation((tx, terminal)))) => {
+            finish_add_labels(
+                &mut std::io::stdout().lock(),
+                &options,
+                mutation,
+                tx,
+                &terminal,
+                cleanup.as_deref(),
+            )
+        }
         (Operation::Read(_), Ok(Completed::Read(receipt, exit))) => {
             if let Some(error) = cleanup {
                 return Err(format!("issue read shutdown failed: {error}"));
@@ -272,6 +310,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                 )),
                 Operation::AddAssignees(_) => Err(format!(
                     "no terminal issue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover using fg outcome with the same principal and key, or retry add-assignees with the identical issue number and assignee set. Do not replace the key or change the command"
+                )),
+                Operation::AddLabels(_) => Err(format!(
+                    "no terminal issue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover using fg outcome with the same principal and key, or retry add-labels with the identical issue number and label set. Do not replace the key or change the command"
                 )),
                 Operation::Read(_) => Err(format!(
                     "issue read failed: {error}{cleanup}; no complete result returned"
@@ -318,6 +359,17 @@ fn finish_add_assignees(
     cleanup: Option<&str>,
 ) -> Result<u8, String> {
     let receipt = output::add_assignees(options, mutation, tx, terminal, cleanup);
+    finish_receipt(output, &receipt, tx, terminal, cleanup)
+}
+fn finish_add_labels(
+    output: &mut impl Write,
+    options: &Options,
+    mutation: &Mutation<IssueLabelsIntent>,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> Result<u8, String> {
+    let receipt = output::add_labels(options, mutation, tx, terminal, cleanup);
     finish_receipt(output, &receipt, tx, terminal, cleanup)
 }
 fn finish_receipt(

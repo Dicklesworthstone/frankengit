@@ -11,6 +11,7 @@ pub enum ForgeCommandProfile {
     ExactVersion,
     AppendIssueCommentV1,
     AddIssueAssigneesV1,
+    AddIssueLabelsV1,
     AppendPullRequestCommentV1,
     /// Unrecognized semantics never gain append eligibility.
     Unknown,
@@ -35,6 +36,14 @@ pub const fn classify_event(
                 if matches!(change.action, IssueAction::Assign { .. }) =>
             {
                 ForgeOperation::IssueAddAssignees
+            }
+            _ => ForgeOperation::Unknown,
+        },
+        ForgeCommandProfile::AddIssueLabelsV1 => match (&event.aggregate, &event.payload) {
+            (crate::AggregateId::Issue(_), ForgeEventPayload::IssueChangedNative(change))
+                if matches!(change.action, IssueAction::AddLabels { .. }) =>
+            {
+                ForgeOperation::IssueAddLabels
             }
             _ => ForgeOperation::Unknown,
         },
@@ -72,6 +81,7 @@ pub const fn classify_event(
                 IssueAction::Unlock => ForgeOperation::IssueUnlock,
                 IssueAction::SetMilestone { .. } => ForgeOperation::IssueSetMilestone,
                 IssueAction::ClearMilestone => ForgeOperation::IssueClearMilestone,
+                IssueAction::AddLabels { .. } => ForgeOperation::IssueExactAddLabels,
             },
             ForgeEventPayload::MilestoneChangedNative(_) => ForgeOperation::MilestoneChange,
             ForgeEventPayload::NotificationPreferenceChangedNative(_) => {
@@ -126,9 +136,13 @@ mod tests {
                 expected_milestone_version: AggregateVersion::FIRST,
             },
             IssueAction::ClearMilestone,
+            IssueAction::AddLabels {
+                labels: vec!["triage".into()],
+            },
         ] {
             let is_comment = matches!(action, IssueAction::Comment { .. });
             let is_assign = matches!(action, IssueAction::Assign { .. });
+            let is_add_labels = matches!(action, IssueAction::AddLabels { .. });
             let expected_version = if matches!(action, IssueAction::Open { .. }) {
                 ExpectedVersion::NewStream
             } else {
@@ -167,6 +181,14 @@ mod tests {
                     ForgeReplanPolicy::PreservePreconditions
                 }
             );
+            assert_eq!(
+                classify_event(&event, ForgeCommandProfile::AddIssueLabelsV1).replan,
+                if is_add_labels {
+                    ForgeReplanPolicy::RevalidateAppend
+                } else {
+                    ForgeReplanPolicy::PreservePreconditions
+                }
+            );
         }
     }
 
@@ -191,6 +213,7 @@ mod tests {
             ForgeCommandProfile::Unknown,
             ForgeCommandProfile::AppendIssueCommentV1,
             ForgeCommandProfile::AddIssueAssigneesV1,
+            ForgeCommandProfile::AddIssueLabelsV1,
         ] {
             assert_eq!(
                 classify_event(&event, profile).replan,
@@ -231,6 +254,42 @@ mod tests {
             wrong.aggregate = aggregate;
             assert_eq!(
                 classify_event(&wrong, ForgeCommandProfile::AddIssueAssigneesV1).replan,
+                ForgeReplanPolicy::PreservePreconditions
+            );
+        }
+    }
+
+    #[test]
+    fn label_addition_eligibility_requires_the_matching_issue_profile_and_aggregate() {
+        use crate::event::issue::IssueLabelsIntent;
+        use crate::{AggregateId, PullRequestNumber};
+        let event = IssueLabelsIntent {
+            number: IssueNumber::FIRST,
+            labels: vec!["triage".into()],
+        }
+        .commitment_event(PrincipalId::from_bytes([7; 16]))
+        .unwrap();
+        for profile in [
+            ForgeCommandProfile::ExactVersion,
+            ForgeCommandProfile::Unknown,
+            ForgeCommandProfile::AppendIssueCommentV1,
+            ForgeCommandProfile::AddIssueAssigneesV1,
+            ForgeCommandProfile::AppendPullRequestCommentV1,
+        ] {
+            assert_eq!(
+                classify_event(&event, profile).replan,
+                ForgeReplanPolicy::PreservePreconditions
+            );
+        }
+        for aggregate in [
+            AggregateId::PullRequest(PullRequestNumber::FIRST),
+            AggregateId::PullRequestConversation(PullRequestNumber::FIRST),
+            AggregateId::ReviewProtection,
+        ] {
+            let mut wrong = event.clone();
+            wrong.aggregate = aggregate;
+            assert_eq!(
+                classify_event(&wrong, ForgeCommandProfile::AddIssueLabelsV1).replan,
                 ForgeReplanPolicy::PreservePreconditions
             );
         }

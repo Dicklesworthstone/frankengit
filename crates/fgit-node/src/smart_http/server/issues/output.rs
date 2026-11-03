@@ -113,6 +113,9 @@ fn action(value: &IssueAction, render: Option<super::rendered::Rendering>) -> St
             )
         }
         IssueAction::Close => "{\"name\":\"close\"}".to_owned(),
+        IssueAction::AddLabels { labels: values } => {
+            format!("{{\"name\":\"add-labels\",\"labels\":{}}}", labels(values))
+        }
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
         IssueAction::Lock => "{\"name\":\"lock\"}".to_owned(),
         IssueAction::Unlock => "{\"name\":\"unlock\"}".to_owned(),
@@ -177,6 +180,7 @@ pub(super) fn mutation(
             (intent.number.get(), "null".to_owned(), "append-comment")
         }
         Command::AddAssignees(intent) => (intent.number.get(), "null".to_owned(), "add-assignees"),
+        Command::AddLabels(intent) => (intent.number.get(), "null".to_owned(), "add-labels"),
         Command::Milestone(command) => {
             let expected = match command.expected_version {
                 fgit_forge::ExpectedVersion::NewStream => 0,
@@ -203,6 +207,8 @@ pub(super) fn mutation(
     };
     let profile = if matches!(command, Command::AddAssignees(_)) {
         "\"command_profile\":\"issue.add-assignees.v1\","
+    } else if matches!(command, Command::AddLabels(_)) {
+        "\"command_profile\":\"issue.add-labels.v1\","
     } else {
         ""
     };

@@ -4,8 +4,8 @@
 use fgit_forge::MilestoneNumber;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_forge::event::issue::{
-    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES,
-    MAX_BODY_BYTES, MAX_LABELS,
+    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
+    IssueLabelsIntent, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, PrincipalId, RepositoryAuthorityHeadId};
@@ -68,6 +68,7 @@ pub(super) enum Command {
     Versioned(IssueCommand),
     AppendComment(IssueCommentIntent),
     AddAssignees(IssueAssigneesIntent),
+    AddLabels(IssueLabelsIntent),
     Milestone(fgit_forge::event::milestone::MilestoneCommand),
     Notification(super::notifications::BoundNotificationCommand),
 }
@@ -151,6 +152,7 @@ impl<'a> Request<'a> {
                         | "comment"
                         | "append-comment"
                         | "add-assignees"
+                        | "add-labels"
                         | "assign"
                         | "unassign"
                         | "set-milestone"
@@ -208,14 +210,16 @@ impl<'a> Request<'a> {
         let (mut milestone, mut milestone_version) = (None, None);
         for (key, value) in fields {
             match key.as_str() {
-                "expected_version" if !matches!(action, "append-comment" | "add-assignees") => {
+                "expected_version"
+                    if !matches!(action, "append-comment" | "add-assignees" | "add-labels") =>
+                {
                     set_once(&mut version, decimal(&value)?)?;
                 }
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
                 "body" if matches!(action, "open" | "edit" | "comment" | "append-comment") => {
                     set_once(&mut text, value)?;
                 }
-                "label" if matches!(action, "open" | "edit") => {
+                "label" if matches!(action, "open" | "edit" | "add-labels") => {
                     if labels.len() == MAX_LABELS {
                         return Err(ApiError::too_large());
                     }
@@ -270,6 +274,17 @@ impl<'a> Request<'a> {
                 .validate()
                 .map_err(|_| ApiError::bad("invalid_issue_content"))?;
             return Ok(Command::AddAssignees(intent));
+        }
+        if action == "add-labels" {
+            labels.sort();
+            if labels.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(ApiError::bad("duplicate_label"));
+            }
+            let intent = IssueLabelsIntent { number, labels };
+            intent
+                .validate()
+                .map_err(|_| ApiError::bad("invalid_issue_content"))?;
+            return Ok(Command::AddLabels(intent));
         }
         let version = version.ok_or_else(|| ApiError::bad("expected_version_required"))?;
         if (action == "open") != (version == 0) {
@@ -550,6 +565,7 @@ mod tests {
             Command::Versioned(command) => Ok(command),
             Command::AppendComment(_)
             | Command::AddAssignees(_)
+            | Command::AddLabels(_)
             | Command::Milestone(_)
             | Command::Notification(_) => panic!("expected a strict versioned command"),
         }
@@ -736,6 +752,66 @@ mod tests {
             );
             assert!(command(strict, format!("expected_version=7&{form}").as_bytes()).is_ok());
         }
+    }
+
+    #[test]
+    fn additive_labels_sort_once_reject_predecessors_and_preserve_replacement_grammar() {
+        let Command::AddLabels(intent) =
+            parsed_command("add-labels", b"label=triage&label=bug").unwrap()
+        else {
+            panic!("additive labels");
+        };
+        assert_eq!(intent.number, IssueNumber::FIRST);
+        assert_eq!(intent.labels, ["bug", "triage"]);
+        for invalid in [
+            String::new(),
+            "label=".into(),
+            "label=+".into(),
+            "label=x%00y".into(),
+            "label=x%0Ay".into(),
+            "label=x%C2%85y".into(),
+            "label=bug&label=bug".into(),
+            "label=bug&expected_version=1".into(),
+            "label=bug&expected_version=0".into(),
+            "label=bug&body=ignored".into(),
+            "label=bug&title=ignored".into(),
+            "label=bug&principal=ignored".into(),
+            "label=bug&clear_labels=true".into(),
+            "label=bug&assignee=ignored".into(),
+            "label=bug&expected_head=ignored".into(),
+            format!("label={}", "x".repeat(65)),
+            format!("label={}", "é".repeat(33)),
+        ] {
+            assert!(
+                parsed_command("add-labels", invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            parsed_command("add-labels", format!("label={}", "é".repeat(32)).as_bytes()).is_ok()
+        );
+        let maximum = (0..MAX_LABELS)
+            .map(|seed| format!("label=label-{seed:02}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(parsed_command("add-labels", maximum.as_bytes()).is_ok());
+        assert_eq!(
+            parsed_command("add-labels", format!("{maximum}&label=overflow").as_bytes())
+                .unwrap_err()
+                .code,
+            "resource_limit"
+        );
+        assert!(command("edit", b"label=bug").is_err());
+        assert_eq!(
+            command("edit", b"expected_version=1&label=bug")
+                .unwrap()
+                .action,
+            IssueAction::Edit(IssueEdit {
+                title: None,
+                body: None,
+                labels: Some(vec!["bug".into()])
+            })
+        );
     }
 
     #[test]

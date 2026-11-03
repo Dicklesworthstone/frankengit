@@ -59,6 +59,57 @@ test('archive v2 pins complete milestone and issue histories at one head and che
   assert.ok(allPages.every(bytes => !bytes.includes(f.src.token)), 'source credentials never enter portable archive pages');
 });
 
+test('v2 replays additive labels and strict removal across pages without changing milestone membership', async t => {
+  const rows = [fixtureMilestoneIssues()[0]], row = rows[0], actor = row.events[0].actor;
+  row.events.push({ version: 6, actor, action: { name: 'add-labels', labels: ['drop', '\u{10000}'] } },
+    { version: 7, actor, action: { name: 'add-labels', labels: ['plan', '\uE000'] } },
+    { version: 8, actor, action: { name: 'edit', labels: ['kept', '\u{10000}'] } },
+    { version: 9, actor, action: { name: 'add-labels', labels: ['é', '\uE000', '\u{10000}'] } });
+  const labels = ['kept', 'é', '\uE000', '\u{10000}'];
+  const f = await fixture(t, rows);
+  // The socket peer predates AddLabels. Supply its independently declared final
+  // snapshot; production archive replay must establish that history agrees.
+  const result = await exportIssueArchive({ ...f.options, pageSize: 1, fetchImpl: transform(value => {
+    if (value.type === 'issue_page') value.issues[0].labels = labels;
+    if (value.type === 'issue_history') value.issue.labels = labels;
+  }) });
+  const before = f.src.calls.length;
+  const view = await readIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 });
+  assert.deepEqual(view.records[0].snapshot.labels, labels);
+  assert.equal(view.records[0].snapshot.version, 9);
+  assert.equal(view.records[0].snapshot.milestone, 1);
+  assert.equal(view.records[0].snapshot.locked, true);
+  assert.equal(view.records[0].snapshot.state, 'closed');
+  assert.equal(view.records[0].comments.length, 1);
+  assert.equal(view.milestones[0].snapshot.open_issues, 0);
+  assert.equal(view.milestones[0].snapshot.closed_issues, 1);
+  assert.equal(result.pages, 22); assert.equal(result.events, 18);
+  assert.equal((await inspectIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 })).complete, true);
+  assert.equal(f.src.calls.length, before);
+});
+
+for (const overflow of [false, true]) test(`v2 ${overflow ? 'refuses label overflow before publication' : 'allows a full-set label overlap'}`, async t => {
+  const rows = [fixtureMilestoneIssues()[3]], row = rows[0], actor = row.events[0].actor;
+  const labels = Array.from({ length: 31 }, (_, i) => `l${String(i).padStart(2, '0')}`);
+  row.events[0].action.labels = labels;
+  row.events.push({ version: 2, actor, action: { name: 'add-labels', labels: ['z'] } },
+    { version: 3, actor, action: { name: 'add-labels', labels: [overflow ? 'zz' : 'z'] } });
+  const f = await fixture(t, rows, []);
+  const options = { ...f.options, pageSize: 1, fetchImpl: transform(value => {
+    if (value.type === 'issue_page') value.issues[0].labels = [...labels, 'z'];
+    if (value.type === 'issue_history') value.issue.labels = [...labels, 'z'];
+  }) };
+  if (overflow) {
+    await assert.rejects(exportIssueArchive(options), /At most 32 labels/); await absentRoot(f.options.workdir);
+  } else {
+    const result = await exportIssueArchive(options);
+    const view = await readIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 });
+    assert.deepEqual(view.records[0].snapshot.labels, [...labels, 'z']);
+    assert.equal(view.records[0].snapshot.version, 3);
+    assert.equal(view.archive.complete, true);
+  }
+});
+
 test('frozen archive v1 refuses historical membership even when the issue is currently unassigned', async t => {
   const f = await fixture(t, [fixtureMilestoneIssues()[1]]);
   await assert.rejects(exportIssueArchive({ ...f.options, includeMilestones: false }), /milestones_unsupported/);

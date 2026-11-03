@@ -1,6 +1,6 @@
 //! Canonical forge publication and bounded revalidation policy.
 //!
-//! Adding content or assignees keyed by a sealed transaction can preserve its
+//! Adding content, assignees or labels keyed by a sealed transaction can preserve its
 //! meaning across a changed issue or PR conversation frontier. Canonical sequencing,
 //! current permissions, resource limits and terminal outcomes still require
 //! the repository head CAS.
@@ -27,6 +27,8 @@ pub enum ForgeOperation {
     IssueAppendComment,
     IssueAssign,
     IssueAddAssignees,
+    IssueExactAddLabels,
+    IssueAddLabels,
     IssueUnassign,
     IssueLock,
     IssueUnlock,
@@ -61,7 +63,7 @@ pub struct ForgeAdmissionRule {
 
 /// The single semantic table for canonical forge replan eligibility.
 ///
-/// Explicit comment append and issue assignee addition profiles have
+/// Explicit comment append and issue assignee/label addition profiles have
 /// version-independent intents. A PR source anchor retains its exact metadata basis.
 /// Legacy comments, replacement sets, edits, reviews and unknown operations
 /// preserve their submitted preconditions. Every row retains head-CAS authority,
@@ -71,6 +73,7 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
     let replan = match operation {
         ForgeOperation::IssueAppendComment
         | ForgeOperation::IssueAddAssignees
+        | ForgeOperation::IssueAddLabels
         | ForgeOperation::PullRequestAppendComment => ForgeReplanPolicy::RevalidateAppend,
         ForgeOperation::PullRequestOpen
         | ForgeOperation::PullRequestHeadAdvance
@@ -85,6 +88,7 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::IssueReopen
         | ForgeOperation::IssueExactComment
         | ForgeOperation::IssueAssign
+        | ForgeOperation::IssueExactAddLabels
         | ForgeOperation::IssueUnassign
         | ForgeOperation::IssueLock
         | ForgeOperation::IssueUnlock
@@ -124,6 +128,7 @@ mod tests {
             ForgeOperation::IssueReopen,
             ForgeOperation::IssueExactComment,
             ForgeOperation::IssueAssign,
+            ForgeOperation::IssueExactAddLabels,
             ForgeOperation::IssueUnassign,
             ForgeOperation::IssueLock,
             ForgeOperation::IssueUnlock,
@@ -152,6 +157,7 @@ mod tests {
         for operation in [
             ForgeOperation::IssueAppendComment,
             ForgeOperation::IssueAddAssignees,
+            ForgeOperation::IssueAddLabels,
             ForgeOperation::PullRequestAppendComment,
         ] {
             let rule = forge_admission_rule(operation);

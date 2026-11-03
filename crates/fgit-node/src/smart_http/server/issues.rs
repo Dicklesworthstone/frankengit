@@ -486,6 +486,17 @@ pub(super) fn execute(
                     ),
                     &mut live,
                 ),
+                Command::AddLabels(intent) => drive_request_while(
+                    node,
+                    &context,
+                    node.admit_issue_labels_durable_in(
+                        &context,
+                        session,
+                        intent,
+                        Default::default(),
+                    ),
+                    &mut live,
+                ),
                 Command::Milestone(command) => {
                     command
                         .proposed_event(principal)

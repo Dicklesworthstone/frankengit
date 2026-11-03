@@ -3,8 +3,8 @@ use super::options::{Mutation, Options, ReadOptions, expected_version, head_toke
 use crate::publication_support::quote;
 use fgit_authority::TerminalOutcome;
 use fgit_forge::event::issue::{
-    IssueAction, IssueAssigneesIntent, IssueCommentIntent, IssueSnapshot, IssueState,
-    validate_assignees,
+    IssueAction, IssueAssigneesIntent, IssueCommentIntent, IssueLabelsIntent, IssueSnapshot,
+    IssueState, validate_assignees,
 };
 use fgit_forge::{AggregateId, ForgeEvent, ForgeEventPayload, IssueNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
@@ -56,6 +56,9 @@ fn action(value: &IssueAction) -> String {
         }
         IssueAction::Comment { body } => {
             format!("{{\"name\":\"comment\",\"body\":{}}}", quote(body))
+        }
+        IssueAction::AddLabels { labels: values } => {
+            format!("{{\"name\":\"add-labels\",\"labels\":{}}}", labels(values))
         }
         IssueAction::Close => "{\"name\":\"close\"}".to_owned(),
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
@@ -141,6 +144,30 @@ pub(super) fn add_assignees(
             action: format!(
                 "{{\"name\":\"add-assignees\",\"assignees\":{}}}",
                 assignees(&mutation.command.assignees)
+            ),
+        },
+        tx,
+        terminal,
+        cleanup,
+    )
+}
+pub(super) fn add_labels(
+    options: &Options,
+    mutation: &Mutation<IssueLabelsIntent>,
+    tx: TxId,
+    terminal: &TerminalOutcome,
+    cleanup: Option<&str>,
+) -> String {
+    publication(
+        options,
+        ReceiptCommand {
+            principal: mutation.principal,
+            number: mutation.command.number,
+            expected_version: None,
+            profile: Some("issue.add-labels.v1"),
+            action: format!(
+                "{{\"name\":\"add-labels\",\"labels\":{}}}",
+                labels(&mutation.command.labels)
             ),
         },
         tx,

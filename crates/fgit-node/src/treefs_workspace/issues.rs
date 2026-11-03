@@ -13,7 +13,7 @@ use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
 use fgit_forge::{
     IssueNumber,
-    event::issue::{IssueAssigneesIntent, IssueCommand, IssueCommentIntent},
+    event::issue::{IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueLabelsIntent},
 };
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, TxId};
@@ -23,9 +23,25 @@ enum IssueSubmission<'a> {
     Exact(&'a IssueCommand),
     AppendComment(&'a IssueCommentIntent),
     AddAssignees(&'a IssueAssigneesIntent),
+    AddLabels(&'a IssueLabelsIntent),
 }
 
 impl OneNode {
+    /// Add the exact label set without selecting an issue predecessor.
+    /// Publication revalidates the current issue and bounded set union on every
+    /// attempt. The original actor, issue, labels and retry key never change;
+    /// terminal recovery cannot re-add labels removed by a later strict edit.
+    pub async fn admit_issue_labels_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        intent: &IssueLabelsIntent,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_issue_submission_in(request, session, IssueSubmission::AddLabels(intent), limits)
+            .await
+    }
+
     /// Add the exact assignee set without selecting an issue predecessor.
     /// Every attempt revalidates the current issue and its bounded set union;
     /// concurrent additions and unrelated edits retain their ordinary effects.
@@ -104,6 +120,7 @@ impl OneNode {
             IssueSubmission::Exact(command) => issues::proposal(&context, command),
             IssueSubmission::AppendComment(intent) => issues::append_proposal(&context, intent),
             IssueSubmission::AddAssignees(intent) => issues::assignees_proposal(&context, intent),
+            IssueSubmission::AddLabels(intent) => issues::labels_proposal(&context, intent),
         }
         .map_err(error)?;
         let tx = attempt
@@ -165,6 +182,17 @@ impl OneNode {
             }
             IssueSubmission::AddAssignees(intent) => {
                 Box::pin(issues::admit_issue_assignees_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    intent,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+            IssueSubmission::AddLabels(intent) => {
+                Box::pin(issues::admit_issue_labels_async(
                     &self.authority,
                     request.authority(),
                     &context,

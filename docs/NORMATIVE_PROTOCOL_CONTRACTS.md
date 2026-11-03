@@ -1039,6 +1039,48 @@ The CALM table admits this named profile for bounded replanning and retains
 assignment store or a commutative canonical event order. Historical strict
 assignment bytes and saved requests retain their original meaning.
 
+### 20.2.6 Native issue label-addition intents
+
+`IssueLabelsIntent` explicitly unions 1–32 sorted, distinct labels into an
+existing issue without selecting its predecessor. Labels retain the existing
+64-byte UTF-8, nonblank, no-control-character contract. Human adapters sort
+input by UTF-8 bytes and reject duplicates. This profile MUST reject
+`expected_version`. Exact-version `IssueEdit.labels` still replaces or clears
+the complete label set; existing request and event bytes remain unchanged.
+
+The canonical issue action `AddLabels` has required action tag **12**, followed
+by the existing bounded label-sequence encoding. Earlier readers refuse the
+unknown required action. Its canonical request uses the native event at fixed
+**version 2** solely as an identity template, under the single `forge` scoped
+entry `issue.add-labels.v1`. The ordinary transaction derivation binds tenant,
+repository, native object format, authenticated actor, exact issue, label set
+and original key. No ref updates or push options are present. Independent seal
+verification reconstructs this complete intent; an exact-version `AddLabels`
+event under another request profile cannot acquire permission to replan.
+
+Every attempt authenticates the current issue frontier, selects its next
+checked version, and unions the exact additions with its current labels.
+The resulting set MUST fit 32 labels before any publication. Filling the last
+slot succeeds; overflow or version exhaustion refuses with
+`ResourceBudgetExceeded`. Already-present labels consume no additional slots;
+a distinct entirely overlapping request still records one ordinary event.
+Missing issues refuse with `EvidenceStale`. Open/closed state and discussion
+locks do not disable label metadata. All other issue fields are preserved.
+
+Only the named addition profile may replan after head-CAS loss. It preserves
+its seal, actor and label set while revalidating current policy and capacity.
+The event and outbox obligation publish atomically through the existing head
+CAS. A known terminal retry, including after restart, returns the original
+outcome before new intake or quota checks. It MUST NOT re-add a label removed
+by a later exact replacement. A terminal capacity refusal remains refused even
+if capacity later becomes available; a genuinely new attempt needs a new key.
+Cancellation and lost replies retain the ordinary outcome-recovery contract.
+
+The CALM table retains `HeadCasRequired`: this is bounded position replanning,
+not an observed-remove set or commutative event ordering. Only independent
+additions whose union fits the bound have order-independent membership. Exact
+replacements and removals retain their original ordered preconditions.
+
 ### 20.3 Native protected-review quorums
 
 Repository review protection binds a sorted set of eligible reviewer principals

@@ -63,10 +63,10 @@ function checkedAssignees(values, canonical = false) {
 }
 export function issueAction(name, fields) {
   object(fields);
-  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock', 'set-milestone', 'clear-milestone'].includes(name)) fail('Unsupported issue action.');
+  if (!['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'].includes(name)) fail('Unsupported issue action.');
   const assignment = name === 'assign' || name === 'unassign';
   const allowed = name === 'open' || name === 'edit' ? ['title', 'body', 'labels'] : name === 'comment' ? ['body'] : assignment ? ['assignees']
-    : name === 'set-milestone' ? ['milestone', 'expected_milestone_version'] : [];
+    : name === 'add-labels' ? ['labels'] : name === 'set-milestone' ? ['milestone', 'expected_milestone_version'] : [];
   if (Object.keys(fields).some(key => !allowed.includes(key))) fail('Unknown or inapplicable issue field.');
   const result = {};
   if (own(fields, 'title')) result.title = text(fields.title, 256, 'title', true);
@@ -83,14 +83,17 @@ export function issueAction(name, fields) {
   } else if (name === 'edit' && !Object.keys(result).length) fail('Select at least one field to replace.');
   else if (name === 'comment' && (!own(result, 'body') || !result.body.trim())) fail('Comment must not be empty.');
   else if (assignment && !result.assignees?.length) fail('Name at least one principal to assign or unassign.');
+  else if (name === 'add-labels' && !result.labels?.length) fail('Name at least one label to add.');
   return result;
 }
 export function mutationRequest(number, version, action, fields) {
   natural(number, 'issue number', 1);
   const append = action === 'append-comment';
   const addAssignees = action === 'add-assignees';
-  if (append || addAssignees) {
-    if (version !== null) fail(append ? 'Appending a comment has no expected version.' : 'Adding assignees has no expected version.');
+  const addLabels = action === 'add-labels';
+  if (append || addAssignees || addLabels) {
+    if (version !== null) fail(append ? 'Appending a comment has no expected version.' : addAssignees
+      ? 'Adding assignees has no expected version.' : 'Adding labels has no expected version.');
   } else {
     natural(version, 'expected issue version', 0, Number.MAX_SAFE_INTEGER - 1);
     if ((action === 'open') !== (version === 0)) fail('Only a new issue uses expected version zero.');
@@ -98,7 +101,7 @@ export function mutationRequest(number, version, action, fields) {
   // These intent profiles still publish canonical Comment and Assign events.
   // Legacy exact-version receipts retain their original request and key bytes.
   const checked = issueAction(append ? 'comment' : addAssignees ? 'assign' : action, fields);
-  const form = new URLSearchParams(append || addAssignees ? {} : { expected_version: String(version) });
+  const form = new URLSearchParams(append || addAssignees || addLabels ? {} : { expected_version: String(version) });
   for (const name of ['title', 'body']) if (own(checked, name)) form.append(name, checked[name]);
   if (checked.labels) {
     for (const label of checked.labels) form.append('label', label);
@@ -197,6 +200,7 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
         delete fields.body_rendered;
       }
       issueAction(name, fields);
+      if (name === 'add-labels') checkedLabels(fields.labels, true);
       if (name === 'set-milestone' || name === 'clear-milestone') {
         if (!own(reply.issue, 'milestone')) fail('Milestone history requires an explicit membership state.');
         milestone = name === 'set-milestone' ? fields.milestone : null;
@@ -315,6 +319,10 @@ export function publication(reply, pending, status = 200, entity = 'issue') {
   if (entity === 'issue' && pending.action === 'add-assignees' &&
       (pending.expected_version !== null || reply.command_profile !== 'issue.add-assignees.v1')) {
     fail('Unrecognized additive assignee publication profile.');
+  }
+  if (entity === 'issue' && pending.action === 'add-labels' &&
+      (pending.expected_version !== null || reply.command_profile !== 'issue.add-labels.v1')) {
+    fail('Unrecognized additive label publication profile.');
   }
   if (reply.type !== `${entity}_publication` || reply.number !== pending.number ||
       reply.expected_version !== pending.expected_version || reply.action !== pending.action ||

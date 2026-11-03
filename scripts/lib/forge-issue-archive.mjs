@@ -104,6 +104,9 @@ class Walk {
       const s = this.folded;
       if (!s) fail('missing_open');
       if (name === 'edit') for (const key of ['title', 'body', 'labels']) if (Object.hasOwn(action, key)) s[key] = action[key];
+      if (name === 'add-labels') s.labels = issueAction('edit', {
+        labels: [...new Set([...s.labels, ...action.labels])],
+      }).labels;
       if (name === 'comment') {
         if (s.locked) fail('comment_while_locked');
         s.comments++;

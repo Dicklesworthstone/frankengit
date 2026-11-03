@@ -74,7 +74,7 @@ fn lock_action_goldens_are_new_payloadless_tags_with_strict_decode_boundaries() 
             "a lock cannot create an issue"
         );
     }
-    for tag in [0u32, 12, u32::MAX] {
+    for tag in [0u32, 13, u32::MAX] {
         assert!(matches!(
             IssueAction::read(&mut Decoder::new(&tag.to_be_bytes(), DecodeLimits::DEFAULT)),
             Err(CodecRefusal::VariantUnknown { field: "issue.action", observed, .. }) if observed == tag

@@ -330,10 +330,14 @@ pub fn prepare_event(
             {
                 let milestone_stream = AsciiSlug::try_new(
                     "forge_stream",
-                    fgit_forge::AggregateId::Milestone(*milestone).to_string().as_bytes(),
+                    fgit_forge::AggregateId::Milestone(*milestone)
+                        .to_string()
+                        .as_bytes(),
                 )
                 .map_err(|_| RefusalCode::EvidenceInvalid)?;
-                if resolved.forge.entry(milestone_stream)
+                if resolved
+                    .forge
+                    .entry(milestone_stream)
                     .map(|entry| entry.successor_position())
                     != Some(expected_milestone_version.get())
                 {
@@ -347,7 +351,10 @@ pub fn prepare_event(
             )
         }
         ForgeEventPayload::MilestoneChangedNative(change) => {
-            change.action.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            change
+                .action
+                .validate()
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
             if change.actor != context.principal_id
                 || !attempt.request.ref_commands().is_empty()
                 || !closure.objects.is_empty()
@@ -355,23 +362,47 @@ pub fn prepare_event(
                 return Err(RefusalCode::EvidenceInvalid);
             }
             super::native::milestones::verify_event_seal(context, event, attempt)?;
-            (ForgeEventKind::MilestoneChanged { milestone: entity }, Vec::new(), None)
+            (
+                ForgeEventKind::MilestoneChanged { milestone: entity },
+                Vec::new(),
+                None,
+            )
         }
         ForgeEventPayload::NotificationPreferenceChangedNative(change) => {
-            if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty() || !closure.objects.is_empty() {
+            if change.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
                 return Err(RefusalCode::EvidenceInvalid);
             }
             super::native::notifications::verify_event_seal(context, event, attempt)?;
-            let fgit_forge::AggregateId::NotificationPreference { issue, .. } = event.aggregate else {
+            let fgit_forge::AggregateId::NotificationPreference { issue, .. } = event.aggregate
+            else {
                 return Err(RefusalCode::EvidenceInvalid);
             };
-            let issue_stream = AsciiSlug::try_new("forge_stream", fgit_forge::AggregateId::Issue(issue).to_string().as_bytes())
-                .map_err(|_| RefusalCode::EvidenceInvalid)?;
-            let current = resolved.forge.entry(issue_stream).ok_or(RefusalCode::EvidenceMissing)?.successor_position();
-            if let fgit_forge::event::notification::NotificationAction::SetReadThrough(Some(through)) = change.action {
-                if through.get() > current { return Err(RefusalCode::EvidenceStale); }
+            let issue_stream = AsciiSlug::try_new(
+                "forge_stream",
+                fgit_forge::AggregateId::Issue(issue).to_string().as_bytes(),
+            )
+            .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            let current = resolved
+                .forge
+                .entry(issue_stream)
+                .ok_or(RefusalCode::EvidenceMissing)?
+                .successor_position();
+            if let fgit_forge::event::notification::NotificationAction::SetReadThrough(Some(
+                through,
+            )) = change.action
+            {
+                if through.get() > current {
+                    return Err(RefusalCode::EvidenceStale);
+                }
             }
-            (ForgeEventKind::NotificationPreferenceChanged { preference: entity }, Vec::new(), None)
+            (
+                ForgeEventKind::NotificationPreferenceChanged { preference: entity },
+                Vec::new(),
+                None,
+            )
         }
         ForgeEventPayload::MergeCommittedNative(merge) => {
             merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
@@ -749,7 +780,7 @@ fn verify_issue_seal(
     attempt: &SealAttempt,
 ) -> Result<(), RefusalCode> {
     use fgit_forge::event::issue::{
-        IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent,
+        IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueLabelsIntent,
     };
     use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion};
 
@@ -792,6 +823,13 @@ fn verify_issue_seal(
             &IssueAssigneesIntent {
                 number,
                 assignees: assignees.clone(),
+            },
+        ),
+        IssueAction::AddLabels { labels } => super::native::issues::labels_proposal(
+            context,
+            &IssueLabelsIntent {
+                number,
+                labels: labels.clone(),
             },
         ),
         _ => return Err(RefusalCode::EvidenceInvalid),

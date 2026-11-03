@@ -188,6 +188,9 @@ fn action(action: &IssueAction) -> Value {
             Value::Object(out)
         }
         IssueAction::Close => object([("name", text("close"))]),
+        IssueAction::AddLabels { labels: values } => {
+            object([("name", text("add-labels")), ("labels", labels(values))])
+        }
         IssueAction::Reopen => object([("name", text("reopen"))]),
         IssueAction::Lock => object([("name", text("lock"))]),
         IssueAction::Unlock => object([("name", text("unlock"))]),

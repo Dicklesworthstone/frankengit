@@ -2,8 +2,8 @@
 use fgit_authority::IdempotencyKey;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, IssueNumber, MilestoneNumber};
 use fgit_forge::event::issue::{
-    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit, MAX_ASSIGNEES,
-    MAX_BODY_BYTES, MAX_LABELS,
+    IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
+    IssueLabelsIntent, MAX_ASSIGNEES, MAX_BODY_BYTES, MAX_LABELS,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
@@ -26,6 +26,7 @@ pub(super) enum Operation {
     Mutate(Mutation),
     AppendComment(Mutation<IssueCommentIntent>),
     AddAssignees(Mutation<IssueAssigneesIntent>),
+    AddLabels(Mutation<IssueLabelsIntent>),
     Read(ReadOptions),
 }
 #[derive(Debug)]
@@ -68,6 +69,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             | "comment"
             | "append-comment"
             | "add-assignees"
+            | "add-labels"
             | "assign"
             | "unassign"
             | "set-milestone"
@@ -116,9 +118,10 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         let allowed = flag == "--object-format"
             || if mutate {
                 matches!(flag, "--principal" | "--idempotency-key")
-                    || (!matches!(action, "append-comment" | "add-assignees")
+                    || (!matches!(action, "append-comment" | "add-assignees" | "add-labels")
                         && flag == "--expected-version")
-                    || (matches!(action, "open" | "edit") && matches!(flag, "--title" | "--label"))
+                    || (matches!(action, "open" | "edit") && flag == "--title")
+                    || (matches!(action, "open" | "edit" | "add-labels") && flag == "--label")
                     || (matches!(action, "assign" | "unassign" | "add-assignees")
                         && flag == "--assignee")
                     || (action == "set-milestone"
@@ -213,6 +216,20 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 key,
                 command,
                 body_file,
+            })
+        } else if action == "add-labels" {
+            let command = IssueLabelsIntent {
+                number: number.ok_or("missing issue number")?,
+                labels,
+            };
+            command
+                .validate()
+                .map_err(|_| "invalid additive issue labels")?;
+            Operation::AddLabels(Mutation {
+                principal,
+                key,
+                command,
+                body_file: None,
             })
         } else if action == "add-assignees" {
             let command = IssueAssigneesIntent {

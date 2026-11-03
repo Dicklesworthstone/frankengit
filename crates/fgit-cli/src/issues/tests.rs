@@ -788,6 +788,152 @@ fn add_assignees_input() -> Vec<String> {
     args.extend(["--assignee".into(), "44".repeat(16)]);
     args
 }
+
+fn add_labels_input() -> Vec<String> {
+    let mut args = input("add-labels");
+    let version = args
+        .iter()
+        .position(|arg| arg == "--expected-version")
+        .unwrap();
+    args.drain(version..version + 2);
+    args.extend(["--label", "triage"].map(str::to_owned));
+    args
+}
+fn add_labels_mutation(options: &Options) -> &Mutation<IssueLabelsIntent> {
+    let Operation::AddLabels(mutation) = &options.operation else {
+        panic!("add-labels fixture");
+    };
+    mutation
+}
+#[test]
+fn additive_label_commands_are_canonical_bounded_and_preserve_strict_edit_semantics() {
+    for format in ["sha1", "sha256"] {
+        let mut args = add_labels_input();
+        args.extend(["--label", "bug", "--object-format", format].map(str::to_owned));
+        let parsed = parse(&args).unwrap();
+        let addition = add_labels_mutation(&parsed);
+        assert_eq!(addition.command.number.get(), 7);
+        assert_eq!(addition.command.labels, ["bug", "triage"]);
+        assert_eq!(addition.principal, PrincipalId::from_bytes([0x33; 16]));
+        assert_eq!(addition.key, b"private-issue-key");
+        assert!(addition.body_file.is_none());
+        assert_eq!(parsed.format.as_str(), format);
+        addition.command.validate().unwrap();
+        args[0] = "edit".into();
+        assert!(
+            parse(&args).is_err(),
+            "replacement still needs an exact predecessor"
+        );
+        args.extend(["--expected-version", "1"].map(str::to_owned));
+        let parsed = parse(&args).unwrap();
+        let IssueAction::Edit(edit) = &mutation(&parsed).command.action else {
+            panic!("strict edit");
+        };
+        assert_eq!(
+            edit.labels.as_deref(),
+            Some(["bug".to_owned(), "triage".to_owned()].as_slice())
+        );
+    }
+}
+#[test]
+fn additive_label_commands_reject_predecessors_authority_fields_and_invalid_sets_before_io() {
+    for (flag, value) in [
+        ("--expected-version", "0"),
+        ("--expected-version", "1"),
+        ("--expected-head", "unselected"),
+        ("--title", "unrelated"),
+        ("--body", "unrelated"),
+        ("--body-file", "must-not-read"),
+        ("--assignee", "44"),
+        ("--grant", "authority"),
+    ] {
+        let mut args = add_labels_input();
+        args.extend([flag, value].map(str::to_owned));
+        assert!(parse(&args).is_err(), "{flag}");
+    }
+    let mut args = add_labels_input();
+    args.push("--clear-labels".into());
+    assert!(parse(&args).is_err());
+    for flag in ["--principal", "--idempotency-key", "--label"] {
+        let mut args = add_labels_input();
+        let at = args.iter().position(|arg| arg == flag).unwrap();
+        args.drain(at..at + 2);
+        assert!(parse(&args).is_err(), "{flag}");
+    }
+    for value in [
+        String::new(),
+        " ".into(),
+        "x\0y".into(),
+        "x\ny".into(),
+        "x\u{85}y".into(),
+        "x".repeat(65),
+        "é".repeat(33),
+    ] {
+        let mut args = add_labels_input();
+        replace(&mut args, "--label", &value);
+        assert!(parse(&args).is_err(), "{value:?}");
+    }
+    let mut args = add_labels_input();
+    replace(&mut args, "--label", &"é".repeat(32));
+    assert!(
+        parse(&args).is_ok(),
+        "the exact UTF-8 byte bound is permitted"
+    );
+    let mut args = add_labels_input();
+    args.extend(["--label", "triage"].map(str::to_owned));
+    assert!(
+        parse(&args).is_err(),
+        "duplicates are rejected, not silently removed"
+    );
+    let mut args = add_labels_input();
+    for value in 1..32 {
+        args.extend(["--label".into(), format!("label-{value:02}")]);
+    }
+    assert!(parse(&args).is_ok());
+    args.extend(["--label", "overflow"].map(str::to_owned));
+    assert!(parse(&args).is_err());
+}
+#[test]
+fn additive_label_receipts_keep_original_terminal_identity_and_output_ambiguity() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let parsed = parse(&add_labels_input()).unwrap();
+    let mutation = add_labels_mutation(&parsed);
+    for committed in [true, false] {
+        let (tx, terminal) = terminal(committed);
+        let receipt = output::add_labels(&parsed, mutation, tx, &terminal, None);
+        assert!(receipt.contains("\"command_profile\":\"issue.add-labels.v1\""));
+        assert!(receipt.contains("\"expected_version\":null"));
+        assert!(receipt.contains("\"name\":\"add-labels\",\"labels\":[\"triage\"]"));
+        assert!(!receipt.contains("private-issue-key"));
+        assert_eq!(
+            finish_add_labels(&mut Vec::new(), &parsed, mutation, tx, &terminal, None).unwrap(),
+            if committed { 0 } else { 3 }
+        );
+        let error = finish_add_labels(
+            &mut Broken,
+            &parsed,
+            mutation,
+            tx,
+            &terminal,
+            Some("shutdown-marker"),
+        )
+        .unwrap_err();
+        assert!(error.contains(&tx.to_string()) && error.contains("shutdown-marker"));
+        assert!(error.contains(if committed {
+            "is committed"
+        } else {
+            "canonical refusal"
+        }));
+    }
+}
 fn add_assignees_mutation(options: &Options) -> &Mutation<IssueAssigneesIntent> {
     let Operation::AddAssignees(mutation) = &options.operation else {
         panic!("add-assignees fixture");

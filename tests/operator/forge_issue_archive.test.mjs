@@ -118,6 +118,56 @@ test('assignment deltas, reopen and partial edits reconstruct the retained final
   const f = await fixture(t, { items }); const result = await exportIssueArchive({ ...f.options, pageSize: 2 });
   assert.equal(result.events, 8); assert.equal(result.pages, 5);
 });
+for (const clear of [false, true]) test(`archive folds paginated label additions across strict ${clear ? 'clear' : 'replacement'}`, async t => {
+  const items = data().slice(0, 1), item = items[0];
+  item.events.push(event(6, other, 'add-labels', { labels: ['drop', 'kept', 'é', '\u{10000}'] }),
+    event(7, actor, 'add-labels', { labels: ['kept', '\uE000'] }),
+    event(8, other, 'add-labels', { labels: ['é'] }),
+    event(9, actor, 'edit', { labels: clear ? [] : ['kept', '\u{10000}'] }),
+    event(10, other, 'add-labels', { labels: ['é', '\uE000', '\u{10000}'] }));
+  // UTF-8 places U+E000 before U+10000; JavaScript's default sort does not.
+  const labels = clear ? ['é', '\uE000', '\u{10000}'] : ['kept', 'é', '\uE000', '\u{10000}'];
+  Object.assign(item.issue, { version: 10, labels, last_actor: other });
+  const f = await fixture(t, { items }), result = await exportIssueArchive(f.options);
+  const before = f.calls.length;
+  const view = await readIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 });
+  assert.deepEqual(view.records[0].snapshot.labels, labels);
+  assert.equal(view.records[0].snapshot.state, 'closed');
+  assert.equal(view.records[0].snapshot.body, item.issue.body);
+  assert.deepEqual(view.records[0].snapshot.assignees, [assignee]);
+  assert.equal(view.records[0].comments.length, 1);
+  assert.equal(result.pages, 11); assert.equal(result.events, 10);
+  const retained = JSON.parse(await readFile(join(f.options.workdir, 'page-000008.json')));
+  assert.deepEqual(retained.events[0].action, item.events[6].action);
+  assert.equal((await inspectIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 })).complete, true);
+  assert.equal(f.calls.length, before, 'offline replay performs no source reads');
+});
+for (const overflow of [false, true]) test(`archive ${overflow ? 'refuses overflow' : 'permits overlap'} at the label set limit`, async t => {
+  const labels = Array.from({ length: 31 }, (_, i) => `l${String(i).padStart(2, '0')}`);
+  const issue = { ...data()[1].issue, number: 1, version: 3, labels: [...labels, 'z'],
+    opened_by: actor, last_actor: other };
+  const items = [{ issue, events: [event(1, actor, 'open', { title: issue.title, body: issue.body, labels }),
+    event(2, actor, 'add-labels', { labels: ['z'] }),
+    event(3, other, 'add-labels', { labels: [overflow ? 'zz' : 'z'] })] }];
+  const f = await fixture(t, { items });
+  if (overflow) {
+    await assert.rejects(exportIssueArchive(f.options), /At most 32 labels/); await noRoot(f.options);
+  } else {
+    const result = await exportIssueArchive(f.options);
+    const view = await readIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 });
+    assert.deepEqual(view.records[0].snapshot.labels, [...labels, 'z']);
+    assert.equal(view.records[0].snapshot.version, 3);
+  }
+});
+for (const labels of [['z', 'a'], ['a', 'a'], ['\u{10000}', '\uE000'], []]) {
+  test(`archive rejects noncanonical additive labels ${JSON.stringify(labels)}`, async t => {
+    const items = data().slice(0, 1), item = items[0];
+    item.events.push(event(6, actor, 'add-labels', { labels })); item.issue.version = 6;
+    const f = await fixture(t, { items });
+    await assert.rejects(exportIssueArchive(f.options), /ordering or duplicates|at least one label/);
+    await noRoot(f.options);
+  });
+}
 for (const locked of [false, true]) test(`archive replays cross-page locks and retains final locked=${locked}`, async t => {
   const items = data().slice(0, 1), item = items[0];
   item.events.push(event(6, actor, 'lock'), event(7, other, 'edit', { title: 'Edited while locked' }),

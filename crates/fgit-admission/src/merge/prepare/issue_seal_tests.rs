@@ -1,8 +1,11 @@
 use super::*;
-use crate::merge::native::issues::{append_proposal, assignees_proposal, proposal};
+use crate::merge::native::issues::{
+    append_proposal, assignees_proposal, labels_proposal, proposal,
+};
 use fgit_authority::{HeadKey, IdempotencyKey, SemanticRequest};
 use fgit_forge::event::issue::{
     IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
+    IssueLabelsIntent,
 };
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
@@ -56,6 +59,9 @@ fn all_legacy_issue_actions_bind_the_exact_event_and_predecessor() {
             expected_milestone_version: AggregateVersion::FIRST,
         },
         IssueAction::ClearMilestone,
+        IssueAction::AddLabels {
+            labels: vec!["triage".into()],
+        },
     ] {
         let command = IssueCommand {
             number: IssueNumber::FIRST,
@@ -262,4 +268,73 @@ fn addition_seals_reject_substituted_sets_removals_context_keys_and_other_profil
         verify_issue_seal(&context, &template, &changed),
         Err(RefusalCode::EvidenceInvalid)
     );
+}
+
+#[test]
+fn only_the_explicit_label_addition_seal_admits_a_fresh_position_with_identical_semantics() {
+    let context = context();
+    let intent = IssueLabelsIntent {
+        number: IssueNumber::FIRST,
+        labels: vec!["triage".into()],
+    };
+    let (template, seal) = labels_proposal(&context, &intent).unwrap();
+    for version in [2, 3, 28, u64::MAX] {
+        let event = ForgeEvent {
+            version: AggregateVersion::try_new(version).unwrap(),
+            ..template.clone()
+        };
+        assert_eq!(verify_issue_seal(&context, &event, &seal), Ok(()));
+    }
+    for field in 0..9 {
+        let mut event = template.clone();
+        let mut changed_context = context.clone();
+        let ForgeEventPayload::IssueChangedNative(change) = &mut event.payload else {
+            unreachable!()
+        };
+        match field {
+            0 => event.version = AggregateVersion::FIRST,
+            1 => change.actor = PrincipalId::from_bytes([4; 16]),
+            2 => event.aggregate = AggregateId::Issue(IssueNumber::try_new(2).unwrap()),
+            3 => {
+                change.action = IssueAction::AddLabels {
+                    labels: vec!["substituted".into()],
+                }
+            }
+            4 => {
+                change.action = IssueAction::Edit(IssueEdit {
+                    labels: Some(intent.labels.clone()),
+                    ..Default::default()
+                })
+            }
+            5 => changed_context.repository_id = RepositoryId::from_bytes([5; 16]),
+            6 => changed_context.tenant_id = TenantId::from_bytes([6; 16]),
+            7 => changed_context.object_format = GitHashAlgorithm::Sha256,
+            _ => {
+                changed_context.idempotency_key =
+                    IdempotencyKey::new(b"changed-key".to_vec()).unwrap()
+            }
+        }
+        assert_eq!(
+            verify_issue_seal(&changed_context, &event, &seal),
+            Err(RefusalCode::EvidenceInvalid),
+            "field {field}"
+        );
+    }
+    for other in [
+        append_proposal(&context, &comment()).unwrap().1,
+        assignees_proposal(
+            &context,
+            &IssueAssigneesIntent {
+                number: intent.number,
+                assignees: vec![context.principal_id],
+            },
+        )
+        .unwrap()
+        .1,
+    ] {
+        assert_eq!(
+            verify_issue_seal(&context, &template, &other),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+    }
 }
