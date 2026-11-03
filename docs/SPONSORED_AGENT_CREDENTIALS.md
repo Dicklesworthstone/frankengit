@@ -67,6 +67,9 @@ unavailability does not erase an established terminal decision. Legacy
 Outcome JSON refuses duplicate keys, including escaped-equivalent spellings,
 before interpreting principal evidence. Parsing remains bounded to 16 KiB and
 16 nesting levels.
+Native source-import recovery also validates the CLI's optional principal
+evidence, including exact u64 witness times, while retaining its existing local
+observation schema. This grants no agent source-import capability.
 
 | Explicit scope | Available operations |
 | --- | --- |
@@ -201,6 +204,15 @@ specified tag 14 and exact entity encoding, with a literal shared by the
 independent reference-trace regression, deterministic folding and entity
 separation checks. The failed build produced no native image or operator-suite
 result; the added transaction test still requires compiled execution.
+
+At `8b3b6fdb61bf2339675f853ff55c3f9aba2f6e96`, the transaction crate's
+offloaded `cargo check --all-targets` completed, including compilation of that
+test. The native CLI build then reached three `E0277` errors in principal
+recovery: concrete engine methods shadowed the `AsyncAuthorityStore` methods.
+The repair explicitly selects the existing authority adapter for head reads,
+receipt authentication and immutable reads, preserving its retry and typed
+failure semantics. This second failed build also produced no native image or
+operator-suite result. Test compilation is not test execution.
 
 On a host with sufficient build memory, the focused follow-up is:
 
