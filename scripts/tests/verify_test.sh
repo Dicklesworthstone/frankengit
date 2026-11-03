@@ -50,7 +50,8 @@ if args[0] == "metadata":
 elif args[0] == "build":
     if os.environ.get("TEST_BUILD_EXIT"): sys.exit(int(os.environ["TEST_BUILD_EXIT"]))
     if os.environ.get("TEST_MISSING_BINARY"): sys.exit(0)
-    directory = Path(os.environ["TEST_TARGET"]) / args[args.index("--target") + 1] / "debug"
+    profile = "release" if "--release" in args else "debug"
+    directory = Path(os.environ["TEST_TARGET"]) / args[args.index("--target") + 1] / profile
     directory.mkdir(parents=True, exist_ok=True)
     for i, arg in enumerate(args):
         if arg != "--bin": continue
@@ -134,7 +135,7 @@ else: sys.exit(92)
 exec "$PYTHON_BIN" - "$@" <<'OPERATOR_DISPATCH'
 import json, os, sys
 from pathlib import Path
-original = Path(os.environ["TEST_TARGET"]) / "''' + HOST + '''/debug/fg"
+original = Path(os.environ["TEST_TARGET"]) / "''' + HOST + '''/release/fg"
 selected = Path(os.environ["FG_BIN"])
 assert selected != original and selected.resolve() == selected
 assert selected.name == "fg" and selected.parent.name.startswith(".operator-native-")
@@ -144,6 +145,7 @@ assert selected.stat().st_mode & 0o777 == 0o500
 assert selected.read_bytes() == original.read_bytes() and os.access(selected, os.X_OK)
 row = {"kind":"suite", "args":sys.argv[1:], "cwd":os.getcwd(),
        "fg":os.environ["FG_BIN"], "node":os.environ.get("FGE_NODE"),
+       "profile":os.environ.get("FGE_PROFILE"),
        "source_cut":os.environ.get("FG_SIGNED_BUNDLE_SOURCE_CUT")}
 with open(os.environ["TEST_LOG"], "a") as out: out.write(json.dumps(row) + "\\n")
 sys.exit(int(os.environ.get("TEST_SUITE_EXIT", "0")))
@@ -154,14 +156,16 @@ OPERATOR_DISPATCH
         self.operator_fixture()
         _, rows = self.invoke("operator", changes={"CARGO_BUILD_JOBS":"3", "FGE_E2E_TIMEOUT":"37",
                                                    "FG_BIN":"/stale-supplied-fg",
+                                                   "FGE_PROFILE":"stale-supplied-profile",
                                                    "FG_SIGNED_BUNDLE_SOURCE_CUT":"c" * 40})
         self.assertEqual(rows[0]["kind"], "node")
         self.assertEqual(rows[0]["args"], [str(self.root / "scripts/verify_js.mjs"), "runtime"])
         builds = [r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build"]
         self.assertEqual([r["args"] for r in builds], [["build", "--locked", "--target", HOST,
-                         "--jobs", "3", "-p", "fgit-cli", "--bin", "fg"]])
+                         "--jobs", "3", "-p", "fgit-cli", "--bin", "fg", "--release"]])
         suite = next(r for r in rows if r["kind"] == "suite")
         self.assertEqual(suite["node"], self.env["FGE_NODE"])
+        self.assertEqual(suite["profile"], "release")
         self.assertEqual(suite["source_cut"], "a" * 40)
         self.assertEqual(suite["args"], ["--timeout", "37", *[str(self.root / "scripts/e2e/suites" / p)
                          for p in ["operator/a.sh", "operator/nested/z.sh", "recovery/native_signed_bundle.sh"]]])
@@ -170,7 +174,7 @@ OPERATOR_DISPATCH
         self.operator_fixture()
         _, rows = self.invoke("operator", changes={"TEST_BINARY_MODE": "775"})
         selected = Path(next(r for r in rows if r["kind"] == "suite")["fg"])
-        original = self.target / HOST / "debug/fg"
+        original = self.target / HOST / "release/fg"
         self.assertEqual(original.stat().st_mode & 0o777, 0o775)
         self.assertEqual(selected.stat().st_mode & 0o777, 0o500)
         self.assertEqual(selected.read_bytes(), original.read_bytes())

@@ -67,13 +67,19 @@ The dedicated `operator` command checks the existing
 compilation. `FGE_NODE` selects that executable; otherwise it uses Node on PATH.
 An unavailable runtime returns a typed exit-3 refusal, and a mismatched version
 retains the shared verifier's typed refusal. There is no second version pin.
-The command builds `fg` once through the native-host/private-target/Cargo/RCH
+The command builds `fg` once with the existing Cargo `release` profile through
+the native-host/private-target/Cargo/RCH
 functions above, installs an identical private executable snapshot, then supplies
 it and the same Node to
 [`run_all.sh`](../scripts/e2e/run_all.sh). A supplied `FG_BIN` cannot bypass the
 build. Source must be clean before compilation; a changed revision or dirty
 checkout afterwards prevents campaign dispatch. The selected source revision
 overrides a stale `FG_SIGNED_BUNDLE_SOURCE_CUT` for the signed campaign.
+Campaign receipts record `FGE_PROFILE=release`. The optimized, stripped artifact
+serves the operators' existing executable-size and execution-time budgets;
+those production guards are retained. This profile selection applies only to
+`operator`; it is not evidence for the default-profile `fast` lane or the dormant
+`release` gate.
 The [native installer](../scripts/prepare_operator_native.py) leaves the Cargo/RCH
 delivery unchanged, checks stable source identity and matching SHA-256 bytes,
 and retains a canonical path under a private target subdirectory with mode

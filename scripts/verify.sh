@@ -70,9 +70,9 @@ print(target)
 }
 
 native_binary_path() {
-  local suffix=''
+  local suffix='' profile="${2:-debug}"
   case "${VERIFY_NATIVE_HOST}" in *-windows-*) suffix='.exe' ;; esac
-  printf '%s/%s/debug/%s%s\n' "$VERIFY_TARGET_DIRECTORY" "$VERIFY_NATIVE_HOST" "$1" "$suffix"
+  printf '%s/%s/%s/%s%s\n' "$VERIFY_TARGET_DIRECTORY" "$VERIFY_NATIVE_HOST" "$profile" "$1" "$suffix"
 }
 
 build_native_tools() {
@@ -225,19 +225,21 @@ run_operator() {
     return 1
   fi
   echo_step "Building fg once for the current operator campaigns"
-  build_native_tools -p fgit-cli --bin fg
+  # Operator proof-read size and execution budgets apply to the deployable
+  # artifact. Keep those guards and use the repository's normal release profile.
+  build_native_tools -p fgit-cli --bin fg --release
   current_cut="$(git rev-parse --verify HEAD)" || return
   source_state="$(git status --porcelain=v1 --untracked-files=all)" || return
   if [[ "$current_cut" != "$source_cut" || -n "$source_state" ]]; then
     printf 'verify: operator source changed during the native build\n' >&2
     return 1
   fi
-  fg_binary="$(native_binary_path fg)"
+  fg_binary="$(native_binary_path fg release)"
   [[ -x "$fg_binary" ]] || { printf 'verify: no returned native executable at %s\n' "$fg_binary" >&2; return 1; }
   fg_binary="$("${PYTHON_BIN:-python3}" "$ROOT/scripts/prepare_operator_native.py" \
     "$fg_binary" "$VERIFY_TARGET_DIRECTORY")" || return
   echo_step "Running ${#suites[@]} current operator suites; the full entrypoint matrix remains separate"
-  FGE_NODE="$node" FG_BIN="$fg_binary" FG_SIGNED_BUNDLE_SOURCE_CUT="$source_cut" \
+  FGE_PROFILE=release FGE_NODE="$node" FG_BIN="$fg_binary" FG_SIGNED_BUNDLE_SOURCE_CUT="$source_cut" \
     "$ROOT/scripts/e2e/run_all.sh" --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
 }
 
