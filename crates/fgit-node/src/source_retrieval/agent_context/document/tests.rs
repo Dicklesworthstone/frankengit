@@ -251,3 +251,59 @@ fn mcp_document_binds_its_actual_host_without_extending_the_credential() {
         commitment(domain, http_intent.encode(128 * 1024).unwrap().as_bytes())
     );
 }
+
+#[test]
+fn explicit_index_source_changes_only_the_committed_selector_not_the_host_profile() {
+    let authentication = authentication();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let contexts = [
+        model_context(namespace()),
+        model_agent_context(namespace(), authentication, deadline),
+        model_mcp_agent_context(namespace(), authentication, deadline),
+    ];
+    let reference = RefName::try_new(b"refs/heads/main").unwrap();
+    let query = InitialQuery::new(&[b"needle".to_vec()], &[]).unwrap();
+    let checkpoints = Checkpoints::default();
+    for authorization in &contexts {
+        let input = AgentContextRequest {
+            authorization,
+            reference: &reference,
+            query: &query,
+            checkpoints: &checkpoints,
+            retrieval_limits: Default::default(),
+            context_limits: Default::default(),
+            sponsor: authentication.sponsor(),
+            expected_head: None,
+            expires_after: MAX_LIFETIME,
+            max_output_bytes: 1024 * 1024,
+        };
+        let strict = render::intent(&input);
+        let strict_bytes = strict.encode(128 * 1024).unwrap();
+        assert!(!strict.object().unwrap().contains_key("index_source"));
+        let revalidated = render::revalidated_intent(&input);
+        assert_eq!(field(&strict, "profile"), field(&revalidated, "profile"));
+        assert_eq!(
+            field(&strict, "authorization_host"),
+            field(&revalidated, "authorization_host")
+        );
+        assert_eq!(
+            field(&revalidated, "index_source").text(),
+            Some(CURRENT_NATIVE_INDEX_SOURCE)
+        );
+        let mut without_selector = revalidated.object().unwrap().clone();
+        without_selector.remove("index_source");
+        assert_eq!(Value::Object(without_selector), strict);
+        let domain = b"frankengit/agent-context-request/v1\0";
+        assert_ne!(
+            commitment(domain, strict_bytes.as_bytes()),
+            commitment(domain, revalidated.encode(128 * 1024).unwrap().as_bytes())
+        );
+        // The strict API still emits exactly the preexisting intent, including
+        // omission of absent agent provenance; invoking the new mode cannot
+        // relabel its host or change an earlier strict commitment.
+        assert_eq!(
+            render::intent(&input).encode(128 * 1024).unwrap(),
+            strict_bytes
+        );
+    }
+}

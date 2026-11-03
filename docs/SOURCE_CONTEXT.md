@@ -73,6 +73,41 @@ the labels without treating them as reusable access credentials.
 
 ## Authenticated HTTP context
 
+### Reuse after metadata-only changes
+
+`index_source=current-native-v1` explicitly selects current-source revalidation
+for `search-initial` and `context-initial`. It is also available as the same JSON
+argument in `frankengit_source_initial` and `frankengit_source_context`, and as a
+`field=value` argument to `fg search --initial` or `fg search --context`.
+
+The current visible native commit and tree must still match the original index
+source. A metadata-only head movement can then reuse those immutable generations.
+The returned current source and each index's original authority head, RCR, forge
+position and generation remain distinct. Code changes, current visibility
+failures, missing indexes, generation-floor mismatches and stale current-head
+pins refuse. No read builds an index, rewrites its provenance or retries source
+selection. Absent `index_source` retains the strict profile and its old encoding;
+unknown selector values refuse with `unsupported_index_source`.
+
+Native callers first obtain a `RevalidatedInitialReport` through
+`search_source_initial_revalidated_local_in`, then pass it with independent read
+authority to `hydrate_source_initial_revalidated_local_in`. The result is a
+distinct `RevalidatedInitialContext`, with the same exact-file, excerpt, omission
+and lineage accessors as `InitialContext`. It reports
+`source-initial-context-revalidated-v1` on the wire. The shared hydration verifies
+current native path/blob membership and every original row/anchor label. Its
+additional lineage metadata is reserved against the retained original
+`max_result_bytes` before source I/O; source/excerpt ceilings and the original
+request deadline remain in force.
+
+This mode supports `raw-path-prefix` context selection. Combining it with the
+ranked selection profile refuses with `unsupported_context_selection`. The
+existing ranked path keeps its strict source contract. For a real Agent Protocol
+packet with the same explicit reuse mode, see
+[agent context](AGENT_CONTEXT_COMMAND.md#read-after-unrelated-metadata-changes).
+
+### Request and result
+
 ```text
 POST {repository-route}/api/v1/source/context-initial
 Content-Type: application/x-www-form-urlencoded

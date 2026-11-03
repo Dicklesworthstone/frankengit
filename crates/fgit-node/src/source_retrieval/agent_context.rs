@@ -4,7 +4,11 @@
 //! model. It accepts only an authenticated IntentRun, proves that the hydrated
 //! source context is from that run's exact repository/head/RCR/forge position,
 //! and keeps repository bytes in ContextSource's visibly-untrusted field.
-use super::{InitialReport, context::InitialContext};
+use super::{
+    InitialReport,
+    context::{ContextFile, InitialContext, RevalidatedInitialContext},
+    current_index::LexicalSource,
+};
 use fgit_agent::{
     AuthorityReadReceipt, ContextControl, ContextPacket, ContextSource, IntentRun, OperationClass,
     ProtocolRefusal, RetrievalChannel,
@@ -13,7 +17,9 @@ use fgit_crypto::sha256_digest;
 
 pub mod document;
 mod read;
-pub use read::{AgentContextRead, AgentContextReadError, AgentSourceContext};
+pub use read::{
+    AgentContextRead, AgentContextReadError, AgentSourceContext, RevalidatedAgentSourceContext,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentContextRefusal {
@@ -68,8 +74,31 @@ pub fn context_packet_for_run(
     let receipt = run_receipt(run, &control)?;
     match_run_source(receipt, context.retrieval())?;
 
+    packet_for_files(receipt, context.files(), control)
+}
+
+/// Bind an explicitly revalidated native context to the run's CURRENT source.
+///
+/// Original index provenance stays in the typed retrieval report. It never
+/// replaces the current head/RCR/forge position authenticated by the run.
+pub fn context_packet_for_revalidated_run(
+    run: &IntentRun,
+    context: &RevalidatedInitialContext,
+    control: ContextControl,
+) -> Result<ContextPacket, AgentContextRefusal> {
+    let receipt = run_receipt(run, &control)?;
+    match_run_current_source(receipt, context.retrieval().current_source())?;
+
+    packet_for_files(receipt, context.files(), control)
+}
+
+fn packet_for_files(
+    receipt: &AuthorityReadReceipt,
+    files: &[ContextFile],
+    control: ContextControl,
+) -> Result<ContextPacket, AgentContextRefusal> {
     let mut sources = Vec::new();
-    for file in context.files() {
+    for file in files {
         for excerpt in file.excerpts() {
             let body = excerpt.untrusted_bytes().to_vec();
             let commitment = source_commitment(file.path(), file.blob(), excerpt.offset(), &body);
@@ -108,7 +137,13 @@ fn match_run_source(
     receipt: &AuthorityReadReceipt,
     initial: &InitialReport,
 ) -> Result<(), AgentContextRefusal> {
-    let source = initial.source();
+    match_run_current_source(receipt, initial.source())
+}
+
+fn match_run_current_source(
+    receipt: &AuthorityReadReceipt,
+    source: &LexicalSource,
+) -> Result<(), AgentContextRefusal> {
     if source.namespace.repository != receipt.repository_id() {
         return Err(AgentContextRefusal::RepositoryMismatch);
     }

@@ -150,3 +150,27 @@ fn invalid_hydration_evidence_is_not_success_or_client_syntax_failure() {
         Status::TooLarge
     );
 }
+
+#[test]
+fn revalidated_context_requires_explicit_raw_path_selection() {
+    let strict_ranked = format!("{BASE}&context_selection={}", ranked::PROFILE);
+    let strict = command(strict_ranked.as_bytes(), GitHashAlgorithm::Sha1).unwrap();
+    assert!(strict.ranked);
+    assert_eq!(strict.initial.index_source, IndexSource::Exact);
+    for selection in ["", "&context_selection=raw-path-prefix"] {
+        let input = format!("{BASE}&index_source=current-native-v1{selection}");
+        let selected = command(input.as_bytes(), GitHashAlgorithm::Sha1).unwrap();
+        assert_eq!(selected.initial.index_source, IndexSource::Current);
+        assert!(!selected.ranked);
+    }
+    assert_eq!(
+        command(
+            format!("{strict_ranked}&index_source=current-native-v1").as_bytes(),
+            GitHashAlgorithm::Sha1
+        )
+        .err()
+        .unwrap()
+        .code,
+        "unsupported_context_selection"
+    );
+}

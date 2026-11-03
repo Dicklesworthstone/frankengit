@@ -6,6 +6,8 @@ use fgit_forge::preparation::MergeMetadata;
 use fgit_identity::agent::{AgentCredentialId, SOURCE_READ};
 use fgit_types::{DecisionOutcome, GitOid, RefName};
 
+mod revalidated;
+
 const REFERENCE: &str = "refs/heads/source";
 const CONTEXT: &str = "frankengit_agent_context";
 const HOST: &str = "mcp-sponsored-agent-source-read-credential";

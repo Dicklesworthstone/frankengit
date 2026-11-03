@@ -488,6 +488,14 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+Explicit `current-native-v1` index reuse independently authenticates current
+visibility and native commit/tree identity. Each immutable index retains its
+original source positions and generations; those old positions cannot replace
+the current run receipt. Hydration rechecks current path/blob membership and
+original row/anchor lineage before returning exact bytes. Missing backing,
+changed source, substituted labels, expired requests and budget exhaustion abort
+the entire result. The selector adds no source-read capability or index-writing
+permission, and an absent selector retains strict source-position matching.
 Exact source bytes remain separate untrusted data, and omissions remain visible.
 This read path grants no durable agent credential, effect or publication right.
 

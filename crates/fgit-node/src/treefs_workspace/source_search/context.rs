@@ -7,13 +7,17 @@ use super::{
 };
 use crate::source_retrieval::authorization::SourceReadContext;
 use crate::source_retrieval::context::ranked::RankedContext;
-use crate::source_retrieval::context::{Assembly, ContextLimits, InitialContext, Plan};
+use crate::source_retrieval::context::{
+    Assembly, ContextLimits, InitialContext, Plan, RevalidatedInitialContext,
+};
+use crate::source_retrieval::current_index::initial::RevalidatedInitialReport;
 use crate::source_retrieval::{InitialReport, RetrievalError};
 use fgit_forge::source_search::SearchCase;
+use fgit_graph::lexical::LexicalSource;
 use fgit_treefs::BaseEntry;
 
 struct Hydrate<'a> {
-    initial: &'a InitialReport,
+    selected: &'a LexicalSource,
     plan: &'a Plan,
     scope: SourceQuery,
     limits: ContextLimits,
@@ -27,7 +31,7 @@ impl LocalSearch for Hydrate<'_> {
         &self.scope
     }
     fn empty(&self, selected: SourceSearchReport) -> Self::Report {
-        let expected = self.initial.source();
+        let expected = self.selected;
         if !self.plan.files.is_empty()
             || selected.repository != expected.namespace.repository
             || selected.source_rcr != expected.source_rcr
@@ -48,7 +52,7 @@ impl LocalSearch for Hydrate<'_> {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self::Report, SearchError> {
         Ok((|| {
-            let expected = self.initial.source();
+            let expected = self.selected;
             let parse = |oid: GitOid| {
                 A::parse_hex(&oid.to_string()).map_err(|_| RetrievalError::MixedSource)
             };
@@ -118,6 +122,43 @@ impl OneNode {
             .await
     }
 
+    /// Hydrate a revalidated Initial response at its exact current source head.
+    /// Native path membership, file mode, blob identity and original indexed
+    /// spans are checked again before returning any excerpts. The older index
+    /// provenance and original authorization labels are retained unchanged.
+    ///
+    /// All phases share the caller's request lifetime and the report's original
+    /// result-byte allowance. Any head/visibility/code movement, substitution,
+    /// cancellation or exhausted limit refuses the entire response. This never
+    /// rebuilds an index, selects another source or retries a stale selection.
+    pub async fn hydrate_source_initial_revalidated_local_in(
+        &self,
+        request: &NodeRequestContext,
+        read: &SourceReadContext,
+        initial: RevalidatedInitialReport,
+        limits: ContextLimits,
+    ) -> Result<RevalidatedInitialContext, RetrievalError> {
+        read.check_node(self)?;
+        initial.validate_authorization(read, &mut || crate::source_retrieval::live(request))?;
+        let plan = Plan::revalidated(&initial, limits, &|| {
+            !workspace_request_live(request) || !read.is_live()
+        })?;
+        // The original Initial limit covers every additional lineage copy;
+        // reserve it before consulting the native source or allocating blobs.
+        initial.check_context_metadata(plan.lineage_metadata_bytes()?)?;
+        let (assembled, file_limit) = self
+            .hydrate_source_context_plan_local_in(request, initial.current_source(), limits, &plan)
+            .await?;
+        RevalidatedInitialContext::finish(initial, &plan, assembled, file_limit, &mut || {
+            crate::source_retrieval::live(request)?;
+            if read.is_live() {
+                Ok(())
+            } else {
+                Err(failure(SearchError::Cancelled))
+            }
+        })
+    }
+
     /// Explicit weighted document fusion, not semantic ranking or authorization.
     /// The receipt records distinct-path channel ranks and fixed-point scores;
     /// the original source/generation/coverage evidence is preserved unchanged.
@@ -152,7 +193,24 @@ impl OneNode {
         // Reserve all newly retained lineage before any native source I/O;
         // the original Initial result-byte allowance remains the sole limit.
         initial.check_context_metadata(plan.lineage_metadata_bytes()?)?;
-        let expected = initial.source();
+        let (assembled, file_limit) = self
+            .hydrate_source_context_plan_local_in(request, initial.source(), limits, plan)
+            .await?;
+        InitialContext::finish(initial, plan, assembled, file_limit, &mut || {
+            crate::source_retrieval::live(request)
+        })
+    }
+
+    async fn hydrate_source_context_plan_local_in(
+        &self,
+        request: &NodeRequestContext,
+        expected: &LexicalSource,
+        limits: ContextLimits,
+        plan: &Plan,
+    ) -> Result<(Assembly, usize), RetrievalError> {
+        if !workspace_request_live(request) {
+            return Err(failure(SearchError::Cancelled));
+        }
         if expected.namespace.tenant != self.tenant_id
             || expected.namespace.repository != self.repository_id
             || expected.namespace.incarnation != self.repository_incarnation_id()
@@ -163,7 +221,7 @@ impl OneNode {
         let file_limit = limits.file_limit(plan.files.len())?;
         let paths: Vec<_> = plan.files.iter().map(|file| file.path.clone()).collect();
         let query = Hydrate {
-            initial: &initial,
+            selected: expected,
             plan,
             limits,
             scope: SourceQuery::new(b"context", SearchCase::Exact, &paths).map_err(failure)?,
@@ -204,8 +262,6 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(failure(SearchError::Cancelled));
         }
-        InitialContext::finish(initial, plan, assembled?, file_limit, &mut || {
-            crate::source_retrieval::live(request)
-        })
+        Ok((assembled?, file_limit))
     }
 }

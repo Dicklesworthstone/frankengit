@@ -3,13 +3,13 @@
 //! grant, run identity, durable state or publication capability.
 use super::{
     ApiError, BTreeMap, BodyFraming, GitDaemonSessionDeadline, GitDaemonSessionWorkScaling,
-    GitHashAlgorithm, HttpLimits, JsonReply, OneNode, Read, SourceReadContext, Status, context,
-    drive_request_while, parse_form, positive, read_form,
+    GitHashAlgorithm, HttpLimits, IndexSource, JsonReply, OneNode, Read, SourceReadContext, Status,
+    context, drive_request_while, parse_form, positive, read_form,
 };
 use crate::source_retrieval::agent_context::AgentContextReadError;
 use crate::source_retrieval::agent_context::document::{
     AgentContextDocumentError, AgentContextRequest, MAX_LIFETIME, MAX_OUTPUT_BYTES,
-    read_agent_context_in,
+    read_agent_context_in, read_agent_context_revalidated_in,
 };
 use crate::{GitDaemonSessionTimeout, NodeRequestContext};
 use fgit_types::PrincipalId;
@@ -26,7 +26,7 @@ fn command_fields(
     format: GitHashAlgorithm,
     maximum: usize,
 ) -> Result<AgentCommand, ApiError> {
-    if parsed.len() > 199 {
+    if parsed.len() > 200 {
         return Err(ApiError::too_large());
     }
     let maximum = maximum.min(MAX_OUTPUT_BYTES);
@@ -93,7 +93,7 @@ pub(super) fn execute(
     let maximum = usize::try_from(maximum)
         .unwrap_or(usize::MAX)
         .min(super::super::output::MAX_REPLY_BYTES);
-    let fields = parse_form(&read_form(reader, framing, http)?, 199)?;
+    let fields = parse_form(&read_form(reader, framing, http)?, 200)?;
     let command = command_fields(fields, node.object_format, maximum)?;
     let body = run(node, read, sponsor, &command)?;
     Ok(JsonReply {
@@ -153,10 +153,8 @@ fn run(
     drive_request_while(
         node,
         &request,
-        read_agent_context_in(
-            node,
-            &request,
-            AgentContextRequest {
+        async {
+            let input = AgentContextRequest {
                 authorization: read,
                 reference: &context.initial.selection.reference,
                 query: &context.initial.query,
@@ -167,8 +165,14 @@ fn run(
                 expected_head: context.initial.selection.expected_head,
                 expires_after,
                 max_output_bytes: command.max_output_bytes,
-            },
-        ),
+            };
+            match context.initial.index_source {
+                IndexSource::Exact => read_agent_context_in(node, &request, input).await,
+                IndexSource::Current => {
+                    read_agent_context_revalidated_in(node, &request, input).await
+                }
+            }
+        },
         &mut live,
     )
     .map(|document| document.json)

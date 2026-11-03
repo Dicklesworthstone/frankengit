@@ -53,6 +53,48 @@ const fn valid_prototype() -> McpToolEntry {
 }
 
 #[test]
+fn current_native_index_reuse_is_explicit_and_retains_each_tools_read_grant() {
+    for (name, capability, principal) in [
+        (
+            "frankengit_source_initial",
+            CapabilityRequirement::READ_DERIVED_GENERATION,
+            PrincipalRequirement::None,
+        ),
+        (
+            "frankengit_source_context",
+            CapabilityRequirement::READ_DERIVED_GENERATION,
+            PrincipalRequirement::None,
+        ),
+        (
+            "frankengit_agent_context",
+            CapabilityRequirement::READ_AGENT_CONTEXT,
+            PrincipalRequirement::HostBound,
+        ),
+    ] {
+        let tool = find_tool(name).unwrap();
+        assert_eq!(tool.read_mutation, ReadMutationClass::ReadOnly);
+        assert_eq!(tool.capability, capability);
+        assert_eq!(tool.principal, principal);
+        let selectors: Vec<_> = tool
+            .input_fields
+            .iter()
+            .filter(|field| field.name == "index_source")
+            .collect();
+        assert_eq!(selectors.len(), 1);
+        let selector = selectors[0];
+        assert!(!selector.required, "absence must retain the strict profile");
+        assert_eq!(selector.field_type, "string");
+        assert_eq!(
+            selector.classification,
+            FieldClassification::SelectorPosition
+        );
+        assert_eq!(selector.pattern, Some("^current-native-v1$"));
+        assert!(selector.description.contains("original index provenance"));
+        assert!(tool.refusal_codes.contains(&"unsupported_index_source"));
+    }
+}
+
+#[test]
 fn protection_registry_describes_optional_queue_requirement_without_new_authority() {
     let tool = find_tool("frankengit_protection_set").unwrap();
     let branches = tool

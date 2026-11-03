@@ -1,5 +1,5 @@
-use super::{AgentContextRequest, profile, sponsor_authentication};
-use crate::source_retrieval::context::InitialContext;
+use super::{AgentContextRequest, CURRENT_NATIVE_INDEX_SOURCE, profile, sponsor_authentication};
+use crate::source_retrieval::context::{ContextFile, InitialContext, RevalidatedInitialContext};
 use crate::source_retrieval::current_index::{
     GenerationActivation, IndexedLexicalReport, LexicalSource,
 };
@@ -7,6 +7,7 @@ use crate::source_retrieval::{SymbolChannel, SymbolPolicy, SymbolUnavailable};
 use fgit_admission::evidence::AgentAuthentication;
 use fgit_agent::{AuthorityReadReceipt, ContextPacket, IntentRun};
 use fgit_forge::source_symbols::SymbolMatchMode;
+use fgit_graph::lexical::LexicalChannel;
 use fgit_resource::algebra::Grade;
 use fgit_schema::json::{Value, number, object, text};
 use fgit_types::{Digest, InternalObjectId};
@@ -186,6 +187,14 @@ pub(super) fn intent(input: &AgentContextRequest<'_>) -> Value {
     ]);
     with_agent_authentication(input, value)
 }
+
+pub(super) fn revalidated_intent(input: &AgentContextRequest<'_>) -> Value {
+    let mut value = intent(input);
+    if let Value::Object(fields) = &mut value {
+        fields.insert("index_source".into(), text(CURRENT_NATIVE_INDEX_SOURCE));
+    }
+    value
+}
 fn source(value: &LexicalSource) -> Value {
     object([
         ("tenant_id", text(value.namespace.tenant.to_string())),
@@ -208,6 +217,24 @@ fn source(value: &LexicalSource) -> Value {
             token(value.source_rcr.as_internal_object_id()),
         ),
         ("forge_position_root", digest(value.forge_position_root)),
+        ("commit", text(value.commit.to_string())),
+        ("tree", text(value.tree.to_string())),
+    ])
+}
+
+fn symbol_source(value: &fgit_forge::source_symbols::index::Source) -> Value {
+    object([
+        ("tenant_id", text(value.tenant.to_string())),
+        ("repository_id", text(value.repository.to_string())),
+        ("incarnation_id", text(value.incarnation.to_string())),
+        ("object_format", text(value.format.as_str())),
+        ("reference_hex", bytes(value.reference.as_bytes())),
+        ("head", token(value.head.as_internal_object_id())),
+        (
+            "repository_commit",
+            token(value.rcr.as_internal_object_id()),
+        ),
+        ("forge_position_root", digest(value.forge)),
         ("commit", text(value.commit.to_string())),
         ("tree", text(value.tree.to_string())),
     ])
@@ -307,15 +334,12 @@ fn symbols(
     }
 }
 
-/// This evidence body has no executable/source-text fields. Raw paths remain
-/// byte strings, and every source excerpt is separately retained below.
-pub(super) fn evidence(
-    context: &InitialContext,
+fn evidence_files(
+    context: &[ContextFile],
     live: &mut impl FnMut() -> Result<(), String>,
-) -> Result<Value, String> {
-    let initial = context.retrieval();
+) -> Result<Vec<Value>, String> {
     let mut files = Vec::new();
-    for file in context.files() {
+    for file in context {
         live()?;
         let anchors = file
             .anchors()
@@ -354,6 +378,17 @@ pub(super) fn evidence(
             ),
         ]));
     }
+    Ok(files)
+}
+
+/// This evidence body has no executable/source-text fields. Raw paths remain
+/// byte strings, and every source excerpt is separately retained below.
+pub(super) fn evidence(
+    context: &InitialContext,
+    live: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Value, String> {
+    let initial = context.retrieval();
+    let files = evidence_files(context.files(), live)?;
     Ok(object([
         ("profile", text("agent-context-evidence-v1")),
         ("source", source(initial.source())),
@@ -375,6 +410,88 @@ pub(super) fn evidence(
         ("content_channel", lexical(initial.content(), live)?),
         ("path_channel", lexical(initial.path(), live)?),
         ("symbol_channel", symbols(initial.symbols(), live)?),
+        ("complete", Value::Bool(context.complete())),
+        (
+            "coverage_meaning",
+            text(
+                "all requested channels complete and every returned match hydrated; excerpts do not claim whole-file or repository completeness",
+            ),
+        ),
+        ("selection", text("raw-path-prefix")),
+        ("candidate_files", count(context.candidate_files())),
+        ("omitted_candidate_files", count(context.omitted_files())),
+        ("source_bytes_read", count(context.source_bytes_read())),
+        ("excerpt_bytes", count(context.excerpt_bytes())),
+        ("source_file_limit", count(context.source_file_limit())),
+        (
+            "lineage_metadata_bytes",
+            count(context.lineage_metadata_bytes()),
+        ),
+        ("result_bytes", count(initial.result_bytes())),
+        ("files", Value::Array(files)),
+    ]))
+}
+
+/// Current disclosure and immutable index provenance are separate records.
+/// Every original row label is retained, including rows omitted by the finite
+/// file selection; hydrated anchors keep their saved labels and commitments.
+pub(super) fn revalidated_evidence(
+    context: &RevalidatedInitialContext,
+    live: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Value, String> {
+    let initial = context.retrieval();
+    let mut content = lexical(initial.content(), live)?;
+    let mut path = lexical(initial.path(), live)?;
+    for (value, report, channel) in [
+        (&mut content, initial.content(), LexicalChannel::Content),
+        (&mut path, initial.path(), LexicalChannel::Path),
+    ] {
+        if let Value::Object(fields) = value {
+            fields.insert("index_source".into(), source(&report.source));
+            fields.insert(
+                "authorization_labels".into(),
+                labels(initial.authorization().lexical(channel)),
+            );
+        }
+    }
+    let mut symbol_channel = symbols(initial.symbols(), live)?;
+    if let SymbolChannel::Available(symbols) = initial.symbols()
+        && let Value::Object(fields) = &mut symbol_channel
+    {
+        fields.insert("index_source".into(), symbol_source(&symbols.source));
+        fields.insert(
+            "authorization_labels".into(),
+            labels(initial.authorization().symbols()),
+        );
+    }
+    // Both names describe the same observation. `source` preserves the common
+    // host namespace contract; `current_source` makes the provenance split
+    // explicit without another selection or any rewrite of the index reports.
+    let current = source(initial.current_source());
+    let files = evidence_files(context.files(), live)?;
+    Ok(object([
+        ("profile", text("agent-context-revalidated-evidence-v1")),
+        ("index_source", text(CURRENT_NATIVE_INDEX_SOURCE)),
+        ("source", current.clone()),
+        ("current_source", current),
+        (
+            "authorization_binding",
+            bytes(initial.authorization().binding()),
+        ),
+        ("authorization_host", text(initial.authorization().host())),
+        ("authorization_scope", text("whole-repository")),
+        ("reusable_capability", Value::Bool(false)),
+        (
+            "lexical_generation",
+            generation(&initial.generations().lexical),
+        ),
+        (
+            "symbol_generation",
+            optional(initial.generations().symbols.as_ref(), generation),
+        ),
+        ("content_channel", content),
+        ("path_channel", path),
+        ("symbol_channel", symbol_channel),
         ("complete", Value::Bool(context.complete())),
         (
             "coverage_meaning",
@@ -463,12 +580,13 @@ pub(super) fn document(
     intent: Value,
     evidence: Value,
     evidence_commitment: [u8; 32],
-    context: &InitialContext,
+    files: &[ContextFile],
+    complete: bool,
     live: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<Value, String> {
     let mut sources = Vec::new();
     let mut originals = packet.sources().iter();
-    for file in context.files() {
+    for file in files {
         for span in file.excerpts() {
             live()?;
             let original = originals
@@ -497,7 +615,6 @@ pub(super) fn document(
     if originals.next().is_some() {
         return Err("agent packet source count mismatch".into());
     }
-    let complete = context.complete();
     let document = object([
         ("type", text("agent_context")),
         ("schema_version", number(1)),

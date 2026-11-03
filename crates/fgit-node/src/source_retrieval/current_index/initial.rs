@@ -32,6 +32,7 @@ pub struct RevalidatedInitialReport {
     symbols: SymbolChannel,
     vector: GenerationVector,
     result_bytes: usize,
+    max_result_bytes: usize,
     authorization: InitialAuthorization,
 }
 impl RevalidatedInitialReport {
@@ -70,6 +71,12 @@ impl RevalidatedInitialReport {
     #[must_use]
     pub const fn result_bytes(&self) -> usize {
         self.result_bytes
+    }
+    /// Hydration retains additional lineage under the original result-byte
+    /// allowance. Revalidation never grants a fresh metadata budget.
+    pub(crate) fn check_context_metadata(&self, amount: usize) -> Result<(), RetrievalError> {
+        let mut aggregate = self.result_bytes;
+        add_result(&mut aggregate, amount, self.max_result_bytes)
     }
     #[must_use]
     pub fn complete(&self) -> bool {
@@ -292,6 +299,7 @@ impl OneNode {
             symbols,
             vector,
             result_bytes,
+            max_result_bytes: limits.max_result_bytes,
             authorization,
         })
     }

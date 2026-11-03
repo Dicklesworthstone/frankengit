@@ -73,7 +73,13 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     .map_err(refusal)?;
     let value = json::parse_with(document.as_bytes(), DOCUMENT_LIMITS)
         .map_err(|_| ToolError::failed("invalid_agent_context_report"))?;
-    validate_report(backend, &read, sponsor, &value)?;
+    validate_report(
+        backend,
+        &read,
+        sponsor,
+        string(args, "index_source")?,
+        &value,
+    )?;
     Ok(value)
 }
 
@@ -81,6 +87,7 @@ fn validate_report(
     backend: &NodeTools,
     read: &SourceReadContext,
     sponsor_id: PrincipalId,
+    index_source: Option<&str>,
     value: &Value,
 ) -> Result<(), ToolError> {
     let invalid = || ToolError::failed("invalid_agent_context_report");
@@ -118,6 +125,20 @@ fn validate_report(
         || sponsor.get("authentication").and_then(Value::text) != Some(authentication)
         || sponsor.get("authorization_host").and_then(Value::text) != Some(read.host())
         || !witness_fields_match(report, witness.as_ref())
+        || report
+            .get("request")
+            .and_then(Value::object)
+            .and_then(|request| request.get("index_source"))
+            .and_then(Value::text)
+            != index_source
+        || evidence.get("index_source").and_then(Value::text) != index_source
+        || evidence.get("profile").and_then(Value::text)
+            != Some(if index_source.is_some() {
+                "agent-context-revalidated-evidence-v1"
+            } else {
+                "agent-context-evidence-v1"
+            })
+        || (index_source.is_some() && evidence.get("current_source") != evidence.get("source"))
         || source.get("tenant_id").and_then(Value::text)
             != Some(backend.options.tenant.to_string().as_str())
         || source.get("repository_id").and_then(Value::text)

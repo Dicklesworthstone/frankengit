@@ -5,7 +5,7 @@ use super::write_report;
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
-const MAX_FIELDS: usize = 197;
+const MAX_FIELDS: usize = 198;
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const USAGE: &str =
     "usage: fg search (--initial | --context) <storage-root> <tenant-id> <repository-id>
@@ -15,6 +15,10 @@ Fields use the HTTP search-initial/context-initial grammar exactly, for example
   ref=refs/heads/main term_hex=5468696e67 path_prefix_hex=737263
   symbol_name_hex=5468696e67 symbol_match=prefix symbol_policy=required
   max_results_per_channel=20 context_selection=context-weighted-rrf-q16-v1
+Use index_source=current-native-v1 to reuse original index generations after
+metadata-only changes, revalidating the current visible native commit and tree.
+This mode uses raw-path-prefix context selection; ranked selection is separate.
+Without index_source, index source positions must match the exact current head.
 Repeat term_hex, path_prefix_hex and symbol_kind for several values. The node
 supplies object_format. Requires built lexical (and, for symbols, symbol)
 indexes; nothing is built or refreshed and no repository state changes.

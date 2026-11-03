@@ -26,7 +26,8 @@ const LISTS: [(&str, &str, usize); 3] = [
     ("symbol_kinds", "symbol_kind", 8),
 ];
 /// Arguments passed through unchanged as one string route field.
-const STRINGS: [&str; 9] = [
+const STRINGS: [&str; 10] = [
+    "index_source",
     "expected_head",
     "expected_commit",
     "symbol_name_hex",
@@ -77,6 +78,9 @@ pub(super) fn fields(args: &Object, context: bool) -> Result<Vec<(String, String
         allowed.push("context_selection");
     }
     require_fields(args, &allowed)?;
+    if string(args, "index_source")?.is_some_and(|mode| mode != "current-native-v1") {
+        return Err(ToolError::invalid("unsupported_index_source"));
+    }
     let reference = string(args, "reference")?.ok_or(ToolError::invalid("reference_required"))?;
     let mut out = vec![("ref".to_owned(), reference.to_owned())];
     for (name, field, maximum) in LISTS {
@@ -151,7 +155,24 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     } else {
         object
     };
-    if object.get("read_only") != Some(&Value::Bool(true))
+    let current = args.get("index_source").and_then(Value::text) == Some("current-native-v1");
+    let profile = if current {
+        fgit_node::source_retrieval::current_index::initial::PROFILE
+    } else {
+        fgit_node::source_retrieval::PROFILE
+    };
+    let selector = current.then_some("current-native-v1");
+    if retrieval.get("profile").and_then(Value::text) != Some(profile)
+        || retrieval.get("index_source").and_then(Value::text) != selector
+        || (context && object.get("index_source").and_then(Value::text) != selector)
+        || (context
+            && object.get("profile").and_then(Value::text)
+                != Some(if current {
+                    fgit_node::source_retrieval::context::REVALIDATED_PROFILE
+                } else {
+                    fgit_node::source_retrieval::context::PROFILE
+                }))
+        || object.get("read_only") != Some(&Value::Bool(true))
         || object.get("transaction_created") != Some(&Value::Bool(false))
         || retrieval.get("tenant_id").and_then(Value::text)
             != Some(backend.options.tenant.to_string().as_str())
@@ -239,6 +260,14 @@ pub(super) fn input_schema(context: bool) -> Value {
             string_schema(256, "Same field as HTTP search-initial."),
         );
     }
+    properties.insert(
+        "index_source".into(),
+        object([
+            ("type", text("string")),
+            ("enum", Value::Array(vec![text("current-native-v1")])),
+            ("description", text("Omit for the strict authority-head index contract; current-native-v1 revalidates unchanged native source while preserving original index provenance. Context uses raw-path-prefix selection only in this mode.")),
+        ]),
+    );
     let limits: &[&str] = if context {
         &[
             "max_results_per_channel",

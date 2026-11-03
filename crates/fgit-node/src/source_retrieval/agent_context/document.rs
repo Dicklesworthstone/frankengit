@@ -4,13 +4,19 @@
 //! operator attribution. These profiles create no durable run or write right.
 mod render;
 
-use super::{AgentContextRead, AgentContextReadError, context_packet_for_run};
+use super::{
+    AgentContextRead, AgentContextReadError, context_packet_for_revalidated_run,
+    context_packet_for_run,
+};
 use crate::source_retrieval::authorization::SourceReadContext;
-use crate::source_retrieval::context::ContextLimits;
+use crate::source_retrieval::context::{
+    ContextFile, ContextLimits, InitialContext, RevalidatedInitialContext,
+};
 use crate::source_retrieval::{Checkpoints, InitialLimits, InitialQuery};
 use crate::{NodeRefusal, NodeRequestContext, OneNode};
 use fgit_agent::{
-    AuthorityReadReceipt, ClassSet, ContextControl, IntentRun, LogicalTime, OperationClass, RunId,
+    AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket, IntentRun, LogicalTime,
+    OperationClass, RunId,
 };
 use fgit_crypto::sha256_digest;
 use fgit_resource::{ResourceVector, algebra::Grade};
@@ -27,6 +33,8 @@ pub const HTTP_AGENT_PROFILE: &str = "agent-context-http-sponsored-agent-v1";
 /// Canonical sponsored MCP authentication, distinct from trusted-local MCP
 /// attribution and retaining the verified request's original finite lifetime.
 pub const MCP_AGENT_PROFILE: &str = "agent-context-mcp-sponsored-agent-v1";
+/// Explicit index-source selection; independent of the authenticated host.
+pub const CURRENT_NATIVE_INDEX_SOURCE: &str = "current-native-v1";
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_LIFETIME: Duration = Duration::from_secs(300);
 const VERIFIER: &[u8] = b"frankengit/native-agent-context/authenticated-head/v1\0";
@@ -119,6 +127,52 @@ pub struct AgentContextRequest<'a> {
 pub struct AgentContextDocument {
     pub json: String,
     pub complete: bool,
+}
+
+#[derive(Clone, Copy)]
+enum IndexSource {
+    Strict,
+    CurrentNative,
+}
+
+// Keep the native result types distinct all the way through packet binding.
+// In particular, a current observation never becomes fictitious index source.
+enum NativeContext {
+    Strict(InitialContext),
+    Revalidated(RevalidatedInitialContext),
+}
+impl NativeContext {
+    fn files(&self) -> &[ContextFile] {
+        match self {
+            Self::Strict(context) => context.files(),
+            Self::Revalidated(context) => context.files(),
+        }
+    }
+    fn complete(&self) -> bool {
+        match self {
+            Self::Strict(context) => context.complete(),
+            Self::Revalidated(context) => context.complete(),
+        }
+    }
+    fn evidence(
+        &self,
+        live: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<fgit_schema::json::Value, String> {
+        match self {
+            Self::Strict(context) => render::evidence(context, live),
+            Self::Revalidated(context) => render::revalidated_evidence(context, live),
+        }
+    }
+    fn packet(
+        &self,
+        run: &IntentRun,
+        control: ContextControl,
+    ) -> Result<ContextPacket, super::AgentContextRefusal> {
+        match self {
+            Self::Strict(context) => context_packet_for_run(run, context, control),
+            Self::Revalidated(context) => context_packet_for_revalidated_run(run, context, control),
+        }
+    }
 }
 
 fn validate_lifetime(lifetime: Duration) -> Result<(), AgentContextDocumentError> {
@@ -256,6 +310,30 @@ pub async fn read_agent_context_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
 ) -> Result<AgentContextDocument, AgentContextDocumentError> {
+    read_agent_context_with_source_in(node, request, input, IndexSource::Strict).await
+}
+
+/// Explicitly read existing indexes revalidated against the current native
+/// source. The request commitment includes `index_source=current-native-v1`;
+/// the host authentication profile and original index provenance are retained.
+///
+/// This sibling never changes the strict entrypoint's source joins, intent
+/// bytes or rendered shape. Both modes share the same sponsor, run, lifetime,
+/// resource, packet binding and all-or-nothing output enforcement below.
+pub async fn read_agent_context_revalidated_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+) -> Result<AgentContextDocument, AgentContextDocumentError> {
+    read_agent_context_with_source_in(node, request, input, IndexSource::CurrentNative).await
+}
+
+async fn read_agent_context_with_source_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+    index_source: IndexSource,
+) -> Result<AgentContextDocument, AgentContextDocumentError> {
     input
         .authorization
         .check_node(node)
@@ -293,7 +371,10 @@ pub async fn read_agent_context_in(
     {
         return Err(AgentContextDocumentError::AuthorityHeadChanged);
     }
-    let intent = render::intent(&input);
+    let intent = match index_source {
+        IndexSource::Strict => render::intent(&input),
+        IndexSource::CurrentNative => render::revalidated_intent(&input),
+    };
     let intent_bytes = intent.encode(128 * 1024).map_err(str::to_owned)?;
     let request_commitment = commitment(
         b"frankengit/agent-context-request/v1\0",
@@ -339,34 +420,41 @@ pub async fn read_agent_context_in(
     .map_err(|error| error.to_string())?;
     let ranking = sha256_digest(RANKING);
     let control = ContextControl::new(request_commitment, read_scope(), ranking, vec![], vec![]);
-    let native = node
-        .retrieve_agent_context_local_in(
-            request,
-            AgentContextRead {
-                run: &run,
-                authorization: input.authorization,
-                reference: input.reference,
-                query: input.query,
-                checkpoints: input.checkpoints,
-                retrieval_limits: input.retrieval_limits,
-                context_limits: input.context_limits,
-                control,
-            },
-            &|| clock.now(),
-        )
-        .await
-        .map_err(AgentContextDocumentError::Native)?;
+    let read = AgentContextRead {
+        run: &run,
+        authorization: input.authorization,
+        reference: input.reference,
+        query: input.query,
+        checkpoints: input.checkpoints,
+        retrieval_limits: input.retrieval_limits,
+        context_limits: input.context_limits,
+        control,
+    };
+    let context = match index_source {
+        IndexSource::Strict => NativeContext::Strict(
+            node.retrieve_agent_context_local_in(request, read, &|| clock.now())
+                .await
+                .map_err(AgentContextDocumentError::Native)?
+                .into_parts()
+                .0,
+        ),
+        IndexSource::CurrentNative => NativeContext::Revalidated(
+            node.retrieve_agent_context_revalidated_local_in(request, read, &|| clock.now())
+                .await
+                .map_err(AgentContextDocumentError::Native)?
+                .into_parts()
+                .0,
+        ),
+    };
     clock.check(request)?;
-    let context = native.context();
-    let evidence = render::evidence(context, &mut || {
-        clock.check(request).map_err(|error| error.to_string())
-    })
-    .map_err(|error| {
-        clock
-            .check(request)
-            .err()
-            .unwrap_or(AgentContextDocumentError::Evidence(error))
-    })?;
+    let evidence = context
+        .evidence(&mut || clock.check(request).map_err(|error| error.to_string()))
+        .map_err(|error| {
+            clock
+                .check(request)
+                .err()
+                .unwrap_or(AgentContextDocumentError::Evidence(error))
+        })?;
     let evidence_bytes = evidence
         .encode(input.max_output_bytes)
         .map_err(|_| AgentContextDocumentError::OutputLimit)?;
@@ -377,18 +465,18 @@ pub async fn read_agent_context_in(
     // Actual omissions and generation positions are available only after the
     // native read. Rebind the same native context with that immutable evidence;
     // do not fabricate an empty completeness claim before retrieval.
-    let packet = context_packet_for_run(
-        &run,
-        context,
-        ContextControl::new(
-            request_commitment,
-            read_scope(),
-            ranking,
-            vec![],
-            vec![evidence_commitment],
-        ),
-    )
-    .map_err(|error| error.to_string())?;
+    let packet = context
+        .packet(
+            &run,
+            ContextControl::new(
+                request_commitment,
+                read_scope(),
+                ranking,
+                vec![],
+                vec![evidence_commitment],
+            ),
+        )
+        .map_err(|error| error.to_string())?;
     clock.check(request)?;
     let document = render::document(
         &input,
@@ -397,7 +485,8 @@ pub async fn read_agent_context_in(
         intent,
         evidence,
         evidence_commitment,
-        context,
+        context.files(),
+        context.complete(),
         &mut || clock.check(request).map_err(|error| error.to_string()),
     )
     .map_err(|error| {

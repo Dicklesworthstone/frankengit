@@ -334,6 +334,11 @@ Git publication, reviews, merges and administration remain outside this profile.
 credentials. Its independent `--allow-source` and `--allow-agent-context` ceilings
 expose current source retrieval and authenticated context while preserving the
 actual agent/sponsor and original request lifetime through response output.
+For Initial, source-context and agent-context reads, explicit
+`index_source=current-native-v1` reuses existing indexes after metadata-only
+changes while retaining their original provenance and checking current visible
+commit/tree identity. The CLI equivalent is `fg agent context --index-source
+current-native-v1`; unchanged strict reads still require exact index positions.
 Revocation is rechecked at the publication CAS basis, and outcome receipts retain
 the original agent/sponsor evidence across rotation and restart. See
 [sponsored agent credentials](docs/SPONSORED_AGENT_CREDENTIALS.md) for private token

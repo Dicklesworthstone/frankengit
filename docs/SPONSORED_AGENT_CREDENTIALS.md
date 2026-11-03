@@ -198,8 +198,14 @@ Initial, source-context and agent-context retrieval require existing current
 indexes; reads do not create or rebuild them. Current visible-source filtering
 and exact snapshot preconditions remain enforced by the native readers.
 Credential issuance, revocation or other metadata changes advance the selected
-authority head, so these strict indexed tools return `source_index_stale` until
-indexes cover that head, even when the Git commit is unchanged.
+authority head, so the default strict indexed tools return `source_index_stale`
+until indexes cover that head, even when the Git commit is unchanged. Select
+`index_source: "current-native-v1"` in Initial, source-context or agent-context
+arguments to reuse existing generations after these metadata-only changes.
+Current visible commit/tree identity must still match, and the response preserves
+both current disclosure and original index provenance. Actual source movement,
+visibility failure, missing required indexes and stale current-head pins refuse.
+This mode grants no additional operation and does not rebuild indexes.
 
 Sponsored MCP agent-context documents use
 `agent-context-mcp-sponsored-agent-v1` with

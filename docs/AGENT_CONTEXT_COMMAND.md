@@ -31,6 +31,40 @@ The repository and lexical index must already exist. Reading context does not
 build or refresh an index. A missing or stale required index refuses the read;
 an empty source result is never substituted for that failure.
 
+### Read after unrelated metadata changes
+
+Add `--index-source current-native-v1` when existing indexes should remain usable
+after an issue comment, credential rotation, or another metadata-only change:
+
+```sh
+fg agent context /srv/frankengit/repository \
+  TENANT_ID REPOSITORY_ID refs/heads/main \
+  --trusted-local --sponsor SPONSOR_ID --term cancellation \
+  --index-source current-native-v1 --max-files 8
+```
+
+This explicit mode authenticates the current visible native source and requires
+the original indexes to describe that same tenant, repository, incarnation,
+object format, ref, commit and tree. Their old authority heads, repository commits,
+forge positions and generation IDs remain recorded as original index provenance.
+Source changes still require an index covering the new source. Missing or corrupt
+indexes, hidden refs, unsatisfied generation floors and changed current-head pins
+remain refusals. Reading never builds indexes or retries against a newer head.
+
+Omitting the selector retains the original strict behavior: index authority
+positions must coincide with the selected current source. Only the exact value
+`current-native-v1` is accepted when supplied. The mode supports raw-path-prefix
+context selection; it does not implicitly select ranked retrieval.
+
+The current source authenticates the run and packet. The new request commits
+`index_source: "current-native-v1"`; `retrieval_evidence.current_source` retains
+the current disclosure observation, while each channel's `index_source` records
+its original index observation. The `source` field remains the current source.
+Original generation positions, row labels, anchor membership, omissions and exact
+excerpt bytes remain bound into the evidence commitment. Lineage metadata uses
+the original retrieval result-byte ceiling before any source hydration; this mode
+does not introduce a fresh resource allowance or request lifetime.
+
 `--term` selects complete lexical tokens and can be repeated up to 32 times.
 Terms use the existing Initial retrieval token normalization. They are not
 regular expressions or a natural-language prompt. `--path` is a raw byte prefix
@@ -143,6 +177,8 @@ as the independently authenticated principal. The existing
 `fgit_cli::agent_context::read_agent_context_in` API remains a trusted-local
 wrapper, and `bounded_request_context` supplies that command's deadline.
 Neither entry point accepts a bearer token or widens a source grant.
+The native and CLI `read_agent_context_revalidated_in` siblings select the
+explicit current-native mode with the same request type and authorization checks.
 
 ## Authenticated HTTP context
 
@@ -177,6 +213,7 @@ Requests use `application/x-www-form-urlencoded`, with these fields:
 | `term_hex` | Repeated exact lexical token bytes, at most 32 terms. |
 | `path_prefix_hex` | Repeated raw path prefixes narrowing selection, at most 128. |
 | `expected_head` | Optional exact authority-head token from a previous response. |
+| `index_source` | Optional `current-native-v1` to reuse unchanged-source indexes after metadata movement; absence retains strict matching. |
 | `symbol_name_hex`, `symbol_match`, `symbol_policy`, `symbol_kind` | The existing Initial symbol grammar; match is exact/prefix and policy required/optional. |
 | `minimum_lexical_token`, `minimum_lexical_number` | Optional paired lexical-generation floor. |
 | `minimum_symbol_token`, `minimum_symbol_number` | Optional paired symbol-generation floor. |
@@ -270,6 +307,11 @@ node supplies `object_format`; clients cannot replace it. The complete native
 JSON document is limited to 1 MiB, including all source and evidence, and the
 existing MCP transport envelope remains independently bounded. No truncated
 JSON or successful empty substitute is returned when a required index is absent.
+Add `"index_source":"current-native-v1"` to the same tool arguments to retain
+usable context after unrelated metadata changes. It uses the same source-read
+credential and independent launch ceiling, and commits the selector into the
+request. The host authentication profile and original credential lifetime remain
+unchanged; the retrieval evidence distinguishes current source from index origins.
 
 A partial packet remains a successful read with `complete: false` and explicit
 omissions in `structuredContent`; it grants no publication rights. Cancellation

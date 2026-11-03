@@ -1,4 +1,6 @@
 //! Persisted native repositories, real index generations and metadata changes.
+mod hydration;
+
 use super::*;
 use crate::source_retrieval::{SymbolPolicy, SymbolUnavailable};
 use crate::{LoopbackReceiveSession, NodeConfig};

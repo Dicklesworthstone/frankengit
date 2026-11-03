@@ -64,6 +64,13 @@
               "x-classification": "selector_position",
               "maxLength": 256
             },
+            "index_source": {
+              "type": "string",
+              "description": "Optional current-native-v1 reuses existing index generations after metadata-only movement when the current visible native commit and tree still match. Absence retains exact source-position matching; original index provenance is never rewritten.",
+              "x-classification": "selector_position",
+              "maxLength": 32,
+              "pattern": "^current-native-v1$"
+            },
             "symbol_name_hex": {
               "type": "string",
               "description": "Exact symbol name bytes as lowercase hex.",
@@ -3526,7 +3533,7 @@
     },
     "frankengit_source_context": {
       "title": "frankengit_source_context",
-      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector.",
+      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector. Explicit current-native-v1 index reuse preserves original index provenance after metadata-only changes and supports raw-path-prefix selection.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3559,6 +3566,13 @@
               "description": "Optional snapshot token pin.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "index_source": {
+              "type": "string",
+              "description": "Optional current-native-v1 reuses original index generations only when current visible native commit and tree still match. Absence retains strict exact source-position matching; current and original index provenance remain separate.",
+              "x-classification": "selector_position",
+              "maxLength": 32,
+              "pattern": "^current-native-v1$"
             },
             "minimum_lexical_token": {
               "type": "string",
@@ -3591,7 +3605,7 @@
     },
     "frankengit_source_initial": {
       "title": "frankengit_source_initial",
-      "description": "Model-free Initial search over persisted lexical, path and symbol indexes in one snapshot and index generation vector.",
+      "description": "Model-free Initial search over persisted lexical, path and symbol indexes in one snapshot and index generation vector. Explicit current-native-v1 index reuse authenticates current visible source while preserving each original index source and generation after metadata-only changes.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3624,6 +3638,13 @@
               "description": "Optional snapshot token pin.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "index_source": {
+              "type": "string",
+              "description": "Optional current-native-v1 reuses original index generations only when current visible native commit and tree still match. Absence retains strict exact source-position matching; current and original index provenance remain separate.",
+              "x-classification": "selector_position",
+              "maxLength": 32,
+              "pattern": "^current-native-v1$"
             },
             "minimum_lexical_token": {
               "type": "string",

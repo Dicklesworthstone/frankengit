@@ -120,6 +120,15 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
             "Optional exact authenticated authority-head token; mismatch refuses before source disclosure.",
             256,
         ),
+        McpField {
+            name: "index_source",
+            field_type: "string",
+            classification: FieldClassification::SelectorPosition,
+            description: "Optional current-native-v1 reuses existing index generations after metadata-only movement when the current visible native commit and tree still match. Absence retains exact source-position matching; original index provenance is never rewritten.",
+            required: false,
+            max_bytes: Some(32),
+            pattern: Some("^current-native-v1$"),
+        },
         selector(
             "symbol_name_hex",
             "Exact symbol name bytes as lowercase hex.",
@@ -264,7 +273,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         output(
             "request",
             "object",
-            "Complete normalized bounded request and its source-read host.",
+            "Complete normalized bounded request and its source-read host; explicit index_source is committed when current-native-v1 is selected.",
         ),
         output(
             "context_packet",
@@ -274,7 +283,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         output(
             "retrieval_evidence",
             "object",
-            "Exact source identity, native generations, channel and selection omissions, source counters and file lineage.",
+            "Exact current source identity, original native index sources and generations, channel and selection omissions, source counters and file lineage. Current-native-v1 preserves current disclosure and original index positions separately.",
         ),
         field(
             "evidence_commitment",
@@ -361,6 +370,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         "unsupported_agent_context_precondition",
         "unsupported_agent_context_selection",
         "unsupported_context_selection",
+        "unsupported_index_source",
         "unsupported_symbol_kind",
         "unsupported_symbol_match",
         "unsupported_symbol_policy",

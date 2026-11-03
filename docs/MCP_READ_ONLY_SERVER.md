@@ -87,6 +87,14 @@ This grant enables no other tool group or write capability. See
 [the context command and HTTP/MCP contract](AGENT_CONTEXT_COMMAND.md#mcp-context)
 for arguments, explicit omissions, output limits and sponsorship semantics.
 
+Initial, source-context and agent-context tools accept the explicit
+`index_source: "current-native-v1"` selector. It keeps existing index generations
+usable after unrelated metadata changes by authenticating the current visible
+native source and requiring the same commit and tree. Original index authority
+positions and generations remain separate evidence. The default strict profile
+is unchanged; missing indexes and actual source changes still refuse. The mode
+uses the existing read grants and supports raw-path-prefix context selection.
+
 ## Issue read tools
 
 `frankengit_issue_list` accepts optional `limit` (integer, 1..20, default 5),
