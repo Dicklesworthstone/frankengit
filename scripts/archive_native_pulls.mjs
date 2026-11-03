@@ -69,7 +69,7 @@ export async function main(args,{stdout=process.stdout,stderr=process.stderr}={}
       ...(error.archive_progress ? {archive_progress:error.archive_progress} : {}),
       ...(error.capture_progress ? {capture_progress:error.capture_progress} : {}),
       ...(result ? {retained_result:result} : {})}); } catch { /* Custody stays available for explicit inspection. */ }
-    const retained = result || error.archive_progress?.expected_archive_sha256 ||
+    const retained = result || error.archive_progress?.directory_created === true || error.archive_progress?.expected_archive_sha256 ||
       error.capture_progress?.selection_sha256 && (error.capture_progress.directory_created || error.capture_progress.selection_verified);
     return retained ? 4 : 2;
   } finally { process.removeListener('SIGTERM',abort); process.removeListener('SIGINT',abort); }
