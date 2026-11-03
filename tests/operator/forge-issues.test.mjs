@@ -43,19 +43,20 @@ async function fixture(t) {
       return respond(200, { type: 'issue_history', ...common(), snapshot_token: snapshot, after_version: after, limit,
         found: Boolean(f.row), issue: f.row, events, next_after_version: f.events.length > after + events.length ? after + events.length : null });
     }
-    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-labels|lock|unlock)$/.exec(url.pathname);
+    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-assignees|add-labels|lock|unlock)$/.exec(url.pathname);
     if (!match || req.method !== 'POST') return respond(404, {});
     if (f.onMutation) f.onMutation({ key, body });
     const form = new URLSearchParams(body), action = match[1];
-    const expected = action === 'add-labels' ? null : Number(form.get('expected_version'));
+    const independent = ['add-assignees', 'add-labels'].includes(action);
+    const expected = independent ? null : Number(form.get('expected_version'));
     let decision = f.decisions.get(key);
     if (decision && decision.original_body !== body) return respond(409, { error: 'key reuse' });
     if (!decision) {
       const permitted = action === 'comment' ? !f.row?.locked : action === 'lock' ? f.row?.locked === false
         : action === 'unlock' ? f.row?.locked === true : true;
-      const committed = (action === 'add-labels' ? Boolean(f.row) : expected === f.version) && f.mode !== 'refuse' && permitted;
+      const committed = (independent ? Boolean(f.row) : expected === f.version) && f.mode !== 'refuse' && permitted;
       decision = { type: 'issue_publication', ...common(), number: 1, expected_version: expected, action,
-        ...(action === 'add-labels' ? { command_profile: 'issue.add-labels.v1' } : {}),
+        ...(independent ? { command_profile: `issue.${action}.v1` } : {}),
         principal_id: actor, tx_id: 'tx-' + key, decision_sequence: f.decisions.size + 1,
         outcome: committed ? 'committed' : 'refused', repository_commit_id: committed ? 'rcr-1' : null,
         refusal_code: committed ? null : !permitted ? 'ProtectedRefTransitionDenied' : 'expected_version',
@@ -73,10 +74,10 @@ async function fixture(t) {
           for (const k of ['title', 'body']) if (form.has(k)) f.row[k] = form.get(k);
           if (form.has('label') || form.has('clear_labels')) f.row.labels = form.getAll('label');
         }
-        if (action === 'assign') f.row.assignees = [...new Set([...f.row.assignees, ...form.getAll('assignee')])].sort();
+        if (['assign', 'add-assignees'].includes(action)) f.row.assignees = [...new Set([...f.row.assignees, ...form.getAll('assignee')])].sort();
         if (action === 'unassign') f.row.assignees = f.row.assignees.filter(id => !form.getAll('assignee').includes(id));
         if (action === 'add-labels') f.row.labels = [...new Set([...f.row.labels, ...form.getAll('label')])].sort();
-        const eventAction = { name: action };
+        const eventAction = { name: action === 'add-assignees' ? 'assign' : action };
         for (const k of ['title', 'body']) if (form.has(k)) eventAction[k] = form.get(k);
         if (form.has('label') || action === 'open') eventAction.labels = form.getAll('label');
         if (form.has('assignee')) eventAction.assignees = form.getAll('assignee');
@@ -96,7 +97,7 @@ async function fixture(t) {
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
   return f;
 }
-const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-labels|lock|unlock)$/.test(c.path));
+const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-assignees|add-labels|lock|unlock)$/.test(c.path));
 function command(args) {
   const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = []; child.stdout.on('data', b => out.push(b)); child.stderr.on('data', b => err.push(b));
@@ -284,6 +285,94 @@ test('assignment CLI validates bounded canonical IDs before files or network eff
     assert.throws(() => issueArguments([...flags(f, operation).slice(0, -2), '--assignee', a]));
   }
   assert.equal(f.calls.length, 0); assert.deepEqual(await readdir(f.root), ['token']);
+});
+test('additive-assignee CLI validates the bounded set without a predecessor or unrelated fields', async t => {
+  const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16);
+  const args = [...flags(f, 'add-assignees'), '--number', '1'];
+  const parsed = issueArguments([...args, '--assignee', b, '--assignee', a]);
+  assert.equal(parsed.options.operation, 'add-assignees');
+  assert.equal(parsed.options.expectedVersion, null);
+  assert.deepEqual(parsed.options.fields, { assignees: [a, b] });
+  for (const expectedVersion of [undefined, null]) {
+    assert.equal(issueOperatorOptions({ ...f.options('add-assignees'), number: 1,
+      expectedVersion, fields: { assignees: [a] } }).expectedVersion, null);
+  }
+  for (const expectedVersion of [0, 1, '1', false]) {
+    assert.throws(() => issueOperatorOptions({ ...f.options('add-assignees'), number: 1,
+      expectedVersion, fields: { assignees: [a] } }),
+    e => e.code === 'issue_operator_add_assignees_has_no_version');
+  }
+  for (const extra of [[], ['--assignee', ''], ['--assignee', a, '--assignee', a],
+    ['--assignee', 'AA'.repeat(16)], ['--assignee', a, '--expected-version', '1'],
+    ['--assignee', a, '--label', 'bug'], ['--assignee', a, '--clear-labels'],
+    ['--assignee', a, '--title', 'replacement'], ['--assignee', a, '--body-file', f.tokenFile]]) {
+    assert.throws(() => issueArguments([...args, ...extra]));
+  }
+  const ids = Array.from({ length: 17 }, (_, i) => (i + 1).toString(16).padStart(32, '0'));
+  assert.equal(issueArguments([...args, ...ids.slice(0, 16).flatMap(id => ['--assignee', id])]).options.fields.assignees.length, 16);
+  assert.throws(() => issueArguments([...args, ...ids.flatMap(id => ['--assignee', id])]));
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await readdir(f.root), ['token']);
+});
+test('additive-assignee operator refuses a missing issue before recording, then permits the existing twin', async t => {
+  const f = await fixture(t), a = '41'.repeat(16);
+  const options = { ...f.options('add-assignees'), number: 1, fields: { assignees: [a] } };
+  await assert.rejects(runIssueOperation(options), e => e.code === 'issue_operator_version_moved' && e.operator_state === 'not_submitted');
+  assert.equal(mutations(f).length, 0);
+  assert.deepEqual(await readdir(f.root), ['token']);
+  await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const result = await runIssueOperation(options);
+  assert.equal(result.result.outcome, 'committed');
+  assert.deepEqual(f.row.assignees, [a]);
+  assert.equal(f.version, 2);
+});
+test('additive-assignee retry preserves the original delta after an intervening strict assignment', async t => {
+  const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16), c = '63'.repeat(16);
+  await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const record = join(f.root, 'add.json');
+  await assert.rejects(runIssueOperation({ ...f.options('add-assignees', record), number: 1,
+    fields: { assignees: [b, a] }, onProgress: ({ phase }) => {
+      if (phase === 'receipt_saved') throw Error('interrupted before send');
+    } }), e => e.operator_state === 'recorded_unknown');
+  const original = await readFile(record), saved = JSON.parse(original).receipt.request;
+  assert.equal(saved.action, 'add-assignees'); assert.equal(saved.expected_version, null);
+  assert.deepEqual(saved.fields, { assignees: [a, b] });
+  assert.equal(saved.body, `assignee=${a}&assignee=${b}`);
+  await runIssueOperation({ ...f.options('assign', join(f.root, 'strict.json')), number: 1,
+    expectedVersion: 1, fields: { assignees: [c] } });
+  const result = await runIssueOperation(f.options('retry', record));
+  assert.equal(result.result.outcome, 'committed'); assert.equal(result.mutation_submitted, true);
+  assert.equal(mutations(f).at(-1).key, saved.key); assert.equal(mutations(f).at(-1).body, saved.body);
+  assert.deepEqual(f.row.assignees, [a, b, c]); assert.equal(f.version, 3);
+  assert.equal(f.row.title, 'Real request'); assert.equal(f.row.body, 'private draft');
+  assert.deepEqual(await readFile(record), original);
+});
+test('additive-assignee CLI recovers a lost reply without undoing later removal on a locked closed issue', async t => {
+  const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16);
+  await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  await runIssueOperation({ ...f.options('close', join(f.root, 'close.json')), number: 1, expectedVersion: 1 });
+  await runIssueOperation({ ...f.options('lock', join(f.root, 'lock.json')), number: 1, expectedVersion: 2 });
+  await runIssueOperation({ ...f.options('assign', join(f.root, 'existing.json')), number: 1,
+    expectedVersion: 3, fields: { assignees: [a] } });
+  const record = join(f.root, 'add.json'); f.mode = 'lost-reply';
+  const lost = await command([...flags(f, 'add-assignees', record), '--number', '1',
+    '--assignee', b, '--assignee', a]).done;
+  assert.equal(lost.code, 2); assert.equal(f.version, 5); assert.deepEqual(f.row.assignees, [a, b]);
+  const original = await readFile(record), saved = JSON.parse(original).receipt.request;
+  assert.equal(saved.expected_version, null); assert.equal(saved.body, `assignee=${a}&assignee=${b}`);
+  assert.equal(mutations(f).at(-1).key, saved.key); assert.ok(!original.includes(token));
+  f.mode = null;
+  const recovered = await command(flags(f, 'status', record)).done;
+  assert.equal(recovered.code, 0, recovered.stderr); assert.equal(mutations(f).length, 5);
+  const removed = await command([...flags(f, 'unassign', join(f.root, 'remove.json')), '--number', '1',
+    '--expected-version', '5', '--assignee', b]).done;
+  assert.equal(removed.code, 0, removed.stderr); assert.deepEqual(f.row.assignees, [a]);
+  const retried = await command(flags(f, 'retry', record)).done;
+  assert.equal(retried.code, 0, retried.stderr); assert.equal(JSON.parse(retried.stdout).mutation_submitted, false);
+  assert.equal(mutations(f).length, 6); assert.equal(f.version, 6); assert.deepEqual(f.row.assignees, [a]);
+  assert.equal(f.row.state, 'closed'); assert.equal(f.row.locked, true);
+  assert.deepEqual(f.events[4].action, { name: 'assign', assignees: [a, b] });
+  assert.deepEqual(await readFile(record), original);
 });
 test('additive-label CLI validates a bounded set without accepting a predecessor or replacement fields', async t => {
   const f = await fixture(t), args = [...flags(f, 'add-labels'), '--number', '1'];

@@ -44,6 +44,9 @@ for format in sha1 sha256; do
   fge_assert_eq "OPERATOR-ISSUE-$format-006" true "$(fact "${format}_forge_all_actions_and_recovery")" 'shipped IssueClient performs every forge mutation with canonical readback and original-key recovery'
   fge_assert_eq "OPERATOR-ISSUE-$format-007" true "$(fact "${format}_forge_stale_and_grant_twins")" 'forge stale preflight and denied write preserve state; exact retry commits after restored grant'
   fge_assert_eq "OPERATOR-ISSUE-$format-008" true "$(fact "${format}_forge_retained_reads_and_unknown_pin_refusal")" 'forge list/history/search preserve native pages and retained history; unknown pins refuse'
+  fge_assert_eq "OPERATOR-ISSUE-$format-009" true "$(fact "${format}_forge_additive_assignees")" 'additive assignee operator preserves native union and unrelated locked/closed metadata'
+  fge_assert_eq "OPERATOR-ISSUE-$format-010" true "$(fact "${format}_forge_additive_recovery")" 'original additive recovery never re-adds a later removed assignee'
+  fge_assert_eq "OPERATOR-ISSUE-$format-011" true "$(fact "${format}_forge_additive_grant_twins")" 'denied additive write preserves uncertainty; the same recorded request commits after restored grant'
 done
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" operator-issue-summary; fi
 if [ -f "$WORK/campaign/commands.jsonl" ]; then fge_artifact "$WORK/campaign/commands.jsonl" native-and-operator-command-journal; fi
