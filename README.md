@@ -316,6 +316,8 @@ are excluded from shared repository event feeds and webhook delivery. See
 source limits and validation scope. Select discussions with `fg inbox list ... --kind discussion`,
 MCP `kind:"discussion"`, or `/api/v1/notifications/discussions`; issue and
 discussion preferences stay independent even when their numbers match.
+The discussion browser links to `/{repository}/ui/discussion-notifications/`,
+with unread/muted filters, observed-version actions and recoverable requests.
 Email delivery and PR notifications remain separate work.
 
 ### Native merge queues

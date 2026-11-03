@@ -32,6 +32,7 @@ Select the namespace explicitly:
 | --- | --- |
 | CLI | Add `--kind discussion` to any `fg inbox` command |
 | MCP | Add `"kind":"discussion"` to any of the seven `frankengit_inbox_*` tools |
+| Browser | Open `/{repository}/ui/discussion-notifications/` |
 | HTTP list | `GET /api/v1/notifications/discussions` |
 | HTTP thread | `GET /api/v1/notifications/discussions/{number}` |
 | HTTP preference | `POST /api/v1/notifications/discussions/{number}/{action}` |
@@ -67,6 +68,16 @@ fg inbox read "$ROOT" "$TENANT" "$REPOSITORY" 7 \
 This acknowledges only the observed discussion prefix. A concurrent reply at
 version 5 remains unread. Keep the original kind, number, preference version,
 prefix, identity guards and key for recovery, including after a restart.
+
+The discussion browser links to this inbox and provides unread/muted filters,
+thread lookup, subscriptions, read acknowledgements and outcome recovery.
+Actions capture the displayed discussion and preference versions. Interrupted
+writes keep the exact original request for retry or receipt export; reconnecting
+does not silently replace it. The discussion inbox uses its own retry-key digest
+domain, `fgdn` prefix and receipt schema, so an issue receipt cannot be restored
+as a discussion preference even when the number, action and form bytes coincide.
+Receipt imports are bound to the connection that selected the file. Tokens stay
+in memory, and repository titles are displayed as literal text.
 
 Discussion preferences use required aggregate escape **12**,
 `DiscussionNotificationPreference { principal, discussion }`, and canonical
