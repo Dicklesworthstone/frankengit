@@ -3,6 +3,7 @@
 import { archiveSelection, archiveLimits, captureSourcePaths, validatePathCapture,
   sourcePaths, oid, hexBytes, sha256, ARCHIVE_LIMITS, MAX_PATH_PROOF_FILES } from './source_archive.mjs';
 import { fail, fields, integer, parse } from './source_archive_transport.mjs';
+import { contextProvenance } from './source_context_provenance.mjs';
 
 export const CONTEXT_PROOF_LIMIT = 160 * 1024 * 1024;
 export const CONTEXT_INPUT_LIMIT = 12 * 1024 * 1024;
@@ -14,7 +15,7 @@ function pinned(bytes, hash, limit) {
 }
 // Parse original capture/HTTP bytes without changing full-width index IDs. Those
 // IDs remain untrusted search evidence here; only safe source coordinates matter.
-function contextPlan(bytes, hash, selected) {
+function contextPlan(bytes, hash, selected, check) {
   pinned(bytes, hash, CONTEXT_INPUT_LIMIT);
   let value;
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (_key, value, context) =>
@@ -25,11 +26,11 @@ function contextPlan(bytes, hash, selected) {
     if (value.endpoint !== expected.endpoint) fail('Saved context endpoint differs from independent selection.');
     value = value.native_response;
   }
-  const source = value?.retrieval;
-  if (value?.type !== 'source_context_initial' || value.schema_version !== 1 || value.profile !== 'source-initial-context-v1' ||
-      value.read_only !== true || value.transaction_created !== false || value.source_material_untrusted !== true ||
-      source?.type !== 'source_search_initial' || source.profile !== 'source-initial-retrieval-v1' || source.schema_version !== 1 ||
-      source.read_only !== true || source.transaction_created !== false || !Array.isArray(value.files) ||
+  const provenance = contextProvenance(value, fail, check);
+  // A revalidated result keeps older index positions. Byte membership binds to
+  // its actual current source, never to those original search observations.
+  const source = provenance === null ? value.retrieval : provenance.current;
+  if (!Array.isArray(value.files) ||
       value.files.length < 1 || value.files.length > MAX_PATH_PROOF_FILES || value.files.length !== value.returned_files) fail('Unsupported source context for byte proof.');
   if (['tenant_id', 'repository_id', 'repository_incarnation', 'object_format'].some(k => source[k] !== expected[k]) ||
       source.ref !== expected.ref || source.ref_hex !== Buffer.from(expected.ref).toString('hex') ||
@@ -110,7 +111,7 @@ export async function captureContextProof(contextBytes, contextHash, selected, t
   const start = performance.now(), signal = options.signal;
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('Invalid proof cancellation signal.');
   const check = () => { signal?.throwIfAborted(); if (performance.now() - start >= limits.timeoutMs) fail('Context proof deadline exceeded.'); };
-  check(); const plan = contextPlan(contextBytes, contextHash, selected); check();
+  check(); const plan = contextPlan(contextBytes, contextHash, selected, check); check();
   const remaining = Math.floor(limits.timeoutMs - (performance.now() - start));
   if (remaining < 1) fail('Context proof deadline exceeded.');
   const { capture, metrics } = await captureSourcePaths(plan.selection, token, plan.paths,
@@ -122,7 +123,7 @@ export async function captureContextProof(contextBytes, contextHash, selected, t
 // context ranges. The two independent file hashes bind the exact saved inputs.
 export function inspectContextProof(bytes, expectedHash, contextBytes, contextHash, selected, check = () => {}) {
   check(); pinned(bytes, expectedHash, CONTEXT_PROOF_LIMIT);
-  const plan = contextPlan(contextBytes, contextHash, selected), value = parse(bytes);
+  const plan = contextPlan(contextBytes, contextHash, selected, check), value = parse(bytes);
   fields(value, ['schema', 'context_sha256', 'capture']);
   if (value.schema !== SCHEMA || value.context_sha256 !== contextHash) fail('Proof belongs to another saved context.');
   const c = value.capture;

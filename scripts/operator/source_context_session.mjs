@@ -98,6 +98,8 @@ async function names(path, allowed, check) {
 }
 function boundCapture(capture, parent, selected) {
   if (capture.endpoint !== parent.endpoint || !same(capture.summary.source, parent.summary.source) ||
+      capture.summary.index_source !== parent.summary.index_source ||
+      (parent.summary.index_source && !same(capture.summary.current_source, parent.summary.current_source)) ||
       !same(capture.summary.query, selected) || capture.request_sha256 !== sha256(command(selected).body)) fail('context_session_capture_changed');
 }
 function candidateRecord(requestHash, capture, check) {
@@ -255,7 +257,9 @@ export async function assembleSessionContext(root, sessionHash, throughTip, requ
       content: channel(r.content), path: channel(r.path),
       symbols: s.symbols ?? { state: 'not_requested' },
       symbol_omissions: r.symbols.result?.omissions ?? [],
-      selection: capture.native_response.selection, ranking: s.ranking ?? null };
+      selection: capture.native_response.selection, ranking: s.ranking ?? null,
+      ...(s.index_source ? { index_source: s.index_source,
+        current_source: s.current_source, index_sources: s.index_sources } : {}) };
     metadataBytes += Buffer.byteLength(JSON.stringify({ query: s.query, evidence }));
     if (metadataBytes > limits.max_metadata_bytes) fail('context_union_metadata_limit');
     entries.push({ sequence, manifest_sha256: bundle.manifest_sha256, capture_sha256: bundle.capture_sha256,

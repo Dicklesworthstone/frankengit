@@ -34,6 +34,15 @@ symbols were originally optional. Full-width u64 numbers remain decimal strings.
 The new response must agree with the complete prior source tuple, including RCR
 and tree, not just claim the same head and commit.
 
+For an explicit `current-native-v1` capture, continuation also inherits that
+index mode and retains the original per-index provenance. Its source pin is the
+capture's current authenticated observation, never an older index head. The
+complete current source, including its forge position, must remain identical
+through acquisition, pending-candidate recovery and terminal replay. The
+follow-up object cannot replace `index_source`; ranked selection remains
+incompatible with revalidation. Even a metadata-only authority change refuses a
+saved continuation. Start a new capture to select that changed head explicitly.
+
 A follow-up is a closed object with required `terms`. Optional `prefixes_hex`
 may only narrow the prior slash-component byte scopes; empty scopes cannot
 replace a nonempty prior restriction. Optional `limits` inherit unspecified

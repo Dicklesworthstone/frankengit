@@ -111,6 +111,40 @@ new explicit capture needs a different output directory and may select a newer
 source unless the original pins are supplied. Repeating a capture is a new read,
 not resumption of a prior snapshot.
 
+## Reuse indexes after metadata changes
+
+Add `"index_source": "current-native-v1"` to the query to use existing lexical
+and symbol generations after an unrelated metadata change, such as a credential
+rotation or issue comment. The native reader authenticates the current visible
+source and requires the original indexes to describe the same namespace, ref,
+Git commit and tree. A changed source still needs an applicable index.
+
+The client checks the distinct revalidated response profiles and their complete
+source records. `summary.source` continues to describe the current selection;
+`summary.current_source` retains its full native coordinates, and
+`summary.index_sources` retains the original lexical and optional symbol
+coordinates. The native response, `context.txt`, export receipt, and each query
+in a merged session preserve that distinction. Original generations, row labels,
+anchor lineage, omissions and resource accounting remain checked.
+
+The selector is explicit and closed. Omission retains the existing strict
+request and export encodings; other values refuse. Revalidated context supports
+`raw-path-prefix` selection. Combining it with ranked selection refuses before
+network dispatch.
+
+Continuation inherits the mode and pins the **current source observed by the
+saved capture**, together with its strongest observed generation floors. It
+cannot replace that pin with an index's older head or move to a newer authority
+head. A subsequent metadata change therefore requires a separately explicit new
+capture. Existing session reservations are not renewed or refunded by a refusal.
+
+Saved revalidated captures and raw native responses also feed the source package
+and byte-proof commands under those commands' existing credential requirements.
+They independently verify the selected current commit, paths, complete blobs and
+saved excerpt bytes. Index provenance remains untrusted search evidence; accepting
+the new profile does not turn a source-only proof into an authority or search
+verification receipt.
+
 ## Query and source constraints
 
 Terms are 1–32 whole ASCII alphanumeric/underscore words, at most 128 bytes each.
@@ -140,8 +174,10 @@ from independently retained observations/configuration. The minimum generation
 is a decimal string so all u64 bits survive. A queried generation and the newest
 observed maintenance checkpoint are recorded separately: maintenance may advance
 an observed head without changing which generation answered the query. Conflicting
-or regressed heads are rejected. Source refs, heads, commits, trees, incarnations,
-corpus counts and document identities must agree across the joined response.
+or regressed heads are rejected. Source refs, commits, trees, incarnations, corpus
+counts and document identities must agree across the joined response. Strict
+mode also requires matching source authority positions; explicit revalidation
+retains and checks each original index position separately from the current one.
 
 ## Native read-result labels
 

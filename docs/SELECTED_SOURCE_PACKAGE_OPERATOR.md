@@ -6,6 +6,14 @@ standard `frankengit-selected-source-package-v1` format. Its output is accepted 
 `fg_source_edit.mjs prepare-verified` input contract. No archive conversion or
 manual reconstruction of commit/tree evidence is needed.
 
+The command also accepts explicit `current-native-v1` contexts. It checks the
+current and original index source records, then proves the selected files against
+the current captured source and the independently supplied commit. Metadata-only
+index age does not change the resulting source package bytes. Original index
+coordinates cannot replace the captured head, and this source-only projection
+does not verify search evidence. The same distinction applies to context byte
+proofs and their offline replay.
+
 The package contains **complete selected files**, the original commit body, and
 complete needed parent trees (including sibling names and object IDs). It is not
 just the saved excerpts. Treat the package and all inputs as private source data.

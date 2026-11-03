@@ -94,6 +94,12 @@ export async function continueCapture(bundle, expectedManifest, credential, foll
   // Native expected_head/expected_commit pins are necessary but do not excuse
   // inconsistent RCR/tree metadata in a response claiming the same head.
   if (JSON.stringify(capture.summary.source) !== JSON.stringify(previous.capture.summary.source)) fail('context_followup_source_changed');
+  // A revalidated capture also retains the forge position bound by this exact
+  // authority head. Different original index observations are allowed, but a
+  // new read cannot replace the capture's current disclosure observation.
+  if (capture.summary.index_source !== previous.capture.summary.index_source ||
+      (previous.capture.summary.index_source &&
+        JSON.stringify(capture.summary.current_source) !== JSON.stringify(previous.capture.summary.current_source))) fail('context_followup_source_changed');
   return { capture, continued_from: { manifest_sha256: expectedManifest, capture_sha256: previous.receipt.capture_sha256,
     source: previous.capture.summary.source, lexical_checkpoint: previous.capture.summary.lexical_checkpoint,
     ...(previous.capture.summary.symbols?.generation ? { symbol_checkpoint: previous.capture.summary.symbols.generation } : {}) } };

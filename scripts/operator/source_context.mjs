@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isCredentialToken } from './credential_token.mjs';
+import { CURRENT_INDEX_SOURCE, contextProvenance } from './source_context_provenance.mjs';
 
 export const LIMITS = Object.freeze({ response: 8 * 1024 * 1024, request: 256 * 1024,
   files: 32, anchors: 4096, windows: 128, source: 64 * 1024 * 1024, file: 8 * 1024 * 1024,
@@ -116,7 +117,7 @@ function atLeast(observed, floor) {
       (observed.number === floor.number && observed.token !== floor.token))) fail('context_index_checkpoint_regressed');
 }
 export function query(input) {
-  keys(input, ['schema', 'scope', 'reference', 'terms', 'prefixes_hex', 'expected_head', 'expected_commit', 'minimum_lexical', 'symbols', 'minimum_symbol', 'selection', 'limits'],
+  keys(input, ['schema', 'scope', 'reference', 'terms', 'prefixes_hex', 'expected_head', 'expected_commit', 'minimum_lexical', 'symbols', 'minimum_symbol', 'selection', 'limits', 'index_source'],
     ['schema', 'scope', 'reference', 'terms']);
   if (input.schema !== 'frankengit-source-context-query-v1') fail('unsupported_context_query');
   keys(input.scope, ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format']);
@@ -143,7 +144,9 @@ export function query(input) {
     symbols = { name: value.name, match: value.match ?? 'exact', policy: value.policy ?? 'optional', kinds: [...new Set(kinds)].sort() };
   }
   if (!symbols && input.minimum_symbol != null) fail('context_symbol_floor_without_query');
+  if (Object.hasOwn(input, 'index_source') && input.index_source !== CURRENT_INDEX_SOURCE) fail('unsupported_index_source');
   if (Object.hasOwn(input, 'selection') && !['raw-path-prefix', RANKING_PROFILE].includes(input.selection)) fail('unsupported_context_selection');
+  if (input.index_source === CURRENT_INDEX_SOURCE && input.selection === RANKING_PROFILE) fail('unsupported_context_selection');
   const limits = input.limits ?? {}; keys(limits, Object.keys(defaults), []);
   const selected = { ...defaults, ...limits };
   for (const [name, maximum, minimum] of [['max_results_per_channel', 100, 1], ['max_work', LIMITS.work, symbols ? 3 : 2],
@@ -155,7 +158,8 @@ export function query(input) {
     expected_commit: input.expected_commit == null ? null : oid(input.expected_commit, scope.object_format),
     minimum_lexical: input.minimum_lexical == null ? null : activation(input.minimum_lexical), limits: selected,
     ...(symbols ? { symbols, minimum_symbol: input.minimum_symbol == null ? null : activation(input.minimum_symbol) } : {}),
-    ...(Object.hasOwn(input, 'selection') ? { selection: input.selection } : {}) };
+    ...(Object.hasOwn(input, 'selection') ? { selection: input.selection } : {}),
+    ...(Object.hasOwn(input, 'index_source') ? { index_source: input.index_source } : {}) };
 }
 export function command(input) {
   const q = query(input), values = { object_format: q.scope.object_format, ref: q.reference, ...q.limits };
@@ -166,6 +170,7 @@ export function command(input) {
     symbol_match: q.symbols.match, symbol_policy: q.symbols.policy });
   if (q.minimum_symbol) Object.assign(values, { minimum_symbol_token: q.minimum_symbol.token, minimum_symbol_number: q.minimum_symbol.number });
   if (q.selection) values.context_selection = q.selection;
+  if (q.index_source) values.index_source = q.index_source;
   const body = new URLSearchParams(values);
   for (const kind of q.symbols?.kinds ?? []) body.append('symbol_kind', kind);
   for (const t of q.terms) body.append('term_hex', Buffer.from(t).toString('hex'));
@@ -185,13 +190,13 @@ export function parse(bytes) {
   } catch (error) { if (error instanceof ContextError) throw error; fail('invalid_context_json'); }
 }
 function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
-function source(value, q, prior = null) {
+function source(value, q, prior = null, checkHead = true) {
   record(value);
   if (Object.keys(q.scope).some(k => value[k] !== q.scope[k]) || value.ref_hex !== Buffer.from(q.reference).toString('hex') ||
       value.ref !== q.reference || value.read_only !== true || value.transaction_created !== false) fail('context_source_scope_changed');
   const selected = { ...q.scope, reference: q.reference, snapshot_token: token(value.snapshot_token),
     source_rcr: opaque(value.source_rcr), source_commit: oid(value.source_commit, q.scope.object_format), root_tree: oid(value.root_tree, q.scope.object_format) };
-  if ((q.expected_head !== null && q.expected_head !== selected.snapshot_token) ||
+  if ((checkHead && q.expected_head !== null && q.expected_head !== selected.snapshot_token) ||
       (q.expected_commit !== null && q.expected_commit !== selected.source_commit) || (prior && !same(selected, prior))) fail('context_source_snapshot_changed');
   return selected;
 }
@@ -205,7 +210,7 @@ function verifyPathWord(bytes, span, expected) {
       (span.byte_offset + span.byte_length < bytes.length && word(bytes[span.byte_offset + span.byte_length]))) fail('context_path_anchor_mismatch');
 }
 function lexical(value, name, q, selected, generation, ordinal, check, evidence) {
-  source(value, q, selected); opaque(value.source_head);
+  source(value, q, selected, q.index_source !== CURRENT_INDEX_SOURCE); opaque(value.source_head);
   const limits = q.limits, share = total => channelShare(total, q, ordinal);
   if (value.type !== 'source_search_index' || ![1, 2].includes(value.schema_version) || value.profile !== 'ascii-word-postings-v1' ||
       value.published !== false || value.channel !== name || value.after !== null || value.limit !== limits.max_results_per_channel ||
@@ -273,7 +278,7 @@ function symbols(channel, vector, q, selected, sourceHead, check, evidence) {
   keys(vector, ['index_token', 'index_number']);
   const generation = activation({ token: vector.index_token, number: vector.index_number });
   const value = record(channel.result), limits = q.limits, requested = q.symbols;
-  source(value, q, selected);
+  source(value, q, selected, q.index_source !== CURRENT_INDEX_SOURCE);
   const index = activation({ token: value.index_token, number: value.index_number });
   if (!same(index, generation)) fail('context_symbol_generation_join_changed');
   atLeast(index, q.minimum_symbol);
@@ -424,22 +429,31 @@ function ranking(value, q, candidates, channels, check) {
 
 export function validate(reply, input, check = () => {}) {
   const q = query(input), limits = q.limits; check(); record(reply);
-  if (reply.type !== 'source_context_initial' || reply.schema_version !== 1 || reply.profile !== 'source-initial-context-v1' ||
+  const provenance = contextProvenance(reply, fail, check);
+  if ((provenance?.mode ?? null) !== (q.index_source ?? null)) fail('context_index_source_changed');
+  if (reply.type !== 'source_context_initial' || reply.schema_version !== 1 ||
       reply.read_only !== true || reply.transaction_created !== false || reply.source_material_untrusted !== true ||
       reply.selection !== (q.selection ?? 'raw-path-prefix') ||
       (reply.selection === 'raw-path-prefix' && Object.hasOwn(reply, 'ranking')) || !Array.isArray(reply.files)) fail('unsupported_native_context');
   for (const k of ['context_max_files', 'context_radius_bytes', 'context_max_source_bytes', 'context_max_excerpt_bytes']) if (reply[k] !== limits[k]) fail('context_budget_echo_changed');
   const r = record(reply.retrieval), selected = source(r, q);
   const evidence = readLabels(r), labelled = evidence.state === 'labelled';
-  if (r.type !== 'source_search_initial' || r.schema_version !== 1 || r.profile !== 'source-initial-retrieval-v1' || r.phase !== 'Initial' ||
+  if (provenance && !labelled) fail('undeclared_context_read_labels');
+  if (r.type !== 'source_search_initial' || r.schema_version !== 1 || r.phase !== 'Initial' ||
       r.streaming !== false || r.semantic_refinement !== false || r.source_blobs_read !== 0 || r.source_bytes_read !== 0) fail('unsupported_context_retrieval');
   for (const k of ['max_results_per_channel', 'max_work', 'max_payload_bytes', 'max_result_bytes']) if (r[k] !== limits[k]) fail('context_query_budget_changed');
   keys(r.generation_vector, ['lexical', 'symbols']);
   const vector = r.generation_vector.lexical; keys(vector, ['index_token', 'index_number']);
   const generation = activation({ token: vector.index_token, number: vector.index_number });
-  const contentCoverage = lexical(r.content, 'content', q, selected, generation, 0, check, evidence);
-  const pathCoverage = lexical(r.path, 'path', q, selected, generation, 1, check, evidence);
-  const symbol = symbols(r.symbols, r.generation_vector.symbols, q, selected, r.content.source_head, check, evidence);
+  // A current-head pin constrains disclosure above, never the immutable index's
+  // older authority position. The shared provenance check keeps native source
+  // identity equal while these validators retain each original source record.
+  const lexicalSource = provenance ? source(r.content, q, null, false) : selected;
+  const symbolSource = provenance?.symbols ? source(r.symbols.result, q, null, false) : selected;
+  const contentCoverage = lexical(r.content, 'content', q, lexicalSource, generation, 0, check, evidence);
+  const pathCoverage = lexical(r.path, 'path', q, lexicalSource, generation, 1, check, evidence);
+  const symbol = symbols(r.symbols, r.generation_vector.symbols, q, symbolSource,
+    provenance?.symbols?.source_head ?? r.content.source_head, check, evidence);
   if (r.content.source_head !== r.path.source_head || r.content.indexed_documents !== r.path.indexed_documents ||
       r.content.indexed_source_bytes !== r.path.indexed_source_bytes || r.content.non_regular_entries !== r.path.non_regular_entries ||
       !same(r.content.omissions ?? [], r.path.omissions ?? [])) fail('context_lexical_corpus_changed');
@@ -570,7 +584,9 @@ export function validate(reply, input, check = () => {}) {
     source_bytes_read: sourceBytes, excerpt_bytes: excerptBytes,
     ...(q.symbols ? { symbols: { state: symbol.state, ...(symbol.reason ? { reason: symbol.reason } : {}),
       generation: symbol.generation, coverage_complete: symbol.coverage, complete: symbol.complete } } : {}),
-    ...(ranked ? { ranking: ranked } : {}) };
+    ...(ranked ? { ranking: ranked } : {}),
+    ...(provenance ? { index_source: provenance.mode, current_source: provenance.current,
+      index_sources: { lexical: provenance.lexical, symbols: provenance.symbols } } : {}) };
 }
 
 // Closed single-request acquisition. Never follows redirects or changes the
