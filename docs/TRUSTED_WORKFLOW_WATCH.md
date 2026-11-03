@@ -227,6 +227,16 @@ A started intent is never automatically retried. State corruption, temporary
 files from interrupted publication, or lost history refuse rather than resetting.
 Status is a read-only local observation, not an atomic repository snapshot.
 
+Shared create-only custody writes attempt file close, staging-name removal and
+parent-directory synchronization even when an earlier write or cleanup step
+fails. They preserve the first failure, including an existing-destination
+`EEXIST`, rather than replacing it with a later cleanup error. Once the hard
+link makes the destination visible, cleanup never removes that destination.
+A reported error can therefore accompany a visible result; it does not prove
+absence or grant permission to overwrite, replay an execution or choose a new
+key. Cleanup is attempted, not guaranteed: a failing unlink can leave staging
+custody, and these filesystem contracts do not establish power-loss recovery.
+
 ## Bounds and exit codes
 
 At most 256 ref pages, 100 rows/page, 1 MiB/page and 16 MiB aggregate ref output
