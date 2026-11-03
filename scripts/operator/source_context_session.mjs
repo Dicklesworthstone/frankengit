@@ -1,6 +1,7 @@
 // Durable, explicitly bounded follow-up sessions over the existing read client.
 // Local custody/quotas are not repository authority, an IntentRun, or a lease.
 import { constants } from 'node:fs';
+import { isCredentialToken } from './credential_token.mjs';
 import { mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { command, fail, sha256 } from './source_context.mjs';
@@ -303,7 +304,7 @@ function pending(state, requestHash) {
 }
 export async function acquireSessionStep(root, sessionHash, previousTip, requestHash, credential, options = {}) {
   const time = clock(options, true);
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('invalid_source_read_token');
+  if (!isCredentialToken(credential)) fail('invalid_source_read_token');
   const state = await readState(root, sessionHash, previousTip, time.check), p = pending(state, requestHash);
   if (state.tip !== previousTip || p.state !== 'reserved') fail('context_session_dispatch_already_started');
   // This durable one-shot marker is never deleted, inferred from a PID, or
@@ -379,7 +380,7 @@ export async function recoverSessionStep(root, sessionHash, minimumTip, requestH
 }
 export async function runSessionStep(root, sessionHash, expectedTip, followup, credential, options = {}) {
   const time = clock(options, true);
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('invalid_source_read_token');
+  if (!isCredentialToken(credential)) fail('invalid_source_read_token');
   const reservation = await reserveSessionStep(root, sessionHash, expectedTip, followup, { signal: time.signal, timeoutMs: time.remaining() });
   try {
     const staged = await acquireSessionStep(root, sessionHash, expectedTip, reservation.request_sha256, credential,

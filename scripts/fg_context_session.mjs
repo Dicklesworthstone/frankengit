@@ -5,6 +5,7 @@ import { parse, fail } from './operator/source_context.mjs';
 import { absolute, readPrivate } from './operator/source_context_export.mjs';
 import { createSession, inspectSession, runSessionStep, acquireSessionStep, recoverSessionStep } from './operator/source_context_session.mjs';
 import { exportSessionContext, inspectSessionContextExport } from './operator/source_context_session_export.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES, isCredentialToken } from './operator/credential_token.mjs';
 
 const USAGE = `node scripts/fg_context_session.mjs init --session ABSENT_PRIVATE_PATH
   --from-bundle PRIVATE_BUNDLE --from-sha256 RETAINED_MANIFEST --limits-file PRIVATE_JSON
@@ -81,10 +82,11 @@ async function emit(stream, value) {
   });
 }
 async function credential(path, check) {
-  const bytes = await readPrivate(path, 66, check);
+  const bytes = await readPrivate(path, MAX_CREDENTIAL_TOKEN_BYTES + 2, check);
   try {
-    if (bytes.some(b => b > 127) || !/^[0-9a-f]{64}(?:\r?\n)?$/.test(bytes.toString('ascii'))) fail('invalid_source_read_token_file');
-    return bytes.toString('ascii').replace(/\r?\n$/, '');
+    const token = bytes.toString('ascii').replace(/\r?\n$/, '');
+    if (bytes.some(b => b > 127) || !isCredentialToken(token)) fail('invalid_source_read_token_file');
+    return token;
   } finally { bytes.fill(0); }
 }
 function exitCode(result) {

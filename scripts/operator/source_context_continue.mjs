@@ -2,6 +2,7 @@
 // server cursor, authorization grant, or cross-query completeness claim.
 import { acquire, query, endpoint, fail } from './source_context.mjs';
 import { loadBundle } from './source_context_export.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 const LIMIT_NAMES = ['max_results_per_channel', 'max_work', 'max_payload_bytes', 'max_result_bytes',
   'context_max_files', 'context_radius_bytes', 'context_max_source_bytes', 'context_max_excerpt_bytes'];
@@ -75,7 +76,7 @@ export async function continueCapture(bundle, expectedManifest, credential, foll
   const timeout = options.timeoutMs ?? 30000, signal = options.signal;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300000) fail('invalid_context_cli_timeout');
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('invalid_context_signal');
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('invalid_source_read_token');
+  if (!isCredentialToken(credential)) fail('invalid_source_read_token');
   if (options.ca !== undefined && (!(options.ca instanceof Uint8Array) || !options.ca.length || options.ca.length > 262144)) fail('invalid_context_ca');
   const started = performance.now(), check = () => {
     signal?.throwIfAborted();

@@ -5,6 +5,7 @@ import { sep } from 'node:path';
 import { continueCapture } from './operator/source_context_continue.mjs';
 import { acquire, endpoint, parse, query, fail } from './operator/source_context.mjs';
 import { absolute, absentBundle, readPrivate, publishBundle, inspectBundle } from './operator/source_context_export.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES, isCredentialToken } from './operator/credential_token.mjs';
 
 const USAGE = `usage: node scripts/fg_source_context.mjs capture
   --endpoint <https-repository-endpoint> --query-file <absolute-private-json>
@@ -84,9 +85,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const address = continuing ? null : endpoint(fields.get('--endpoint'));
       const input = parse(await readPrivate(fields.get(continuing ? '--followup-file' : '--query-file'), 256 * 1024));
       const q = continuing ? input : query(input);
-      const tokenBytes = await readPrivate(fields.get('--token-file'), 66);
-      if (!/^[0-9a-f]{64}(?:\r?\n)?$/.test(tokenBytes.toString('ascii')) || tokenBytes.some(b => b > 127)) fail('invalid_source_read_token_file');
-      const token = tokenBytes.toString('ascii').replace(/\r?\n$/, ''); tokenBytes.fill(0);
+      const tokenBytes = await readPrivate(fields.get('--token-file'), MAX_CREDENTIAL_TOKEN_BYTES + 2);
+      let token;
+      try {
+        token = tokenBytes.toString('ascii').replace(/\r?\n$/, '');
+        if (tokenBytes.some(b => b > 127) || !isCredentialToken(token)) fail('invalid_source_read_token_file');
+      } finally { tokenBytes.fill(0); }
       const ca = fields.has('--ca-file') ? await readPrivate(fields.get('--ca-file'), 256 * 1024) : undefined;
       const timeoutText = fields.get('--timeout-ms') ?? '30000';
       if (!/^[1-9][0-9]{0,5}$/.test(timeoutText) || Number(timeoutText) > 300000) fail('invalid_context_cli_timeout');
