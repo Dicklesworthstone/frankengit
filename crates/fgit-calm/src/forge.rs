@@ -36,6 +36,7 @@ pub enum ForgeOperation {
     IssueClearMilestone,
     MilestoneChange,
     DiscussionChange,
+    AgentCredentialChange,
     NotificationPreferenceChange,
     ReviewProtection,
     MergeQueueChange,
@@ -97,6 +98,7 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::IssueClearMilestone
         | ForgeOperation::MilestoneChange
         | ForgeOperation::DiscussionChange
+        | ForgeOperation::AgentCredentialChange
         | ForgeOperation::NotificationPreferenceChange
         | ForgeOperation::ReviewProtection
         | ForgeOperation::MergeQueueChange
@@ -138,6 +140,7 @@ mod tests {
             ForgeOperation::IssueClearMilestone,
             ForgeOperation::MilestoneChange,
             ForgeOperation::DiscussionChange,
+            ForgeOperation::AgentCredentialChange,
             ForgeOperation::NotificationPreferenceChange,
             ForgeOperation::ReviewProtection,
             ForgeOperation::MergeQueueChange,

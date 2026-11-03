@@ -220,6 +220,11 @@ pub enum ForgeEventKind {
     NotificationPreferenceChanged {
         preference: ForgeEntityId,
     },
+    /// Sponsored metadata credential issuance or revocation. The canonical
+    /// event batch binds the exact grant; this marker implies no ref effect.
+    AgentCredentialChanged {
+        credential: ForgeEntityId,
+    },
 }
 
 impl ForgeEventKind {
@@ -236,6 +241,7 @@ impl ForgeEventKind {
             | Self::DiscussionChanged { .. }
             | Self::MilestoneChanged { .. }
             | Self::NotificationPreferenceChanged { .. }
+            | Self::AgentCredentialChanged { .. }
             | Self::ReviewProtectionChanged { .. }
             | Self::WorkflowCheckObserved { .. }
             | Self::PullRequestCommented { .. }
@@ -260,6 +266,7 @@ impl ForgeEventKind {
             Self::DiscussionChanged { discussion } => *discussion,
             Self::MilestoneChanged { milestone } => *milestone,
             Self::NotificationPreferenceChanged { preference } => *preference,
+            Self::AgentCredentialChanged { credential } => *credential,
         }
     }
 }
