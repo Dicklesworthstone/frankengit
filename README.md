@@ -320,6 +320,19 @@ The discussion browser links to `/{repository}/ui/discussion-notifications/`,
 with unread/muted filters, observed-version actions and recoverable requests.
 Email delivery and PR notifications remain separate work.
 
+### Sponsored agent metadata credentials
+
+`fg agent-credential generate-token|issue|revoke|show` manages immutable,
+repository-incarnation-bound credentials with an explicit agent and human or
+service sponsor. Native HTTP requests authenticate the current canonical grant
+and run under finite metadata scopes, byte envelopes and expiry. Issue, PR
+metadata/conversation, discussion and individual outcome operations are supported;
+Git publication, reviews, merges and administration remain outside this profile.
+Revocation is rechecked at the publication CAS basis, and outcome receipts retain
+the original agent/sponsor evidence across rotation and restart. See
+[sponsored agent credentials](docs/SPONSORED_AGENT_CREDENTIALS.md) for private token
+files, trusted-local administration, scope limits and validation status.
+
 ### Native merge queues
 
 `fg queue enqueue|dequeue|reorder|show|list` manages durable queue membership and

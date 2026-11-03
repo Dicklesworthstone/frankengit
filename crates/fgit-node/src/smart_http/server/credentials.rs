@@ -40,6 +40,11 @@ pub(super) struct Binding {
 // No Debug implementation: credentials must not be printed in diagnostics.
 #[derive(Clone)]
 pub(super) enum CredentialSource {
+    /// Verified against canonical state for one request, never saved as config.
+    AgentRequest {
+        digest: [u8; 32],
+        grant: Grant,
+    },
     Static {
         digest: [u8; 32],
         principal: PrincipalId,
@@ -132,8 +137,32 @@ pub(super) struct Grant {
     pub principal: PrincipalId,
     scopes: Scopes,
     ref_write_scope: Option<Arc<RefWriteScope>>,
+    authentication: AdmissionAuthentication,
+    agent_deadline: Option<std::time::Instant>,
 }
 impl Grant {
+    pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
+        use fgit_identity::agent::{DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE};
+        let mut scopes = Scopes::default();
+        let scope = match request.operation {
+            ISSUES_READ => Scope::IssuesRead,
+            ISSUES_WRITE => Scope::IssuesWrite,
+            PULLS_READ => Scope::PullsRead,
+            PULLS_WRITE => Scope::PullsWrite,
+            DISCUSSIONS_READ => Scope::DiscussionsRead,
+            DISCUSSIONS_WRITE => Scope::DiscussionsWrite,
+            OUTCOMES_READ => Scope::OutcomesRead,
+            _ => unreachable!("node authenticated a closed operation"),
+        };
+        scopes.insert(scope);
+        Self {
+            principal: request.authentication.agent(),
+            scopes,
+            ref_write_scope: None,
+            authentication: AdmissionAuthentication::AgentCredential(request.authentication),
+            agent_deadline: Some(request.deadline()),
+        }
+    }
     pub const fn permits(&self, service: Service) -> bool {
         match service {
             Service::UploadPack => self.scopes.contains(Scope::Read),
@@ -242,7 +271,8 @@ impl Grant {
     pub(super) fn session(&self, key: IdempotencyKey) -> LoopbackReceiveSession {
         LoopbackReceiveSession::Authenticated(
             AuthenticatedReceiveSession::new(self.principal, key)
-                .with_authentication(AdmissionAuthentication::HttpToken)
+                .with_authentication(self.authentication)
+                .with_agent_deadline(self.agent_deadline)
                 .with_ref_write_scope(self.ref_write_scope.clone()),
         )
     }
@@ -279,14 +309,31 @@ impl Error for CredentialFailure {}
 impl CredentialSource {
     pub fn validate(&self) -> Result<(), CredentialFailure> {
         match self {
+            Self::AgentRequest { .. } => Ok(()),
             Self::Static { .. } => Ok(()),
             Self::File { path, binding } => load(path, *binding).map(|_| ()),
         }
     }
 
     pub fn authenticate(&self, authorization: Option<&str>) -> Result<Grant, CredentialFailure> {
+        if let Self::AgentRequest { digest, grant } = self {
+            let token = authorization
+                .and_then(|value| value.split_once(' '))
+                .filter(|(scheme, token)| {
+                    scheme.eq_ignore_ascii_case("bearer")
+                        && crate::agent_credentials::valid_agent_credential_token(token.as_bytes())
+                })
+                .map(|(_, token)| token)
+                .ok_or(CredentialFailure::UnknownCredential)?;
+            return if verify_mac(digest, &sha256_digest(token.as_bytes())) {
+                Ok(grant.clone())
+            } else {
+                Err(CredentialFailure::UnknownCredential)
+            };
+        }
         let candidate = credential_digest(authorization)?;
         match self {
+            Self::AgentRequest { .. } => Err(CredentialFailure::UnknownCredential),
             Self::Static { digest, principal } => {
                 if !verify_mac(digest, &candidate) {
                     return Err(CredentialFailure::UnknownCredential);
@@ -297,6 +344,8 @@ impl CredentialSource {
                     principal: *principal,
                     scopes: Scopes::git_transport(),
                     ref_write_scope: None,
+                    authentication: AdmissionAuthentication::HttpToken,
+                    agent_deadline: None,
                 })
             }
             Self::File { path, binding } => {
@@ -490,6 +539,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
         principal,
         scopes: Scopes::default(),
         ref_write_scope: None,
+        authentication: AdmissionAuthentication::HttpToken,
+        agent_deadline: None,
     };
     let mut previous = None;
     for name in scopes.split(',') {

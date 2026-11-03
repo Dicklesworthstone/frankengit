@@ -98,6 +98,17 @@ pub(super) enum Request<'a> {
     FastForward(fast_forward::Request<'a>),
 }
 impl<'a> Request<'a> {
+    pub(super) fn agent_operation(&self) -> Option<u16> {
+        use fgit_identity::agent::{PULLS_READ, PULLS_WRITE};
+        match self {
+            Self::Metadata(_) | Self::Conversation(_) => Some(if self.is_mutation() {
+                PULLS_WRITE
+            } else {
+                PULLS_READ
+            }),
+            _ => None,
+        }
+    }
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
         if let Some(request) = conversation::Request::parse(envelope)? {
             return Ok(Some(Self::Conversation(request)));
@@ -314,7 +325,7 @@ fn execute_metadata(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
+    let context = node.authenticated_session_request_context(&deadline, session);
     let mut live = || !deadline.expired();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)

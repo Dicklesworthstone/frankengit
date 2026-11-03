@@ -12,6 +12,8 @@ use fgit_authority::key_recovery::{
 };
 use fgit_types::RefusalCode;
 
+mod principal;
+
 impl OneNode {
     /// Recover this authenticated principal's original sealed request by key.
     ///

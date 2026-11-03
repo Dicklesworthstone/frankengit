@@ -521,7 +521,7 @@ impl OneNode {
 
 /// The existing asynchronous projection plus real native-object validation.
 /// This deliberately does not implement synchronous staging callbacks.
-pub(super) struct NodeNativeMergeProjection<'node> {
+pub(crate) struct NodeNativeMergeProjection<'node> {
     pub(super) node: &'node OneNode,
     pub(super) inner: DurableAsyncAdmissionProjection<'node>,
     pub(super) object_limits: MergeObjectLimits,
@@ -531,6 +531,28 @@ pub(super) struct NodeNativeMergeProjection<'node> {
     pub(super) workspace_clock_floor: u64,
     /// Private candidate objects owned by this bundle operation, if any.
     pub(super) staging: Option<&'node ReceiveStaging>,
+}
+
+impl<'node> NodeNativeMergeProjection<'node> {
+    /// Construct the metadata-only projection without exposing workspace or
+    /// staged-object capabilities outside their owning module.
+    pub(crate) fn metadata(
+        node: &'node OneNode,
+        context: &AdmissionContext,
+        session: &crate::AuthenticatedReceiveSession,
+    ) -> Result<Self, AdmissionError> {
+        Ok(Self {
+            node,
+            inner: node
+                .durable_admission_projection(context)?
+                .with_authenticated_session(session),
+            object_limits: MergeObjectLimits::default(),
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
+            staging: None,
+        })
+    }
 }
 
 impl NodeNativeMergeProjection<'_> {
@@ -611,6 +633,10 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         self.inner.authentication
     }
 
+    fn agent_credential_now(&self) -> Option<u64> {
+        crate::agent_credentials::epoch_seconds()
+    }
+
     fn validate_comment_anchor_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -665,6 +691,23 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
     }
     fn merge_publication_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         self.merge_checkpoint(cx)?;
+        if let Some(authentication) = self.inner.authentication
+            && let Some(agent) = authentication.agent_provenance()
+        {
+            if self
+                .inner
+                .agent_deadline
+                .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+            {
+                return Err(RefusalCode::CapabilityExpired);
+            }
+            let now = self
+                .agent_credential_now()
+                .ok_or(RefusalCode::CapabilityExpired)?;
+            if now < agent.authenticated_at() || now >= agent.expires_at() {
+                return Err(RefusalCode::CapabilityExpired);
+            }
+        }
         self.workspace_live()
     }
 
