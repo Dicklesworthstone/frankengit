@@ -1,7 +1,7 @@
 // HTTP response-schema peer, NOT a Rust fg authority. Production operators,
 // clients, sockets, pinned archive traversal and private custody run unchanged.
 import { createServer } from 'node:http';
-import { once } from 'node:events';
+import { listenForFetch } from './fetch_listener_helper.mjs';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -144,8 +144,8 @@ export async function milestonePeer({ rows = [], milestones = [], tenantId = ten
       send(decision, committed ? 200 : 409);
     } catch (error) { res.destroy(error); }
   });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  return { href: `http://127.0.0.1:${server.address().port}/repository/ui/issues/`, token, calls, source, milestoneSource, decisions,
+  const port = await listenForFetch(server);
+  return { href: `http://127.0.0.1:${port}/repository/ui/issues/`, token, calls, source, milestoneSource, decisions,
     async close() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
 }
 export async function setupMilestones(t, { rows = fixtureMilestoneIssues(), milestones = fixtureMilestones(), ...options } = {}) {
