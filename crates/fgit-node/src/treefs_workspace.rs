@@ -30,7 +30,9 @@ mod queue;
 pub use discussions::DiscussionReadRefusal;
 pub use issues::IssueReadRefusal;
 pub use milestones::MilestoneReadRefusal;
-pub use notifications::{NotificationInboxPage, NotificationReadRefusal, NotificationThreadView};
+pub use notifications::{
+    NotificationInboxPage, NotificationReadRefusal, NotificationThreadState, NotificationThreadView,
+};
 pub use pull_request::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,

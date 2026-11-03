@@ -13,25 +13,27 @@ use std::io::Write;
 const USAGE: &str = "\
 usage: fg inbox list <storage-root> <tenant-id> <repository-id>
   --trusted-local --principal <id> [--limit <1..100>] [--unread-only] [--include-muted]
-  [--after <issue-number> --expected-head <snapshot-token>]
-usage: fg inbox show <storage-root> <tenant-id> <repository-id> <issue-number>
+  [--after <thread-number> --expected-head <snapshot-token>]
+usage: fg inbox show <storage-root> <tenant-id> <repository-id> <thread-number>
   --trusted-local --principal <id> [--expected-head <snapshot-token>]
-usage: fg inbox <subscribe|mute|automatic|read|unread> <storage-root> <tenant-id> <repository-id> <issue-number>
+usage: fg inbox <subscribe|mute|automatic|read|unread> <storage-root> <tenant-id> <repository-id> <thread-number>
   --trusted-local --principal <id> --expected-version <preference-version>
-  --idempotency-key <original-key> [--read-through <observed-issue-version>]
-All commands accept [--object-format sha1|sha256] and [--expected-incarnation <id>].
+  --idempotency-key <original-key> [--read-through <observed-thread-version>]
+All commands accept [--kind issue|discussion] (default issue),
+[--object-format sha1|sha256] and [--expected-incarnation <id>].
 
 The principal is this trusted local operator's identity, not a selected recipient.
-Inbox entries are issue threads; reasons, read state and delivery preferences come
+Issue and discussion inboxes have separate preference streams, even at the same number.
+Reasons, read state and delivery preferences come
 from the exact canonical source named by the response's snapshot token.
 Preference version 0 creates your own preference stream. All other versions are exact.
-read requires a positive --read-through from a previously observed issue version;
+read requires a positive --read-through from a previously observed thread version;
 newer activity stays unread. unread clears the read prefix. Neither changes mode.
 subscribe selects the thread, mute suppresses it, automatic restores participation rules.
-List continuation requires the original snapshot token and unchanged filters/principal.
-Retry uncertain mutations with the identical action, version, read prefix and key,
+List continuation requires the original snapshot token and unchanged kind/filters/principal.
+Retry uncertain mutations with the identical kind, number, action, version, read prefix and key,
 or recover with fg outcome. Never refresh a retry's expected version.
-Exit 0: read/committed; 3: canonical refusal; 4: missing issue; 2: input/I/O failure.";
+Exit 0: read/committed; 3: canonical refusal; 4: missing thread; 2: input/I/O failure.";
 
 pub fn run(args: &[String]) -> Result<u8, String> {
     run_to(args, &mut std::io::stdout().lock())
@@ -93,23 +95,25 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                     IdempotencyKey::new(b"inbox-read-no-publication".to_vec())
                         .map_err(|_| "invalid read session")?,
                 );
-                let page = if let Some(number) = read.number {
-                    node.runtime().block_on(node.read_notification_thread_in(
+                let page = if let Some(target) = read.target {
+                    node.runtime().block_on(node.read_notification_target_in(
                         &request,
                         &session,
-                        number,
+                        target,
                         read.expected_head,
                     ))
                 } else {
-                    node.runtime().block_on(node.read_notification_inbox_in(
-                        &request,
-                        &session,
-                        read.after,
-                        read.limit,
-                        read.expected_head,
-                        read.unread_only,
-                        read.include_muted,
-                    ))
+                    node.runtime()
+                        .block_on(node.read_notification_inbox_for_kind_in(
+                            &request,
+                            &session,
+                            options.kind,
+                            read.after,
+                            read.limit,
+                            read.expected_head,
+                            read.unread_only,
+                            read.include_muted,
+                        ))
                 }
                 .map_err(|error| error.to_string())?;
                 output::page(&options, read, &page).map(|(body, exit)| Completed::Read(body, exit))

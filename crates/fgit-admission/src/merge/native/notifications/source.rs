@@ -5,11 +5,15 @@ use crate::AdmissionError;
 use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositionStateEntry};
-use fgit_forge::event::issue::{IssueAction, IssueSnapshot};
-use fgit_forge::event::notification::NotificationPreferenceSnapshot;
-use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventPayload, IssueNumber};
+use fgit_forge::event::notification::{
+    NotificationPreferenceSnapshot, NotificationTarget, NotificationTargetKind,
+};
+use fgit_forge::{AggregateId, AggregateVersion, DiscussionNumber, ForgeEvent, IssueNumber};
 use fgit_types::{Digest, PrincipalId, RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod subject;
+pub use subject::NotificationSubjectSnapshot;
 
 const MAX_THREADS: usize = 16_384;
 const MAX_EVENTS: usize = 65_536;
@@ -18,7 +22,7 @@ const MAX_RETAINED_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NotificationThread {
-    pub issue: IssueSnapshot,
+    pub subject: NotificationSubjectSnapshot,
     pub preference: Option<NotificationPreferenceSnapshot>,
     pub latest_other_version: Option<AggregateVersion>,
     pub participated: bool,
@@ -30,6 +34,7 @@ pub struct NotificationSourceSnapshot {
     pub forge_root: Digest,
     pub outbox_root: Digest,
     pub principal: PrincipalId,
+    pub kind: NotificationTargetKind,
     pub threads: Vec<NotificationThread>,
 }
 
@@ -41,11 +46,36 @@ fn checkpoint(cancelled: &impl Fn() -> bool) -> Result<(), AdmissionError> {
     }
 }
 
+/// Compatibility wrapper for the existing issue-only source.
 pub async fn read_source_at<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,
     principal: PrincipalId,
+    cancelled: &C,
+) -> Result<NotificationSourceSnapshot, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    read_source_for_kind_at(
+        store,
+        cx,
+        basis,
+        principal,
+        NotificationTargetKind::Issue,
+        cancelled,
+    )
+    .await
+}
+
+/// Reconstruct one subject kind and only the requesting principal's preferences.
+pub async fn read_source_for_kind_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    principal: PrincipalId,
+    kind: NotificationTargetKind,
     cancelled: &C,
 ) -> Result<NotificationSourceSnapshot, AdmissionError>
 where
@@ -67,6 +97,7 @@ where
         &roots.forge,
         &roots.outbox,
         principal,
+        kind,
         cancelled,
     )
     .await?;
@@ -77,6 +108,7 @@ where
         forge_root: basis.body().forge_position_root,
         outbox_root: basis.body().outbox_root,
         principal,
+        kind,
         threads,
     })
 }
@@ -84,37 +116,29 @@ where
 fn frontiers<C: Fn() -> bool + Sync>(
     forge: &CanonicalForgePositionState,
     principal: PrincipalId,
+    kind: NotificationTargetKind,
     cancelled: &C,
 ) -> Result<BTreeMap<AggregateId, ForgePositionStateEntry>, AdmissionError> {
     let mut selected = BTreeMap::new();
-    let mut issue_count = 0usize;
+    let mut subject_count = 0usize;
     let mut preference_count = 0usize;
+    let (subject_prefix, preference_prefix) = match kind {
+        NotificationTargetKind::Issue => ("issue/", "notify/"),
+        NotificationTargetKind::Discussion => ("discussion/", "dnotify/"),
+    };
     for entry in forge.entries() {
         checkpoint(cancelled)?;
         let label = entry.stream();
-        let aggregate = if let Some(number) = label.as_str().strip_prefix("issue/") {
-            let number = number
-                .parse::<u64>()
-                .ok()
-                .and_then(IssueNumber::try_new)
-                .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-            issue_count += 1;
-            AggregateId::Issue(number)
-        } else if let Some(preference) = label.as_str().strip_prefix("notify/") {
+        let aggregate = if let Some(number) = label.as_str().strip_prefix(subject_prefix) {
+            subject_count += 1;
+            parse_target(kind, number)?.aggregate()
+        } else if let Some(preference) = label.as_str().strip_prefix(preference_prefix) {
             let (owner, number) = preference
                 .split_once('/')
                 .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
             let owner = PrincipalId::from_hex(owner)
                 .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-            let number = number
-                .parse::<u64>()
-                .ok()
-                .and_then(IssueNumber::try_new)
-                .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-            let aggregate = AggregateId::NotificationPreference {
-                principal: owner,
-                issue: number,
-            };
+            let aggregate = parse_target(kind, number)?.preference_aggregate(owner);
             if storage::aggregate_label(aggregate)? != label {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
@@ -126,7 +150,7 @@ fn frontiers<C: Fn() -> bool + Sync>(
         } else {
             continue;
         };
-        if issue_count > MAX_THREADS || preference_count > MAX_THREADS {
+        if subject_count > MAX_THREADS || preference_count > MAX_THREADS {
             return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
         }
         if storage::aggregate_label(aggregate)? != label
@@ -138,6 +162,30 @@ fn frontiers<C: Fn() -> bool + Sync>(
     Ok(selected)
 }
 
+fn parse_target(
+    kind: NotificationTargetKind,
+    raw: &str,
+) -> Result<NotificationTarget, AdmissionError> {
+    let number = raw.parse::<u64>().ok();
+    let target = match kind {
+        NotificationTargetKind::Issue => number
+            .and_then(IssueNumber::try_new)
+            .map(NotificationTarget::Issue),
+        NotificationTargetKind::Discussion => number
+            .and_then(DiscussionNumber::try_new)
+            .map(NotificationTarget::Discussion),
+    };
+    target.ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))
+}
+
+fn subject_target(aggregate: AggregateId) -> Option<NotificationTarget> {
+    match aggregate {
+        AggregateId::Issue(number) => Some(NotificationTarget::Issue(number)),
+        AggregateId::Discussion(number) => Some(NotificationTarget::Discussion(number)),
+        _ => None,
+    }
+}
+
 async fn replay<S, C>(
     store: &S,
     cx: &S::Context,
@@ -145,6 +193,7 @@ async fn replay<S, C>(
     forge: &CanonicalForgePositionState,
     outbox: &CanonicalOutboxState,
     principal: PrincipalId,
+    kind: NotificationTargetKind,
     cancelled: &C,
 ) -> Result<Vec<NotificationThread>, AdmissionError>
 where
@@ -155,7 +204,7 @@ where
     if forge.repository_id() != repository || outbox.repository_id() != repository {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    let frontiers = frontiers(forge, principal, cancelled)?;
+    let frontiers = frontiers(forge, principal, kind, cancelled)?;
     let mut selected_batches =
         BTreeMap::<Digest, Vec<(AggregateId, ForgePositionStateEntry)>>::new();
     for (aggregate, entry) in &frontiers {
@@ -206,8 +255,10 @@ where
         }
         for event in batch.events {
             checkpoint(cancelled)?;
-            let relevant = matches!(event.aggregate, AggregateId::Issue(_))
-                || matches!(event.aggregate, AggregateId::NotificationPreference { principal: owner, .. } if owner == principal);
+            let relevant = subject_target(event.aggregate)
+                .is_some_and(|target| target.kind() == kind)
+                || NotificationTarget::from_preference_aggregate(event.aggregate)
+                    .is_some_and(|(owner, target)| owner == principal && target.kind() == kind);
             if !relevant {
                 continue;
             }
@@ -237,53 +288,46 @@ where
     if !selected_batches.is_empty() {
         return Err(unavailable(RefusalCode::EvidenceMissing));
     }
-    let mut issues = BTreeMap::<IssueNumber, NotificationThread>::new();
-    let mut preferences = BTreeMap::<IssueNumber, NotificationPreferenceSnapshot>::new();
+    let mut threads = BTreeMap::<NotificationTarget, NotificationThread>::new();
+    let mut preferences = BTreeMap::<NotificationTarget, NotificationPreferenceSnapshot>::new();
     let mut latest = BTreeMap::new();
     for ((aggregate, _), event) in events {
         checkpoint(cancelled)?;
-        match (aggregate, &event.payload) {
-            (AggregateId::Issue(number), ForgeEventPayload::IssueChangedNative(change)) => {
-                let previous = issues.get(&number);
-                let issue = fgit_forge::event::issue::apply_event(
-                    previous.map(|thread| &thread.issue),
-                    &event,
-                )
-                .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-                let participated = previous.is_some_and(|thread| thread.participated)
-                    || (change.actor == principal
-                        && matches!(
-                            change.action,
-                            IssueAction::Open { .. } | IssueAction::Comment { .. }
-                        ));
-                let latest_other_version = if change.actor != principal {
-                    Some(event.version)
-                } else {
-                    previous.and_then(|thread| thread.latest_other_version)
-                };
-                issues.insert(
-                    number,
-                    NotificationThread {
-                        issue,
-                        preference: None,
-                        latest_other_version,
-                        participated,
-                    },
-                );
-            }
-            (
-                AggregateId::NotificationPreference {
-                    principal: owner,
-                    issue,
+        if let Some(target) = subject_target(aggregate) {
+            let previous = threads.get(&target);
+            let (subject, actor, participates) = NotificationSubjectSnapshot::apply_event(
+                previous.map(|thread| &thread.subject),
+                &event,
+            )
+            .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+            let participated = previous.is_some_and(|thread| thread.participated)
+                || (actor == principal && participates);
+            let latest_other_version = if actor != principal {
+                Some(event.version)
+            } else {
+                previous.and_then(|thread| thread.latest_other_version)
+            };
+            threads.insert(
+                target,
+                NotificationThread {
+                    subject,
+                    preference: None,
+                    latest_other_version,
+                    participated,
                 },
-                ForgeEventPayload::NotificationPreferenceChangedNative(_),
-            ) if owner == principal => {
-                let next =
-                    fgit_forge::event::notification::apply_event(preferences.get(&issue), &event)
-                        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-                preferences.insert(issue, next);
+            );
+        } else if let Some((owner, target)) =
+            NotificationTarget::from_preference_aggregate(aggregate)
+        {
+            if owner != principal || target.kind() != kind {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
-            _ => return Err(unavailable(RefusalCode::EvidenceInvalid)),
+            let next =
+                fgit_forge::event::notification::apply_event(preferences.get(&target), &event)
+                    .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+            preferences.insert(target, next);
+        } else {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
         latest.insert(aggregate, event);
     }
@@ -299,14 +343,14 @@ where
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
     }
-    for (number, thread) in &mut issues {
+    for (target, thread) in &mut threads {
         checkpoint(cancelled)?;
-        thread.preference = preferences.remove(number);
+        thread.preference = preferences.remove(target);
         if thread
             .preference
             .as_ref()
             .and_then(|preference| preference.read_through)
-            .is_some_and(|through| through > thread.issue.version)
+            .is_some_and(|through| through > thread.subject.version())
         {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
@@ -315,7 +359,7 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     checkpoint(cancelled)?;
-    Ok(issues.into_values().collect())
+    Ok(threads.into_values().collect())
 }
 
 #[cfg(test)]

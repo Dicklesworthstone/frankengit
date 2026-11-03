@@ -881,7 +881,7 @@
     },
     "frankengit_inbox_automatic": {
       "title": "frankengit_inbox_automatic",
-      "description": "Restore author/participant/assignee selection while preserving your read prefix, under notification-write plus issue-read.",
+      "description": "Restore author/participant selection, and assignee selection for issues, while preserving your read prefix. Requires notification-write plus the selected kind's read grant; kind defaults to issue.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -889,7 +889,7 @@
           "properties": {
             "number": {
               "type": "string",
-              "description": "Positive canonical decimal issue number.",
+              "description": "Positive canonical decimal issue or discussion number in the selected kind.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -907,6 +907,13 @@
               "x-classification": "selector_position",
               "maxLength": 256,
               "pattern": "^[!-~]+$"
+            },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
             }
           },
           "required": ["number", "expected_version", "idempotency_key"],
@@ -917,7 +924,7 @@
     },
     "frankengit_inbox_list": {
       "title": "frankengit_inbox_list",
-      "description": "Read your issue inbox from one exact canonical source through the typed SQLModel projection. Requires issue-read and launch-bound principal/incarnation; keep snapshot and filters fixed across pages.",
+      "description": "Read your issue or discussion inbox from one exact canonical source through the typed SQLModel projection. Kind defaults to issue. Requires the selected kind's independent read grant and launch-bound principal/incarnation; keep snapshot, kind and filters fixed across pages.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -925,7 +932,7 @@
           "properties": {
             "after": {
               "type": "string",
-              "description": "Numeric issue cursor, zero by default. Keep snapshot, recipient and filters fixed across pages.",
+              "description": "Numeric thread cursor, zero by default. Keep snapshot, kind, recipient and filters fixed across pages.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^(0|[1-9][0-9]*)$"
@@ -950,6 +957,13 @@
               "type": "boolean",
               "description": "Include your explicitly muted threads, default false.",
               "x-classification": "selector_position"
+            },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
             }
           },
           "required": [],
@@ -960,7 +974,7 @@
     },
     "frankengit_inbox_mute": {
       "title": "frankengit_inbox_mute",
-      "description": "Mute your issue thread while preserving its read prefix, under independent notification-write plus issue-read.",
+      "description": "Mute your issue or discussion thread while preserving its read prefix, under independent notification-write plus the selected kind's read grant. Kind defaults to issue.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -968,7 +982,7 @@
           "properties": {
             "number": {
               "type": "string",
-              "description": "Positive canonical decimal issue number.",
+              "description": "Positive canonical decimal issue or discussion number in the selected kind.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -986,6 +1000,13 @@
               "x-classification": "selector_position",
               "maxLength": 256,
               "pattern": "^[!-~]+$"
+            },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
             }
           },
           "required": ["number", "expected_version", "idempotency_key"],
@@ -996,7 +1017,7 @@
     },
     "frankengit_inbox_read": {
       "title": "frankengit_inbox_read",
-      "description": "Mark the explicit observed issue prefix read at your exact preference version. Future activity stays unread. Requires notification-write plus issue-read; preserve the original read prefix and durable key on retry.",
+      "description": "Mark the explicit observed issue or discussion prefix read at your exact preference version. Future activity stays unread. Requires notification-write plus the selected kind's read grant; kind defaults to issue. Preserve kind, number, read prefix and durable key on retry.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -1004,7 +1025,7 @@
           "properties": {
             "number": {
               "type": "string",
-              "description": "Positive canonical decimal issue number.",
+              "description": "Positive canonical decimal issue or discussion number in the selected kind.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -1023,9 +1044,16 @@
               "maxLength": 256,
               "pattern": "^[!-~]+$"
             },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
+            },
             "read_through": {
               "type": "string",
-              "description": "Explicit observed positive issue version. Later activity stays unread; future versions refuse.",
+              "description": "Explicit observed positive version of the selected issue or discussion. Later activity stays unread; future versions refuse.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -1039,7 +1067,7 @@
     },
     "frankengit_inbox_show": {
       "title": "frankengit_inbox_show",
-      "description": "Read your canonical preferences and latest activity for one issue, including an unfollowed issue. Requires issue-read and launch-bound principal/incarnation. No read acknowledgement occurs.",
+      "description": "Read your canonical preferences and latest activity for one issue or discussion, including an unfollowed thread. Kind defaults to issue. Requires the selected kind's independent read grant and launch-bound principal/incarnation. No read acknowledgement occurs.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -1047,7 +1075,7 @@
           "properties": {
             "number": {
               "type": "string",
-              "description": "Positive canonical decimal issue number.",
+              "description": "Positive canonical decimal issue or discussion number in the selected kind.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -1057,6 +1085,13 @@
               "description": "Exact snapshot token from the first page, required with a nonzero after cursor.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
             }
           },
           "required": ["number"],
@@ -1067,7 +1102,7 @@
     },
     "frankengit_inbox_subscribe": {
       "title": "frankengit_inbox_subscribe",
-      "description": "Subscribe your issue thread at its exact preference version. Requires independent notification-write plus issue-read and launch-bound principal/incarnation; issue-write grants no preference authority.",
+      "description": "Subscribe your issue or discussion thread at its exact preference version. Kind defaults to issue. Requires independent notification-write plus the selected kind's read grant and launch-bound principal/incarnation; content-write grants no preference authority.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -1075,7 +1110,7 @@
           "properties": {
             "number": {
               "type": "string",
-              "description": "Positive canonical decimal issue number.",
+              "description": "Positive canonical decimal issue or discussion number in the selected kind.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -1093,6 +1128,13 @@
               "x-classification": "selector_position",
               "maxLength": 256,
               "pattern": "^[!-~]+$"
+            },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
             }
           },
           "required": ["number", "expected_version", "idempotency_key"],
@@ -1103,7 +1145,7 @@
     },
     "frankengit_inbox_unread": {
       "title": "frankengit_inbox_unread",
-      "description": "Clear your read prefix without changing delivery mode, under notification-write plus issue-read and an exact preference version.",
+      "description": "Clear your read prefix without changing delivery mode, under notification-write plus the selected kind's read grant and an exact preference version. Kind defaults to issue.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -1111,7 +1153,7 @@
           "properties": {
             "number": {
               "type": "string",
-              "description": "Positive canonical decimal issue number.",
+              "description": "Positive canonical decimal issue or discussion number in the selected kind.",
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
@@ -1129,6 +1171,13 @@
               "x-classification": "selector_position",
               "maxLength": 256,
               "pattern": "^[!-~]+$"
+            },
+            "kind": {
+              "type": "string",
+              "description": "issue (default) or discussion. Requires the selected kind's independent read grant; same-number domains have separate preference streams. Preserve kind on retry and pagination. Discussion HTTP operations use /{repository}/api/v1/notifications/discussions.",
+              "x-classification": "selector_position",
+              "maxLength": 10,
+              "pattern": "^(issue|discussion)$"
             }
           },
           "required": ["number", "expected_version", "idempotency_key"],

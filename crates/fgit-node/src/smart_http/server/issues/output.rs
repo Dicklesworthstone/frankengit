@@ -199,7 +199,7 @@ pub(super) fn mutation(
                 fgit_forge::ExpectedVersion::Exactly(version) => version.get(),
             };
             (
-                command.number.get(),
+                command.target.number(),
                 expected.to_string(),
                 super::notifications::action_name(&command.action),
             )
@@ -209,6 +209,8 @@ pub(super) fn mutation(
         "\"command_profile\":\"issue.add-assignees.v1\","
     } else if matches!(command, Command::AddLabels(_)) {
         "\"command_profile\":\"issue.add-labels.v1\","
+    } else if let Command::Notification(command) = command {
+        super::notifications::kind_field(command.canonical.target.kind())
     } else {
         ""
     };
@@ -219,8 +221,15 @@ pub(super) fn mutation(
             "\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
             "\"refusal_record_id\":{},\"refusal_code\":{},\"delivery_acknowledged\":null}}"
         ),
-        quote(if matches!(command, Command::Notification(_)) {
-            "notification_publication"
+        quote(if let Command::Notification(command) = command {
+            match command.canonical.target.kind() {
+                fgit_forge::event::notification::NotificationTargetKind::Issue => {
+                    "notification_publication"
+                }
+                fgit_forge::event::notification::NotificationTargetKind::Discussion => {
+                    "discussion_notification_publication"
+                }
+            }
         } else if matches!(command, Command::Milestone(_)) {
             "milestone_publication"
         } else {

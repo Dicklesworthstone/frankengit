@@ -9,8 +9,10 @@ unless it is locked. Locking stops new comments while allowing maintenance.
 
 The byte, version, authority and retry contract is specified in
 [NORMATIVE_PROTOCOL_CONTRACTS.md §20.2.7](NORMATIVE_PROTOCOL_CONTRACTS.md#2027-native-standalone-discussions).
-This profile does not yet provide categories, accepted answers, discussion
-notifications, cross-repository migration, or predecessor-independent comments.
+Discussion replies and subscriptions participate in a separate
+[native notification inbox](NATIVE_NOTIFICATIONS.md#discussion-inboxes).
+Categories, accepted answers, cross-repository migration and
+predecessor-independent comments remain outside this lifecycle profile.
 
 ## Use the CLI
 

@@ -90,7 +90,7 @@ pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
 pub use treefs_workspace::{
-    NotificationInboxPage, NotificationReadRefusal, NotificationThreadView,
+    NotificationInboxPage, NotificationReadRefusal, NotificationThreadState, NotificationThreadView,
 };
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{

@@ -1,27 +1,33 @@
-//! Self-owned issue preferences and a disposable, exact-source sqlmodel inbox.
+//! Self-owned issue and discussion preferences and a disposable, exact-source sqlmodel inbox.
 use super::{issues::snapshots, native_merge::NodeNativeMergeProjection};
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
 use fgit_admission::merge::native::{notifications, objects::MergeObjectLimits};
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
-use fgit_forge::event::issue::IssueState;
-use fgit_forge::event::notification::{NotificationCommand, NotificationMode};
+use fgit_forge::event::notification::{
+    NotificationCommand, NotificationMode, NotificationTarget, NotificationTargetKind,
+};
 use fgit_forge::{AggregateVersion, IssueNumber};
 use fgit_projection::inbox::{
-    InboxError, InboxQuery, InboxReason, InboxSnapshot, InboxSnapshotBinding, IssueInboxRow,
-    IssueInboxSession,
+    InboxError, InboxKind, InboxQuery, InboxReason, InboxRow, InboxSession, InboxSnapshot,
+    InboxSnapshotBinding,
 };
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{PrincipalId, RefusalCode, RepositoryAuthorityHeadId, TxId};
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationThreadState {
+    Open,
+    Closed,
+}
 #[derive(Clone, Debug)]
 pub struct NotificationThreadView {
-    pub number: IssueNumber,
-    pub issue_version: AggregateVersion,
+    pub target: NotificationTarget,
+    pub thread_version: AggregateVersion,
     pub title: String,
-    pub state: IssueState,
+    pub state: NotificationThreadState,
     pub preference_version: Option<AggregateVersion>,
     pub mode: NotificationMode,
     pub read_through: Option<AggregateVersion>,
@@ -36,13 +42,13 @@ impl NotificationThreadView {
             .as_ref()
             .map_or(NotificationMode::Participating, |p| p.mode);
         let mut reasons = Vec::new();
-        if thread.issue.opened_by == principal {
+        if thread.subject.opened_by() == principal {
             reasons.push(InboxReason::Author);
         }
         if thread.participated {
             reasons.push(InboxReason::Participant);
         }
-        if thread.issue.assignees.contains(&principal) {
+        if thread.subject.assigned_to(principal) {
             reasons.push(InboxReason::Assignee);
         }
         if mode == NotificationMode::Subscribed {
@@ -50,10 +56,14 @@ impl NotificationThreadView {
         }
         let read_through = thread.preference.as_ref().and_then(|p| p.read_through);
         Self {
-            number: thread.issue.number,
-            issue_version: thread.issue.version,
-            title: thread.issue.title,
-            state: thread.issue.state,
+            target: thread.subject.target(),
+            thread_version: thread.subject.version(),
+            title: thread.subject.title().to_owned(),
+            state: if thread.subject.is_closed() {
+                NotificationThreadState::Closed
+            } else {
+                NotificationThreadState::Open
+            },
             preference_version: thread.preference.as_ref().map(|p| p.version),
             mode,
             read_through,
@@ -63,10 +73,10 @@ impl NotificationThreadView {
                 > read_through.map_or(0, AggregateVersion::get),
         }
     }
-    fn row(&self) -> IssueInboxRow {
-        IssueInboxRow {
-            issue_number: self.number.get(),
-            issue_version: self.issue_version.get(),
+    fn row(&self) -> InboxRow {
+        InboxRow {
+            thread_number: self.target.number(),
+            thread_version: self.thread_version.get(),
             preference_version: self.preference_version.map(AggregateVersion::get),
             read_through: self.read_through.map(AggregateVersion::get),
             latest_other_version: self.latest_other_version.map(AggregateVersion::get),
@@ -77,6 +87,7 @@ impl NotificationThreadView {
 }
 #[derive(Clone, Debug)]
 pub struct NotificationInboxPage {
+    pub kind: NotificationTargetKind,
     pub binding: InboxSnapshotBinding,
     pub threads: Vec<NotificationThreadView>,
     pub next_after: Option<u64>,
@@ -152,6 +163,7 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
+        kind: NotificationTargetKind,
         expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<
         (InboxSnapshotBinding, BTreeMap<u64, NotificationThreadView>),
@@ -174,19 +186,24 @@ impl OneNode {
             &|| !super::workspace_request_live(request),
         )
         .await?;
-        let source = notifications::read_source_at(
+        let source = notifications::read_source_for_kind_at(
             &self.authority,
             request.authority(),
             &selected,
             principal,
+            kind,
             &|| !super::workspace_request_live(request),
         )
         .await
         .map_err(|source| NotificationReadRefusal::Admission(Box::new(source)))?;
-        if source.principal != principal {
+        if source.principal != principal || source.kind != kind {
             return Err(NotificationReadRefusal::InvalidProjection);
         }
         let binding = InboxSnapshotBinding {
+            kind: match kind {
+                NotificationTargetKind::Issue => InboxKind::Issue,
+                NotificationTargetKind::Discussion => InboxKind::Discussion,
+            },
             tenant: self.tenant_id,
             repository: self.repository_id,
             incarnation: self.repository_incarnation_id,
@@ -199,19 +216,44 @@ impl OneNode {
         let mut threads = BTreeMap::new();
         for thread in source.threads {
             let view = NotificationThreadView::from_source(thread, principal);
-            if threads.insert(view.number.get(), view).is_some() {
+            if view.target.kind() != kind || threads.insert(view.target.number(), view).is_some() {
                 return Err(NotificationReadRefusal::InvalidProjection);
             }
         }
         Ok((binding, threads))
     }
-    /// Remote adapters first check current issue disclosure and service grants.
-    /// The session supplies the recipient; page tokens only request retained
-    /// ancestors in the current configuration, policy and retention epoch.
+    /// Legacy issue-only wrapper. Discussion reads select their own namespace
+    /// explicitly and require their own current disclosure grants in adapters.
     pub async fn read_notification_inbox_in(
         &self,
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
+        after: u64,
+        limit: u16,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        unread_only: bool,
+        include_muted: bool,
+    ) -> Result<NotificationInboxPage, NotificationReadRefusal> {
+        self.read_notification_inbox_for_kind_in(
+            request,
+            session,
+            NotificationTargetKind::Issue,
+            after,
+            limit,
+            expected_head,
+            unread_only,
+            include_muted,
+        )
+        .await
+    }
+    /// Remote adapters first check the selected kind's disclosure and service grants.
+    /// The session supplies the recipient; page tokens only request retained
+    /// ancestors in the current configuration, policy and retention epoch.
+    pub async fn read_notification_inbox_for_kind_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        kind: NotificationTargetKind,
         after: u64,
         limit: u16,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -225,7 +267,7 @@ impl OneNode {
             return Err(NotificationReadRefusal::SnapshotRequired);
         }
         let (binding, mut threads) = self
-            .notification_source_in(request, session, expected_head)
+            .notification_source_in(request, session, kind, expected_head)
             .await?;
         let rows = threads
             .values()
@@ -237,7 +279,7 @@ impl OneNode {
             .attached_native_cx()
             .ok_or(NotificationReadRefusal::MissingRuntime)?;
         let mut projection =
-            IssueInboxSession::open_memory().map_err(NotificationReadRefusal::projection)?;
+            InboxSession::open_memory().map_err(NotificationReadRefusal::projection)?;
         let result = async {
             projection
                 .install_snapshot(&cx, InboxSnapshot { binding, rows })
@@ -248,7 +290,7 @@ impl OneNode {
                     &cx,
                     &binding,
                     InboxQuery {
-                        after_issue: (after != 0).then_some(after),
+                        after_thread: (after != 0).then_some(after),
                         limit: NonZeroU16::new(limit)
                             .ok_or(NotificationReadRefusal::InvalidLimit)?,
                         unread_only,
@@ -260,7 +302,7 @@ impl OneNode {
             let mut result = Vec::with_capacity(page.rows.len());
             for row in page.rows {
                 let view = threads
-                    .remove(&row.issue_number)
+                    .remove(&row.thread_number)
                     .ok_or(NotificationReadRefusal::InvalidProjection)?;
                 // Display fields come only from this exact verified source.
                 if view.row() != row {
@@ -269,9 +311,10 @@ impl OneNode {
                 result.push(view);
             }
             Ok(NotificationInboxPage {
+                kind,
                 binding: page.binding,
                 threads: result,
-                next_after: page.next_issue,
+                next_after: page.next_thread,
             })
         }
         .await;
@@ -286,8 +329,7 @@ impl OneNode {
             }),
         }
     }
-    /// Exact issue lookup includes implicit automatic preferences so a reader
-    /// can subscribe to an issue not currently relevant to their inbox.
+    /// Exact issue lookup, retained for existing callers.
     pub async fn read_notification_thread_in(
         &self,
         request: &NodeRequestContext,
@@ -295,12 +337,31 @@ impl OneNode {
         number: IssueNumber,
         expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<NotificationInboxPage, NotificationReadRefusal> {
+        self.read_notification_target_in(
+            request,
+            session,
+            NotificationTarget::Issue(number),
+            expected_head,
+        )
+        .await
+    }
+    /// Exact target lookup includes implicit automatic preferences so a reader
+    /// can subscribe to a thread not currently relevant to their inbox.
+    pub async fn read_notification_target_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        target: NotificationTarget,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<NotificationInboxPage, NotificationReadRefusal> {
+        let kind = target.kind();
         let (binding, mut threads) = self
-            .notification_source_in(request, session, expected_head)
+            .notification_source_in(request, session, kind, expected_head)
             .await?;
         Ok(NotificationInboxPage {
+            kind,
             binding,
-            threads: threads.remove(&number.get()).into_iter().collect(),
+            threads: threads.remove(&target.number()).into_iter().collect(),
             next_after: None,
         })
     }

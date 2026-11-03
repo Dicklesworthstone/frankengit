@@ -449,12 +449,12 @@ fn wire_aggregate_zero_and_mismatched_payloads_are_rejected_on_decode() {
     let mut bytes = out.as_bytes().to_vec();
     bytes[8..12].copy_from_slice(&4u32.to_be_bytes());
     assert!(super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)).is_err());
-    bytes[8..12].copy_from_slice(&12u32.to_be_bytes());
+    bytes[8..12].copy_from_slice(&13u32.to_be_bytes());
     assert!(matches!(
         super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)),
         Err(CodecRefusal::VariantUnknown {
             field: "aggregate.kind",
-            observed: 12,
+            observed: 13,
             ..
         })
     ));

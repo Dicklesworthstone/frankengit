@@ -6,11 +6,11 @@ use sqlmodel_core::field::FieldInfo;
 use sqlmodel_core::{Model, Row, SqlType, Value};
 
 use super::{
-    InboxError, InboxReason, InboxRefusal, InboxSnapshot, InboxSnapshotBinding, IssueInboxRow,
+    InboxError, InboxReason, InboxRefusal, InboxRow, InboxSnapshot, InboxSnapshotBinding,
     checked_counter,
 };
 
-const PROFILE: &str = "frankengit/issue-notification-inbox/v1";
+const PROFILE: &str = "frankengit/thread-notification-inbox/v2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StoredInbox {
@@ -25,6 +25,7 @@ pub(super) struct StoredInbox {
     forge_position_root: String,
     outbox_root: String,
     principal: String,
+    target_kind: String,
     pub complete: i64,
     pub row_count: i64,
 }
@@ -35,7 +36,7 @@ impl StoredInbox {
         Ok(Self {
             singleton: 1,
             profile: PROFILE.to_owned(),
-            schema_generation: 1,
+            schema_generation: 2,
             tenant: binding.tenant.to_string(),
             repository: binding.repository.to_string(),
             incarnation: binding.incarnation.to_string(),
@@ -47,6 +48,7 @@ impl StoredInbox {
             forge_position_root: binding.forge_position_root.to_string(),
             outbox_root: binding.outbox_root.to_string(),
             principal: binding.principal.to_string(),
+            target_kind: binding.kind.name().to_owned(),
             complete: 1,
             row_count: i64::try_from(snapshot.rows.len())
                 .map_err(|_| InboxRefusal::IncompleteSnapshot)?,
@@ -56,7 +58,7 @@ impl StoredInbox {
     pub fn matches(&self, binding: &InboxSnapshotBinding) -> bool {
         self.singleton == 1
             && self.profile == PROFILE
-            && self.schema_generation == 1
+            && self.schema_generation == 2
             && self.tenant == binding.tenant.to_string()
             && self.repository == binding.repository.to_string()
             && self.incarnation == binding.incarnation.to_string()
@@ -66,6 +68,7 @@ impl StoredInbox {
             && self.forge_position_root == binding.forge_position_root.to_string()
             && self.outbox_root == binding.outbox_root.to_string()
             && self.principal == binding.principal.to_string()
+            && self.target_kind == binding.kind.name()
     }
 }
 
@@ -76,7 +79,7 @@ const fn singleton_field() -> FieldInfo {
 }
 
 impl Model for StoredInbox {
-    const TABLE_NAME: &'static str = "fgit_issue_inbox_complete";
+    const TABLE_NAME: &'static str = "fgit_thread_inbox_complete";
     const PRIMARY_KEY: &'static [&'static str] = &["singleton"];
 
     fn fields() -> &'static [FieldInfo] {
@@ -96,6 +99,7 @@ impl Model for StoredInbox {
             FieldInfo::new("forge_position_root", "forge_position_root", SqlType::Text),
             FieldInfo::new("outbox_root", "outbox_root", SqlType::Text),
             FieldInfo::new("principal", "principal", SqlType::Text),
+            FieldInfo::new("target_kind", "target_kind", SqlType::Text),
             FieldInfo::new("complete", "complete", SqlType::BigInt),
             FieldInfo::new("row_count", "row_count", SqlType::BigInt),
         ];
@@ -121,6 +125,7 @@ impl Model for StoredInbox {
             ),
             ("outbox_root", Value::Text(self.outbox_root.clone())),
             ("principal", Value::Text(self.principal.clone())),
+            ("target_kind", Value::Text(self.target_kind.clone())),
             ("complete", Value::BigInt(self.complete)),
             ("row_count", Value::BigInt(self.row_count)),
         ]
@@ -139,6 +144,7 @@ impl Model for StoredInbox {
             forge_position_root: row.get_named("forge_position_root")?,
             outbox_root: row.get_named("outbox_root")?,
             principal: row.get_named("principal")?,
+            target_kind: row.get_named("target_kind")?,
             complete: row.get_named("complete")?,
             row_count: row.get_named("row_count")?,
         })
@@ -154,8 +160,8 @@ impl Model for StoredInbox {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StoredThread {
-    issue_number: i64,
-    issue_version: i64,
+    thread_number: i64,
+    thread_version: i64,
     preference_version: Option<i64>,
     read_through: Option<i64>,
     latest_other_version: Option<i64>,
@@ -165,10 +171,10 @@ pub(super) struct StoredThread {
 }
 
 impl StoredThread {
-    pub fn from_input(row: &IssueInboxRow) -> Result<Self, InboxError> {
+    pub fn from_input(row: &InboxRow) -> Result<Self, InboxError> {
         Ok(Self {
-            issue_number: checked_counter("issue_number", row.issue_number)?,
-            issue_version: checked_counter("issue_version", row.issue_version)?,
+            thread_number: checked_counter("thread_number", row.thread_number)?,
+            thread_version: checked_counter("thread_version", row.thread_version)?,
             preference_version: row
                 .preference_version
                 .map(|value| checked_counter("preference_version", value))
@@ -190,7 +196,7 @@ impl StoredThread {
         })
     }
 
-    pub fn into_output(self) -> Result<IssueInboxRow, InboxError> {
+    pub fn into_output(self) -> Result<InboxRow, InboxError> {
         let unsigned = |value| u64::try_from(value).map_err(|_| InboxRefusal::CorruptRow);
         if !(0..=15).contains(&self.reason_mask)
             || !(0..=1).contains(&self.muted)
@@ -198,9 +204,9 @@ impl StoredThread {
         {
             return Err(InboxRefusal::CorruptRow.into());
         }
-        let mut row = IssueInboxRow {
-            issue_number: unsigned(self.issue_number)?,
-            issue_version: unsigned(self.issue_version)?,
+        let mut row = InboxRow {
+            thread_number: unsigned(self.thread_number)?,
+            thread_version: unsigned(self.thread_version)?,
             preference_version: self.preference_version.map(unsigned).transpose()?,
             read_through: self.read_through.map(unsigned).transpose()?,
             latest_other_version: self.latest_other_version.map(unsigned).transpose()?,
@@ -224,13 +230,13 @@ impl StoredThread {
 }
 
 impl Model for StoredThread {
-    const TABLE_NAME: &'static str = "fgit_issue_inbox_thread";
-    const PRIMARY_KEY: &'static [&'static str] = &["issue_number"];
+    const TABLE_NAME: &'static str = "fgit_thread_inbox_thread";
+    const PRIMARY_KEY: &'static [&'static str] = &["thread_number"];
 
     fn fields() -> &'static [FieldInfo] {
         const FIELDS: &[FieldInfo] = &[
-            FieldInfo::new("issue_number", "issue_number", SqlType::BigInt).primary_key(true),
-            FieldInfo::new("issue_version", "issue_version", SqlType::BigInt),
+            FieldInfo::new("thread_number", "thread_number", SqlType::BigInt).primary_key(true),
+            FieldInfo::new("thread_version", "thread_version", SqlType::BigInt),
             FieldInfo::new("preference_version", "preference_version", SqlType::BigInt)
                 .nullable(true),
             FieldInfo::new("read_through", "read_through", SqlType::BigInt).nullable(true),
@@ -250,8 +256,8 @@ impl Model for StoredThread {
     fn to_row(&self) -> Vec<(&'static str, Value)> {
         let optional = |value: Option<i64>| value.map_or(Value::Null, Value::BigInt);
         vec![
-            ("issue_number", Value::BigInt(self.issue_number)),
-            ("issue_version", Value::BigInt(self.issue_version)),
+            ("thread_number", Value::BigInt(self.thread_number)),
+            ("thread_version", Value::BigInt(self.thread_version)),
             ("preference_version", optional(self.preference_version)),
             ("read_through", optional(self.read_through)),
             ("latest_other_version", optional(self.latest_other_version)),
@@ -263,8 +269,8 @@ impl Model for StoredThread {
 
     fn from_row(row: &Row) -> sqlmodel_core::Result<Self> {
         Ok(Self {
-            issue_number: row.get_named("issue_number")?,
-            issue_version: row.get_named("issue_version")?,
+            thread_number: row.get_named("thread_number")?,
+            thread_version: row.get_named("thread_version")?,
             preference_version: row.get_named("preference_version")?,
             read_through: row.get_named("read_through")?,
             latest_other_version: row.get_named("latest_other_version")?,
@@ -275,7 +281,7 @@ impl Model for StoredThread {
     }
 
     fn primary_key_value(&self) -> Vec<Value> {
-        vec![Value::BigInt(self.issue_number)]
+        vec![Value::BigInt(self.thread_number)]
     }
     fn is_new(&self) -> bool {
         false

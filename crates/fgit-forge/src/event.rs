@@ -254,6 +254,15 @@ fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
             out.write_opaque_id(principal.as_bytes());
             out.write_scalar(issue.get());
         }
+        AggregateId::DiscussionNotificationPreference {
+            principal,
+            discussion,
+        } => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE);
+            out.write_opaque_id(principal.as_bytes());
+            out.write_scalar(discussion.get());
+        }
         AggregateId::Discussion(number) => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_DISCUSSION);
@@ -319,6 +328,17 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE => {
+            Ok(AggregateId::DiscussionNotificationPreference {
+                principal: fgit_types::PrincipalId::from_bytes(
+                    input.read_opaque_id("aggregate.notification_principal")?,
+                ),
+                discussion: counter(
+                    "aggregate.notification_discussion",
+                    input.read_scalar::<u64>("aggregate.notification_discussion")?,
+                )?,
+            })
+        }
         crate::aggregate::AGGREGATE_KIND_NOTIFICATION_PREFERENCE => {
             Ok(AggregateId::NotificationPreference {
                 principal: fgit_types::PrincipalId::from_bytes(

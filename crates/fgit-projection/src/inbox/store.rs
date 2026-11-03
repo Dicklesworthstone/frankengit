@@ -122,7 +122,7 @@ pub(super) fn page(query: InboxQuery) -> (String, Vec<Value>) {
         vec![
             // The caller checked this conversion before opening a transaction.
             Value::BigInt(
-                i64::try_from(query.after_issue.unwrap_or(0)).expect("checked inbox cursor"),
+                i64::try_from(query.after_thread.unwrap_or(0)).expect("checked inbox cursor"),
             ),
             Value::BigInt(i64::from(query.include_muted)),
             Value::BigInt(i64::from(query.unread_only)),

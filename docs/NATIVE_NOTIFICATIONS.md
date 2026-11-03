@@ -1,15 +1,81 @@
-# Native issue notifications
+# Native issue and discussion notifications
 
-FrankenGit provides a repository issue inbox for an explicit principal, with
+FrankenGit provides repository issue and discussion inboxes for an explicit principal, with
 automatic participation, subscription, mute and read-prefix controls. The
 browser, authenticated HTTP API, local `fg inbox` commands and MCP adapters use
-the same canonical issue history and principal-owned preference events.
+the same canonical thread histories and principal-owned preference events.
 
 Preferences are durable forge metadata. The inbox is a disposable projection of
 one authenticated source snapshot. Rebuilding that projection cannot subscribe
 someone, change a read cursor, edit an issue or publish a repository decision.
-This profile covers issue notifications. It does not claim email delivery,
-push delivery, PR notifications or completion of the broader notification plan.
+This profile covers issue and discussion notifications. Email delivery,
+push delivery and PR notifications remain separate work.
+
+## Discussion inboxes
+
+Standalone discussions have the same subscription, mute, automatic participation,
+read and unread controls as issues. The two thread namespaces are distinct:
+issue 7 and discussion 7 have separate activity, preferences, read prefixes and
+transaction seals for the same principal. Changing one never changes the other.
+
+The discussion opener receives `author` and `participant` reasons. Commenters
+receive `participant`; explicit followers receive `subscribed`. Discussion
+metadata edits alone do not make their actor a participant. Discussions have no
+assignee reason. Activity by another actor, including edits, lifecycle changes
+and locks, can be unread. A principal's own activity never creates a notification
+from another actor. Closing or locking does not discard subscriptions or read
+state.
+
+Select the namespace explicitly:
+
+| Surface | Discussion selection |
+| --- | --- |
+| CLI | Add `--kind discussion` to any `fg inbox` command |
+| MCP | Add `"kind":"discussion"` to any of the seven `frankengit_inbox_*` tools |
+| HTTP list | `GET /api/v1/notifications/discussions` |
+| HTTP thread | `GET /api/v1/notifications/discussions/{number}` |
+| HTTP preference | `POST /api/v1/notifications/discussions/{number}/{action}` |
+
+The actions are `subscribe`, `mute`, `automatic`, `read` and `unread`. Existing
+issue routes and default CLI/MCP calls retain their issue-only behavior and
+response fields. Discussion responses include `target_kind:"discussion"` and
+use `discussion_version`; they never relabel that counter as `issue_version`.
+HTTP response types are `discussion_notification_page`,
+`discussion_notification_thread` and `discussion_notification_publication`.
+CLI and MCP use `discussion_notification_inbox` for the list response.
+
+HTTP discussion inboxes require the independently enabled discussion service
+and `discussions-read`. Preference writes additionally require
+`notifications-write`. They work when the issue service is disabled.
+`issues-read`, `discussions-write`, or `notifications-write` alone cannot read
+the discussion inbox. MCP similarly requires `--allow-discussions`, the
+launch-bound principal and incarnation, plus `--allow-notification-writes` for
+preferences. Every tool invocation checks its selected kind; discovering an
+inbox tool through an issue grant does not authorize a discussion call.
+
+For example, after observing discussion 7 at version 4 with no explicit
+preference stream:
+
+```sh
+fg inbox read "$ROOT" "$TENANT" "$REPOSITORY" 7 \
+  --kind discussion --trusted-local --principal "$PRINCIPAL" \
+  --expected-incarnation "$INCARNATION" \
+  --expected-version 0 --read-through 4 \
+  --idempotency-key discussion-7-read-through-4
+```
+
+This acknowledges only the observed discussion prefix. A concurrent reply at
+version 5 remains unread. Keep the original kind, number, preference version,
+prefix, identity guards and key for recovery, including after a restart.
+
+Discussion preferences use required aggregate escape **12**,
+`DiscussionNotificationPreference { principal, discussion }`, and canonical
+stream `dnotify/{principal}/{discussion}`. They reuse notification payload kind
+**23** and the existing sealed metadata admission path. The issue aggregate
+escape **10** and its bytes remain unchanged. Readers must understand the new
+required aggregate before accepting its canonical state. The complete derived
+inbox marker also binds its thread kind; identical numeric IDs and authority
+roots cannot make an issue projection stand in for a discussion projection.
 
 ## What appears in the inbox
 
@@ -224,7 +290,7 @@ session. Installation places the complete typed rows and source marker in one
 transaction. Page reads verify that marker and rows in one transaction, and
 display fields are hydrated from the same verified source. The binding contains
 tenant, repository, incarnation, selected head/generation, forge root, outbox
-root and principal. The request awaits session close, including failure paths.
+root, principal and thread kind. The request awaits session close, including failure paths.
 There is no independent persistent inbox database to become a second authority.
 Restart recovery comes from canonical events, not a retained mutable projection.
 
@@ -232,7 +298,7 @@ Source construction is deliberately bounded:
 
 | Resource | Current ceiling |
 | --- | --- |
-| Complete repository issue threads / projection rows | 16,384 |
+| Complete selected-kind repository threads / projection rows | 16,384 |
 | Scanned events across unique canonical batches | 65,536 |
 | Verified batch frames scanned | 128 MiB |
 | Retained event bytes | 32 MiB |
@@ -255,7 +321,9 @@ event delivery remains governed by its own subscription and disclosure rules.
 Checked-in tests cover native event identity and source reconstruction,
 projection bindings and filters, exact preference versions, later unread
 activity, HTTP scopes and identity guards, stable retries, retained pagination,
-credential rotation and reopened canonical state. Privacy regressions cover the
+credential rotation and reopened canonical state. Discussion cases additionally
+cover same-number issue/discussion isolation, target-bound keys, independent
+grants and operation with the issue service disabled. Privacy regressions cover the
 shared event feed and every webhook filter family, with permitted public-event
 twins. Browser tests exercise the request and recovery contract separately.
 

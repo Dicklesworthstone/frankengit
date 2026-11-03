@@ -59,11 +59,11 @@ mod tests {
 
     #[test]
     fn private_notification_preferences_refuse_every_subscription_and_complete_mixed_batch() {
-        use fgit_forge::IssueNumber;
         use fgit_forge::event::issue::{IssueAction, IssueCommand};
         use fgit_forge::event::notification::{
-            NotificationAction, NotificationCommand, NotificationMode,
+            NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
         };
+        use fgit_forge::{DiscussionNumber, IssueNumber};
 
         let actor = PrincipalId::from_bytes([0x39; 16]);
         let public = IssueCommand {
@@ -114,38 +114,43 @@ mod tests {
             "issue".into(),
             "kind:23".into(),
         ]));
-        for action in [
-            NotificationAction::SetMode(NotificationMode::Participating),
-            NotificationAction::SetMode(NotificationMode::Subscribed),
-            NotificationAction::SetMode(NotificationMode::Muted),
-            NotificationAction::SetReadThrough(Some(AggregateVersion::FIRST)),
-            NotificationAction::SetReadThrough(None),
+        for target in [
+            NotificationTarget::Issue(IssueNumber::FIRST),
+            NotificationTarget::Discussion(DiscussionNumber::FIRST),
         ] {
-            let private = NotificationCommand {
-                number: IssueNumber::FIRST,
-                expected_version: ExpectedVersion::NewStream,
-                action,
-            }
-            .proposed_event(actor)
-            .unwrap();
-            assert_eq!(private.payload.kind(), 23);
-            assert!(WebhookEventFilter::Wildcard.matches("kind:23"));
-            assert!(WebhookEventFilter::Selected(vec!["kind:23".into()]).matches("kind:23"));
-            for filter in &filters {
-                let refusal =
-                    require_subscription(filter, std::slice::from_ref(&private)).unwrap_err();
-                assert!(
-                    refusal.contains("private notification preferences"),
-                    "{refusal}"
-                );
-                for mixed in [
-                    [public.clone(), private.clone()],
-                    [private.clone(), public.clone()],
-                ] {
+            for action in [
+                NotificationAction::SetMode(NotificationMode::Participating),
+                NotificationAction::SetMode(NotificationMode::Subscribed),
+                NotificationAction::SetMode(NotificationMode::Muted),
+                NotificationAction::SetReadThrough(Some(AggregateVersion::FIRST)),
+                NotificationAction::SetReadThrough(None),
+            ] {
+                let private = NotificationCommand {
+                    target,
+                    expected_version: ExpectedVersion::NewStream,
+                    action,
+                }
+                .proposed_event(actor)
+                .unwrap();
+                assert_eq!(private.payload.kind(), 23);
+                assert!(WebhookEventFilter::Wildcard.matches("kind:23"));
+                assert!(WebhookEventFilter::Selected(vec!["kind:23".into()]).matches("kind:23"));
+                for filter in &filters {
+                    let refusal =
+                        require_subscription(filter, std::slice::from_ref(&private)).unwrap_err();
                     assert!(
-                        require_subscription(filter, &mixed).is_err(),
-                        "a batch containing private preferences cannot be delivered or silently truncated"
+                        refusal.contains("private notification preferences"),
+                        "{refusal}"
                     );
+                    for mixed in [
+                        [public.clone(), private.clone()],
+                        [private.clone(), public.clone()],
+                    ] {
+                        assert!(
+                            require_subscription(filter, &mixed).is_err(),
+                            "a batch containing private preferences cannot be delivered or silently truncated"
+                        );
+                    }
                 }
             }
         }
@@ -156,7 +161,7 @@ mod tests {
         use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand};
         use fgit_forge::event::issue::{IssueAction, IssueCommand};
         use fgit_forge::event::notification::{
-            NotificationAction, NotificationCommand, NotificationMode,
+            NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
         };
         use fgit_forge::{DiscussionNumber, IssueNumber};
 
@@ -222,7 +227,7 @@ mod tests {
             }
         }
         let private = NotificationCommand {
-            number: IssueNumber::FIRST,
+            target: NotificationTarget::Issue(IssueNumber::FIRST),
             expected_version: ExpectedVersion::NewStream,
             action: NotificationAction::SetMode(NotificationMode::Muted),
         }

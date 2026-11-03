@@ -28,6 +28,7 @@ fn head(byte: u8) -> RepositoryAuthorityHeadId {
 
 fn binding() -> InboxSnapshotBinding {
     InboxSnapshotBinding {
+        kind: InboxKind::Issue,
         tenant: TenantId::from_bytes([1; 16]),
         repository: RepositoryId::from_bytes([2; 16]),
         incarnation: RepositoryIncarnationId::from_bytes([3; 16]),
@@ -39,10 +40,10 @@ fn binding() -> InboxSnapshotBinding {
     }
 }
 
-fn row(issue: u64) -> IssueInboxRow {
-    IssueInboxRow {
-        issue_number: issue,
-        issue_version: 8,
+fn row(issue: u64) -> InboxRow {
+    InboxRow {
+        thread_number: issue,
+        thread_version: 8,
         preference_version: None,
         read_through: None,
         latest_other_version: Some(7),
@@ -74,7 +75,7 @@ fn snapshot() -> InboxSnapshot {
 
 fn query(limit: u16) -> InboxQuery {
     InboxQuery {
-        after_issue: None,
+        after_thread: None,
         limit: NonZeroU16::new(limit).expect("positive page"),
         unread_only: false,
         include_muted: false,
@@ -98,18 +99,18 @@ fn run_case<F: Future<Output = Result<(), InboxError>>>(case: impl FnOnce(Cx) ->
     );
 }
 
-fn issue_numbers(page: &IssueInboxPage) -> Vec<u64> {
-    page.rows.iter().map(|row| row.issue_number).collect()
+fn thread_numbers(page: &InboxPage) -> Vec<u64> {
+    page.rows.iter().map(|row| row.thread_number).collect()
 }
 
 #[test]
 fn typed_snapshot_pages_reasons_read_state_and_mute_are_coherent() {
     run_case(|cx| async move {
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         session.install_snapshot(&cx, snapshot()).await?;
         let first = session.read_page(&cx, &binding(), query(2)).await?;
-        assert_eq!(issue_numbers(&first), [1, 2]);
-        assert_eq!(first.next_issue, Some(2));
+        assert_eq!(thread_numbers(&first), [1, 2]);
+        assert_eq!(first.next_thread, Some(2));
         assert_eq!(
             first.rows[0].reasons,
             [InboxReason::Author, InboxReason::Participant]
@@ -117,20 +118,20 @@ fn typed_snapshot_pages_reasons_read_state_and_mute_are_coherent() {
         assert!(first.rows[0].unread());
         assert!(!first.rows[1].unread());
         assert_eq!(first.rows[1].preference_version, Some(3));
-        assert_eq!(first.rows[1].issue_version, 8);
+        assert_eq!(first.rows[1].thread_version, 8);
 
         let second = session
             .read_page(
                 &cx,
                 &binding(),
                 InboxQuery {
-                    after_issue: first.next_issue,
+                    after_thread: first.next_thread,
                     ..query(2)
                 },
             )
             .await?;
-        assert_eq!(issue_numbers(&second), [4]);
-        assert_eq!(second.next_issue, None);
+        assert_eq!(thread_numbers(&second), [4]);
+        assert_eq!(second.next_thread, None);
         assert!(!second.rows[0].unread(), "only own activity is not unread");
 
         let unread = session
@@ -143,7 +144,7 @@ fn typed_snapshot_pages_reasons_read_state_and_mute_are_coherent() {
                 },
             )
             .await?;
-        assert_eq!(issue_numbers(&unread), [1]);
+        assert_eq!(thread_numbers(&unread), [1]);
         let with_muted = session
             .read_page(
                 &cx,
@@ -155,7 +156,7 @@ fn typed_snapshot_pages_reasons_read_state_and_mute_are_coherent() {
                 },
             )
             .await?;
-        assert_eq!(issue_numbers(&with_muted), [1, 3]);
+        assert_eq!(thread_numbers(&with_muted), [1, 3]);
         assert!(with_muted.rows[1].muted);
         assert!(with_muted.rows[1].reasons.is_empty());
         session.close(&cx).await
@@ -165,7 +166,7 @@ fn typed_snapshot_pages_reasons_read_state_and_mute_are_coherent() {
 #[test]
 fn every_source_coordinate_and_the_recipient_must_match() {
     run_case(|cx| async move {
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         session.install_snapshot(&cx, snapshot()).await?;
         let original = binding();
         let twins = [
@@ -208,7 +209,7 @@ fn every_source_coordinate_and_the_recipient_must_match() {
                 Err(InboxError::Refusal(InboxRefusal::SourceMismatch))
             ));
             assert_eq!(
-                issue_numbers(&session.read_page(&cx, &original, query(100)).await?),
+                thread_numbers(&session.read_page(&cx, &original, query(100)).await?),
                 [1, 2, 4]
             );
         }
@@ -219,7 +220,7 @@ fn every_source_coordinate_and_the_recipient_must_match() {
 #[test]
 fn identical_replay_and_fresh_rebuild_produce_the_same_complete_page() {
     run_case(|cx| async move {
-        let mut first = IssueInboxSession::open_memory()?;
+        let mut first = InboxSession::open_memory()?;
         first.install_snapshot(&cx, snapshot()).await?;
         let all = InboxQuery {
             include_muted: true,
@@ -234,7 +235,7 @@ fn identical_replay_and_fresh_rebuild_produce_the_same_complete_page() {
 
         // The whole disposable database is gone. Only the verified source
         // input survives; rebuilding it restores precisely the same page.
-        let mut rebuilt = IssueInboxSession::open_memory()?;
+        let mut rebuilt = InboxSession::open_memory()?;
         rebuilt.install_snapshot(&cx, reordered).await?;
         assert_eq!(rebuilt.read_page(&cx, &binding(), all).await?, expected);
         rebuilt.close(&cx).await
@@ -244,7 +245,7 @@ fn identical_replay_and_fresh_rebuild_produce_the_same_complete_page() {
 #[test]
 fn refused_input_or_conflicting_replay_preserves_the_installed_generation() {
     run_case(|cx| async move {
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         session.install_snapshot(&cx, snapshot()).await?;
         let expected = session.read_page(&cx, &binding(), query(100)).await?;
 
@@ -252,7 +253,7 @@ fn refused_input_or_conflicting_replay_preserves_the_installed_generation() {
         duplicate.rows.push(row(1));
         assert!(matches!(
             session.install_snapshot(&cx, duplicate).await,
-            Err(InboxError::Refusal(InboxRefusal::DuplicateIssue(1)))
+            Err(InboxError::Refusal(InboxRefusal::DuplicateThread(1)))
         ));
 
         let mut changed = snapshot();
@@ -289,7 +290,7 @@ fn refused_input_or_conflicting_replay_preserves_the_installed_generation() {
 #[test]
 fn missing_rows_or_a_stored_foreign_recipient_never_pass_the_complete_gate() {
     run_case(|cx| async move {
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         session.install_snapshot(&cx, snapshot()).await?;
         // Simulate local derived-state loss. The complete marker is retained.
         flatten(
@@ -305,7 +306,7 @@ fn missing_rows_or_a_stored_foreign_recipient_never_pass_the_complete_gate() {
         ));
         session.close(&cx).await?;
 
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         session.install_snapshot(&cx, snapshot()).await?;
         let mut foreign = snapshot();
         foreign.binding.principal = PrincipalId::from_bytes([99; 16]);
@@ -333,7 +334,7 @@ fn missing_rows_or_a_stored_foreign_recipient_never_pass_the_complete_gate() {
 #[test]
 fn empty_snapshot_has_a_real_marker_and_limits_refuse_before_disclosure() {
     run_case(|cx| async move {
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         assert!(matches!(
             session.read_page(&cx, &binding(), query(100)).await,
             Err(InboxError::Refusal(InboxRefusal::SnapshotMissing))
@@ -350,7 +351,7 @@ fn empty_snapshot_has_a_real_marker_and_limits_refuse_before_disclosure() {
         let page = session.read_page(&cx, &binding(), query(100)).await?;
         assert!(page.rows.is_empty());
         assert_eq!(page.binding, binding());
-        assert_eq!(page.next_issue, None);
+        assert_eq!(page.next_thread, None);
         assert!(matches!(
             session.read_page(&cx, &binding(), query(101)).await,
             Err(InboxError::Refusal(InboxRefusal::PageLimit { .. }))
@@ -361,13 +362,13 @@ fn empty_snapshot_has_a_real_marker_and_limits_refuse_before_disclosure() {
                     &cx,
                     &binding(),
                     InboxQuery {
-                        after_issue: Some(u64::MAX),
+                        after_thread: Some(u64::MAX),
                         ..query(1)
                     }
                 )
                 .await,
             Err(InboxError::Storage(ProjectionError::OutOfRange {
-                field: "after_issue",
+                field: "after_thread",
                 ..
             }))
         ));
@@ -378,7 +379,7 @@ fn empty_snapshot_has_a_real_marker_and_limits_refuse_before_disclosure() {
 #[test]
 fn cancelled_request_returns_no_page_and_explicitly_closes_its_worker() {
     run_case(|cx| async move {
-        let mut session = IssueInboxSession::open_memory()?;
+        let mut session = InboxSession::open_memory()?;
         session.install_snapshot(&cx, snapshot()).await?;
         cx.set_cancel_requested(true);
         assert!(matches!(
@@ -439,4 +440,34 @@ fn future_or_fabricated_preference_cursors_and_reason_sets_are_refused() {
         offered.unread(),
         "clearing the canonical cursor restores unread state"
     );
+}
+
+#[test]
+fn identical_numbers_and_source_roots_cannot_cross_inbox_kinds() {
+    run_case(|cx| async move {
+        let mut session = InboxSession::open_memory()?;
+        session.install_snapshot(&cx, snapshot()).await?;
+        let mut discussion = binding();
+        discussion.kind = InboxKind::Discussion;
+        assert!(matches!(
+            session.read_page(&cx, &discussion, query(10)).await,
+            Err(InboxError::Refusal(InboxRefusal::SourceMismatch))
+        ));
+        let mut other = snapshot();
+        other.binding = discussion;
+        assert!(matches!(
+            session.install_snapshot(&cx, other).await,
+            Err(InboxError::Refusal(InboxRefusal::SourceMismatch))
+        ));
+        session.close(&cx).await?;
+        let mut session = InboxSession::open_memory()?;
+        let mut discussion_rows = snapshot();
+        discussion_rows.binding = discussion;
+        session.install_snapshot(&cx, discussion_rows).await?;
+        let page = session.read_page(&cx, &discussion, query(10)).await?;
+        assert_eq!(page.binding.kind, InboxKind::Discussion);
+        assert_eq!(page.rows[0].thread_number, 1);
+        assert!(page.rows[0].unread());
+        session.close(&cx).await
+    });
 }

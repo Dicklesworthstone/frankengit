@@ -180,6 +180,11 @@ pub enum AggregateId {
         principal: fgit_types::PrincipalId,
         issue: IssueNumber,
     },
+    /// Self-owned delivery mode and read prefix for one repository discussion.
+    DiscussionNotificationPreference {
+        principal: fgit_types::PrincipalId,
+        discussion: DiscussionNumber,
+    },
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -201,6 +206,8 @@ pub(crate) const AGGREGATE_KIND_MILESTONE: u32 = 9;
 pub(crate) const AGGREGATE_KIND_NOTIFICATION_PREFERENCE: u32 = 10;
 /// Required discussion aggregate; earlier encodings retain their exact bytes.
 pub(crate) const AGGREGATE_KIND_DISCUSSION: u32 = 11;
+/// Distinct discussion preferences; issue preference bytes are unchanged.
+pub(crate) const AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE: u32 = 12;
 impl From<DiscussionNumber> for AggregateId {
     fn from(number: DiscussionNumber) -> Self {
         Self::Discussion(number)
@@ -261,6 +268,10 @@ impl fmt::Display for AggregateId {
             Self::NotificationPreference { principal, issue } => {
                 write!(formatter, "notify/{principal}/{issue}")
             }
+            Self::DiscussionNotificationPreference {
+                principal,
+                discussion,
+            } => write!(formatter, "dnotify/{principal}/{discussion}"),
         }
     }
 }

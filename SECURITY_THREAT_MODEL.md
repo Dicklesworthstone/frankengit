@@ -50,6 +50,13 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 
 ### 1.4 Confidentiality and privacy
 
+- Issue and discussion notification preferences are separate, recipient-owned
+  canonical aggregates. Equal thread numbers cannot alias preferences, sealed
+  requests, read prefixes or projection markers. Discussion inbox reads require
+  current discussion disclosure; issue grants do not imply it. Preference writes
+  also require their own notification grant and bind the authenticated owner.
+  Retained snapshot tokens never supply an owner or authorization. Both private
+  preference kinds are excluded from shared event feeds and webhook batches.
 - Private source, refs, metadata, graph/search/vector data, context, logs, evidence, artifacts, repair symbols, and secrets remain inside authorization/encryption domains.
 - Dedup, caches, timing, range requests, embeddings, and error messages do not become cross-tenant existence or membership oracles.
 - Secrets are brokered, least privilege, short lived, redacted, and absent from prompts/context/logs unless explicitly authorized.

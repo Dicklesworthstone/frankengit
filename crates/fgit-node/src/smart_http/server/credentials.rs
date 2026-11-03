@@ -158,8 +158,23 @@ impl Grant {
     /// Self-owned preferences require disclosure plus their own write scope.
     /// Neither issue editing nor Git publication implies this grant.
     pub const fn permits_notifications(&self, mutation: bool) -> bool {
-        self.scopes.contains(Scope::IssuesRead)
-            && (!mutation || self.scopes.contains(Scope::NotificationsWrite))
+        self.permits_notifications_for(
+            fgit_forge::event::notification::NotificationTargetKind::Issue,
+            mutation,
+        )
+    }
+    pub const fn permits_notifications_for(
+        &self,
+        kind: fgit_forge::event::notification::NotificationTargetKind,
+        mutation: bool,
+    ) -> bool {
+        let read = match kind {
+            fgit_forge::event::notification::NotificationTargetKind::Issue => Scope::IssuesRead,
+            fgit_forge::event::notification::NotificationTargetKind::Discussion => {
+                Scope::DiscussionsRead
+            }
+        };
+        self.scopes.contains(read) && (!mutation || self.scopes.contains(Scope::NotificationsWrite))
     }
     /// PR metadata authority is separate from code publication and reviews.
     pub const fn permits_pulls(&self, mutation: bool) -> bool {
