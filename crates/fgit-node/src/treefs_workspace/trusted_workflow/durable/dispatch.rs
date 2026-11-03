@@ -476,6 +476,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
         ).map_err(|error| match error {
             fgit_runner::workflow::TriggerSelectionError::MissingBranchReference =>
                 invalid("filtered pull_request dispatch requires a canonical target; use workflow watch --pull-request"),
+            fgit_runner::workflow::TriggerSelectionError::MissingPushReference =>
+                invalid("filtered push dispatch requires a canonical branch or tag"),
             fgit_runner::workflow::TriggerSelectionError::ReferenceTooLong =>
                 invalid("workflow trigger reference exceeds profile"),
             fgit_runner::workflow::TriggerSelectionError::MissingChangedPaths |

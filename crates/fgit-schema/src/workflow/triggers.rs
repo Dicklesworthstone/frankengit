@@ -1,4 +1,4 @@
-//! Bounded branch selection over exact reference bytes. No regex, branch lookup,
+//! Bounded branch and tag selection over exact reference bytes. No regex or lookup,
 //! scheduling or authorization. The caller supplies authenticated coordinates.
 use super::{Node, Span, Trigger, WorkflowGraph, WorkflowRefusal};
 mod paths;
@@ -46,9 +46,27 @@ impl BranchFilter {
         Ok(selected)
     }
 }
+
+/// An ordered push-tag filter sharing the exact bounded branch-pattern grammar.
+/// It applies only to the bytes following `refs/tags/`, never to a peeled commit
+/// or a branch with the same short name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TagFilter(BranchFilter);
+impl TagFilter {
+    #[must_use]
+    pub const fn field(&self) -> &'static str {
+        if self.0.ignore { "tags-ignore" } else { "tags" }
+    }
+
+    pub fn patterns(&self) -> impl Iterator<Item = &str> {
+        self.0.patterns()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TriggerSelectionError {
     MissingBranchReference,
+    MissingPushReference,
     ReferenceTooLong,
     Cancelled,
     MissingChangedPaths,
@@ -57,12 +75,14 @@ pub enum TriggerSelectionError {
 }
 impl std::fmt::Display for TriggerSelectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "workflow branch selection refused: {self:?}")
+        write!(f, "workflow reference selection refused: {self:?}")
     }
 }
 impl std::error::Error for TriggerSelectionError {}
 impl WorkflowGraph {
-    /// Full reference: push source or PR TARGET. The caller authenticates it.
+    /// Full reference: push source branch/tag or PR TARGET branch. The caller
+    /// authenticates it; a tag's direct ref identity must not be replaced by its
+    /// peeled commit or by a branch carrying the same short name.
     /// Unfiltered historical graphs do not require additional coordinates.
     pub fn selects_event(
         &self,
@@ -74,6 +94,8 @@ impl WorkflowGraph {
     }
     /// None means unavailable evidence; Some(empty) means a complete empty diff.
     /// The caller authenticates the exact source of the complete changed paths.
+    /// Push tag events do not evaluate path filters: a tag push is not a branch
+    /// diff. Branch and pull-request path filters keep requiring complete paths.
     pub fn selects_event_with_paths(
         &self,
         event: &str,
@@ -86,28 +108,67 @@ impl WorkflowGraph {
         }
         let mut selected = false;
         for trigger in self.triggers.iter().filter(|trigger| trigger.name == event) {
-            let path_selected = match &trigger.path_filter {
-                Some(filter) => filter.selects(
-                    paths.ok_or(TriggerSelectionError::MissingChangedPaths)?,
-                    cancelled,
-                )?,
-                None => true,
+            let tag_reference = if trigger.tag_filter.is_some() {
+                let reference = reference.ok_or(TriggerSelectionError::MissingPushReference)?;
+                if reference.len() > MAX_REFERENCE_BYTES {
+                    return Err(TriggerSelectionError::ReferenceTooLong);
+                }
+                Some(reference)
+            } else {
+                None
             };
-            let branch_selected = match &trigger.branch_filter {
-                None => true,
-                Some(filter) => {
-                    let reference =
-                        reference.ok_or(TriggerSelectionError::MissingBranchReference)?;
-                    if reference.len() > MAX_REFERENCE_BYTES {
-                        return Err(TriggerSelectionError::ReferenceTooLong);
-                    }
-                    match reference.strip_prefix(b"refs/heads/") {
-                        Some(branch) if !branch.is_empty() => filter.matches(branch, cancelled)?,
-                        _ => false,
-                    }
+            let tag_push = event == "push"
+                && reference.is_some_and(|reference| {
+                    reference
+                        .strip_prefix(b"refs/tags/")
+                        .is_some_and(|tag| !tag.is_empty())
+                });
+            let path_selected = if tag_push {
+                true
+            } else {
+                match &trigger.path_filter {
+                    Some(filter) => filter.selects(
+                        paths.ok_or(TriggerSelectionError::MissingChangedPaths)?,
+                        cancelled,
+                    )?,
+                    None => true,
                 }
             };
-            selected |= branch_selected && path_selected;
+            let reference_selected = match (&trigger.tag_filter, tag_reference) {
+                (Some(filter), Some(reference)) if event == "push" => {
+                    if let Some(tag) = reference.strip_prefix(b"refs/tags/") {
+                        !tag.is_empty() && filter.0.matches(tag, cancelled)?
+                    } else if let Some(branch) = reference.strip_prefix(b"refs/heads/") {
+                        match &trigger.branch_filter {
+                            Some(filter) if !branch.is_empty() => {
+                                filter.matches(branch, cancelled)?
+                            }
+                            // A tag-only declaration never selects branches.
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+                (Some(_), _) => false,
+                (None, _) => match &trigger.branch_filter {
+                    None => true,
+                    Some(filter) => {
+                        let reference =
+                            reference.ok_or(TriggerSelectionError::MissingBranchReference)?;
+                        if reference.len() > MAX_REFERENCE_BYTES {
+                            return Err(TriggerSelectionError::ReferenceTooLong);
+                        }
+                        match reference.strip_prefix(b"refs/heads/") {
+                            Some(branch) if !branch.is_empty() => {
+                                filter.matches(branch, cancelled)?
+                            }
+                            _ => false,
+                        }
+                    }
+                },
+            };
+            selected |= reference_selected && path_selected;
         }
         if cancelled() {
             return Err(TriggerSelectionError::Cancelled);
@@ -125,6 +186,12 @@ impl WorkflowGraph {
         self.triggers
             .iter()
             .any(|trigger| trigger.branch_filter.is_some())
+    }
+    #[must_use]
+    pub fn has_tag_filters(&self) -> bool {
+        self.triggers
+            .iter()
+            .any(|trigger| trigger.tag_filter.is_some())
     }
 }
 const fn malformed(span: Span, expected: &'static str) -> WorkflowRefusal {
@@ -148,13 +215,30 @@ const fn bounded(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatternScope {
+    Branch,
+    Tag,
+    Path,
+}
+
 fn pattern(
     text: &str,
     span: Span,
     ignore: bool,
-    path: bool,
+    scope: PatternScope,
 ) -> Result<(bool, Vec<Token>), WorkflowRefusal> {
-    bounded(text.len(), MAX_PATTERN_BYTES, "branch pattern bytes", span)?;
+    bounded(
+        text.len(),
+        MAX_PATTERN_BYTES,
+        if scope == PatternScope::Tag {
+            "tag pattern bytes"
+        } else {
+            "branch pattern bytes"
+        },
+        span,
+    )?;
+    let path = scope == PatternScope::Path;
     let negative = text.starts_with('!');
     let body = if negative { &text[1..] } else { text };
     if body.is_empty()
@@ -166,7 +250,11 @@ fn pattern(
     {
         return Err(malformed(
             span,
-            "a literal branch pattern with *, **, or a leading ! in branches",
+            if scope == PatternScope::Tag {
+                "a literal tag pattern with *, **, or a leading ! in tags"
+            } else {
+                "a literal branch pattern with *, **, or a leading ! in branches"
+            },
         ));
     }
     if path
@@ -207,25 +295,46 @@ fn pattern(
     }
     Ok((negative, tokens))
 }
-fn filter(node: &Node, ignore: bool, path: bool) -> Result<BranchFilter, WorkflowRefusal> {
+fn filter(node: &Node, ignore: bool, scope: PatternScope) -> Result<BranchFilter, WorkflowRefusal> {
+    let field = match scope {
+        PatternScope::Branch => "on.branches",
+        PatternScope::Tag => "on.tags",
+        PatternScope::Path => "on.paths",
+    };
     let Node::Sequence { items, span } = node else {
         return Err(WorkflowRefusal::FieldShape {
-            path: if path { "on.paths" } else { "on.branches" },
+            path: field,
             expected: "a nonempty sequence of patterns",
             observed: node.shape(),
             span: node.span(),
         });
     };
-    bounded(items.len(), MAX_PATTERNS, "branch patterns", *span)?;
+    bounded(
+        items.len(),
+        MAX_PATTERNS,
+        if scope == PatternScope::Tag {
+            "tag patterns"
+        } else {
+            "branch patterns"
+        },
+        *span,
+    )?;
     if items.is_empty() {
-        return Err(malformed(*span, "at least one branch pattern"));
+        return Err(malformed(
+            *span,
+            if scope == PatternScope::Tag {
+                "at least one tag pattern"
+            } else {
+                "at least one branch pattern"
+            },
+        ));
     }
     let mut patterns = Vec::with_capacity(items.len());
     let mut total = 0;
     for item in items {
         let Node::Scalar { value, span } = item else {
             return Err(WorkflowRefusal::FieldShape {
-                path: if path { "on.paths" } else { "on.branches" },
+                path: field,
                 expected: "a scalar pattern",
                 observed: item.shape(),
                 span: item.span(),
@@ -235,14 +344,25 @@ fn filter(node: &Node, ignore: bool, path: bool) -> Result<BranchFilter, Workflo
         bounded(
             total,
             MAX_TOTAL_PATTERN_BYTES,
-            "aggregate branch pattern bytes",
+            if scope == PatternScope::Tag {
+                "aggregate tag pattern bytes"
+            } else {
+                "aggregate branch pattern bytes"
+            },
             *span,
         )?;
-        let (negative, tokens) = pattern(value, *span, ignore, path)?;
+        let (negative, tokens) = pattern(value, *span, ignore, scope)?;
         patterns.push((value.clone(), negative, tokens));
     }
     if !ignore && patterns.iter().all(|(_, negative, _)| *negative) {
-        return Err(malformed(*span, "at least one positive branches pattern"));
+        return Err(malformed(
+            *span,
+            if scope == PatternScope::Tag {
+                "at least one positive tags pattern"
+            } else {
+                "at least one positive branches pattern"
+            },
+        ));
     }
     Ok(BranchFilter { ignore, patterns })
 }
@@ -252,6 +372,7 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
         name: name.to_owned(),
         span,
         branch_filter: None,
+        tag_filter: None,
         path_filter: None,
     };
     let mut triggers = match node {
@@ -293,8 +414,25 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
                                         "paths or paths-ignore, never both",
                                     ));
                                 }
-                                trigger.path_filter =
-                                    Some(PathFilter(filter(value, key == "paths-ignore", true)?));
+                                trigger.path_filter = Some(PathFilter(filter(
+                                    value,
+                                    key == "paths-ignore",
+                                    PatternScope::Path,
+                                )?));
+                                continue;
+                            }
+                            if matches!(key.as_str(), "tags" | "tags-ignore") && name == "push" {
+                                if trigger.tag_filter.is_some() {
+                                    return Err(malformed(
+                                        *span,
+                                        "tags or tags-ignore, never both",
+                                    ));
+                                }
+                                trigger.tag_filter = Some(TagFilter(filter(
+                                    value,
+                                    key == "tags-ignore",
+                                    PatternScope::Tag,
+                                )?));
                                 continue;
                             }
                             if name == "workflow_dispatch"
@@ -312,14 +450,17 @@ pub(super) fn lower(node: &Node) -> Result<Vec<Trigger>, WorkflowRefusal> {
                                     "branches or branches-ignore, never both",
                                 ));
                             }
-                            trigger.branch_filter =
-                                Some(filter(value, key == "branches-ignore", false)?);
+                            trigger.branch_filter = Some(filter(
+                                value,
+                                key == "branches-ignore",
+                                PatternScope::Branch,
+                            )?);
                         }
                     }
                     other => {
                         return Err(WorkflowRefusal::FieldShape {
                             path: "on.event",
-                            expected: "a branch-filter mapping or an explicitly empty quoted scalar",
+                            expected: "a trigger-filter mapping or an explicitly empty quoted scalar",
                             observed: other.shape(),
                             span: other.span(),
                         });

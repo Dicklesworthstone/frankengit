@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/workflow-constructs.json",
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
-  "count_accepted": 16,
+  "count_accepted": 18,
   "count_normalized": 10,
   "count_unsupported": 19,
   "count_ambiguous": 0,
@@ -144,13 +144,25 @@
       "key": "trigger.paths",
       "status": "accepted",
       "refuses": false,
-      "reason": "ordered bounded path patterns select complete canonical push ref differences or PR merge-base changes; missing, incomplete or over-budget evidence refuses"
+      "reason": "ordered bounded path patterns select complete canonical push branch differences or PR merge-base changes; missing, incomplete or over-budget evidence refuses; tag pushes do not evaluate path filters"
     },
     {
       "key": "trigger.paths-ignore",
       "status": "accepted",
       "refuses": false,
-      "reason": "push and PR execution require at least one changed path outside the exclusions; empty changes create no jobs or passing checks"
+      "reason": "push branch and PR execution require at least one changed path outside the exclusions; empty changes create no jobs or passing checks; tag pushes do not evaluate path filters"
+    },
+    {
+      "key": "trigger.tags",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "ordered bounded literal, *, ** and leading ! patterns select only push refs/tags names; branch and tag filters select their own namespaces; PR and dispatch tag filters refuse"
+    },
+    {
+      "key": "trigger.tags-ignore",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "bounded exclusion-only push tag patterns; mutually exclusive with tags; a tag-only declaration never selects branches or grants check publication"
     },
     {
       "key": "workflow.concurrency",
@@ -180,7 +192,7 @@
       "key": "workflow.on",
       "status": "accepted",
       "refuses": false,
-      "reason": "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch and path filters and explicitly empty event scalars"
+      "reason": "scalar/sequence trigger names retain their bytes; block mappings admit push branch/tag filters, pull_request branch filters, branch/PR path filters and explicitly empty event scalars"
     },
     {
       "key": "workflow.secrets",
