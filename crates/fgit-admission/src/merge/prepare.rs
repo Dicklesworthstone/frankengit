@@ -105,6 +105,9 @@ pub fn prepare_event(
         ForgeEventPayload::IssueChangedNative(_) => {
             matches!(event.aggregate, fgit_forge::AggregateId::Issue(_))
         }
+        ForgeEventPayload::DiscussionChangedNative(_) => {
+            matches!(event.aggregate, fgit_forge::AggregateId::Discussion(_))
+        }
         ForgeEventPayload::MilestoneChangedNative(_) => {
             matches!(event.aggregate, fgit_forge::AggregateId::Milestone(_))
         }
@@ -346,6 +349,24 @@ pub fn prepare_event(
             }
             (
                 ForgeEventKind::IssueChanged { issue: entity },
+                Vec::new(),
+                None,
+            )
+        }
+        ForgeEventPayload::DiscussionChangedNative(change) => {
+            change
+                .action
+                .validate()
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            super::native::discussions::verify_event_seal(context, event, attempt)?;
+            (
+                ForgeEventKind::DiscussionChanged { discussion: entity },
                 Vec::new(),
                 None,
             )

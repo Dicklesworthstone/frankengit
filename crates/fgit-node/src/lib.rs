@@ -67,6 +67,7 @@ mod treefs_workspace;
 mod upload_refusal;
 #[cfg(target_os = "linux")]
 pub mod workflow_artifacts;
+pub use treefs_workspace::DiscussionReadRefusal;
 pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::MilestoneReadRefusal;
 pub use treefs_workspace::RetiredForgeDeliveryReceipt;
@@ -7659,6 +7660,8 @@ pub struct NodeConfig {
     http_queue_management: bool,
     /// Independent HTTP queue-head landing ceiling; grants and ref scope still apply.
     http_queue_landings: bool,
+    /// Independent HTTP discussions ceiling; read and write grants remain required.
+    http_discussions: bool,
     /// Explicit local artifact-fabric custody for the HTTP Git LFS basic
     /// transfer profile. Disabled unless an operator selects a private root;
     /// per-request LFS credentials remain independently required.
@@ -7733,6 +7736,7 @@ impl NodeConfig {
             http_protection_admin: false,
             http_queue_management: false,
             http_queue_landings: false,
+            http_discussions: false,
             http_lfs_root: None,
             workflow_artifact_root: None,
         }
@@ -7939,6 +7943,20 @@ impl NodeConfig {
     #[must_use]
     pub const fn http_queue_landings_enabled(&self) -> bool {
         self.http_queue_landings
+    }
+
+    /// Enables independently scoped native discussion reads and mutations.
+    /// This deployment ceiling grants no credential or Git publication authority.
+    #[must_use]
+    pub const fn with_http_discussions(mut self) -> Self {
+        self.http_discussions = true;
+        self
+    }
+
+    /// Whether the native HTTP discussions API was explicitly enabled.
+    #[must_use]
+    pub const fn http_discussions_enabled(&self) -> bool {
+        self.http_discussions
     }
 
     /// Enables Git LFS basic transfers in the authenticated HTTP service.

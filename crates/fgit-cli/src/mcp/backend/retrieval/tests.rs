@@ -243,6 +243,7 @@ fn seeded(format: GitHashAlgorithm, indexes: bool) -> (Scratch, NodeTools) {
         format,
         incarnation: Some(incarnation),
         issues: false,
+        discussions: false,
         pulls: false,
         source: true,
         writes: Default::default(),

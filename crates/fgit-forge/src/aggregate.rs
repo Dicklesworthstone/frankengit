@@ -74,6 +74,10 @@ forge_counter!(
     "Repository-scoped issue identity, distinct from a pull request number."
 );
 forge_counter!(
+    DiscussionNumber,
+    "Repository-scoped discussion identity, independent of issues and pull requests."
+);
+forge_counter!(
     MilestoneNumber,
     "Repository-scoped milestone identity, distinct from an issue number."
 );
@@ -143,7 +147,8 @@ impl fmt::Display for ExpectedVersion {
 /// Widening the slot to carry a tag unconditionally would have changed every
 /// one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum AggregateId {    /// One repository-scoped review-protection policy stream.
+pub enum AggregateId {
+    /// One repository-scoped review-protection policy stream.
     ReviewProtection,
     /// One pull request. Encoded bare, with no tag.
     PullRequest(PullRequestNumber),
@@ -168,6 +173,8 @@ pub enum AggregateId {    /// One repository-scoped review-protection policy str
     PullRequestConversation(PullRequestNumber),
     /// A repository milestone; issue membership is owned by each issue stream.
     Milestone(MilestoneNumber),
+    /// Independent repository discussion and its exact-version conversation.
+    Discussion(DiscussionNumber),
     /// Self-owned delivery mode and read prefix for one issue.
     NotificationPreference {
         principal: fgit_types::PrincipalId,
@@ -192,6 +199,13 @@ pub(crate) const AGGREGATE_KIND_WORKFLOW_CHECK: u32 = 7;
 pub(crate) const AGGREGATE_KIND_PULL_REQUEST_CONVERSATION: u32 = 8;
 pub(crate) const AGGREGATE_KIND_MILESTONE: u32 = 9;
 pub(crate) const AGGREGATE_KIND_NOTIFICATION_PREFERENCE: u32 = 10;
+/// Required discussion aggregate; earlier encodings retain their exact bytes.
+pub(crate) const AGGREGATE_KIND_DISCUSSION: u32 = 11;
+impl From<DiscussionNumber> for AggregateId {
+    fn from(number: DiscussionNumber) -> Self {
+        Self::Discussion(number)
+    }
+}
 impl From<MilestoneNumber> for AggregateId {
     fn from(number: MilestoneNumber) -> Self {
         Self::Milestone(number)
@@ -243,7 +257,10 @@ impl fmt::Display for AggregateId {
             Self::WorkflowCheck(id) => fmt::Display::fmt(id, formatter),
             Self::PullRequestConversation(number) => write!(formatter, "conversation/{number}"),
             Self::Milestone(number) => write!(formatter, "milestone/{number}"),
-            Self::NotificationPreference { principal, issue } => write!(formatter, "notify/{principal}/{issue}"),
+            Self::Discussion(number) => write!(formatter, "discussion/{number}"),
+            Self::NotificationPreference { principal, issue } => {
+                write!(formatter, "notify/{principal}/{issue}")
+            }
         }
     }
 }

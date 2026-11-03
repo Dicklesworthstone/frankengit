@@ -28,7 +28,7 @@ mod workflow;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
-  [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
+  [--allow-receive] [--allow-issues] [--allow-discussions] [--allow-outcomes] [--allow-pulls] [--allow-source]
   [--allow-protection] [--allow-queues] [--allow-queue-landings]
   [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
@@ -136,11 +136,13 @@ Provisioning (reads/authenticates the repository, opens no listener):
 
 Requires an existing repository. Git pushes, issue APIs, PR APIs, source APIs,
 protection APIs and outcome queries are disabled by default. --allow-receive enables
-Git pushes for receive-scoped tokens. --allow-issues, --allow-outcomes, --allow-pulls,
+Git pushes for receive-scoped tokens. --allow-issues, --allow-discussions, --allow-outcomes, --allow-pulls,
 --allow-source, --allow-protection, --allow-queues and --allow-queue-landings
 require --credentials-file and the token's
 appropriate scopes. No switch enables another service. --allow-source exposes
 read-only source queries to read-scoped tokens; it grants no mutation permission.
+--allow-discussions enables the independent discussions-read/discussions-write
+scopes for native repository discussions, including their browser workspace.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
@@ -154,7 +156,7 @@ At most 64 selectors / 4096 decoded bytes per row restrict every Git and native
 source/merge ref write, including deletes and both ends of renames. They do not
 filter reads or grant a service. See docs/HTTP_REF_WRITE_SCOPES.md.
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write,queues-land
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write,queues-land,notifications-read,notifications-write,discussions-read,discussions-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -314,6 +316,7 @@ struct Options {
     credentials: CredentialInput,
     allow_receive: bool,
     allow_issues: bool,
+    allow_discussions: bool,
     allow_outcomes: bool,
     allow_pulls: bool,
     allow_source: bool,
@@ -387,6 +390,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--trusted-local"
                 | "--allow-receive"
                 | "--allow-issues"
+                | "--allow-discussions"
                 | "--allow-outcomes"
                 | "--allow-pulls"
                 | "--allow-source"
@@ -559,6 +563,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         }
     };
     let allow_issues = flags.contains_key("--allow-issues");
+    let allow_discussions = flags.contains_key("--allow-discussions");
     let allow_outcomes = flags.contains_key("--allow-outcomes");
     let allow_pulls = flags.contains_key("--allow-pulls");
     let allow_source = flags.contains_key("--allow-source");
@@ -585,6 +590,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         return Err("workflow artifact custody requires Linux".into());
     }
     if (allow_issues
+        || allow_discussions
         || allow_outcomes
         || allow_pulls
         || allow_source
@@ -594,7 +600,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
         return Err(
-            "issue/PR/source/protection/queue/outcome endpoints require explicit scopes in --credentials-file"
+            "issue/discussion/PR/source/protection/queue/outcome endpoints require explicit scopes in --credentials-file"
                 .into(),
         );
     }
@@ -725,6 +731,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             fgit_cli::parse_received_pack_cache_mib(value).map_err(|error| error.to_string())?,
         );
     }
+    if allow_discussions {
+        config = config.with_http_discussions();
+    }
     if allow_protection {
         config = config.with_http_protection_admin();
     }
@@ -759,6 +768,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         credentials,
         allow_receive: flags.contains_key("--allow-receive"),
         allow_issues,
+        allow_discussions,
         allow_outcomes,
         allow_pulls,
         allow_source,
@@ -898,8 +908,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"queue_landings_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
-            quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"discussions_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"queue_landings_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            quote(&url), options.allow_receive, options.allow_issues, options.allow_discussions, options.allow_outcomes, options.allow_pulls,
             options.allow_source, options.allow_protection, options.allow_queues, options.allow_queue_landings, lfs_enabled, artifacts_enabled, workflow_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
         };
@@ -1101,6 +1111,7 @@ mod tests {
         let options = parse(&arguments()).unwrap();
         assert!(!options.allow_receive);
         assert!(!options.allow_issues);
+        assert!(!options.allow_discussions);
         assert!(!options.allow_outcomes);
         assert!(!options.allow_pulls);
         assert!(!options.allow_source);
@@ -1113,12 +1124,36 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert!(options.workflow_service.is_none());
         assert!(!options.config.http_protection_admin_enabled());
+        assert!(!options.config.http_discussions_enabled());
         assert!(options.config.http_lfs_root().is_none());
         assert!(options.config.workflow_artifact_root().is_none());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
         args.retain(|arg| arg != "--trusted-local");
+        assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn discussion_http_launch_requires_independent_scoped_credentials() {
+        let mut args = arguments();
+        args.push("--allow-discussions".into());
+        assert!(parse(&args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend([
+            "--credentials-file".into(),
+            "grants".into(),
+            "--allow-discussions".into(),
+        ]);
+        let options = parse(&args).unwrap();
+        assert!(options.allow_discussions && options.config.http_discussions_enabled());
+        assert!(
+            !options.allow_issues
+                && !options.allow_pulls
+                && !options.allow_receive
+                && !options.allow_source
+        );
+        args.push("--allow-discussions".into());
         assert!(parse(&args).is_err());
     }
 
@@ -1215,6 +1250,7 @@ mod tests {
                     && !options.allow_source
                     && !options.allow_pulls
                     && !options.allow_issues
+                    && !options.allow_discussions
             );
             assert!(options.config.http_lfs_root().is_none());
         }
@@ -1763,6 +1799,7 @@ mod tests {
         assert!(
             !options.allow_receive
                 && !options.allow_issues
+                && !options.allow_discussions
                 && !options.allow_outcomes
                 && !options.allow_pulls
         );
@@ -1801,6 +1838,7 @@ mod tests {
         assert!(
             !options.allow_receive
                 && !options.allow_issues
+                && !options.allow_discussions
                 && !options.allow_outcomes
                 && !options.allow_pulls
                 && !options.allow_source
@@ -1830,6 +1868,7 @@ mod tests {
         assert!(
             !options.allow_receive
                 && !options.allow_issues
+                && !options.allow_discussions
                 && !options.allow_outcomes
                 && !options.allow_pulls
                 && !options.allow_source
@@ -1854,6 +1893,7 @@ mod tests {
         assert!(
             !options.allow_receive
                 && !options.allow_issues
+                && !options.allow_discussions
                 && !options.allow_outcomes
                 && !options.allow_pulls
                 && !options.allow_source
@@ -1941,15 +1981,18 @@ mod tests {
         assert!(
             !options.allow_receive
                 && !options.allow_issues
+                && !options.allow_discussions
                 && !options.allow_outcomes
                 && !options.allow_pulls
                 && !options.allow_source
                 && !options.allow_protection
         );
         assert!(!options.config.http_protection_admin_enabled());
+        assert!(!options.config.http_discussions_enabled());
         for flag in [
             "--allow-receive",
             "--allow-issues",
+            "--allow-discussions",
             "--allow-outcomes",
             "--allow-pulls",
             "--allow-source",
@@ -1962,6 +2005,11 @@ mod tests {
             let options = parse(&selected).unwrap();
             assert_eq!(options.allow_receive, flag == "--allow-receive");
             assert_eq!(options.allow_issues, flag == "--allow-issues");
+            assert_eq!(options.allow_discussions, flag == "--allow-discussions");
+            assert_eq!(
+                options.config.http_discussions_enabled(),
+                flag == "--allow-discussions"
+            );
             assert_eq!(options.allow_outcomes, flag == "--allow-outcomes");
             assert_eq!(options.allow_pulls, flag == "--allow-pulls");
             assert_eq!(options.allow_source, flag == "--allow-source");

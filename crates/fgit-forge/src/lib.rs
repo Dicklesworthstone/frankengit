@@ -57,8 +57,8 @@ pub use federation::{
 };
 
 pub use aggregate::{
-    AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, IssueNumber, MilestoneNumber, OrganisationNumber,
-    PullRequestNumber, QueueNumber, TeamNumber,
+    AggregateHead, AggregateId, AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber,
+    MilestoneNumber, OrganisationNumber, PullRequestNumber, QueueNumber, TeamNumber,
 };
 pub use merge_queue::{
     BatchLandingPackage, BatchStatus, MergeQueueSnapshot, QueueAction, QueueBatchEntry,

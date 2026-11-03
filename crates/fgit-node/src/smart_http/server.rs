@@ -13,6 +13,7 @@
 mod artifacts;
 mod browser;
 mod credentials;
+mod discussions;
 mod events;
 mod issues;
 #[cfg(target_os = "linux")]
@@ -1301,6 +1302,7 @@ fn serve_connection(
     let mut protection_api = false;
     let mut pull_api = false;
     let mut milestone_api = false;
+    let mut discussion_api = false;
     let mut queue_api = false;
     let mut source_api = false;
     let mut api_error = None;
@@ -1369,6 +1371,7 @@ fn serve_connection(
         }
         protection_api = protection::is_route(envelope.target);
         queue_api = queues::is_route(envelope.target);
+        discussion_api = discussions::is_route(envelope.target);
         source_api = envelope
             .target
             .split('?')
@@ -1386,10 +1389,14 @@ fn serve_connection(
             .is_some_and(|path| path.contains("/api/v1/milestones"));
         native = protection_api
             || queue_api
+            || discussion_api
             || source_api
             || pull_api
             || milestone_api
-            || envelope.target.split('?').next()
+            || envelope
+                .target
+                .split('?')
+                .next()
                 .is_some_and(|path| path.contains("/api/v1/notifications"))
             || envelope
                 .target
@@ -1445,10 +1452,27 @@ fn serve_connection(
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
         }
+        let discussion_request = if protection_request.is_none()
+            && queue_request.is_none()
+            && source_request.is_none()
+            && pull_request.is_none()
+            && discussion_api
+        {
+            Some(discussions::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?)
+        } else {
+            None
+        };
+        if let Some(request) = &discussion_request {
+            native_mutation = request.is_mutation();
+        }
         let issue_request = if protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && pull_request.is_none()
+            && discussion_request.is_none()
         {
             issues::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
@@ -1463,6 +1487,7 @@ fn serve_connection(
         let git_request = if protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
+            && discussion_request.is_none()
             && issue_request.is_none()
             && pull_request.is_none()
         {
@@ -1500,6 +1525,12 @@ fn serve_connection(
                         api_error = Some(error);
                         error.status
                     })?
+            } else if let Some(request) = &discussion_request {
+                discussions::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?
             } else if let Some(request) = &issue_request {
                 issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
                     .map_err(|error| {
@@ -1520,6 +1551,7 @@ fn serve_connection(
         if (protection_request.is_some()
             || queue_request.is_some()
             || source_request.is_some()
+            || discussion_request.is_some()
             || issue_request
                 .as_ref()
                 .is_some_and(|request| request.accepts_body()))
@@ -1584,6 +1616,9 @@ fn serve_connection(
                 .as_ref()
                 .is_some_and(|request| !request.accepts_body())
             || issue_request
+                .as_ref()
+                .is_some_and(|request| !request.accepts_body())
+            || discussion_request
                 .as_ref()
                 .is_some_and(|request| !request.accepts_body())
             || git_request
@@ -1655,6 +1690,23 @@ fn serve_connection(
                     .map_err(|_| Status::Unavailable)?;
             } else if let Some(request) = &pull_request {
                 let reply = pulls::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
+            } else if let Some(request) = &discussion_request {
+                let reply = discussions::execute(
                     &node,
                     request,
                     &session,
@@ -1799,6 +1851,8 @@ fn serve_connection(
                     let _ = error.send_named(&mut writer, version, "pull_request_error");
                 } else if milestone_api {
                     let _ = error.send_named(&mut writer, version, "milestone_error");
+                } else if discussion_api {
+                    let _ = error.send_named(&mut writer, version, "discussion_error");
                 } else {
                     let _ = error.send(&mut writer, version);
                 }

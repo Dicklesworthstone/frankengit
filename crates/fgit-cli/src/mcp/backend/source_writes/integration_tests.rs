@@ -42,6 +42,7 @@ impl Fixture {
             format,
             incarnation: None,
             issues: false,
+            discussions: false,
             pulls: true,
             source: true,
             writes: WriteGrants {

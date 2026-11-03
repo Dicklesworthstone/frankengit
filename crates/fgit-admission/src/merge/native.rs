@@ -30,6 +30,7 @@ pub use blocking::{
     admit_workspace_sealed_native_merge,
 };
 pub mod delivery;
+pub mod discussions;
 pub mod dispatch;
 pub mod feed;
 pub mod history;

@@ -92,6 +92,7 @@ fn setup(format: GitHashAlgorithm) -> (Scratch, NodeTools, GitOid) {
         format,
         incarnation: Some(incarnation),
         issues: false,
+        discussions: false,
         pulls: false,
         source: true,
         writes: Default::default(),
@@ -251,8 +252,8 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    // The 75-tool catalog minus queues (7), agent context (1), artifacts (2),
-    // separate protection tools (2), and ungranted notification writes (5).
+    // The 84-tool catalog minus queues (7), agent context (1), artifacts (2),
+    // protection (2), notification writes (5), and independent discussions (9).
     assert_eq!(backend.tools().len(), 58);
     assert!(
         backend

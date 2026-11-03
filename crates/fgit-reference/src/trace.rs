@@ -344,6 +344,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(6);
             write_slug(out, "ForgeEntityId", issue.label())?;
         }
+        ForgeEventKind::DiscussionChanged { discussion } => {
+            out.write_raw_byte(13);
+            write_slug(out, "ForgeEntityId", discussion.label())?;
+        }
         ForgeEventKind::MilestoneChanged { milestone } => {
             out.write_raw_byte(11);
             write_slug(out, "ForgeEntityId", milestone.label())?;
@@ -418,6 +422,9 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         11 => Ok(ForgeEventKind::MilestoneChanged {
             milestone: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        13 => Ok(ForgeEventKind::DiscussionChanged {
+            discussion: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
         }),
         12 => Ok(ForgeEventKind::NotificationPreferenceChanged {
             preference: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
@@ -2303,5 +2310,25 @@ mod tests {
         }
         assert_eq!(event.required_ref_effect(), None);
         assert_eq!(event.entity().label().as_str(), "milestone/7");
+    }
+
+    #[test]
+    fn discussion_trace_uses_tag_thirteen_and_never_implies_a_reference_effect() {
+        let event = ForgeEventKind::DiscussionChanged {
+            discussion: ForgeEntityId::new(crate::harness::label("discussion/7")),
+        };
+        let literal = b"\x0d\0\0\0\x0cdiscussion/7";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut input).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity().label().as_str(), "discussion/7");
     }
 }

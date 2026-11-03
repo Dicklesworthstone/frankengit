@@ -245,6 +245,48 @@ fn private_notification_preferences_never_enter_the_shared_feed_even_with_both_g
 }
 
 #[test]
+fn discussion_bodies_never_inherit_issue_or_pull_feed_grants() {
+    use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand};
+    use fgit_forge::{DiscussionNumber, ExpectedVersion};
+
+    let private = DiscussionCommand {
+        number: DiscussionNumber::FIRST,
+        expected_version: ExpectedVersion::NewStream,
+        action: DiscussionAction::Open {
+            title: "Discussion with separate disclosure".into(),
+            body: "discussion-only secret".into(),
+        },
+    }
+    .proposed_event(PrincipalId::from_bytes([0x41; 16]))
+    .unwrap();
+    let frame = hex(&encode_body(&private).unwrap()).unwrap();
+    for (issues, pulls) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert!(!permitted(&private, issues, pulls, &|_| false));
+    }
+    let selected = selected(
+        page(
+            vec![
+                envelope(1, issue("visible twin")),
+                envelope(2, private),
+                envelope(3, pull()),
+            ],
+            false,
+        ),
+        true,
+        true,
+        None,
+    );
+    assert_eq!(selected.events().len(), 2);
+    assert_eq!(selected.events()[0].kind(), 8);
+    assert_eq!(selected.events()[1].kind(), 6);
+    assert_eq!(selected.resume_after(), Some((3, 0)));
+    let wire = selected.to_json().unwrap();
+    assert!(!wire.contains(&frame));
+    assert!(!wire.contains("discussion-only secret"));
+    assert!(!wire.contains("discussion/"));
+}
+
+#[test]
 fn denied_payload_is_not_encoded_or_exposed_even_when_its_codec_would_refuse() {
     let raw = page(
         vec![envelope(1, issue("invalid\0secret")), envelope(2, pull())],

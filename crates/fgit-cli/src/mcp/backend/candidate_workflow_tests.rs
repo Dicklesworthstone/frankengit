@@ -82,6 +82,7 @@ impl Fixture {
             format,
             incarnation: None,
             issues: false,
+            discussions: false,
             pulls: false,
             source: false,
             writes: WriteGrants::default(),

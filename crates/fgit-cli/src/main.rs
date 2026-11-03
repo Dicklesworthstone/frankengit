@@ -6,6 +6,7 @@ mod branches;
 mod bundle;
 mod checkpoint;
 mod commit_replay;
+mod discussions;
 mod events;
 mod fsck;
 mod guarded_git_server;
@@ -438,6 +439,18 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         .is_some_and(|argument| argument == "queue")
     {
         return match queue::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "discussion")
+    {
+        return match discussions::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
                 eprintln!("fg: {error}");

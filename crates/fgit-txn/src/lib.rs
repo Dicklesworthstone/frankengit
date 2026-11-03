@@ -601,6 +601,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(6);
             out.write_text("ForgeEntityId", issue.label().as_str())?;
         }
+        ForgeEventKind::DiscussionChanged { discussion } => {
+            out.write_raw_byte(13);
+            out.write_text("ForgeEntityId", discussion.label().as_str())?;
+        }
         ForgeEventKind::MilestoneChanged { milestone } => {
             out.write_raw_byte(11);
             out.write_text("ForgeEntityId", milestone.label().as_str())?;
@@ -646,6 +650,7 @@ mod tests {
     use super::*;
     include!("issue_normal_form_tests.rs");
     include!("milestone_normal_form_tests.rs");
+    include!("discussion_normal_form_tests.rs");
     include!("notification_normal_form_tests.rs");
     include!("workflow_check_normal_form_tests.rs");
     include!("pull_request_comment_normal_form_tests.rs");

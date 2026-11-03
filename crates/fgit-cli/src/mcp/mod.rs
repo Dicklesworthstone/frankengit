@@ -6,12 +6,13 @@ use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnat
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes --allow-issues]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require --allow-issues\nplus the launch-bound principal and incarnation. Notification writes additionally\nrequire --allow-notification-writes; issue-write permission does not grant them.\nRead acknowledgements supply an explicit observed issue prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes --allow-issues]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Discussion reads and writes each require their own\nexplicit grant; issue access never implies discussion access.\nRead groups, issue/discussion/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require --allow-issues\nplus the launch-bound principal and incarnation. Notification writes additionally\nrequire --allow-notification-writes; issue-write permission does not grant them.\nRead acknowledgements supply an explicit observed issue prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
 /// Independent launch-time mutation ceilings. None implies a read/recovery grant.
 #[derive(Clone, Copy, Debug, Default)]
 struct WriteGrants {
     issues: bool,
+    discussions: bool,
     notifications: bool,
     pulls: bool,
     source: bool,
@@ -21,6 +22,7 @@ struct WriteGrants {
 impl WriteGrants {
     const fn any(self) -> bool {
         self.issues
+            || self.discussions
             || self.notifications
             || self.pulls
             || self.source
@@ -53,6 +55,7 @@ struct Options {
     format: GitHashAlgorithm,
     incarnation: Option<RepositoryIncarnationId>,
     issues: bool,
+    discussions: bool,
     pulls: bool,
     source: bool,
     queues: QueueGrants,
@@ -67,6 +70,7 @@ struct Options {
 impl Options {
     fn validate_access(&self) -> Result<(), String> {
         if !(self.issues
+            || self.discussions
             || self.pulls
             || self.source
             || self.queues.any()
@@ -152,7 +156,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     }
 }
 fn parse_options(arguments: &[String]) -> Result<Options, String> {
-    if arguments.len() < 3 || arguments.len() > 31 {
+    if arguments.len() < 3 || arguments.len() > 33 {
         return Err(USAGE.into());
     }
     if arguments.iter().any(|s| s.len() > 4096) || arguments[0].is_empty() {
@@ -168,6 +172,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
         let value = match name {
             "--trusted-local"
             | "--allow-issues"
+            | "--allow-discussions"
             | "--allow-pulls"
             | "--allow-source"
             | "--allow-queues"
@@ -175,6 +180,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             | "--allow-queue-landings"
             | "--allow-agent-context"
             | "--allow-issue-writes"
+            | "--allow-discussion-writes"
             | "--allow-notification-writes"
             | "--allow-pull-writes"
             | "--allow-source-writes"
@@ -228,6 +234,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
         format,
         incarnation,
         issues: flags.contains_key("--allow-issues"),
+        discussions: flags.contains_key("--allow-discussions"),
         pulls: flags.contains_key("--allow-pulls"),
         source: flags.contains_key("--allow-source"),
         queues: QueueGrants {
@@ -242,6 +249,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             .map(|value| PathBuf::from(*value)),
         writes: WriteGrants {
             issues: flags.contains_key("--allow-issue-writes"),
+            discussions: flags.contains_key("--allow-discussion-writes"),
             notifications: flags.contains_key("--allow-notification-writes"),
             pulls: flags.contains_key("--allow-pull-writes"),
             source: flags.contains_key("--allow-source-writes"),
@@ -315,6 +323,7 @@ mod tests {
     fn write_and_recovery_grants_require_identity_and_incarnation_but_imply_no_reads() {
         for flag in [
             "--allow-issue-writes",
+            "--allow-discussion-writes",
             "--allow-pull-writes",
             "--allow-source-writes",
             "--allow-review-writes",
@@ -330,7 +339,12 @@ mod tests {
             args.extend(["--expected-incarnation".into(), "44".repeat(16)]);
             let options = parse_options(&args).unwrap();
             assert!(!options.issues && !options.pulls && !options.source);
+            assert!(!options.discussions);
             assert_eq!(options.writes.issues, flag == "--allow-issue-writes");
+            assert_eq!(
+                options.writes.discussions,
+                flag == "--allow-discussion-writes"
+            );
             assert_eq!(options.writes.pulls, flag == "--allow-pull-writes");
             assert_eq!(options.writes.source, flag == "--allow-source-writes");
             assert_eq!(options.writes.reviews, flag == "--allow-review-writes");
@@ -348,7 +362,7 @@ mod grant_tests {
     use super::*;
     #[test]
     fn read_groups_are_independent_and_at_least_one_is_required() {
-        for mask in 0..8 {
+        for mask in 0..16 {
             let mut args = vec![
                 "/unused".to_owned(),
                 "11".repeat(16),
@@ -359,6 +373,7 @@ mod grant_tests {
                 (1, "--allow-issues"),
                 (2, "--allow-pulls"),
                 (4, "--allow-source"),
+                (8, "--allow-discussions"),
             ] {
                 if mask & bit != 0 {
                     args.push(flag.to_owned());
@@ -372,6 +387,7 @@ mod grant_tests {
                 assert_eq!(options.issues, mask & 1 != 0);
                 assert_eq!(options.pulls, mask & 2 != 0);
                 assert_eq!(options.source, mask & 4 != 0);
+                assert_eq!(options.discussions, mask & 8 != 0);
                 assert!(!options.writes.any() && !options.outcomes && options.principal.is_none());
             }
         }

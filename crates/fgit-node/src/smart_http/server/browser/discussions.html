@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Discussions · FrankenGit</title>
+  <link rel="stylesheet" href="./browser.css">
+  <script type="module" src="./discussions-view.mjs"></script>
+</head>
+<body>
+<header><h1>Repository discussions</h1><p>Ask questions, share ideas, and keep an authored conversation.</p></header>
+<main>
+  <section aria-labelledby="connection-title">
+    <h2 id="connection-title">Connect</h2>
+    <form id="discussion-connect">
+      <label>Repository token <input id="discussion-token" type="password" autocomplete="off" spellcheck="false" required></label>
+      <button type="submit">Connect</button>
+      <button id="discussion-disconnect" type="button">Disconnect</button>
+    </form>
+    <p>Use a token with discussions-read; posting needs discussions-write. Outcome recovery needs outcomes-read. Tokens stay in this tab.</p>
+  </section>
+  <p id="discussion-status" role="status" aria-live="polite">Connect to read discussions.</p>
+  <section aria-labelledby="browse-title">
+    <h2 id="browse-title">Browse</h2>
+    <button id="discussion-list" type="button">Refresh list</button>
+    <button id="discussion-cancel" type="button">Cancel read</button>
+    <form id="discussion-show"><label>Discussion number <input id="show-number" inputmode="numeric" required></label><button type="submit">Open discussion</button></form>
+    <p id="discussion-snapshot"></p>
+    <div id="discussion-content"></div>
+    <div id="discussion-paging"></div>
+  </section>
+  <section aria-labelledby="change-title">
+    <h2 id="change-title">Write a discussion or reply</h2>
+    <form id="discussion-change">
+      <label>Discussion number <input id="change-number" inputmode="numeric" required></label>
+      <label>Action <select id="change-action">
+        <option value="open">Open</option><option value="comment">Comment</option><option value="edit">Edit</option>
+        <option value="close">Close</option><option value="reopen">Reopen</option><option value="lock">Lock comments</option><option value="unlock">Unlock comments</option>
+      </select></label>
+      <label>Expected version <input id="change-version" inputmode="numeric" value="0" required></label>
+      <p>Opening uses version 0 and an unused number. Other changes use the version you read. A conflict keeps the original result; review the latest discussion before preparing a new change.</p>
+      <div id="title-field"><label>Title <input id="change-title-text" maxlength="256"></label><label id="replace-title-label"><input id="replace-title" type="checkbox" checked>Replace title</label></div>
+      <div id="body-field"><label>Body <textarea id="change-body" rows="8"></textarea></label><label id="replace-body-label"><input id="replace-body" type="checkbox" checked>Replace body</label></div>
+      <button id="prepare-change" type="submit">Prepare change</button>
+    </form>
+    <section id="prepared-change" hidden aria-labelledby="prepared-title">
+      <h3 id="prepared-title">Prepared change</h3>
+      <pre id="prepared-summary"></pre>
+      <button id="send-change" type="button">Send prepared change</button>
+      <button id="check-outcome" type="button">Check outcome</button>
+      <button id="save-receipt" type="button">Save recovery receipt</button>
+      <button id="discard-change" type="button">Discard unsent change</button>
+      <p>Keep the receipt if the connection is lost. It contains the private draft and original retry identity, but no token.</p>
+    </section>
+    <label>Restore recovery receipt <input id="restore-receipt" type="file" accept="application/json,.json"></label>
+  </section>
+</main>
+</body>
+</html>

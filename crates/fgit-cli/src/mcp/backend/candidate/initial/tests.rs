@@ -172,6 +172,7 @@ fn empty(format: GitHashAlgorithm) -> (Scratch, NodeTools) {
         incarnation: Some(incarnation),
         source: true,
         issues: false,
+        discussions: false,
         pulls: false,
         writes: Default::default(),
         outcomes: false,

@@ -6,8 +6,8 @@ pub mod candidate_inspection;
 mod full_bundle;
 pub use full_bundle::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
-    StreamBundleExportRefusal, StreamBundleReuse,
-    StreamBundleImportQuery, StreamBundleImportRefusal, StreamIncrementalBundleImportQuery,
+    StreamBundleExportRefusal, StreamBundleImportQuery, StreamBundleImportRefusal,
+    StreamBundleReuse, StreamIncrementalBundleImportQuery,
 };
 mod initial_commit;
 mod merge_prepare;
@@ -18,6 +18,7 @@ pub use outbox_delivery::RetiredForgeDeliveryReceipt;
 mod patch;
 mod tags;
 pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
+mod discussions;
 mod events;
 mod issues;
 mod milestones;
@@ -26,6 +27,7 @@ mod protection;
 mod publication;
 mod pull_request;
 mod queue;
+pub use discussions::DiscussionReadRefusal;
 pub use issues::IssueReadRefusal;
 pub use milestones::MilestoneReadRefusal;
 pub use notifications::{NotificationInboxPage, NotificationReadRefusal, NotificationThreadView};

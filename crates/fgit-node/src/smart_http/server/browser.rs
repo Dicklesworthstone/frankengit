@@ -2,6 +2,7 @@
 //! Same-origin API calls authenticate through existing grants. Each shell is
 //! independently enabled by its existing gateway profile.
 
+mod discussions;
 mod protection;
 mod pulls;
 mod queues;
@@ -128,6 +129,9 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if discussions::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
     if queues::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }

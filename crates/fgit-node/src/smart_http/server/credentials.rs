@@ -73,6 +73,8 @@ enum Scope {
     QueuesWrite,
     QueuesLand,
     NotificationsWrite,
+    DiscussionsRead,
+    DiscussionsWrite,
 }
 
 impl Scope {
@@ -97,6 +99,8 @@ impl Scope {
             "queues-write" => Ok(Self::QueuesWrite),
             "queues-land" => Ok(Self::QueuesLand),
             "notifications-write" => Ok(Self::NotificationsWrite),
+            "discussions-read" => Ok(Self::DiscussionsRead),
+            "discussions-write" => Ok(Self::DiscussionsWrite),
             _ => Err(CredentialFailure::InvalidFile),
         }
     }
@@ -141,6 +145,14 @@ impl Grant {
             self.scopes.contains(Scope::IssuesWrite)
         } else {
             self.scopes.contains(Scope::IssuesRead)
+        }
+    }
+    /// Discussion grants never follow from issue, source, or publication access.
+    pub const fn permits_discussions(&self, mutation: bool) -> bool {
+        if mutation {
+            self.scopes.contains(Scope::DiscussionsWrite)
+        } else {
+            self.scopes.contains(Scope::DiscussionsRead)
         }
     }
     /// Self-owned preferences require disclosure plus their own write scope.
@@ -545,6 +557,48 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discussion_scopes_are_independent_and_keep_canonical_credential_order() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        for scopes in [
+            "read",
+            "receive",
+            "issues-read,issues-write",
+            "pulls-read,pulls-write",
+        ] {
+            let value = grant(principal, scopes).unwrap();
+            assert!(!value.permits_discussions(false));
+            assert!(!value.permits_discussions(true));
+        }
+        for (scopes, read, write) in [
+            ("discussions-read", true, false),
+            ("discussions-write", false, true),
+            ("discussions-read,discussions-write", true, true),
+        ] {
+            let value = grant(principal, scopes).unwrap();
+            assert_eq!(value.permits_discussions(false), read);
+            assert_eq!(value.permits_discussions(true), write);
+            assert!(!value.permits_issues(false));
+            assert!(!value.permits_issues(true));
+            assert!(!value.permits(Service::ReceivePack));
+        }
+        assert!(
+            grant(
+                principal,
+                "notifications-write,discussions-read,discussions-write"
+            )
+            .is_ok()
+        );
+        for scopes in [
+            "discussions-write,discussions-read",
+            "discussions-read,discussions-read",
+            "discussions-read,issues-write",
+            "discussion-read",
+        ] {
+            assert!(grant(principal, scopes).is_err(), "{scopes}");
+        }
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     fn binding() -> Binding {
