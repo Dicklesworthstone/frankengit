@@ -95,11 +95,16 @@ snapshot, the observed verdict, and the attempt number. A failed output stream
 may lose a receipt after the receiver has already accepted the request.
 
 Supported subscription families are `pull_request`, `pull_request_review`,
-`issue`, `review_protection`, `merge_queue`, and `workflow_check` (case-insensitive).
+`pull_request_commented`, `issue`, `discussion`, `milestone`,
+`review_protection`, `merge_queue`, `workflow_check`, and
+`candidate_workflow_check` (case-insensitive).
 An exact `kind:N` filter selects a canonical numeric event kind. `all`/`*` remains
 the wildcard registration. The manual path refuses an entire mixed batch when
 any event fails the filter; it does not remove events while retaining the old
 batch commitment. This does not yet implement per-subscription canonical fan-out.
+Discussion events use kind 24; issue subscriptions do not admit them. Private
+notification preferences remain undeliverable even under wildcard or exact-kind
+subscriptions, including when mixed with public discussion or issue events.
 
 Default egress uses the existing strict SSRF policy. `--permissive-for-tests`
 permits loopback tests only under the adapter's existing policy. HTTPS still

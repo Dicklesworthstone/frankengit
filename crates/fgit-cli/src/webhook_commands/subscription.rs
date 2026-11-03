@@ -15,7 +15,10 @@ pub(super) fn require_subscription(
     for event in events {
         let name = match &event.payload {
             ForgeEventPayload::NotificationPreferenceChangedNative(_) => {
-                return Err("private notification preferences cannot be delivered by repository webhooks".into());
+                return Err(
+                    "private notification preferences cannot be delivered by repository webhooks"
+                        .into(),
+                );
             }
             ForgeEventPayload::PullRequestOpened { .. }
             | ForgeEventPayload::PullRequestHeadAdvanced { .. }
@@ -26,6 +29,7 @@ pub(super) fn require_subscription(
             ForgeEventPayload::PullRequestReviewedNative(_) => "pull_request_review",
             ForgeEventPayload::PullRequestCommentedNative(_) => "pull_request_commented",
             ForgeEventPayload::IssueChangedNative(_) => "issue",
+            ForgeEventPayload::DiscussionChangedNative(_) => "discussion",
             ForgeEventPayload::MilestoneChangedNative(_) => "milestone",
             ForgeEventPayload::ReviewProtectionChanged(_) => "review_protection",
             ForgeEventPayload::MergeQueueChangedNative(_) => "merge_queue",
@@ -89,6 +93,7 @@ mod tests {
             [
                 "*",
                 "issue",
+                "discussion",
                 "milestone",
                 "pull_request",
                 "pull_request_review",
@@ -100,6 +105,7 @@ mod tests {
                 "notification",
                 "notification_preference",
                 "kind:23",
+                "kind:24",
             ]
             .into_iter()
             .map(|name| WebhookEventFilter::Selected(vec![name.into()])),
@@ -142,6 +148,89 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn discussions_have_a_distinct_family_and_never_truncate_mixed_batches() {
+        use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand};
+        use fgit_forge::event::issue::{IssueAction, IssueCommand};
+        use fgit_forge::event::notification::{
+            NotificationAction, NotificationCommand, NotificationMode,
+        };
+        use fgit_forge::{DiscussionNumber, IssueNumber};
+
+        let actor = PrincipalId::from_bytes([7; 16]);
+        let discussion = DiscussionCommand {
+            number: DiscussionNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: DiscussionAction::Open {
+                title: "Repository discussion".into(),
+                body: "Exact authored discussion bytes".into(),
+            },
+        }
+        .proposed_event(actor)
+        .unwrap();
+        let issue = IssueCommand {
+            number: IssueNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: IssueAction::Open {
+                title: "Separate issue".into(),
+                body: String::new(),
+                labels: Vec::new(),
+            },
+        }
+        .proposed_event(actor)
+        .unwrap();
+        assert_eq!(discussion.payload.kind(), 24);
+        for filter in [
+            WebhookEventFilter::Wildcard,
+            WebhookEventFilter::Selected(vec!["discussion".into()]),
+            WebhookEventFilter::Selected(vec!["DISCUSSION".into()]),
+            WebhookEventFilter::Selected(vec!["kind:24".into()]),
+        ] {
+            assert!(require_subscription(&filter, std::slice::from_ref(&discussion)).is_ok());
+        }
+        for selector in ["issue", "milestone", "pull_request", "kind:8", "kind:23"] {
+            assert!(
+                require_subscription(
+                    &WebhookEventFilter::Selected(vec![selector.into()]),
+                    std::slice::from_ref(&discussion),
+                )
+                .is_err()
+            );
+        }
+        for mixed in [
+            [issue.clone(), discussion.clone()],
+            [discussion.clone(), issue],
+        ] {
+            for selector in ["issue", "discussion", "kind:24"] {
+                assert!(
+                    require_subscription(
+                        &WebhookEventFilter::Selected(vec![selector.into()]),
+                        &mixed,
+                    )
+                    .is_err()
+                );
+            }
+            for filter in [
+                WebhookEventFilter::Wildcard,
+                WebhookEventFilter::Selected(vec!["issue".into(), "discussion".into()]),
+                WebhookEventFilter::Selected(vec!["kind:8".into(), "kind:24".into()]),
+            ] {
+                assert!(require_subscription(&filter, &mixed).is_ok());
+            }
+        }
+        let private = NotificationCommand {
+            number: IssueNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: NotificationAction::SetMode(NotificationMode::Muted),
+        }
+        .proposed_event(actor)
+        .unwrap();
+        for mixed in [[discussion.clone(), private.clone()], [private, discussion]] {
+            let refusal = require_subscription(&WebhookEventFilter::Wildcard, &mixed).unwrap_err();
+            assert!(refusal.contains("private notification preferences"));
         }
     }
 
