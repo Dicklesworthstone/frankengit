@@ -4,6 +4,7 @@ use crate::source_retrieval::current_index::{
     GenerationActivation, IndexedLexicalReport, LexicalSource,
 };
 use crate::source_retrieval::{SymbolChannel, SymbolPolicy, SymbolUnavailable};
+use fgit_admission::evidence::AgentAuthentication;
 use fgit_agent::{AuthorityReadReceipt, ContextPacket, IntentRun};
 use fgit_forge::source_symbols::SymbolMatchMode;
 use fgit_resource::algebra::Grade;
@@ -55,6 +56,38 @@ fn labels(values: &[[u8; 32]]) -> Value {
     Value::Array(values.iter().map(|value| bytes(value)).collect())
 }
 
+// These are verifier-owned provenance facts. They contain no bearer secret
+// and do not turn the returned context document into a credential.
+fn agent_authentication(value: AgentAuthentication) -> Value {
+    object([
+        ("principal_id", text(value.agent().to_string())),
+        ("sponsor_id", text(value.sponsor().to_string())),
+        ("sponsor_kind", text(value.sponsor_kind().name())),
+        ("credential_id", text(value.credential_id().to_string())),
+        ("grant_root", digest(value.grant_root())),
+        ("request_run_commitment", bytes(value.run_commitment())),
+        (
+            "authenticated_at_unix_seconds",
+            number(value.authenticated_at()),
+        ),
+        ("expires_at_unix_seconds", number(value.expires_at())),
+    ])
+}
+
+// Keep existing local and ordinary HTTP intent bytes stable. Only the new
+// sponsored profile adds this independently authenticated provenance field.
+fn with_agent_authentication(input: &AgentContextRequest<'_>, mut value: Value) -> Value {
+    if let Some(authentication) = input.authorization.agent_authentication()
+        && let Value::Object(fields) = &mut value
+    {
+        fields.insert(
+            "agent_authentication".into(),
+            agent_authentication(authentication),
+        );
+    }
+    value
+}
+
 pub(super) fn intent(input: &AgentContextRequest<'_>) -> Value {
     let symbols = input
         .query
@@ -88,7 +121,7 @@ pub(super) fn intent(input: &AgentContextRequest<'_>) -> Value {
                 ),
             ])
         });
-    object([
+    let value = object([
         ("profile", text(profile(input))),
         ("sponsor_id", text(input.sponsor.to_string())),
         (
@@ -150,7 +183,8 @@ pub(super) fn intent(input: &AgentContextRequest<'_>) -> Value {
                 ("max_output_bytes", count(input.max_output_bytes)),
             ]),
         ),
-    ])
+    ]);
+    with_agent_authentication(input, value)
 }
 fn source(value: &LexicalSource) -> Value {
     object([
@@ -556,5 +590,5 @@ pub(super) fn document(
     // The owner encodes once against the caller's exact finite byte bound.
     // Keeping the value private means no partially encoded packet escapes.
     live()?;
-    Ok(document)
+    Ok(with_agent_authentication(input, document))
 }

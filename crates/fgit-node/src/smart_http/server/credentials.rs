@@ -80,6 +80,7 @@ enum Scope {
     NotificationsWrite,
     DiscussionsRead,
     DiscussionsWrite,
+    SourceRead,
 }
 
 impl Scope {
@@ -144,7 +145,7 @@ impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-            PULLS_READ, PULLS_WRITE,
+            PULLS_READ, PULLS_WRITE, SOURCE_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -155,6 +156,7 @@ impl Grant {
             DISCUSSIONS_READ => Scope::DiscussionsRead,
             DISCUSSIONS_WRITE => Scope::DiscussionsWrite,
             OUTCOMES_READ => Scope::OutcomesRead,
+            SOURCE_READ => Scope::SourceRead,
             _ => unreachable!("node authenticated a closed operation"),
         };
         scopes.insert(scope);
@@ -171,6 +173,12 @@ impl Grant {
             Service::UploadPack => self.scopes.contains(Scope::Read),
             Service::ReceivePack => self.scopes.contains(Scope::Receive),
         }
+    }
+    /// Source API disclosure is separate from Git transport access. Existing
+    /// operator read grants retain their scope; sponsored source readers never
+    /// acquire upload-pack authority by passing this check.
+    pub const fn permits_source_read(&self) -> bool {
+        self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceRead)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -626,6 +634,36 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_read_permission_does_not_grant_git_or_metadata_services() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let mut value = grant(principal, "read").unwrap();
+        assert!(value.permits_source_read());
+        assert!(value.permits(Service::UploadPack));
+
+        value.scopes = Scopes(Scope::SourceRead.mask());
+        assert!(value.permits_source_read());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_discussions(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_lfs(mutation));
+            assert!(!value.permits_queues(mutation));
+        }
+        assert!(!value.permits_outcomes());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        assert!(!value.permits_artifact_read());
+
+        for scopes in ["receive", "issues-read", "pulls-read", "discussions-read"] {
+            assert!(!grant(principal, scopes).unwrap().permits_source_read());
+        }
+    }
 
     #[test]
     fn discussion_scopes_are_independent_and_keep_canonical_credential_order() {

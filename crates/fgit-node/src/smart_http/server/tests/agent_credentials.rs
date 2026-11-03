@@ -2,6 +2,8 @@
 //! Real bearer requests cross the canonical grant registry, request run,
 //! metadata publication and immutable terminal-provenance boundaries.
 
+mod source_read;
+
 use super::{profile, *};
 use crate::LoopbackReceiveSession;
 use fgit_authority::IdempotencyKey;

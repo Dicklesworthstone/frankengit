@@ -87,7 +87,7 @@ pub(super) fn execute(
     http: HttpLimits,
     maximum: u64,
 ) -> Result<JsonReply, ApiError> {
-    let sponsor = read.principal().ok_or_else(|| {
+    let sponsor = read.sponsor().ok_or_else(|| {
         ApiError::new(Status::Forbidden, "agent_context_read_credential_required")
     })?;
     let maximum = usize::try_from(maximum)
@@ -105,8 +105,8 @@ pub(super) fn execute(
 
 /// The real HTTP `source/agent-context` grammar and implementation for a
 /// separately authorized in-process host. `fields` omit `object_format`, which
-/// comes from the selected node. An HTTP read context binds sponsorship to its
-/// principal; trusted-local hosts must first check their explicit launch grant
+/// comes from the selected node. An HTTP read context retains its verified
+/// sponsor; trusted-local hosts must first check their explicit launch grant
 /// and supply the launch-bound sponsor. Caller fields cannot choose either.
 /// The result is a buffered read-only document, never a reusable credential.
 pub fn source_agent_context_json(
@@ -135,10 +135,7 @@ fn run(
 ) -> Result<String, ApiError> {
     read.check_node(node)
         .map_err(|_| ApiError::new(Status::Forbidden, "source_read_context_mismatch"))?;
-    if read
-        .principal()
-        .is_some_and(|principal| principal != sponsor)
-    {
+    if read.sponsor().is_some_and(|expected| expected != sponsor) {
         return Err(ApiError::new(
             Status::Forbidden,
             "agent_context_sponsor_mismatch",
@@ -150,8 +147,8 @@ fn run(
     let timeout = GitDaemonSessionTimeout::try_new(expires_after)
         .map_err(|_| ApiError::bad("invalid_agent_context_lifetime"))?;
     let deadline = GitDaemonSessionDeadline::new(timeout, GitDaemonSessionWorkScaling::FLAT);
-    let request = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let request = read.request_context(node, &deadline);
+    let mut live = || !deadline.expired() && read.is_live();
     let context = &command.context;
     drive_request_while(
         node,

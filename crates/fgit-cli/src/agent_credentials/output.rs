@@ -4,7 +4,7 @@ use fgit_authority::TerminalOutcome;
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE,
+    PULLS_WRITE, SOURCE_READ,
 };
 use fgit_types::{DecisionOutcome, TxId};
 
@@ -17,6 +17,7 @@ fn grant(value: &AgentCredentialGrant) -> String {
         (DISCUSSIONS_READ, "discussions-read"),
         (DISCUSSIONS_WRITE, "discussions-write"),
         (OUTCOMES_READ, "outcomes-read"),
+        (SOURCE_READ, "source-read"),
     ]
     .into_iter()
     .filter(|(bit, _)| value.permits(*bit))

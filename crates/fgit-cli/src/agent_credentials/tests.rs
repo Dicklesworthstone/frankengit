@@ -1,5 +1,5 @@
 use super::*;
-use fgit_identity::agent::{ISSUES_READ, ISSUES_WRITE, PULLS_WRITE, SponsorKind};
+use fgit_identity::agent::{ISSUES_READ, ISSUES_WRITE, PULLS_WRITE, SOURCE_READ, SponsorKind};
 use std::path::PathBuf;
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -37,6 +37,24 @@ fn issue() -> Vec<String> {
 fn replace(args: &mut [String], flag: &str, value: &str) {
     let index = args.iter().position(|arg| arg == flag).unwrap();
     args[index + 1] = value.into();
+}
+
+#[test]
+fn source_read_is_explicit_and_independent_of_metadata_and_git_permissions() {
+    let mut input = issue();
+    replace(&mut input, "--operations", "source-read");
+    let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+        panic!("repository issuance expected")
+    };
+    let Operation::Issue { grant, .. } = parsed.operation else {
+        panic!("issuance expected")
+    };
+    assert_eq!(grant.operations, SOURCE_READ);
+    assert!(!grant.permits(ISSUES_READ | ISSUES_WRITE | PULLS_WRITE));
+    for operations in ["source-read,source-read", "source-write", "read", "receive"] {
+        replace(&mut input, "--operations", operations);
+        assert!(options::parse(&input).is_err(), "{operations}");
+    }
 }
 
 #[test]

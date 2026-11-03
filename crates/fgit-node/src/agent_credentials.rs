@@ -1,8 +1,8 @@
 //! Canonical sponsored agent credentials and bounded request authentication.
 //!
 //! Issuance is an explicit trusted-local administration operation. Credential
-//! holders receive only finite metadata scopes, never source publication,
-//! review, merge, process execution, or repository administration authority.
+//! holders receive finite metadata and explicit source-read scopes, never source
+//! publication, review, merge, process execution, or administration authority.
 
 use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
@@ -180,7 +180,7 @@ impl OneNode {
         output_limit: u64,
     ) -> Result<AgentRequest, NodeReceiveTransportRefusal> {
         use fgit_identity::agent::{
-            DISCUSSIONS_WRITE, ISSUES_WRITE, PULLS_WRITE, agent_credential_id,
+            DISCUSSIONS_WRITE, ISSUES_WRITE, PULLS_WRITE, SOURCE_READ, agent_credential_id,
             authenticate_agent_credential,
         };
         if !valid_agent_credential_token(bearer)
@@ -241,7 +241,14 @@ impl OneNode {
         } else {
             OperationClass::ReadCanonicalObject
         };
-        let classes = ClassSet::from_classes(&[class]);
+        let classes = if operation == SOURCE_READ {
+            ClassSet::from_classes(&[
+                OperationClass::ReadCanonicalObject,
+                OperationClass::ReadDerivedGeneration,
+            ])
+        } else {
+            ClassSet::from_classes(&[class])
+        };
         let budget = ResourceVector::single(Grade::Bytes, input_limit)
             .with(Grade::EgressBytes, output_limit);
         let receipt = AuthorityReadReceipt::from_authenticated_head(

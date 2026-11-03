@@ -757,7 +757,7 @@ impl SharedAdaptiveRetryController {
 
     fn next_sequence(&self) -> Option<u64> {
         self.sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
                 sequence.checked_add(1)
             })
             .ok()

@@ -1,9 +1,10 @@
-# Sponsored agent credentials for forge metadata
+# Sponsored agent credentials for source reads and forge metadata
 
 This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
-HTTP issue, pull-request metadata and conversation, standalone discussion, and
-single-transaction outcome endpoints, plus the explicit MCP metadata profile. Each request creates a real bounded
+HTTP current-source browsing and context, issue, pull-request metadata and
+conversation, standalone discussion, and single-transaction outcome endpoints,
+plus the explicit MCP metadata profile. Each request creates a real bounded
 `IntentRun`; the bearer alone is not an execution or publication capability.
 
 ## Issue and use a credential
@@ -84,12 +85,65 @@ observation schema. This grants no agent source-import capability.
 | `discussions-read` | Standalone discussion reads |
 | `discussions-write` | Standalone discussion commands |
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
+| `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
-Source/Git access, candidate preparation, reviews, checks, merges, queue operations,
-milestones, notifications, policy administration, artifact access, process
-execution, secrets and external effects are outside this profile. MCP also keeps
-its separate trusted-local operator profile with its existing grants.
+Source reads require an explicit `source-read` grant and the server's existing
+source-read feature switch. Metadata scopes, including all seven previously
+available flags, grant no source access. The HTTP adapter admits a closed set of
+current-source read routes; it does not interpret arbitrary GET requests or the
+ordinary token's broader `read` scope as agent permission. Source selection and
+disclosure retain the existing canonical hidden-ref and visibility checks.
+
+Git upload-pack/receive-pack, commit history and historical source snapshots,
+verified-blob streaming, bundles, candidate preparation or inspection, diffs,
+reviews, checks, merges, queue operations, milestones, notifications, policy
+administration, workflow and artifact access, process execution, secrets and
+external effects are outside this profile. MCP offers its independent sponsored
+metadata profile described below and keeps its existing trusted-local profile.
+Sponsored source reads currently use HTTP.
+
+A separate source-only credential can be issued with `--operations source-read`.
+Combine it with a metadata scope only when both capabilities are intended. Source
+requests use the same per-request canonical authentication, revocation checks,
+finite IntentRun and input/output envelopes as the metadata routes. They do not
+publish repository state or create a durable autonomous execution run.
+
+### Source routes and authenticated context
+
+The closed source route set consists of the following POST queries under the
+repository's `/api/v1/source/` route. All use the existing bounded form grammar.
+
+| Route suffix | Read surface |
+| --- | --- |
+| `tree`, `blob` | Selected current visible tree and exact file bytes |
+| `refs`, `tags/inspect` | Current visible references and selected tag target/annotation inspection |
+| `search`, `search-batch`, `search-regex` | Bounded native literal and byte-regex source search |
+| `search-index`, `search-symbols`, `search-symbols-index` | Lexical index and Rust declaration search with current source checks |
+| `search-initial`, `context-initial`, `agent-context` | Generation-bound retrieval, source context and Agent Protocol context documents |
+
+A source grant covers the repository's visible current source. Path selectors
+and query limits narrow an individual request; they are not a stored sparse-path
+capability. Read-only route classification alone does not grant access: history,
+bundle export and candidate preparation remain excluded even where their native
+HTTP operation does not publish a transaction. Read queries reject an
+`Idempotency-Key`; the transport's internal request key never seals a write.
+
+An agent-context response uses the
+`agent-context-http-sponsored-agent-v1` profile. Its `sponsor.principal_id` is the
+grant's authenticated human or service sponsor, while
+`agent_authentication.principal_id` is the agent. The retained witness also names
+the sponsor kind, credential ID, immutable grant root, original request-run
+commitment, authentication time and bounded request expiry. The same witness is
+bound into `request.agent_authentication`. None of these fields contains the
+bearer or gives the document reusable authority. Caller-selected principal,
+sponsor and run-ID fields are rejected.
+
+The context run's expiry is bounded by the original authenticated request's
+absolute wall-clock expiry and monotonic deadline. Parsing, index lookup and
+source hydration cannot renew that lifetime. Retrieved text remains explicitly
+untrusted source data, including any embedded instruction. Ordinary operator HTTP
+credentials retain the existing `agent-context-http-credential-v1` profile.
 
 ## Use the credential with MCP
 
@@ -190,10 +244,14 @@ new publication. This principal-kind rule is repository scoped.
 
 Each HTTP request derives an `IntentRun` from the authenticated authority receipt,
 credential, agent, sponsor, selected route operation, retry key and request-header
-commitment. The run permits one operation class and reserves the actual bounded
-HTTP input/output envelopes. It lasts at most 300 seconds and never past the
-grant's expiry. The response writer measures emitted bytes; metadata publication
-checks both a monotonic deadline and the grant's wall-clock validity. These are
+commitment. It reserves the actual bounded HTTP input/output envelopes. Metadata
+requests permit one operation class. A `source-read` request permits exactly
+`ReadCanonicalObject` and `ReadDerivedGeneration` so the same bounded run can
+read native source and its authenticated search generations.
+It grants no write, process or publication class. Every request lasts at most
+300 seconds and never past the grant's expiry. The response writer measures
+emitted bytes; source work and metadata publication retain the original
+monotonic deadline and wall-clock validity ceiling. These are
 request-envelope reservations, not measurements of whole-process CPU, RSS or
 storage charges. Grants have a maximum lifetime of 30 days and use a half-open
 `[issued_at, expires_at)` interval.
@@ -215,6 +273,15 @@ timeout proves non-commit.
 | Principal snapshot | Schema 1.2: full agent authentication witness |
 | Authentication policy evidence | Schema 1.5: full witness binding |
 
+The required operation mask remains a canonical `u16`. `source-read` adds bit 7
+(`0x0080`); the original seven flags retain bits 0 through 6 and their exact
+encodings. A stored `0x007f` grant still grants only the original metadata and
+outcome operations. Issuing source access requires a new grant, and revocation
+must retain the exact original operation mask. Bits 8 through 15 remain unknown
+and refuse decoding or authentication. Upgrade repository readers before issuing
+a source-read grant: an older reader fails closed on its unknown flag; it must
+not strip the flag or fall back to another credential profile.
+
 The forge stream label is `agent/` plus 52 unpadded lowercase RFC 4648 base32
 characters. This preserves all 256 digest bits within the 64-byte slug bound;
 noncanonical case, padding and unused bits are refused. CLI IDs remain lowercase
@@ -229,11 +296,13 @@ is rejected. Existing authentication predicates see single-factor strength;
 this profile adds no human-kind, sponsor, membership, MFA or hardware policy
 predicate. Ordinary HTTP and SSH credentials never imply a human principal.
 
-This implements the bounded metadata part of
-`frankengit-root-doctrine-x2mv.4.34`. Sponsored code publication, policy-visible
-sponsor selectors, human-review requirements for agent-produced code, broader
-agent runtime capabilities, and durable autonomous execution remain separate
-work. The request-run commitment is provenance, not a durable execution journal.
+This implements bounded current-source reads and metadata operations within
+`frankengit-root-doctrine-x2mv.4.34`, and provides source access needed by the
+agent-day integration in `frankengit-root-doctrine-x2mv.4.24`. Sponsored code
+publication, policy-visible sponsor selectors, human-review requirements for
+agent-produced code, broader agent runtime capabilities, and durable autonomous
+execution remain separate work. The request-run commitment is provenance, not a
+durable execution journal.
 
 ## Validation status and focused commands
 
@@ -246,6 +315,22 @@ own-principal recovery, and retained sponsor evidence in both Git object formats
 Deterministic protocol writers cover expiry before disclosure, partial writes,
 interrupted writes, flush, byte ceilings, and response-reservation cleanup. Their
 presence is a coverage inventory, not a passing test result.
+
+Source-read regressions additionally freeze the historical seven-bit grant,
+exercise source-only and combined operation masks, preserve issue/revoke codec
+round trips, reject unknown operation bits and grant changes during revocation,
+and require current lifetime and revocation evidence for source authentication.
+The native HTTP fixtures import real SHA-1 and SHA-256 repositories and build
+persisted lexical and symbol indexes. They exercise current-source reads and
+agent-context documents, exact binary/untrusted bytes, distinct agent/sponsor
+provenance, old-grant refusal, expired and revoked credentials, stale snapshots,
+identity injection, output limits, service disablement and pool reopen. A
+colliding ordinary credential cannot repair a revoked canonical agent token.
+The route and credential unit tests separately freeze the closed source allowlist
+and prevent a source scope from granting Git transport. Canonical hidden-ref
+visibility continues through the existing native readers and its separate
+integration tests. These tests must compile and pass at the candidate revision
+before they establish a verified end-to-end claim.
 
 `tests/operator/sponsored_metadata_credentials.test.mjs` covers both private
 token spellings, exact fingerprints, closed provenance shapes and u64 times,

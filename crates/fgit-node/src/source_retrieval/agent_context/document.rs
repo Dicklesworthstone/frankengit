@@ -1,7 +1,7 @@
 //! Shared bounded Agent Protocol document for native, CLI, MCP and HTTP hosts.
 //! Hosts supply independent source-read authorization. HTTP sponsorship is
 //! bound to that read credential, while trusted-local sponsorship is explicit
-//! operator attribution. Neither profile creates a durable run or write right.
+//! operator attribution. These profiles create no durable run or write right.
 mod render;
 
 use super::{AgentContextRead, AgentContextReadError, context_packet_for_run};
@@ -21,6 +21,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const PROFILE: &str = "agent-context-trusted-local-v1";
 /// Repository source-read authentication from the existing HTTP credential host.
 pub const HTTP_PROFILE: &str = "agent-context-http-credential-v1";
+/// Canonical sponsored agent authentication, retaining the original request's
+/// principal, sponsor and finite lifetime through this read-only context.
+pub const HTTP_AGENT_PROFILE: &str = "agent-context-http-sponsored-agent-v1";
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_LIFETIME: Duration = Duration::from_secs(300);
 const VERIFIER: &[u8] = b"frankengit/native-agent-context/authenticated-head/v1\0";
@@ -72,14 +75,18 @@ impl From<&'static str> for AgentContextDocumentError {
 }
 
 const fn profile(input: &AgentContextRequest<'_>) -> &'static str {
-    if input.authorization.principal().is_some() {
+    if input.authorization.agent_authentication().is_some() {
+        HTTP_AGENT_PROFILE
+    } else if input.authorization.principal().is_some() {
         HTTP_PROFILE
     } else {
         PROFILE
     }
 }
 const fn sponsor_authentication(input: &AgentContextRequest<'_>) -> &'static str {
-    if input.authorization.principal().is_some() {
+    if input.authorization.agent_authentication().is_some() {
+        "canonical-agent-credential"
+    } else if input.authorization.principal().is_some() {
         "http-repository-read-credential"
     } else {
         "operator-asserted"
@@ -87,8 +94,9 @@ const fn sponsor_authentication(input: &AgentContextRequest<'_>) -> &'static str
 }
 
 /// Inputs shared by independently authorized source-read hosts. The sponsor
-/// must equal the authenticated HTTP principal, or be explicit local operator
-/// attribution. A sponsor identifier alone never grants read permission.
+/// must match the read credential's verified sponsor, or be explicit local
+/// operator attribution. An agent remains distinct from its sponsor. A sponsor
+/// identifier alone never grants read permission.
 pub struct AgentContextRequest<'a> {
     pub authorization: &'a SourceReadContext,
     pub reference: &'a RefName,
@@ -125,25 +133,55 @@ fn read_scope() -> ClassSet {
     ])
 }
 
-struct Clock {
+struct Clock<'a> {
+    authorization: &'a SourceReadContext,
     origin: Instant,
     logical_origin: u64,
     expiry: LogicalTime,
 }
-impl Clock {
-    fn start(lifetime: Duration) -> Result<Self, AgentContextDocumentError> {
-        validate_lifetime(lifetime)?;
+impl<'a> Clock<'a> {
+    fn start(
+        lifetime: Duration,
+        authorization: &'a SourceReadContext,
+    ) -> Result<Self, AgentContextDocumentError> {
         let origin = Instant::now();
-        let logical_origin = SystemTime::now()
+        let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|time| u64::try_from(time.as_nanos()).ok())
-            .ok_or("agent context clock is outside its supported epoch")?;
+            .map_err(|_| "agent context clock is outside its supported epoch")?;
+        Self::start_at(lifetime, authorization, origin, wall)
+    }
+    fn start_at(
+        mut lifetime: Duration,
+        authorization: &'a SourceReadContext,
+        origin: Instant,
+        wall: Duration,
+    ) -> Result<Self, AgentContextDocumentError> {
+        validate_lifetime(lifetime)?;
+        if let Some(authentication) = authorization.agent_authentication() {
+            if wall < Duration::from_secs(authentication.authenticated_at()) {
+                return Err(AgentContextDocumentError::Expired);
+            }
+            let remaining_wall = Duration::from_secs(authentication.expires_at())
+                .checked_sub(wall)
+                .unwrap_or(Duration::ZERO);
+            let remaining_monotonic = authorization
+                .agent_deadline()
+                .map_or(Duration::ZERO, |deadline| {
+                    deadline.saturating_duration_since(origin)
+                });
+            lifetime = lifetime.min(remaining_wall).min(remaining_monotonic);
+            if lifetime.is_zero() {
+                return Err(AgentContextDocumentError::Expired);
+            }
+        }
+        let logical_origin = u64::try_from(wall.as_nanos())
+            .map_err(|_| "agent context clock is outside its supported epoch")?;
         let nanos = u64::try_from(lifetime.as_nanos()).map_err(|_| "agent lifetime overflow")?;
         let expiry = logical_origin
             .checked_add(nanos)
             .ok_or("agent context expiry overflow")?;
         Ok(Self {
+            authorization,
             origin,
             logical_origin,
             expiry: LogicalTime::new(expiry),
@@ -168,10 +206,27 @@ impl Clock {
                 ));
             }
         }
-        if self.now() >= self.expiry {
+        if self.now() >= self.expiry || !self.authorization.is_live() {
             return Err(AgentContextDocumentError::Expired);
         }
         Ok(())
+    }
+}
+
+fn check_sponsor(
+    authorization: &SourceReadContext,
+    sponsor: PrincipalId,
+) -> Result<(), AgentContextDocumentError> {
+    match authorization.sponsor() {
+        Some(expected) if expected == sponsor => Ok(()),
+        None if matches!(
+            authorization.host(),
+            "trusted-local-cli" | "trusted-local-mcp" | "trusted-local-native"
+        ) =>
+        {
+            Ok(())
+        }
+        _ => Err(AgentContextDocumentError::SponsorAuthorization),
     }
 }
 
@@ -200,14 +255,7 @@ pub async fn read_agent_context_in(
         .authorization
         .check_node(node)
         .map_err(|_| AgentContextDocumentError::SponsorAuthorization)?;
-    match input.authorization.principal() {
-        Some(principal) if principal == input.sponsor => {}
-        None if matches!(
-            input.authorization.host(),
-            "trusted-local-cli" | "trusted-local-mcp" | "trusted-local-native"
-        ) => {}
-        _ => return Err(AgentContextDocumentError::SponsorAuthorization),
-    }
+    check_sponsor(input.authorization, input.sponsor)?;
     if input.max_output_bytes == 0 || input.max_output_bytes > MAX_OUTPUT_BYTES {
         return Err(AgentContextDocumentError::InvalidInput(
             "agent context output bound is outside the supported profile",
@@ -221,7 +269,7 @@ pub async fn read_agent_context_in(
         .context_limits
         .validate()
         .map_err(|error| error.to_string())?;
-    let clock = Clock::start(input.expires_after)?;
+    let clock = Clock::start(input.expires_after, input.authorization)?;
     clock.check(request)?;
     let authenticated = node
         .authenticate_authority_head_in(request)
@@ -362,3 +410,6 @@ pub async fn read_agent_context_in(
         complete: context.complete(),
     })
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,7 +1,8 @@
-//! Canonical sponsored authentication for bounded forge metadata requests.
+//! Canonical sponsored authentication for bounded source reads and forge metadata.
 //!
 //! These immutable grants identify an agent and its operator-attested sponsor.
-//! They do not authorize code, reviews, merges, administration, or an agent run.
+//! They do not authorize code publication, reviews, merges, administration, or an
+//! agent run.
 //! A host must additionally establish and enforce its sponsored IntentRun before
 //! using any granted operation. Issuance and revocation become authoritative
 //! only when ordinary repository admission selects these events.
@@ -18,7 +19,11 @@ pub const PULLS_WRITE: u16 = 1 << 3;
 pub const DISCUSSIONS_READ: u16 = 1 << 4;
 pub const DISCUSSIONS_WRITE: u16 = 1 << 5;
 pub const OUTCOMES_READ: u16 = 1 << 6;
-pub const ALL_OPERATIONS: u16 = (1 << 7) - 1;
+/// Bounded current source, search and context reads through the native API.
+/// The host must enforce its closed read-route profile and canonical visibility;
+/// this flag does not grant Git transport, history snapshots or candidate work.
+pub const SOURCE_READ: u16 = 1 << 7;
+pub const ALL_OPERATIONS: u16 = (1 << 8) - 1;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";

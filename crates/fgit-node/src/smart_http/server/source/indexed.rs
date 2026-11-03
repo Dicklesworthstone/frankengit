@@ -337,8 +337,8 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     // Explicit selection, never a fallback after a failed strict read. Both
     // modes use the same authenticated gateway, deadline and request budget.
     if command.source_mode == SourceMode::Revalidated {

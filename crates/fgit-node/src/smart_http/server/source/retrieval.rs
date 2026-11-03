@@ -336,8 +336,8 @@ fn run(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = read.request_context(node, &deadline);
+    let mut live = || !deadline.expired() && read.is_live();
     let report = drive_request_while(
         node,
         &context,

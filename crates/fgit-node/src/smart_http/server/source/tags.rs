@@ -53,8 +53,8 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);

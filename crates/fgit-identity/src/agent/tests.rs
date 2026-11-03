@@ -51,6 +51,7 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         PULLS_WRITE,
         DISCUSSIONS_READ,
         OUTCOMES_READ,
+        SOURCE_READ,
         1 << 15,
     ] {
         assert_eq!(
@@ -58,6 +59,74 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
             Err(AgentCredentialRefusal::OperationNotGranted)
         );
     }
+}
+
+#[test]
+fn explicit_source_read_authentication_preserves_scope_lifetime_and_revocation() {
+    let source = AgentCredentialGrant {
+        operations: SOURCE_READ,
+        ..grant()
+    };
+    let authenticated = authenticate(&source, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.authorize(SOURCE_READ), Ok(()));
+    assert_eq!(authenticated.principal(), source.agent);
+    assert_eq!(authenticated.sponsor(), source.sponsor);
+    assert_eq!(authenticated.grant(), &source);
+    for denied in [
+        0,
+        ISSUES_READ,
+        ISSUES_WRITE,
+        PULLS_READ,
+        PULLS_WRITE,
+        DISCUSSIONS_READ,
+        DISCUSSIONS_WRITE,
+        OUTCOMES_READ,
+        SOURCE_READ | ISSUES_READ,
+        1 << 8,
+        SOURCE_READ | (1 << 15),
+    ] {
+        assert_eq!(
+            authenticated.authorize(denied),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    let legacy = AgentCredentialGrant {
+        operations: 0x007f,
+        ..source
+    };
+    let legacy = authenticate(&legacy, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(
+        legacy.authorize(SOURCE_READ),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    for (now, revocation, expected) in [
+        (
+            99,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::NotYetValid,
+        ),
+        (
+            200,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::Expired,
+        ),
+        (
+            100,
+            RevocationEvidence::Revoked,
+            AgentCredentialRefusal::Revoked,
+        ),
+        (
+            100,
+            RevocationEvidence::NotChecked,
+            AgentCredentialRefusal::RevocationEvidenceRequired,
+        ),
+    ] {
+        assert_eq!(
+            authenticate(&source, BEARER, now, revocation),
+            Err(expected)
+        );
+    }
+    assert!(authenticate(&source, BEARER, 199, RevocationEvidence::Live).is_ok());
 }
 
 #[test]

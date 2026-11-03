@@ -133,8 +133,8 @@ pub(super) fn run(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let request = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let request = read.request_context(node, &deadline);
+    let mut live = || !deadline.expired() && read.is_live();
     let (context, ranking) = drive_request_while(
         node,
         &request,

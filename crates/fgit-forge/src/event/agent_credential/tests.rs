@@ -249,6 +249,111 @@ fn grants_have_finite_lifetimes_explicit_scopes_and_nonzero_distinct_identities(
 }
 
 #[test]
+fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
+    // Freeze the original seven-bit mask rather than giving historical grants
+    // whatever future operations ALL_OPERATIONS might come to contain.
+    let legacy = AgentCredentialGrant {
+        operations: 0x007f,
+        ..grant()
+    };
+    assert!(legacy.validate().is_ok());
+    assert!(!legacy.permits(SOURCE_READ));
+    let source = AgentCredentialGrant {
+        operations: SOURCE_READ,
+        ..grant()
+    };
+    assert!(source.validate().is_ok());
+    assert!(source.permits(SOURCE_READ));
+    for metadata in [
+        ISSUES_READ,
+        ISSUES_WRITE,
+        PULLS_READ,
+        PULLS_WRITE,
+        DISCUSSIONS_READ,
+        DISCUSSIONS_WRITE,
+        OUTCOMES_READ,
+    ] {
+        assert!(legacy.permits(metadata));
+        assert!(!source.permits(metadata));
+        assert!(!source.permits(SOURCE_READ | metadata));
+        let explicit = AgentCredentialGrant {
+            operations: SOURCE_READ | metadata,
+            ..grant()
+        };
+        assert!(explicit.validate().is_ok());
+        assert!(explicit.permits(SOURCE_READ | metadata));
+    }
+    for unknown in (8..16).map(|bit| 1u16 << bit) {
+        let invalid = AgentCredentialGrant {
+            operations: SOURCE_READ | unknown,
+            ..grant()
+        };
+        assert!(invalid.validate().is_err());
+        assert!(!invalid.permits(SOURCE_READ));
+        assert!(!source.permits(unknown));
+        assert!(!source.permits(SOURCE_READ | unknown));
+    }
+    assert!(!source.permits(0));
+}
+
+#[test]
+fn source_read_issue_and_revocation_round_trip_without_widening_legacy_grants() {
+    for operations in [0x007f, SOURCE_READ, SOURCE_READ | PULLS_READ] {
+        let grant = AgentCredentialGrant {
+            operations,
+            ..grant()
+        };
+        let issued = AgentCredentialCommand {
+            id: AgentCredentialId::try_new([9; 32]).unwrap(),
+            expected_version: ExpectedVersion::NewStream,
+            action: AgentCredentialAction::Issue(grant),
+        }
+        .proposed_event(grant.sponsor)
+        .unwrap();
+        let mut payload = Encoder::new();
+        issued.write_payload(&mut payload).unwrap();
+        // The required u16 operation field retains its original location and
+        // meaning; granting the new bit does not reinterpret any older byte.
+        assert_eq!(payload.as_bytes().len(), 178);
+        assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
+        let mut unknown = payload.into_bytes();
+        unknown[176..178].copy_from_slice(&(operations | (1 << 8)).to_be_bytes());
+        assert!(
+            ForgeEvent::read_payload(&mut Decoder::new(&unknown, DecodeLimits::DEFAULT)).is_err()
+        );
+        let original = apply_event(None, &issued).unwrap();
+        let revoked = revoke(&original);
+        for event in [issued, revoked.clone()] {
+            let bytes = encode_body(&event).unwrap();
+            let decoded = decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap();
+            assert_eq!(decoded, event);
+            assert_eq!(encode_body(&decoded).unwrap(), bytes);
+        }
+        let final_state = apply_event(Some(&original), &revoked).unwrap();
+        assert!(final_state.revoked);
+        assert_eq!(original.grant, grant);
+        assert_eq!(final_state.grant, grant);
+        assert_eq!(
+            original.grant.permits(SOURCE_READ),
+            operations & SOURCE_READ != 0
+        );
+        let mut substituted = revoked;
+        let ForgeEventPayload::AgentCredentialChangedNative(change) = &mut substituted.payload
+        else {
+            unreachable!()
+        };
+        let AgentCredentialAction::Revoke(grant) = &mut change.action else {
+            unreachable!()
+        };
+        grant.operations = (grant.operations ^ SOURCE_READ) | PULLS_WRITE;
+        assert_eq!(
+            apply_event(Some(&original), &substituted),
+            Err(RefusalCode::EvidenceStale)
+        );
+    }
+}
+
+#[test]
 fn required_tags_unknown_fields_and_every_truncation_fail_closed() {
     let event = issue();
     let mut out = Encoder::new();

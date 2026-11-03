@@ -1,7 +1,7 @@
 //! A canonical agent grant is authenticated anew for each request. Existing
 //! route parsers and service switches then attenuate the one-request grant.
 
-use super::{Profile, Status, credentials, discussions, issues, pulls, retry_key};
+use super::{Profile, Status, credentials, discussions, issues, pulls, retry_key, source};
 use crate::agent_credentials::{AgentRequest, MAX_REQUEST_BYTES, TOKEN_PREFIX};
 use crate::smart_http::drive_request_while;
 use crate::{GitDaemonSessionDeadline, GitDaemonSessionTimeout, GitDaemonSessionWorkScaling};
@@ -27,8 +27,14 @@ fn operation(envelope: &Envelope<'_>) -> Result<u16, Status> {
     if let Some(request) = issues::Request::parse(envelope).map_err(|error| error.status)? {
         return request.agent_operation().ok_or(Status::Forbidden);
     }
+    if envelope.target.contains("/api/v1/source/") {
+        return source::Request::parse(envelope)
+            .map_err(|error| error.status)?
+            .agent_operation()
+            .ok_or(Status::Forbidden);
+    }
     // Only single metadata-transaction recovery. Receive/session recovery and
-    // all source, review, workflow, merge and administration routes stay closed.
+    // Git, review, workflow, merge and administration routes stay closed.
     if envelope.method == "POST" && envelope.target.ends_with("/api/v1/outcomes") {
         return Ok(OUTCOMES_READ);
     }
@@ -150,6 +156,73 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(operation(&envelope).is_ok(), allowed, "{path}");
+        }
+    }
+
+    #[test]
+    fn sponsored_source_read_uses_a_closed_read_only_route_set() {
+        use fgit_identity::agent::SOURCE_READ;
+
+        for action in [
+            "tree",
+            "blob",
+            "search",
+            "search-batch",
+            "search-regex",
+            "search-index",
+            "search-symbols",
+            "search-symbols-index",
+            "search-initial",
+            "context-initial",
+            "agent-context",
+            "refs",
+            "tags/inspect",
+        ] {
+            let raw = format!(
+                "POST /repo/api/v1/source/{action} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(operation(&envelope).unwrap(), SOURCE_READ, "{action}");
+        }
+        for action in [
+            "prepare",
+            "apply",
+            "initial",
+            "diff",
+            "history",
+            "historical-tree",
+            "historical-blob",
+            "verified-blob",
+            "branches/create",
+            "branches/update",
+            "branches/delete",
+            "branches/rename",
+            "branches/transaction",
+            "tags/lightweight",
+            "tags/annotated",
+            "tags/delete",
+            "bundle/export",
+            "bundle/import",
+            "bundle/fetch",
+            "cherry-pick/prepare",
+            "cherry-pick/resolve",
+            "revert/prepare",
+            "revert/resolve",
+            "rebase/prepare",
+            "rebase/resolve",
+            "rebase/inspect",
+            "rebase/apply",
+            "unknown-read",
+        ] {
+            let raw = format!(
+                "POST /repo/api/v1/source/{action} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(operation(&envelope).is_err(), "{action}");
         }
     }
 }
