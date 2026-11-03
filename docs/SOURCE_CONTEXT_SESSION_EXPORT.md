@@ -172,3 +172,14 @@ boundaries, corrupted selected/later records, concurrent exports, cancellation,
 lost output and offline regeneration. Native interoperability, full session and
 client suites, real-browser runs and workspace verification remain separate.
 FG-032 and concrete Agent Protocol adoption remain open.
+
+## Native operator evidence
+
+The discovered native workspace lane exports both the original base prefix and
+the later terminal prefix after the Rust service drains. It checks query counts,
+retained refused steps, exact source bytes, offline replay and wrong-pin refusal.
+An export containing a refused acquisition retains exit 3 even when every
+captured query is complete. The original parent bundle remains byte-identical.
+See [native operator evidence](SPARSE_SOURCE_PROOFS.md#native-operator-evidence)
+for the exact client revision and older native provider; this does not establish
+current native authorization, aggregate search completeness or hardware durability.

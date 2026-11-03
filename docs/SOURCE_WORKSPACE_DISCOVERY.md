@@ -179,3 +179,14 @@ offline inspection without the original workspace, and tampered observation
 rejection even after local checksums are recalculated. The service-boundary
 fixtures do **not** establish native membership verification, Git tree derivation,
 native `fg` server publication, or full-workspace correctness.
+
+## Native operator evidence
+
+The discovered native workspace lane now runs scan, select and capture over a
+sparse workspace created from independently checked native source. It compares
+the selected edits, modes, deletion, draft hash and expected tree with the
+existing manually selected capture. The default text profile refuses the binary
+edit, the explicit binary profile succeeds, and a later local edit invalidates
+the approved scan. The existing real native preparation/publication/readback
+flow then completes. See [native operator evidence](SPARSE_SOURCE_PROOFS.md#native-operator-evidence)
+for the exact client revision, older native provider and applicability limits.

@@ -219,3 +219,10 @@ candidate recovery, stale tips, quotas, partial responses, invalid controls,
 private credentials, concurrent processes, deadline/SIGTERM/SIGKILL, custody
 records before HTTP observation and lost stdout. They use the same explicit
 native-schema HTTP peers, not a Rust server or a hardware power-loss oracle.
+
+The discovered native workspace lane separately exercises all seven session
+actions over a real Rust-produced parent context. A denied read remains charged;
+a permitted follow-up retains exact source/scope; stale writers and duplicate
+dispatch refuse. Recovery of the original staged candidate, quota exhaustion,
+status and exports run after the native service drains. See the exact revision,
+older-native provider and limits in [native operator evidence](SPARSE_SOURCE_PROOFS.md#native-operator-evidence).

@@ -128,6 +128,15 @@ complete verified blob, including CRLF, raw bytes and empty files. All requested
 files must pass; the verifier cannot swap a failed selection for another file.
 The original capture, query, ranking and completeness records remain unchanged.
 
+Current native excerpts also carry `position_domain: "source-blob-bytes"` and a
+64-digit lowercase-hex `lineage_commitment`. The byte-proof reader accepts that
+closed excerpt shape only when both fields agree with the containing file.
+Legacy unlabelled excerpts retain their two-field shape. Partial labels, a path
+position domain, unknown excerpt fields or a different file label refuse.
+These labels remain untrusted metadata: their consistency does not authenticate
+the lineage commitment, query, authorization or search evidence. The independent
+commit/path/blob and exact excerpt-byte checks still establish the byte proof.
+
 The library exposes `captureContextProof(contextBytes, contextHash, selection,
 token, options)` and `inspectContextProof(proofBytes, proofHash, contextBytes,
 contextHash, selection, check)`. Acquisition returns canonical proof bytes, a
@@ -178,3 +187,28 @@ stdout. The context fixture is explicitly a native wire projection for byte
 proof, not a simulated search engine. The complete source-context ranking and
 retrieval test suites, live Rust interoperability and full-workspace gates are
 separate and are not claimed by these tests.
+
+## Native operator evidence
+
+The discovered [`operator/source_workspace.sh`](../scripts/e2e/suites/operator/source_workspace.sh)
+lane now consumes real native context through sessions, sparse proofs and local
+workspace scanning, alongside its existing acquisition/authoring/publication
+flows. At client/harness source `68c4e250a9ee3948916b0c06b9896f72b8fab992`,
+all 43 assertions complete in SHA-1 and SHA-256, including the original 31.
+The focused seven-file module/CLI cohort separately completes 261 cases.
+
+This join exposed a real incompatibility: the earlier proof parser rejected
+native lineage-bearing excerpts before source acquisition. A separate control
+restores only that predecessor parser while keeping the new native consumer;
+it reproduces the original rejection. It is a code-ablation control, not a
+route-removed build or the full operator negative matrix.
+
+Native receipt:
+`/data/frankengit-targets/noble_operator_context_68c4e250_20261103/receipt.ndjson`,
+SHA-256 `537644aea3c1112af01228e3f6bc01b5edafd17fa53c11c24bc6ef8706dbe719`.
+The supplied Rust binary is explicitly older source
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+This is mixed-source integration, not current-source native qualification,
+authorization attestation, hardware durability, deployment, whole-workspace
+acceptance or closure of the original operator Bead.
