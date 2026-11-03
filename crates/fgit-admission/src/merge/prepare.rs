@@ -99,6 +99,9 @@ pub fn prepare_event(
     resolved: &NativeMergeBasis,
 ) -> Result<PreparedNativeMerge, RefusalCode> {
     let aggregate_matches = match &event.payload {
+        ForgeEventPayload::AgentCredentialChangedNative(_) => {
+            matches!(event.aggregate, fgit_forge::AggregateId::AgentCredential(_))
+        }
         ForgeEventPayload::PullRequestReviewedNative(review) => {
             event.aggregate == review.aggregate()
         }
@@ -164,6 +167,20 @@ pub fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::AgentCredentialChangedNative(change) => {
+            if change.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            super::native::agent_credentials::verify_event_seal(context, event, attempt)?;
+            (
+                ForgeEventKind::AgentCredentialChanged { credential: entity },
+                Vec::new(),
+                None,
+            )
+        }
         ForgeEventPayload::MergeQueueChangedNative(change) => {
             if !attempt.request.ref_commands().is_empty() || !closure.objects.is_empty() {
                 return Err(RefusalCode::EvidenceInvalid);

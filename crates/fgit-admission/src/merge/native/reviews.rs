@@ -219,6 +219,15 @@ where
             None => continue,
         }
         let preparation: Result<_, PreparationFailure> = async {
+            super::super::protection::require_non_agent_publication_at(
+                store,
+                cx,
+                &basis,
+                Some(context.principal_id),
+                projection.admission_authentication(),
+                &|| projection.merge_checkpoint(cx).is_err(),
+            )
+            .await?;
             let snapshot = projection
                 .snapshot_async(store, cx, &basis, &authenticated)
                 .await?;

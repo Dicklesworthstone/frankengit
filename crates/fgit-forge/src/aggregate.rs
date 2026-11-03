@@ -148,6 +148,8 @@ impl fmt::Display for ExpectedVersion {
 /// one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AggregateId {
+    /// Immutable sponsored credential followed by at most one revocation.
+    AgentCredential(crate::event::agent_credential::AgentCredentialId),
     /// One repository-scoped review-protection policy stream.
     ReviewProtection,
     /// One pull request. Encoded bare, with no tag.
@@ -208,6 +210,8 @@ pub(crate) const AGGREGATE_KIND_NOTIFICATION_PREFERENCE: u32 = 10;
 pub(crate) const AGGREGATE_KIND_DISCUSSION: u32 = 11;
 /// Distinct discussion preferences; issue preference bytes are unchanged.
 pub(crate) const AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE: u32 = 12;
+/// Required sponsored credential aggregate; established code points are unchanged.
+pub(crate) const AGGREGATE_KIND_AGENT_CREDENTIAL: u32 = 13;
 impl From<DiscussionNumber> for AggregateId {
     fn from(number: DiscussionNumber) -> Self {
         Self::Discussion(number)
@@ -251,6 +255,7 @@ impl From<TeamNumber> for AggregateId {
 impl fmt::Display for AggregateId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AgentCredential(id) => formatter.write_str(&id.aggregate_label()),
             Self::ReviewProtection => formatter.write_str("review-protection"),
             Self::Issue(number) => write!(formatter, "issue/{number}"),
             Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),

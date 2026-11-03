@@ -33,14 +33,20 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST' && path === 'pulls/7/fast-forward') {
         writes.push({ body, key: req.headers['idempotency-key'] });
         assert.equal(req.headers['content-type'], 'application/x-www-form-urlencoded');
-        if (mode === 'lost') { req.socket.destroy(); return; }
+        if (mode === 'lost') {
+          // Begin the response before truncating it. Closing a reused connection
+          // before headers lets Chromium transparently replay the POST, which
+          // would test transport retries instead of the explicit retry below.
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': 2, 'Connection': 'close' });
+          res.end('{'); return;
+        }
         return send(terminal(observed, Object.fromEntries(new URLSearchParams(body)), mode), mode === 'refused' ? 409 : 200);
       }
       if (req.method === 'POST' && path === 'outcomes') { assert.equal(body, ''); return send(missingOutcome(observed)); }
       throw new Error(`Unexpected API request: ${req.method} ${path}`);
     }
     const name = url.pathname === '/repository/ui/pulls/' ? 'pulls.html' : url.pathname.replace('/repository/ui/', '');
-    if (!/^(?:pulls(?:-[a-z]+)?|markdown)\.(?:mjs|html|css)$/.test(name)) { res.writeHead(404); res.end(); return; }
+    if (!/^(?:pulls(?:-[a-z]+)*|markdown)\.(?:mjs|html|css)$/.test(name)) { res.writeHead(404); res.end(); return; }
     const bytes = await readFile(new URL(name, sourceRoot));
     res.writeHead(200, { 'Content-Type': name.endsWith('.mjs') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html',
       'Content-Length': bytes.length, 'Content-Security-Policy': csp }); res.end(bytes);
@@ -55,7 +61,7 @@ try {
     chrome.once('error', error => { clearTimeout(timer); reject(error); });
     chrome.stderr.on('data', bytes => { output = (output + bytes).slice(-16384); const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(output);
       if (match) { clearTimeout(timer); resolve(match[1]); } });
-    chrome.once('exit', code => { clearTimeout(timer); reject(new Error(`Chrome exited at startup: ${code}`)); });
+    chrome.once('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`Chrome exited at startup: ${signal ?? code}`)); });
   });
   socket = new WebSocket(endpoint); await once(socket, 'open');
   let serial = 0; const waiting = new Map();
@@ -111,7 +117,7 @@ try {
     mode = 'lost'; await connect(format); await stage(); await send();
     await wait('document.querySelector("#status").textContent.includes("Outcome remains unknown")');
     const first = { ...writes[0] }; await click('recover');
-    await wait('document.querySelector("#status").textContent.includes("key_not_observed")'); assert.equal(writes.length, 1);
+    await wait('document.querySelector("#status").textContent.includes("key_not_observed")'); assert.equal(writes.length, 1, 'unexpected transport writes: ' + JSON.stringify(writes));
     mode = 'committed'; await send(); await wait('document.querySelector("#status").textContent.includes("Canonical committed")');
     assert.equal(writes.length, 2); assert.deepEqual(writes[1], first);
     console.log(JSON.stringify({ profile: 'real-browser-controlled-api', case: `${format}-lost-reply-explicit-retry`, passed: true }));
@@ -120,7 +126,7 @@ try {
   console.log(JSON.stringify({ browser: version.product, cases: 6, errors, native_server: false }));
 } finally {
   socket?.close();
-  if (chrome && chrome.exitCode === null) { const stopped = once(chrome, 'exit'); chrome.kill('SIGTERM');
+  if (chrome && chrome.exitCode === null && chrome.signalCode === null) { const stopped = once(chrome, 'exit'); chrome.kill('SIGTERM');
     const kill = setTimeout(() => chrome.kill('SIGKILL'), 3000); await stopped; clearTimeout(kill); }
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await rm(profile, { recursive: true, force: true, maxRetries: 3 });

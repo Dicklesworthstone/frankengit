@@ -14,6 +14,12 @@ pub(super) fn require_subscription(
     }
     for event in events {
         let name = match &event.payload {
+            ForgeEventPayload::AgentCredentialChangedNative(_) => {
+                return Err(
+                    "private agent credential declarations cannot be delivered by repository webhooks"
+                        .into(),
+                );
+            }
             ForgeEventPayload::NotificationPreferenceChangedNative(_) => {
                 return Err(
                     "private notification preferences cannot be delivered by repository webhooks"
@@ -56,6 +62,89 @@ mod tests {
     };
     use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
     use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
+
+    #[test]
+    fn agent_credentials_are_private_for_wildcard_exact_kind_and_mixed_batches() {
+        use fgit_forge::event::agent_credential::{
+            AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
+            ISSUES_READ, SponsorKind,
+        };
+        use fgit_forge::event::issue::{IssueAction, IssueCommand};
+        use fgit_types::{RepositoryId, RepositoryIncarnationId, TenantId};
+
+        let sponsor = PrincipalId::from_bytes([0x39; 16]);
+        let grant = AgentCredentialGrant {
+            agent: PrincipalId::from_bytes([0x40; 16]),
+            sponsor,
+            sponsor_kind: SponsorKind::Human,
+            tenant: TenantId::from_bytes([0x41; 16]),
+            repository: RepositoryId::from_bytes([0x42; 16]),
+            incarnation: RepositoryIncarnationId::from_bytes([0x43; 16]),
+            issued_at: 100,
+            expires_at: 200,
+            operations: ISSUES_READ,
+        };
+        let public = IssueCommand {
+            number: fgit_forge::IssueNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            action: IssueAction::Open {
+                title: "Public issue".into(),
+                body: String::new(),
+                labels: Vec::new(),
+            },
+        }
+        .proposed_event(sponsor)
+        .unwrap();
+        let filters = [
+            WebhookEventFilter::Wildcard,
+            WebhookEventFilter::Selected(vec!["issue".into(), "agent_credential".into()]),
+            WebhookEventFilter::Selected(vec!["kind:8".into(), "kind:25".into()]),
+        ];
+        let private_only_filters = [
+            WebhookEventFilter::Selected(vec!["kind:25".into()]),
+            WebhookEventFilter::Selected(vec!["agent_credential".into()]),
+        ];
+        for filter in &filters {
+            // Excluding the private family does not disable ordinary public
+            // delivery for the same registration, including wildcard routes.
+            assert!(require_subscription(filter, std::slice::from_ref(&public)).is_ok());
+        }
+        for (expected_version, action) in [
+            (
+                ExpectedVersion::NewStream,
+                AgentCredentialAction::Issue(grant),
+            ),
+            (
+                ExpectedVersion::Exactly(AggregateVersion::FIRST),
+                AgentCredentialAction::Revoke(grant),
+            ),
+        ] {
+            let private = AgentCredentialCommand {
+                id: AgentCredentialId::try_new([0x44; 32]).unwrap(),
+                expected_version,
+                action,
+            }
+            .proposed_event(sponsor)
+            .unwrap();
+            assert_eq!(private.payload.kind(), 25);
+            assert!(WebhookEventFilter::Wildcard.matches("kind:25"));
+            assert!(WebhookEventFilter::Selected(vec!["kind:25".into()]).matches("kind:25"));
+            for filter in filters.iter().chain(&private_only_filters) {
+                let refusal =
+                    require_subscription(filter, std::slice::from_ref(&private)).unwrap_err();
+                assert!(refusal.contains("private agent credential declarations"));
+            }
+            for filter in &filters {
+                for mixed in [
+                    [public.clone(), private.clone()],
+                    [private.clone(), public.clone()],
+                ] {
+                    let refusal = require_subscription(filter, &mixed).unwrap_err();
+                    assert!(refusal.contains("private agent credential declarations"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn private_notification_preferences_refuse_every_subscription_and_complete_mixed_batch() {

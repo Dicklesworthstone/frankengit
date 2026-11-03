@@ -264,6 +264,9 @@ async fn stage_principal_snapshot(
         crate::evidence::PrincipalSnapshotRecord::Authenticated(body) => {
             stage(store, repo, namespace, body).await
         }
+        crate::evidence::PrincipalSnapshotRecord::Agent(body) => {
+            stage(store, repo, namespace, body).await
+        }
     }
 }
 

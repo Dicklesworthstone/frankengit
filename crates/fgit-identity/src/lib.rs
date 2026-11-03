@@ -6,6 +6,8 @@
 //!
 //! The identity model for FG-042. It owns:
 //!
+//! * [`agent`] — canonical sponsored agent identities and finite forge-metadata
+//!   authentication ceilings, requiring current revocation evidence;
 //! * [`deploy_key`] — an ed25519 public key bound to exactly one repository,
 //!   resolving to the principal it speaks as and the scopes it may exercise
 //!   there;
@@ -30,8 +32,8 @@
 //! It is not a key authority and holds no SECRET key material. A deploy key is
 //! recorded as the peer's public half, which is public by construction; the
 //! purpose-marker keys in `fgit-crypto` (`KeyPurposeMarker`) remain the only
-//! place a key is minted or verified, and nothing in this crate signs or
-//! verifies anything. A credential record that could also mint the credential
+//! place a key is minted or verified. Bearer authentication compares a digest;
+//! it does not sign or create credentials. A record that could also mint the credential
 //! it describes would be a second authority for the same thing.
 //!
 //! It does not admit. Identity aggregates are published as forge events on the
@@ -56,6 +58,7 @@
 //!   silently false for two bodies once, because encode/decode never consults
 //!   the registry — `tests/canonical_identity.rs` is what makes it observable.
 
+pub mod agent;
 pub mod deploy_key;
 pub mod oauth;
 pub mod passkey;
@@ -66,6 +69,11 @@ pub mod revocation;
 pub mod session;
 pub mod token;
 
+pub use agent::{
+    AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
+    AgentCredentialRefusal, AgentCredentialSnapshot, AuthenticatedAgentCredential,
+    NativeAgentCredentialEvent, SponsorKind, agent_credential_id, authenticate_agent_credential,
+};
 pub use deploy_key::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
 pub use oauth::{
     AuthorizationCode, OAuthRefusal, PkceMethod, derive_s256_challenge, validate_redirect_uri,

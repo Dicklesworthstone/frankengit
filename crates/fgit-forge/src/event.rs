@@ -15,6 +15,7 @@ use crate::aggregate::{
 };
 
 pub mod admission;
+pub mod agent_credential;
 pub mod discussion;
 pub mod issue;
 pub mod milestone;
@@ -54,6 +55,7 @@ const KIND_CANDIDATE_CHECK_PROTECTION_CHANGED: u32 = 21;
 const KIND_NATIVE_MILESTONE_CHANGED: u32 = 22;
 const KIND_NATIVE_NOTIFICATION_PREFERENCE_CHANGED: u32 = 23;
 const KIND_NATIVE_DISCUSSION_CHANGED: u32 = 24;
+const KIND_NATIVE_AGENT_CREDENTIAL_CHANGED: u32 = 25;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -136,6 +138,8 @@ const fn invalid_native(field: &'static str) -> CodecRefusal {
 /// remains a native typed value; it is never cast into a legacy Digest field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeEventPayload {
+    /// Sponsored metadata authentication grant or its permanent revocation.
+    AgentCredentialChangedNative(agent_credential::NativeAgentCredentialEvent),
     /// Canonical protection replacement: historical unanimous-review kind 9,
     /// required-check kind 13, explicit review-quorum kind 14, queue kind 19,
     /// or exact-candidate check kind 21.
@@ -188,6 +192,7 @@ impl ForgeEventPayload {
     #[must_use]
     pub fn kind(&self) -> u32 {
         match self {
+            Self::AgentCredentialChangedNative(_) => KIND_NATIVE_AGENT_CREDENTIAL_CHANGED,
             Self::PullRequestOpened { .. } => KIND_OPENED,
             Self::PullRequestHeadAdvanced { .. } => KIND_HEAD_ADVANCED,
             Self::MergeCommitted { .. } => KIND_MERGE_COMMITTED,
@@ -248,6 +253,11 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::AgentCredential(id) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_AGENT_CREDENTIAL);
+            out.write_raw(id.as_bytes());
+        }
         AggregateId::NotificationPreference { principal, issue } => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_NOTIFICATION_PREFERENCE);
@@ -328,6 +338,14 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_AGENT_CREDENTIAL => {
+            let mut bytes = [0_u8; 32];
+            bytes.copy_from_slice(input.take("aggregate.agent_credential", 32)?);
+            Ok(AggregateId::AgentCredential(
+                agent_credential::AgentCredentialId::try_new(bytes)
+                    .ok_or_else(|| invalid_native("aggregate.agent_credential"))?,
+            ))
+        }
         crate::aggregate::AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE => {
             Ok(AggregateId::DiscussionNotificationPreference {
                 principal: fgit_types::PrincipalId::from_bytes(
@@ -468,6 +486,7 @@ fn validate_queue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
 }
 
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
+    agent_credential::validate_event(event)?;
     discussion::validate_event(event)?;
     milestone::validate_event(event)?;
     notification::validate_event(event)?;
@@ -487,6 +506,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
     out.write_scalar(event.version.get());
     out.write_scalar(event.payload.kind());
     match &event.payload {
+        ForgeEventPayload::AgentCredentialChangedNative(change) => change.write(out)?,
         ForgeEventPayload::PullRequestOpened {
             source_ref,
             target_ref,
@@ -546,6 +566,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("kind")?;
     let payload = match kind {
+        KIND_NATIVE_AGENT_CREDENTIAL_CHANGED => ForgeEventPayload::AgentCredentialChangedNative(
+            agent_credential::NativeAgentCredentialEvent::read(input)?,
+        ),
         KIND_OPENED => ForgeEventPayload::PullRequestOpened {
             source_ref: input.read_bytes("source_ref")?.to_vec(),
             target_ref: input.read_bytes("target_ref")?.to_vec(),
@@ -646,6 +669,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         version,
         payload,
     };
+    agent_credential::validate_event(&event)?;
     validate_issue(&event)?;
     discussion::validate_event(&event)?;
     milestone::validate_event(&event)?;

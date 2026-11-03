@@ -30,6 +30,17 @@ pub(super) use rendered::Rendering;
 use request::{Command, Operation};
 pub(super) use request::{Page, Request};
 
+impl Request<'_> {
+    pub(super) fn agent_operation(&self) -> Option<u16> {
+        use fgit_identity::agent::{ISSUES_READ, ISSUES_WRITE};
+        match self.operation {
+            Operation::List(_) | Operation::Show { .. } | Operation::Search => Some(ISSUES_READ),
+            Operation::Mutate { .. } => Some(ISSUES_WRITE),
+            _ => None,
+        }
+    }
+}
+
 // Sibling forge adapters reuse the same hostile-input and JSON primitives.
 // These helpers confer no identity, visibility, or publication permission.
 pub(super) const MAX_FORM_BYTES: usize = request::MAX_FORM_BYTES;
@@ -322,7 +333,7 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
+    let context = node.authenticated_session_request_context(&deadline, session);
     let mut live = || !deadline.expired();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)

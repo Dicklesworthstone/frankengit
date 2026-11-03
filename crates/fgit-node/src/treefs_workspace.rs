@@ -12,7 +12,7 @@ pub use full_bundle::{
 mod initial_commit;
 mod merge_prepare;
 pub use merge_prepare::{PreparedQueuePrefixBundle, QueuePrefixEntry};
-mod native_merge;
+pub(crate) mod native_merge;
 mod outbox_delivery;
 pub use outbox_delivery::RetiredForgeDeliveryReceipt;
 mod patch;

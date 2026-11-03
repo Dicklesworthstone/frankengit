@@ -356,6 +356,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(12);
             write_slug(out, "ForgeEntityId", preference.label())?;
         }
+        ForgeEventKind::AgentCredentialChanged { credential } => {
+            out.write_raw_byte(14);
+            write_slug(out, "ForgeEntityId", credential.label())?;
+        }
         ForgeEventKind::PullRequestReviewed { review, target } => {
             out.write_raw_byte(5);
             write_slug(out, "ForgeEntityId", review.label())?;
@@ -428,6 +432,9 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         12 => Ok(ForgeEventKind::NotificationPreferenceChanged {
             preference: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        14 => Ok(ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
         }),
         8 => Ok(ForgeEventKind::WorkflowCheckObserved {
             check: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
@@ -2330,5 +2337,34 @@ mod tests {
         }
         assert_eq!(event.required_ref_effect(), None);
         assert_eq!(event.entity().label().as_str(), "discussion/7");
+    }
+
+    #[test]
+    fn agent_credential_trace_uses_tag_fourteen_and_never_implies_a_reference_effect() {
+        let event = ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(crate::harness::label("agent-credential/7")),
+        };
+        let literal = b"\x0e\0\0\0\x12agent-credential/7";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut input).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity().label().as_str(), "agent-credential/7");
+        let changed = ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(crate::harness::label("agent-credential/8")),
+        };
+        let mut bytes = Encoder::new();
+        write_forge_event(&mut bytes, &changed).unwrap();
+        assert_ne!(bytes.as_bytes(), literal);
+        let mut decoded = Decoder::new(bytes.as_bytes(), DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut decoded).unwrap(), changed);
+        decoded.finish().unwrap();
     }
 }

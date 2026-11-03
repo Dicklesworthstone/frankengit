@@ -9,6 +9,7 @@
 //! headers never authenticate. Git RPCs stream to native machines; metadata
 //! forms have a separate small envelope. Outcome queries never mutate state.
 
+mod agent;
 #[cfg(target_os = "linux")]
 mod artifacts;
 mod browser;
@@ -1141,9 +1142,20 @@ struct ResponseWriter<'a> {
     inner: DeadlineTcpStream<'a>,
     timeout: GitDaemonSessionTimeout,
     started: bool,
+    agent: Option<crate::agent_credentials::AgentRequest>,
+    agent_bytes: u64,
 }
 impl Write for ResponseWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(agent) = &self.agent {
+            let next = self
+                .agent_bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| io::Error::other("agent response budget exceeded"))?;
+            agent.check(0, next).map_err(|_| {
+                io::Error::other("agent response expired or exceeded its byte budget")
+            })?;
+        }
         if !self.started {
             self.inner.restart_deadline(GitDaemonSessionDeadline::new(
                 self.timeout,
@@ -1151,7 +1163,9 @@ impl Write for ResponseWriter<'_> {
             ));
             self.started = true;
         }
-        self.inner.write(bytes)
+        let written = self.inner.write(bytes)?;
+        self.agent_bytes += written as u64;
+        Ok(written)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
@@ -1295,6 +1309,8 @@ fn serve_connection(
         inner: DeadlineTcpStream::new(&mut output, deadline),
         timeout: profile.timeout,
         started: false,
+        agent: None,
+        agent_bytes: 0,
     };
     let mut version = HttpVersion::Http11;
     let mut native = false;
@@ -1318,57 +1334,14 @@ fn serve_connection(
         if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
         }
-        #[cfg(target_os = "linux")]
-        if lfs::is_route(envelope.target, &profile.route) {
-            return lfs::serve(
-                profile,
-                &envelope,
-                &bytes[envelope.consumed..],
-                &mut reader,
-                &mut writer,
-                &admission_deadline,
-                local,
-            );
-        }
-        #[cfg(target_os = "linux")]
-        if artifacts::is_route(envelope.target) {
-            return artifacts::serve(
-                profile,
-                &envelope,
-                &bytes[..envelope.consumed],
-                &bytes[envelope.consumed..],
-                &mut writer,
-                &admission_deadline,
-            );
-        }
-        if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
-            return Ok(());
-        }
-        if events::is_route(envelope.target) {
-            // The read-only adapter owns its typed response and pooled-node
-            // cleanup. It never enters Git receive or takes a writer slot.
-            return events::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer);
-        }
+        // Select the response contract before canonical bearer verification.
+        // Rejected agent credentials must preserve native JSON errors and the
+        // Bearer-only challenge, including outcome-recovery uncertainty.
         recovery = envelope
             .target
             .split('?')
             .next()
             .is_some_and(|path| path.contains("/api/v1/outcomes"));
-        if recovery {
-            // This read-only child has no mutation intake/Serving transition.
-            // It uses its own scoped quota and always closes before returning.
-            return outcomes::serve(
-                profile,
-                &envelope,
-                &bytes[..envelope.consumed],
-                &bytes[envelope.consumed..],
-                &mut writer,
-            )
-            .map_err(|error| {
-                recovery_error = Some(error);
-                error.status
-            });
-        }
         protection_api = protection::is_route(envelope.target);
         queue_api = queues::is_route(envelope.target);
         discussion_api = discussions::is_route(envelope.target);
@@ -1404,6 +1377,60 @@ fn serve_connection(
                 .next()
                 .is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST" && !source_api;
+        let agent_profile = agent::authenticate(profile, &envelope, &bytes[..envelope.consumed])?;
+        let agent_profile = agent_profile.map(|(profile, request)| {
+            reader.cap_deadline(request.deadline());
+            writer.inner.cap_deadline(request.deadline());
+            writer.agent = Some(request);
+            profile
+        });
+        let profile = agent_profile.as_ref().unwrap_or(profile);
+        #[cfg(target_os = "linux")]
+        if lfs::is_route(envelope.target, &profile.route) {
+            return lfs::serve(
+                profile,
+                &envelope,
+                &bytes[envelope.consumed..],
+                &mut reader,
+                &mut writer,
+                &admission_deadline,
+                local,
+            );
+        }
+        #[cfg(target_os = "linux")]
+        if artifacts::is_route(envelope.target) {
+            return artifacts::serve(
+                profile,
+                &envelope,
+                &bytes[..envelope.consumed],
+                &bytes[envelope.consumed..],
+                &mut writer,
+                &admission_deadline,
+            );
+        }
+        if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
+            return Ok(());
+        }
+        if events::is_route(envelope.target) {
+            // The read-only adapter owns its typed response and pooled-node
+            // cleanup. It never enters Git receive or takes a writer slot.
+            return events::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer);
+        }
+        if recovery {
+            // This read-only child has no mutation intake/Serving transition.
+            // It uses its own scoped quota and always closes before returning.
+            return outcomes::serve(
+                profile,
+                &envelope,
+                &bytes[..envelope.consumed],
+                &bytes[envelope.consumed..],
+                &mut writer,
+            )
+            .map_err(|error| {
+                recovery_error = Some(error);
+                error.status
+            });
+        }
         let protection_request = if protection_api {
             Some(protection::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
@@ -1886,6 +1913,7 @@ fn log_cleanup(error: &NodeRefusal) {
 
 #[cfg(test)]
 mod tests {
+    mod agent_credentials;
     mod issue_search;
     mod queue_preparation;
 

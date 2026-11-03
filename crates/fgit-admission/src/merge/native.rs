@@ -24,6 +24,7 @@ use crate::{
 };
 use storage::root;
 
+pub mod agent_credentials;
 mod blocking;
 pub use blocking::{
     SyncNativeMergeProjection, admit_native_merge, admit_sealed_native_merge,
@@ -256,6 +257,12 @@ where
     /// Authentication established by this request's host. Missing historical
     /// evidence stays missing; terminal retries retain their recorded receipt.
     fn admission_authentication(&self) -> Option<crate::evidence::AdmissionAuthentication> {
+        None
+    }
+
+    /// Trusted host clock used only for a live agent credential. A projection
+    /// without this capability cannot publish on behalf of an agent.
+    fn agent_credential_now(&self) -> Option<u64> {
         None
     }
 
@@ -636,6 +643,15 @@ where
         }
 
         let preparation: Result<_, PreparationFailure> = async {
+            protection::require_non_agent_publication_at(
+                store,
+                cx,
+                &basis,
+                Some(context.principal_id),
+                projection.admission_authentication(),
+                &|| projection.merge_checkpoint(cx).is_err(),
+            )
+            .await?;
             if let Some(expected) = intent.workspace_snapshot_digest() {
                 let observed = projection.workspace_snapshot_digest()?;
                 if observed != expected {

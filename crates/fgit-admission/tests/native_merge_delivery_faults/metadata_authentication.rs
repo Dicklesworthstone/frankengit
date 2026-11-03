@@ -127,6 +127,486 @@ impl NativeMergeProjection<Model> for AuthenticationProjection {
     }
 }
 
+fn sponsored(fixture: &Fixture) -> AdmissionAuthentication {
+    use fgit_admission::evidence::AgentAuthentication;
+    use fgit_forge::event::agent_credential::{AgentCredentialId, SponsorKind};
+    AdmissionAuthentication::AgentCredential(
+        AgentAuthentication::try_new(
+            fixture.context.principal_id,
+            PrincipalId::from_bytes([4; 16]),
+            SponsorKind::Human,
+            AgentCredentialId::try_new([5; 32]).unwrap(),
+            digest(6),
+            [7; 32],
+            100,
+            200,
+        )
+        .unwrap(),
+    )
+}
+
+fn declared_agent_fixture(revoked: bool) -> Fixture {
+    use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositionStateEntry};
+    use fgit_forge::event::agent_credential::{
+        AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
+        ISSUES_WRITE, SponsorKind,
+    };
+    let mut fixture = Fixture::new();
+    let id = AgentCredentialId::try_new([5; 32]).unwrap();
+    let grant = AgentCredentialGrant {
+        agent: fixture.context.principal_id,
+        sponsor: PrincipalId::from_bytes([4; 16]),
+        sponsor_kind: SponsorKind::Human,
+        tenant: fixture.context.tenant_id,
+        repository: fixture.context.repository_id,
+        incarnation: fgit_types::RepositoryIncarnationId::from_bytes([8; 16]),
+        issued_at: 100,
+        expires_at: 200,
+        operations: ISSUES_WRITE,
+    };
+    let mut events = vec![
+        AgentCredentialCommand {
+            id,
+            expected_version: ExpectedVersion::NewStream,
+            action: AgentCredentialAction::Issue(grant),
+        }
+        .proposed_event(grant.sponsor)
+        .unwrap(),
+    ];
+    if revoked {
+        events.push(
+            AgentCredentialCommand {
+                id,
+                expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+                action: AgentCredentialAction::Revoke(grant),
+            }
+            .proposed_event(grant.sponsor)
+            .unwrap(),
+        );
+    }
+    let count = u32::try_from(events.len()).unwrap();
+    let root = fixture
+        .store
+        .stage(
+            fixture.context.repository_id,
+            EVENT_NAMESPACE,
+            &ForgeEventBatch { events },
+        )
+        .unwrap();
+    let label = fgit_forge::AggregateId::AgentCredential(id).to_string();
+    let positions = CanonicalForgePositionState::try_new(
+        fixture.context.repository_id,
+        vec![
+            ForgePositionStateEntry::try_new(
+                AsciiSlug::try_new("agent", label.as_bytes()).unwrap(),
+                0,
+                count,
+                root,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    fixture.genesis.forge_position_root = fixture
+        .store
+        .stage(
+            fixture.context.repository_id,
+            POSITION_NAMESPACE,
+            &positions,
+        )
+        .unwrap();
+    fixture.genesis.outbox_root = fixture
+        .store
+        .stage(
+            fixture.context.repository_id,
+            delivery::OUTBOX_NAMESPACE,
+            &CanonicalOutboxState::try_new(fixture.context.repository_id, Vec::new()).unwrap(),
+        )
+        .unwrap();
+    fixture.context.head_key = HeadKey::new(b"declared-agent/head".to_vec()).unwrap();
+    initialize_repository(
+        &fixture.store.backend,
+        &fixture.context.head_key,
+        &fixture.genesis,
+    )
+    .unwrap();
+    fixture
+}
+
+#[test]
+fn canonical_agent_role_cannot_be_downgraded_by_any_legacy_method_after_revocation() {
+    use fgit_admission::merge::native::{protection, pull_request::reviews};
+    use fgit_forge::event::review::{ReviewCommand, ReviewDecision, ReviewSubject};
+    for revoked in [false, true] {
+        for authentication in METHODS {
+            let fixture = declared_agent_fixture(revoked);
+            let before = fixture.head();
+            let projection = AuthenticationProjection {
+                inner: fixture.projection(&fixture.context),
+                context: fixture.context.clone(),
+                authentication,
+                preparation_available: false,
+            };
+            let merged = poll_ready(admit_native_merge_async(
+                fixture.store.as_ref(),
+                &(),
+                &fixture.context,
+                &fixture.intent,
+                AdmissionLimits::default(),
+                &projection,
+            ))
+            .unwrap();
+            assert!(matches!(
+                merged.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::CapabilityScopeViolation,
+                    ..
+                }
+            ));
+
+            let mut review_context = fixture.context.clone();
+            review_context.idempotency_key =
+                IdempotencyKey::new(b"declared-agent-review".to_vec()).unwrap();
+            let merge = fixture.intent.merge().unwrap();
+            let command = ReviewCommand {
+                expected_version: ExpectedVersion::NewStream,
+                subject: ReviewSubject {
+                    pull_request: PullRequestNumber::FIRST,
+                    pull_request_version: AggregateVersion::FIRST,
+                    source_ref: merge.source_ref.clone(),
+                    target_ref: merge.target_ref.clone(),
+                    source_tip: merge.source_tip,
+                    target_tip: merge.target_tip_before,
+                    policy_epoch: PolicyEpoch::FIRST,
+                },
+                decision: ReviewDecision::Approve,
+                reason: String::new(),
+            };
+            let review_projection = AuthenticationProjection {
+                inner: fixture.projection(&review_context),
+                context: review_context.clone(),
+                authentication,
+                preparation_available: false,
+            };
+            let reviewed = poll_ready(reviews::admit_review_async(
+                fixture.store.as_ref(),
+                &(),
+                &review_context,
+                &command,
+                AdmissionLimits::default(),
+                &review_projection,
+            ))
+            .unwrap();
+            assert!(matches!(
+                reviewed.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::CapabilityScopeViolation,
+                    ..
+                }
+            ));
+
+            let basis = PublicationBasis::new(
+                fgit_authority::authority_head_identity(&before).unwrap(),
+                before.clone(),
+            );
+            let refs: CanonicalRefState = fixture
+                .store
+                .read(
+                    fixture.context.repository_id,
+                    REF_NAMESPACE,
+                    before.ref_root,
+                )
+                .unwrap();
+            let attempt = fixture.intent.seal_attempt(&fixture.context).unwrap();
+            let (tx_id, seal) = attempt.derive().unwrap();
+            let request = TransactionRequest {
+                tx_id,
+                tenant: fixture.context.tenant_id,
+                repository: fixture.context.repository_id,
+                principal: fixture.context.principal_id,
+                schema: attempt.request.request_schema(),
+                idempotency_key: ModelKey::new(AsciiSlug::from_static("test")),
+                canonical_request_digest: seal.canonical_request_digest,
+                statements: Vec::new(),
+                promised_closure: BTreeSet::new(),
+                atomic: true,
+                durability: DurabilityProfile::CanonicalSource,
+            };
+            let fold = fgit_txn::IntentEvaluator::new().evaluate(
+                FoldBasis {
+                    refs: refs.refs(),
+                    forge_positions: &BTreeMap::new(),
+                    retention: &BTreeSet::new(),
+                    outbox: &BTreeMap::new(),
+                },
+                &request,
+            );
+            let direct = match authentication {
+                Some(authentication) => {
+                    poll_ready(protection::direct_decision_evidence_with_authentication_at(
+                        fixture.store.as_ref(),
+                        &(),
+                        &fixture.context,
+                        &basis,
+                        &refs,
+                        RootLayoutVersion::LegacyWholeBody,
+                        &request,
+                        &fold,
+                        authentication,
+                        &|| false,
+                    ))
+                }
+                None => poll_ready(protection::direct_decision_evidence_at(
+                    fixture.store.as_ref(),
+                    &(),
+                    &fixture.context,
+                    &basis,
+                    &refs,
+                    RootLayoutVersion::LegacyWholeBody,
+                    &request,
+                    &fold,
+                    &|| false,
+                )),
+            };
+            assert!(matches!(
+                direct,
+                Err(ProjectionFailure::Refuse(
+                    RefusalCode::CapabilityScopeViolation
+                ))
+            ));
+            let after = fixture.head();
+            assert_eq!(after.ref_root, before.ref_root);
+            assert_eq!(after.forge_position_root, before.forge_position_root);
+            assert_eq!(after.outbox_root, before.outbox_root);
+            assert_eq!(after.retention_root, before.retention_root);
+        }
+    }
+}
+
+#[test]
+fn sponsored_agent_cannot_merge_without_protection_and_terminal_recovery_still_wins() {
+    let fixture = Fixture::new();
+    let before = fixture.head();
+    let submit_merge = |authentication, preparation_available| {
+        poll_ready(admit_native_merge_async(
+            fixture.store.as_ref(),
+            &(),
+            &fixture.context,
+            &fixture.intent,
+            AdmissionLimits::default(),
+            &AuthenticationProjection {
+                inner: fixture.projection(&fixture.context),
+                context: fixture.context.clone(),
+                authentication,
+                preparation_available,
+            },
+        ))
+        .unwrap()
+    };
+    // No review-protection stream exists, and preparation is unavailable.
+    // The canonical driver must still refuse before any candidate work.
+    let refused = submit_merge(Some(sponsored(&fixture)), false);
+    assert!(matches!(
+        refused.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::CapabilityScopeViolation,
+            ..
+        }
+    ));
+    let after = fixture.head();
+    assert_eq!(after.ref_root, before.ref_root);
+    assert_eq!(after.forge_position_root, before.forge_position_root);
+    assert_eq!(after.outbox_root, before.outbox_root);
+    assert_eq!(after.retention_root, before.retention_root);
+    for method in METHODS {
+        assert_eq!(submit_merge(method, false), refused);
+        assert_eq!(fixture.head(), after);
+    }
+
+    let permitted = Fixture::new();
+    let terminal = poll_ready(admit_native_merge_async(
+        permitted.store.as_ref(),
+        &(),
+        &permitted.context,
+        &permitted.intent,
+        AdmissionLimits::default(),
+        &AuthenticationProjection {
+            inner: permitted.projection(&permitted.context),
+            context: permitted.context.clone(),
+            authentication: Some(AdmissionAuthentication::HttpToken),
+            preparation_available: true,
+        },
+    ))
+    .unwrap();
+    permitted.assert_committed(terminal);
+    // A later agent attempt may recover this same already-decided identity;
+    // it does not receive permission for a new merge or rewrite its receipt.
+    let replay = poll_ready(admit_native_merge_async(
+        permitted.store.as_ref(),
+        &(),
+        &permitted.context,
+        &permitted.intent,
+        AdmissionLimits::default(),
+        &AuthenticationProjection {
+            inner: permitted.projection(&permitted.context),
+            context: permitted.context.clone(),
+            authentication: Some(sponsored(&permitted)),
+            preparation_available: false,
+        },
+    ))
+    .unwrap();
+    assert_eq!(replay, terminal);
+}
+
+impl fgit_admission::merge::native::pull_request::reviews::ReviewProjection<Model>
+    for AuthenticationProjection
+{
+    async fn validate_review_async<'a>(
+        &'a self,
+        _: &'a Model,
+        _: &'a (),
+        _: &'a PublicationBasis,
+        _: &'a AuthenticatedHead,
+        _: &'a fgit_forge::event::review::ReviewCommand,
+        _: Option<fgit_forge::event::review::CandidateBinding>,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        panic!("a refused sponsored review must never validate a candidate")
+    }
+}
+
+#[test]
+fn sponsored_agent_cannot_cast_review_without_installed_review_protection() {
+    use fgit_admission::merge::native::pull_request::reviews;
+    use fgit_forge::event::review::{ReviewCommand, ReviewDecision, ReviewSubject};
+    let fixture = Fixture::new();
+    let merge = fixture.intent.merge().unwrap();
+    let command = ReviewCommand {
+        expected_version: ExpectedVersion::NewStream,
+        subject: ReviewSubject {
+            pull_request: PullRequestNumber::FIRST,
+            pull_request_version: AggregateVersion::FIRST,
+            source_ref: merge.source_ref.clone(),
+            target_ref: merge.target_ref.clone(),
+            source_tip: merge.source_tip,
+            target_tip: merge.target_tip_before,
+            policy_epoch: PolicyEpoch::FIRST,
+        },
+        decision: ReviewDecision::Approve,
+        reason: String::new(),
+    };
+    let before = fixture.head();
+    let submit_review = |authentication| {
+        poll_ready(reviews::admit_review_async(
+            fixture.store.as_ref(),
+            &(),
+            &fixture.context,
+            &command,
+            AdmissionLimits::default(),
+            &AuthenticationProjection {
+                inner: fixture.projection(&fixture.context),
+                context: fixture.context.clone(),
+                authentication,
+                preparation_available: false,
+            },
+        ))
+        .unwrap()
+    };
+    let refused = submit_review(Some(sponsored(&fixture)));
+    assert!(matches!(
+        refused.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::CapabilityScopeViolation,
+            ..
+        }
+    ));
+    let after = fixture.head();
+    assert_eq!(after.ref_root, before.ref_root);
+    assert_eq!(after.forge_position_root, before.forge_position_root);
+    assert_eq!(after.outbox_root, before.outbox_root);
+    for method in METHODS {
+        assert_eq!(submit_review(method), refused);
+        assert_eq!(fixture.head(), after);
+    }
+}
+
+#[test]
+fn sponsored_direct_publication_refuses_ref_updates_and_noops_without_protection() {
+    use fgit_admission::merge::native::protection;
+    let fixture = Fixture::new();
+    let head = fixture.head();
+    let basis = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&head).unwrap(),
+        head.clone(),
+    );
+    let current: CanonicalRefState = fixture
+        .store
+        .read(fixture.context.repository_id, REF_NAMESPACE, head.ref_root)
+        .unwrap();
+    let attempt = fixture.intent.seal_attempt(&fixture.context).unwrap();
+    let (tx_id, sealed) = attempt.derive().unwrap();
+    for with_ref in [false, true] {
+        let request = TransactionRequest {
+            tx_id,
+            tenant: fixture.context.tenant_id,
+            repository: fixture.context.repository_id,
+            principal: fixture.context.principal_id,
+            schema: attempt.request.request_schema(),
+            idempotency_key: ModelKey::new(AsciiSlug::from_static("test")),
+            canonical_request_digest: sealed.canonical_request_digest,
+            statements: if with_ref {
+                vec![Statement {
+                    intents: vec![Intent::Ref(RefIntent::Update {
+                        name: name(b"refs/tags/sponsored"),
+                        expected: ExpectedRefState::Absent,
+                        new: fixture.intent.merge().unwrap().source_tip,
+                        force: false,
+                    })],
+                    mismatch_policy: MismatchPolicy::TxnAbort,
+                }]
+            } else {
+                Vec::new()
+            },
+            promised_closure: BTreeSet::new(),
+            atomic: true,
+            durability: DurabilityProfile::CanonicalSource,
+        };
+        let fold = fgit_txn::IntentEvaluator::new().evaluate(
+            FoldBasis {
+                refs: current.refs(),
+                forge_positions: &BTreeMap::new(),
+                retention: &BTreeSet::new(),
+                outbox: &BTreeMap::new(),
+            },
+            &request,
+        );
+        let evaluate = |authentication| {
+            poll_ready(protection::direct_decision_evidence_with_authentication_at(
+                fixture.store.as_ref(),
+                &(),
+                &fixture.context,
+                &basis,
+                &current,
+                RootLayoutVersion::LegacyWholeBody,
+                &request,
+                &fold,
+                authentication,
+                &|| false,
+            ))
+        };
+        assert!(matches!(
+            evaluate(sponsored(&fixture)),
+            Err(ProjectionFailure::Refuse(
+                RefusalCode::CapabilityScopeViolation
+            ))
+        ));
+        evaluate(AdmissionAuthentication::HttpToken)
+            .unwrap()
+            .verify_decision(&fixture.context, &basis, &request, &fold)
+            .unwrap();
+        assert_eq!(fixture.head(), head);
+    }
+}
+
 fn submit(
     fixture: &Fixture,
     command: &IssueCommand,

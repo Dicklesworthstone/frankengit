@@ -149,6 +149,9 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
         crate::evidence::PrincipalSnapshotRecord::Authenticated(body) => {
             stage(store, cx, repository, PRINCIPAL, body).await?;
         }
+        crate::evidence::PrincipalSnapshotRecord::Agent(body) => {
+            stage(store, cx, repository, PRINCIPAL, body).await?;
+        }
     }
     match prepared.evidence.policy_decision() {
         crate::evidence::PolicyDecisionRecord::Legacy(body) => {
@@ -164,6 +167,9 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
             stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
         crate::evidence::PolicyDecisionRecord::AuthenticationActivated(body) => {
+            stage(store, cx, repository, POLICY, body.as_ref()).await?;
+        }
+        crate::evidence::PolicyDecisionRecord::AgentAuthenticationActivated(body) => {
             stage(store, cx, repository, POLICY, body.as_ref()).await?;
         }
     }

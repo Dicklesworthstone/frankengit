@@ -42,7 +42,9 @@ mod actor;
 pub use actor::ActorPolicyDecisionEvidence;
 #[path = "policy_evidence/authentication.rs"]
 mod authentication;
-pub use authentication::AuthenticationPolicyDecisionEvidence;
+pub use authentication::{
+    AgentAuthenticationPolicyDecisionEvidence, AuthenticationPolicyDecisionEvidence,
+};
 
 /// Exact supported policy-evidence minor. The legacy variant is not a claim
 /// that the historical record retained an evaluated compiled snapshot.
@@ -53,6 +55,7 @@ pub enum PolicyDecisionRecord {
     Activated(Box<ActivatedPolicyDecisionEvidence>),
     ActorActivated(Box<ActorPolicyDecisionEvidence>),
     AuthenticationActivated(Box<AuthenticationPolicyDecisionEvidence>),
+    AgentAuthenticationActivated(Box<AgentAuthenticationPolicyDecisionEvidence>),
 }
 
 impl PolicyDecisionRecord {
@@ -64,6 +67,7 @@ impl PolicyDecisionRecord {
             Self::Activated(body) => &body.references.base,
             Self::ActorActivated(body) => &body.0.references.base,
             Self::AuthenticationActivated(body) => &body.0.references.base,
+            Self::AgentAuthenticationActivated(body) => &body.0.references.base,
         }
     }
 
@@ -74,6 +78,7 @@ impl PolicyDecisionRecord {
             Self::Activated(body) => evidence_root(body.as_ref()),
             Self::ActorActivated(body) => evidence_root(body.as_ref()),
             Self::AuthenticationActivated(body) => evidence_root(body.as_ref()),
+            Self::AgentAuthenticationActivated(body) => evidence_root(body.as_ref()),
         }
     }
 
@@ -96,6 +101,11 @@ impl PolicyDecisionRecord {
                 Ok(bytes)
             }
             Self::AuthenticationActivated(body) => {
+                let bytes = encode_body(body.as_ref())?;
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Ok(bytes)
+            }
+            Self::AgentAuthenticationActivated(body) => {
                 let bytes = encode_body(body.as_ref())?;
                 bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
                 Ok(bytes)
@@ -140,11 +150,17 @@ impl PolicyDecisionRecord {
                     AuthenticationPolicyDecisionEvidence,
                 >(bytes, limits)?))
             }
+            5 => {
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Self::AgentAuthenticationActivated(Box::new(decode_body::<
+                    AgentAuthenticationPolicyDecisionEvidence,
+                >(bytes, limits)?))
+            }
             minor => {
                 return Err(CodecRefusal::schema_minor_unsupported(
                     PolicyDecisionEvidence::DOMAIN,
                     minor,
-                    4,
+                    5,
                 ));
             }
         };
@@ -163,6 +179,7 @@ impl PolicyDecisionRecord {
             Self::Activated(body) => Some(&body.references),
             Self::ActorActivated(body) => Some(&body.0.references),
             Self::AuthenticationActivated(body) => Some(&body.0.references),
+            Self::AgentAuthenticationActivated(body) => Some(&body.0.references),
         }
     }
 
@@ -172,6 +189,7 @@ impl PolicyDecisionRecord {
     pub fn authentication(&self) -> Option<AdmissionAuthentication> {
         match self {
             Self::AuthenticationActivated(body) => Some(body.authentication()),
+            Self::AgentAuthenticationActivated(body) => Some(body.authentication()),
             _ => None,
         }
     }
@@ -188,6 +206,7 @@ impl PolicyDecisionRecord {
             Self::Activated(body) => body.verify_decision(context, basis, fold),
             Self::ActorActivated(body) => body.verify_decision(context, basis, fold),
             Self::AuthenticationActivated(body) => body.verify_decision(context, basis, fold),
+            Self::AgentAuthenticationActivated(body) => body.verify_decision(context, basis, fold),
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Read-only lost-response recovery. It never rebuilds or resubmits a mutation.
 use super::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_admission::MAX_RECEIVE_SESSION_COMMANDS;
+use fgit_admission::evidence::{AdmissionAuthentication, PrincipalSnapshotRecord};
 use fgit_authority::key_recovery::RequestRecovery;
 use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, OutcomeLookup};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
@@ -46,11 +47,15 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     // Recovery intentionally does not bring a cell into serving state. It can
     // report historical outcomes even when new mutation admission is disabled.
     let request = fgit_cli::command_request_context(&node);
-    let operation = node
-        .runtime()
-        .block_on(node.recover_transaction_in(&request, &session));
+    let operation = node.runtime().block_on(async {
+        let report = node.recover_transaction_in(&request, &session).await?;
+        let provenance = node
+            .recover_transaction_principal_in(&request, &session, &report)
+            .await;
+        Ok::<_, fgit_authority::key_recovery::RecoveryFailure>((report, provenance))
+    });
     let cleanup = node.shutdown().err().map(|e| e.to_string());
-    let report = match operation {
+    let (report, provenance) = match operation {
         Ok(report) => report,
         Err(error) => {
             return Err(match cleanup {
@@ -59,7 +64,14 @@ pub fn run(args: &[String]) -> Result<u8, String> {
             });
         }
     };
-    let (receipt, status) = render(&options, key_digest, &report, cleanup.as_deref());
+    let (mut receipt, status) = render(&options, key_digest, &report, cleanup.as_deref());
+    append_principal_provenance(
+        &mut receipt,
+        provenance
+            .as_ref()
+            .map(|value| value.as_ref())
+            .map_err(|_| ()),
+    );
     let known = match &report {
         RequestRecovery::Recovered(request) => {
             report.terminal().map(|outcome| (request.tx_id(), outcome))
@@ -264,6 +276,70 @@ fn digest(value: Digest) -> String {
         quote(&hex(value.bytes().as_bytes()))
     )
 }
+
+fn append_principal_provenance(
+    receipt: &mut String,
+    provenance: Result<Option<&PrincipalSnapshotRecord>, ()>,
+) {
+    let (provenance, error) = match provenance {
+        Err(()) => (
+            "{\"state\":\"unavailable\"}".to_owned(),
+            "\"original_principal_evidence_unavailable\"",
+        ),
+        Ok(None) => ("{\"state\":\"not_terminal\"}".to_owned(), "null"),
+        Ok(Some(snapshot)) => {
+            let method = match snapshot.authentication() {
+                None => "null",
+                Some(AdmissionAuthentication::OperatorAssertion) => "\"operator_assertion\"",
+                Some(AdmissionAuthentication::HttpToken) => "\"http_token\"",
+                Some(AdmissionAuthentication::SshDeployKey) => "\"ssh_deploy_key\"",
+                Some(AdmissionAuthentication::AgentCredential(_)) => "\"agent_credential\"",
+            };
+            let witness = snapshot.agent_provenance().map_or_else(
+                || "null".to_owned(),
+                |agent| {
+                    format!(
+                        concat!(
+                            "{{\"agent\":{},\"sponsor\":{},\"sponsor_kind\":{},",
+                            "\"credential_id\":{},\"grant_root\":{},\"run_commitment\":{},",
+                            "\"authenticated_at\":{},\"expires_at\":{}}}"
+                        ),
+                        quote(&agent.agent().to_string()),
+                        quote(&agent.sponsor().to_string()),
+                        quote(agent.sponsor_kind().name()),
+                        quote(&agent.credential_id().to_string()),
+                        digest(agent.grant_root()),
+                        quote(&hex(agent.run_commitment())),
+                        agent.authenticated_at(),
+                        agent.expires_at()
+                    )
+                },
+            );
+            (
+                format!(
+                    "{{\"state\":{},\"principal_id\":{},\"authentication\":{},\"agent_provenance\":{}}}",
+                    quote(if snapshot.authentication().is_some() {
+                        "recorded"
+                    } else {
+                        "legacy_unknown"
+                    }),
+                    quote(&snapshot.principal_id().to_string()),
+                    method,
+                    witness
+                ),
+                "null",
+            )
+        }
+    };
+    // The existing renderer owns this complete top-level JSON object. Keep
+    // its decision and exit status even if optional evidence could not load.
+    if receipt.ends_with('}') {
+        receipt.pop();
+        receipt.push_str(&format!(
+            ",\"principal_provenance\":{provenance},\"provenance_error\":{error}}}"
+        ));
+    }
+}
 fn render(
     options: &Options,
     key_digest: Digest,
@@ -349,6 +425,23 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect()
+    }
+    #[test]
+    fn optional_provenance_failure_keeps_the_established_terminal_fields() {
+        let original =
+            "{\"state\":\"committed\",\"terminal\":true,\"decision\":{\"kind\":\"committed\"}}";
+        let mut receipt = original.to_owned();
+        append_principal_provenance(&mut receipt, Err(()));
+        assert!(receipt.starts_with(&original[..original.len() - 1]));
+        assert!(receipt.contains("\"principal_provenance\":{\"state\":\"unavailable\"}"));
+        assert!(
+            receipt.contains("\"provenance_error\":\"original_principal_evidence_unavailable\"")
+        );
+        assert!(!receipt.contains("legacy_unknown"));
+        let mut pending = "{\"state\":\"undecided\",\"terminal\":false}".to_owned();
+        append_principal_provenance(&mut pending, Ok(None));
+        assert!(pending.contains("\"state\":\"not_terminal\""));
+        assert!(pending.contains("\"provenance_error\":null"));
     }
     #[test]
     fn recovery_inputs_are_explicit_scoped_and_never_accept_mutation_arguments() {
