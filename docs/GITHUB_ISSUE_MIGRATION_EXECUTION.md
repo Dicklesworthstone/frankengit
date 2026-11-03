@@ -8,7 +8,7 @@ publish each original request. Related work: FG-049.
 
 ## Prepare and inspect without custom scripts
 
-Node.js 22.16 or later and owner-private POSIX files are required. First obtain
+Use the repository-pinned Node runtime and owner-private POSIX files. First obtain
 and independently pin the complete inventory and all corresponding captures
 using the existing capture workflow. Create a private selection file in one of
 these encodings: `JSON.stringify(selection) + "\n"` or
@@ -202,3 +202,39 @@ the default CLI routing execute unchanged. They do not establish actual
 native HTTP publication, Rust admission/CAS, GitHub capture correctness,
 filesystem power-loss durability or a full-workspace pass. No Rust code, native
 protocol or dependency is changed by this operator composition.
+
+### Native destination campaign
+
+The automatically discovered operator suite
+`scripts/e2e/suites/operator/github_issue_migration.sh` drives the shipped
+`import_github_issues.mjs` and `migrate_github_issues.mjs` commands through an
+actual Rust HTTP node in both SHA-1 and SHA-256. It reuses the existing bounded
+command/service owners. The source fixture supplies synthetic GitHub responses
+to the existing capture parser; it never stands in for destination authority.
+
+For a focused run, select an already qualified native executable and the
+repository-pinned Node binary. Replace the paths and source SHA with the actual
+inputs; the source-cut value is caller provenance, not build authentication:
+
+```sh
+FG_BIN=/path/to/qualified/fg FGE_NODE=/path/to/pinned/node \
+  FG_SIGNED_BUNDLE_SOURCE_CUT="$NATIVE_SOURCE_SHA" \
+  scripts/e2e/run_all.sh scripts/e2e/suites/operator/github_issue_migration.sh
+```
+
+The suite records the executable digest and checks 22 named assertions: local
+preparation without native changes, a globally bounded mutation prefix,
+read-only status, resume after external inputs disappear, literal text and
+native actor readback, completed recovery without another mutation, occupied
+target refusal, denied-write/exact-retry twins, complete-plan tamper refusal,
+disabled-service/exact-retry twins, and healthy native drains. A disabled issue
+service must produce the documented 403 and fail the command. Restoring the
+service at the same destination does not automatically resend a started request;
+only an explicit retry can submit its unchanged original bytes and key.
+
+The canonical operator lane builds its own current native executable before
+discovering this suite. A focused run against a separately built executable
+records separate campaign and native source cuts. It does not establish a new
+same-source canonical lane result, live GitHub compatibility, production TLS,
+physical crash durability, a compiled-out route test, every production
+entrypoint, independent batch verification or complete FG-049 acceptance.

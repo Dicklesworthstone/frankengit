@@ -30,7 +30,8 @@ those links. No link rewriting is performed. Source PR-number gaps are retained.
 
 ## Capture and review
 
-Use Node 22.16 or newer with JSON reviver source context. Source capture pins
+Use the repository-pinned Node runtime (`node scripts/verify_js.mjs runtime`)
+for qualification; source capture requires JSON reviver source context. It pins
 GitHub REST API version `2026-03-10`, reads `api.github.com` only, and does not
 follow redirects. The source credential may be omitted for public repositories.
 Prepare private files and a private directory on a supported Unix filesystem:
@@ -210,5 +211,21 @@ runIssueOperation, filesystem custody and real CLI child processes. Source HTTP
 responses are controlled GitHub fixtures; the loopback receiver is explicitly a
 native-schema contract peer, **not `fg`**. They do not establish native
 policy/CAS correctness, live GitHub compatibility, production TLS behavior,
-hardware crash durability or full FG-049 acceptance. Run the complete workflow
-against a built native server before relying on it for a production migration.
+hardware crash durability or full FG-049 acceptance.
+
+The native destination campaign is
+`scripts/e2e/suites/operator/github_issue_migration.sh`, discovered by
+`./scripts/verify.sh operator`. It runs this CLI and the complete migration CLI
+against a prebuilt Rust node in both object formats, then reads the resulting
+issue histories independently through `fg issue`. Source inputs are synthetic
+GitHub captures; there is no native response peer in this campaign. It checks
+literal bodies/comments and authenticated native authorship, original-request
+recovery, mutation bounds, occupied destinations, denied writes, tampered later
+requests and a disabled issue service. The disabled-service response is the
+documented 403; enabling the service permits only an explicit retry of the
+unchanged original request. Every native listener must drain normally.
+
+See [the complete migration guide](GITHUB_ISSUE_MIGRATION_EXECUTION.md#native-destination-campaign)
+for the focused command and proof boundaries. These checks do not establish
+live GitHub acquisition, production TLS, hardware crash durability or complete
+FG-049/every-entrypoint acceptance.
