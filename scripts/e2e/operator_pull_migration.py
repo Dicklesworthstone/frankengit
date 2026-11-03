@@ -298,6 +298,12 @@ def main():
         require(len(operators) == 3 and Path(operators[-1]["command"][1]) == ROOT / "scripts/archive_native_pulls.mjs"
                 and operators[-1]["command"][2] == "export" and operators[-1]["exit"] == 4,
                 "missing-route control did not reach the native archive entrypoint")
+        refusal = json.loads(Path(operators[-1]["artifacts"]).with_suffix(".stderr").read_text())
+        require(refusal["type"] == "pull_archive_error"
+                and refusal["message"] == "Required independent scope is missing or this endpoint is disabled."
+                and refusal["archive_progress"]["directory_created"] is True
+                and refusal["archive_progress"]["expected_archive_sha256"] is None,
+                "missing-route control observed an unrelated archive error")
         require(1 <= len(starts) <= 16 and len(starts) == len(drains)
                 and {row["pid"] for row in starts} == {row["pid"] for row in drains}
                 and all("--allow-pulls" not in row["command"] for row in starts)
