@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { main } from '../../scripts/fg_context_proof.mjs';
 import { inspectContextProof } from '../../scripts/operator/source_context_proof.mjs';
 import { sha256 } from '../../scripts/operator/source_archive.mjs';
-import { setup, bytes, token } from './source_context_proof_fixtures.mjs';
+import { setup, bytes, token, labelledContext } from './source_context_proof_fixtures.mjs';
 const cli = new URL('../../scripts/fg_context_proof.mjs', import.meta.url).pathname;
 function child(args) {
   const process = spawn(globalThis.process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -30,6 +30,19 @@ async function fixture(t, format = 'sha1') {
     args: ['capture', ...common, '--token-file', credential, '--output', output] };
 }
 const exists = path => lstat(path).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+for (const format of ['sha1', 'sha256']) test(`${format}: actual CLI accepts native labelled context then verifies its proof offline`, async t => {
+  const f = await fixture(t, format), data = bytes({ schema: 'frankengit-source-context-capture-v1',
+    endpoint: f.selection.endpoint, native_response: labelledContext(f.context) });
+  await writeFile(f.contextFile, data);
+  const common = f.common.map(value => value === sha256(f.data) ? sha256(data) : value);
+  const result = await child(['capture', ...common, '--token-file', f.credential, '--output', f.output]).done;
+  assert.equal(result.code, 0, result.stderr); const receipt = JSON.parse(result.stdout), calls = f.calls.length;
+  await rm(f.credential);
+  const inspected = await child(['inspect', ...common, '--proof', f.output, '--proof-sha256', receipt.proof_sha256]).done;
+  assert.equal(inspected.code, 0, inspected.stderr); assert.equal(f.calls.length, calls);
+  assert.equal(JSON.parse(inspected.stdout).authority_verified, false);
+  assert.deepEqual(await readFile(f.contextFile), data);
+});
 for (const format of ['sha1', 'sha256']) test(`${format}: capture publishes proof, inspect needs only independently pinned files`, async t => {
   const f = await fixture(t, format), run = await child(f.args).done;
   assert.equal(run.code, 0, run.stderr); const result = JSON.parse(run.stdout);

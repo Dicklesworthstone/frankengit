@@ -17,6 +17,7 @@ import sys
 from typing import Any
 
 from operator_issue_smoke import OperatorCampaign
+from operator_context_smoke import acquire_context_cases, inspect_context_cases, workspace_scan_case
 from patch_smoke import loose, oid, bundle_objects
 from scoped_events_smoke import HttpServer, PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 from source_browse_smoke import tree
@@ -179,6 +180,8 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         selection = put("package-selection.json", {"endpoint": acquisition.url, "tenant_id": TENANT,
             "repository_id": REPOSITORY, "repository_incarnation": incarnation, "object_format": fmt,
             "ref": REF, "expected_commit": base, "expected_head": pin["snapshot_token"]})
+        context_cases = acquire_context_cases(c, home, fmt, context_bundle, context, selection,
+                                              token_path, grants, BEFORE, selected)
         archive_cli = ROOT / "scripts/fg_source_archive.mjs"
         archive, reused_archive = home / "source.tar", home / "reused-source.tar"
         archive_args = ["capture", "--selection", str(selection), "--token-file", str(token_path),
@@ -247,6 +250,7 @@ object_id:f.object_id,kind:f.kind,body_hex:Buffer.from(f.bytes).toString('hex')}
         require({t["pathHex"]: (t["oid"], t["bodyHex"]) for t in package["membership"]["trees"]}
                 == {p.hex() if p else None: (identity, body.hex()) for p, (identity, body) in trees.items()},
                 "acquired parent trees differ from independent original objects")
+    inspect_context_cases(c, home, fmt, context_cases)
     inspected_archive = c.node_command(archive_cli, ["inspect", "--archive", str(reused_archive), "--sha256", reused["archive_sha256"]])
     require(inspected_archive["source_commit"] == base and inspected_archive["files"] == len(BEFORE),
             "offline archive inspection lost complete native source")
@@ -291,6 +295,7 @@ object_id:f.object_id,kind:f.kind,body_hex:Buffer.from(f.bytes).toString('hex')}
             and captured["repository_changed"] is False, "captured intent differs from independently computed tree")
     c.node_command(workspace_cli, ["inspect-capture", "--capture", str(capture), "--sha256", captured["capture_sha256"]])
     c.facts[f"{fmt}_workspace_capture_and_binary_twin"] = True
+    workspace_scan_case(c, home, fmt, workspace, workspace_hash, capture, captured, BEFORE, AFTER, paths, result_tree)
 
     server = HttpServer(c, repository, credentials, "workspace-" + fmt)
     server.command.extend(["--allow-source", "--allow-receive", "--allow-outcomes"])
@@ -587,7 +592,8 @@ def main() -> None:
     summary: dict[str, Any] = {"complete": False, "facts": c.facts, "binary_sha256": file_sha256(fg),
         "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_context.mjs",
         "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
-        "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs",
+        "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 
