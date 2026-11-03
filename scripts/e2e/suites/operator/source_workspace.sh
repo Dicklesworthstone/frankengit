@@ -6,7 +6,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init operator-source-workspace
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
-fge_context non_claim 'Ten source/context entrypoints with actual native acquisition, sessions/proofs and independently imported objects; not every operator, current-source native qualification, broad search completeness, retained authority proofs, TLS or deployment.'
+fge_context non_claim 'Twelve source/context entrypoints with actual native acquisition, composition/replay and independently imported objects; not every operator, current-source native qualification, broad search completeness, retained authority proofs, TLS or deployment.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
@@ -45,7 +45,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in workspace_capture_and_binary_twin native_prepare_grant_and_exact_pack canonical_bytes_modes_and_sibling original_key_and_outcome_grant service_drained verified_parent_trees parent_evidence_custody native_context_and_grant_twins native_package_and_proof_custody refresh_stale_publication refresh_review_and_exact_result refresh_publication_and_drain native_archive_and_grant_twins native_archive_reuse_and_offline_verification native_context_session_quota_and_grants native_context_session_dispatch_and_offline_export native_context_proof_bytes_and_grants native_context_proof_offline_pins native_workspace_scan_selection native_workspace_scan_capture_and_stale_twin; do
+  for property in workspace_capture_and_binary_twin native_prepare_grant_and_exact_pack canonical_bytes_modes_and_sibling original_key_and_outcome_grant service_drained verified_parent_trees parent_evidence_custody native_context_and_grant_twins native_package_and_proof_custody refresh_stale_publication refresh_review_and_exact_result refresh_publication_and_drain native_archive_and_grant_twins native_archive_reuse_and_offline_verification native_context_session_quota_and_grants native_context_session_dispatch_and_offline_export native_context_proof_bytes_and_grants native_context_proof_offline_pins native_workspace_scan_selection native_workspace_scan_capture_and_stale_twin composition_native_contributions_and_conflict composition_assembly_consent_and_canonical_publication composition_replay_refusal_and_explicit_next_base composition_replay_consent_and_canonical_publication composition_offline_custody_and_original_recovery; do
     fge_assert_eq "OPERATOR-WORKSPACE-$format-$property" true "$(fact "${format}_$property")" "native source workspace $property"
   done
 done
