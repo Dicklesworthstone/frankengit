@@ -96,5 +96,16 @@ The subprocess is a Node fixture, **not `fg`**. These are not native Rust, full
 canonical check-publication, process-containment, or physical power-loss tests,
 and they do not close the broader CI product-loop acceptance.
 
+The separate [live operator join](HTTP_WORKFLOW_ARTIFACTS.md#live-javascript-operator-join)
+now exercises these same file/input/log contracts through the actual native
+watcher pipeline. The successful producer's stdout and binary stderr, the failed
+consumer's stdout and empty stderr all match independently selected bytes,
+Rust inspect/export and JavaScript downloads. The consumer still exits 7,
+its published check remains failure, and its skipped dependent acquires no
+executed-stream receipt. Read access and artifact presence grant no successful
+check. The linked receipt identifies the exact client source, older native
+provider and qualification limits; the focused schema-peer tests above retain
+their own evidence class.
+
 The underlying native custody semantics and inspect/export interfaces are in
 [`TRUSTED_WORKFLOW_ARTIFACTS.md`](TRUSTED_WORKFLOW_ARTIFACTS.md).

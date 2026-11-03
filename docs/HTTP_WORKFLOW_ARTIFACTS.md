@@ -168,3 +168,38 @@ SHA-256 repositories, checking exact metadata/bytes, live grant replacement,
 Git-scope separation, all four namespace dimensions, corruption without a leaked
 prefix, and restart without repository publication. CLI tests cover explicit
 credential/root selection and preservation of the disabled default.
+
+### Live JavaScript operator join
+
+The discovered [`operator/workflow.sh`](../scripts/e2e/suites/operator/workflow.sh)
+campaign also runs the shipped watcher and its `artifact-download` action against
+real native custody. It produces an executable binary artifact, verifies its
+same-attempt delivery inside a dependent job, and compares the JavaScript output
+and four executed log streams with independent fixture bytes and native
+`fg artifact inspect`/`export`. Failed-job streams, including empty stderr,
+retain their failed outcome. Downloads remain private `0600` files with
+create-only refusal.
+
+The campaign checks native HTTP 403 for a disabled profile, a missing grant and
+revocation after successful reads, plus wrong receipt metadata. After a service
+restart, the same artifact ID remains downloadable while original run paths are
+offline. These reads preserve original receipts, execution markers and the
+repository head; ordinary check publication and original-key recovery still run
+afterward.
+
+At client/harness source `0a2262e782ff1d19889d14a32721e9b1076dfb37`, the lane
+completes 23 assertions across both Git hash domains, retaining the original 15.
+Receipt: `/data/frankengit-targets/noble_operator_artifacts_0a2262e7_20261103/receipt.ndjson`.
+The Rust provider is older source `a9d65885fde8a996c229827b3a86e136b2583bba`,
+binary SHA-256 `95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+This is mixed-source integration, not current-source native qualification,
+authenticated producer provenance, hostile-runner isolation, retention
+enforcement, general log completeness or full operator acceptance.
+
+A targeted control delegates every command to that same Rust binary but disables
+only the artifact profile on the intended download service. Native capture,
+delivery and local inspect/export finish; the first permitted JavaScript download
+exits 2 with `artifact_http_refused`, and the campaign fails with no downloaded
+destination. The original executed jobs and their receipts remain retained.
+This is a deployment-ceiling control, not a route-removed Rust build or the full
+operator negative matrix.
