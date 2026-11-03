@@ -27,6 +27,9 @@ fge_context oracle_run "$ORACLE_RUN"
 WORK="$(fge_tempdir operator-backup-https)"
 SUMMARY="$WORK/summary.json"
 fge_phase action
+fge_capture fixture-owner-selftests env FGE_ARTIFACT_ROOT="$WORK" python3 "$E2E_ROOT/selftests/test_backup_https_fixture.py" || true
+fge_assert_exit BACKUP-HTTPS-OWNER-001 0 "$FGE_LAST_EXIT" 'real TLS fixture ownership survives startup/body/terminal journal failures'
+fge_phase action
 fge_run_timeout 420 campaign python3 "$E2E_ROOT/operator_backup_https.py" \
   --fg "$FG_BIN" --node "$NODE" --work "$ORACLE_RUN/work/campaign" \
   --oracle-run "$ORACLE_RUN" --summary "$SUMMARY" || true

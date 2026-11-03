@@ -90,11 +90,17 @@ class ObjectFixture(HTTPServer):
                        "put": self.url(namespace, kind, "write", version)} for kind in ("archive", "approval")}
 
     def __enter__(self):
-        self.thread.start()
-        self.c.record(kind="https_fixture_start", port=self.server_port, service_class="loopback_transport_fixture")
+        try:
+            self.thread.start()
+            self.c.record(kind="https_fixture_start", port=self.server_port, service_class="loopback_transport_fixture")
+        except BaseException:
+            # A failed context entry never invokes __exit__. Retain ownership
+            # until its listener/thread have drained, even if journaling failed.
+            require(self._drain(), "loopback HTTPS fixture startup failed to quiesce")
+            raise
         return self
 
-    def __exit__(self, kind, error, traceback):
+    def _drain(self):
         # shutdown waits for the bounded current handler, then the owner thread
         # joins. No process kill, detached listener or arbitrary drain sleep.
         handlers = {}
@@ -102,17 +108,21 @@ class ObjectFixture(HTTPServer):
             if threading.current_thread() is threading.main_thread():
                 for number in (signal.SIGTERM, signal.SIGINT):
                     handlers[number] = signal.signal(number, signal.SIG_IGN)
-            self.shutdown()
-            self.thread.join(timeout=3)
+            if self.thread.ident is not None:
+                self.shutdown()
+                self.thread.join(timeout=3)
             self.server_close()
-            drained = not self.thread.is_alive() and not self.sockets and not self.failures
-            self.c.record(kind="https_fixture_stop", port=self.server_port, drained=drained,
-                          active_sockets=len(self.sockets), failures=self.failures)
-            (self.directory / "requests.json").write_text(json.dumps(self.events, indent=2) + "\n")
-            require(drained, "loopback HTTPS fixture failed to quiesce")
+            return not self.thread.is_alive() and not self.sockets and not self.failures
         finally:
             for number, handler in handlers.items():
                 signal.signal(number, handler)
+
+    def __exit__(self, kind, error, traceback):
+        drained = self._drain()
+        self.c.record(kind="https_fixture_stop", port=self.server_port, drained=drained,
+                      active_sockets=len(self.sockets), failures=self.failures)
+        (self.directory / "requests.json").write_text(json.dumps(self.events, indent=2) + "\n")
+        require(drained, "loopback HTTPS fixture failed to quiesce")
 
 
 class ObjectHandler(BaseHTTPRequestHandler):

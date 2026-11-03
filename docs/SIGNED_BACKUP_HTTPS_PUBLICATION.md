@@ -176,3 +176,10 @@ pinned Node, sandboxed Git 2.54.0, Python and test-only OpenSSL for its ephemera
 CA. Original diagnostic bytes remain retained. No independent storage,
 destructive/hardware fault, full capsule, independent review, fresh-current-main
 build or full-workspace qualification is established.
+
+`python3 scripts/e2e/selftests/test_backup_https_fixture.py` checks the campaign's
+TLS owner using real sockets and filesystem failures. A startup journal failure
+must drain its thread/listener before propagating the original error: failed
+Python context entry does not automatically call `__exit__`. The tests also
+exercise a permitted HTTPS request, body failure and terminal journal failure.
+These are harness ownership regressions, not native or provider evidence.
