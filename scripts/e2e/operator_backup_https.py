@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
+from secrets import token_urlsafe
 import signal
 import socket
 import ssl
@@ -29,7 +30,8 @@ from scoped_events_smoke import PRINCIPAL, REPOSITORY, TENANT, file_sha256, requ
 
 ROOT = Path(__file__).resolve().parents[2]
 USER_AGENT = "frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)"
-SECRET = "CAPABILITY_DO_NOT_LOG"
+# A fresh fixture capability also acts as the client-output redaction canary.
+CAPABILITY = token_urlsafe(24)
 ENTRYPOINTS = ("upload_repository_backup.mjs", "repository_backup_upload_job.mjs",
                "download_repository_backup.mjs", "recover_repository_backup.mjs")
 PROPERTIES = ("signed_native_archive", "direct_upload_pin_budget_and_exact_retry",
@@ -81,7 +83,7 @@ class ObjectFixture(HTTPServer):
         return self.directory / f"{namespace}-{kind}"
 
     def url(self, namespace, kind, method="read", version=1):
-        return f"{self.origin}/{namespace}/{kind}?cap={SECRET}-{method}-{version}"
+        return f"{self.origin}/{namespace}/{kind}?cap={CAPABILITY}-{method}-{version}"
 
     def target(self, namespace, version=1):
         return {kind: {"get": self.url(namespace, kind, "read", version),
@@ -137,7 +139,7 @@ class ObjectHandler(BaseHTTPRequestHandler):
         expected = "read" if self.command == "GET" else "write"
         token = parse_qs(parsed.query).get("cap", [])
         require(self.headers.get("User-Agent") == USER_AGENT, "operator used an unexpected User-Agent")
-        require(len(token) == 1 and token[0] in (f"{SECRET}-{expected}-1", f"{SECRET}-{expected}-2"), "fixture capability mismatch")
+        require(len(token) == 1 and token[0] in (f"{CAPABILITY}-{expected}-1", f"{CAPABILITY}-{expected}-2"), "fixture capability mismatch")
         self.server.events.append({"method": self.command, "path": parsed.path,
             "user_agent": self.headers.get("User-Agent"), "conditional": self.headers.get("If-None-Match"),
             "expect": self.headers.get("Expect")})
@@ -388,7 +390,7 @@ def run_case(c, oracle, fmt, certificate, tls_key):
             "offline cache resume reopened URL input or republished native authority")
     c.facts[f"{fmt}_https_recovery_then_offline_cache_resume"] = True
     outputs = [path for path in c.work.glob("operator-*.stdout")] + [path for path in c.work.glob("operator-*.stderr")]
-    require(all(SECRET.encode() not in path.read_bytes() for path in [*outputs, *controls]), "capability leaked in client output or immutable intent")
+    require(all(CAPABILITY.encode() not in path.read_bytes() for path in [*outputs, *controls]), "capability leaked in client output or immutable intent")
     require(not store.thread.is_alive() and not store.sockets and not store.failures
             and any(e.get("response_lost") is True for e in store.events), "fixture did not record loss and complete ownership drain")
     for namespace in ("direct", "job-a", "job-b"):
