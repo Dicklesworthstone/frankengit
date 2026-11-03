@@ -41,11 +41,12 @@ export function mountIssues(document, location, options = {}) {
   function configureEditor() {
     const action = byId('change-action').value;
     const full = ['open', 'edit'].includes(action);
-    const independent = ['append-comment', 'add-assignees'].includes(action);
+    const independent = ['append-comment', 'add-assignees', 'add-labels'].includes(action);
     byId('change-version').disabled = independent;
     byId('change-version').required = !independent;
     byId('title-field').hidden = !full;
-    byId('labels-field').hidden = !full;
+    byId('labels-field').hidden = !full && action !== 'add-labels';
+    byId('replace-labels').disabled = action !== 'edit';
     byId('body-field').hidden = !full && action !== 'append-comment';
     byId('assignees-field').hidden = !['assign', 'add-assignees', 'unassign'].includes(action);
     byId('replace-body-label').hidden = action !== 'edit';
@@ -56,16 +57,17 @@ export function mountIssues(document, location, options = {}) {
       status(`Issue #${issue.number} is locked. Unlock it before adding a comment.`); return;
     }
     byId('change-number').value = String(issue.number);
-    byId('change-version').value = ['append-comment', 'add-assignees'].includes(action) ? '' : String(issue.version);
+    byId('change-version').value = ['append-comment', 'add-assignees', 'add-labels'].includes(action) ? '' : String(issue.version);
     byId('change-action').value = action;
     byId('change-title').value = issue.title;
     byId('change-body').value = action === 'append-comment' ? '' : issue.body;
-    byId('change-labels').value = issue.labels.join('\n');
+    byId('change-labels').value = action === 'add-labels' ? '' : issue.labels.join('\n');
     byId('change-assignees').value = action === 'unassign' ? (issue.assignees ?? []).join('\n') : '';
     for (const field of ['replace-title', 'replace-body', 'replace-labels']) byId(field).checked = true;
     configureEditor();
     status(action === 'append-comment' ? `Preparing a comment on issue #${issue.number}. Nothing sent.`
       : action === 'add-assignees' ? `Preparing to add assignees to issue #${issue.number}. Nothing sent.`
+      : action === 'add-labels' ? `Preparing to add labels to issue #${issue.number}. Existing labels are preserved. Nothing sent.`
       : `Preparing against issue #${issue.number} version ${issue.version}. Nothing sent.`);
   }
   function issueTable(issues, head) {
@@ -114,7 +116,7 @@ export function mountIssues(document, location, options = {}) {
           node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
         content.append(node('p', `Milestone: ${issue.milestone == null ? '(none)' : `#${issue.milestone}`}`));
         const actions = node('div'); actions.className = 'issue-actions';
-        for (const [label, action] of [['Comment', 'append-comment'], ['Edit issue', 'edit'], ['Add assignees', 'add-assignees'], ['Remove assignees', 'unassign'],
+        for (const [label, action] of [['Comment', 'append-comment'], ['Edit issue', 'edit'], ['Add labels', 'add-labels'], ['Add assignees', 'add-assignees'], ['Remove assignees', 'unassign'],
           [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen'],
           [locked ? 'Unlock discussion' : 'Lock discussion', locked ? 'unlock' : 'lock']]) {
           const control = button(label, () => edit(issue, action));
@@ -238,12 +240,16 @@ export function mountIssues(document, location, options = {}) {
           const labels = byId('change-labels').value; fields.labels = labels === '' ? [] : labels.split('\n');
         }
       } else if (action === 'append-comment') fields.body = byId('change-body').value;
+      else if (action === 'add-labels') {
+        const labels = byId('change-labels').value;
+        fields.labels = labels === '' ? [] : labels.split('\n');
+      }
       else if (['assign', 'add-assignees', 'unassign'].includes(action)) {
         const ids = byId('change-assignees').value;
         fields.assignees = ids === '' ? [] : ids.split('\n');
       }
       await client.stage(decimal(byId('change-number').value, 'issue number', 1),
-        ['append-comment', 'add-assignees'].includes(action) ? null : decimal(byId('change-version').value, 'expected version'), action, fields);
+        ['append-comment', 'add-assignees', 'add-labels'].includes(action) ? null : decimal(byId('change-version').value, 'expected version'), action, fields);
       if (current !== session) return;
       status('Prepared locally. Save the recovery receipt, review the exact request, then send explicitly.');
       syncPending();

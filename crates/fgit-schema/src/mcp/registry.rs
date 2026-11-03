@@ -6,6 +6,7 @@ mod append;
 mod artifacts;
 mod assignees;
 mod core;
+mod labels;
 mod locking;
 mod milestones;
 mod notifications;
@@ -73,7 +74,7 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 31] = [
+const ADDITIONS: [McpToolEntry; 32] = [
     agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,
@@ -86,6 +87,7 @@ const ADDITIONS: [McpToolEntry; 31] = [
     notifications::SUBSCRIBE,
     notifications::UNREAD_COMMAND,
     assignees::ENTRY,
+    labels::ENTRY,
     append::ENTRY,
     milestones::CLEAR,
     locking::LOCK,

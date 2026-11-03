@@ -259,6 +259,17 @@ accepts an explicit milestone number map, opens the destination milestones befor
 importing issues, and closes source-closed milestones afterward. Preparation is
 offline; interrupted execution recovers the original saved requests and keys.
 
+### Concurrent issue label additions
+
+`fg issue add-labels` adds labels without choosing a stale issue version or
+replacing other writers' labels. The node revalidates the current bounded union
+on publication, preserves unrelated changes, and recovers the original result
+when a request is retried—even after a later strict label removal. Native CLI,
+authenticated HTTP, MCP, the issue browser, and the remote operator share this
+admission path. Archive readers retain the exact additive history. See
+[native issue label additions](docs/NATIVE_ISSUE_LABELS.md) for usage, limits,
+retry behavior, and the reader upgrade boundary.
+
 ### Native issue discussion controls
 
 `fg issue` exposes canonical open, edit, comment, assignment, close/reopen and

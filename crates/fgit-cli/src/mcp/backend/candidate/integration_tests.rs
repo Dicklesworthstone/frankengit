@@ -251,9 +251,9 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    // The 74-tool catalog minus queues (7), agent context (1), artifacts (2),
+    // The 75-tool catalog minus queues (7), agent context (1), artifacts (2),
     // separate protection tools (2), and ungranted notification writes (5).
-    assert_eq!(backend.tools().len(), 57);
+    assert_eq!(backend.tools().len(), 58);
     assert!(
         backend
             .tools()

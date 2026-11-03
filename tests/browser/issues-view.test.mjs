@@ -61,6 +61,31 @@ function harness(respond = () => json(page())) {
   };
 }
 
+test('label additions use an empty delta without a version, including on locked closed issues', async () => {
+  const issue = state(1, { version: 3, state: 'closed', locked: true });
+  const events = [...history().events, { version: 2, actor, action: { name: 'close' } },
+    { version: 3, actor, action: { name: 'lock' } }];
+  const h = harness(call => json(call.method === 'POST'
+    ? committed({ action: 'add-labels', command_profile: 'issue.add-labels.v1' })
+    : call.url.includes('/issues?') ? page({ issues: [issue] }) : history({ issue, events })));
+  await h.connect(); await h.read(1); click(h.elements['issue-content'], 'Add labels');
+  assert.equal(h.elements['change-labels'].value, '');
+  assert.equal(h.elements['labels-field'].hidden, false);
+  assert.equal(h.elements['title-field'].hidden, true); assert.equal(h.elements['body-field'].hidden, true);
+  assert.equal(h.elements['replace-labels'].disabled, true);
+  assert.equal(h.elements['change-version'].disabled, true); assert.equal(h.elements['change-version'].required, false);
+  assert.equal(h.elements['prepare-change'].disabled, false);
+  h.elements['change-version'].value = 'stale version must not be submitted';
+  h.elements['change-labels'].value = 'transport\nbug'; await h.elements['issue-change'].fire('submit');
+  assert.equal(h.calls.length, 2); assert.equal(h.client.pending.expected_version, null);
+  assert.equal(h.client.pending.body, 'label=bug&label=transport');
+  h.elements['change-labels'].value = 'later form edits';
+  h.elements['send-change'].fire('click'); await settled();
+  assert.ok(h.calls.at(-1).url.endsWith('/issues/1/add-labels'));
+  assert.equal(h.calls.at(-1).body, 'label=bug&label=transport');
+  assert.equal(h.client.pending, null); assert.match(h.elements['issue-status'].textContent, /^Committed/);
+});
+
 test('issue list renders inert names and erases the token input on connection', async () => {
   const h = harness(); await h.connect();
   assert.equal(h.elements['issue-token'].value, ''); assert.ok(h.elements['issue-content'].textContent.includes('<img onerror=alert(1)>'));

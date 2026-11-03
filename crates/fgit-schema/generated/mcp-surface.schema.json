@@ -802,6 +802,40 @@
       },
       "additionalProperties": false
     },
+    "frankengit_issue_add_labels": {
+      "title": "frankengit_issue_add_labels",
+      "description": "Add 1..32 distinct labels to an existing issue without expected_version. Concurrent additions preserve each other's labels within the 32-label union bound. Retry the identical issue, label set and original durable key to recover the original terminal outcome without undoing later replacements. Labels grant no authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal issue number, bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical issue number and label set, including after an uncertain response.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "labels": {
+              "type": "array",
+              "description": "1..32 unique nonblank labels of at most 64 UTF-8 bytes each, without control characters; input order is canonicalized before sealing.",
+              "x-classification": "untrusted_content"
+            }
+          },
+          "required": ["number", "idempotency_key", "labels"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_issue_append_comment": {
       "title": "frankengit_issue_append_comment",
       "description": "Append literal comment text to an existing issue without expected_version. Admission selects the exact predecessor at each head-CAS attempt; retry the identical issue number, body and original durable key to recover one terminal outcome without a duplicate comment.",

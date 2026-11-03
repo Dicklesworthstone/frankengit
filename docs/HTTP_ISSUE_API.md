@@ -91,6 +91,7 @@ POST {REPO_URL}/api/v1/issues/{number}/unlock
 POST {REPO_URL}/api/v1/issues/{number}/comment
 POST {REPO_URL}/api/v1/issues/{number}/append-comment
 POST {REPO_URL}/api/v1/issues/{number}/add-assignees
+POST {REPO_URL}/api/v1/issues/{number}/add-labels
 POST {REPO_URL}/api/v1/issues/{number}/assign
 POST {REPO_URL}/api/v1/issues/{number}/unassign
 POST {REPO_URL}/api/v1/issues/{number}/set-milestone
@@ -123,6 +124,7 @@ Concurrent additions can all commit when the resulting set fits the existing
 | `comment` | Required nonblank `body`, with the exact `expected_version`. |
 | `append-comment` | Required nonblank `body` only; `expected_version` is forbidden. |
 | `add-assignees` | 1–16 distinct repeated `assignee` IDs; `expected_version` is forbidden. |
+| `add-labels` | 1–32 distinct repeated `label` values; `expected_version` and `clear_labels` are forbidden. |
 | `close`, `reopen`, `lock`, `unlock` | No fields besides `expected_version`. |
 | `assign`, `unassign` | Required repeated `assignee`: 1–16 distinct 32-character lowercase hexadecimal principal IDs. |
 | `set-milestone` | Required positive `milestone` and `expected_milestone_version`, in addition to the issue's exact `expected_version`. |
@@ -153,6 +155,23 @@ removal, and never adds the removed principal again. A changed set or switching
 between `assign` and `add-assignees` requires a new intent/key. The complete
 [addition contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2025-native-issue-assignee-addition-intents)
 preserves the existing exact-version commands and request identities.
+
+`POST .../issues/{number}/add-labels` unions the supplied labels with the current
+set under the same `issues-write` grant. Each label is nonblank, at most 64 UTF-8
+bytes, and contains no control characters; the complete union must fit 32 labels.
+Its receipt identifies `action: "add-labels"`, `expected_version: null` and
+`command_profile: "issue.add-labels.v1"`. Canonical history records the original
+`{"name":"add-labels","labels":["bug"]}` delta. An identical original-key retry
+recovers its terminal result without re-adding labels removed by a later edit.
+`edit` with repeated `label` still replaces the whole set at an exact version;
+`clear_labels=true` still clears it. See [native label additions](NATIVE_ISSUE_LABELS.md).
+
+```sh
+curl --fail-with-body --header @/secure/issue-writer.headers \
+  --header 'Idempotency-Key: issue-41-labels-attempt-1' \
+  --data-urlencode 'label=bug' --data-urlencode 'label=transport' \
+  "$REPO_URL/api/v1/issues/41/add-labels"
+```
 
 Lock/unlock uses the same `issues-write` grant and explicit idempotency header.
 It applies independently to open and closed issues. While locked, both strict

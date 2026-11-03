@@ -12,7 +12,7 @@ pub const MAX_TOOL_RESULT: usize = 2 * 1024 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 // The complete native tool registry includes independent conversation reads
 // and appends. Discovery remains finite and subject to MAX_RESPONSE.
-// Independent additive assignment brings the complete native surface to 74 active tools.
+// Independent additive labels bring the complete native surface to 75 active tools.
 const MAX_TOOLS: usize = 80;
 
 pub struct Tool {

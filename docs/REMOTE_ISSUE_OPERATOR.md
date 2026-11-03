@@ -7,7 +7,7 @@ The server authenticates the bearer token and enforces its configured scopes at
 each request. This supplies a network operator alternative; it does not change
 the trusted-local principal semantics of the native `fg` or MCP commands.
 
-The command supports issue opening, partial edits (including labels), comments,
+The command supports issue opening, partial edits, independent label additions, comments,
 closing, reopening, locking/unlocking discussion, assigning and unassigning
 principals, outcome lookup and explicit same-request retry. Mutation
 semantics and terminal-response validation are the same as the served issue UI.
@@ -38,11 +38,31 @@ node scripts/forge_issues.mjs open \
 ```
 
 `ISSUE_PAGE_URL` is the exact URL ending in `/ui/issues/`, including the repository
-route, with no query, fragment or credentials. The caller chooses the issue
-number and expected version. Before staging, the command reads that issue,
+route, with no query, fragment or credentials. For exact-version actions, the caller
+chooses the issue number and expected version. Before staging, the command reads that issue,
 checks tenant/repository identity and refuses a moved version. The native server
 still enforces the exact expected version if state changes after this observation.
 No client read is an authorization grant and no race refreshes the request.
+
+Add labels without choosing a predecessor using a fresh private record:
+
+```sh
+node scripts/forge_issues.mjs add-labels \
+  --url "$ISSUE_PAGE_URL" --tenant-id "$TENANT_HEX" \
+  --repository-id "$REPOSITORY_HEX" --token-file "$PRIVATE_DIR/token" \
+  --record "$PRIVATE_DIR/labels-1.json" \
+  --number 1 --label bug --label transport
+```
+
+`add-labels` rejects `--expected-version` and `--clear-labels`. It verifies that
+the issue exists, then preserves the requested delta while admission selects the
+current predecessor. Supply 1–32 distinct nonblank labels of at most 64 UTF-8 bytes
+each, without control characters; the final union must fit 32 labels. Terminal
+receipts have `expected_version: null` and `command_profile: "issue.add-labels.v1"`.
+Use `status` or `retry` with the original record after a lost reply. Recovery never
+restores labels removed by a later edit. `edit --expected-version V --label ...`
+still replaces the whole set, and `--clear-labels` clears it. See
+[native label additions](NATIVE_ISSUE_LABELS.md).
 
 Assignment uses the same connection options and a fresh record for each command:
 

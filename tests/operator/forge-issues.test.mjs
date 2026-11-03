@@ -43,17 +43,19 @@ async function fixture(t) {
       return respond(200, { type: 'issue_history', ...common(), snapshot_token: snapshot, after_version: after, limit,
         found: Boolean(f.row), issue: f.row, events, next_after_version: f.events.length > after + events.length ? after + events.length : null });
     }
-    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign|lock|unlock)$/.exec(url.pathname);
+    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-labels|lock|unlock)$/.exec(url.pathname);
     if (!match || req.method !== 'POST') return respond(404, {});
     if (f.onMutation) f.onMutation({ key, body });
-    const form = new URLSearchParams(body), action = match[1], expected = Number(form.get('expected_version'));
+    const form = new URLSearchParams(body), action = match[1];
+    const expected = action === 'add-labels' ? null : Number(form.get('expected_version'));
     let decision = f.decisions.get(key);
     if (decision && decision.original_body !== body) return respond(409, { error: 'key reuse' });
     if (!decision) {
       const permitted = action === 'comment' ? !f.row?.locked : action === 'lock' ? f.row?.locked === false
         : action === 'unlock' ? f.row?.locked === true : true;
-      const committed = expected === f.version && f.mode !== 'refuse' && permitted;
+      const committed = (action === 'add-labels' ? Boolean(f.row) : expected === f.version) && f.mode !== 'refuse' && permitted;
       decision = { type: 'issue_publication', ...common(), number: 1, expected_version: expected, action,
+        ...(action === 'add-labels' ? { command_profile: 'issue.add-labels.v1' } : {}),
         principal_id: actor, tx_id: 'tx-' + key, decision_sequence: f.decisions.size + 1,
         outcome: committed ? 'committed' : 'refused', repository_commit_id: committed ? 'rcr-1' : null,
         refusal_code: committed ? null : !permitted ? 'ProtectedRefTransitionDenied' : 'expected_version',
@@ -73,6 +75,7 @@ async function fixture(t) {
         }
         if (action === 'assign') f.row.assignees = [...new Set([...f.row.assignees, ...form.getAll('assignee')])].sort();
         if (action === 'unassign') f.row.assignees = f.row.assignees.filter(id => !form.getAll('assignee').includes(id));
+        if (action === 'add-labels') f.row.labels = [...new Set([...f.row.labels, ...form.getAll('label')])].sort();
         const eventAction = { name: action };
         for (const k of ['title', 'body']) if (form.has(k)) eventAction[k] = form.get(k);
         if (form.has('label') || action === 'open') eventAction.labels = form.getAll('label');
@@ -93,7 +96,7 @@ async function fixture(t) {
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
   return f;
 }
-const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign|lock|unlock)$/.test(c.path));
+const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-labels|lock|unlock)$/.test(c.path));
 function command(args) {
   const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = []; child.stdout.on('data', b => out.push(b)); child.stderr.on('data', b => err.push(b));
@@ -281,6 +284,115 @@ test('assignment CLI validates bounded canonical IDs before files or network eff
     assert.throws(() => issueArguments([...flags(f, operation).slice(0, -2), '--assignee', a]));
   }
   assert.equal(f.calls.length, 0); assert.deepEqual(await readdir(f.root), ['token']);
+});
+test('additive-label CLI validates a bounded set without accepting a predecessor or replacement fields', async t => {
+  const f = await fixture(t), args = [...flags(f, 'add-labels'), '--number', '1'];
+  const parsed = issueArguments([...args, '--label', 'zeta', '--label', 'alpha']);
+  assert.equal(parsed.options.operation, 'add-labels');
+  assert.equal(parsed.options.expectedVersion, null);
+  assert.deepEqual(parsed.options.fields, { labels: ['alpha', 'zeta'] });
+  assert.equal(parsed.bodyFile, null);
+  for (const expectedVersion of [undefined, null]) {
+    assert.equal(issueOperatorOptions({ ...f.options('add-labels'), number: 1,
+      expectedVersion, fields: { labels: ['triage'] } }).expectedVersion, null);
+  }
+  for (const expectedVersion of [0, 1, '1', false]) {
+    assert.throws(() => issueOperatorOptions({ ...f.options('add-labels'), number: 1,
+      expectedVersion, fields: { labels: ['triage'] } }),
+    e => e.code === 'issue_operator_add_labels_has_no_version');
+  }
+  for (const extra of [[], ['--label', ''], ['--label', 'same', '--label', 'same'],
+    ['--clear-labels'], ['--label', 'triage', '--expected-version', '0'],
+    ['--label', 'triage', '--expected-version', '1'], ['--label', 'triage', '--title', 'replacement'],
+    ['--label', 'triage', '--body-file', f.tokenFile], ['--label', 'triage', '--assignee', actor],
+    ['--label', 'triage', '--principal', actor]]) {
+    assert.throws(() => issueArguments([...args, ...extra]));
+  }
+  const labels = Array.from({ length: 33 }, (_, i) => `label-${String(i).padStart(2, '0')}`);
+  assert.equal(issueArguments([...args, ...labels.slice(0, 32).flatMap(label => ['--label', label])]).options.fields.labels.length, 32);
+  assert.throws(() => issueArguments([...args, ...labels.flatMap(label => ['--label', label])]));
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await readdir(f.root), ['token']);
+});
+test('additive-label operator refuses an absent issue before recording or mutation', async t => {
+  const f = await fixture(t), o = { ...f.options('add-labels'), number: 1, fields: { labels: ['triage'] } };
+  await assert.rejects(runIssueOperation(o), e => e.code === 'issue_operator_version_moved' && e.operator_state === 'not_submitted');
+  assert.equal(mutations(f).length, 0);
+  assert.deepEqual(await readdir(f.root), ['token']);
+  await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const result = await runIssueOperation(o);
+  assert.equal(result.result.outcome, 'committed');
+  assert.deepEqual(f.row.labels, ['triage']);
+  assert.equal(f.version, 2);
+});
+test('additive-label operator retries the original staged set after intervening strict edits', async t => {
+  const f = await fixture(t);
+  await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const record = join(f.root, 'labels.json');
+  await assert.rejects(runIssueOperation({ ...f.options('add-labels', record), number: 1,
+    fields: { labels: ['zeta', 'alpha'] }, onProgress: ({ phase }) => {
+      if (phase === 'receipt_saved') throw Error('interrupted before send');
+    } }), e => e.operator_state === 'recorded_unknown');
+  const original = await readFile(record), saved = JSON.parse(original).receipt.request;
+  assert.equal(saved.action, 'add-labels');
+  assert.equal(saved.expected_version, null);
+  assert.deepEqual(saved.fields, { labels: ['alpha', 'zeta'] });
+  assert.equal(saved.body, 'label=alpha&label=zeta');
+  assert.equal(mutations(f).length, 1);
+  await runIssueOperation({ ...f.options('edit', join(f.root, 'intervening.json')), number: 1,
+    expectedVersion: 1, fields: { title: 'Intervening title', labels: ['replacement'] } });
+  const result = await runIssueOperation(f.options('retry', record));
+  assert.equal(result.result.outcome, 'committed');
+  assert.equal(result.mutation_submitted, true);
+  assert.equal(mutations(f).at(-1).key, saved.key);
+  assert.equal(mutations(f).at(-1).body, saved.body);
+  assert.deepEqual(f.row.labels, ['alpha', 'replacement', 'zeta']);
+  assert.equal(f.row.title, 'Intervening title');
+  assert.equal(f.row.body, 'private draft');
+  assert.equal(f.version, 3);
+  assert.deepEqual(await readFile(record), original);
+});
+test('additive-label CLI preserves exact recovery across a lost reply and later strict removal', async t => {
+  const f = await fixture(t);
+  await runIssueOperation({ ...f.options('open', join(f.root, 'open.json')),
+    fields: { title: 'Keep title', body: 'Keep body', labels: ['existing'] } });
+  await runIssueOperation({ ...f.options('close', join(f.root, 'close.json')),
+    number: 1, expectedVersion: 1, fields: {} });
+  await runIssueOperation({ ...f.options('lock', join(f.root, 'lock.json')),
+    number: 1, expectedVersion: 2, fields: {} });
+  const record = join(f.root, 'labels.json');
+  f.mode = 'lost-reply';
+  const lost = await command([...flags(f, 'add-labels', record), '--number', '1',
+    '--label', 'zeta', '--label', 'alpha']).done;
+  assert.equal(lost.code, 2);
+  assert.equal(f.version, 4);
+  assert.deepEqual(f.row.labels, ['alpha', 'existing', 'zeta']);
+  assert.equal(f.row.title, 'Keep title'); assert.equal(f.row.body, 'Keep body');
+  assert.equal(f.row.state, 'closed'); assert.equal(f.row.locked, true);
+  const original = await readFile(record), saved = JSON.parse(original).receipt.request;
+  assert.equal(saved.action, 'add-labels'); assert.equal(saved.expected_version, null);
+  assert.equal(saved.body, 'label=alpha&label=zeta');
+  assert.deepEqual(saved.fields, { labels: ['alpha', 'zeta'] });
+  assert.equal(mutations(f).at(-1).body, saved.body);
+  assert.equal(mutations(f).at(-1).key, saved.key);
+  assert.ok(!original.includes(token));
+  f.mode = null;
+  const recovered = await command(flags(f, 'status', record)).done;
+  assert.equal(recovered.code, 0, recovered.stderr);
+  assert.equal(JSON.parse(recovered.stdout).result.outcome, 'committed');
+  assert.equal(mutations(f).length, 4);
+  const removal = await command([...flags(f, 'edit', join(f.root, 'remove.json')), '--number', '1',
+    '--expected-version', '4', '--label', 'existing']).done;
+  assert.equal(removal.code, 0, removal.stderr);
+  assert.equal(f.version, 5); assert.deepEqual(f.row.labels, ['existing']);
+  const retried = await command(flags(f, 'retry', record)).done;
+  assert.equal(retried.code, 0, retried.stderr);
+  assert.equal(JSON.parse(retried.stdout).mutation_submitted, false);
+  assert.equal(mutations(f).length, 5);
+  assert.equal(f.version, 5); assert.deepEqual(f.row.labels, ['existing']);
+  assert.equal(f.row.state, 'closed'); assert.equal(f.row.locked, true);
+  assert.deepEqual(await readFile(record), original);
+  assert.deepEqual(f.events[3].action, { name: 'add-labels', labels: ['alpha', 'zeta'] });
 });
 test('assignment and removal CLI preserve canonical receipts and recover lost replies', async t => {
   const f = await fixture(t), a = '41'.repeat(16), b = '52'.repeat(16);

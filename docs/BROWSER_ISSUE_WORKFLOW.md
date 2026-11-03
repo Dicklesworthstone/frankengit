@@ -14,7 +14,7 @@ List issues and page their canonical event history at one explicit snapshot.
 Open an issue with an explicit number and version zero. Select an existing issue
 to prepare a comment without an expected version; the browser uses the explicit
 `append-comment` intent so concurrent commenters can all publish. Adding
-assignees also uses a version-independent intent. Field edits, assignee removal,
+assignees or labels also uses a version-independent intent. Field edits, assignee removal,
 close, reopen, lock and unlock still require the exact displayed version.
 Title, body and labels can be replaced independently; an explicitly selected
 empty label replacement clears the set. Preparation makes no HTTP mutation.
@@ -22,6 +22,14 @@ Inspect the prepared request, save its private recovery receipt, and send it
 explicitly. Later editor changes cannot change the prepared body or retry key.
 Native text is inert, not executable HTML or rendered Markdown. UTF-8 limits,
 exact safe integers, response byte budgets and snapshot continuity are checked.
+
+Choose **Add labels** on an existing issue, enter one label per line, then prepare,
+save the receipt and send explicitly. The addition editor starts empty and disables
+the expected-version field. Supply 1–32 distinct nonblank labels, each at most
+64 UTF-8 bytes without control characters; the resulting issue must still fit
+32 labels. Existing labels and unrelated fields survive. **Edit fields** with
+**Replace labels** continues to replace or clear the set at the displayed exact
+version. See [native label additions](NATIVE_ISSUE_LABELS.md).
 
 Issue details display the assigned principal IDs. **Add assignees** prepares an
 `add-assignees` request without an expected version. Independent additions
@@ -74,6 +82,12 @@ check. Additive-assignee terminal replies must identify
 after a later removal recovers the original result and does not add the removed
 principal again. A capacity refusal also remains the original refusal after
 capacity is freed; a new attempt requires a new prepared request and key.
+
+Label-addition receipts likewise have `expected_version: null` and require
+`command_profile: "issue.add-labels.v1"` on terminal replies. History displays
+the original `add-labels` delta. Retrying the saved request after a later label
+replacement recovers the original result without restoring removed labels.
+Saved exact-version `edit` requests retain their replacement semantics.
 
 Tokens live only in page memory. Disconnect clears tokens, visible data and
 editors while retaining an unresolved token-free request for recovery. No

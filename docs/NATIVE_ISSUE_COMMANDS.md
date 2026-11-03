@@ -10,7 +10,7 @@ on the hosting GitHub repository's issue tracker.
 
 All mutations supply an explicit positive issue number, principal, and stable
 idempotency key. Exact-version actions also require an expected predecessor;
-opening uses version zero. `append-comment` and `add-assignees` explicitly omit
+opening uses version zero. `append-comment`, `add-assignees`, and `add-labels` explicitly omit
 the issue version.
 The node decides whether an exact predecessor is still current and selects the
 append intent's predecessor inside canonical admission.
@@ -87,6 +87,17 @@ Both comment forms preserve exact text and use the same body bounds. The append
 receipt identifies `action.name: "append-comment"` and `expected_version: null`;
 it does not invent a caller-selected predecessor or report a guessed current
 version. Read `fg issue show` for the canonical event and current issue state.
+
+## Add labels while other writers update the issue
+
+`fg issue add-labels` unions the requested labels with the current issue state,
+without an expected version. It preserves other writers' labels and unrelated
+edits. Supply repeated `--label` options and a stable idempotency key; retries
+recover the original result even after a later label removal. The complete
+result must fit the existing 32-label bound. See
+[native label additions](NATIVE_ISSUE_LABELS.md) for CLI, HTTP, MCP, browser and
+remote operator usage. Exact `edit --label` replacement and `--clear-labels`
+retain their original version requirements.
 
 ## Assign and unassign issue work
 

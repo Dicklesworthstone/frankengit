@@ -36,9 +36,9 @@ The write group exposes `frankengit_issue_open`, `frankengit_issue_edit`,
 `frankengit_issue_close`, `frankengit_issue_reopen`,
 `frankengit_issue_lock`, `frankengit_issue_unlock`,
 `frankengit_issue_comment`, `frankengit_issue_append_comment`,
-`frankengit_issue_assign`, `frankengit_issue_unassign` and
-`frankengit_issue_add_assignees`. Each requires a positive
-`number` and `idempotency_key`. All except the explicit append and assignee-addition tools require an
+`frankengit_issue_assign`, `frankengit_issue_unassign`,
+`frankengit_issue_add_assignees` and `frankengit_issue_add_labels`. Each requires
+a positive `number` and `idempotency_key`. All except the explicit append and addition tools require an
 exact `expected_version`. Numbers and versions are canonical unsigned decimal
 **strings**, not JSON numbers.
 
@@ -79,6 +79,20 @@ principal/incarnation remain mandatory; an assignment grants no access.
 
 ```json
 {"jsonrpc":"2.0","id":"add-assignees-attempt-1","method":"tools/call","params":{"name":"frankengit_issue_add_assignees","arguments":{"number":"7","idempotency_key":"assign-issue-7-independent","assignees":["44444444444444444444444444444444"]}}}
+```
+
+`frankengit_issue_add_labels` requires only `number`, `labels`, and
+`idempotency_key`; it rejects `expected_version`. Supply 1–32 distinct nonblank
+labels of at most 64 UTF-8 bytes each, without control characters. Admission
+adds that delta to the current set and refuses a union over 32 labels. The receipt
+uses `action: "add-labels"`, `expected_version: null` and
+`command_profile: "issue.add-labels.v1"`; history retains the original label delta.
+An original-key retry recovers its result without restoring labels removed later.
+`frankengit_issue_edit` retains exact-version replacement and clearing semantics.
+See [native label additions](NATIVE_ISSUE_LABELS.md).
+
+```json
+{"jsonrpc":"2.0","id":"add-labels-attempt-1","method":"tools/call","params":{"name":"frankengit_issue_add_labels","arguments":{"number":"7","idempotency_key":"label-issue-7-independent","labels":["bug","transport"]}}}
 ```
 
 `frankengit_issue_append_comment` requires only `number`, `body`, and
@@ -130,7 +144,7 @@ After the initialization handshake, an example `tools/call` is:
 The durable key is 1..256 printable ASCII bytes without spaces. A retry uses a
 **new JSON-RPC ID**, the **same durable key**, and the **identical complete
 command** and original tool name. Never refresh the expected version on an
-exact-version retry; append retries continue to omit it. Key reuse with changed
+exact-version retry; append and addition retries continue to omit it. Key reuse with changed
 semantics cannot alias the original command; it remains an error. Notifications
 never execute tools, and duplicate JSON-RPC IDs cannot execute again.
 

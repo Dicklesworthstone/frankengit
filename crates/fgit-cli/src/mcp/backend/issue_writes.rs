@@ -8,7 +8,7 @@ use fgit_forge::{
     AggregateVersion, IssueNumber, MilestoneNumber,
     event::issue::{
         IssueAction, IssueAssigneesIntent, IssueCommand, IssueCommentIntent, IssueEdit,
-        MAX_ASSIGNEES, MAX_LABELS,
+        IssueLabelsIntent, MAX_ASSIGNEES, MAX_LABELS,
     },
 };
 use fgit_types::PrincipalId;
@@ -25,6 +25,7 @@ pub(super) fn is_tool(name: &str) -> bool {
             | "frankengit_issue_comment"
             | "frankengit_issue_append_comment"
             | "frankengit_issue_add_assignees"
+            | "frankengit_issue_add_labels"
             | "frankengit_issue_assign"
             | "frankengit_issue_unassign"
             | "frankengit_issue_set_milestone"
@@ -42,6 +43,7 @@ pub(super) fn tools() -> Vec<Tool> {
         ("frankengit_issue_comment", "Append literal comment text at an exact positive issue version. Replaying the identical command and key never duplicates the comment."),
         ("frankengit_issue_append_comment", "Append literal comment text to an existing issue without expected_version, even after independent issue edits. Retry the identical number, body and original key to recover the same outcome without a duplicate comment."),
         ("frankengit_issue_add_assignees", "Add 1..16 principal IDs to an existing issue without expected_version, preserving independent additions and other fields. Assignment grants no access or membership. Retry the identical issue, assignee set and original key to recover its original outcome."),
+        ("frankengit_issue_add_labels", "Add 1..32 distinct labels to an existing issue without expected_version, preserving independent additions and other fields within the 32-label union bound. Retry the identical issue, label set and original key to recover its original outcome; later label replacements are not undone."),
         ("frankengit_issue_assign", "Add 1..16 principal IDs to an issue's metadata assignments at an exact version, preserving other assignees. Assignment grants no access or membership."),
         ("frankengit_issue_unassign", "Remove only the named 1..16 principal IDs from issue metadata at an exact version. Retry the identical command and original key after an uncertain response."),
         ("frankengit_issue_set_milestone", "Assign an issue to an existing open milestone using exact issue and milestone versions at the same authority head. Membership is metadata, not authorization. Retry the identical command and original key."),
@@ -58,13 +60,17 @@ fn schema(name: &str) -> Value {
     }
     if matches!(
         name,
-        "frankengit_issue_append_comment" | "frankengit_issue_add_assignees"
+        "frankengit_issue_append_comment"
+            | "frankengit_issue_add_assignees"
+            | "frankengit_issue_add_labels"
     ) {
         properties.remove("expected_version");
         required.retain(|field| *field != "expected_version");
         if let Some(Value::Object(key)) = properties.get_mut("idempotency_key") {
             let description = if name == "frankengit_issue_append_comment" {
                 "Stable key for this append intent. Retry the identical issue number and body with the original key; do not replace the key after an uncertain response."
+            } else if name == "frankengit_issue_add_labels" {
+                "Stable key for this additive intent. Retry the identical issue number and label set with the original key; do not replace the key after an uncertain response."
             } else {
                 "Stable key for this additive intent. Retry the identical issue number and assignee set with the original key; do not replace the key after an uncertain response."
             };
@@ -104,6 +110,19 @@ fn schema(name: &str) -> Value {
                 ("items", common::text_schema(64)),
             ]),
         );
+    }
+    if name == "frankengit_issue_add_labels" {
+        properties.insert(
+            "labels".into(),
+            object([
+                ("type", text("array")),
+                ("minItems", json::number(1)),
+                ("maxItems", json::number(MAX_LABELS as u64)),
+                ("uniqueItems", Value::Bool(true)),
+                ("items", common::text_schema(64)),
+            ]),
+        );
+        required.push("labels");
     }
     if matches!(
         name,
@@ -180,7 +199,9 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
     if !is_tool(name)
         || matches!(
             name,
-            "frankengit_issue_append_comment" | "frankengit_issue_add_assignees"
+            "frankengit_issue_append_comment"
+                | "frankengit_issue_add_assignees"
+                | "frankengit_issue_add_labels"
         )
     {
         return Err(ToolError::invalid("tool_not_granted"));
@@ -280,10 +301,23 @@ fn parse_add_assignees(args: &Object) -> Result<IssueAssigneesIntent, ToolError>
         .map_err(|_| ToolError::invalid("invalid_issue_assignees"))?;
     Ok(intent)
 }
+fn parse_add_labels(args: &Object) -> Result<IssueLabelsIntent, ToolError> {
+    require_fields(args, &["number", "idempotency_key", "labels"])?;
+    let intent = IssueLabelsIntent {
+        number: IssueNumber::try_new(common::number(args, "number")?)
+            .ok_or(ToolError::invalid("positive_issue_number_required"))?,
+        labels: labels(args)?.ok_or(ToolError::invalid("labels_required"))?,
+    };
+    intent
+        .validate()
+        .map_err(|_| ToolError::invalid("invalid_issue_labels"))?;
+    Ok(intent)
+}
 enum MutationCommand {
     Versioned(IssueCommand),
     Append(IssueCommentIntent),
     AddAssignees(IssueAssigneesIntent),
+    AddLabels(IssueLabelsIntent),
 }
 
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
@@ -294,6 +328,8 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         MutationCommand::Append(parse_append_comment(args)?)
     } else if name == "frankengit_issue_add_assignees" {
         MutationCommand::AddAssignees(parse_add_assignees(args)?)
+    } else if name == "frankengit_issue_add_labels" {
+        MutationCommand::AddLabels(parse_add_labels(args)?)
     } else {
         MutationCommand::Versioned(parse(name, args)?)
     };
@@ -315,6 +351,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         }
         MutationCommand::Append(intent) => (intent.number, "append-comment", Value::Null),
         MutationCommand::AddAssignees(intent) => (intent.number, "add-assignees", Value::Null),
+        MutationCommand::AddLabels(intent) => (intent.number, "add-labels", Value::Null),
     };
     let context = fgit_cli::command_request_context(&backend.node);
     // From here onward a failed response is not proof of non-commit. Native
@@ -352,6 +389,17 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
                         )
                         .await
                 }
+                MutationCommand::AddLabels(intent) => {
+                    backend
+                        .node
+                        .admit_issue_labels_durable_in(
+                            &context,
+                            &session,
+                            intent,
+                            Default::default(),
+                        )
+                        .await
+                }
             }
         })
         .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
@@ -362,6 +410,8 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     result.insert("action".into(), text(action));
     if matches!(command, MutationCommand::AddAssignees(_)) {
         result.insert("command_profile".into(), text("issue.add-assignees.v1"));
+    } else if matches!(command, MutationCommand::AddLabels(_)) {
+        result.insert("command_profile".into(), text("issue.add-labels.v1"));
     }
     result.insert("expected_version".into(), expected_version);
     result.insert("complete".into(), Value::Bool(true));
@@ -748,5 +798,113 @@ mod additive_assignee_tests {
         maximum.push(text("ff".repeat(16)));
         input.insert("assignees".into(), Value::Array(maximum));
         assert!(parse_add_assignees(&input).is_err());
+    }
+}
+
+#[cfg(test)]
+mod additive_label_tests {
+    use super::*;
+    fn args() -> Object {
+        let Value::Object(args) = object([
+            ("number", text("7")),
+            ("idempotency_key", text("add-original")),
+            ("labels", Value::Array(vec![text("triage"), text("bug")])),
+        ]) else {
+            unreachable!()
+        };
+        args
+    }
+    #[test]
+    fn additive_labels_have_a_closed_version_independent_schema_and_canonical_set() {
+        let name = "frankengit_issue_add_labels";
+        assert!(is_tool(name));
+        let tool = tools().into_iter().find(|tool| tool.name == name).unwrap();
+        let schema = tool.schema.object().unwrap();
+        assert_eq!(schema["additionalProperties"], Value::Bool(false));
+        let fields = schema["properties"].object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(!fields.contains_key("expected_version"));
+        assert_eq!(
+            schema["required"],
+            Value::Array(vec![
+                text("number"),
+                text("idempotency_key"),
+                text("labels")
+            ])
+        );
+        let label_schema = fields["labels"].object().unwrap();
+        assert_eq!(label_schema["minItems"], json::number(1));
+        assert_eq!(label_schema["maxItems"], json::number(32));
+        assert_eq!(label_schema["uniqueItems"], Value::Bool(true));
+        let input = args();
+        let intent = parse_add_labels(&input).unwrap();
+        assert_eq!(intent.number.get(), 7);
+        assert_eq!(intent.labels, ["bug", "triage"]);
+        assert!(parse(name, &input).is_err());
+        assert!(parse("frankengit_issue_edit", &input).is_err());
+        let mut exact = input;
+        exact.insert("expected_version".into(), text("1"));
+        assert!(parse("frankengit_issue_edit", &exact).is_ok());
+        assert!(parse_add_labels(&exact).is_err());
+    }
+    #[test]
+    fn additive_labels_refuse_authority_injection_invalid_numbers_and_unbounded_text() {
+        for name in [
+            "expected_version",
+            "expected_head",
+            "principal",
+            "repository",
+            "storage",
+            "policy",
+            "title",
+            "body",
+            "assignees",
+            "action",
+        ] {
+            let mut input = args();
+            input.insert(name.into(), text("untrusted"));
+            assert!(parse_add_labels(&input).is_err(), "{name}");
+        }
+        for number in [
+            text("0"),
+            text("01"),
+            text("-1"),
+            json::number(7),
+            Value::Null,
+        ] {
+            let mut input = args();
+            input.insert("number".into(), number);
+            assert!(parse_add_labels(&input).is_err());
+        }
+        for labels in [
+            Value::Null,
+            text("bug"),
+            Value::Array(vec![]),
+            Value::Array(vec![text("bug"), text("bug")]),
+            Value::Array(vec![text(" ")]),
+            Value::Array(vec![text("x\0y")]),
+            Value::Array(vec![text("x\ny")]),
+            Value::Array(vec![text("x\u{85}y")]),
+            Value::Array(vec![text("x".repeat(65))]),
+            Value::Array(vec![text("é".repeat(33))]),
+            Value::Array(vec![json::number(7)]),
+        ] {
+            let mut input = args();
+            input.insert("labels".into(), labels);
+            assert!(parse_add_labels(&input).is_err());
+        }
+        let mut input = args();
+        input.remove("labels");
+        assert!(parse_add_labels(&input).is_err());
+        input.insert("labels".into(), Value::Array(vec![text("é".repeat(32))]));
+        assert!(parse_add_labels(&input).is_ok());
+        let mut maximum = (0..MAX_LABELS)
+            .map(|i| text(format!("label-{i:02}")))
+            .collect::<Vec<_>>();
+        input.insert("labels".into(), Value::Array(maximum.clone()));
+        assert!(parse_add_labels(&input).is_ok());
+        maximum.push(text("overflow"));
+        input.insert("labels".into(), Value::Array(maximum));
+        assert!(parse_add_labels(&input).is_err());
     }
 }

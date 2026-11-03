@@ -15,6 +15,7 @@ edit: --number N --expected-version N [--title TEXT] [--body TEXT | --body-file 
 comment: --number N --expected-version N (--body TEXT | --body-file PRIVATE_FILE)
 close|reopen|lock|unlock: --number N --expected-version N
 assign|unassign: --number N --expected-version N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...]
+add-labels: --number N --label TEXT [--label TEXT ...] (no --expected-version)
 status|retry: use only the connection options and the ORIGINAL --record.
 list|show|search: read only, no --record. show requires --number N.
   [--after N --expected-head TOKEN] [--limit 1..100 --max-pages 1..100]

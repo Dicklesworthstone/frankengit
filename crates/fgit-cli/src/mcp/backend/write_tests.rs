@@ -13,6 +13,7 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 mod add_assignees;
+mod add_labels;
 mod locking;
 mod milestones;
 mod notifications;
@@ -324,7 +325,7 @@ fn canonical_issue_lifecycle_retries_refusals_and_recovery_survive_reopen_in_bot
 fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     let f = Fixture::new(GitHashAlgorithm::Sha256);
     let mut writer = NodeTools::open(f.options(true, false, false, 0xa3)).unwrap();
-    assert_eq!(writer.tools().len(), 17); // thirteen issue and four milestone writes; no read grants
+    assert_eq!(writer.tools().len(), 18); // fourteen issue and four milestone writes; no read grants
     for name in [
         "frankengit_issue_assign",
         "frankengit_issue_unassign",
@@ -332,6 +333,7 @@ fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
         "frankengit_issue_unlock",
         "frankengit_issue_append_comment",
         "frankengit_issue_add_assignees",
+        "frankengit_issue_add_labels",
     ] {
         assert!(writer.tools().iter().any(|tool| tool.name == name));
         assert!(writer.is_mutation(name));
@@ -384,6 +386,7 @@ fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
             .is_err()
     );
     assert!(reader.call("frankengit_issue_lock", &args).is_err());
+    assert!(reader.call("frankengit_issue_add_labels", &args).is_err());
     assert!(reader.call("frankengit_issue_unlock", &args).is_err());
     assert!(
         reader
