@@ -12,6 +12,9 @@ use core::fmt;
 mod blob;
 pub use blob::VerifiedBlobReadRefusal;
 
+#[cfg(test)]
+mod configuration_tests;
+
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityFailure, HeadBodyRefusal, HeadReadReceipt, OutcomeFailure,
     RepositoryIncarnationConfigurationEvidence, TerminalOutcome, authority_head_identity,
@@ -539,13 +542,13 @@ impl OneNode {
             Ok(RepositoryIncarnationConfigurationEvidence::V2_1(body)) => {
                 Ok(VerifiedReadConfiguration::RepositoryIncarnationV2_1(body))
             }
-            // The revocation-aware 2.2 body has no exact envelope variant yet.
-            // Handing the envelope the normalized projection (or a downgraded
-            // 2.1 body) would let it recompute an identity other than the one
-            // `head.configuration_root` committed to, so this read fails
-            // closed until the verified-read vocabulary carries 2.2 exactly.
-            Ok(RepositoryIncarnationConfigurationEvidence::V2_2(_)) => {
-                Err(VerifiedReadServingRefusal::ConfigurationSchemaUnsupported { schema_minor: 2 })
+            // The revocation selection is part of the exact configuration
+            // identity, including when it is absent. Carry the original 2.2
+            // body through the existing envelope variant; normalizing it to
+            // 2.1 would authenticate a different root and disable proofs as
+            // soon as the repository selects revocation-aware configuration.
+            Ok(RepositoryIncarnationConfigurationEvidence::V2_2(body)) => {
+                Ok(VerifiedReadConfiguration::RepositoryIncarnationV2_2(body))
             }
             Err(OutcomeFailure::Codec(_)) => read_repository_configuration_async(
                 &self.authority,
