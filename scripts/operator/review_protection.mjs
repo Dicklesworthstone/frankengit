@@ -240,6 +240,7 @@ export async function jsonRequest(address, token, { path = 'protection', method 
   if (key !== undefined) headers['Idempotency-Key'] = key;
   if (method === 'POST') headers['Content-Length'] = String(body === undefined ? 0 : Buffer.byteLength(body));
   if (body !== undefined) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  const deadline = performance.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     let request, response, result, error, finishing = false, closed = false, timer;
     const deliver = () => { if (error) reject(error); else resolve(result); };
@@ -251,6 +252,14 @@ export async function jsonRequest(address, token, { path = 'protection', method 
       if (closed || !request) deliver();
     };
     const abort = () => finish(new ProtectionError('cancelled', { outcomeUnknown: isWrite }));
+    const withinBudget = () => {
+      if (finishing) return false;
+      if (signal?.aborted) { abort(); return false; }
+      if (performance.now() >= deadline) {
+        finish(new ProtectionError('request_timeout', { outcomeUnknown: isWrite })); return false;
+      }
+      return true;
+    };
     try {
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method, headers, agent: false, maxHeaderSize: 16 * 1024, rejectUnauthorized: true,
@@ -263,6 +272,7 @@ export async function jsonRequest(address, token, { path = 'protection', method 
       request.on('error', () => finish(new ProtectionError('transport_unavailable', { outcomeUnknown: isWrite })));
       request.once('response', incoming => {
         response = incoming;
+        if (!withinBudget()) return;
         const status = incoming.statusCode;
         if (status !== 200 && !(isWrite && status === 409)) {
           finish(new ProtectionError('http_request_refused', { status, outcomeUnknown: isWrite })); return;
@@ -283,23 +293,26 @@ export async function jsonRequest(address, token, { path = 'protection', method 
         let bytes = 0; const chunks = [];
         incoming.on('error', () => finish(new ProtectionError('response_incomplete', { outcomeUnknown: isWrite })));
         incoming.on('data', chunk => {
-          if (finishing) return;
+          if (!withinBudget()) return;
           bytes += chunk.length;
           if (bytes > maximum || chunks.length >= 16_384) finish(new ProtectionError('response_byte_limit', { outcomeUnknown: isWrite }));
           else chunks.push(chunk);
         });
         incoming.once('end', () => {
-          if (finishing) return;
+          if (!withinBudget()) return;
           if (!incoming.complete || (declared !== undefined && BigInt(declared) !== BigInt(bytes))) {
             finish(new ProtectionError('response_incomplete', { outcomeUnknown: isWrite })); return;
           }
-          try { finish(null, { status, value: parseJson(Buffer.concat(chunks, bytes)) }); }
+          try {
+            const value = parseJson(Buffer.concat(chunks, bytes));
+            if (withinBudget()) finish(null, { status, value });
+          }
           catch (failure) { failure.outcomeUnknown ||= isWrite; finish(failure); }
         });
       });
       signal?.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(() => finish(new ProtectionError('request_timeout', { outcomeUnknown: isWrite })), timeoutMs);
-      if (signal?.aborted) abort(); else request.end(body);
+      timer = setTimeout(() => finish(new ProtectionError('request_timeout', { outcomeUnknown: isWrite })), Math.max(1, Math.ceil(deadline - performance.now())));
+      if (withinBudget()) request.end(body);
     } catch { finish(new ProtectionError('transport_unavailable', { outcomeUnknown: isWrite })); }
   });
 }

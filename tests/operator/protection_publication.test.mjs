@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { readFile, writeFile, mkdir, lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { prepareIntent, publicationReply, outcomeReply, publishIntent, recoverIntent, verifyObservation,
-  observation, canonical, parseJson } from '../../scripts/operator/review_protection.mjs';
+  observation, canonical, parseJson, jsonRequest } from '../../scripts/operator/review_protection.mjs';
 import { saveIntent, loadIntent } from '../../scripts/operator/protection_files.mjs';
 import { sendSavedIntent, recoverSavedIntent } from '../../scripts/operator/protection_journal.mjs';
 import { run } from '../../scripts/fg_protection_admin.mjs';
@@ -44,6 +46,80 @@ function child(args) {
 }
 const sendArgs = (f, intent, extra = []) => ['send', '--endpoint', intent.endpoint, '--token-file', f.token, '--intent', f.intent, '--confirm-intent', intent.intent_sha256, ...extra];
 const outcomeArgs = (f, intent, tokenFile = f.token) => ['outcome', '--endpoint', intent.endpoint, '--token-file', tokenFile, '--intent', f.intent];
+
+for (const action of ['inspect', 'send', 'outcome']) for (const overdue of [false, true]) {
+  test(`${action}: protection transport enforces elapsed time with delayed deadline callback (${overdue})`, { timeout: 8000 }, async t => {
+    const budget = 250, originalTimeout = globalThis.setTimeout; let deferred = false, timerRan = false;
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+      if (ms > budget) return originalTimeout(callback, ms, ...args);
+      deferred = true; return originalTimeout(() => { timerRan = true; callback(...args); }, 5000);
+    });
+    const { p, intent } = await prepared(t, async (_call, response, intent) => {
+      if (overdue) await delay(budget + 100);
+      json(response, action === 'inspect' ? state() : action === 'send' ? publish(intent) : recovered(intent));
+    });
+    const request = action === 'inspect' ? {} : { method: 'POST', path: action === 'send' ? 'protection' : 'outcomes',
+      key: intent.request.key, ...(action === 'send' ? { body: intent.request.body } : {}) };
+    const pending = jsonRequest(intent.endpoint, TOKEN, { ...request, timeoutMs: budget });
+    if (overdue) await assert.rejects(pending, error => error.code === 'request_timeout' && (action !== 'send' || error.outcomeUnknown === true));
+    else assert.equal((await pending).status, 200);
+    assert.equal(deferred, true); assert.equal(timerRan, false); assert.equal(p.calls.length, 1);
+    assert.equal(p.calls[0].headers['idempotency-key'], action === 'inspect' ? undefined : intent.request.key);
+    for (let n = 0; p.sockets.size && n < 30; n++) await delay(5);
+    assert.equal(p.sockets.size, 0, 'deadline refusal must still drain the request');
+  });
+}
+test('protection body spends the original budget after in-budget headers', { timeout: 8000 }, async t => {
+  const budget = 250, originalTimeout = globalThis.setTimeout; let timerRan = false;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => ms > budget ? originalTimeout(callback, ms, ...args)
+    : originalTimeout(() => { timerRan = true; callback(...args); }, 5000));
+  const { p, intent } = await prepared(t, async (_call, response, intent) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' }); response.flushHeaders();
+    await delay(budget + 100); response.end(JSON.stringify(publish(intent)));
+  });
+  await assert.rejects(publishIntent(intent, TOKEN, { ...options(intent), timeoutMs: budget }), /request_timeout/);
+  assert.equal(timerRan, false); assert.equal(p.calls.length, 1);
+});
+test('protection JSON validation spends the original transport budget', { timeout: 8000 }, async t => {
+  const budget = 250, originalParse = JSON.parse; let parsed = false;
+  t.mock.method(JSON, 'parse', (...args) => {
+    const value = originalParse(...args);
+    if (value?.type === 'review_protection_publication') { parsed = true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, budget + 100); }
+    return value;
+  });
+  const { intent } = await prepared(t);
+  await assert.rejects(publishIntent(intent, TOKEN, { ...options(intent), timeoutMs: budget }), /request_timeout/);
+  assert.equal(parsed, true);
+});
+for (const terminal of ['committed', 'refused']) test(`late ${terminal} protection reply stays unknown until original-key recovery`, { timeout: 8000 }, async t => {
+  const budget = 250, originalTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => ms > budget ? originalTimeout(callback, ms, ...args)
+    : originalTimeout(callback, 5000, ...args));
+  const { f, p, intent } = await prepared(t, async (call, response, intent) => {
+    if (call.url.endsWith('/outcomes')) json(response, recovered(intent, terminal));
+    else { await delay(budget + 100); json(response, terminal === 'committed' ? publish(intent) : refused(intent), terminal === 'committed' ? 200 : 409); }
+  });
+  const original = await readFile(join(f.intent, 'intent.json'));
+  await assert.rejects(sendSavedIntent(f.intent, TOKEN, { ...options(intent), timeoutMs: budget }), error =>
+    error.code === 'request_timeout' && error.outcomeUnknown === true);
+  assert.ok((await readdir(f.intent)).includes('attempt.json')); assert.equal((await readdir(f.intent)).includes('terminal.json'), false);
+  const found = await recoverSavedIntent(f.intent, TOKEN, { expectedEndpoint: intent.endpoint });
+  assert.equal(found.summary.state, terminal); assert.equal(found.request_reexecuted, false);
+  assert.deepEqual(await readFile(join(f.intent, 'intent.json')), original);
+  assert.equal(p.calls.filter(c => c.url.endsWith('/protection')).length, 1);
+  assert.equal(p.calls.filter(c => c.url.endsWith('/outcomes')).length, 1);
+  assert.ok(p.calls.every(c => c.headers['idempotency-key'] === intent.request.key));
+});
+for (const terminal of ['committed', 'refused']) test(`cleanup cancellation preserves a validated ${terminal} protection decision`, async t => {
+  const { f, p, intent } = await prepared(t, (_call, response, intent) => json(response,
+    terminal === 'committed' ? publish(intent) : refused(intent), terminal === 'committed' ? 200 : 409));
+  const stop = new AbortController(), destroy = http.ClientRequest.prototype.destroy;
+  t.mock.method(http.ClientRequest.prototype, 'destroy', function (...args) { stop.abort(); return destroy.apply(this, args); });
+  const result = await sendSavedIntent(f.intent, TOKEN, { ...options(intent), signal: stop.signal });
+  assert.equal(result.summary.state, terminal); assert.equal(stop.signal.aborted, true); assert.equal(result.local_observation_synced, true);
+  assert.ok((await readdir(f.intent)).includes('terminal.json')); assert.equal((await readdir(f.intent)).includes('.send-lock'), false);
+  assert.equal(p.calls.length, 1);
+});
 
 test('native publication validation binds both domains, exact epochs and full-u64 decisions', () => {
   for (const object_format of ['sha1', 'sha256']) {
