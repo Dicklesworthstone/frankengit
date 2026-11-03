@@ -233,6 +233,17 @@ and request-validation coverage, not a native server capacity measurement.
 No Rust/admission/CAS, deployed service, hardware durability or full-workspace
 verification is claimed. No Rust or dependency files are changed.
 
+The separate [native GitHub PR destination campaign](../scripts/e2e/suites/operator/github_pull_migration.sh)
+connects this CLI to a real native destination under `./scripts/verify.sh operator`.
+It derives historical branch requirements from fully pinned single and collection
+PR plans using an independently selected branch principal. Separate Rust ref
+reads verify exact create-only effects, unchanged pre-existing refs, operation
+budgets, denied-grant recovery and occupied-ref refusal. PR writes subsequently
+use a different credential and cannot inherit the branch principal's authority.
+The GitHub observations are synthetic source input; this bounded native campaign
+does not establish live GitHub, maximum-scale, power-loss or independent batch
+verification, or complete `.4.59`'s original matrix.
+
 The CLI/bridge suite also runs the complete unchanged production PR preparer,
 archive validator, request compiler and loader; no substitute loader or partial
 source extraction is used. A static archive fixture supplies API observations,
