@@ -376,22 +376,24 @@ function protectionTransaction(value) {
     canonical_request_digest: { algorithm: d.algorithm, hex: d.hex } };
 }
 function protectionOutcome(reply, intent, prior = null) {
+  const provenance = ['principal_provenance', 'provenance_error'].some(key => Object.hasOwn(reply, key));
   protectionFields(reply, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'principal_id',
     'selector', 'command_index', 'state', 'terminal', 'transaction', 'decision', 'read_only', 'request_reexecuted',
-    'absence_proves_non_commit', 'session_completeness_established']);
+    'absence_proves_non_commit', 'session_completeness_established', ...(provenance ? ['principal_provenance', 'provenance_error'] : [])]);
   binding({ ...reply, object_format: intent.source.scope.format }, intent.source.scope);
   if (reply.type !== 'transaction_outcome' || reply.principal_id !== intent.principal || reply.selector !== 'transaction' ||
       reply.command_index !== null || reply.read_only !== true || reply.request_reexecuted !== false ||
       reply.absence_proves_non_commit !== false || reply.session_completeness_established !== false ||
       !['key_not_observed', 'seal_not_observed', 'undecided', 'committed', 'refused'].includes(reply.state) ||
       reply.terminal !== ['committed', 'refused'].includes(reply.state)) fail('Invalid original protection outcome.');
+  const evidence = provenance ? protectionPrincipalEvidence(reply, intent.principal) : {};
   const present = !['key_not_observed', 'seal_not_observed'].includes(reply.state);
   if (present !== (reply.transaction !== null)) fail('Inconsistent protection transaction.');
   const transaction = present ? protectionTransaction(reply.transaction) : null;
   if (prior !== null && !protectionEqual(prior, transaction)) fail('Protection transaction or seal regressed.');
   if (!reply.terminal) {
     if (reply.decision !== null) fail('Nonterminal outcome contains a decision.');
-    return { terminal: false, state: reply.state, transaction };
+    return { terminal: false, state: reply.state, transaction, ...evidence };
   }
   const committed = reply.state === 'committed';
   const decision = protectionFields(reply.decision, committed ? ['kind', 'decision_sequence', 'repository_commit_id']
@@ -402,7 +404,27 @@ function protectionOutcome(reply, intent, prior = null) {
   else { opaque(decision.code); opaque(decision.refusal_record_id); integer(decision.code_point, 'refusal code', 0, 65535); }
   return { terminal: true, outcome: reply.state, tx: transaction.tx_id, principal: intent.principal,
     sequence: decision.decision_sequence, rcr: decision.repository_commit_id ?? null, refusal: decision.code ?? null,
-    deliveryAcknowledged: null };
+    deliveryAcknowledged: null, ...evidence };
+}
+function protectionPrincipalEvidence(reply, expected) {
+  const value = reply.principal_provenance, error = reply.provenance_error;
+  if (value?.state === 'unavailable') {
+    protectionFields(value, ['state']);
+    if (!['original_principal_evidence_unavailable', 'response_limit'].includes(error)) fail('Invalid protection evidence error.');
+  } else if (value?.state === 'not_terminal') {
+    protectionFields(value, ['state']);
+    if (reply.terminal || error !== null) fail('Invalid nonterminal protection evidence.');
+  } else {
+    protectionFields(value, ['state', 'principal_id', 'authentication', 'agent_provenance']);
+    // Agent credentials cannot administer protection. A recorded policy action
+    // therefore belongs to the existing ordinary/operator authentication profile.
+    if (!reply.terminal || error !== null || value.principal_id !== expected || value.agent_provenance !== null ||
+        (value.state === 'legacy_unknown' ? value.authentication !== null
+          : value.state !== 'recorded' || !['http_token', 'ssh_deploy_key', 'operator_assertion'].includes(value.authentication))) {
+      fail('Invalid original protection principal evidence.');
+    }
+  }
+  return { principalProvenance: protectionCopy(value), provenanceError: error };
 }
 function protectionPublication(reply, intent, status, prior) {
   protectionFields(reply, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
