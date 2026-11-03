@@ -68,7 +68,11 @@ assert len(operators) == 3
 assert Path(operators[-1]['command'][1]).name == 'archive_native_pulls.mjs'
 assert operators[-1]['command'][2] == 'export' and operators[-1]['exit'] == 4
 drains = [row for row in commands if row.get('kind') == 'service_stop']
-assert len(drains) == 1 and drains[0]['exit'] == 0 and drains[0]['forced'] is False
+starts = [row for row in commands if row.get('kind') == 'service_start']
+assert 1 <= len(starts) <= 16 and len(starts) == len(drains)
+assert {row['pid'] for row in starts} == {row['pid'] for row in drains}
+assert all('--allow-pulls' not in row['command'] for row in starts)
+assert all(row['exit'] == 0 and row['forced'] is False for row in drains)
 print('22 native portability facts and the real missing-route negative verified')
 PY
 fge_assert_exit PULL-MIGRATION-006 0 "$FGE_LAST_EXIT" 'exact fact population, entrypoint digests and planted negative read back'

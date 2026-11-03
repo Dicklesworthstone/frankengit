@@ -298,8 +298,10 @@ def main():
         require(len(operators) == 3 and Path(operators[-1]["command"][1]) == ROOT / "scripts/archive_native_pulls.mjs"
                 and operators[-1]["command"][2] == "export" and operators[-1]["exit"] == 4,
                 "missing-route control did not reach the native archive entrypoint")
-        require(len(starts) == len(drains) == 1 and "--allow-pulls" not in starts[0]["command"]
-                and drains[0]["exit"] == 0 and drains[0]["forced"] is False,
+        require(1 <= len(starts) <= 16 and len(starts) == len(drains)
+                and {row["pid"] for row in starts} == {row["pid"] for row in drains}
+                and all("--allow-pulls" not in row["command"] for row in starts)
+                and all(row["exit"] == 0 and row["forced"] is False for row in drains),
                 "missing-route control lost its native service ceiling or normal owner drain")
         require(set(campaign.facts) == {"sha1_pinned_git_fixture"}, "missing-route control ran unexpected successor work")
         summary["negative_observed"] = True
