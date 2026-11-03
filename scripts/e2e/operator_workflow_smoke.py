@@ -18,6 +18,7 @@ import subprocess
 import sys
 
 from operator_issue_smoke import OperatorCampaign, issue_server, TOKEN
+from operator_artifact_smoke import artifact_case
 from operator_workspace_smoke import file_tree
 from patch_smoke import loose
 from scoped_events_smoke import PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
@@ -183,12 +184,17 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
     workflow_dir, inputs = ("ci/workflows", "inputs/selected") if nested else ("ci", "inputs")
     marker = home / "executions"
     log = shlex.quote(str(marker))
+    artifact_build = "" if supervised else "; printf 'artifact\\000bytes\\377' > result.bin; chmod +x result.bin; printf 'log\\000bytes\\377' >&2"
+    artifact_check = "" if supervised else ("set -eu; printf 'artifact\\000bytes\\377' > expected.bin; "
+        "test -x .fgit-artifacts/result.bin; cmp expected.bin .fgit-artifacts/result.bin; "
+        f"printf verified > {shlex.quote(str(home / 'artifact-delivery-verified'))}; ")
+    dependency = "" if supervised else "    needs: a_success\n"
     workflow = ("name: native-operator\non: push\njobs:\n"
         "  a_success:\n    runs-on: fgit-trusted-local\n    steps:\n"
         f"      - run: test \"$(cat {inputs}/message.txt)\" = 'selected native workflow input'; test ! -e elsewhere/secret; "
-        f"test ! -e inputs/omitted; printf s >> {log}; printf workflow-ok\n"
-        "  b_failure:\n    runs-on: fgit-trusted-local\n    steps:\n"
-        f"      - run: printf f >> {log}; printf workflow-failed; exit 7\n"
+        f"test ! -e inputs/omitted; printf s >> {log}; printf workflow-ok{artifact_build}\n"
+        f"  b_failure:\n{dependency}    runs-on: fgit-trusted-local\n    steps:\n"
+        f"      - run: {artifact_check}printf f >> {log}; printf workflow-failed; exit 7\n"
         "  c_skipped:\n    needs: b_failure\n    runs-on: fgit-trusted-local\n    steps:\n"
         f"      - run: printf x >> {log}\n").encode()
     files = {(workflow_dir + "/workflow.yml").encode(): (b"100644", workflow),
@@ -230,6 +236,15 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
         input_prefixes_hex=[workflow_dir.encode().hex(), inputs.encode().hex()], event="push",
         state_directory=str(watch_state), run_parent=str(run_parent), max_runs=16,
         trust="selected-branch-host-execution")
+    if not supervised:
+        artifact_root = home / "artifacts"
+        artifact_root.mkdir(mode=0o700)
+        config["artifacts"] = dict(root=str(artifact_root), maximum_file_mib=1, total_payload_mib=2,
+            capture_logs=True, selections=[dict(workflow_path_hex=(workflow_dir + "/workflow.yml").encode().hex(),
+                job_id="a_success", output_path_hex=b"result.bin".hex())], total_delivery_mib=1,
+            inputs=[dict(workflow_path_hex=(workflow_dir + "/workflow.yml").encode().hex(),
+                consumer_job_id="b_failure", producer_job_id="a_success", output_path_hex=b"result.bin".hex(),
+                destination_hex=b"result.bin".hex())])
     config_path = home / "watch.json"
     config_path.write_text(json.dumps(config))
     watch_cli, check_cli = ROOT / "scripts/fg_workflow_watch.mjs", ROOT / "scripts/fg_workflow_checks.mjs"
@@ -291,6 +306,7 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
     require(marker.read_bytes() == b"sf" and c.run("at", repository, TENANT, REPOSITORY, "latest") == before,
             "watch status/reconcile/dedup reran jobs or published state")
     c.facts[f"{fmt}_watch_dedup_and_reconcile"] = True
+    artifact_case(c, home, repository, config, credentials, incarnation, token, grants, before)
     open_pull(7, tip)
 
     require(canonical()["checks"] == [], "execution was presented as check publication")

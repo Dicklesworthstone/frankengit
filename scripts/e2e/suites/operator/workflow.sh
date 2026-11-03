@@ -6,7 +6,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init operator-workflow
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
-fge_context non_claim 'Fixed trusted-host scripts and two JS entrypoints; not hostile isolation, all operators, same-source native qualification, TLS or required-check policy.'
+fge_context non_claim 'Fixed trusted-host scripts, actual output/input/log custody and read-only artifact downloads through two JS entrypoints; not hostile isolation, all operators, current-source native qualification, TLS, retention enforcement or required-check policy.'
 fge_phase setup
 case "${FGE_WORKFLOW_NESTED_INPUTS:-0}" in
   0|1) ;;
@@ -52,7 +52,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in watch_execution_and_input_selection watch_dedup_and_reconcile canonical_success_failure_and_skip publisher_dedup_and_original_keys outcome_grant_twins_and_service_drain recovery_no_execution_or_publication; do
+  for property in watch_execution_and_input_selection watch_dedup_and_reconcile artifact_native_capture_and_delivery artifact_download_grant_and_ceiling_twins artifact_binary_empty_failed_logs artifact_restart_custody_and_no_reexecution canonical_success_failure_and_skip publisher_dedup_and_original_keys outcome_grant_twins_and_service_drain recovery_no_execution_or_publication; do
     fge_assert_eq "OPERATOR-WORKFLOW-$format-$property" true "$(fact "${format}_$property")" "native workflow operator $property"
   done
 done
