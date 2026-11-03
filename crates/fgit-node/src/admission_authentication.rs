@@ -52,6 +52,17 @@ where
             )
             .await
         }
+        PrincipalSnapshotRecord::Agent(snapshot) => {
+            stage_evidence_body_in(
+                store,
+                cx,
+                repository,
+                ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+                snapshot,
+                cancelled,
+            )
+            .await
+        }
     }
 }
 

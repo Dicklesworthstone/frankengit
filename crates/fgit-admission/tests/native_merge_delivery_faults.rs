@@ -219,6 +219,9 @@ impl Model {
             fgit_admission::evidence::PrincipalSnapshotRecord::Authenticated(body) => {
                 self.stage(repo, namespace, body)
             }
+            fgit_admission::evidence::PrincipalSnapshotRecord::Agent(body) => {
+                self.stage(repo, namespace, body)
+            }
         }
     }
 

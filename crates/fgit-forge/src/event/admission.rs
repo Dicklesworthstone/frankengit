@@ -58,6 +58,9 @@ pub const fn classify_event(
         }
         ForgeCommandProfile::Unknown => ForgeOperation::Unknown,
         ForgeCommandProfile::ExactVersion => match &event.payload {
+            ForgeEventPayload::AgentCredentialChangedNative(_) => {
+                ForgeOperation::AgentCredentialChange
+            }
             ForgeEventPayload::PullRequestOpened { .. } => ForgeOperation::PullRequestOpen,
             ForgeEventPayload::PullRequestHeadAdvanced { .. } => {
                 ForgeOperation::PullRequestHeadAdvance

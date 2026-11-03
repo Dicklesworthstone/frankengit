@@ -480,7 +480,8 @@ pub fn apply_forge_event_to_prs(
                 // A mixed history cannot leave a misleading legacy row behind.
                 prs.remove(&num);
             }
-            ForgeEventPayload::ReviewProtectionChanged(_)
+            ForgeEventPayload::AgentCredentialChangedNative(_)
+            | ForgeEventPayload::ReviewProtectionChanged(_)
             | ForgeEventPayload::IssueChangedNative(_)
             | ForgeEventPayload::MilestoneChangedNative(_)
             | ForgeEventPayload::DiscussionChangedNative(_)

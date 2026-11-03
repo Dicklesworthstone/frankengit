@@ -144,6 +144,10 @@ where
                 return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
             }
             let event = planned;
+            super::agent_credentials::validate_metadata_at(
+                store, cx, context, &basis, &event, projection,
+            )
+            .await?;
             let closure = validation
                 .validate(
                     store,

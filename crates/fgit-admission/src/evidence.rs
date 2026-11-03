@@ -22,14 +22,15 @@ use crate::AdmissionContext;
 mod policy_decision;
 pub use policy_decision::{
     ActivatedPolicyDecisionEvidence, ActorPolicyDecisionEvidence,
-    AuthenticationPolicyDecisionEvidence, EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord,
-    RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
+    AgentAuthenticationPolicyDecisionEvidence, AuthenticationPolicyDecisionEvidence,
+    EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord, RefPolicyEvaluation, RefPolicyInput,
+    RefPolicyPublication,
 };
 #[path = "principal_snapshot.rs"]
 mod principal_snapshot;
 pub use principal_snapshot::{
-    AdmissionAuthentication, AuthenticatedPrincipalSnapshot, PrincipalSnapshotIdentity,
-    PrincipalSnapshotRecord,
+    AdmissionAuthentication, AgentAuthentication, AgentPrincipalSnapshot,
+    AuthenticatedPrincipalSnapshot, PrincipalSnapshotIdentity, PrincipalSnapshotRecord,
 };
 
 /// Stable refusal-record detail for a refusal supported by
@@ -229,6 +230,29 @@ pub struct RefusalEvidence {
     code: RefusalCode,
 }
 
+impl RefusalEvidence {
+    #[must_use]
+    pub const fn principal_snapshot_id(&self) -> PrincipalSnapshotId {
+        self.principal_snapshot_id
+    }
+    #[must_use]
+    pub const fn basis_head_id(&self) -> RepositoryAuthorityHeadId {
+        self.basis_head_id
+    }
+    #[must_use]
+    pub const fn tx_id(&self) -> TxId {
+        self.tx_id
+    }
+    #[must_use]
+    pub const fn policy_epoch(&self) -> PolicyEpoch {
+        self.policy_epoch
+    }
+    #[must_use]
+    pub const fn code(&self) -> RefusalCode {
+        self.code
+    }
+}
+
 impl CanonicalBody for RefusalEvidence {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-refusal-evidence/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-refusal-evidence");
@@ -308,6 +332,7 @@ impl RefusalEvidenceBodies {
     ) -> Result<Self, RefusalCode> {
         let principal_snapshot =
             PrincipalSnapshotRecord::from_context(context, basis, authentication);
+        principal_snapshot.verify_context(context, basis)?;
         let principal_snapshot_id = principal_snapshot_id(&principal_snapshot)?;
         Ok(Self {
             refusal_evidence: RefusalEvidence {
@@ -378,6 +403,7 @@ impl DecisionEvidenceBodies {
             .ok_or(RefusalCode::ConflictingSemanticEffects)?;
         let principal_snapshot =
             PrincipalSnapshotRecord::from_context(context, basis, authentication);
+        principal_snapshot.verify_context(context, basis)?;
         let principal_snapshot_id = principal_snapshot_id(&principal_snapshot)?;
         Ok(Self {
             policy_decision: PolicyDecisionRecord::Legacy(PolicyDecisionEvidence {
@@ -517,6 +543,23 @@ impl DecisionEvidenceBodies {
                 .principal_snapshot
                 .authentication()
                 .ok_or(RefusalCode::EvidenceMissing)?;
+            if let AdmissionAuthentication::AgentCredential(agent) = authentication {
+                let record = AgentAuthenticationPolicyDecisionEvidence::evaluate(
+                    self.policy_decision.base().clone(),
+                    context,
+                    basis,
+                    current,
+                    layout,
+                    fold,
+                    review_branches,
+                    snapshot,
+                    publication,
+                    agent,
+                )?;
+                self.policy_decision =
+                    PolicyDecisionRecord::AgentAuthenticationActivated(Box::new(record));
+                return Ok(());
+            }
             let record = AuthenticationPolicyDecisionEvidence::evaluate(
                 self.policy_decision.base().clone(),
                 context,

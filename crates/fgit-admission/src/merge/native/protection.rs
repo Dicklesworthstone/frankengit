@@ -56,6 +56,45 @@ fn live(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionError> {
 fn infrastructure(error: AdmissionError) -> ProjectionFailure {
     error.into_projection_unavailable(RefusalCode::AuthorityReceiptInvalid)
 }
+
+/// The initial sponsored credential profile permits only its explicit forge
+/// metadata operations. A single-factor policy result cannot expand it into
+/// code publication, a review, or a merge, even without installed protection.
+pub(super) async fn require_non_agent_publication_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    principal: Option<PrincipalId>,
+    authentication: Option<AdmissionAuthentication>,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    if authentication.is_some_and(|method| method.agent_provenance().is_some()) {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::CapabilityScopeViolation,
+        ));
+    }
+    if let Some(principal) = principal {
+        // A different transport, an absent method, or revoking a credential
+        // cannot turn a canonically declared agent into a human/service actor.
+        // This exact-basis check repeats after every lost publication CAS.
+        let declarations = super::agent_credentials::read_all_at(store, cx, basis, cancelled)
+            .await
+            .map_err(infrastructure)?;
+        if declarations
+            .iter()
+            .any(|state| state.grant.agent == principal)
+        {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::CapabilityScopeViolation,
+            ));
+        }
+    }
+    Ok(())
+}
 /// Read from the exact authenticated forge root, never a local policy file or
 /// an optional caller projection. Missing/corrupt selected bodies fail closed.
 pub async fn read_at<S, C>(
@@ -241,6 +280,8 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    require_non_agent_publication_at(store, cx, basis, principal, authentication, cancelled)
+        .await?;
     let fgit_reference::effect::FoldOutcome::Folded(effects) = &fold.outcome else {
         return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
     };
@@ -566,6 +607,24 @@ where
                 )
                 .map_err(ProjectionFailure::Unavailable)?;
         }
+        crate::evidence::PolicyDecisionRecord::AgentAuthenticationActivated(record) => {
+            let selected = read_at(store, cx, basis, cancelled)
+                .await
+                .map_err(infrastructure)?;
+            let snapshot = selected
+                .protection()
+                .and_then(|p| p.ref_policy.as_ref())
+                .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+            record
+                .verify_provenance(
+                    basis,
+                    current,
+                    layout,
+                    &review_branches(&selected),
+                    snapshot,
+                )
+                .map_err(ProjectionFailure::Unavailable)?;
+        }
     }
     live(cancelled).map_err(infrastructure)
 }
@@ -674,6 +733,15 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    require_non_agent_publication_at(
+        store,
+        cx,
+        basis,
+        Some(context.principal_id),
+        authentication,
+        cancelled,
+    )
+    .await?;
     if let Some(landing) = landing {
         if publication != crate::evidence::RefPolicyPublication::NativeMerge {
             return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
