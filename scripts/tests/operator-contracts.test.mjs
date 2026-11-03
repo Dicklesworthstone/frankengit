@@ -3,7 +3,7 @@
 // these checks are not native forge, stock-Git compatibility or live API proof.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, copyFile, writeFile, readFile, rm, access, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, writeFile, readFile, rm, access, unlink, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -25,11 +25,17 @@ async function fixture(t, failOperator = false) {
     await mkdir(join(root, directory), { recursive: true });
   }
   for (const path of [suite, 'scripts/verify_js.mjs', 'scripts/lib/native-process-owner.mjs',
-    'scripts/e2e/selftests/test_operator_command.py', 'scripts/e2e/operator_issue_smoke.py',
-    'scripts/e2e/scoped_events_smoke.py', 'scripts/e2e/operator_workflow_smoke.py',
-    'scripts/e2e/operator_workspace_smoke.py', 'scripts/e2e/patch_smoke.py',
-    'scripts/e2e/source_browse_smoke.py']) {
+    'scripts/e2e/selftests/test_operator_command.py']) {
     await copyFile(join(repository, path), join(root, path));
+  }
+  // The ownership cases import shipped workflow helpers, which transitively
+  // import workspace/native consumers. Copy the flat Python source surface so
+  // adding a real consumer cannot silently invalidate this miniature fixture.
+  // Only imported modules execute; the fixture's TAP corpora stay explicit.
+  for (const entry of await readdir(join(repository, 'scripts/e2e'), { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.py')) {
+      await copyFile(join(repository, 'scripts/e2e', entry.name), join(root, 'scripts/e2e', entry.name));
+    }
   }
   await writeFile(join(root, 'tests/node-version'), process.versions.node + '\n');
   const probe = (scope, extra = '') => `import test from 'node:test';import assert from 'node:assert/strict';import {writeFileSync} from 'node:fs';import vm from 'node:vm';test('${scope} fixture',()=>{${extra}assert.equal(process.env.FG_NATIVE_BIN,process.execPath);writeFileSync(new URL('${scope === 'supervisor' ? '../' : '../../'}${scope}-entered',import.meta.url),'executed');});\n`;

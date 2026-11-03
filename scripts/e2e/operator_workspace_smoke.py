@@ -18,6 +18,7 @@ from typing import Any
 
 from operator_issue_smoke import OperatorCampaign
 from operator_context_smoke import acquire_context_cases, inspect_context_cases, workspace_scan_case
+from operator_composition_smoke import run_composition_case
 from patch_smoke import loose, oid, bundle_objects
 from scoped_events_smoke import HttpServer, PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 from source_browse_smoke import tree
@@ -593,7 +594,8 @@ def main() -> None:
         "node_sha256": file_sha256(node), "entrypoints": ["scripts/fg_source_context.mjs",
         "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
         "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs",
-        "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs",
+        "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 
@@ -607,6 +609,7 @@ def main() -> None:
         summary["node_version"] = identity["node"]
         for fmt in ("sha1", "sha256"):
             run_case(c, oracle_run, fmt)
+            run_composition_case(c, oracle_run, fmt, file_tree, BEFORE, {EDIT: AFTER[EDIT], MODE: AFTER[MODE]}, AUTHOR)
         summary["complete"] = True
     except BaseException as error:
         summary["failure"] = f"{type(error).__name__}: {error}"
