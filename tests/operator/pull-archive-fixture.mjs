@@ -5,6 +5,7 @@ import { mkdtemp, chmod, writeFile, rm, readFile, readdir, unlink } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { listenForFetch } from '../fetch-peer.mjs';
 
 export const TEN='11'.repeat(16), REP='22'.repeat(16), INC='33'.repeat(16), ACT='44'.repeat(16);
 export const HEAD='alg:2:'+ '66'.repeat(32), SOURCE='source-head-1', TOKEN='aa'.repeat(32);
@@ -57,10 +58,10 @@ export async function fixture(t,{format='sha1',pulls=2,reviews=2,comments=3,chan
     } catch(error){res.writeHead(500,{'content-type':'application/json'});res.end(JSON.stringify({error:error.message}));}
   });
   server.on('connection',s=>{sockets.add(s);s.on('close',()=>sockets.delete(s));});
-  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   let closed=false;
   const close=async()=>{if(closed)return;closed=true;for(const s of sockets)s.destroy();await new Promise(resolve=>server.close(resolve));};
   t.after(async()=>{await close();await rm(root,{recursive:true,force:true});});
+  await listenForFetch(server);
   const out=join(root,'archive'), href=`http://127.0.0.1:${server.address().port}/repo/ui/pulls/`;
   return {root,token,out,href,requests,close,options:{workdir:out,href,tenant:TEN,repository:REP,tokenFile:token,pageSize:1}};
 }

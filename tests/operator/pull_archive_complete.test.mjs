@@ -2,8 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, readdir, unlink, stat, symlink, link } from 'node:fs/promises';
 import { join } from 'node:path';
+import http from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import { exportPullArchive, inspectPullArchive, PULL_ARCHIVE_LIMITS as L } from '../../scripts/lib/forge-pull-archive.mjs';
 import { fixture, rewriteArchive, HEAD, TEN } from './pull-archive-fixture.mjs';
+
+test('fixture retires a forbidden port before exporting the complete archive', async t => {
+  // Fault-inject the allocator observation, retaining real servers and Fetch.
+  // This is a fixture lifecycle check, not evidence about native Rust authority.
+  const create = http.createServer;
+  let retired = 0;
+  http.createServer = (...args) => {
+    const server = create(...args), address = server.address.bind(server);
+    let first = true;
+    server.address = () => {
+      const bound = address();
+      if (bound && first) { first = false; return { ...bound, port: 6000 }; }
+      return bound;
+    };
+    server.on('close', () => retired++);
+    return server;
+  };
+  syncBuiltinESMExports();
+  try {
+    const f = await fixture(t), result = await exportPullArchive(f.options);
+    assert.equal(result.complete, true);
+    assert.deepEqual([result.pulls, result.reviews, result.comments], [2, 4, 6]);
+    assert(retired >= 1, 'forbidden listener was not retired before requests');
+    assert.notEqual(new URL(f.href).port, '6000');
+  } finally {
+    http.createServer = create;
+    syncBuiltinESMExports();
+  }
+});
 
 for(const format of ['sha1','sha256'])test(`complete production HTTP traversal and credential-free readback: ${format}`,async t=>{
   const f=await fixture(t,{format});const result=await exportPullArchive(f.options);
