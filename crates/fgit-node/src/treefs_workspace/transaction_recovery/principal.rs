@@ -49,17 +49,20 @@ impl OneNode {
             return Ok(None);
         };
         recovery_checkpoint(request).map_err(RecoveryFailure::Interrupted)?;
-        let HeadRead::Present(receipt) = self
-            .authority
-            .read_head(request.authority(), &self.head_key)
-            .await?
+        // The concrete engine has same-named inherent methods. Select the
+        // authority adapter so retries and typed AuthorityFailure stay intact.
+        let HeadRead::Present(receipt) =
+            AsyncAuthorityStore::read_head(&self.authority, request.authority(), &self.head_key)
+                .await?
         else {
             return Err(RecoveryFailure::HeadNotObserved);
         };
-        let head = self
-            .authority
-            .authenticate_head_receipt(request.authority(), &receipt)
-            .await?;
+        let head = AsyncAuthorityStore::authenticate_head_receipt(
+            &self.authority,
+            request.authority(),
+            &receipt,
+        )
+        .await?;
         let mut successor = head
             .body()
             .map_err(|_| invalid("principal recovery head"))?;
@@ -203,10 +206,8 @@ async fn read_frame(
     key: &ImmutableKey,
 ) -> Result<Vec<u8>, RecoveryFailure> {
     recovery_checkpoint(request).map_err(RecoveryFailure::Interrupted)?;
-    let ImmutableRead::Present(bytes) = node
-        .authority
-        .read_immutable(request.authority(), key)
-        .await?
+    let ImmutableRead::Present(bytes) =
+        AsyncAuthorityStore::read_immutable(&node.authority, request.authority(), key).await?
     else {
         return Err(invalid("original principal evidence missing"));
     };

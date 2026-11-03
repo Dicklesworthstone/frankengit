@@ -1295,6 +1295,56 @@ mod tests {
     }
 
     #[test]
+    fn agent_credential_event_has_the_reference_tag_and_exact_canonical_bytes() {
+        let event = ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(label("agent-credential/7")),
+        };
+        // The independently defined reference trace freezes this literal too.
+        // Never reinterpret a historical tag or omit the entity from a seal.
+        let literal = b"\x0e\0\0\0\x12agent-credential/7";
+        let mut encoder = Encoder::new();
+        write_forge_event(&mut encoder, &event).unwrap();
+        assert_eq!(encoder.as_bytes(), literal);
+        assert_eq!(event.required_ref_effect(), None);
+
+        let stream = ForgeStreamId::new(label("agent-credential/7"));
+        let make = |event| {
+            request(vec![Statement {
+                mismatch_policy: MismatchPolicy::TxnAbort,
+                intents: vec![Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::new(1),
+                    event,
+                })],
+            }])
+        };
+        let (refs, mut positions, retention, outbox) = empty_basis();
+        positions.insert(stream, ForgeStreamPosition::new(1));
+        let original = make(event.clone());
+        let evaluate = |request: &TransactionRequest| {
+            IntentEvaluator.evaluate(basis_of(&refs, &positions, &retention, &outbox), request)
+        };
+        let report = evaluate(&original);
+        IntentEvaluator.validate_report(&original, &report).unwrap();
+        assert!(report.is_total_for(&original));
+        let effects = report.effects().unwrap();
+        assert!(effects.refs.is_empty());
+        assert_eq!(effects.forge.get(&stream), Some(&vec![event]));
+        let bytes = canonical_fold_bytes(&original, &report).unwrap();
+        assert_eq!(
+            bytes,
+            canonical_fold_bytes(&original, &evaluate(&original)).unwrap()
+        );
+        let different = make(ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(label("agent-credential/8")),
+        });
+        assert_ne!(
+            bytes,
+            canonical_fold_bytes(&different, &evaluate(&different)).unwrap()
+        );
+    }
+
+    #[test]
     fn pull_request_update_is_distinct_and_requires_no_ref_movement() {
         let entity = ForgeEntityId::new(label("native-pr"));
         let target = name("refs/heads/main");

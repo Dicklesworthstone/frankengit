@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { PULL_LIMITS, PullError, failPull, pullFields, pullHash, pullCanonical, parsePullJson,
   pullTokenFingerprint, validatePullIntent, validatePullPublication, pullOutcomeScope, validatePullBundle } from './pull_command.mjs';
 import { validateOutcomeReply } from './transaction_outcome.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES } from './credential_token.mjs';
 
 export const PULL_RECORD_LIMIT = 128 * 1024;
 function privateStat(stat, directory = false) {
@@ -51,9 +52,12 @@ export async function readPullPrivate(path, maximum, { sync = false } = {}) {
   } finally { await file.close(); }
 }
 export async function readPullToken(path) {
-  const bytes = await readPullPrivate(path, 65);
-  if (bytes.length !== 64 && !(bytes.length === 65 && bytes[64] === 10)) failPull('invalid_pull_token_file');
-  const token = bytes.subarray(0, 64).toString('utf8'); pullTokenFingerprint(token); return token;
+  const bytes = await readPullPrivate(path, MAX_CREDENTIAL_TOKEN_BYTES + 1);
+  try {
+    const end = bytes.at(-1) === 10 ? bytes.length - 1 : bytes.length;
+    if (![64, MAX_CREDENTIAL_TOKEN_BYTES].includes(end)) failPull('invalid_pull_token_file');
+    const token = bytes.subarray(0, end).toString('utf8'); pullTokenFingerprint(token); return token;
+  } finally { bytes.fill(0); }
 }
 async function syncDirectory(path) {
   const file = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);

@@ -3,6 +3,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { validateOutcomeReply } from './transaction_outcome.mjs';
 
 export const LIMITS = Object.freeze({ command: 256 * 1024, response: 1024 * 1024,
   intent: 2 * 1024 * 1024, administrators: 32, branches: 64, reviewers: 32, checks: 32, job: 1024, ref: 1024 });
@@ -354,9 +355,15 @@ export function publicationReply(value, intent, status) {
     value.repository_commit_id, value.refusal_code, value.refusal_record_id, value.refusal_code_point);
 }
 export function outcomeReply(value, intent) {
+  const provenance = value && ['principal_provenance', 'provenance_error'].some(key => Object.hasOwn(value, key));
+  if (provenance) {
+    try { validateOutcomeReply(value, { tenant_id: intent.scope.tenant_id, repository_id: intent.scope.repository_id,
+      repository_incarnation: intent.scope.repository_incarnation, principal_id: intent.principal_id }); }
+    catch { fail('invalid_original_outcome'); }
+  }
   fields(value, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'principal_id',
     'selector', 'command_index', 'state', 'terminal', 'transaction', 'decision', 'read_only', 'request_reexecuted',
-    'absence_proves_non_commit', 'session_completeness_established']);
+    'absence_proves_non_commit', 'session_completeness_established', ...(provenance ? ['principal_provenance', 'provenance_error'] : [])]);
   binding(value, intent.scope, false);
   if (value.type !== 'transaction_outcome' || value.schema_version !== 1 || identity(value.principal_id) !== intent.principal_id ||
       value.selector !== 'transaction' || value.command_index !== null || value.read_only !== true || value.request_reexecuted !== false ||
@@ -404,6 +411,12 @@ export function extendsObservation(next, known) {
       (k.terminal && JSON.stringify(n) !== JSON.stringify(k))) fail('outcome_regressed_or_conflicted');
   const previousSeal = known.record.reply.transaction, nextSeal = next.record.reply.transaction;
   if (previousSeal && nextSeal && JSON.stringify(previousSeal) !== JSON.stringify(nextSeal)) fail('outcome_seal_changed');
+  if (next.record.kind === 'outcome' && known.record.kind === 'outcome') {
+    const old = known.record.reply;
+    try { validateOutcomeReply(next.record.reply, { tenant_id: old.tenant_id, repository_id: old.repository_id,
+      repository_incarnation: old.repository_incarnation, principal_id: old.principal_id }, old); }
+    catch { fail('outcome_regressed_or_conflicted'); }
+  }
 }
 export function publicationPreflight(value, token, expectedEndpoint, confirmation) {
   const intent = validateIntent(value);

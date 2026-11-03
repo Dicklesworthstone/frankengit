@@ -2,6 +2,7 @@
 // not Git semantics, native transaction identities, or publication authority.
 import { createHash, randomBytes } from 'node:crypto';
 import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
+import { isCredentialToken, isAgentCredentialToken } from './credential_token.mjs';
 
 export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024, bundle: 16 * 1024 * 1024 });
 export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'comment', 'fast-forward']);
@@ -43,7 +44,15 @@ function text(value, maximum, single = false) {
 }
 function opaque(value) { text(value, 256, true); if (/\s/u.test(value)) failPull('invalid_pull_identity'); return value; }
 function hash(value) { if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) failPull('invalid_pull_digest'); return value; }
-export function pullTokenFingerprint(value) { return pullHash(hash(value)); }
+export function pullTokenFingerprint(value) {
+  if (!isCredentialToken(value)) failPull('invalid_pull_digest');
+  return pullHash(value);
+}
+export function requireAgentMetadataOperation(action, token) {
+  if (isAgentCredentialToken(token) && !['open', 'update', 'close', 'reopen', 'comment'].includes(action)) {
+    failPull('agent_metadata_operation_unsupported');
+  }
+}
 function branch(value) {
   text(value, 1024, true);
   // HTTP forms admit UTF-8 refs only; never lossy-decode a native byte-only ref.
@@ -142,6 +151,7 @@ function intentFor(input) {
   return result;
 }
 export function preparePull(input, token, bundle = null) {
+  requireAgentMetadataOperation(input?.action, token);
   return preparePullWithIdentity(input, { nonce: randomBytes(16).toString('hex'),
     credential_fingerprint: pullTokenFingerprint(token) }, bundle);
 }

@@ -47,6 +47,34 @@ Authentication and scope refusals retain each native API's JSON error contract
 and Bearer-only challenge. Recovery refusals explicitly preserve unknown outcome
 status; a rejected lookup never proves that the original mutation failed.
 
+The Node operators `scripts/remote_issue.mjs` and `scripts/remote_pull.mjs` also
+accept this private token file. Use the agent ID as `scope.principal_id` and the
+grant's exact repository incarnation in the saved input. Follow the existing
+[issue](REMOTE_ISSUES.md) and [pull-request](REMOTE_PULL_REQUESTS.md) preparation,
+inspection, send and original-key recovery commands. The PR operator accepts an
+agent credential for `open`, `update`, `close`, `reopen` and `comment`; it refuses
+code-publication and review actions with that credential before networking.
+Browser forms retain their existing ordinary-token profile.
+The protection-admin operator and browser protection client accept optional
+ordinary principal evidence in native recovery replies without changing their
+policy-administration grants, exact saved keys or seal checks. Agent credentials
+remain unavailable for policy administration.
+
+Preparation fingerprints every token byte, including `fgagent_`. Sending still
+requires the original token and saved key. Recovery may use a newly authorized
+credential for the same agent after rotation or revocation. The shared outcome
+reader retains and checks the native optional principal-provenance fields,
+including the original sponsor, credential and run witness. It does not replace
+that witness with the credential used for recovery. Optional evidence
+unavailability does not erase an established terminal decision. Legacy
+64-hexadecimal-token inputs and retained outcomes remain readable.
+Outcome JSON refuses duplicate keys, including escaped-equivalent spellings,
+before interpreting principal evidence. Parsing remains bounded to 16 KiB and
+16 nesting levels.
+Native source-import recovery also validates the CLI's optional principal
+evidence, including exact u64 witness times, while retaining its existing local
+observation schema. This grants no agent source-import capability.
+
 | Explicit scope | Available operations |
 | --- | --- |
 | `issues-read` | Issue listing, history and search |
@@ -161,14 +189,38 @@ legacy-method downgrade, real-node restart/revocation, private-token CLI, and re
 TCP HTTP regression tests. Their presence is a coverage inventory, not a passing
 test result.
 
+`tests/operator/sponsored_metadata_credentials.test.mjs` covers both private
+token spellings, exact fingerprints, closed provenance shapes and u64 times,
+witness substitution, and real Node CLI send/rotated-recovery flows against a
+controlled HTTP schema peer. That peer is not the native Rust server and does
+not qualify native issuance, revocation or authorization.
+
 At source revision `a5808f474637f68d5182f5d8c08da804beeb34c7`, the reference/CALM
 suites completed with 176 passes, no failures, and one existing ignored test.
-Compilation of dependent crates was blocked before
+Pinned rustfmt and whitespace checks passed. Compilation of dependent crates was blocked before
 first-party diagnostics by Asupersync being killed under the shared 8 GiB memory
 limit. Serial metadata-only compilation, disabled debug symbols, bounded compiler
 threads, and allocator-retention controls were attempted without changing
 dependency source. The forge/identity/admission/node/CLI integration therefore
 still requires a successful native compile and execution of its new tests.
+
+A later strict remote release build at
+`bafa9a87d4dfa43350c09ccaf9abd00a2964847e` reached first-party diagnostics and
+failed with `E0004` in `fgit-txn::write_forge_event`: the new credential event
+was missing from transaction canonicalization. The repair adds the already
+specified tag 14 and exact entity encoding, with a literal shared by the
+independent reference-trace regression, deterministic folding and entity
+separation checks. The failed build produced no native image or operator-suite
+result; the added transaction test still requires compiled execution.
+
+At `8b3b6fdb61bf2339675f853ff55c3f9aba2f6e96`, the transaction crate's
+offloaded `cargo check --all-targets` completed, including compilation of that
+test. The native CLI build then reached three `E0277` errors in principal
+recovery: concrete engine methods shadowed the `AsyncAuthorityStore` methods.
+The repair explicitly selects the existing authority adapter for head reads,
+receipt authentication and immutable reads, preserving its retry and typed
+failure semantics. This second failed build also produced no native image or
+operator-suite result. Test compilation is not test execution.
 
 On a host with sufficient build memory, the focused follow-up is:
 
