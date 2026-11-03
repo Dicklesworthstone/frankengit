@@ -95,7 +95,31 @@ export function outcomeEndpoint(value) {
 export function parseOutcomeJson(bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length > OUTCOME_BYTES) fail('outcome_byte_limit');
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
+    const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), stack = [];
+    // JSON.parse otherwise discards earlier, possibly conflicting witnesses.
+    // Match the issue/PR readers' bounded lexical pass before interpreting data.
+    let nodes = 0;
+    for (let i = 0; i < source.length; i++) {
+      const c = source[i];
+      if (c === '{' || c === '[') {
+        if (++nodes > 16384 || stack.length >= 16) fail('outcome_json_structure_limit');
+        stack.push({ type: c, keys: new Set() });
+      } else if (c === '}' || c === ']') {
+        if (stack.pop()?.type !== (c === '}' ? '{' : '[')) fail('invalid_outcome_json');
+      } else if (c === '"') {
+        const start = i++;
+        for (; i < source.length && source[i] !== '"'; i++) if (source[i] === '\\') i++;
+        if (i >= source.length || ++nodes > 16384) fail('outcome_json_structure_limit');
+        let next = i + 1; while (next < source.length && /[\x20\t\r\n]/.test(source[next])) next++;
+        if (source[next] === ':') {
+          const current = stack.at(-1), key = JSON.parse(source.slice(start, i + 1));
+          if (current?.type !== '{' || current.keys.has(key)) fail('duplicate_outcome_json_key');
+          current.keys.add(key);
+        }
+      }
+    }
+    if (stack.length) fail('invalid_outcome_json');
+    return JSON.parse(source, (key, value, context) => {
       if (typeof value !== 'number') return value;
       // Native Rust emits the decision sequence as an unquoted u64. The raw
       // lexical value, not the rounded JS number, owns every one of those bits.

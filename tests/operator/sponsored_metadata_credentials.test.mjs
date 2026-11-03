@@ -92,6 +92,25 @@ test('agent provenance retains every u64 time bit and never rounds a witness', (
   value.principal_provenance.agent_provenance.expires_at = '18446744073709551615';
   assert.deepEqual(validateOutcomeReply(parseOutcomeJson(Buffer.from(wire(value))), scope), value);
 });
+test('outcome JSON refuses duplicate and escaped-equivalent principal and credential keys', () => {
+  const value = annotated(), source = wire(value);
+  assert.deepEqual(validateOutcomeReply(parseOutcomeJson(Buffer.from(source)), scope), value);
+  for (const ambiguous of [
+    source.replace('"principal_id":', '"principal_id":"' + '9'.repeat(32) + '","principal_id":'),
+    source.replace('"principal_id":', '"\\u0070rincipal_id":"' + '9'.repeat(32) + '","principal_id":'),
+    source.replace('"credential_id":', '"credential_id":"' + '0'.repeat(64) + '","credential_id":'),
+    source.replace('"grant_root":{"algorithm":', '"grant_root":{"\\u0061lgorithm":0,"algorithm":'),
+  ]) assert.throws(() => validateOutcomeReply(parseOutcomeJson(Buffer.from(ambiguous)), scope));
+});
+test('outcome JSON bounds nesting and ignores quoted structural characters', () => {
+  const value = annotated(); value.transaction.request_schema = 'schema:{["\\]}';
+  assert.deepEqual(validateOutcomeReply(parseOutcomeJson(Buffer.from(wire(value))), scope), value);
+  assert.doesNotThrow(() => parseOutcomeJson(Buffer.from('['.repeat(16) + '0' + ']'.repeat(16))));
+  assert.throws(() => parseOutcomeJson(Buffer.from('['.repeat(17) + '0' + ']'.repeat(17))), /structure_limit/);
+  for (const malformed of ['{"state":', '{"state":"unfinished', '{"state":1]}', '{}{}']) {
+    assert.throws(() => parseOutcomeJson(Buffer.from(malformed)));
+  }
+});
 test('legacy retained outcomes gain provenance without changing original decisions', () => {
   const old = receipt(), current = annotated();
   assert.deepEqual(validateOutcomeReply(current, scope, old), current);

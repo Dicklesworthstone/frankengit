@@ -64,6 +64,9 @@ including the original sponsor, credential and run witness. It does not replace
 that witness with the credential used for recovery. Optional evidence
 unavailability does not erase an established terminal decision. Legacy
 64-hexadecimal-token inputs and retained outcomes remain readable.
+Outcome JSON refuses duplicate keys, including escaped-equivalent spellings,
+before interpreting principal evidence. Parsing remains bounded to 16 KiB and
+16 nesting levels.
 
 | Explicit scope | Available operations |
 | --- | --- |
