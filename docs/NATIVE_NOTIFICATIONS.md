@@ -136,6 +136,15 @@ original principal and incarnation; changing credentials is not permission to
 rewrite or redispatch it as another user. Existing Origin, bearer credential,
 body framing, cancellation and response-size rules continue to apply.
 
+Disconnect, page hide and authentication expiry discard displayed recipient
+data, the cached inbox page and lookup fields. An unresolved preference request
+remains as exact token-free recovery custody; it is never discarded or changed
+into a new request. The page warns before navigation while that responsibility
+remains. Recovery files are byte-bounded, decoded as strict UTF-8 and restored
+only into the session that selected the file. A late read or import from an old
+session cannot restore its display or cancel a new connection. A known committed
+preference remains reported as saved if its subsequent inbox refresh fails.
+
 ## Snapshot pages and source completeness
 
 List queries accept `limit` (1–100, default 20), `after`, `expected_head`,

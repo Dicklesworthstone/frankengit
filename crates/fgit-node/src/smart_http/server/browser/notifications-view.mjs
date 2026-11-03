@@ -38,20 +38,44 @@ export class NotificationInboxController {
 export function mountNotificationInbox({ document, href, client = new NotificationClient({ href }) }) {
   const controller = new NotificationInboxController(client);
   const get = id => document.getElementById(id);
+  let session = 0;
   const status = text => { get('inbox-status').textContent = text; };
   const element = (tag, text) => { const node = document.createElement(tag); node.textContent = text; return node; };
   const pending = () => {
     const request = client.pending;
     get('inbox-pending').hidden = !request;
-    get('inbox-pending-summary').textContent = request ? 'Issue #' + request.number + ': ' + request.action + '\nExpected preference version ' +
-      request.expected_version + '\n' + (request.sent ? 'Possibly sent; retain the original request.' : 'Prepared but not sent.') : '';
-    get('inbox-discard').disabled = Boolean(request?.sent || request?.exported);
-    for (const button of get('inbox-content').querySelectorAll('button')) button.disabled = Boolean(request || client.busy);
+    get('inbox-pending-summary').textContent = !request ? '' : !client.connected
+      ? 'Disconnected. An unresolved preference request is retained. Reconnect the original credential to inspect it.'
+      : 'Issue #' + request.number + ': ' + request.action + '\nExpected preference version ' +
+        request.expected_version + '\n' + (request.sent ? 'Possibly sent; retain the original request.' : 'Prepared but not sent.');
+    get('inbox-discard').disabled = !request || Boolean(request.sent || request.exported || client.busy);
+    get('inbox-retry').disabled = get('inbox-recover').disabled = !client.connected || !request || client.busy;
+    get('inbox-save').disabled = !request;
+    get('inbox-restore').disabled = !client.connected || Boolean(request || client.busy);
+    for (const button of get('inbox-content').querySelectorAll('button')) button.disabled = !client.connected || Boolean(request || client.busy);
+  };
+  const disconnect = () => {
+    session += 1;
+    controller.disconnect();
+    for (const id of ['inbox-token', 'inbox-number', 'inbox-restore']) get(id).value = '';
+    get('inbox-content').replaceChildren(); get('inbox-paging').replaceChildren(); get('inbox-snapshot').textContent = '';
+    pending();
   };
   const run = async operation => {
+    const current = session;
     try { await operation(); }
-    catch (error) { status(error.outcomeUnknown ? 'Outcome unknown: ' + error.message + ' Check the outcome or retry the original request.' : error.message); }
-    finally { pending(); }
+    catch (error) {
+      if (current !== session) return;
+      if (!client.connected) disconnect();
+      status(error.outcomeUnknown ? 'Outcome unknown: ' + error.message + ' Check the outcome or retry the original request.' : error.message);
+    }
+    finally {
+      // Refresh can catch an error after a known commitment. Still clear the
+      // expired recipient view, without overwriting that terminal observation.
+      // An old read must never cancel a newer credential digest in progress.
+      if (current === session && !client.connected) disconnect();
+      pending();
+    }
   };
   const terminal = value => status((value.outcome === 'committed' ? 'Preference saved' : 'Preference refused') + (value.refusal ? ': ' + value.refusal : '') + '.');
   const showTerminal = async value => {
@@ -86,14 +110,16 @@ export function mountNotificationInbox({ document, href, client = new Notificati
     }
     status(rows.length + ' issue' + (rows.length === 1 ? '' : 's') + ' shown.'); pending();
   };
-  get('inbox-connect').addEventListener('submit', event => { event.preventDefault(); void run(async () => {
-    controller.disconnect(); get('inbox-content').replaceChildren(); get('inbox-paging').replaceChildren(); get('inbox-snapshot').textContent = '';
+  get('inbox-connect').addEventListener('submit', event => {
+    event.preventDefault();
     const token = get('inbox-token').value; get('inbox-token').value = '';
-    await client.connect(token); draw(await controller.load({ unreadOnly: get('inbox-unread').checked, includeMuted: get('inbox-muted').checked }));
-  }); });
+    disconnect();
+    return run(async () => {
+      await client.connect(token); draw(await controller.load({ unreadOnly: get('inbox-unread').checked, includeMuted: get('inbox-muted').checked }));
+    });
+  });
   get('inbox-disconnect').addEventListener('click', () => {
-    controller.disconnect(); get('inbox-token').value = ''; get('inbox-content').replaceChildren();
-    get('inbox-paging').replaceChildren(); get('inbox-snapshot').textContent = ''; status('Disconnected.'); pending();
+    disconnect(); status('Disconnected.');
   });
   get('inbox-filters').addEventListener('submit', event => { event.preventDefault(); void run(async () => {
     draw(await controller.load({ unreadOnly: get('inbox-unread').checked, includeMuted: get('inbox-muted').checked }));
@@ -114,11 +140,21 @@ export function mountNotificationInbox({ document, href, client = new Notificati
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }));
   get('inbox-restore').addEventListener('change', () => run(async () => {
+    const current = session;
     const file = get('inbox-restore').files?.[0]; get('inbox-restore').value = '';
     if (!file) return;
     if (file.size > MAX_RECEIPT_BYTES) throw new Error('Recovery receipt is too large.');
-    await client.restoreReceipt(await file.text()); status('Original request restored; no change sent.');
+    const bytes = await file.arrayBuffer();
+    if (current !== session) return;
+    if (bytes.byteLength > MAX_RECEIPT_BYTES) throw new Error('Recovery receipt is too large.');
+    await client.restoreReceipt(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+    if (current === session) status('Original request restored; no change sent.');
   }));
-  return { client, controller };
+  document.defaultView?.addEventListener('pagehide', disconnect);
+  document.defaultView?.addEventListener('beforeunload', event => {
+    if (client.pending) { event.preventDefault(); event.returnValue = ''; }
+  });
+  pending();
+  return { client, controller, disconnect };
 }
 if (typeof document !== 'undefined') mountNotificationInbox({ document, href: globalThis.location.href });
