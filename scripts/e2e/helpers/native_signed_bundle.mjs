@@ -22,7 +22,7 @@ const hash = data => createHash('sha256').update(data).digest('hex');
 const fgDigest = hash(await readFile(fg));
 const MIB = 1024 * 1024, ref = 'refs/heads/main', repository = 'signed-bundle-e2e/repository';
 const summary = { node: process.versions.node, fg, fg_sha256: fgDigest,
-  fg_source_cut: input[3], source_cut_is_caller_supplied: true, expected_checks: 18,
+  fg_source_cut: input[3], source_cut_is_caller_supplied: true, expected_checks: 20,
   checks: {}, commands: [], client_files: {}, non_claim: 'Generated native packs; no upstream Git, new Rust build, whole operator lane, forge authority or performance claim.' };
 for (const name of ['scripts/verify_git_bundle.mjs', 'scripts/lib/native-bundle-verifier.mjs',
   'scripts/lib/source-attestation.mjs', 'scripts/lib/source-attestation-options.mjs']) {
@@ -154,7 +154,15 @@ try {
         'native_verification_refused', /^expected_reference_mismatch:/);
     });
     await check(`${format}.expanded`, async () => {
+      // File-backed blobs retain their separate 32 MiB default allowance.
+      // The 17 MiB blob fits that allowance but exceeds the 1 MiB total.
       refused(await command('expanded', artifact, approval, ['--native-max-input-mib', '18', '--native-max-expanded-mib', '1']),
+        'native_verification_refused', /^bundle_pack: TotalExpandedLimit \{ actual: 17825792, limit: 1048576 \}$/);
+    });
+    await check(`${format}.blob_limit`, async () => {
+      // Keep the aggregate allowance sufficient so this isolates the blob cap.
+      refused(await command('blob-limit', artifact, approval, ['--native-max-input-mib', '18',
+        '--native-max-expanded-mib', '18', '--native-max-blob-mib', '1']),
         'native_verification_refused', /^bundle_pack: ObjectSizeLimit \{ actual: 17825792, limit: 1048576 \}$/);
     });
     const badBytes = Buffer.from(bytes); badBytes[badBytes.length - 1] ^= 1;
@@ -175,7 +183,7 @@ try {
     assert.deepEqual(await readdir(process.env.TMPDIR), [], 'native adapter must finalize its snapshots and scratch');
   }
   assert.equal(Object.keys(summary.checks).length, summary.expected_checks);
-  assert.equal(summary.commands.length, 18);
+  assert.equal(summary.commands.length, 20);
   assert.equal(hash(await readFile(fg)), fgDigest, 'the selected native executable changed');
 } catch (error) {
   summary.error = error.stack ?? String(error); console.error(summary.error); process.exitCode = 1;

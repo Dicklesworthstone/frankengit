@@ -151,12 +151,20 @@ its filename or infer it from the JavaScript checkout. It records that source
 cut, the executable digest and the actual client-module hashes separately.
 No compilation occurs in the suite.
 
-Its 18 checks cover default-budget refusal and explicit file-backed success,
-a direct Rust content read, wrong trust/ref pins, expansion exhaustion, correctly
-signed invalid native content, artifact tampering and expired approvals. All
+Its 20 checks cover default-budget refusal and explicit file-backed success,
+a direct Rust content read, wrong trust/ref pins, separate aggregate-expansion
+and streamed-blob exhaustion, correctly signed invalid native content, artifact
+tampering and expired approvals. All
 native processes use the selected executable; child PATH is empty. Process
 owners wait for group quiescence, and successful cases require snapshot/scratch
 cleanup. Raw command streams and a summary remain under the E2E artifact root.
+
+The aggregate case keeps the default 32 MiB streamed-blob allowance and requires
+the exact `TotalExpandedLimit` for 17 MiB against a 1 MiB total. The separate blob
+case keeps an 18 MiB total and requires the exact `ObjectSizeLimit` for a 1 MiB
+blob allowance. Neither refusal substitutes for the successful 18 MiB allowance
+and direct Rust readback.
+
 This establishes one signed-bundle entrypoint, not the complete `.4.59` operator
 lane. Generated packs are test inputs; no upstream-Git differential, signature
 key-management, memory benchmark or forge-recovery claim follows.
