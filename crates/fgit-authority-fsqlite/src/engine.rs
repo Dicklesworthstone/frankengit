@@ -349,8 +349,10 @@ impl FsqliteAuthorityStore {
 
     /// The advisory contention-retry controller's current state and epoch log.
     ///
-    /// No retry loop consults the controller yet; until one records operation
-    /// outcomes, this reports the pinned fallback policy it starts in.
+    /// The production [`AsyncAuthorityStore`] boundary selects one bounded
+    /// policy per operation and records its observed contention when it ends.
+    /// Abandoned or ambiguous operations force the evidence-gap fallback;
+    /// the controller never decides whether an authority operation committed.
     #[must_use]
     pub fn contention_retry_snapshot(&self) -> AdaptiveRetrySnapshot {
         self.contention_retry.snapshot()
@@ -1356,10 +1358,9 @@ where
 /// budget", backoff "stops before the parent deadline"); a fixed 2 s window
 /// under a 15 s or longer request deadline let a contended loser give up while
 /// its request still had most of its budget, and HTTP then had to report
-/// `outcome_unknown` for a deterministic refusal (x2mv.4.27). Backoff doubles
-/// from 2 ms to a 512 ms ceiling; the attempt bound still caps the loop.
-const OPERATION_BACKOFF_BASE_MS: u64 = 2;
-const OPERATION_BACKOFF_CEILING_MS: u64 = 512;
+/// `outcome_unknown` for a deterministic refusal (x2mv.4.27). The controller
+/// selects a bounded backoff at entry; the unchanged retry law and attempt
+/// bound remain authoritative, and each failure refreshes the remaining time.
 /// The retry window when the caller's context carries no deadline.
 const OPERATION_RETRY_FALLBACK_MS: u64 = 2_000;
 
@@ -1377,8 +1378,11 @@ fn runtime_timer() -> Option<asupersync::time::TimerDriverHandle> {
 /// its budget was minted on, or `None` when its context has no deadline.
 fn parent_remaining_ms(cx: &Cx) -> Option<u64> {
     let native = cx.attached_native_cx().or_else(asupersync::Cx::current)?;
-    let remaining = native.budget().remaining(native.now()).deadline?;
-    Some(u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX))
+    // Budget::remaining_time returns None both without a deadline and after
+    // expiry. Preserve that distinction here: an expired request has zero
+    // allowance, never a fresh OPERATION_RETRY_FALLBACK_MS window.
+    let deadline = native.budget().deadline?;
+    Some(deadline.duration_since(native.now()) / 1_000_000)
 }
 
 /// Retry state for one production store operation.
@@ -1390,15 +1394,24 @@ fn parent_remaining_ms(cx: &Cx) -> Option<u64> {
 /// the last real error is mapped exactly as a single attempt would be, so an
 /// exhausted contention retry is still `Refused(Throttled)`: no effect, never
 /// an ambiguity.
-struct OperationRetry {
+struct OperationRetry<'a> {
+    cx: &'a Cx,
+    controller: &'a SharedAdaptiveRetryController,
     budget: RetryBudget,
     backoff: BackoffPlan,
     elapsed_ticks: u64,
     attempt: u32,
+    attempts_started: u32,
+    contended: bool,
+    completed: bool,
 }
 
-impl OperationRetry {
-    fn new(instance: StoreInstanceId, cx: &Cx) -> Self {
+impl<'a> OperationRetry<'a> {
+    fn new(
+        instance: StoreInstanceId,
+        cx: &'a Cx,
+        controller: &'a SharedAdaptiveRetryController,
+    ) -> Self {
         let budget = if runtime_timer().is_some() {
             RetryBudget::new(
                 parent_remaining_ms(cx).unwrap_or(OPERATION_RETRY_FALLBACK_MS),
@@ -1409,14 +1422,32 @@ impl OperationRetry {
         };
         let seed = instance.raw() ^ OPERATION_RETRY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         Self {
+            cx,
+            controller,
             budget,
-            backoff: BackoffPlan::new(
-                OPERATION_BACKOFF_BASE_MS,
-                OPERATION_BACKOFF_CEILING_MS,
-                seed,
-            ),
+            // Freeze this operation's policy, including its jitter seed. A
+            // peer's observation may select a new epoch for the next call,
+            // but cannot rewrite a partially executed operation's plan.
+            backoff: controller.backoff_plan(seed),
             elapsed_ticks: 0,
             attempt: 1,
+            attempts_started: 0,
+            contended: false,
+            completed: false,
+        }
+    }
+
+    fn start_attempt(&mut self) {
+        self.attempts_started += 1;
+    }
+
+    fn complete<T>(&mut self, outcome: &Result<T, AuthorityFailure>) {
+        self.completed = true;
+        let retries = self.attempts_started.saturating_sub(1);
+        if matches!(outcome, Err(AuthorityFailure::Ambiguous(_))) {
+            let _ = self.controller.record_incomplete(self.contended, retries);
+        } else {
+            let _ = self.controller.record_operation(self.contended, retries);
         }
     }
 
@@ -1426,6 +1457,16 @@ impl OperationRetry {
         &mut self,
         error: EngineError,
     ) -> Result<asupersync::time::Sleep, AuthorityFailure> {
+        self.contended |= error.transient_class().is_retryable();
+        // SQL work and operation-gate waits consume the parent's time too;
+        // subtracting only our planned sleeps could otherwise extend a retry
+        // beyond the deadline, under either the fixed or adaptive policy.
+        if let Some(remaining) = parent_remaining_ms(self.cx) {
+            self.budget = RetryBudget::new(
+                self.budget.remaining_ticks().min(remaining),
+                self.budget.max_attempts(),
+            );
+        }
         match decide_after_failure(
             self.budget,
             self.backoff,
@@ -1454,21 +1495,93 @@ impl OperationRetry {
     }
 }
 
+impl Drop for OperationRetry<'_> {
+    fn drop(&mut self) {
+        if !self.completed && self.attempts_started != 0 {
+            // A dropped future may have dispatched SQL. It is neither a
+            // successful observation nor proof that no contention occurred.
+            // Retain the known attempt count and invalidate adaptive support.
+            let _ = self
+                .controller
+                .record_incomplete(self.contended, self.attempts_started.saturating_sub(1));
+        }
+    }
+}
+
+/// Wait under the caller's cancellation ownership, not merely a timer. In
+/// particular, cancellation during a long backoff must wake the operation
+/// without starting another SQL transaction or changing ambiguity semantics.
+async fn wait_for_retry(cx: &Cx, wait: asupersync::time::Sleep) -> Result<(), AuthorityFailure> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    use asupersync::channel::oneshot;
+
+    let cancelled = || EngineError::Engine(TransientClass::Cancelled).into_failure();
+    if cx.is_cancel_requested() || cx.checkpoint().is_err() {
+        return Err(cancelled());
+    }
+    let native = cx
+        .attached_native_cx()
+        .or_else(asupersync::Cx::current)
+        .ok_or(AuthorityFailure::Refused(AuthorityRefusal::Unavailable))?;
+    let mut wait = std::pin::pin!(wait);
+    let mut local_cancel = std::pin::pin!(cx.wait_for_local_cancel_request());
+    // Holding the sender open makes this receiver a native-cancellation
+    // wakeup, exactly as in the connection's OperationGate.
+    let (native_sender, mut native_receiver) = oneshot::channel::<()>();
+    let mut native_cancel = std::pin::pin!(native_receiver.recv(&native));
+    let result = poll_fn(|task| {
+        if local_cancel.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(cancelled()));
+        }
+        if let Poll::Ready(outcome) = native_cancel.as_mut().poll(task) {
+            return Poll::Ready(Err(match outcome {
+                Err(oneshot::RecvError::Cancelled) => cancelled(),
+                _ => AuthorityFailure::Refused(AuthorityRefusal::Unavailable),
+            }));
+        }
+        wait.as_mut().poll(task).map(|()| {
+            if cx.is_cancel_requested() || cx.checkpoint().is_err() {
+                Err(cancelled())
+            } else if parent_remaining_ms(cx) == Some(0) {
+                // All preceding attempts proved no effect; an expired retry
+                // allowance does not turn that knowledge into an ambiguity.
+                Err(AuthorityFailure::Refused(AuthorityRefusal::Throttled))
+            } else {
+                Ok(())
+            }
+        })
+    })
+    .await;
+    drop(native_sender);
+    result
+}
+
 /// Re-run `$operation` (one whole SQL transaction) under [`OperationRetry`].
 /// A macro rather than a generic driver keeps each trait future a plain state
 /// machine over the operation's own future, so proving it `Send` stays local.
 macro_rules! with_transient_retry {
-    ($instance:expr, $cx:expr, $operation:expr) => {{
-        let mut retry = OperationRetry::new($instance, $cx);
-        loop {
+    ($store:expr, $cx:expr, $operation:expr) => {{
+        let retry_store = $store;
+        let mut retry =
+            OperationRetry::new(retry_store.instance, $cx, &retry_store.contention_retry);
+        let outcome = loop {
+            retry.start_attempt();
             match $operation.await {
                 Ok(value) => break Ok(value),
                 Err(error) => match retry.after_failure(error) {
-                    Ok(wait) => wait.await,
+                    Ok(wait) => {
+                        if let Err(failure) = wait_for_retry($cx, wait).await {
+                            break Err(failure);
+                        }
+                    }
                     Err(failure) => break Err(failure),
                 },
             }
-        }
+        };
+        retry.complete(&outcome);
+        outcome
     }};
 }
 
@@ -1503,7 +1616,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         key: &ImmutableKey,
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
-        with_transient_retry!(self.instance, cx, Self::put_if_absent(self, cx, key, body))
+        with_transient_retry!(self, cx, Self::put_if_absent(self, cx, key, body))
     }
 
     async fn put_if_absent_batch(
@@ -1518,12 +1631,12 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         // Retry one complete transaction from a fresh snapshot. An interrupted
         // native batch exposes no individually settled prefix: its COMMIT may
         // have executed, so the caller must reconcile every requested key.
-        with_transient_retry!(self.instance, cx, self.put_batch_once(cx, entries)).map_err(
-            |source| fgit_authority::ImmutableBatchFailure::Interrupted {
+        with_transient_retry!(self, cx, self.put_batch_once(cx, entries)).map_err(|source| {
+            fgit_authority::ImmutableBatchFailure::Interrupted {
                 completed: 0,
                 source,
-            },
-        )
+            }
+        })
     }
 
     async fn read_immutable(
@@ -1531,7 +1644,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         key: &ImmutableKey,
     ) -> Result<ImmutableRead, AuthorityFailure> {
-        with_transient_retry!(self.instance, cx, Self::read_immutable(self, cx, key))
+        with_transient_retry!(self, cx, Self::read_immutable(self, cx, key))
     }
 
     async fn initialize_head(
@@ -1542,7 +1655,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         body: &[u8],
     ) -> Result<HeadInit, AuthorityFailure> {
         with_transient_retry!(
-            self.instance,
+            self,
             cx,
             Self::initialize_head(self, cx, key, generation, body)
         )
@@ -1553,7 +1666,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         key: &HeadKey,
     ) -> Result<HeadRead, AuthorityFailure> {
-        with_transient_retry!(self.instance, cx, Self::read_head(self, cx, key))
+        with_transient_retry!(self, cx, Self::read_head(self, cx, key))
     }
 
     async fn compare_exchange_head(
@@ -1565,7 +1678,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         new_body: &[u8],
     ) -> Result<CasOutcome, AuthorityFailure> {
         with_transient_retry!(
-            self.instance,
+            self,
             cx,
             Self::compare_exchange_head(self, cx, key, expected, new_generation, new_body)
         )
@@ -1582,7 +1695,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         witness: &DuplicateAbsenceWitness,
     ) -> Result<CasOutcome, AuthorityFailure> {
         with_transient_retry!(
-            self.instance,
+            self,
             cx,
             Self::publish_head_with_outcomes(
                 self,
@@ -1602,20 +1715,20 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         receipt: &HeadReadReceipt,
     ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        with_transient_retry!(
-            self.instance,
-            cx,
-            Self::authenticate_head_receipt(self, cx, receipt)
-        )
+        with_transient_retry!(self, cx, Self::authenticate_head_receipt(self, cx, receipt))
     }
 }
+
+#[cfg(test)]
+#[path = "retry_integration_tests.rs"]
+mod retry_integration_tests;
 
 #[cfg(test)]
 mod tests {
     use super::{
         AuthorityFailure, AuthorityRefusal, EngineError, HeadGeneration, MAX_TRANSIENT_ATTEMPTS,
-        MarshalError, OperationRetry, StoreInstanceId, TransientClass,
-        head_generation_from_unsigned,
+        MarshalError, OperationRetry, SharedAdaptiveRetryController, StoreInstanceId,
+        TransientClass, head_generation_from_unsigned, parent_remaining_ms,
     };
     use fgit_authority::AmbiguityReason;
     use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
@@ -1635,7 +1748,8 @@ mod tests {
 
     /// How many whole-transaction attempts a busy store gets under `cx`.
     fn attempts_before_refusal(cx: &Cx) -> u32 {
-        let mut retry = OperationRetry::new(INSTANCE, cx);
+        let controller = SharedAdaptiveRetryController::new();
+        let mut retry = OperationRetry::new(INSTANCE, cx, &controller);
         let mut attempts = 1;
         while retry
             .after_failure(EngineError::Engine(TransientClass::Busy))
@@ -1651,7 +1765,8 @@ mod tests {
         let runtime = RuntimeProfile::production(1).build().unwrap();
         let cx = request_cx(&runtime, Duration::from_secs(600));
         runtime.block_on(async {
-            let mut retry = OperationRetry::new(INSTANCE, &cx);
+            let controller = SharedAdaptiveRetryController::new();
+            let mut retry = OperationRetry::new(INSTANCE, &cx, &controller);
             for attempt in 1..MAX_TRANSIENT_ATTEMPTS {
                 assert!(
                     retry
@@ -1692,7 +1807,8 @@ mod tests {
             );
             let long = request_cx(&runtime, Duration::from_secs(600));
             assert_eq!(attempts_before_refusal(&long), MAX_TRANSIENT_ATTEMPTS);
-            let mut retry = OperationRetry::new(INSTANCE, &short);
+            let controller = SharedAdaptiveRetryController::new();
+            let mut retry = OperationRetry::new(INSTANCE, &short, &controller);
             while retry
                 .after_failure(EngineError::Engine(TransientClass::Busy))
                 .is_ok()
@@ -1721,6 +1837,24 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_deadline_is_zero_allowance_not_an_absent_deadline() {
+        let runtime = RuntimeProfile::production(1).build().unwrap();
+        let expired = request_cx(&runtime, Duration::ZERO);
+        runtime.block_on(async {
+            assert_eq!(parent_remaining_ms(&expired), Some(0));
+            let controller = SharedAdaptiveRetryController::new();
+            let mut retry = OperationRetry::new(INSTANCE, &expired, &controller);
+            assert_eq!(retry.budget.remaining_ticks(), 0);
+            assert_eq!(
+                retry
+                    .after_failure(EngineError::Engine(TransientClass::Busy))
+                    .unwrap_err(),
+                AuthorityFailure::Refused(AuthorityRefusal::Throttled),
+            );
+        });
+    }
+
+    #[test]
     fn cancellation_indeterminacy_and_permanent_errors_are_never_retried() {
         let runtime = RuntimeProfile::production(1).build().unwrap();
         let cx = request_cx(&runtime, Duration::from_secs(600));
@@ -1739,7 +1873,8 @@ mod tests {
                     AuthorityFailure::Refused(AuthorityRefusal::Unavailable),
                 ),
             ] {
-                let mut retry = OperationRetry::new(INSTANCE, &cx);
+                let controller = SharedAdaptiveRetryController::new();
+                let mut retry = OperationRetry::new(INSTANCE, &cx, &controller);
                 assert_eq!(retry.after_failure(error).unwrap_err(), expected);
             }
         });
@@ -1748,7 +1883,9 @@ mod tests {
     #[test]
     fn without_a_runtime_clock_contention_is_not_retried() {
         // Time belongs to the runtime: outside one there is no way to back off.
-        let mut retry = OperationRetry::new(INSTANCE, &Cx::new());
+        let controller = SharedAdaptiveRetryController::new();
+        let cx = Cx::new();
+        let mut retry = OperationRetry::new(INSTANCE, &cx, &controller);
         assert_eq!(
             retry
                 .after_failure(EngineError::Engine(TransientClass::Busy))

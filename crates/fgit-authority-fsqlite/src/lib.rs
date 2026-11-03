@@ -22,6 +22,34 @@
 //! binding itself: [`FsqliteAuthorityStore`], which executes that statement set
 //! over an `AsyncConnection`.
 //!
+//! # Production contention retry
+//!
+//! The [`fgit_authority::AsyncAuthorityStore`] implementation wraps each
+//! operation in the same whole-transaction retry law as the deterministic
+//! driver. It now selects its millisecond backoff from
+//! [`SharedAdaptiveRetryController`] and feeds real terminal observations
+//! back into that controller. The default remains the pinned 2..=512 ms
+//! fallback until enough supported observations admit the 1..=256 ms
+//! candidate. Both policies retain the 128-attempt bound, refresh the caller's
+//! remaining deadline, and stop on cancellation or an indeterminate outcome.
+//! A CAS predecessor mismatch remains an ordinary terminal result.
+//!
+//! Each operation freezes its selected plan and jitter seed. Abandoned or
+//! ambiguous operations, missed observations, regime alarms, and exhausted
+//! evidence select the fallback. Optional statistical recording never waits
+//! for its mutex and cannot delay an authority result. The read-only
+//! [`FsqliteAuthorityStore::contention_retry_snapshot`] exposes bounded epoch
+//! history; [`AdaptiveRetryEpochLog::to_json_line`] renders its metric,
+//! population, selection, sequence window, regime, policies, assumptions, and
+//! toolchain identity for an operator-owned evidence sink.
+//!
+//! The owning-crate integration regressions exercise real trait calls and the
+//! production retry driver with planted transient failures. They do not
+//! establish live concurrent-writer latency improvements, an A-A performance
+//! baseline, or the complete acceptance of x2mv.4.37. Direct inherent engine
+//! methods remain single-attempt primitives; production retry is the trait
+//! boundary, not a second implementation of SQL or authority semantics.
+//!
 //! # What this crate does and does not claim about [`AuthorityStore`]
 //!
 //! The binding's operations are **async inherent methods**, because the engine

@@ -5,8 +5,11 @@
 //! This module is the first production consumer of [`fgit_statistics`] inside
 //! the embedded `FrankenSQLite` authority store:
 //!
-//! * Each whole-transaction store operation produces one sequenced contention
-//!   observation (`contended: bool`, `retry_attempts: u32`).
+//! * Operations at the production `AsyncAuthorityStore` boundary feed
+//!   sequenced contention observations (`contended: bool`,
+//!   `retry_attempts: u32`). Abandoned, ambiguous, or unretained observations
+//!   invalidate support through `EvidenceGap` rather than count as calm
+//!   completions. Optional statistical work never waits for its record lock.
 //! * A betting [`EProcess`] monitors the Bernoulli contention rate for regime
 //!   shifts (`wealth >= 1 / alpha`) in exact integer parts-per-million
 //!   arithmetic, paired with an integer [`Cusum`] excursion detector on retry
@@ -26,8 +29,8 @@
 //!   hard invariants).
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, TryLockError};
 
 use fgit_codec::encode_body;
 use fgit_crypto::{DigestAlgorithm, DigestHasher, Sha256Hasher};
@@ -638,6 +641,8 @@ impl AdaptiveRetryController {
 #[derive(Debug)]
 pub struct SharedAdaptiveRetryController {
     sequence: AtomicU64,
+    candidate_ready: AtomicBool,
+    evidence_gap: AtomicBool,
     inner: Mutex<AdaptiveRetryController>,
 }
 
@@ -653,6 +658,8 @@ impl SharedAdaptiveRetryController {
     pub fn new() -> Self {
         Self {
             sequence: AtomicU64::new(0),
+            candidate_ready: AtomicBool::new(false),
+            evidence_gap: AtomicBool::new(false),
             inner: Mutex::new(AdaptiveRetryController::default_production()),
         }
     }
@@ -660,35 +667,125 @@ impl SharedAdaptiveRetryController {
     /// Returns the active [`BackoffPlan`] for a new whole-transaction operation.
     #[must_use]
     pub fn backoff_plan(&self, seed: u64) -> BackoffPlan {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.active_backoff_plan(seed)
+        // Read only a successfully published policy bit. A diagnostic snapshot
+        // or another observation cannot make an authority operation block on
+        // the optional statistics mutex. Shared controllers use only the fixed
+        // production configuration, so these are the same admitted bounds.
+        if self.inner.is_poisoned() {
+            self.evidence_gap.store(true, Ordering::Release);
+        }
+        if self.candidate_ready.load(Ordering::Acquire)
+            && !self.evidence_gap.load(Ordering::Acquire)
+        {
+            BackoffPlan::new(
+                CANDIDATE_BACKOFF_BASE_MS,
+                CANDIDATE_BACKOFF_CEILING_MS,
+                seed,
+            )
+        } else {
+            BackoffPlan::new(FALLBACK_BACKOFF_BASE_MS, FALLBACK_BACKOFF_CEILING_MS, seed)
+        }
     }
 
     /// Records the completion of one whole-transaction store operation.
+    /// Returns `None` when the observation cannot be retained without waiting
+    /// or its evidence stream is exhausted; either case selects the fallback.
     pub fn record_operation(
         &self,
         contended: bool,
         retry_attempts: u32,
     ) -> Option<AdaptiveRetryStep> {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        guard.observe(seq, contended, retry_attempts).ok()
+        self.record_observation(contended, retry_attempts, false)
+    }
+
+    /// Retain partial knowledge of an interrupted operation without treating
+    /// its missing terminal observation as support for the candidate policy.
+    pub(crate) fn record_incomplete(
+        &self,
+        contended: bool,
+        retry_attempts: u32,
+    ) -> Option<AdaptiveRetryStep> {
+        self.record_observation(contended, retry_attempts, true)
+    }
+
+    fn record_observation(
+        &self,
+        contended: bool,
+        retry_attempts: u32,
+        incomplete: bool,
+    ) -> Option<AdaptiveRetryStep> {
+        if incomplete {
+            self.evidence_gap.store(true, Ordering::Release);
+        }
+        let mut guard = match self.inner.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(error)) => {
+                self.evidence_gap.store(true, Ordering::Release);
+                error.into_inner()
+            }
+            Err(TryLockError::WouldBlock) => {
+                // Do not delay delivery of a committed/ambiguous authority
+                // result for statistics. Leave an actual hole in the stream,
+                // and make all subsequent selections fail closed immediately.
+                self.evidence_gap.store(true, Ordering::Release);
+                let _ = self.next_sequence();
+                return None;
+            }
+        };
+        if self.evidence_gap.load(Ordering::Acquire) {
+            guard.gate.set(FallbackTrigger::EvidenceGap);
+        }
+        if let Some(sequence) = self.next_sequence()
+            && let Ok(step) = guard.observe(sequence, contended, retry_attempts)
+        {
+            self.candidate_ready
+                .store(step.selection.admits_candidate(), Ordering::Release);
+            return Some(step);
+        }
+        // Counter exhaustion or a refused evidence body must not leave the
+        // previously selected candidate active. There is no new valid epoch
+        // evidence to report; retain old history but withdraw the current log.
+        guard.gate.set(FallbackTrigger::NumericBoundViolation);
+        guard.active_selection = guard.gate.select();
+        guard.current_evidence = None;
+        self.candidate_ready.store(false, Ordering::Release);
+        // Retire this stream rather than reuse a policy epoch after an
+        // overflow. A newly opened store starts a new, unsupported stream.
+        self.sequence.store(u64::MAX, Ordering::Relaxed);
+        None
+    }
+
+    fn next_sequence(&self) -> Option<u64> {
+        self.sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sequence| {
+                sequence.checked_add(1)
+            })
+            .ok()
+            .map(|previous| previous + 1)
     }
 
     /// Captures a point-in-time snapshot of the store's adaptive retry state.
     #[must_use]
     pub fn snapshot(&self) -> AdaptiveRetrySnapshot {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.snapshot()
+        let mut snapshot = match self.inner.lock() {
+            Ok(guard) => guard.snapshot(),
+            Err(error) => {
+                self.evidence_gap.store(true, Ordering::Release);
+                error.into_inner().snapshot()
+            }
+        };
+        if self.evidence_gap.load(Ordering::Acquire)
+            && snapshot.active_selection != PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
+        {
+            // A concurrent skipped record may not yet have acquired the lock
+            // to publish its fallback epoch. Do not present older candidate
+            // evidence as if it still selected the operational policy.
+            snapshot.active_selection = PolicySelection::Fallback(FallbackTrigger::EvidenceGap);
+            snapshot.active_base_ticks = FALLBACK_BACKOFF_BASE_MS;
+            snapshot.active_ceiling_ticks = FALLBACK_BACKOFF_CEILING_MS;
+            snapshot.current_evidence = None;
+        }
+        snapshot
     }
 }
 
@@ -727,6 +824,128 @@ pub const fn forbidden_targets() -> [ForbiddenTarget; 5] {
 mod tests {
     use super::*;
     use fgit_codec::decode_body;
+
+    #[test]
+    fn busy_statistical_record_never_blocks_selection_or_a_terminal_observation() {
+        let shared = SharedAdaptiveRetryController::new();
+        for _ in 0..DEFAULT_MIN_SUPPORT_OBSERVATIONS {
+            shared
+                .record_operation(false, 0)
+                .expect("valid observation");
+        }
+        let held = shared.inner.lock().expect("hold the statistical record");
+        let (before, skipped, after) = std::thread::scope(|scope| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let shared_ref = &shared;
+            let worker = scope.spawn(move || {
+                let before = shared_ref.backoff_plan(7);
+                let skipped = shared_ref.record_operation(true, 3);
+                let after = shared_ref.backoff_plan(7);
+                sender
+                    .send((before, skipped, after))
+                    .expect("test receiver");
+            });
+            let received = receiver.recv_timeout(std::time::Duration::from_secs(5));
+            // Release even on regression, so a blocking implementation fails
+            // the assertion instead of leaving the test suite deadlocked.
+            drop(held);
+            worker.join().expect("observer thread exits");
+            received.expect("statistical calls must return while the record lock is held")
+        });
+        assert_eq!(
+            before,
+            BackoffPlan::new(CANDIDATE_BACKOFF_BASE_MS, CANDIDATE_BACKOFF_CEILING_MS, 7)
+        );
+        assert_eq!(
+            skipped, None,
+            "statistics cannot wait behind another observer or diagnostic reader"
+        );
+        assert_eq!(
+            after,
+            BackoffPlan::new(FALLBACK_BACKOFF_BASE_MS, FALLBACK_BACKOFF_CEILING_MS, 7)
+        );
+        let snapshot = shared.snapshot();
+        assert_eq!(
+            snapshot.active_selection,
+            PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
+        );
+        assert_eq!(snapshot.current_evidence, None);
+        let retained = shared
+            .record_operation(false, 0)
+            .expect("retain the next sample");
+        assert_eq!(
+            retained.selection,
+            PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
+        );
+        assert_eq!(
+            retained.epoch_log.evidence.window.last(),
+            u64::from(DEFAULT_MIN_SUPPORT_OBSERVATIONS) + 2,
+            "the skipped observation must leave a real sequence hole"
+        );
+    }
+
+    #[test]
+    fn exhausted_shared_observation_stream_permanently_reverts_to_the_pinned_plan() {
+        let shared = SharedAdaptiveRetryController::new();
+        for _ in 0..DEFAULT_MIN_SUPPORT_OBSERVATIONS {
+            shared
+                .record_operation(false, 0)
+                .expect("valid observation");
+        }
+        assert_eq!(
+            shared.snapshot().active_selection,
+            PolicySelection::Candidate
+        );
+        shared.sequence.store(u64::MAX, Ordering::Relaxed);
+        for _ in 0..2 {
+            assert_eq!(shared.record_operation(false, 0), None);
+            let snapshot = shared.snapshot();
+            assert_eq!(
+                snapshot.active_selection,
+                PolicySelection::Fallback(FallbackTrigger::NumericBoundViolation)
+            );
+            assert_eq!(snapshot.current_evidence, None);
+            assert_eq!(
+                shared.backoff_plan(7),
+                BackoffPlan::new(FALLBACK_BACKOFF_BASE_MS, FALLBACK_BACKOFF_CEILING_MS, 7)
+            );
+        }
+    }
+
+    #[test]
+    fn poisoned_shared_observations_cannot_leave_a_candidate_plan_or_current_log() {
+        let shared = SharedAdaptiveRetryController::new();
+        for _ in 0..DEFAULT_MIN_SUPPORT_OBSERVATIONS {
+            shared
+                .record_operation(false, 0)
+                .expect("valid observation");
+        }
+        assert_eq!(
+            shared.snapshot().active_selection,
+            PolicySelection::Candidate
+        );
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = shared.inner.lock().expect("initial lock");
+            panic!("planted interruption during statistical observation");
+        });
+        assert!(panic.is_err());
+        assert_eq!(
+            shared.backoff_plan(7),
+            BackoffPlan::new(FALLBACK_BACKOFF_BASE_MS, FALLBACK_BACKOFF_CEILING_MS, 7)
+        );
+        let snapshot = shared.snapshot();
+        assert_eq!(
+            snapshot.active_selection,
+            PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
+        );
+        assert_eq!(snapshot.current_evidence, None);
+        let recovered = shared.record_operation(false, 0).expect("gap observation");
+        assert_eq!(
+            recovered.selection,
+            PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
+        );
+        assert!(recovered.published_epoch);
+    }
 
     #[test]
     fn planted_stream_with_too_little_data_selects_fixed_fallback() {
