@@ -287,6 +287,21 @@ and MCP retain their existing independent issue-write grants. Retrying an
 identical command recovers its original terminal outcome even if the issue is
 subsequently locked or unlocked.
 
+### Native standalone discussions
+
+`fg discussion` opens and edits repository discussions, records immutable
+authored comments, and closes/reopens or locks/unlocks a conversation. Exact
+predecessor versions prevent overwriting another writer, and original-key
+retries recover the historical terminal outcome after restart. Bounded list
+and history reads retain one authenticated repository snapshot.
+
+The CLI, authenticated HTTP endpoints, MCP tools, and
+`/{repository}/ui/discussions/` browser use the same native authority path.
+Discussion read/write grants are independent of issue and PR grants. The
+browser supports safe Markdown, prepared changes and saved recovery receipts.
+See [native discussions](docs/NATIVE_DISCUSSIONS.md) for commands, scopes,
+recovery, pagination and the initial lifecycle profile's limits.
+
 ### Native issue notifications
 
 Each principal can subscribe to, mute, or follow issue participation, and mark an

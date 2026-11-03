@@ -313,7 +313,7 @@ export function issueSearchPage(reply, input, options = {}) {
 }
 
 export function publication(reply, pending, status = 200, entity = 'issue') {
-  if (!['issue', 'milestone', 'notification'].includes(entity)) fail('Unsupported publication profile.');
+  if (!['issue', 'milestone', 'notification', 'discussion'].includes(entity)) fail('Unsupported publication profile.');
   identity(reply, pending.binding);
   if (entity === 'notification' && pending.binding?.principal && reply.principal_id !== pending.binding.principal) fail('Notification principal changed.');
   if (entity === 'issue' && pending.action === 'add-assignees' &&
@@ -392,7 +392,7 @@ export async function readJson(response, signal, maximum = MAX_REPLY_BYTES) {
 }
 function rootFor(href, kind = 'issue') {
   const page = new URL(href);
-  const suffix = kind === 'notification' ? '/ui/notifications/' : '/ui/issues/';
+  const suffix = kind === 'discussion' ? '/ui/discussions/' : kind === 'notification' ? '/ui/notifications/' : '/ui/issues/';
   if (page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix) ||
       !['https:', 'http:'].includes(page.protocol)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['127.0.0.1', '[::1]', 'localhost'].includes(page.hostname)) {
@@ -424,7 +424,7 @@ export class IssueClient {
     // This closed code profile never comes from a receipt or remote response;
     // it cannot choose an origin, route, recovery endpoint or key namespace.
     if (metadataProfile !== null && (!Object.isFrozen(metadataProfile) ||
-        Object.keys(metadataProfile).length !== 4 || !own(metadataProfile, 'kind') || !['milestone', 'notification'].includes(metadataProfile.kind) ||
+        Object.keys(metadataProfile).length !== 4 || !own(metadataProfile, 'kind') || !['milestone', 'notification', 'discussion'].includes(metadataProfile.kind) ||
         !['mutationRequest', 'page', 'history'].every(key => own(metadataProfile, key)) ||
         !['mutationRequest', 'page', 'history'].every(key => typeof metadataProfile[key] === 'function'))) {
       fail('Invalid native metadata client profile.');
@@ -434,8 +434,8 @@ export class IssueClient {
     this.#timeout = natural(timeoutMs, 'request timeout', 1, 300_000);
   }
   get #kind() { return this.#profile?.kind ?? 'issue'; }
-  get #family() { return this.#kind === 'notification' ? 'notifications' : this.#kind === 'milestone' ? 'milestones' : 'issues'; }
-  get #keyPrefix() { return this.#kind === 'notification' ? 'fgni' : this.#kind === 'milestone' ? 'fgmi' : 'fgui'; }
+  get #family() { return this.#kind === 'discussion' ? 'discussions' : this.#kind === 'notification' ? 'notifications' : this.#kind === 'milestone' ? 'milestones' : 'issues'; }
+  get #keyPrefix() { return this.#kind === 'discussion' ? 'fgdi' : this.#kind === 'notification' ? 'fgni' : this.#kind === 'milestone' ? 'fgmi' : 'fgui'; }
   get connected() { return Boolean(this.#token); }
   get busy() { return this.#busy; }
   get pending() {

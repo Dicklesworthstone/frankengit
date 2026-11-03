@@ -1114,8 +1114,9 @@ including a comment, requires the exact positive predecessor version. Missing
 or stale predecessors refuse with `EvidenceStale`. Closing requires an open
 discussion; reopening requires a closed one. Locking requires an unlocked
 discussion; unlocking requires a locked one. Repeating these transitions under
-a new key refuses with `PolicyDenied`. Closed discussions can receive comments
-while unlocked. Locking only stops new comments: title/body maintenance and
+a new key, or commenting while locked, refuses with
+`ProtectedRefTransitionDenied`. Closed discussions can receive comments while
+unlocked. Locking only stops new comments: title/body maintenance and
 open/closed state changes remain independently available. Opening authorship
 and all accepted comment events are immutable; later edits do not rewrite them.
 
