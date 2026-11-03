@@ -1081,6 +1081,81 @@ not an observed-remove set or commutative event ordering. Only independent
 additions whose union fits the bound have order-independent membership. Exact
 replacements and removals retain their original ordered preconditions.
 
+### 20.2.7 Native standalone discussions
+
+The canonical owner is `fgit-forge/src/event/discussion.rs`. A discussion is a
+repository-scoped aggregate distinct from an issue, PR conversation, milestone,
+or notification preference. Required aggregate escape kind **11**, after the
+existing zero `u64`, carries its positive discussion number as a big-endian
+`u64`; its stream label is `discussion/N`. Required event kind **24** carries a
+16-byte authenticated actor followed by a big-endian `u32` action tag. Existing
+aggregate and event encodings remain byte-identical. Older readers MUST refuse
+these unknown required kinds rather than silently omit discussion state.
+
+| Action tag | Action | Remaining canonical fields |
+| --- | --- | --- |
+| 1 | Open | Length-prefixed UTF-8 title, then body |
+| 2 | Edit | Title-present boolean and selected title, then body-present boolean and selected body |
+| 3 | Close | None |
+| 4 | Reopen | None |
+| 5 | Comment | Length-prefixed UTF-8 body |
+| 6 | Lock | None |
+| 7 | Unlock | None |
+
+Titles contain 1..256 UTF-8 bytes, must not be blank, and exclude control
+characters. Bodies contain at most 65,536 UTF-8 bytes and exclude NUL. Opening
+and replacement bodies may be empty; comments must contain non-whitespace text.
+An edit selects at least one field. Omission preserves a field; a selected empty
+body clears it. Text is untrusted data and never selects the actor, grants
+permissions, changes Git refs, or becomes a policy instruction.
+
+Creation requires `ExpectedVersion::NewStream`. Every subsequent action,
+including a comment, requires the exact positive predecessor version. Missing
+or stale predecessors refuse with `EvidenceStale`. Closing requires an open
+discussion; reopening requires a closed one. Locking requires an unlocked
+discussion; unlocking requires a locked one. Repeating these transitions under
+a new key refuses with `PolicyDenied`. Closed discussions can receive comments
+while unlocked. Locking only stops new comments: title/body maintenance and
+open/closed state changes remain independently available. Opening authorship
+and all accepted comment events are immutable; later edits do not rewrite them.
+
+The canonical event batch root is sealed under the distinct `forge` scope
+`discussion.event-batch-root.v1`, including the aggregate number, actor,
+expected version, action and exact text. Native admission replays authenticated
+current discussion history, enforces current policy, and publishes the event,
+forge position and one outbox obligation through the ordinary exact authority
+head CAS. Discussion commands use the strict CALM `HeadCasRequired` profile;
+they do not opt into predecessor-independent append replanning. The reference
+and transaction codecs use new metadata-only trace tag **13**. Discussion
+effects cannot substitute for an issue or PR event even when numeric identifiers
+coincide, and cannot imply a reference effect.
+
+A retry MUST retain its original key and complete command. A known terminal
+outcome is recovered, with the original seal rechecked, before new native
+intake or quota checks. A later edit, lock, close or reopen does not alter that
+historical outcome. A changed command under an existing key refuses. A lost
+reply, cancellation or nonterminal lookup never proves non-commit; callers
+retain the original recovery identity. Remote authentication and current
+transport grants still precede both mutation and recovery requests.
+
+List and history reads are bounded projections of one authenticated current
+or retained authority head, with no second canonical store. Lists use ascending
+discussion numbers; history uses contiguous aggregate versions. Every nonzero
+cursor requires the original snapshot token. Native pages contain 1..100 items;
+the scan bounds remain 65,536 events, 128 MiB of scanned bytes and 32 MiB retained
+for the selected discussion fold. Incomplete or malformed history refuses;
+pagination does not turn a prefix into complete aggregate state.
+
+HTTP deployment explicitly enables discussions and requires independent
+`discussions-read` or `discussions-write` credential scopes. Issue, source, PR,
+and Git grants do not imply either. MCP similarly enables discussion reads and
+writes independently of issue grants; mutation authorship comes from the
+launch-bound principal. Trusted-local CLI calls require explicit acknowledgement
+of operator-asserted identity. Rendered document presentations are derived and
+accompany unchanged raw text. Discussion categories, accepted answers, typed
+cross-references, migration, and discussion-specific notification preferences
+are outside this initial lifecycle profile.
+
 ### 20.3 Native protected-review quorums
 
 Repository review protection binds a sorted set of eligible reviewer principals

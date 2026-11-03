@@ -4,6 +4,7 @@ mod agent_context;
 mod artifacts;
 mod candidate;
 mod checks;
+mod discussions;
 mod events;
 mod history;
 mod issue_writes;
@@ -146,6 +147,9 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.extend(issues::tools());
         tools.extend(milestones::read_tools());
     }
+    if options.discussions {
+        tools.extend(discussions::read_tools());
+    }
     if options.pulls {
         tools.extend(pulls::tools());
         tools.push(checks::tool());
@@ -162,6 +166,9 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.writes.issues {
         tools.extend(issue_writes::tools());
         tools.extend(milestones::write_tools());
+    }
+    if options.writes.discussions {
+        tools.extend(discussions::write_tools());
     }
     if options.writes.pulls {
         tools.extend(pull_writes::tools());
@@ -198,6 +205,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         format: fgit_types::GitHashAlgorithm::Sha1,
         incarnation: Some(fgit_types::RepositoryIncarnationId::from_bytes([0x33; 16])),
         issues: true,
+        discussions: true,
         pulls: true,
         source: true,
         queues: super::QueueGrants {
@@ -210,6 +218,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         artifact_root: None,
         writes: super::WriteGrants {
             issues: true,
+            discussions: true,
             notifications: true,
             pulls: true,
             source: true,
@@ -236,6 +245,7 @@ impl ReadTools for NodeTools {
         (notifications::write_permitted(&self.options) && notifications::is_write(name))
             || (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.issues && milestones::is_write(name))
+            || (self.options.writes.discussions && discussions::is_write(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.pulls
                 && matches!(name, pull_comments::WRITE | pull_comments::APPEND))
@@ -271,6 +281,9 @@ impl ReadTools for NodeTools {
         if self.options.writes.issues && milestones::is_write(name) {
             return milestones::write(self, name, args);
         }
+        if self.options.writes.discussions && discussions::is_write(name) {
+            return discussions::write(self, name, args);
+        }
         if self.options.writes.pulls && pull_writes::is_tool(name) {
             return pull_writes::call(self, name, args);
         }
@@ -304,6 +317,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.issues && milestones::is_read(name) {
             return milestones::read(self, name, args);
+        }
+        if self.options.discussions && discussions::is_read(name) {
+            return discussions::read(self, name, args);
         }
         if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
             return pulls::call(self, name, args);
@@ -536,7 +552,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 75);
+        assert_eq!(server_names.len(), 84);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));

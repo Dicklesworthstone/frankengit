@@ -113,6 +113,7 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
             artifact_root: None,
             max_messages: maximum as usize,
             issues: false,
+            discussions: false,
             pulls: false,
             source: false,
             writes: Default::default(),

@@ -84,6 +84,7 @@ pub const fn classify_event(
                 IssueAction::AddLabels { .. } => ForgeOperation::IssueExactAddLabels,
             },
             ForgeEventPayload::MilestoneChangedNative(_) => ForgeOperation::MilestoneChange,
+            ForgeEventPayload::DiscussionChangedNative(_) => ForgeOperation::DiscussionChange,
             ForgeEventPayload::NotificationPreferenceChangedNative(_) => {
                 ForgeOperation::NotificationPreferenceChange
             }

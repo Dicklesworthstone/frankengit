@@ -168,6 +168,7 @@ fn seeded(format: GitHashAlgorithm, patch: &[u8]) -> (Scratch, NodeTools) {
         format,
         incarnation: Some(incarnation),
         issues: false,
+        discussions: false,
         pulls: false,
         source: true,
         writes: Default::default(),

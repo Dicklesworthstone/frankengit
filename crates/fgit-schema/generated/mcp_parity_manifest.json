@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 79,
+  "total_tools": 88,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -104,6 +104,96 @@
       "capability": "prepare_publication",
       "cli_command": "fg branch update",
       "rest_api_path": "PATCH /repos/{id}/branches/{ref}"
+    },
+    {
+      "tool": "frankengit_discussion_close",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion close",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/close"
+    },
+    {
+      "tool": "frankengit_discussion_comment",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion comment",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/comment"
+    },
+    {
+      "tool": "frankengit_discussion_edit",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion edit",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/edit"
+    },
+    {
+      "tool": "frankengit_discussion_list",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg discussion list",
+      "rest_api_path": "GET /{repository}/api/v1/discussions"
+    },
+    {
+      "tool": "frankengit_discussion_lock",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion lock",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/lock"
+    },
+    {
+      "tool": "frankengit_discussion_open",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion open",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/open"
+    },
+    {
+      "tool": "frankengit_discussion_reopen",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion reopen",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/reopen"
+    },
+    {
+      "tool": "frankengit_discussion_show",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg discussion show",
+      "rest_api_path": "GET /{repository}/api/v1/discussions/{number}"
+    },
+    {
+      "tool": "frankengit_discussion_unlock",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion unlock",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/unlock"
     },
     {
       "tool": "frankengit_events",

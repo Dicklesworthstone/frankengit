@@ -11,6 +11,7 @@ fn options() -> Options {
         format: GitHashAlgorithm::Sha1,
         incarnation: Some(RepositoryIncarnationId::from_bytes([3; 16])),
         issues: false,
+        discussions: false,
         pulls: false,
         source: false,
         writes: Default::default(),
@@ -43,6 +44,7 @@ impl ReadTools for Catalog {
 fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     let mut full = options();
     full.issues = true;
+    full.discussions = true;
     full.pulls = true;
     full.source = true;
     full.agent_context = true;
@@ -50,6 +52,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     full.outcomes = true;
     full.writes = crate::mcp::WriteGrants {
         issues: true,
+        discussions: true,
         notifications: true,
         pulls: true,
         source: true,
@@ -89,7 +92,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     let Value::Array(tools) = &reply.object().unwrap()["result"].object().unwrap()["tools"] else {
         panic!("missing discovery")
     };
-    assert_eq!(tools.len(), 75);
+    assert_eq!(tools.len(), 84);
     let names: std::collections::BTreeSet<_> = tools
         .iter()
         .map(|tool| tool.object().unwrap()["name"].text().unwrap())
@@ -98,7 +101,8 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     for tool in tools {
         let fields = tool.object().unwrap();
         let name = fields["name"].text().unwrap();
-        if milestones::is_write(name)
+        if discussions::is_write(name)
+            || milestones::is_write(name)
             || notifications::is_write(name)
             || matches!(
                 name,
@@ -159,6 +163,64 @@ fn milestone_catalog_reuses_only_each_explicit_issue_grant_and_declares_exact_fi
                     .map(String::as_str)
                     .collect();
                 assert_eq!(served, declared);
+                assert_eq!(schema["additionalProperties"], Value::Bool(false));
+            }
+        }
+    }
+}
+
+#[test]
+fn discussion_catalog_requires_its_own_grants_and_matches_registered_fields() {
+    for read in [false, true] {
+        for write in [false, true] {
+            let mut launch = options();
+            launch.issues = true;
+            launch.writes.issues = true;
+            launch.pulls = true;
+            launch.source = true;
+            launch.outcomes = true;
+            launch.discussions = read;
+            launch.writes.discussions = write;
+            let tools = tools_for_options(&launch);
+            for name in ["frankengit_discussion_list", "frankengit_discussion_show"] {
+                assert_eq!(tools.iter().any(|tool| tool.name == name), read);
+            }
+            for action in [
+                "open", "edit", "comment", "close", "reopen", "lock", "unlock",
+            ] {
+                let name = format!("frankengit_discussion_{action}");
+                assert_eq!(tools.iter().any(|tool| tool.name == name), write);
+            }
+            for tool in tools
+                .into_iter()
+                .filter(|tool| discussions::is_read(tool.name) || discussions::is_write(tool.name))
+            {
+                let contract = fgit_schema::mcp::find_tool(tool.name).unwrap();
+                let schema = tool.schema.object().unwrap();
+                let declared: std::collections::BTreeSet<_> = contract
+                    .input_fields
+                    .iter()
+                    .map(|field| field.name)
+                    .collect();
+                let served: std::collections::BTreeSet<_> = schema["properties"]
+                    .object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(served, declared, "{}", tool.name);
+                let Value::Array(required) = &schema["required"] else {
+                    panic!("required fields")
+                };
+                let required: std::collections::BTreeSet<_> =
+                    required.iter().map(|value| value.text().unwrap()).collect();
+                let registered: std::collections::BTreeSet<_> = contract
+                    .input_fields
+                    .iter()
+                    .filter(|field| field.required)
+                    .map(|field| field.name)
+                    .collect();
+                assert_eq!(required, registered, "{}", tool.name);
                 assert_eq!(schema["additionalProperties"], Value::Bool(false));
             }
         }

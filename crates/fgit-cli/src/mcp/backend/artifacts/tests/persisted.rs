@@ -58,6 +58,7 @@ impl Fixture {
                 format,
                 incarnation: Some(incarnation),
                 issues: false,
+                discussions: false,
                 pulls: false,
                 source: false,
                 queues: Default::default(),

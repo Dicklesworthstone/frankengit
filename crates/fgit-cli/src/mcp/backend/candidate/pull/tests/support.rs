@@ -218,6 +218,7 @@ impl Fixture {
             format,
             incarnation: Some(incarnation),
             issues: false,
+            discussions: false,
             pulls: true,
             source: true,
             writes: Default::default(),

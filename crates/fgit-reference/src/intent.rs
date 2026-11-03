@@ -143,7 +143,8 @@ impl ForgeStreamPosition {
 /// opening nor a closure. Detailed event bytes are separately bound by the
 /// sealed request and canonical forge-event batch.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ForgeEventKind {    /// A pull request was opened against a target ref.
+pub enum ForgeEventKind {
+    /// A pull request was opened against a target ref.
     PullRequestOpened {
         /// The pull request.
         pull_request: ForgeEntityId,
@@ -207,6 +208,10 @@ pub enum ForgeEventKind {    /// A pull request was opened against a target ref.
         queue: ForgeEntityId,
         target: RefName,
     },
+    /// Standalone discussion metadata; no source or reference effects.
+    DiscussionChanged {
+        discussion: ForgeEntityId,
+    },
     /// Milestone metadata only; issue membership remains an issue-owned event.
     MilestoneChanged {
         milestone: ForgeEntityId,
@@ -228,6 +233,7 @@ impl ForgeEventKind {
             | Self::PullRequestUpdated { .. }
             | Self::PullRequestReviewed { .. }
             | Self::IssueChanged { .. }
+            | Self::DiscussionChanged { .. }
             | Self::MilestoneChanged { .. }
             | Self::NotificationPreferenceChanged { .. }
             | Self::ReviewProtectionChanged { .. }
@@ -251,6 +257,7 @@ impl ForgeEventKind {
             Self::WorkflowCheckObserved { check, .. } => *check,
             Self::PullRequestCommented { conversation } => *conversation,
             Self::MergeQueueChanged { queue, .. } => *queue,
+            Self::DiscussionChanged { discussion } => *discussion,
             Self::MilestoneChanged { milestone } => *milestone,
             Self::NotificationPreferenceChanged { preference } => *preference,
         }

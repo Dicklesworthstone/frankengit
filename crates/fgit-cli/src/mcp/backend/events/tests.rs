@@ -185,6 +185,7 @@ fn open(scratch: &Scratch, format: GitHashAlgorithm, body: &str) -> NodeTools {
         format,
         incarnation: Some(incarnation),
         issues: true,
+        discussions: false,
         pulls: false,
         source: false,
         writes: Default::default(),

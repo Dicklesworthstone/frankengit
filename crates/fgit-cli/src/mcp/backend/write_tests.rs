@@ -14,6 +14,7 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 mod add_assignees;
 mod add_labels;
+mod discussions;
 mod locking;
 mod milestones;
 mod notifications;
@@ -66,10 +67,12 @@ impl Fixture {
             format: self.format,
             incarnation: Some(self.incarnation),
             issues: reads,
+            discussions: false,
             pulls: false,
             source: false,
             writes: super::super::WriteGrants {
                 issues: writes,
+                discussions: false,
                 ..Default::default()
             },
             outcomes,

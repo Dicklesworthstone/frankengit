@@ -61,6 +61,23 @@ pub(super) fn parse_snapshot(
 pub(super) fn quote(text: &str) -> String {
     output::quote(text)
 }
+pub(super) fn response_header(
+    node: &OneNode,
+    page: Page,
+    head: fgit_types::RepositoryAuthorityHeadId,
+) -> Result<String, ApiError> {
+    output::header(node, page, head)
+}
+pub(super) fn append_json(
+    output: &mut String,
+    value: &str,
+    maximum: usize,
+) -> Result<(), ApiError> {
+    self::output::append(output, value, maximum)
+}
+pub(super) fn optional_number(value: Option<u64>) -> String {
+    output::optional(value)
+}
 /// Derive a safe presentation only after the caller has selected and authorized
 /// the canonical text. Issue and PR responses share the same parser, profile,
 /// source commitment and typed rendering refusals; HTML never grants authority.

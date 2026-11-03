@@ -95,6 +95,7 @@ impl Fixture {
             incarnation: Some(incarnation),
             source: true,
             issues: false,
+            discussions: false,
             pulls: false,
             writes: Default::default(),
             outcomes: false,
