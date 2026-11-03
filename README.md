@@ -370,6 +370,17 @@ See [Native merge queues](docs/NATIVE_MERGE_QUEUE.md) for exact commands,
 [branch protection](docs/MANDATORY_REVIEW_PROTECTION.md) for queue-required
 policies, and the HTTP guide for upload limits and recovery.
 
+### Release-tag workflows
+
+Native trusted-local workflows can follow an explicit `refs/tags/*` release tag,
+including lightweight, annotated, and nested tags in SHA-1 and SHA-256
+repositories. Bounded `push.tags` / `tags-ignore` filters select releases; the
+runner executes the verified peeled commit while retaining the raw tag identity
+through dispatch, attempt custody, and restart recovery. Finite polling,
+continuous watching, and the HTTP workflow controller share this selection.
+Tag watches do not publish branch checks or select PR/queue candidates. See
+[native tag workflows](docs/NATIVE_TAG_WORKFLOW_WATCH.md) for commands and bounds.
+
 ### Retained outcome checkpoints
 
 `fg checkpoint outcomes` creates an authority-bound checkpoint of terminal

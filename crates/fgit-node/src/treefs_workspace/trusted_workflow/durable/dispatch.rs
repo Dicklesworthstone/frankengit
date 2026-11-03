@@ -227,6 +227,11 @@ impl OneNode {
                 "unsupported dispatch event",
             ));
         }
+        if event == "pull_request" && reference.as_bytes().starts_with(b"refs/tags/") {
+            return Err(TrustedWorkflowFailure::InvalidInput(
+                "pull_request dispatch requires a branch source",
+            ));
+        }
         limits
             .validate()
             .map_err(TrustedWorkflowFailure::Workflow)?;
@@ -312,7 +317,7 @@ impl OneNode {
         .with_file_budget(FETCH_OBJECTS);
         let observed = Mutex::new(None);
         let selected = self
-            .with_workspace_snapshot_in::<A, _>(
+            .with_workflow_snapshot_in::<A, _>(
                 request,
                 reference,
                 &Default::default(),
@@ -321,7 +326,7 @@ impl OneNode {
                 Some(expected.0),
                 Some(expected.1),
                 SOURCE_LIMITS.max_entry_bytes,
-                |base, source, capability, head, _| {
+                |base, source, capability, head, _, tag_tip| {
                     let result = (|| {
                         if !workspace_request_live(request)
                             || started.elapsed() >= limits.run_timeout
@@ -362,6 +367,7 @@ impl OneNode {
                             trigger_reference,
                             source,
                             path_basis,
+                            tag_tip,
                         )
                     })();
                     *observed
@@ -410,6 +416,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     trigger_reference: Option<&RefName>,
     source: &crate::treefs_workspace::NodeTreeSource<'_>,
     path_basis: Option<PathBasis>,
+    tag_tip: Option<GitOid>,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
@@ -427,7 +434,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     let mut definitions = Vec::new();
     let mut ids = BTreeSet::new();
     let (mut source_bytes, mut jobs, mut steps) = (0usize, 0usize, 0usize);
-    let mut branch_filtered = false;
+    let mut reference_filtered = false;
     let mut path_changes: Option<SourcePathChanges> = None;
     for entry in entries {
         if !live() {
@@ -444,16 +451,16 @@ fn dispatch_at<A: GitHashAlgorithm>(
             std::str::from_utf8(body).map_err(|_| invalid("workflow is not UTF-8"))?,
         )
         .map_err(TrustedWorkflowFailure::Workflow)?;
-        branch_filtered |= plan
-            .graph()
-            .triggers
-            .iter()
-            .any(|trigger| trigger.name == event && trigger.branch_filter.is_some());
-        if plan
-            .graph()
-            .triggers
-            .iter()
-            .any(|t| t.name == event && t.path_filter.is_some())
+        reference_filtered |= plan.graph().triggers.iter().any(|trigger| {
+            trigger.name == event
+                && (trigger.branch_filter.is_some() || trigger.tag_filter.is_some())
+        });
+        if !(event == "push" && reference.as_bytes().starts_with(b"refs/tags/"))
+            && plan
+                .graph()
+                .triggers
+                .iter()
+                .any(|t| t.name == event && t.path_filter.is_some())
             && path_changes.is_none()
         {
             let (before, mode, after) = path_basis.ok_or_else(|| invalid("path-filtered dispatch requires canonical event coordinates; use workflow watch"))?;
@@ -606,6 +613,9 @@ fn dispatch_at<A: GitHashAlgorithm>(
         limits.run_timeout.as_millis(),
         limits.total_output_bytes,
     );
+    if let Some(tip) = tag_tip {
+        write!(identity, ",\"source_tag_tip\":\"{tip}\"").expect("writing to a String cannot fail");
+    }
     if let Some(candidate) = candidate {
         write!(identity,
             ",\"input_kind\":\"unpublished_candidate\",\"executed_commit\":\"{}\",\"executed_tree\":\"{}\",\"candidate\":{{\"commit\":\"{}\",\"tree\":\"{}\",\"bundle_sha256\":\"{}\",\"admitted\":false}},\"merge\":{}",
@@ -633,8 +643,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
             oid(changes.before_tree), changes.after_tree, changes.paths.len(), hex(&sha256_digest(&bytes))
         ).expect("writing to a String cannot fail");
     }
-    if branch_filtered {
-        let selected_ref = trigger_reference.ok_or_else(|| invalid("missing trigger branch"))?;
+    if reference_filtered {
+        let selected_ref = trigger_reference.ok_or_else(|| invalid("missing trigger reference"))?;
         write!(
             identity,
             ",\"trigger_ref_hex\":\"{}\"",
@@ -712,7 +722,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
             ..limits
         };
         let run = run_inputs(node, request, inputs.shared(), capability, head, reference,
-            &definition.path, declared, definition.run_id, &batch_directory, child_limits, started, artifact_session.as_ref())
+            &definition.path, declared, definition.run_id, &batch_directory, child_limits, started, artifact_session.as_ref(), tag_tip)
             .map_err(|e| failed(format!("dispatch child {} failed: {e}; retain the batch and inspect its child journals, do not replay", hex(&definition.run_id))))?;
         let captured = run
             .execution

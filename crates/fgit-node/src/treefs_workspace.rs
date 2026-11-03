@@ -255,6 +255,43 @@ impl OneNode {
         ) -> Result<T, NodeWorkspaceRefusal>
         + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
+        self.with_workspace_snapshot_from_in(
+            request,
+            reference,
+            visibility,
+            capability,
+            now,
+            expected_head,
+            expected_commit,
+            None,
+            maximum_object_bytes,
+            consume,
+        )
+        .await
+    }
+
+    // Only the workflow reader supplies a verified tag binding. Ordinary
+    // browse/edit/tool callers continue to require a direct commit reference.
+    async fn with_workspace_snapshot_from_in<A: GitHashAlgorithm, T>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        now: u64,
+        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
+        expected_commit: Option<AnyOid>,
+        tag_binding: Option<(AnyOid, AnyOid)>,
+        maximum_object_bytes: usize,
+        consume: impl FnOnce(
+            &BaseView<A>,
+            &NodeTreeSource<'_>,
+            &mut TreeCapability,
+            fgit_types::RepositoryAuthorityHeadId,
+            u64,
+        ) -> Result<T, NodeWorkspaceRefusal>
+        + Send,
+    ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {
             return Err(NodeWorkspaceRefusal::RepositoryMismatch);
@@ -279,17 +316,27 @@ impl OneNode {
         if selected.snapshot().hidden_refs.hides(reference.as_bytes()) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
-        let commit = selected
+        let tip = *selected
             .snapshot()
             .refs
             .get(reference)
             .ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
+        let commit = if let Some((expected_tip, peeled)) = tag_binding {
+            if !reference.as_bytes().starts_with(b"refs/tags/") || tip != expected_tip {
+                return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
+                    SourceBrowseError::CommitMoved,
+                )));
+            }
+            peeled
+        } else {
+            tip
+        };
         if expected_head.is_some_and(|head| head != selected.basis().id()) {
             return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
                 SourceBrowseError::SnapshotMoved,
             )));
         }
-        if expected_commit.is_some_and(|expected| expected != *commit) {
+        if expected_commit.is_some_and(|expected| expected != commit) {
             return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
                 SourceBrowseError::CommitMoved,
             )));

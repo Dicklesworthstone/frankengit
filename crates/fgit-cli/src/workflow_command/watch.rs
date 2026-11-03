@@ -7,7 +7,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: fg workflow watch <storage-root> <tenant-id> <repository-id> <branch>
+const USAGE: &str =
+    "usage: fg workflow watch <storage-root> <tenant-id> <repository-id> <branch-or-tag>
   --trusted-local --workflow <repository-directory> --input <repository-path> [--input ...]
   --run-parent <absolute-private-directory> [--object-format sha1|sha256]
   [--pull-request <positive-native-pr-number> | --merge-queue <positive-queue-number>]
@@ -38,6 +39,9 @@ Trust ALL future selected workflow scripts with host-user privileges. This is
 Linux trusted-local execution, not a hostile-code sandbox or a remote listener.
 Canonical import, receive and merge ref changes qualify. Intermediate tips missed
 between polls are coalesced. Unrelated forge updates do not create a new event.
+Ordinary push watches accept explicit refs/heads/* or refs/tags/* references.
+Commit tags execute their peeled commit; a tag does not select a PR, merge queue
+or merge candidate and cannot publish canonical checks in this profile.
 The engine derives immutable event/run IDs; --event, --run-id, --expected-head and
 --expected-commit are not accepted. Retain the run parent across restart/restore.
 An unresolved event blocks later events; no script is automatically retried.
@@ -207,10 +211,24 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
         }
     }
     let execution = super::parse(&ordinary)?;
-    if !execution.reference.as_bytes().starts_with(b"refs/heads/") {
-        return Err("watch requires a branch ref".into());
+    let branch = execution.reference.as_bytes().starts_with(b"refs/heads/");
+    let tag = execution.reference.as_bytes().starts_with(b"refs/tags/");
+    if !branch && !tag {
+        return Err("watch requires an explicit branch or tag ref".into());
     }
     let merge_candidate = crate::workflow_merge_watch::parse(&merge_fields)?;
+    if tag
+        && (publish
+            || publisher.is_some()
+            || pull_request.is_some()
+            || merge_queue.is_some()
+            || merge_candidate.is_some())
+    {
+        return Err(
+            "tag watches support ordinary execution only; check publication, PR and queue modes require a branch"
+                .into(),
+        );
+    }
     if merge_queue.is_some() && pull_request.is_some() {
         return Err("--merge-queue and --pull-request are mutually exclusive".into());
     }

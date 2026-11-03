@@ -139,6 +139,7 @@ pub(super) fn parse(
     if let Some(artifacts) = artifact_config(flags, artifact_selections, artifact_inputs)? {
         config = config.with_artifacts(artifacts);
     }
+    config.validate().map_err(|error| error.to_string())?;
     Ok(Some(config))
 }
 
@@ -261,6 +262,66 @@ mod tests {
             .unwrap();
         arguments[at] = "--workflow-merge-queue".into();
         arguments
+    }
+
+    #[test]
+    fn tag_service_selects_ordinary_execution_without_implicit_publication() {
+        let mut arguments = server_arguments();
+        let at = arguments
+            .iter()
+            .position(|value| value == "--workflow-ref")
+            .unwrap();
+        arguments[at + 1] = "refs/tags/releases/v1".into();
+        let options = parse_server(&arguments).unwrap();
+        assert!(!options.allow_receive);
+        assert!(!options.allow_pulls);
+        let service = options.workflow_service.unwrap();
+        assert_eq!(service.reference().as_bytes(), b"refs/tags/releases/v1");
+        assert!(service.publisher().is_none());
+        assert!(service.pull_request().is_none());
+        assert!(service.pull_requests().is_none());
+        assert!(service.merge_queue().is_none());
+        assert!(service.merge_candidate().is_none());
+        assert!(service.validate().is_ok());
+    }
+
+    #[test]
+    fn tag_service_refuses_check_publication_pr_collection_and_merge_modes_before_io() {
+        let mut publication = server_arguments();
+        publication.extend([
+            "--workflow-publish-checks".into(),
+            "--workflow-principal".into(),
+            "77".repeat(16),
+            "--expected-incarnation".into(),
+            "88".repeat(16),
+        ]);
+        let mut pull_request = server_arguments();
+        pull_request.extend(["--workflow-pull-request".into(), "7".into()]);
+        let mut collection = server_arguments();
+        collection.extend([
+            "--workflow-pull-requests".into(),
+            "--expected-incarnation".into(),
+            "88".repeat(16),
+        ]);
+        for mut arguments in [
+            publication,
+            pull_request,
+            collection,
+            merge_arguments(),
+            queue_arguments(),
+        ] {
+            assert!(
+                parse_server(&arguments).is_ok(),
+                "branch selection: {arguments:?}"
+            );
+            let at = arguments
+                .iter()
+                .position(|value| value == "--workflow-ref")
+                .unwrap();
+            arguments[at + 1] = "refs/tags/v1".into();
+            let error = parse_server(&arguments).err().unwrap();
+            assert!(error.contains("branch"), "{error}");
+        }
     }
 
     #[test]
@@ -700,7 +761,10 @@ mod tests {
             ("--workflow-interval-ms", "9"),
             ("--workflow-interval-ms", "60001"),
             ("--workflow-pull-request", "0"),
-            ("--workflow-ref", "refs/tags/v1"),
+            ("--workflow-ref", "refs/notes/review"),
+            ("--workflow-ref", "refs/remotes/origin/main"),
+            ("--workflow-ref", "refs/heads-other/main"),
+            ("--workflow-ref", "refs/tags-other/v1"),
             ("--workflow-format", "sha512"),
             ("--workflow-run-parent", "relative"),
         ] {

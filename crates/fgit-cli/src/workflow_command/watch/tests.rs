@@ -272,6 +272,60 @@ fn defaults_and_finite_polling_options_parse_without_io() {
     assert_eq!(opts.polls, 10000);
     assert_eq!(opts.interval, Duration::from_millis(10));
 }
+
+#[test]
+fn tag_watch_accepts_explicit_names_for_finite_and_continuous_execution() {
+    for continuous in [false, true] {
+        let mut input = args();
+        input[4] = "refs/tags/releases/v1".into();
+        if continuous {
+            input.extend([
+                "--continuous".into(),
+                "--stop-file".into(),
+                "/private/tag.stop".into(),
+            ]);
+        }
+        let parsed = options(&input).unwrap();
+        assert_eq!(
+            parsed.execution.reference.as_bytes(),
+            b"refs/tags/releases/v1"
+        );
+        assert_eq!(parsed.stop_file.is_some(), continuous);
+        assert!(parsed.publisher.is_none());
+        assert!(parsed.pull_request.is_none());
+        assert!(parsed.merge_queue.is_none());
+        assert!(parsed.merge_candidate.is_none());
+    }
+    let mut input = args();
+    input[4] = "726566732f746167732fff".into();
+    input.push("--ref-hex".into());
+    assert_eq!(
+        options(&input).unwrap().execution.reference.as_bytes(),
+        b"refs/tags/\xff"
+    );
+}
+
+#[test]
+fn tag_watch_refuses_check_publication_and_pr_or_queue_modes_before_io() {
+    let mut publication = args();
+    publication.extend([
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "77".repeat(16),
+        "--expected-incarnation".into(),
+        "88".repeat(16),
+    ]);
+    let mut pull_request = args();
+    pull_request.extend(["--pull-request".into(), "7".into()]);
+    for mut input in [publication, pull_request, merge_args(), queue_args()] {
+        assert!(options(&input).is_ok(), "branch selection: {input:?}");
+        input[4] = "refs/tags/v1".into();
+        let error = options(&input).err().unwrap();
+        assert!(error.contains("tag watches support ordinary execution only"));
+        assert_eq!(run(&input).unwrap_err(), error);
+    }
+}
+
 #[test]
 fn continuous_lifetime_requires_explicit_control_and_preserves_finite_attempts() {
     let input = [
@@ -364,9 +418,16 @@ fn trust_namespace_count_and_interval_bounds_are_mandatory() {
     let mut input = args();
     input.retain(|a| a != "--trusted-local");
     assert!(options(&input).is_err());
-    let mut input = args();
-    input[4] = "refs/tags/v1".into();
-    assert!(options(&input).is_err());
+    for reference in [
+        "refs/notes/review",
+        "refs/remotes/origin/main",
+        "refs/heads-other/main",
+        "refs/tags-other/v1",
+    ] {
+        let mut input = args();
+        input[4] = reference.into();
+        assert!(options(&input).is_err(), "{reference}");
+    }
     for (flag, values) in [
         ("--polls", vec!["0", "10001", "01", "-1", "4294967296"]),
         ("--interval-ms", vec!["0", "9", "60001", "NaN", "1.0"]),

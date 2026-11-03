@@ -115,6 +115,7 @@ pub(super) fn reconstruct(
         head: head(text(fields, "observed_head")?)?,
         commit,
         previous_commit: None,
+        tag_update: None,
         batch: batch(text(fields, "decision_batch")?)?,
         event_head: head(text(fields, "event_head")?)?,
         pull: Some(pull),

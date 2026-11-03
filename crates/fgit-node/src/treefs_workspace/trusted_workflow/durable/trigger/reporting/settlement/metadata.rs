@@ -47,6 +47,31 @@ pub(super) fn dispatch(
     )?;
     let (trigger, candidate) = match text(event, "profile")? {
         "latest-canonical-ref-update-v1" => ("push", false),
+        "latest-canonical-tag-update-v1" => {
+            if !reference.as_bytes().starts_with(b"refs/tags/") {
+                return Err(invalid("tag settlement names a non-tag reference"));
+            }
+            let tip = GitOid::from_hex(node.object_format(), text(event, "tag_tip")?)
+                .map_err(|_| invalid("invalid original tag tip"))?;
+            if tip.is_zero() {
+                return Err(invalid("zero original tag tip"));
+            }
+            match event.get("previous_tag_tip") {
+                Some(Value::Null) => {}
+                Some(value) => {
+                    let previous = value
+                        .text()
+                        .ok_or_else(|| invalid("invalid prior tag tip"))?;
+                    let previous = GitOid::from_hex(node.object_format(), previous)
+                        .map_err(|_| invalid("invalid prior tag tip"))?;
+                    if previous.is_zero() {
+                        return Err(invalid("zero prior tag tip"));
+                    }
+                }
+                None => return Err(invalid("missing prior tag binding")),
+            }
+            ("push", false)
+        }
         "latest-canonical-pull-request-head-v1" => ("pull_request", false),
         "latest-canonical-pull-request-merge-v1" | "latest-canonical-queue-head-merge-v1" => {
             ("pull_request", true)
@@ -87,6 +112,12 @@ pub(super) fn dispatch(
     equal_text(plan, "source_commit", &sources.commit.to_string())?;
     equal_text(plan, "object_format", node.object_format().as_str())?;
     equal_text(plan, "workflow_directory_hex", &hex(workflow_directory))?;
+    if text(event, "profile")? == "latest-canonical-tag-update-v1" {
+        equal_text(plan, "source_tag_tip", text(event, "tag_tip")?)?;
+        equal_text(plan, "source_head", text(event, "observed_head")?)?;
+    } else if plan.contains_key("source_tag_tip") {
+        return Err(invalid("non-tag watch dispatch contains a tag tip"));
+    }
     if plan.contains_key("candidate")
         || plan.contains_key("merge")
         || plan
@@ -184,6 +215,7 @@ pub(super) fn marker(
         "source_head",
         "source_rcr",
         "source_tree",
+        "source_tag_tip",
         "read_prefixes_hex",
         "artifact_contract",
     ] {
