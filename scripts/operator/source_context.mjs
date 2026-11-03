@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { isCredentialToken } from './credential_token.mjs';
 
 export const LIMITS = Object.freeze({ response: 8 * 1024 * 1024, request: 256 * 1024,
   files: 32, anchors: 4096, windows: 128, source: 64 * 1024 * 1024, file: 8 * 1024 * 1024,
@@ -51,9 +52,12 @@ function readLabels(retrieval) {
   if (!Object.hasOwn(retrieval, 'authorization')) return { state: 'legacy-unlabelled' };
   const value = retrieval.authorization;
   keys(value, ['profile', 'host', 'principal', 'scope', 'binding', 'reusable_capability']);
-  if (value.profile !== READ_LABEL_PROFILE || !['trusted-local-native', 'trusted-local-cli', 'trusted-local-mcp', 'http-repository-read-credential'].includes(value.host) ||
+  const remote = ['http-repository-read-credential', 'http-sponsored-agent-source-read-credential'].includes(value.host);
+  if (value.profile !== READ_LABEL_PROFILE || !['trusted-local-native', 'trusted-local-cli', 'trusted-local-mcp', 'http-repository-read-credential',
+    'http-sponsored-agent-source-read-credential'].includes(value.host) ||
       value.scope !== 'whole-repository' || value.reusable_capability !== false ||
-      (value.host === 'http-repository-read-credential' ? typeof value.principal !== 'string' || !/^[0-9a-f]{32}$/.test(value.principal) : value.principal !== null)) fail('context_read_label_profile_changed');
+      (remote ? typeof value.principal !== 'string' || !/^[0-9a-f]{32}$/.test(value.principal) : value.principal !== null) ||
+      (value.host === 'http-sponsored-agent-source-read-credential' && /^0+$/.test(value.principal))) fail('context_read_label_profile_changed');
   return { state: 'labelled', profile: value.profile, host: value.host, principal: value.principal,
     scope: value.scope, binding: resultLabel(value.binding), reusable_capability: false };
 }
@@ -574,7 +578,7 @@ export function validate(reply, input, check = () => {}) {
 export async function acquire(address, credential, input, options = {}) {
   keys(options, ['signal', 'timeoutMs', 'ca'], []);
   const base = endpoint(address), prepared = command(input);
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('invalid_source_read_token');
+  if (!isCredentialToken(credential)) fail('invalid_source_read_token');
   const timeout = count(options.timeoutMs ?? 30000, 300000, 1), signal = options.signal;
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('invalid_context_signal');
   if (options.ca !== undefined && (!(options.ca instanceof Uint8Array) || !options.ca.length || options.ca.length > 256 * 1024 || !base.startsWith('https:'))) fail('invalid_context_ca');

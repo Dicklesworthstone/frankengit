@@ -30,8 +30,11 @@ applicable to the selected reference. A stale, uninitialized, unsupported or
 unavailable index is an error, not an empty successful context. This client
 never repairs that state or retries with weaker source expectations.
 
-Supply a source-read bearer token (the node's existing 64-character lowercase
-hex token format). Keep it in a regular, owner-owned `0600` file whose immediate
+Supply an ordinary 64-character lowercase hexadecimal read token or a native
+`fgagent_` token with an explicit `source-read` grant. Metadata grants do not
+imply source access. Capture, continuation and session commands accept both
+spellings and retain their existing source pins and budgets. Keep the token in
+a regular, owner-owned `0600` file whose immediate
 parent is an owner-owned `0700` directory. Query and optional CA files have the
 same requirements. Symlink components and multiply linked files are refused.
 Stable operator-controlled ancestors and a non-hostile same UID are assumed;
@@ -157,6 +160,11 @@ an unexplained excess, missing field or mixed labelled/unlabelled result fails.
 The normalized summary records the declared descriptor and metadata count;
 `capture.json` retains all original wire labels and references in
 `native_response`.
+
+The sponsored HTTP descriptor retains the native
+`http-sponsored-agent-source-read-credential` host and nonzero agent principal.
+It remains opaque read-result evidence, not client authentication, a reusable
+grant or an Agent Protocol ContextPacket.
 
 Older schema-1 responses without a descriptor are explicitly handled as legacy,
 unlabelled data. Their summary representation remains unchanged so independently
