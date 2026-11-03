@@ -63,14 +63,17 @@ export async function writeNew(path, bytes) {
   await directory(parent);
   const temporary = `${path}.writing-${randomBytes(16).toString('hex')}`;
   const handle = await open(temporary, F.O_CREAT | F.O_EXCL | F.O_WRONLY | F.O_NOFOLLOW, 0o600);
+  let failure, failed = false;
   try {
     await handle.writeFile(bytes); await handle.sync();
     await link(temporary, path);
-  } finally {
-    await handle.close();
-    await unlink(temporary);
-    await syncDirectory(parent);
+  } catch (error) { failure = error; failed = true; }
+  // Attempt every finalizer even if an earlier one fails. Preserve the first
+  // failure, and never unlink the visible destination after possible publication.
+  for (const cleanup of [() => handle.close(), () => unlink(temporary), () => syncDirectory(parent)]) {
+    try { await cleanup(); } catch (error) { if (!failed) { failure = error; failed = true; } }
   }
+  if (failed) throw failure;
 }
 export async function names(path, maximum) {
   const result = [], dir = await opendir(path);
