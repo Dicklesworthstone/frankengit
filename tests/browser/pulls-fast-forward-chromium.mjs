@@ -61,7 +61,7 @@ try {
     chrome.once('error', error => { clearTimeout(timer); reject(error); });
     chrome.stderr.on('data', bytes => { output = (output + bytes).slice(-16384); const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(output);
       if (match) { clearTimeout(timer); resolve(match[1]); } });
-    chrome.once('exit', code => { clearTimeout(timer); reject(new Error(`Chrome exited at startup: ${code}`)); });
+    chrome.once('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`Chrome exited at startup: ${signal ?? code}`)); });
   });
   socket = new WebSocket(endpoint); await once(socket, 'open');
   let serial = 0; const waiting = new Map();
@@ -126,7 +126,7 @@ try {
   console.log(JSON.stringify({ browser: version.product, cases: 6, errors, native_server: false }));
 } finally {
   socket?.close();
-  if (chrome && chrome.exitCode === null) { const stopped = once(chrome, 'exit'); chrome.kill('SIGTERM');
+  if (chrome && chrome.exitCode === null && chrome.signalCode === null) { const stopped = once(chrome, 'exit'); chrome.kill('SIGTERM');
     const kill = setTimeout(() => chrome.kill('SIGKILL'), 3000); await stopped; clearTimeout(kill); }
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await rm(profile, { recursive: true, force: true, maxRetries: 3 });
