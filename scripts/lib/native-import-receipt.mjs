@@ -2,6 +2,7 @@
 // crates/fgit-cli/src/bundle.rs::finish_import and transaction_outcome.rs::render.
 // Receipt interpretation is not a second authority or a synthetic transaction ID.
 import { importError, importJson } from './native-import-process.mjs';
+import { validateOutcomePrincipalProvenance } from '../operator/transaction_outcome.mjs';
 const label = v => typeof v === 'string' && v.length > 0 && v.length <= 256 && /^[\x21-\x7e]+$/.test(v);
 const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray(v)
   && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
@@ -26,9 +27,11 @@ function cleanup(v, exit, expected) {
 }
 export function readNativeOutcomeReceipt(result, intent) {
   const v = importJson(result.stdout);
+  const provenance = ['principal_provenance', 'provenance_error'].some(key => Object.hasOwn(v, key));
   if (!exact(v, ['type', 'schema_version', 'tenant_id', 'repository_id', 'principal_id', 'object_format',
     'key_digest', 'selector', 'command_index', 'state', 'terminal', 'transaction', 'decision', 'read_only',
-    'request_reexecuted', 'absence_proves_non_commit', 'session_completeness_established', 'node_closed', 'cleanup_error'])
+    'request_reexecuted', 'absence_proves_non_commit', 'session_completeness_established', 'node_closed', 'cleanup_error',
+    ...(provenance ? ['principal_provenance', 'provenance_error'] : [])])
     || v.type !== 'transaction_outcome' || v.selector !== 'transaction' || v.command_index !== null
     || v.read_only !== true || v.request_reexecuted !== false || v.absence_proves_non_commit !== false
     || v.session_completeness_established !== false || !nativeKeyDigest(v.key_digest)) throw importError('native_import_receipt_binding');
@@ -57,6 +60,12 @@ export function readNativeOutcomeReceipt(result, intent) {
     }
   } else if ((!missing && v.state !== 'undecided') || v.terminal !== false || v.decision !== null) throw importError('native_import_receipt_outcome');
   cleanup(v, result.code, exit);
+  if (provenance) {
+    try { validateOutcomePrincipalProvenance(v.principal_provenance, intent.principal_id, v.terminal, v.provenance_error); }
+    catch { throw importError('native_import_receipt_provenance'); }
+  }
+  // The native receipt retains original authentication evidence. Import's local
+  // observation schema and authority/cleanup checks do not change with it.
   return { outcome, terminal, transaction_id: v.transaction?.tx_id ?? null, key_digest: v.key_digest,
     node_closed: v.node_closed, cleanup_error: v.cleanup_error };
 }

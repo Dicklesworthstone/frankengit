@@ -38,11 +38,14 @@ function sequence(value) {
   return value;
 }
 function provenanceCounter(value) {
+  if (typeof value === 'bigint') value = String(value);
   if (typeof value === 'number') value = String(integer(value, 1, Number.MAX_SAFE_INTEGER));
   if (typeof value !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > U64_MAX) fail('invalid_outcome_provenance');
   return value;
 }
-function principalProvenance(value, scope, terminal, error) {
+export function validateOutcomePrincipalProvenance(value, principalId, terminal, error) {
+  identity(principalId);
+  if (typeof terminal !== 'boolean') fail('invalid_outcome_provenance');
   if (value?.state === 'unavailable') {
     fields(value, ['state']);
     if (!['original_principal_evidence_unavailable', 'response_limit'].includes(error)) fail('invalid_outcome_provenance');
@@ -54,7 +57,7 @@ function principalProvenance(value, scope, terminal, error) {
     return { state: 'not_terminal' };
   }
   fields(value, ['state', 'principal_id', 'authentication', 'agent_provenance']);
-  if (!terminal || value.principal_id !== scope.principal_id ||
+  if (!terminal || value.principal_id !== principalId ||
       !['recorded', 'legacy_unknown'].includes(value.state)) fail('invalid_outcome_provenance');
   const authentication = value.authentication;
   if (value.state === 'legacy_unknown' ? authentication !== null
@@ -65,7 +68,7 @@ function principalProvenance(value, scope, terminal, error) {
       'grant_root', 'run_commitment', 'authenticated_at', 'expires_at']);
     const nonzero = text => typeof text === 'string' && /^[0-9a-f]{64}$/.test(text) && !/^0+$/.test(text);
     const sponsor = identity(agent.sponsor);
-    if (agent.agent !== scope.principal_id || /^0+$/.test(agent.agent) || /^0+$/.test(sponsor) ||
+    if (agent.agent !== principalId || /^0+$/.test(agent.agent) || /^0+$/.test(sponsor) ||
         sponsor === agent.agent || !['human', 'service'].includes(agent.sponsor_kind) ||
         !nonzero(agent.credential_id) || !nonzero(agent.run_commitment)) fail('invalid_outcome_provenance');
     const root = fields(agent.grant_root, ['algorithm', 'hex']);
@@ -169,7 +172,7 @@ export function validateOutcomeReply(value, expected, known = null) {
     state: value.state, terminal: value.terminal, transaction, decision, read_only: true, request_reexecuted: false,
     absence_proves_non_commit: false, session_completeness_established: false };
   if (provenanceFields.length) {
-    checked.principal_provenance = principalProvenance(value.principal_provenance, scope, value.terminal, value.provenance_error);
+    checked.principal_provenance = validateOutcomePrincipalProvenance(value.principal_provenance, scope.principal_id, value.terminal, value.provenance_error);
     checked.provenance_error = value.provenance_error;
   }
   if (known !== null) {
