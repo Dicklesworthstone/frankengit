@@ -177,3 +177,21 @@ Recovered decisions keep their original key and full-width sequence with no
 second upload even after external inputs and the replay capture are removed.
 No Rust compilation, native authorization/admission/CAS, complete pack-closure,
 real-browser, semantic-compatibility or full-workspace claim follows from this lane.
+
+## Native operator integration
+
+The native workspace lane now consumes a real assembled draft, explicitly
+advances a different branch by a pinned-Git bundle and native expected-tip sync,
+and acquires a separately selected next source package. A changed-selected-file
+twin refuses. A next base with unchanged selected bytes and an unrelated file
+change yields the exact original patch with a new draft hash. Preparation and
+staging reject the old review hash before accepting the new one. Actual native
+publication/readback checks the new commit, full source bytes, modes, retained
+unselected change and both branches.
+
+Later original-key recovery leaves the earlier assembly journal's request and
+decision unchanged. Both capture inspectors run offline after the service drains;
+neither originals nor earlier publication custody are discarded or retargeted.
+See [native operator integration](REVIEWED_SOURCE_ASSEMBLY.md#native-operator-integration)
+for the exact source, older Rust provider, 53-assertion receipt and limitations.
+This does not add an ancestry claim, semantic merge or automatic mutation retry.

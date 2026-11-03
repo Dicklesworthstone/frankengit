@@ -190,3 +190,31 @@ The full composition tests use two real local editor captures in both hash domai
 through pack-verified preparation, staging and original-key lost-response recovery
 with no second upload. HTTP/TLS peers model native schemas and use Git only as a
 test oracle; they are not Rust fg or proof of native authority/admission/CAS.
+
+## Native operator integration
+
+The discovered [`operator/source_workspace.sh`](../scripts/e2e/suites/operator/source_workspace.sh)
+lane separately acquires native source packages and two real editing-workspace
+captures, assembles their disjoint changes, and prepares/stages/applies the result
+to an explicitly selected native branch. It checks overlapping-write and original
+review-pin refusals, byte-identical output under reversed contribution order,
+new combined consent, the complete candidate object inventory, canonical source
+bytes/modes and unchanged unrelated refs. Contributor labels remain local data.
+
+At client/harness source `224c0b1a11dcb53132e77a141adc8e9825e1b2f4`, the expanded
+lane completes 53 assertions in both hash domains, retaining the original 43.
+It also exercises exact replay and offline custody after normal service drain.
+Receipt: `/data/frankengit-targets/noble_operator_composition_224c0b1a_20261103/receipt.ndjson`.
+The supplied Rust binary is older source
+`a9d65885fde8a996c229827b3a86e136b2583bba`, SHA-256
+`95d06ddd1e10f696f4212df08c0c6d0e11b3e3e0a495cd435afb05f44633f2d1`.
+This is mixed-source integration, not current-source native qualification,
+authenticated contributor identity, semantic compatibility, hostile execution
+isolation, deployment or full operator/workspace acceptance.
+
+The targeted control disables only the composition service's receive ceiling
+while delegating every command to that same native binary. Assembly preparation
+and staging complete, but the actual apply receives HTTP 403. Its original
+dispatch remains `outcome_unknown` with no retry or replacement key; that HTTP
+status is not rollback proof. This is a capability-disabled control, not a
+route-removed build or the complete operator negative matrix.
