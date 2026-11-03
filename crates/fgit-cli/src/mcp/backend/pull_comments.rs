@@ -136,7 +136,7 @@ pub(super) fn append(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
         .authenticated_session()
         .ok_or(ToolError::invalid("principal_not_bound"))?
         .principal_id();
-    let context = fgit_cli::command_request_context(&backend.node);
+    let context = backend.command_context();
     let (tx, terminal) = backend
         .node
         .runtime()
@@ -171,7 +171,7 @@ pub(super) fn append_comment(backend: &NodeTools, args: &Object) -> Result<Value
     command
         .commitment_event(principal)
         .map_err(|_| ToolError::invalid("invalid_pull_comment"))?;
-    let context = fgit_cli::command_request_context(&backend.node);
+    let context = backend.command_context();
     let (tx, terminal) = backend
         .node
         .runtime()
@@ -264,7 +264,7 @@ pub(super) fn read(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let query = query(args)?;
-    let context = fgit_cli::command_request_context(&backend.node);
+    let context = backend.command_context();
     let page = backend
         .node
         .runtime()

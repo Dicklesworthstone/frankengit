@@ -575,7 +575,11 @@ fn mcp_mutation_annotations_notifications_and_stopped_intake_preserve_outcome_se
     )
     .unwrap();
     let mut stopped = ProtectionTools {
-        backend: NodeTools { node, options },
+        backend: NodeTools {
+            node,
+            options,
+            agent: None,
+        },
         read: false,
         write: true,
     };

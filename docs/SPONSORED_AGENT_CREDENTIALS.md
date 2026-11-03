@@ -3,7 +3,7 @@
 This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP issue, pull-request metadata and conversation, standalone discussion, and
-single-transaction outcome endpoints. Each request creates a real bounded
+single-transaction outcome endpoints, plus the explicit MCP metadata profile. Each request creates a real bounded
 `IntentRun`; the bearer alone is not an execution or publication capability.
 
 ## Issue and use a credential
@@ -88,8 +88,61 @@ observation schema. This grants no agent source-import capability.
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
 Source/Git access, candidate preparation, reviews, checks, merges, queue operations,
 milestones, notifications, policy administration, artifact access, process
-execution, secrets and external effects are outside this profile. MCP continues
-to use its existing trusted-local operator profile.
+execution, secrets and external effects are outside this profile. MCP also keeps
+its separate trusted-local operator profile with its existing grants.
+
+## Use the credential with MCP
+
+Launch either `fg mcp` or the standalone `fg-mcp` with the private credential
+file and the exact repository incarnation. Select each desired metadata ceiling
+explicitly:
+
+```sh
+fg mcp ./repository TENANT_ID REPOSITORY_ID \
+  --agent-token-file ./agent.token --expected-incarnation INCARNATION_ID \
+  --allow-issues --allow-issue-writes \
+  --allow-pulls --allow-pull-writes --allow-outcomes
+```
+
+`--agent-token-file` and `--trusted-local` are mutually exclusive. Agent mode
+rejects `--principal`: the canonical credential supplies the agent and sponsor.
+The file is read once at launch using the same bounded private-file reader as
+credential issuance. Its contents are never accepted in tool arguments, printed
+in receipts, or included in debug formatting. Replacing the file cannot retarget
+an already running process; restart it to select a replacement credential.
+
+The selected launch flags are ceilings, independently intersected with the
+canonical credential on every tool call. Listing a tool does not authorize it.
+A write-only launch exposes writes without read or recovery tools, and a
+credential with only a write scope cannot use a separately selected read ceiling.
+Discussion reads and writes use `--allow-discussions` and
+`--allow-discussion-writes`. No metadata grant exposes the operator profile's
+additional milestone, notification, check, review, event-feed, source, queue,
+artifact, agent-context or administration tools. An unknown or unsupported tool
+is refused before credential or repository lookup.
+
+Each call authenticates the current canonical grant and constructs a fresh
+`IntentRun` bound to the complete canonical MCP tool name and arguments, its
+single operation scope, and the original durable key. JSON-RPC IDs are transport
+identifiers; retry an identical mutation with a new JSON-RPC ID and the same
+`idempotency_key`. Reads use a fixed non-publication key. Writes and outcome
+recovery receive the verified agent session, original key and monotonic deadline;
+no caller field can replace them. Native admission still revalidates the grant
+at publication. Own-principal outcome recovery retains the original decision
+and sponsored principal evidence after rotation; another agent cannot read that
+key. MCP response schemas are unchanged.
+
+The request reserves the transport's 256 KiB framing ceiling and 8 MiB response
+ceiling plus its final LF; ordinary metadata JSON still has the existing 64 KiB
+parser limit. Its deadline is bounded by credential expiry, 300 seconds, and any
+shorter command timeout. Awaited node work uses the remaining deadline. The
+completed reservation survives result construction and response encoding, and
+stdio checks its deadline and emitted bytes before and after each write of at
+most 16 KiB and around the final flush. Expiry or output failure closes the
+session before another request executes. A blocking stdio write is cooperative:
+bytes already handed to the operating system cannot be withdrawn, and the
+checks do not promise preemption of that write. A partial reply or expired
+response never proves that a submitted mutation did not commit.
 
 ## Inspect, revoke and rotate
 
@@ -186,8 +239,13 @@ work. The request-run commitment is provenance, not a durable execution journal.
 
 The implementation adds canonical codec/lifecycle, authentication, policy replay,
 legacy-method downgrade, real-node restart/revocation, private-token CLI, and real
-TCP HTTP regression tests. Their presence is a coverage inventory, not a passing
-test result.
+TCP HTTP regression tests. The MCP extension adds real persisted-node tests for
+all seven independent scopes, issue/PR/discussion publication, current-request
+revocation, expiry, repository/incarnation binding, restart, credential rotation,
+own-principal recovery, and retained sponsor evidence in both Git object formats.
+Deterministic protocol writers cover expiry before disclosure, partial writes,
+interrupted writes, flush, byte ceilings, and response-reservation cleanup. Their
+presence is a coverage inventory, not a passing test result.
 
 `tests/operator/sponsored_metadata_credentials.test.mjs` covers both private
 token spellings, exact fingerprints, closed provenance shapes and u64 times,
@@ -231,6 +289,9 @@ cargo test --locked -p fgit-admission agent -j 1
 cargo test --locked -p fgit-node --lib agent_credentials -j 1 -- --test-threads=1
 cargo test --locked -p fgit-node --lib socket_authority_expiry_survives_report_restart_and_cannot_be_extended -j 1
 cargo test --locked -p fgit-cli agent_credentials -j 1
+cargo test --locked -p fgit-cli --bin fg-mcp mcp::backend::agent::tests -j 1 -- --test-threads=1
+cargo test --locked -p fgit-cli --bin fg-mcp agent_response_tests -j 1
+cargo test --locked -p fgit-cli --bin fg-mcp agent_grant_tests -j 1
 ```
 
 No bead completion or dependent build success is claimed by this profile's

@@ -3,6 +3,7 @@
 //! Minimal command-line surface for the one-process node slice.
 
 pub mod agent_context;
+pub mod agent_credential_token;
 pub mod agent_tasks;
 
 mod at;

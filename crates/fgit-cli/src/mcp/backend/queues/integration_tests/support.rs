@@ -158,6 +158,7 @@ impl Fixture {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             writes: Default::default(),
             outcomes: true,
             principal: Some(actor()),

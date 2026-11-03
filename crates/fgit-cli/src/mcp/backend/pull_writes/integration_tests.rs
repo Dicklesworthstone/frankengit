@@ -50,6 +50,7 @@ impl Fixture {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             max_messages: 64,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
@@ -297,10 +298,11 @@ fn native_pr_lifecycle_is_versioned_read_independent_and_recoverable_after_reope
         assert_eq!(result(&closed)["refs_changed"], Value::Bool(false));
         let held = head(&backend.node);
         let config = config(&backend.options);
-        let NodeTools { node, options } = backend;
+        let NodeTools { node, options, .. } = backend;
         node.shutdown().unwrap();
         // No bring-into-service: terminal recovery must precede fresh-write intake.
         let mut stopped = NodeTools {
+            agent: None,
             node: OneNode::open_existing(config).unwrap(),
             options,
         };

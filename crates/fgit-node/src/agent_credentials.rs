@@ -165,10 +165,11 @@ impl OneNode {
             .find(|state| state.id == id))
     }
 
-    /// Authenticate one host-bounded request. The HTTP adapter supplies the
-    /// actual route class, retry key and enforced byte ceilings. No credential
+    /// Authenticate one host-bounded request. The transport adapter supplies the
+    /// actual operation class, retry key, complete request commitment and enforced
+    /// byte ceilings. No credential
     /// or run survives as a cache for a subsequent request.
-    pub(crate) async fn authenticate_agent_request_in(
+    pub async fn authenticate_agent_request_in(
         &self,
         request: &NodeRequestContext,
         bearer: &[u8],
@@ -297,6 +298,7 @@ impl OneNode {
             run,
             authentication,
             operation,
+            key: key.clone(),
             deadline: origin
                 + std::time::Duration::from_secs(expiry)
                     .checked_sub(wall)
@@ -308,18 +310,52 @@ impl OneNode {
     }
 }
 
-/// A single request reservation. Its bytes are the actual HTTP input/output
-/// envelopes, not a claim to measure total CPU, memory, storage or billing.
-pub(crate) struct AgentRequest {
+/// A single request reservation. Its bytes bound the transport input/output
+/// envelopes, not total CPU, memory, storage or billing. Adapters must enforce
+/// those envelopes, check expiry before disclosure, and discard this reservation
+/// after the request. This type intentionally has no secret-bearing `Debug`.
+pub struct AgentRequest {
     pub(crate) authentication: AgentAuthentication,
     run: IntentRun,
     pub(crate) operation: u16,
+    key: IdempotencyKey,
     deadline: Instant,
 }
 
 impl AgentRequest {
     pub(crate) fn deadline(&self) -> Instant {
         self.deadline
+    }
+
+    /// Attenuate the request to the adapter's original transport deadline.
+    /// A host may shorten this ceiling but cannot extend the verified grant.
+    pub fn constrain_deadline(&mut self, deadline: Instant) {
+        self.deadline = self.deadline.min(deadline);
+    }
+
+    /// Carry the verified principal, sponsor, original retry key and monotonic
+    /// expiry into native metadata admission or own-principal outcome recovery.
+    /// The caller cannot replace the key used to authenticate this request.
+    #[must_use]
+    pub fn authenticated_session(&self) -> LoopbackReceiveSession {
+        LoopbackReceiveSession::Authenticated(
+            crate::AuthenticatedReceiveSession::new(self.authentication.agent(), self.key.clone())
+                .with_authentication(AdmissionAuthentication::AgentCredential(
+                    self.authentication,
+                ))
+                .with_agent_deadline(Some(self.deadline)),
+        )
+    }
+
+    /// Mint awaited authority work under the remaining request deadline. A new
+    /// adapter phase never refreshes the lifetime of a verified agent request.
+    #[must_use]
+    pub fn context(&self, node: &OneNode) -> NodeRequestContext {
+        node.session_request_context_with_timeout(
+            self.deadline
+                .saturating_duration_since(Instant::now())
+                .min(node.git_daemon_session_timeout.duration()),
+        )
     }
 
     #[cfg(test)]
@@ -333,7 +369,7 @@ impl AgentRequest {
         )
     }
 
-    pub(crate) fn check(
+    pub fn check(
         &self,
         input_bytes: u64,
         output_bytes: u64,

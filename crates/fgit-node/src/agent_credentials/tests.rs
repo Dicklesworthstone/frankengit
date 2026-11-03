@@ -617,3 +617,36 @@ fn authentication_enforces_scope_expiry_binding_request_budgets_and_cancellation
     other.shutdown().unwrap();
     node.shutdown().unwrap();
 }
+
+#[test]
+fn adapter_api_keeps_the_original_key_and_only_shortens_request_authority() {
+    let scratch = Scratch::new();
+    let node = scratch.node(GitHashAlgorithm::Sha256);
+    let token = bearer('c');
+    committed(credential(
+        &node,
+        &issue_command(&token, grant(&node)),
+        actor(1),
+        "adapter-credential",
+    ));
+    let mut run = authentication(&node, &token, "original-adapter-key", ISSUES_WRITE);
+    let session = run.authenticated_session();
+    let authenticated = session.authenticated_session().unwrap();
+    assert_eq!(
+        authenticated.client_idempotency_key(),
+        &key("original-adapter-key")
+    );
+    assert_eq!(authenticated.principal_id(), actor(2));
+    assert_eq!(
+        authenticated.authentication(),
+        AdmissionAuthentication::AgentCredential(run.authentication)
+    );
+    assert!(run.context(&node).is_live());
+    let original_deadline = run.deadline();
+    run.constrain_deadline(original_deadline + std::time::Duration::from_secs(60));
+    assert_eq!(run.deadline(), original_deadline);
+    run.constrain_deadline(Instant::now() - std::time::Duration::from_secs(1));
+    assert!(!run.context(&node).is_live());
+    assert!(run.check(0, 0).is_err());
+    node.shutdown().unwrap();
+}

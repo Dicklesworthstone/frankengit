@@ -57,6 +57,7 @@ impl Fixture {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             max_messages: 64,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
@@ -295,9 +296,10 @@ fn append_comments_keep_one_original_outcome_across_other_comments_and_stopped_i
         injected.insert("expected_version".into(), text("3"));
         assert!(backend.call(APPEND, &injected).is_err());
 
-        let NodeTools { node, options } = backend;
+        let NodeTools { node, options, .. } = backend;
         node.shutdown().unwrap();
         let mut stopped = NodeTools {
+            agent: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };
@@ -390,9 +392,10 @@ fn comments_are_durable_independent_and_identical_retries_survive_stopped_intake
             backend.call(READ, &read_args()).unwrap().object().unwrap()["snapshot_token"],
             held
         );
-        let NodeTools { node, options } = backend;
+        let NodeTools { node, options, .. } = backend;
         node.shutdown().unwrap();
         let mut stopped = NodeTools {
+            agent: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };

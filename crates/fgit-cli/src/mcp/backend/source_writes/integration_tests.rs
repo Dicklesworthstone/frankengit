@@ -56,6 +56,7 @@ impl Fixture {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             max_messages: 128,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
@@ -395,9 +396,10 @@ fn source_publish_pr_review_and_atomic_branch_lifecycle_compose_in_both_hash_dom
         committed(&deleted);
         let held = state(&backend.node);
         assert!(!held.1.contains_key(&reference("refs/heads/renamed")));
-        let NodeTools { node, options } = backend;
+        let NodeTools { node, options, .. } = backend;
         node.shutdown().unwrap();
         let mut stopped = NodeTools {
+            agent: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };

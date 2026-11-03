@@ -172,7 +172,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     command
         .proposed_event(principal, backend.options.format)
         .map_err(|_| ToolError::invalid("invalid_pull_request_command"))?;
-    let context = fgit_cli::command_request_context(&backend.node);
+    let context = backend.command_context();
     let (tx, terminal) = backend
         .node
         .runtime()

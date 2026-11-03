@@ -1,5 +1,6 @@
 //! Real node operations, not fixtures or a CLI subprocess. Grants and principal
 //! are fixed at launch; repository text never selects an admission identity.
+mod agent;
 mod agent_context;
 mod artifacts;
 mod candidate;
@@ -38,6 +39,7 @@ use fgit_types::{
 pub(super) struct NodeTools {
     node: OneNode,
     options: Options,
+    agent: Option<agent::Profile>,
 }
 impl NodeTools {
     pub(super) fn open(options: Options) -> Result<Self, String> {
@@ -54,6 +56,9 @@ impl NodeTools {
             fgit_schema::mcp::REGISTRY,
         )
         .map_err(|error| error.to_string())?;
+        // Read the bounded private secret before acquiring repository/runtime
+        // resources. The file is selected at launch, never by tool arguments.
+        let agent = agent::Profile::load(&options)?;
         let mut config =
             NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
                 .with_object_format(options.format)
@@ -103,7 +108,11 @@ impl NodeTools {
                 Err(_) => Err(format!("{error}; MCP node shutdown also failed")),
             };
         }
-        Ok(Self { node, options })
+        Ok(Self {
+            node,
+            options,
+            agent,
+        })
     }
     pub(super) fn close(self) -> Result<(), String> {
         self.node.shutdown().map_err(|_| {
@@ -125,6 +134,23 @@ impl NodeTools {
             unreachable!()
         };
         fields
+    }
+
+    fn command_context(&self) -> fgit_node::NodeRequestContext {
+        if let Some(request) = self
+            .agent
+            .as_ref()
+            .and_then(|profile| profile.request.as_ref())
+        {
+            return request.context(&self.node);
+        }
+        let context = fgit_cli::command_request_context(&self.node);
+        if self.options.agent_token_file.is_some() {
+            // A metadata adapter reached outside its authenticated call cannot
+            // acquire the trusted-local command budget as a fallback.
+            context.cancel();
+        }
+        context
     }
 }
 
@@ -194,6 +220,9 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.source {
         tools.extend(history::tools());
     }
+    if options.agent_token_file.is_some() {
+        tools.retain(|tool| agent::operation(options, tool.name).is_some());
+    }
     tools
 }
 
@@ -216,6 +245,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         agent_context: true,
         artifacts: true,
         artifact_root: None,
+        agent_token_file: None,
         writes: super::WriteGrants {
             issues: true,
             discussions: true,
@@ -238,10 +268,27 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
 }
 
 impl ReadTools for NodeTools {
+    fn begin_message(&mut self) {
+        if let Some(profile) = &mut self.agent {
+            profile.response = None;
+        }
+    }
+    fn response_checkpoint(&self, output_bytes: u64) -> Result<(), &'static str> {
+        if let Some(profile) = &self.agent {
+            agent::response_checkpoint(profile, output_bytes)?;
+        }
+        Ok(())
+    }
+    fn finish_response(&mut self) {
+        self.begin_message();
+    }
     fn tools(&self) -> Vec<Tool> {
         tools_for_options(&self.options)
     }
     fn is_mutation(&self, name: &str) -> bool {
+        if self.options.agent_token_file.is_some() {
+            return agent::operation(&self.options, name).is_some_and(agent::is_write);
+        }
         (notifications::write_permitted(&self.options) && notifications::is_write(name))
             || (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.issues && milestones::is_write(name))
@@ -263,6 +310,16 @@ impl ReadTools for NodeTools {
                 == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        if self.options.agent_token_file.is_some() {
+            return agent::call(self, name, args);
+        }
+        self.call_granted(name, args)
+    }
+}
+
+impl NodeTools {
+    /// Dispatch only after the selected launch profile has checked its boundary.
+    fn call_granted(&self, name: &str, args: &Object) -> Result<Value, ToolError> {
         if notifications::read_permitted(&self.options) && notifications::is_read(name) {
             return notifications::read(self, name, args);
         }
