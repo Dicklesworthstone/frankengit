@@ -230,6 +230,71 @@ def forge_case(campaign: OperatorCampaign, server: HttpServer, directory: Path, 
             "fresh forge snapshot did not preserve canonical events")
     campaign.facts[f"{fmt}_forge_retained_reads_and_unknown_pin_refusal"] = True
 
+    # Exercise the existing predecessor-independent assignment intent through
+    # the shipped CLI. Keep all prior history/pagination assertions above.
+    def metadata_change(action: str, name: str, fields: list[str], version=None):
+        record = directory / f"forge-additive-{name}.json"
+        arguments = ["--number", "2", "--record", str(record), *fields]
+        if version is not None:
+            arguments += ["--expected-version", str(version)]
+        result = command(action, arguments)
+        require(result["state"] == "terminal_observed" and result["result"]["outcome"] == "committed",
+                f"forge additive counterpart {name} did not commit")
+        return result, record
+
+    a, b, c, d = (value * 16 for value in ("41", "52", "63", "74"))
+    metadata_change("assign", "existing", ["--assignee", a], 8)
+    metadata_change("close", "close", [], 9)
+    metadata_change("lock", "lock", [], 10)
+    before = canonical("2")
+    added, record = metadata_change("add-assignees", "add", ["--assignee", c, "--assignee", b])
+    original = record.read_bytes()
+    request = json.loads(original)["receipt"]["request"]
+    require(request["action"] == "add-assignees" and request["expected_version"] is None
+            and request["fields"] == {"assignees": [b, c]}
+            and request["body"] == f"assignee={b}&assignee={c}",
+            "additive operator invented a predecessor or changed its exact delta")
+    observed = canonical("2")
+    require(observed["issue"]["version"] == 12 and observed["issue"]["assignees"] == [a, b, c]
+            and {k: v for k, v in observed["issue"].items() if k not in ("version", "assignees")}
+            == {k: v for k, v in before["issue"].items() if k not in ("version", "assignees")}
+            and observed["issue"]["state"] == "closed" and observed["issue"]["locked"] is True
+            and observed["events"][-1]["action"] == {"name": "assign", "assignees": [b, c]},
+            "Rust did not retain the additive union and unrelated locked/closed metadata")
+    campaign.facts[f"{fmt}_forge_additive_assignees"] = True
+
+    metadata_change("unassign", "remove", ["--assignee", b], 12)
+    removed = canonical("2")
+    require(removed["issue"]["version"] == 13 and removed["issue"]["assignees"] == [a, c],
+            "strict removal did not select its exact Rust predecessor")
+    for operation in ("status", "retry"):
+        recovered = command(operation, ["--record", str(record)])
+        require(recovered["state"] == "terminal_observed" and recovered["mutation_submitted"] is False
+                and recovered["result"]["tx"] == added["result"]["tx"]
+                and recovered["result"]["rcr"] == added["result"]["rcr"]
+                and record.read_bytes() == original and canonical("2") == removed,
+                "old additive recovery reapplied a removed assignee or changed its original request")
+    campaign.facts[f"{fmt}_forge_additive_recovery"] = True
+
+    denied_record = directory / "forge-additive-grant.json"
+    grants("issues-read,outcomes-read")
+    denied = command("add-assignees", ["--number", "2", "--assignee", d,
+                                       "--record", str(denied_record)], 2, error_reply=True)
+    require(denied["state"] == "submitted_unknown" and denied["http_status"] == 403
+            and canonical("2") == removed, "denied additive write changed native state")
+    saved = denied_record.read_bytes()
+    unknown = command("status", ["--record", str(denied_record)], 2)
+    require(unknown["state"] == "unresolved" and unknown["mutation_submitted"] is False
+            and unknown["absence_proves_non_commit"] is False and canonical("2") == removed,
+            "missing additive outcome claimed non-commit or reapplied a request")
+    grants("issues-read,issues-write,outcomes-read")
+    permitted = command("retry", ["--record", str(denied_record)])
+    final = canonical("2")
+    require(permitted["mutation_submitted"] is True and permitted["result"]["outcome"] == "committed"
+            and denied_record.read_bytes() == saved and final["issue"]["version"] == 14
+            and final["issue"]["assignees"] == [a, c, d], "restored grant lost the original additive delta")
+    campaign.facts[f"{fmt}_forge_additive_grant_twins"] = True
+
 
 def run_case(campaign: OperatorCampaign, fmt: str) -> None:
     directory = campaign.work / fmt

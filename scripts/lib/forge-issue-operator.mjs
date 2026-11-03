@@ -44,7 +44,8 @@ const Client = milestone ? MilestoneClient : IssueClient;
 const request = milestone ? milestoneMutationRequest : mutationRequest;
 const schema = `frankengit-${entity}-operator-v1`;
 const ACTIONS = milestone ? ['open', 'edit', 'close', 'reopen']
-  : ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
+  : ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'add-assignees', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
+const independent = action => ['add-assignees', 'add-labels'].includes(action);
 const fail = code => { throw operatorError(milestone ? code.replace(/^issue_operator_/, 'milestone_operator_') : code); };
 function options(raw) {
   const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
@@ -54,8 +55,10 @@ function options(raw) {
   o.tokenFile = operatorPath(o.tokenFile); o.record = operatorPath(o.record);
   if (o.tokenFile === o.record) fail('issue_operator_separate_record');
   if (ACTIONS.includes(o.operation)) {
-    if (o.operation === 'add-labels') {
-      if (raw.expectedVersion !== undefined && raw.expectedVersion !== null) fail('issue_operator_add_labels_has_no_version');
+    if (independent(o.operation)) {
+      if (raw.expectedVersion !== undefined && raw.expectedVersion !== null) {
+        fail(o.operation === 'add-assignees' ? 'issue_operator_add_assignees_has_no_version' : 'issue_operator_add_labels_has_no_version');
+      }
       o.expectedVersion = null;
     }
     const checked = request(o.number, o.expectedVersion, o.operation, o.fields ?? {});
@@ -95,7 +98,7 @@ async function run(raw) {
       const observed = await client.read(o.number, { limit: 1 }); check();
       checkedBinding(observed.binding, o);
       const version = observed.reply.found ? observed.reply[entity].version : 0;
-      if (o.operation === 'add-labels' ? !observed.reply.found : version !== o.expectedVersion) fail('issue_operator_version_moved');
+      if (independent(o.operation) ? !observed.reply.found : version !== o.expectedVersion) fail('issue_operator_version_moved');
       progress('source_checked');
       await client.stage(o.number, o.expectedVersion, o.operation, o.fields); check();
       const exported = client.exportReceipt();

@@ -7,7 +7,7 @@ The server authenticates the bearer token and enforces its configured scopes at
 each request. This supplies a network operator alternative; it does not change
 the trusted-local principal semantics of the native `fg` or MCP commands.
 
-The command supports issue opening, partial edits, independent label additions, comments,
+The command supports issue opening, partial edits, independent label and assignee additions, comments,
 closing, reopening, locking/unlocking discussion, assigning and unassigning
 principals, outcome lookup and explicit same-request retry. Mutation
 semantics and terminal-response validation are the same as the served issue UI.
@@ -80,6 +80,28 @@ hexadecimal characters. `assign` adds those IDs while preserving other assignees
 and reject unrelated issue fields. Assignment records issue metadata; it does
 not create a principal, grant access or establish a notification destination.
 The native server also limits the resulting issue to 16 assignees.
+
+Use `add-assignees` with the same `--assignee` flags and a fresh record to add
+principals without selecting a predecessor. Omit `--expected-version`; this
+operation rejects it. The operator checks that the issue exists, then stages
+the existing native `issue.add-assignees.v1` intent with `expected_version: null`.
+Independent additions preserve their union within the 16-assignee bound, and
+closed or locked discussions still permit assignment metadata. `assign` and
+`unassign` retain their exact-version preconditions.
+
+```sh
+node scripts/forge_issues.mjs add-assignees \
+  --url "$ISSUE_PAGE_URL" --tenant-id "$TENANT_HEX" \
+  --repository-id "$REPOSITORY_HEX" --token-file "$PRIVATE_DIR/token" \
+  --record "$PRIVATE_DIR/add-assignees-1.json" \
+  --number 1 --assignee "$ASSIGNEE_HEX"
+```
+
+After interruption, keep the original record for `status` or `retry`. Recovery
+uses its exact delta and original key; a recovered committed addition never
+re-adds an assignee removed by a later command. An unavailable outcome remains
+unknown, including when the write grant was denied. Assignment metadata grants
+no permissions or work execution.
 
 `lock` and `unlock` use the same connection, credential and record options with
 `--number` and a positive exact `--expected-version`. They accept no title,
