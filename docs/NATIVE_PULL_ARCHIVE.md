@@ -106,6 +106,10 @@ successfully report incomplete progress. Exit **2** means refusal/invalid input.
 Exit **4** means an error with retained or potentially published custody/result;
 inspect the reported pins and progress rather than inferring completion from the
 exit code. A broken output pipe never resubmits reads or deletes the retained job.
+For a one-shot export, creating its output directory crosses this custody
+boundary even if the first HTTP read refuses and no final archive pin exists.
+A repeat export to that occupied directory refuses in place; it does not resume
+or delete the partial export.
 
 Recovery is for jobs created by `prepare`, not arbitrary partial one-shot export
 directories. A torn, corrupt or partially written selection, page or checkpoint
@@ -133,4 +137,15 @@ Focused local validation:
 bash scripts/verify_native_pull_archive.sh
 ```
 
-The original injected-backend tests remain. Additional tests execute the unchanged production transport and native decoders against a real loopback HTTP response-schema peer and real private files, covering both Git hash domains, pagination, metadata consistency, semantic truncation with recalculated hashes, allocation bounds, cancellation and credential-free readback. A 128-PR/512-page case exercises HTTP export and inspection. A separate batched-file fixture validates the real traversal and offline reader at 4,096 PRs and all 16,384 page descriptors; it is not full-capacity HTTP export/fsync evidence. An attempted full-capacity HTTP run exceeded a 120-second test deadline, so no maximum-population export latency claim is made. Restart tests cover per-page pause/resume, cumulative bounds, credential and snapshot changes, concurrent collectors, page/checkpoint crash windows, offline finalization, and broken output. CLI tests start real Node child processes, send SIGTERM/SIGINT/SIGKILL during a stalled continuation response, then resume in a new process without re-downloading checkpointed pages. Torn-file refusals and the page/checkpoint write gap are separate controlled filesystem fixtures, not power-loss tests. None of these tests executes Rust `fg`, native admission/CAS, a deployed server, or the full workspace.
+The original injected-backend tests remain. Additional tests execute the unchanged production transport and native decoders against a real loopback HTTP response-schema peer and real private files, covering both Git hash domains, pagination, metadata consistency, semantic truncation with recalculated hashes, allocation bounds, cancellation and credential-free readback. A 128-PR/512-page case exercises HTTP export and inspection. A separate batched-file fixture validates the real traversal and offline reader at 4,096 PRs and all 16,384 page descriptors; it is not full-capacity HTTP export/fsync evidence. An attempted full-capacity HTTP run exceeded a 120-second test deadline, so no maximum-population export latency claim is made. Restart tests cover per-page pause/resume, cumulative bounds, credential and snapshot changes, concurrent collectors, page/checkpoint crash windows, offline finalization, and broken output. CLI tests start real Node child processes, send SIGTERM/SIGINT/SIGKILL during a stalled continuation response, then resume in a new process without re-downloading checkpointed pages. Torn-file refusals and the page/checkpoint write gap are separate controlled filesystem fixtures, not power-loss tests. These module tests do not execute Rust `fg`, native admission/CAS, a deployed server, or the full workspace.
+
+The separate [native PR portability campaign](../scripts/e2e/suites/operator/native_pull_migration.sh)
+is discovered by `./scripts/verify.sh operator`. It uses the lane's prebuilt `fg`,
+the shared Node pin and the sandboxed Git fixture oracle, then drives both
+archive and [migration](NATIVE_PULL_IMPORT.md) CLIs against distinct native nodes
+in both hash domains. Separate Rust reads check source immutability, destination
+content and authorship, absent imported approvals and unchanged refs. The suite
+also requires the campaign to fail when its real native source PR service is
+disabled. Its receipt retains both entrypoint paths and the executable digest.
+This bounded campaign does not complete `.4.59`'s every-entrypoint matrix or
+establish independent batch, deployment or power-loss verification.

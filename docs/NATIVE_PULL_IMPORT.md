@@ -257,3 +257,16 @@ power-loss tests. The fixture's destination state is only a schema peer; it is
 not an implementation of or evidence for native Git and admission correctness.
 These are not Rust
 `fg`/admission/CAS tests, Git object-closure tests, or a deployed service gate.
+
+The separate [native PR portability campaign](../scripts/e2e/suites/operator/native_pull_migration.sh)
+connects this CLI and the archive CLI to real source and destination Rust nodes
+under `./scripts/verify.sh operator`. It checks a paused operation budget,
+denied writes followed by original-key recovery and explicitly consented retry,
+occupied-number refusal, owned source/request custody and credential-free
+completion. Separate `fg pr show`, `comments`, `reviews` and ref reads check
+literal text, authenticated destination authorship and the absence of imported
+approvals or ref movement. A source review remains an attributed comment.
+The same suite requires failure when the native source PR service is disabled.
+Receipts bind the selected facts and both entrypoints to the executable digest;
+this is bounded portability coverage, not complete `.4.59`, independent batch
+verification or a deployed-service qualification.

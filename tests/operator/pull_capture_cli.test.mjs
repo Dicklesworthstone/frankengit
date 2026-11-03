@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { unlink, readFile } from 'node:fs/promises';
+import { unlink, readFile, readdir } from 'node:fs/promises';
 import { main } from '../../scripts/archive_native_pulls.mjs';
 import { inspectPullCapture } from '../../scripts/lib/forge-pull-capture.mjs';
 import { fixture, HEAD } from './pull-archive-fixture.mjs';
@@ -102,6 +102,29 @@ test('one-shot export and inspect remain available in the expanded CLI',async t 
   const f=await fixture(t,{pulls:0});const result=value(await run(t,selectArgs(f,'export')));assert.equal(result.complete,true);
   await f.close();await unlink(f.token);
   const inspected=value(await run(t,['inspect','--workdir',join(f.root,'job'),'--confirm',result.archive_sha256]));assert.equal(inspected.complete,true);
+});
+
+for (const blocked of ['list', 'reviews']) test(`one-shot export retains custody on ${blocked} refusal`, async t => {
+  const f = await fixture(t, { alter: ({ kind, res }) => {
+    if (kind !== blocked) return;
+    res.writeHead(403, { 'content-type': 'application/json' }); res.end('{}'); return false;
+  } });
+  const args = selectArgs(f, 'export'), result = await run(t, args);
+  assert.equal(result.code, 4, result.stderr); assert.equal(result.stdout, '');
+  const error = JSON.parse(result.stderr);
+  assert.equal(error.type, 'pull_archive_error');
+  assert.equal(error.archive_progress.directory_created, true);
+  assert.equal(error.archive_progress.expected_archive_sha256, null);
+  assert.equal(error.archive_progress.complete, false);
+  assert.equal(error.archive_progress.mutation_submitted, false);
+  const job = join(f.root, 'job'), names = (await readdir(job)).sort();
+  assert.deepEqual(names, blocked === 'list' ? [] : ['page-000001.json', 'page-000002.json']);
+  const retained = await Promise.all(names.map(name => readFile(join(job, name))));
+  const count = f.requests.length, repeated = await run(t, args);
+  assert.equal(repeated.code, 2, repeated.stderr);
+  assert.equal(JSON.parse(repeated.stderr).archive_progress.directory_created, false);
+  assert.equal(f.requests.length, count); assert.deepEqual((await readdir(job)).sort(), names);
+  assert.deepEqual(await Promise.all(names.map(name => readFile(join(job, name)))), retained);
 });
 
 test('help describes pins and explicit paused completion',async t => {
