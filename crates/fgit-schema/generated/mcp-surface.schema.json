@@ -4415,6 +4415,52 @@
       },
       "additionalProperties": false
     },
+    "frankengit_source_verified_blob": {
+      "title": "frankengit_source_verified_blob",
+      "description": "Read a complete visible ref-anchored blob and its original canonical proof at an independently trusted exact authority head. Ordinary source-read grant only; sponsored profiles exclude full-tree proof disclosure. Native Merkle-layout proof, verifier and canonical codec are unchanged. Bounded complete chunks, no range, truncation, legacy fallback, publication authority, freshness claim or server-selected client trust root. The smaller MCP output limits apply after native construction within its fixed finite v1 budgets.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Exact full visible refs/* name, at most 1024 UTF-8 bytes. Exactly one of reference/reference_hex is required.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Exact full raw refs/* name as lowercase hex, at most 1024 decoded bytes. Mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "path_hex": {
+              "type": "string",
+              "description": "Exact native repository byte path as lowercase hex: at most 4096 decoded bytes, 64 components and 255 bytes per component. No normalization or host-path interpretation.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Required independently trusted algorithm-qualified repository authority head. The response cannot supply its own trust pin. Current-head movement refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "max_blob_bytes": {
+              "type": "integer",
+              "description": "Complete blob allowance, 1..65536 inclusive; default 16384. Empty blobs are valid. Excess refuses with no partial content or proof.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": ["path_hex", "expected_head"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_tag_annotate": {
       "title": "frankengit_tag_annotate",
       "description": "Create an absent annotated tag from explicit native target kind, tagger, timestamp and exact bounded message bytes. Quarantine verifies the native target and authored tag object before ordinary source-write admission. Metadata and signature-looking text grant no authority; sponsored-agent profiles exclude this tool.",

@@ -30,6 +30,7 @@ mod search;
 mod source;
 mod source_writes;
 mod tags;
+mod verified_blob;
 use super::Options;
 use super::json::{self, Object, Value, object, text};
 use super::protocol::{ReadTools, Tool, ToolError, fields};
@@ -246,6 +247,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     }
     if options.source {
         tools.extend(source::tools());
+        tools.push(verified_blob::tool());
         tools.extend(search::tools());
         tools.push(candidate::tool());
         tools.push(refs::tool());
@@ -481,6 +483,9 @@ impl NodeTools {
         {
             return source::call(self, name, args);
         }
+        if self.options.source && name == verified_blob::NAME {
+            return verified_blob::call(self, args);
+        }
         if self.options.source && name == candidate::NAME {
             return candidate::call(self, args);
         }
@@ -701,7 +706,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 91);
+        assert_eq!(server_names.len(), 92);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));

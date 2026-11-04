@@ -17,6 +17,7 @@ mod pull_append;
 mod queues;
 mod rebase;
 mod tags;
+mod verified_blob;
 use super::types;
 use types::{FieldClassification, McpField, McpToolEntry};
 
@@ -79,7 +80,7 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 48] = [
+const ADDITIONS: [McpToolEntry; 49] = [
     agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,
@@ -124,6 +125,7 @@ const ADDITIONS: [McpToolEntry; 48] = [
     queues::SHOW,
     rebase::PUBLISH,
     indexed_search::ENTRY,
+    verified_blob::TOOL,
     tags::ANNOTATE,
     tags::CREATE,
     tags::DELETE,

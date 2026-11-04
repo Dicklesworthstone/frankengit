@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 95,
-  "active_count": 91,
+  "total_count": 96,
+  "active_count": 92,
   "unsupported_count": 4,
   "tools": [
     {
@@ -2526,6 +2526,34 @@
       "refusal_codes": ["ref_not_found", "directory_not_found", "snapshot_moved"],
       "cli_command": "fg tree",
       "rest_api_path": "GET /repos/{id}/trees"
+    },
+    {
+      "name": "frankengit_source_verified_blob",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "description": "Read a complete visible ref-anchored blob and its original canonical proof at an independently trusted exact authority head. Ordinary source-read grant only; sponsored profiles exclude full-tree proof disclosure. Native Merkle-layout proof, verifier and canonical codec are unchanged. Bounded complete chunks, no range, truncation, legacy fallback, publication authority, freshness claim or server-selected client trust root. The smaller MCP output limits apply after native construction within its fixed finite v1 budgets.",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 1048576,
+        "max_depth": 8,
+        "max_items": 64,
+        "max_fan_out": 1,
+        "max_duration_ms": 30000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["tool_not_granted", "unknown_argument", "expected_string", "exactly_one_reference_encoding_required", "full_reference_required", "invalid_reference", "invalid_hex_bytes", "path_required", "invalid_blob_path", "snapshot_required", "invalid_snapshot_token", "invalid_blob_limit", "invalid_verified_blob_query", "source_unavailable", "source_snapshot_moved", "verified_blob_layout_unavailable", "verified_blob_unavailable", "verified_blob_cancelled", "verified_blob_native_limit", "verified_blob_proof_refused", "verified_blob_namespace_mismatch", "verified_blob_byte_limit", "verified_blob_proof_limit", "verified_blob_result_limit"],
+      "cli_command": "fg verify-read",
+      "rest_api_path": "/api/v1/source/verified-blob"
     },
     {
       "name": "frankengit_tag_annotate",
