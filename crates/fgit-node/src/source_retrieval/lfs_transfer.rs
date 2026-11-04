@@ -406,14 +406,14 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
         .map_err(|e| e.to_string())?;
         for &object in &inventory.objects {
             deadline.request(&request)?;
-            let bytes = store.read(object, &operation).map_err(|e| {
+            let mut payload = store.open_verified(object, &operation).map_err(|e| {
                 format!(
                     "LFS source custody missing or invalid for {}: {e}",
                     object.oid
                 )
             })?;
             encoder
-                .object(object, &mut bytes.as_slice(), &mut archive_live)
+                .object(object, &mut payload, &mut archive_live)
                 .map_err(|e| e.to_string())?;
         }
         let seal = encoder

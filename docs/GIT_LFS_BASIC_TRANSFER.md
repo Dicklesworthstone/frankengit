@@ -92,6 +92,14 @@ verified before any payload bytes are disclosed. Corrupt objects are refused;
 the service does not turn corrupt custody into an apparent cache miss or serve
 a verified prefix followed by unverified bytes.
 
+For a download, the service verifies the complete stored container while
+copying its payload into private temporary custody, unlinks the temporary name
+before writing payload bytes, and verifies the retained copy again. Only then
+does it send the success headers and stream the payload in chunks no larger
+than 64 KiB. A later change to the original custody file cannot change this
+verified response. Cancellation, an expired deadline, or a write failure ends
+the response; a partial binary response never gains an appended error document.
+
 Fixed-length and chunked HTTP request bodies use the existing bounded native
 framing parser. Short bodies, malformed chunks, incorrect lengths, and digest
 mismatches cannot publish an object. Authentication and the endpoint's required
@@ -105,11 +113,20 @@ already present in verified custody.
 
 This profile supports `basic` transfers and SHA-256 LFS object IDs for both
 SHA-1 and SHA-256 Git repositories. It accepts at most 100 objects per batch,
-64 KiB of batch/verification JSON, 64 MiB per object, and 64 MiB of aggregate
+64 KiB of batch/verification JSON, 512 MiB per object, and 512 MiB of aggregate
 declared payload bytes for verification within one batch. Objects outside the
 batch verification budget receive individual errors; supported objects retain
 their original order and identity. Request deadlines, bounded listener
 concurrency, and principal quotas also apply.
+
+Upload, verification, temporary-copy readback, and response delivery share the
+original request deadline. Neither `100 Continue` nor the first response write
+renews it. Streaming avoids a payload-sized memory allocation; each active
+download can require up to 512 MiB of temporary disk space in the selected
+private custody root. The complete-verification passes incur additional disk
+I/O under that same deadline. A dropped reader or failed request closes the
+unlinked file. The existing buffered library read API retains its separate
+64 MiB ceiling; the HTTP adapter uses the verified streaming API.
 
 Payload retention is permanent. Pointer-aware garbage collection, resumable
 partial-byte uploads, LFS locking, remote object-store backends, and

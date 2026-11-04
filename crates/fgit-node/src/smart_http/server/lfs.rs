@@ -14,7 +14,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use fgit_object_fabric::artifact::storage::lfs::{LfsObject, LfsStore, MAX_OBJECT_BYTES};
-use fgit_object_fabric::artifact::storage::{ArtifactOperation, ArtifactStorageError};
+use fgit_object_fabric::artifact::storage::{
+    ArtifactOperation, ArtifactStorageError, VerifiedArtifactReader,
+};
 use fgit_types::{RepositoryId, RepositoryIncarnationId, TenantId};
 use fgit_wire::smart_http::{BodyFraming, HttpError, HttpVersion, head::Envelope};
 
@@ -26,8 +28,9 @@ use crate::GitDaemonSessionDeadline;
 const ROUTE: &str = "/info/lfs/";
 const JSON_MEDIA: &str = "application/vnd.git-lfs+json";
 const BINARY_MEDIA: &str = "application/octet-stream";
-const MAX_BATCH_VERIFIED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BATCH_VERIFIED_BYTES: u64 = MAX_OBJECT_BYTES;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub(super) struct Service {
@@ -362,26 +365,24 @@ fn batch_reply(
     Ok(body.into_bytes())
 }
 
-fn execute(
+enum Response<'operation, 'live> {
+    Bytes(&'static str, Vec<u8>),
+    Download(VerifiedArtifactReader<'operation, 'live>),
+}
+
+fn execute<'operation, 'live>(
     profile: &Profile,
     envelope: &Envelope<'_>,
     prefix: &[u8],
     reader: &mut impl Read,
     writer: &mut impl Write,
-    deadline: &GitDaemonSessionDeadline,
+    op: &'operation ArtifactOperation<'live>,
+    live: &dyn Fn() -> bool,
     local: Option<SocketAddr>,
-) -> Result<(&'static str, Vec<u8>), Failure> {
+) -> Result<Response<'operation, 'live>, Failure> {
     let request = Request::parse(envelope)?;
     let grant = authorize(profile, envelope, &request)?;
     let service = profile.lfs.as_ref().ok_or_else(Failure::unavailable)?;
-    let live = || !deadline.expired();
-    let remaining = deadline.remaining().map_err(Failure::io)?;
-    let op = ArtifactOperation::new(
-        MAX_OBJECT_BYTES,
-        remaining.min(Duration::from_secs(3600)),
-        &live,
-    )
-    .map_err(Failure::storage)?;
     if envelope.method == "GET" && !prefix.is_empty() {
         return Err(Failure::bad("lfs_download_body_not_allowed"));
     }
@@ -395,14 +396,15 @@ fn execute(
     }
     match request.endpoint {
         Endpoint::Batch => {
-            let input = body::json(envelope.body, profile.http, prefix, reader, &live)?;
+            let input = body::json(envelope.body, profile.http, prefix, reader, live)?;
             let batch = protocol::Batch::parse(&input).map_err(Failure::bad)?;
             if !grant.permits_lfs(batch.operation == protocol::Operation::Upload) {
                 return Err(Failure::new(Status::Forbidden, "lfs_scope_not_granted"));
             }
             let origin = action_origin(profile, local)?;
             let base = format!("{origin}{}/info/lfs", request.repository_route);
-            batch_reply(service, &batch, &base, &op, &live).map(|bytes| (JSON_MEDIA, bytes))
+            batch_reply(service, &batch, &base, op, live)
+                .map(|bytes| Response::Bytes(JSON_MEDIA, bytes))
         }
         Endpoint::Object(object) if envelope.method == "PUT" => {
             let mut body = body::Framed::new(
@@ -411,32 +413,32 @@ fn execute(
                 object.size,
                 prefix,
                 reader,
-                &live,
+                live,
             )?;
             service
                 .store
-                .put(object, &mut body, &op)
+                .put(object, &mut body, op)
                 .map_err(Failure::storage)?;
-            Ok((JSON_MEDIA, Vec::new()))
+            Ok(Response::Bytes(JSON_MEDIA, Vec::new()))
         }
         Endpoint::Object(object) => service
             .store
-            .read(object, &op)
-            .map(|bytes| (BINARY_MEDIA, bytes))
+            .open_verified(object, op)
+            .map(Response::Download)
             .map_err(Failure::stored),
         Endpoint::Verify(object) => {
-            let input = body::json(envelope.body, profile.http, prefix, reader, &live)?;
+            let input = body::json(envelope.body, profile.http, prefix, reader, live)?;
             if protocol::verify(&input).map_err(Failure::bad)? != object {
                 return Err(Failure::bad("lfs_verify_object_mismatch"));
             }
             if !service
                 .store
-                .contains(object, &op)
+                .contains(object, op)
                 .map_err(Failure::stored)?
             {
                 return Err(Failure::not_found());
             }
-            Ok((JSON_MEDIA, b"{}".to_vec()))
+            Ok(Response::Bytes(JSON_MEDIA, b"{}".to_vec()))
         }
     }
 }
@@ -452,23 +454,83 @@ pub(super) fn serve(
     deadline: &GitDaemonSessionDeadline,
     local: Option<SocketAddr>,
 ) -> Result<(), Status> {
+    let live = || !deadline.expired();
+    let op = deadline
+        .remaining()
+        .map_err(Failure::io)
+        .and_then(|remaining| {
+            ArtifactOperation::new(
+                MAX_OBJECT_BYTES,
+                remaining.min(Duration::from_secs(3600)),
+                &live,
+            )
+            .map_err(Failure::storage)
+        });
+    let op = match op {
+        Ok(op) => op,
+        Err(error) => return refuse(writer, envelope.version, error),
+    };
     match execute(
-        profile, envelope, read_ahead, reader, writer, deadline, local,
+        profile, envelope, read_ahead, reader, writer, &op, &live, local,
     ) {
-        Ok((media, bytes)) => send(writer, envelope.version, Status::Success, media, &bytes)
-            .map_err(|_| Status::Unavailable),
-        Err(error) => {
-            let body = format!("{{\"message\":{}}}", quote(error.message));
-            let _ = send(
-                writer,
-                envelope.version,
-                error.status,
-                JSON_MEDIA,
-                body.as_bytes(),
-            );
-            Err(error.status)
+        Ok(Response::Bytes(media, bytes)) => {
+            send(writer, envelope.version, Status::Success, media, &bytes)
+                .map_err(|_| Status::Unavailable)
         }
+        // Complete verification already succeeded. Once headers start, any
+        // read/write/flush failure terminates the response; no error document
+        // may be appended to a partial binary payload.
+        Ok(Response::Download(mut payload)) => {
+            send_download(writer, envelope.version, &mut payload, &live).map_err(Status::from)
+        }
+        Err(error) => refuse(writer, envelope.version, error),
     }
+}
+
+fn refuse(writer: &mut impl Write, version: HttpVersion, error: Failure) -> Result<(), Status> {
+    let body = format!("{{\"message\":{}}}", quote(error.message));
+    let _ = send(writer, version, error.status, JSON_MEDIA, body.as_bytes());
+    Err(error.status)
+}
+
+fn send_download(
+    writer: &mut impl Write,
+    version: HttpVersion,
+    payload: &mut VerifiedArtifactReader<'_, '_>,
+    live: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    let checkpoint = || {
+        if live() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "lfs_request_expired",
+            ))
+        }
+    };
+    checkpoint()?;
+    send_head(
+        writer,
+        version,
+        Status::Success,
+        BINARY_MEDIA,
+        payload.identity().payload_len(),
+    )?;
+    let mut chunk = [0_u8; DOWNLOAD_CHUNK_BYTES];
+    loop {
+        checkpoint()?;
+        let count = payload.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        checkpoint()?;
+        writer.write_all(&chunk[..count])?;
+        checkpoint()?;
+    }
+    checkpoint()?;
+    writer.flush()?;
+    checkpoint()
 }
 
 fn send(
@@ -477,6 +539,18 @@ fn send(
     status: Status,
     media: &str,
     bytes: &[u8],
+) -> io::Result<()> {
+    send_head(writer, version, status, media, bytes.len() as u64)?;
+    writer.write_all(bytes)?;
+    writer.flush()
+}
+
+fn send_head(
+    writer: &mut impl Write,
+    version: HttpVersion,
+    status: Status,
+    media: &str,
+    length: u64,
 ) -> io::Result<()> {
     let version = match version {
         HttpVersion::Http10 => "HTTP/1.0",
@@ -492,8 +566,6 @@ fn send(
         writer,
         "{version} {}\r\nContent-Type: {media}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nVary: Authorization\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n{extra}\r\n",
         status.line(),
-        bytes.len(),
-    )?;
-    writer.write_all(bytes)?;
-    writer.flush()
+        length,
+    )
 }

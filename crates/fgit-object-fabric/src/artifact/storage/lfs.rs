@@ -4,6 +4,7 @@
 //! is implemented; this module never decides what Git history may discard.
 use super::{
     ArtifactOperation, ArtifactPut, ArtifactScope, ArtifactStorageError, LocalArtifactStore,
+    MAX_BUFFERED_PAYLOAD_BYTES, MAX_PAYLOAD_BYTES, VerifiedArtifactReader,
 };
 use crate::{ArtifactIdentity, ArtifactPayloadKind, MediaType, RetentionProfile};
 use fgit_types::{
@@ -16,7 +17,8 @@ use std::path::Path;
 pub mod transfer;
 
 pub const TRUST_DOMAIN: &str = "git-lfs-basic-v1";
-pub const MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+/// Streaming LFS custody uses the existing artifact payload envelope.
+pub const MAX_OBJECT_BYTES: u64 = MAX_PAYLOAD_BYTES;
 const VERSION: &str = "version https://git-lfs.github.com/spec/v1";
 
 /// Raw payload SHA-256, deliberately distinct from native GitOid and artifact ID.
@@ -167,10 +169,27 @@ impl LfsStore {
         op: &ArtifactOperation<'_>,
     ) -> Result<Vec<u8>, ArtifactStorageError> {
         let identity = object.artifact_identity();
-        let (observed, bytes) = self.0.read_payload(identity.artifact_id(), op)?;
+        let bounded = op.narrow_bytes(MAX_BUFFERED_PAYLOAD_BYTES);
+        let (observed, bytes) = self.0.read_payload(identity.artifact_id(), &bounded)?;
         if observed != identity {
             return Err(ArtifactStorageError::IdentityMismatch);
         }
         Ok(bytes)
+    }
+
+    /// Verify complete custody before exposing a bounded read-only stream.
+    /// The reader owns its private copy, so later changes to the original
+    /// payload path cannot change bytes sent to an authenticated caller.
+    pub fn open_verified<'operation, 'live>(
+        &self,
+        object: LfsObject,
+        op: &'operation ArtifactOperation<'live>,
+    ) -> Result<VerifiedArtifactReader<'operation, 'live>, ArtifactStorageError> {
+        let identity = object.artifact_identity();
+        let reader = self.0.open_verified_payload(identity.artifact_id(), op)?;
+        if reader.identity() != &identity {
+            return Err(ArtifactStorageError::IdentityMismatch);
+        }
+        Ok(reader)
     }
 }

@@ -598,11 +598,14 @@ impl OneNode {
                 .map_err(|_| invalid_configuration("HTTP input envelope is not representable"))?;
         // Git pack ceilings and the independently enabled LFS profile are
         // separate. Each service still applies its own tighter body limit.
+        #[cfg(target_os = "linux")]
         let maximum_body = if self.service_config.http_lfs_root().is_some() {
-            maximum_git_body.max(64 * 1024 * 1024)
+            maximum_git_body.max(fgit_object_fabric::artifact::storage::lfs::MAX_OBJECT_BYTES)
         } else {
             maximum_git_body
         };
+        #[cfg(not(target_os = "linux"))]
+        let maximum_body = maximum_git_body;
         let maximum_wire = maximum_body
             .checked_add(FRAMING_ALLOWANCE)
             .ok_or_else(|| invalid_configuration("HTTP wire envelope overflow"))?;
@@ -1142,6 +1145,7 @@ struct ResponseWriter<'a> {
     inner: DeadlineTcpStream<'a>,
     timeout: GitDaemonSessionTimeout,
     started: bool,
+    preserve_request_deadline: bool,
     agent: Option<crate::agent_credentials::AgentRequest>,
     agent_bytes: u64,
 }
@@ -1157,10 +1161,12 @@ impl Write for ResponseWriter<'_> {
             })?;
         }
         if !self.started {
-            self.inner.restart_deadline(GitDaemonSessionDeadline::new(
-                self.timeout,
-                GitDaemonSessionWorkScaling::FLAT,
-            ));
+            if !self.preserve_request_deadline {
+                self.inner.restart_deadline(GitDaemonSessionDeadline::new(
+                    self.timeout,
+                    GitDaemonSessionWorkScaling::FLAT,
+                ));
+            }
             self.started = true;
         }
         let written = self.inner.write(bytes)?;
@@ -1309,6 +1315,7 @@ fn serve_connection(
         inner: DeadlineTcpStream::new(&mut output, deadline),
         timeout: profile.timeout,
         started: false,
+        preserve_request_deadline: false,
         agent: None,
         agent_bytes: 0,
     };
@@ -1387,6 +1394,10 @@ fn serve_connection(
         let profile = agent_profile.as_ref().unwrap_or(profile);
         #[cfg(target_os = "linux")]
         if lfs::is_route(envelope.target, &profile.route) {
+            // LFS may verify and spool a large payload before writing headers.
+            // Intake, verification and delivery share the original deadline;
+            // neither 100 Continue nor the final response renews it.
+            writer.preserve_request_deadline = true;
             return lfs::serve(
                 profile,
                 &envelope,

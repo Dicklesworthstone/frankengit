@@ -26,6 +26,9 @@ const REPOSITORY: RepositoryId = RepositoryId::from_bytes([0x72; 16]);
 const OWNER: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+#[path = "lfs_portability/streaming.rs"]
+mod streaming;
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {

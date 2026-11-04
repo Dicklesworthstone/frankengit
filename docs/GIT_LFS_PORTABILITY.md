@@ -169,7 +169,7 @@ another authority source.
 
 | Bound | Default | Explicit supported maximum |
 | --- | --- | --- |
-| LFS payload per object | 64 MiB | 64 MiB |
+| LFS payload per object | 512 MiB | 512 MiB |
 | LFS records | 100,000 | 1,000,000 |
 | Aggregate LFS payload bytes | 1 GiB | 1 TiB |
 | Entire archive bytes, including framing | 1 GiB | 1 TiB |
@@ -187,10 +187,19 @@ history, and runtime budgets can refuse earlier. A leading global
 and puts share that deadline; it is never renewed per object.
 
 Archive encoding/verification and native blob scanning use chunks no larger
-than 64 KiB. Export uses the existing fully verified LFS read API, which buffers
-at most one 64 MiB LFS payload. Import streams each verified record into the
-existing custody writer. Filesystem calls themselves can block; deadline and
-cancellation checks are cooperative between those calls.
+than 64 KiB. Export obtains one fully verified LFS reader at a time: it copies
+the stored payload into private unlinked temporary custody, verifies that copy,
+then streams it into the archive. Payload-sized memory allocations are not
+required. The temporary copy can occupy up to 512 MiB of disk space in the LFS
+custody root, in addition to the archive stage. Import streams each verified
+record into the existing custody writer. All verification passes, copying, and
+delivery retain the original operation deadline. Filesystem calls themselves
+can block; deadline and cancellation checks are cooperative between those calls.
+
+This larger supported payload envelope does not change the v1 archive framing
+or object identity. Existing smaller archives remain readable. Older readers
+with the 64 MiB envelope refuse archives containing larger records; use a
+reader supporting the required payload size at the destination.
 
 The companion format is a versioned noncanonical transport. It contains no host
 paths, compression, executable content, authority rows, or ref commands. It has
@@ -202,5 +211,8 @@ remain outside this bounded portion of `frankengit-fg053-lfs-i3h`.
 Focused tests cover the archive framing, streaming and corruption boundary;
 private-input custody and destination coverage; exact source pins and pointer
 recognition; and real persisted native repositories with independent source
-and target incarnations. Test execution results must be bound to the tested
-revision; the existence of these fixtures is not a release or conformance claim.
+and target incarnations. Generated payloads above the buffered 64 MiB ceiling
+exercise streamed custody, HTTP delivery, and pinned companion round trips
+without allocating complete payloads in the fixtures. Test execution results
+must be bound to the tested revision; the existence of these fixtures is not a
+release or conformance claim.

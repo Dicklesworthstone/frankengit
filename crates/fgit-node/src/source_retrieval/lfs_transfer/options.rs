@@ -27,7 +27,7 @@ Options: --object-format sha1|sha256 (default sha1)
          --timeout-secs <1..3600> (default 300; global timeout only narrows)
 
 Only canonical extension-free v1 LFS pointers and SHA-256 LFS payloads up to
-64 MiB each are supported. Every selected native object is verified, including
+512 MiB each are supported. Every selected native object is verified, including
 retained history, under the source scan budget. Missing/corrupt/unsupported
 pointer custody refuses export. Physical orphan payloads are never enumerated.
 Import is idempotent immutable custody, not an atomic multi-object transaction.

@@ -13,9 +13,14 @@ mod codec;
 pub mod lfs;
 mod local;
 pub use local::LocalArtifactStore;
+mod verified_read;
+pub use verified_read::VerifiedArtifactReader;
 
 pub const DEFAULT_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
+/// Buffered reads keep their own ceiling even when a streaming operation
+/// admits larger payloads.
+pub const MAX_BUFFERED_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const HEADER_BYTES: usize = 8192;
 const CHUNK_BYTES: usize = 64 * 1024;
 const MAGIC: &[u8; 8] = b"FGAF\0\0\0\x01";
@@ -77,6 +82,9 @@ impl ArtifactScope {
 }
 
 /// One absolute operation deadline. Sharing it across calls never resets time.
+/// The byte envelope bounds each payload's declared length, not aggregate
+/// physical I/O: custody verification and retained-copy readback make multiple
+/// passes under this same deadline and cancellation signal.
 pub struct ArtifactOperation<'a> {
     maximum_bytes: u64,
     deadline: Instant,
@@ -118,6 +126,14 @@ impl<'a> ArtifactOperation<'a> {
             return Err(ArtifactStorageError::PayloadLimit);
         }
         Ok(())
+    }
+
+    fn narrow_bytes(&self, maximum_bytes: u64) -> Self {
+        Self {
+            maximum_bytes: self.maximum_bytes.min(maximum_bytes),
+            deadline: self.deadline,
+            live: self.live,
+        }
     }
 }
 
@@ -227,6 +243,24 @@ impl LocalArtifactStore {
         op: &ArtifactOperation<'_>,
     ) -> Result<ArtifactIdentity, ArtifactStorageError> {
         self.inspect_inner(id, op)
+    }
+
+    /// Verify a complete payload into private, unlinked custody before any
+    /// bytes can be read by the caller. Memory is bounded by the transfer chunk,
+    /// independently of payload length. The temporary file is read back and
+    /// verified before this returns, and is closed on drop without publishing
+    /// a name, placement, or retention claim.
+    ///
+    /// Construction and subsequent reads share `op`'s original absolute
+    /// deadline, cancellation predicate and per-payload ceiling. Verification
+    /// reads the source once and the spool once; consumption is a third read.
+    /// This is bounded local I/O, not a single-pass transfer or a new deadline.
+    pub fn open_verified_payload<'operation, 'live>(
+        &self,
+        id: &Digest,
+        op: &'operation ArtifactOperation<'live>,
+    ) -> Result<VerifiedArtifactReader<'operation, 'live>, ArtifactStorageError> {
+        self.open_verified_payload_inner(id, op)
     }
     /// Verify into a private staging file, then publish to an absent destination.
     /// No corrupt/unverified payload prefix is exposed at the destination path.
