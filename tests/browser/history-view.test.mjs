@@ -53,6 +53,8 @@ for (const algorithm of ['sha1', 'sha256']) {
   test(`${algorithm}: blame origin navigation verifies the attributed historical bytes`, async () => {
     const h = harness(fixture(algorithm)); await h.connect(); await h.blame();
     assert.match(h.get('content').textContent, /Complete-file blob identity checked/);
+    assert.match(h.get('content').textContent, /2 commits visited/);
+    assert.match(h.get('content').textContent, /unrelated ancestry was not scanned/);
     await one(h.get('content'), `Verify origin ${h.f.base.object_id.slice(0, 12)}:1`).fire('click');
     assert.match(h.get('status').textContent, /Exact attributed origin bytes checked/);
     assert.equal(h.f.calls.at(-1).form.get('offset'), '5'); assert.equal(h.f.calls.at(-1).form.get('limit'), '3');

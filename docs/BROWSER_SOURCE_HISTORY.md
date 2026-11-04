@@ -57,6 +57,11 @@ identity bytes are retained, including signature continuation lines. Author
 and committer strings are untrusted claims, not authenticated identities.
 This does not independently reconstruct the complete server ancestry graph.
 
+The browser distinguishes the native `line-frontier-v1` blame traversal from
+`full-dag-v1` and older full-DAG replies that omitted the field. It displays
+visited commits and explicitly identifies unread unrelated ancestry for the
+frontier profile. Unknown explicit traversal values refuse before display.
+
 Blame preserves zero-based half-open line and byte ranges, including CRLF and
 missing final newlines. All returned origin commits are checked, every output
 line must have an exact contiguous span, and complete-file results reproduce

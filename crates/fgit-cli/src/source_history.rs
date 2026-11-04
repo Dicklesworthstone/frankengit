@@ -538,11 +538,12 @@ fn render_blame(
     let mut out = format!(
         concat!(
             "{{\"type\":\"source_blame\",\"profile\":\"exact-lines-all-parents-v1\",",
-            "\"scope\":\"same_path\",{},\"tree\":{},\"blob\":{},\"path_hex\":{},\"line_origin\":0,",
+            "\"traversal\":{},\"scope\":\"same_path\",{},\"tree\":{},\"blob\":{},\"path_hex\":{},\"line_origin\":0,",
             "\"total_lines\":{},\"first_line\":{},\"end_line\":{},\"content_byte_start\":{},",
             "\"content_hex\":{},\"content_text\":{},\"graph_commits\":{},\"comparisons\":{},",
             "\"max_diff_work\":{},\"algorithms\":[{}],\"origins\":"
         ),
+        quote(result.traversal.as_str()),
         header,
         quote(&result.tree.to_string()),
         quote(&result.blob.to_string()),
@@ -797,11 +798,16 @@ mod tests {
                 origin_byte_end: 2,
             }],
             origins: vec![record],
+            traversal: fgit_forge::history::BlameTraversal::LineFrontier,
             graph_commits: 1,
             comparisons: 0,
             algorithms: Vec::new(),
         };
-        assert!(render_blame(&options, head, &result).is_ok());
+        assert!(
+            render_blame(&options, head, &result)
+                .unwrap()
+                .contains("\"traversal\":\"line-frontier-v1\"")
+        );
         result.lines[0].origin_byte_end = 1;
         assert!(render_blame(&options, head, &result).is_err());
     }

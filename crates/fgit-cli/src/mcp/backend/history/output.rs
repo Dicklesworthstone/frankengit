@@ -376,6 +376,7 @@ pub(super) fn blame(
         text("exact-same-path-all-parents-stored-order"),
     );
     result.insert("human_authorship_proven".into(), Value::Bool(false));
+    result.insert("traversal".into(), text(report.traversal.as_str()));
     result.insert("tree".into(), text(report.tree.to_string()));
     result.insert("blob".into(), text(report.blob.to_string()));
     result.insert("path_hex".into(), text(hex(&report.path)));

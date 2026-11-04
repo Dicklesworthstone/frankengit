@@ -87,7 +87,8 @@ export function mountHistory(doc, options = {}) {
   function renderBlame(result, offset = 0) {
     clear(); raw = result.raw; ui.download.disabled = false;
     ui.content.append(node('h2', `Line provenance: ${pathLabel(result.query.path_hex)}`),
-      node('p', `Native range [${result.query.first}, ${result.raw.end_line}) of ${result.total} lines. ${result.fullBlobVerified ? 'Complete-file blob identity checked.' : 'Partial range: no complete-file blob hash claim.'} Same path, all parents; identities are unauthenticated.`));
+      node('p', `Native range [${result.query.first}, ${result.raw.end_line}) of ${result.total} lines. ${result.fullBlobVerified ? 'Complete-file blob identity checked.' : 'Partial range: no complete-file blob hash claim.'} Same path, all parents; identities are unauthenticated.`),
+      node('p', `${result.raw.graph_commits} commits visited. ${result.traversal === 'line-frontier-v1' ? 'Traversal followed the selected lines; unrelated ancestry was not scanned.' : 'Traversal loaded the complete reachable commit graph.'}`));
     const end = Math.min(offset + LINE_PAGE, result.lines.length), table = node('table'), header = node('tr');
     header.append(node('th', 'Line (zero-based)'), node('th', 'Exact content'), node('th', 'Origin commit / line')); table.append(header);
     const origins = new Map(result.origins.map(value => [value.id, value]));

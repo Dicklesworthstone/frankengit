@@ -79,6 +79,7 @@ fn blame_report(format: GitHashAlgorithm) -> BlameResult {
         content: b"new\nsame\r\n".to_vec(),
         lines,
         origins,
+        traversal: fgit_forge::history::BlameTraversal::LineFrontier,
         graph_commits: 2,
         comparisons: 1,
         algorithms: vec![],
@@ -242,6 +243,7 @@ fn blame_pages_preserve_exact_bytes_and_full_origin_coverage_without_authorship_
         assert_eq!(result["bytes_hex"].text(), Some("6e65770a73616d650d0a"));
         assert_eq!(result["complete"], Value::Bool(true));
         assert_eq!(result["human_authorship_proven"], Value::Bool(false));
+        assert_eq!(result["traversal"].text(), Some("line-frontier-v1"));
         assert_eq!(result["attribution_complete"], Value::Bool(true));
         query.limit = 1;
         let mut first = full.clone();

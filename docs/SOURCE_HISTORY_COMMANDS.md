@@ -117,10 +117,12 @@ all lines. An empty file has zero lines. A missing final LF, CRLF and invalid
 UTF-8 remain exact bytes; no newline or encoding normalization is performed.
 Only the selected line content is emitted, not an implicit full-file payload.
 
-The `exact-lines-all-parents-v1` profile works as follows:
+The `exact-lines-all-parents-v1` attribution profile now uses the bounded
+`line-frontier-v1` traversal through the native node, CLI, HTTP and MCP:
 
-1. Load and validate the reachable commit graph, then process children before
-   parents so convergent histories accumulate all pending line mappings once.
+1. Read the selected commit and file, then track only the requested lines.
+   Read an ancestor when its contents are needed to resolve those lines;
+   unrelated older history does not have to fit the commit budget.
 2. For each active commit, resolve the same raw path in its parents, preserving
    their original order. Compare regular-file lines with the existing bounded
    Myers engine. Identical blobs bypass content diff and reuse cached bytes.
@@ -131,6 +133,27 @@ The `exact-lines-all-parents-v1` profile works as follows:
 4. Before returning, check that every attributed origin slice exactly equals
    its selected output slice. Return the unique origin commits and their exact
    native bodies alongside the current and original blob/line/byte coordinates.
+
+The report's `traversal` identifies this contract. `graph_commits` counts the
+commits actually visited, including parents examined to decide that a line was
+new. It is not a total reachable-history count. Empty ranges read the selected
+file without an ancestry scan; a tip-origin range can finish after inspecting
+the immediate parents even when a much longer history precedes them. Older
+lines still require their ancestry and can exhaust the existing limits.
+
+The pure forge `history::blame` API retains `full-dag-v1` as an explicit
+compatibility path and attribution oracle. `history::blame_frontier` returns
+the same exact line/origin coordinates when both algorithms complete, while
+their traversal counts and comparison work can differ. The node continues to
+own source selection, current visibility and snapshot checks for either API.
+
+Frontier traversal memoizes each ordered parent/current blob correspondence
+and charges all comparisons against one aggregate `max_diff_work` budget.
+All parent headers of each visited commit count against `max_edges`, including
+duplicate headers and unvisited parent bodies. Cached blob bytes, line spans,
+commit/path records, active routes and correspondence payloads share the
+logical cache limit. Every encountered dependency, cancellation, cycle or
+resource refusal fails the whole range; no partial attribution is returned.
 
 The parent-order rule also applies to octopus merges. Duplicate parent headers
 remain in raw metadata but do not duplicate graph dependencies or line work.
@@ -176,9 +199,12 @@ safe JSON escaping rather than becoming terminal commands.
 
 The fixed upper profile is 4,096 commits, 16,384 parent edges, 100,000 visited
 tree entries, depth 64 and 4,096 path bytes. Blame admits at most 1 MiB and 20,000
-lines per compared blob, 32 MiB of retained blob/span cache accounting, and 128
-content comparisons. Each diff has at most 1,000,000 work units and 512,000 trace
-cells. Metadata output is at most 64 KiB per commit and 4 MiB per report. Log
+lines per compared blob, 32 MiB of logical cache payload, and 128 distinct
+content comparisons. Frontier blame shares at most 1,000,000 work units across
+all comparisons; each diff retains the 512,000 trace-cell ceiling. The explicit
+full-DAG core compatibility API retains its original per-diff work budget and
+blob/span cache accounting. Metadata output is at most 64 KiB per commit and
+4 MiB per report. Log
 pages contain 1 through 100 records. The shared native object owner separately
 limits individual reads to node policy/32 MiB and cumulative reads to 128 MiB.
 JSON is capped at 64 MiB.
@@ -208,11 +234,27 @@ selection through the existing private `SelectedSource`. The CLI validates,
 invokes those operations, closes, checks response bindings, and renders.
 No new dependency or lockfile entry is required.
 
-Fourteen Rust test functions are registered: eight core cases, two embedded-node
-cases and four CLI cases. Coverage includes SHA-1/SHA-256 DAGs, both merge parents,
-parent-order ties, shifted lines, raw bytes, empty files, missing final LF,
-cycles, corrupt/missing/binary inputs, caching, bounds, cancellation, unchanged
-canonical state, hidden refs, pinned pages, and write/flush failures.
+The core tests cover both hash domains, merge-parent order, shifted lines,
+exact bytes, ranges, empty files, missing final LF, malformed objects, selected
+source refusals, cache reuse, bounds and every cancellation checkpoint. Frontier
+cases additionally compare generated DAGs against the unchanged full-DAG oracle,
+force late convergence at an already processed ancestor, exercise touched cycles
+that stop line propagation, and use a real 100,000-commit irrelevant tail.
+
+The standalone core runner compiles the actual production history modules and
+source contracts with the real types, crypto and diff libraries. It needs the
+pinned toolchain and cached workspace dependencies, and writes into a private
+caller-selected target directory:
+
+```bash
+CARGO_TARGET_DIR=/data/frankengit-targets/history-core \
+  python3 scripts/test_history_core.py
+```
+
+This core lane excludes the node, authority selection and transports. Embedded
+node, CLI and HTTP tests separately cover visibility, exact head pins, unchanged
+canonical state and output/transport failure. Core execution does not stand in
+for those integration lanes.
 
 ```bash
 python3 scripts/e2e/source_history_smoke.py --self-test
@@ -222,14 +264,12 @@ python3 scripts/e2e/source_history_smoke.py --fg /absolute/path/to/fg
 The real-binary campaign builds its own native-object fixtures, checks exact
 commit bodies and every originating line slice, exercises pagination and raw
 paths, and compares canonical state before and after reads. It fingerprints the
-provided executable. The self-test tests only fixture construction and the
-checker; 36 intentionally corrupted reports were rejected in this editing
-session. The two isolated fixture repositories also passed Git 2.47.3 strict
-fsck and matched Git blame's expected five line origins in both hash formats.
-Those are fixture checks, not executions of FrankenGit.
+provided executable. `--self-test` exercises fixture construction and the
+checker only; it does not execute FrankenGit.
 
-Cargo, rustc and a built `fg` were unavailable in this environment. Rust
-compilation, native tests, the full binary campaign, rustfmt and Clippy were
-not run. Source integration is not a passing native gate or a bead closure.
-Broader Git log/blame compatibility, indexed unbounded histories, rename/copy
-attribution and remote authorization remain outside these explicit profiles.
+The frontier work-count cases establish avoided ancestry reads in the pure
+history algorithm. They do not remove the native source owner's independent
+object-selection, storage or authentication ceilings, and are not end-to-end
+latency measurements. Broader Git presentation compatibility, unbounded
+histories, rename/copy attribution and remote authorization remain outside
+these explicit profiles.

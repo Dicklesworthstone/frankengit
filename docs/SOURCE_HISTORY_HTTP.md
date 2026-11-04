@@ -151,6 +151,16 @@ the returned lines' origin commits, including exact `body_hex` metadata.
 does not imply that the whole file was returned. `graph_commits`, `comparisons`
 and `algorithms` describe the bounded derivation, not an authorization decision.
 
+`traversal: "line-frontier-v1"` follows only ancestry needed to attribute the
+selected lines. `graph_commits` is the count actually visited, including a
+parent examined to establish a newly introduced line; it does not count unread
+history. A short range can therefore complete in a repository whose total DAG
+exceeds the commit ceiling. Older origins still require bounded ancestor reads.
+Ordered blob-pair correspondence is cached, and `max_diff_work` is shared
+across all comparisons in one native call. The exact line and merge-parent
+precedence rules remain unchanged. Missing required objects and touched cycles
+refuse; unrelated unread history is outside this result's validation claim.
+
 All nine native resource dimensions can be lowered, never raised. Their default
 ceilings are `max_commits=4096`, `max_edges=16384`, `max_tree_entries=100000`,
 `max_blob_bytes=1048576`, `max_lines=20000`, `max_cached_bytes=33554432`,

@@ -45,6 +45,7 @@ fn blame_returns_exact_requested_lines_and_origin_records_in_both_formats_after_
         status(&full, 200);
         assert_eq!(text(&full.body, "type"), "source_blame");
         assert_eq!(text(&full.body, "profile"), "exact-lines-all-parents-v1");
+        assert_eq!(text(&full.body, "traversal"), "line-frontier-v1");
         assert_eq!(text(&full.body, "source_commit"), main.to_string());
         assert_eq!(text(&full.body, "content_hex"), hex(TEXT));
         assert_eq!(text(&full.body, "body_hex"), hex(&direct.origins[0].body));

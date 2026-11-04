@@ -4,10 +4,12 @@
 //! Blame follows exact line matches through all parents, in stored parent order.
 //! It does not guess renames, copies, whitespace equivalence or human authorship.
 
+mod blame_frontier;
 /// Recent first-parent pages without traversing the complete ancestor DAG.
 pub mod first_parent;
 /// Exact file and directory change history, without history simplification.
 pub mod path;
+pub use blame_frontier::blame_frontier;
 
 use crate::preparation::{CommitInput, MergeObjectSource, MergeSourceError};
 use fgit_crypto::{GitObjectKind, git_object_id};
@@ -145,8 +147,29 @@ pub struct BlameLine {
     pub origin_byte_start: usize,
     pub origin_byte_end: usize,
 }
+
+/// How much ancestry was required to produce the exact line attribution.
+/// Neither traversal authenticates author headers or grants object access.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlameTraversal {
+    /// Complete bounded ancestry, including commits unrelated to the lines.
+    FullDag,
+    /// Only commits needed to trace the requested lines through stored parents.
+    LineFrontier,
+}
+impl BlameTraversal {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FullDag => "full-dag-v1",
+            Self::LineFrontier => "line-frontier-v1",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlameResult {
+    pub traversal: BlameTraversal,
     pub tip: GitOid,
     pub tree: GitOid,
     pub blob: GitOid,
@@ -160,6 +183,8 @@ pub struct BlameResult {
     pub lines: Vec<BlameLine>,
     /// Unique origin records in native-ID order. Identity is not authentication.
     pub origins: Vec<HistoryCommit>,
+    /// Distinct commits read by this traversal. This is a total ancestor count
+    /// only for FullDag; LineFrontier makes no claim about unread history.
     pub graph_commits: usize,
     pub comparisons: usize,
     pub algorithms: Vec<DiffAlgorithm>,
@@ -663,6 +688,7 @@ pub fn blame(
         .map_or(target.body.len(), |span| span.start);
     source.checkpoint()?;
     Ok(BlameResult {
+        traversal: BlameTraversal::FullDag,
         tip,
         tree,
         blob,

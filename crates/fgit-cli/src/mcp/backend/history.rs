@@ -29,7 +29,7 @@ pub(super) fn tools() -> Vec<Tool> {
         },
         Tool {
             name: BLAME,
-            description: "Read a bounded line range with exact same-path ancestry across all merge parents. Byte-exact content and native origin IDs; no rename/whitespace guesses or human-authorship claims. Continuation requires the same snapshot.",
+            description: "Read a bounded line range with exact same-path ancestry across all merge parents. Demand-driven traversal follows only the selected lines and reports visited commits explicitly. Byte-exact content and native origin IDs; no rename/whitespace guesses or human-authorship claims. Continuation requires the same snapshot.",
             schema: input_schema(true),
         },
     ]

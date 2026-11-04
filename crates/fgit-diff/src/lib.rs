@@ -401,7 +401,7 @@ impl WorkBudget<'_> {
 /// Compute a bounded deterministic diff. No algorithm allocates before its
 /// corresponding byte/unit/work limit has been checked.
 pub fn diff(old: &[u8], new: &[u8], options: DiffOptions) -> Result<DiffResult, DiffError> {
-    diff_inner(old, new, options, None)
+    diff_inner(old, new, options, None).map(|(result, _work)| result)
 }
 
 /// Compute the same deterministic diff with cooperative cancellation.
@@ -422,6 +422,24 @@ pub fn diff_with_cancellation(
     options: DiffOptions,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<DiffResult, DiffError> {
+    diff_with_cancellation_and_work(old, new, options, is_cancelled).map(|(result, _work)| result)
+}
+
+/// Compute the same cancellable diff and report its exact consumed work units.
+///
+/// The count uses the existing algorithm budget, including materialization and
+/// any attempted trace before linear-space refinement. It is not a timing or
+/// allocation measurement. A caller composing several diffs may subtract the
+/// returned count from one aggregate allowance and pass the remainder as the
+/// next call's `max_work`; successful edit scripts and algorithm selection are
+/// identical to [`diff_with_cancellation`]. A failed or cancelled call returns
+/// neither a partial script nor a successful-work receipt.
+pub fn diff_with_cancellation_and_work(
+    old: &[u8],
+    new: &[u8],
+    options: DiffOptions,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(DiffResult, usize), DiffError> {
     diff_inner(old, new, options, Some(is_cancelled))
 }
 
@@ -430,7 +448,7 @@ fn diff_inner(
     new: &[u8],
     options: DiffOptions,
     cancellation: Option<&dyn Fn() -> bool>,
-) -> Result<DiffResult, DiffError> {
+) -> Result<(DiffResult, usize), DiffError> {
     let mut budget = WorkBudget::new(options.limits.max_work);
     budget.cancellation = cancellation;
     budget.checkpoint()?;
@@ -501,12 +519,15 @@ fn diff_inner(
     budget.consume(atoms.len())?;
     let edits = materialize_edits(&old_tokens, &new_tokens, &atoms)?;
     budget.checkpoint()?;
-    Ok(DiffResult {
-        profile: options.profile,
-        granularity: options.granularity,
-        algorithm,
-        edits,
-    })
+    Ok((
+        DiffResult {
+            profile: options.profile,
+            granularity: options.granularity,
+            algorithm,
+            edits,
+        },
+        budget.limit - budget.remaining,
+    ))
 }
 
 fn minimal_atoms(

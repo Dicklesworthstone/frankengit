@@ -45,7 +45,7 @@ export function fixture(algorithm = 'sha1', path = '66696c65') {
       { line: 1, byte_start: 5, byte_end: 8, origin_commit: base.object_id, origin_blob: oldBlob, origin_line: 1, origin_byte_start: 5, origin_byte_end: 8 },
     ].slice(first, end);
     const ids = new Set(lines.map(line => line.origin_commit));
-    return { ...common, type: 'source_blame', author_identity_verified: false, profile: 'exact-lines-all-parents-v1', scope: 'same_path',
+    return { ...common, type: 'source_blame', author_identity_verified: false, profile: 'exact-lines-all-parents-v1', traversal: 'line-frontier-v1', scope: 'same_path',
       range_complete: true, line_origin: 0, tree: tip.tree, blob, path_hex: path, total_lines: 2, first_line: first, end_line: end,
       content_byte_start: spans[first], content_hex: hex(current.subarray(spans[first], spans[end])), graph_commits: 2,
       comparisons: 1, max_diff_work: 1000000, algorithms: ['Myers'],

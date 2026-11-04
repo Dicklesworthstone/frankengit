@@ -122,6 +122,9 @@ head. The upper bound clamps at EOF, so a 100-line request works on a short
 file. A publication between the two reads refuses rather than mixing a size
 from one file version with attribution from another. At most two bounded native
 reads occur per call. Both share the request's existing runtime/storage budgets.
+The empty-range size probe uses the native line frontier and reads no ancestor
+bodies. The requested attribution then traverses only the ancestry those lines
+need, keeping current source authorization and the exact head pin.
 
 The result carries `bytes_hex`, absolute byte ranges, `first_line`, `end_line`,
 `total_lines`, `next_first_line` and `complete`. Every returned line has exact
@@ -137,6 +140,15 @@ copies, whitespace-equivalent lines or human authorship. CRLF and missing final
 LF remain byte-exact; binary blame, missing paths and incomplete/corrupt history
 refuse. `human_authorship_proven=false` and `merge_permission=null` prevent
 provenance from being presented as authentication or merge approval.
+
+Results identify `traversal: "line-frontier-v1"`. `graph_commits` is a decimal
+count of commits actually visited, including examined parents that did not
+contribute lines. It is not the repository's total history size. A recent
+line can resolve without scanning a much older tail, while older origins can
+still exhaust the commit budget. Exact ordered blob-pair comparisons are
+memoized and share one aggregate `max_diff_work` ceiling per native call.
+The compatibility core API retains `full-dag-v1` as the complete-DAG oracle;
+the MCP endpoint selects frontier traversal through the existing native owner.
 
 ## Selection and bounds
 

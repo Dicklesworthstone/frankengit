@@ -2141,7 +2141,7 @@
       "kind": "tool",
       "owner_subsystem": "git-core",
       "support_profile": "active",
-      "description": "Compute line provenance for a file in an authenticated repository snapshot.",
+      "description": "Read a bounded line range with exact same-path ancestry across all merge parents. Demand-driven traversal follows only the selected lines and reports visited commits explicitly. Byte-exact content and native origin IDs; no rename/whitespace guesses or human-authorship claims. Continuation requires the same snapshot.",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
       "principal": "none",

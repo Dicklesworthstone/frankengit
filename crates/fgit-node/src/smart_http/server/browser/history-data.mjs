@@ -140,6 +140,10 @@ export async function blamePage(reply, selection, query, crypto, check) {
   if (reply.end_line !== (query.end ?? reply.total_lines) || !Array.isArray(reply.lines) || reply.lines.length !== reply.end_line - query.first) fail('Incomplete blame range.');
   oid(reply.tree, selection.object_format); const blob = oid(reply.blob, selection.object_format);
   integer(reply.graph_commits, 'ancestry count', 1, HISTORY_LIMITS.commits);
+  // Older servers loaded the full DAG and omitted this field. An explicit
+  // traversal must be recognized; unknown semantics cannot become a count claim.
+  const traversal = reply.traversal === undefined ? 'full-dag-v1' : reply.traversal;
+  if (!['full-dag-v1', 'line-frontier-v1'].includes(traversal)) fail('Invalid blame traversal.');
   integer(reply.comparisons, 'line comparisons', 0, HISTORY_LIMITS.comparisons);
   if (reply.max_diff_work !== 1000000 || !Array.isArray(reply.algorithms) || reply.algorithms.length > HISTORY_LIMITS.comparisons ||
       new Set(reply.algorithms).size !== reply.algorithms.length) fail('Invalid blame work report.');
@@ -173,7 +177,7 @@ export async function blamePage(reply, selection, query, crypto, check) {
   if (query.first === 0 && reply.content_byte_start !== 0) fail('Full-prefix blame has an offset.');
   const full = query.first === 0 && reply.end_line === reply.total_lines;
   if (full && await nativeHash('blob', content, selection.object_format, crypto) !== blob) fail('Complete blame contents do not match the native blob.');
-  check(); return { selection, query, lines, origins: [...origins.values()], total: reply.total_lines, fullBlobVerified: full, raw: reply };
+  check(); return { selection, query, lines, origins: [...origins.values()], total: reply.total_lines, fullBlobVerified: full, traversal, raw: reply };
 }
 export async function historicalPage(reply, selection, query, crypto, check) {
   readOnly(reply);
