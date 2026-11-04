@@ -9,6 +9,7 @@ use super::super::issues::{
 use super::request::Selection;
 use super::{JsonReply, Status, read_error, read_form};
 use crate::smart_http::drive_request_while;
+use crate::source_retrieval::authorization::SourceReadContext;
 use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
     NodeWorkspaceRefusal, OneNode,
@@ -176,9 +177,30 @@ pub(super) fn activation(
     }
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
+    command_fields(parse_form(bytes, 180)?, format)
+}
+fn command_fields(
+    pairs: Vec<(String, String)>,
+    format: GitHashAlgorithm,
+) -> Result<Command, ApiError> {
+    if pairs.len() > 180
+        || pairs
+            .iter()
+            .try_fold(0_usize, |total, (name, value)| {
+                total
+                    .checked_add(name.len())
+                    .and_then(|n| n.checked_add(value.len()))
+                    .and_then(|n| n.checked_add(2))
+            })
+            // One '=' per pair and '&' only between adjacent pairs.
+            .map(|n| n.saturating_sub(1))
+            .is_none_or(|n| n > MAX_FORM_BYTES)
+    {
+        return Err(ApiError::too_large());
+    }
     let mut fields = BTreeMap::new();
     let (mut terms, mut prefixes) = (Vec::new(), Vec::new());
-    for (name, value) in parse_form(bytes, 180)? {
+    for (name, value) in pairs {
         match name.as_str() {
             "term_hex" => {
                 if terms.len() == 32 {
@@ -339,16 +361,67 @@ pub(super) fn execute(
     );
     let context = node.authenticated_session_request_context(&deadline, session);
     let mut live = || !deadline.expired() && context.is_live();
+    run(node, &context, &command, maximum, &mut live)
+}
+
+/// The existing paginated indexed read for an independently granted ordinary
+/// in-process host. Fields are the HTTP form pairs without object_format; the
+/// node supplies that launch-bound coordinate. This is not authentication:
+/// the caller must enforce its source-read grant before constructing read.
+/// Sponsored contexts are excluded from this interface. The current source,
+/// generation pins, complete-page validation and response limits remain the
+/// HTTP route's own, under one node-bound request and cancellation deadline.
+/// Errors are stable route refusal codes; no query builds or refreshes an index.
+pub fn source_index_json(
+    node: &OneNode,
+    read: &SourceReadContext,
+    mut fields: Vec<(String, String)>,
+    maximum: usize,
+) -> Result<String, &'static str> {
+    read.check_node(node)
+        .map_err(|_| "source_read_context_mismatch")?;
+    if read.agent_authentication().is_some() {
+        return Err("tool_not_granted");
+    }
+    if fields.iter().any(|(name, _)| name == "object_format") {
+        return Err("unknown_index_field");
+    }
+    fields.push(("object_format".into(), node.object_format.as_str().into()));
+    let command = command_fields(fields, node.object_format).map_err(|error| error.code)?;
+    let deadline = GitDaemonSessionDeadline::new(
+        node.git_daemon_session_timeout,
+        GitDaemonSessionWorkScaling::FLAT,
+    );
+    let context = read.request_context(node, &deadline);
+    let mut live = || !deadline.expired() && read.is_live() && context.is_live();
+    run(
+        node,
+        &context,
+        &command,
+        u64::try_from(maximum).unwrap_or(u64::MAX),
+        &mut live,
+    )
+    .map(|reply| reply.body)
+    .map_err(|error| error.code)
+}
+
+fn run(
+    node: &OneNode,
+    context: &crate::NodeRequestContext,
+    command: &Command,
+    maximum: u64,
+    live: &mut impl FnMut() -> bool,
+) -> Result<JsonReply, ApiError> {
     // Explicit selection, never a fallback after a failed strict read. Both
-    // modes use the same authenticated gateway, deadline and request budget.
+    // modes use the same authenticated source owner, deadline and request budget.
     if command.source_mode == SourceMode::Revalidated {
-        return current::execute(node, &context, &command, maximum, &mut live);
+        return current::execute(node, context, command, maximum, live);
     }
     let report = drive_request_while(
         node,
-        &context,
+        context,
         node.search_source_index_local_in(
-            &context,
+            context,
             &command.selection.reference,
             command.selection.expected_head,
             command.selection.expected_commit,
@@ -359,15 +432,15 @@ pub(super) fn execute(
             command.limits,
             command.reads,
         ),
-        &mut live,
+        live,
     )
     .map_err(failure)?;
     let body = render(
         node,
-        &command,
+        command,
         &report,
         usize::try_from(maximum).unwrap_or(usize::MAX),
-        &mut live,
+        live,
     )?;
     Ok(JsonReply {
         status: Status::Success,

@@ -1,6 +1,7 @@
 //! Explicitly granted source retrieval over the node's single-snapshot reader.
 //! Query paths narrow the launch grant; they never mint authority or host access.
 mod batch;
+mod indexed;
 mod regex;
 mod symbols;
 
@@ -28,10 +29,16 @@ pub(super) fn tools() -> Vec<Tool> {
         },
         batch::tool(),
         symbols::tool(),
+        indexed::tool(),
     ]
 }
 
+pub(super) use indexed::NAME as INDEXED_NAME;
 pub(super) use symbols::NAME as SYMBOLS_NAME;
+
+pub(super) fn call_indexed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    indexed::call(backend, args)
+}
 
 pub(super) fn call_symbols(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     symbols::call(backend, args)

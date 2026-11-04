@@ -493,6 +493,9 @@ impl NodeTools {
         if self.options.source && matches!(name, retrieval::INITIAL | retrieval::CONTEXT) {
             return retrieval::call(self, name, args);
         }
+        if self.options.source && name == search::INDEXED_NAME {
+            return search::call_indexed(self, args);
+        }
         if self.options.source && name == search::NAME {
             return search::call(self, args);
         }
@@ -698,7 +701,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 89);
+        assert_eq!(server_names.len(), 90);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));

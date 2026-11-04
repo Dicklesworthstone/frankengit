@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 93,
-  "active_count": 89,
+  "total_count": 94,
+  "active_count": 90,
   "unsupported_count": 4,
   "tools": [
     {
@@ -2414,6 +2414,34 @@
       "refusal_codes": ["needles_required", "batch_match_limit", "invalid_search_query", "snapshot_moved", "resource_limit"],
       "cli_command": "fg search --batch",
       "rest_api_path": "POST /repos/{id}/search/batch"
+    },
+    {
+      "name": "frankengit_source_search_index",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "description": "Page all matching documents in a persisted native content or path index under an ordinary source-read grant. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh. Sponsored profiles exclude this tool.",
+      "read_mutation": "read_only",
+      "capability": "read_derived_generation",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 1048576,
+        "max_depth": 16,
+        "max_items": 10000,
+        "max_fan_out": 1,
+        "max_duration_ms": 300000
+      },
+      "pagination": "snapshot_bound_cursor",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "serial_graceful_drain",
+      "refusal_codes": ["tool_not_granted", "expected_string", "expected_array", "unknown_argument", "reference_required", "terms_required", "invalid_index_argument", "invalid_ref", "invalid_index_source_mode", "unsupported_index_channel", "invalid_hex_bytes", "invalid_search_scope", "invalid_index_query", "invalid_snapshot_token", "invalid_expected_commit", "invalid_decimal_string", "incomplete_index_generation", "invalid_index_generation", "index_continuation_requires_pins", "invalid_index_limit", "invalid_index_limits", "missing_index_field", "duplicate_field", "object_format_mismatch", "unknown_index_field", "source_read_context_mismatch", "source_index_uninitialized", "source_index_stale", "index_checkpoint_unavailable", "source_snapshot_moved", "source_commit_moved", "ref_does_not_select_commit", "not_found", "invalid_browse_query", "invalid_search_query", "invalid_index_report", "index_result_limit", "resource_limit", "request_timeout", "repository_unavailable"],
+      "cli_command": "fg search --indexed-current",
+      "rest_api_path": "POST /{repository}/api/v1/source/search-index"
     },
     {
       "name": "frankengit_source_symbols",

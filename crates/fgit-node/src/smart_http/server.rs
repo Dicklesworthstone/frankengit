@@ -28,7 +28,7 @@ mod queues;
 mod source;
 #[cfg(target_os = "linux")]
 mod workflow;
-pub use source::{source_agent_context_json, source_retrieval_json};
+pub use source::{source_agent_context_json, source_index_json, source_retrieval_json};
 mod stock_receive;
 mod upload_liveness;
 

@@ -4015,6 +4015,114 @@
       },
       "additionalProperties": false
     },
+    "frankengit_source_search_index": {
+      "title": "frankengit_source_search_index",
+      "description": "Page all matching documents in a persisted native content or path index under an ordinary source-read grant. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh. Sponsored profiles exclude this tool.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full visible UTF-8 refs/* name, at most 1024 native bytes. The launch fixes tenant, repository, incarnation and object format.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "terms_hex": {
+              "type": "array",
+              "description": "1..32 nonempty ASCII word tokens encoded as lowercase hex, at most 128 decoded bytes each. Case-folded, sorted and deduplicated native conjunction; no substring, regex or semantic interpretation.",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            },
+            "path_prefixes_hex": {
+              "type": "array",
+              "description": "Optional raw repository path prefixes encoded as lowercase hex: at most 128 entries, 4096 decoded bytes each, and 8192 decoded bytes combined. Native path validation and slash-component scope apply.",
+              "x-classification": "selector_position",
+              "maxLength": 32768
+            },
+            "source_mode": {
+              "type": "string",
+              "description": "revalidated (default) checks current source and retains separate original index provenance; exact requires the original source snapshot. No fallback between modes.",
+              "x-classification": "selector_position",
+              "maxLength": 11,
+              "pattern": "^(revalidated|exact)$"
+            },
+            "channel": {
+              "type": "string",
+              "description": "content (default) searches ASCII word postings in regular-file bytes; path searches raw path word postings. An explicit single channel per page sequence.",
+              "x-classification": "selector_position",
+              "maxLength": 7,
+              "pattern": "^(content|path)$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional exact current algorithm-qualified authority snapshot token. Mandatory on continuation, using the first page's snapshot_token; movement refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "expected_commit": {
+              "type": "string",
+              "description": "Optional exact nonzero native source commit in the launch SHA-1 or SHA-256 domain. Mandatory on continuation, using the first page's source_commit.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "index_token": {
+              "type": "string",
+              "description": "Exact native index generation identity, paired with index_number. Both are mandatory on continuation and must come from the original first page.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "index_number": {
+              "type": "string",
+              "description": "Exact positive canonical decimal u64 generation position paired with index_token. Preserves positions above JavaScript's safe integer range.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "minimum_index_token": {
+              "type": "string",
+              "description": "Optional independent retained anti-rollback floor identity, paired with minimum_index_number. Does not replace the exact continuation generation.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "minimum_index_number": {
+              "type": "string",
+              "description": "Positive canonical decimal u64 position paired with minimum_index_token. Failure to resolve the retained floor refuses rather than rolling back.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "after": {
+              "type": "string",
+              "description": "Positive canonical decimal u64 document cursor from next_after. Requires original expected_head, expected_commit, index_token and index_number; repeat query, mode and channel unchanged.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page size from 1 through 100 inclusive; default 20. An incomplete page always contains the requested count and a next_after cursor.",
+              "x-classification": "selector_position"
+            },
+            "max_work": {
+              "type": "integer",
+              "description": "Finite native query-work ceiling from 1 through 16777216 inclusive; defaults to 16777216. Exhaustion refuses the whole read.",
+              "x-classification": "selector_position"
+            },
+            "max_payload_bytes": {
+              "type": "integer",
+              "description": "Finite immutable index-payload read ceiling from 1 through 33554432 bytes inclusive; default 8388608. Independent encoded output ceiling is 1048576 bytes.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": ["reference", "terms_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_source_symbols": {
       "title": "frankengit_source_symbols",
       "description": "Find Rust declaration heads by exact or prefix ASCII name in one authenticated repository snapshot.",

@@ -465,3 +465,49 @@ fn failed_reads_do_not_fabricate_empty_results_or_canonical_write_decisions() {
         assert!(!text.contains("\"hits\":[]") && !text.contains("\"outcome\":\"refused\""));
     }
 }
+
+
+#[test]
+fn in_process_pairs_preserve_the_exact_http_form_byte_boundary() {
+    // A syntactically valid form may reach the exact envelope limit. Each
+    // decoded value stays well inside the ordinary per-field limit.
+    let count = 128;
+    let overhead = count * ("unknown".len() + 2) - 1;
+    let payload = MAX_FORM_BYTES - overhead;
+    let mut pairs: Vec<_> = (0..count)
+        .map(|index| {
+            (
+                "unknown".to_owned(),
+                "x".repeat(payload / count + usize::from(index < payload % count)),
+            )
+        })
+        .collect();
+    let mut form = pairs
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    assert_eq!(form.len(), MAX_FORM_BYTES);
+    assert_eq!(parse_form(form.as_bytes(), 180).unwrap(), pairs);
+    // Unknown fields are refused by the command grammar, not misreported as
+    // an envelope overflow caused by charging an imaginary trailing '&'.
+    for error in [
+        command(form.as_bytes(), GitHashAlgorithm::Sha1).unwrap_err(),
+        command_fields(pairs.clone(), GitHashAlgorithm::Sha1).unwrap_err(),
+    ] {
+        assert_eq!(error.code, "unknown_index_field");
+    }
+    form.push('x');
+    pairs.last_mut().unwrap().1.push('x');
+    for error in [
+        command(form.as_bytes(), GitHashAlgorithm::Sha1).unwrap_err(),
+        command_fields(pairs, GitHashAlgorithm::Sha1).unwrap_err(),
+        command_fields(
+            vec![("unknown".to_owned(), String::new()); 181],
+            GitHashAlgorithm::Sha1,
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(error.code, "resource_limit");
+    }
+}
