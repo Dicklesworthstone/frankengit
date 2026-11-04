@@ -3451,7 +3451,7 @@
     },
     "frankengit_source_candidate": {
       "title": "frankengit_source_candidate",
-      "description": "Prepare or inspect bounded native Git candidate bundles and pull request merge candidates without publishing. prepare_queue_merge additionally requires source, PR and queue read grants and constructs the exact canonical queue-head two-parent candidate; only its separate queue-landing tool may publish.",
+      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_replay and resolve_replay apply one exact cherry-pick or revert through the native path-v1 planner, preserve the target as sole parent, require the original snapshot for conflict resolution, and return bounded handoffs to the existing inspector and source publisher. Replay requires source read and remains outside the sponsored-agent profile. Queue preparation additionally requires source, PR and queue read and constructs the exact canonical queue-head two-parent candidate.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3459,7 +3459,7 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "Candidate operation selector (prepare_patch, prepare_initial, inspect, inspect_initial, prepare_pull_merge, inspect_pull_merge, resolve_pull_merge, prepare_queue_merge).",
+              "description": "Candidate operation selector (prepare_patch, prepare_initial, inspect, inspect_initial, prepare_pull_merge, inspect_pull_merge, resolve_pull_merge, prepare_queue_merge, prepare_replay, resolve_replay).",
               "x-classification": "selector_position",
               "maxLength": 64
             },
@@ -3471,7 +3471,7 @@
             },
             "expected_head": {
               "type": "string",
-              "description": "Optional exact authority snapshot token pin.",
+              "description": "Exact authority snapshot token pin. resolve_replay requires the original preparation snapshot; it is optional for prepare_replay and other supported candidate reads.",
               "x-classification": "selector_position",
               "maxLength": 140
             },
@@ -3488,6 +3488,117 @@
               "x-classification": "selector_position",
               "maxLength": 20,
               "pattern": "^[1-9][0-9]*$"
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Lossless full target branch bytes; exactly one of reference/reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "profile": {
+              "type": "string",
+              "description": "Required for prepare_replay and resolve_replay: explicit path-v1 native single-commit replay profile.",
+              "x-classification": "selector_position",
+              "maxLength": 16,
+              "pattern": "^path-v1$"
+            },
+            "direction": {
+              "type": "string",
+              "description": "Required for replay: cherry-pick applies the selected change; revert applies its inverse while preserving the target as sole parent.",
+              "x-classification": "selector_position",
+              "maxLength": 16,
+              "pattern": "^(cherry-pick|revert)$"
+            },
+            "source_reference": {
+              "type": "string",
+              "description": "Visible branch authorizing historical replay selection; exactly one source reference encoding is required.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "source_reference_hex": {
+              "type": "string",
+              "description": "Lossless source branch bytes; alternative to source_reference. Source and target may be the same branch.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_base": {
+              "type": "string",
+              "description": "Exact current target commit for replay and ordinary single-parent candidate work; never refreshed implicitly.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_source": {
+              "type": "string",
+              "description": "Exact current source branch tip. The selected historical replay commit must be reachable from this tip.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "selected_commit": {
+              "type": "string",
+              "description": "One exact historical commit to replay, reachable from the explicitly visible source history; not an arbitrary admitted object selector.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "mainline": {
+              "type": "integer",
+              "description": "Optional one-based stored parent position, 1 through 65535. Required for merge commits, absent for roots; ordinary commits default to one.",
+              "x-classification": "selector_position"
+            },
+            "author": {
+              "type": "string",
+              "description": "Explicit native author header identity; validated content, never an authenticated principal.",
+              "x-classification": "untrusted_content",
+              "maxLength": 1024
+            },
+            "committer": {
+              "type": "string",
+              "description": "Explicit native committer header identity; ambient Git configuration is not consulted.",
+              "x-classification": "untrusted_content",
+              "maxLength": 1024
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "Explicit positive canonical decimal Unix seconds, at most i64::MAX, encoded in UTC.",
+              "x-classification": "untrusted_content",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "message_hex": {
+              "type": "string",
+              "description": "Exact nonempty NUL-free commit message bytes; at most 4096 decoded bytes, preserving CRLF and missing final newline.",
+              "x-classification": "untrusted_content",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "max_commits": {
+              "type": "integer",
+              "description": "Optional replay history-commit ceiling from 1 through 4096; default 4096.",
+              "x-classification": "selector_position"
+            },
+            "max_edges": {
+              "type": "integer",
+              "description": "Optional replay parent-edge ceiling from 1 through 16384; default 16384.",
+              "x-classification": "selector_position"
+            },
+            "max_tree_entries": {
+              "type": "integer",
+              "description": "Optional replay tree-entry ceiling from 1 through 100000; default 100000.",
+              "x-classification": "selector_position"
+            },
+            "max_preparation_bytes": {
+              "type": "integer",
+              "description": "Optional replay generated/packed expanded-byte ceiling from 1 through 1048576; default 262144. The separate MCP bundle cap remains 24576 bytes.",
+              "x-classification": "selector_position"
+            },
+            "resolutions": {
+              "type": "array",
+              "description": "Required only for resolve_replay and resolve_pull_merge: every and only actual conflict, at most 64 choices, with 24 KiB aggregate decoded paths and regular-file bytes. Empty file chunks=[] is distinct from deletion.",
+              "x-classification": "untrusted_content"
             }
           },
           "required": ["operation"],
@@ -3666,7 +3777,7 @@
     },
     "frankengit_source_log": {
       "title": "frankengit_source_log",
-      "description": "Read commit ancestry log from an authenticated repository snapshot.",
+      "description": "Read a bounded commit DAG, exact-path changes, or an explicit recent first-parent page at one authorized repository snapshot.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3674,36 +3785,67 @@
           "properties": {
             "reference": {
               "type": "string",
-              "description": "Full ref name (e.g. refs/heads/main).",
+              "description": "Full UTF-8 ref name; supply exactly one of reference and reference_hex.",
               "x-classification": "selector_position",
-              "maxLength": 256
+              "maxLength": 4096
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Raw ref bytes in canonical lowercase hex; mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
             },
             "limit": {
               "type": "integer",
-              "description": "Max commits to return (1..100, default 50).",
+              "description": "Max commits to return (1..20, default 5).",
               "x-classification": "selector_position"
             },
-            "after_commit": {
+            "after": {
               "type": "string",
-              "description": "Commit ID cursor.",
+              "description": "Canonical decimal DAG/path offset; a nonzero offset requires expected_head. Invalid in first-parent mode.",
               "x-classification": "selector_position",
-              "maxLength": 64
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "first_parent": {
+              "type": "boolean",
+              "description": "Explicit true selects the stored first-parent prefix; false refuses. Omit for DAG/path history. Incompatible with after or path_hex.",
+              "x-classification": "selector_position"
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Canonical fgfp1 continuation bound to exact head, raw ref and tip; requires first_parent:true.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
             },
             "path_hex": {
               "type": "string",
-              "description": "Optional exact path: only commits whose entry there differs from a parent.",
+              "description": "Optional exact path: only commits whose entry there differs from a parent. Invalid in first-parent mode.",
               "x-classification": "selector_position",
               "maxLength": 8192,
               "pattern": "^(?:[0-9a-f]{2})+$"
             },
             "expected_head": {
               "type": "string",
-              "description": "Optional snapshot token pin.",
+              "description": "Optional exact current authority head pin; must agree with a supplied first-parent cursor.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "expected_commit": {
+              "type": "string",
+              "description": "Optional exact current ref-tip comparison; never an arbitrary object selector.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "max_commits": {
+              "type": "integer",
+              "description": "Lower the visited commit bound (1..4096); first-parent pages charge skipped prefix and returned page.",
+              "x-classification": "selector_position"
             }
           },
-          "required": ["reference"],
+          "required": [],
           "additionalProperties": false
         }
       },
@@ -3910,6 +4052,215 @@
             }
           },
           "required": ["reference"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_tag_annotate": {
+      "title": "frankengit_tag_annotate",
+      "description": "Create an absent annotated tag from explicit native target kind, tagger, timestamp and exact bounded message bytes. Quarantine verifies the native target and authored tag object before ordinary source-write admission. Metadata and signature-looking text grant no authority; sponsored-agent profiles exclude this tool.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full UTF-8 refs/tags/* name, at most 1024 bytes. Supply exactly one of reference and reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Exact raw full refs/tags/* name in lowercase hex, at most 1024 decoded bytes. Mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "target": {
+              "type": "string",
+              "description": "Exact nonzero native target OID in the launch-bound SHA-1 or SHA-256 domain. Current visible reachability is checked by native admission.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "target_kind": {
+              "type": "string",
+              "description": "Declared target kind: commit, tree, blob or tag. Native quarantine checks the actual kind before publication.",
+              "x-classification": "selector_position",
+              "maxLength": 6,
+              "pattern": "^(commit|tree|blob|tag)$"
+            },
+            "tagger": {
+              "type": "string",
+              "description": "Explicit native Name <email> metadata, at most 1024 UTF-8 bytes. Content only, never the launch-bound authenticated principal.",
+              "x-classification": "untrusted_content",
+              "maxLength": 1024
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "Explicit UTC Unix seconds as canonical decimal, 0..9223372036854775807. No ambient clock or authenticated authorship is inferred.",
+              "x-classification": "untrusted_content",
+              "maxLength": 19,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "message_hex": {
+              "type": "string",
+              "description": "Exact message bytes as lowercase hex, at most 8192 decoded bytes. Empty is valid; NUL refuses. No trimming, newline insertion or signature trust.",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384,
+              "pattern": "^(?:[0-9a-f]{2})*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable key: 1..256 printable ASCII bytes. Retry only the identical operation and all original tag operands; JSON-RPC IDs are independent.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["target", "target_kind", "tagger", "timestamp", "message_hex", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_tag_create": {
+      "title": "frankengit_tag_create",
+      "description": "Create an absent lightweight tag at an explicit visible native object through ordinary sealed source publication. Requires source-write and the launch-bound principal; grants no reads or outcome lookup. Exact-key retries return historical decisions without replacing or recreating tags.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full UTF-8 refs/tags/* name, at most 1024 bytes. Supply exactly one of reference and reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Exact raw full refs/tags/* name in lowercase hex, at most 1024 decoded bytes. Mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "target": {
+              "type": "string",
+              "description": "Exact nonzero native target OID in the launch-bound SHA-1 or SHA-256 domain. Current visible reachability is checked by native admission.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable key: 1..256 printable ASCII bytes. Retry only the identical operation and all original tag operands; JSON-RPC IDs are independent.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["target", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_tag_delete": {
+      "title": "frankengit_tag_delete",
+      "description": "Delete one tag at its exact original unpeeled expected_object under the source-write grant and launch-bound principal. No implicit latest tip, force or protection bypass. Retain the original key and lease for retries; the receipt does not assert current ref state.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full UTF-8 refs/tags/* name, at most 1024 bytes. Supply exactly one of reference and reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Exact raw full refs/tags/* name in lowercase hex, at most 1024 decoded bytes. Mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_object": {
+              "type": "string",
+              "description": "Exact nonzero OUTER tag-ref object ID, not its peeled commit. A comparison or deletion lease; never an arbitrary-object read capability.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable key: 1..256 printable ASCII bytes. Retry only the identical operation and all original tag operands; JSON-RPC IDs are independent.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["expected_object", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_tag_inspect": {
+      "title": "frankengit_tag_inspect",
+      "description": "Inspect one visible tag and its verified bounded native annotation chain under the ordinary source-read grant. Optional pins compare the current authority head and outer ref value. Tagger and signature content grant no identity or trust; sponsored-agent profiles exclude this tool.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full UTF-8 refs/tags/* name, at most 1024 bytes. Supply exactly one of reference and reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Exact raw full refs/tags/* name in lowercase hex, at most 1024 decoded bytes. Mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional exact current algorithm-qualified snapshot token. Authority movement refuses; this does not select a retained historical snapshot.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "expected_object": {
+              "type": "string",
+              "description": "Exact nonzero OUTER tag-ref object ID, not its peeled commit. A comparison or deletion lease; never an arbitrary-object read capability.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "max_tags": {
+              "type": "integer",
+              "description": "Narrow the recursively peeled annotation count from 1 through 64; default 64.",
+              "x-classification": "selector_position"
+            },
+            "max_object_bytes": {
+              "type": "integer",
+              "description": "Narrow the native per-object read bound from 1 through 262144 bytes; default 262144. Includes the terminal non-tag object.",
+              "x-classification": "selector_position"
+            },
+            "max_total_bytes": {
+              "type": "integer",
+              "description": "Narrow total original object bytes from 1 through 524288; default 524288. Includes the terminal object, whose body is not returned. Encoded output has an independent 1 MiB limit.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": [],
           "additionalProperties": false
         }
       },

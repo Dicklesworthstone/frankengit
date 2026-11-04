@@ -64,21 +64,21 @@ impl std::fmt::Display for ReplayPreparationRefusal {
 }
 impl std::error::Error for ReplayPreparationRefusal {}
 impl ReplayPreparationRefusal {
-    // Transport adapters classify typed failures without exposing private object
-    // owners, formatting Debug strings, or disclosing internal object IDs.
-    pub(crate) const fn is_snapshot_moved(&self) -> bool {
+    // External transport adapters classify typed failures without exposing private
+    // object owners, formatting Debug strings, or disclosing internal object IDs.
+    pub const fn is_snapshot_moved(&self) -> bool {
         matches!(self, Self::SnapshotMoved)
     }
-    pub(crate) const fn is_tip_moved(&self) -> bool {
+    pub const fn is_tip_moved(&self) -> bool {
         matches!(self, Self::TipMoved)
     }
-    pub(crate) const fn is_unavailable(&self) -> bool {
+    pub const fn is_unavailable(&self) -> bool {
         matches!(self, Self::RefUnavailable)
     }
-    pub(crate) const fn is_invalid_input(&self) -> bool {
+    pub const fn is_invalid_input(&self) -> bool {
         matches!(self, Self::InvalidInput(_))
     }
-    pub(crate) const fn is_resource_refusal(&self) -> bool {
+    pub const fn is_resource_refusal(&self) -> bool {
         matches!(
             self,
             Self::BudgetExceeded
@@ -88,7 +88,7 @@ impl ReplayPreparationRefusal {
                 ))
         )
     }
-    pub(crate) const fn is_cancelled(&self) -> bool {
+    pub const fn is_cancelled(&self) -> bool {
         matches!(
             self,
             Self::Source(MergeSourceError::Cancelled)
@@ -97,14 +97,14 @@ impl ReplayPreparationRefusal {
                 ))
         )
     }
-    pub(crate) const fn source_refusal(&self) -> Option<&MergeSourceError> {
+    pub const fn source_refusal(&self) -> Option<&MergeSourceError> {
         if let Self::Source(error) = self {
             Some(error)
         } else {
             None
         }
     }
-    pub(crate) fn preparation_refusal(&self) -> Option<&ReplayError> {
+    pub fn preparation_refusal(&self) -> Option<&ReplayError> {
         if let Self::Preparation(error) = self {
             Some(error)
         } else {
