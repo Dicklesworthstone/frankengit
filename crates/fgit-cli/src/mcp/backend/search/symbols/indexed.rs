@@ -1,4 +1,4 @@
-//! Ordinary-grant adapter over native persisted symbol readers. An index is
+//! Authorized host adapter over native persisted symbol readers. An index is
 //! derived evidence, never a read grant, implicit refresh or scan fallback.
 mod input;
 #[cfg(test)]
@@ -20,12 +20,14 @@ pub(super) fn schema(properties: Object) -> Value {
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
-    // These APIs deliberately retain their trusted-local native contract. A
-    // sponsored caller must not acquire a whole-source index read by naming a
-    // mode of a tool whose original scanner is available in that profile.
-    if !backend.options.source || backend.options.agent_token_file.is_some() {
+    if !backend.options.source {
         return Err(ToolError::invalid("tool_not_granted"));
     }
+    // The local native readers rely on the host's checked source authority.
+    // Require the retained SOURCE_READ request before parsing or reading when
+    // configured as an agent; command_context keeps that same request's original
+    // deadline. A completed response or metadata request cannot substitute.
+    let _authorization = backend.source_read_context()?;
     let input = input::parse(args, backend.options.format)?;
     let selected = &input.selected;
     let request = backend.command_context();

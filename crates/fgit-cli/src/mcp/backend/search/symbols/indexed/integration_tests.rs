@@ -512,7 +512,7 @@ fn absent_indexes_floors_and_read_limits_refuse_without_fallback_or_publication(
 }
 
 #[test]
-fn source_writes_or_sponsored_profiles_do_not_grant_the_trusted_local_index_modes() {
+fn source_writes_or_unverified_agent_context_do_not_grant_index_modes() {
     let (_scratch, mut backend, _) = seeded(GitHashAlgorithm::Sha1, true, false);
     let before = head_bytes(&backend);
     backend.options.source = false;
@@ -531,12 +531,12 @@ fn source_writes_or_sponsored_profiles_do_not_grant_the_trusted_local_index_mode
     backend.options.agent_token_file = Some(PathBuf::from("must-not-open"));
     assert_eq!(
         super::call(&backend, &Object::new()).unwrap_err().code,
-        "tool_not_granted"
+        "agent_request_required"
     );
     for mode in ["indexed-current", "indexed-exact"] {
         assert_eq!(
             super::super::call(&backend, &query(mode)).unwrap_err().code,
-            "tool_not_granted"
+            "agent_request_required"
         );
     }
     backend.options.agent_token_file = None;

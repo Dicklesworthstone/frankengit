@@ -10,10 +10,11 @@ that scope. These tools do not publish authority, build indexes or execute Git.
 
 `frankengit_source_search_index` pages through complete native content/path
 posting results with original source and generation pins, exact decimal
-counters, and explicit whole-corpus omission coverage. It requires an ordinary
-trusted-local source-read launch and already-built indexes; sponsored profiles
-exclude it. See [MCP_INDEXED_SEARCH.md](MCP_INDEXED_SEARCH.md) for the two source
-modes, continuation contract and finite read/result limits.
+counters, and explicit whole-corpus omission coverage. It requires a source-read
+launch and already-built indexes. Sponsored calls additionally authenticate the
+current canonical `source-read` credential. See
+[MCP_INDEXED_SEARCH.md](MCP_INDEXED_SEARCH.md) for the two source modes,
+continuation contract and finite read/result limits.
 
 ## Exact literal search
 

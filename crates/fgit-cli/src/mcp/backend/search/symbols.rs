@@ -14,7 +14,7 @@ const MAX_NAME_BYTES: usize = 256;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Find Rust declaration heads by exact or prefix ASCII name in .rs files of a visible ref. Default scan reads one source snapshot. Explicit indexed-exact/indexed-current modes read existing persisted declaration tables; current mode independently revalidates the native commit/tree and preserves original index provenance. Index coverage and match completeness are separate. Indexed modes require an ordinary source grant; no build, refresh or scan fallback. Exact byte paths/spans; no compiler resolution, macro expansion or cfg evaluation. Match limits return an incomplete prefix without a cursor.",
+        description: "Find Rust declaration heads by exact or prefix ASCII name in .rs files of a visible ref. Default scan reads one source snapshot. Explicit indexed-exact/indexed-current modes read existing persisted declaration tables; current mode independently revalidates the native commit/tree and preserves original index provenance. Index coverage and match completeness are separate. Indexed modes require source-read authority, including the current canonical source-read credential for sponsored calls; no build, refresh or scan fallback. Exact byte paths/spans; no compiler resolution, macro expansion or cfg evaluation. Match limits return an incomplete prefix without a cursor.",
         schema: input_schema(),
     }
 }

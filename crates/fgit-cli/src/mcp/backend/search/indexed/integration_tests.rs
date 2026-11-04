@@ -289,7 +289,7 @@ fn absent_index_and_work_or_payload_exhaustion_refuse_without_rebuilding_or_part
 }
 
 #[test]
-fn source_write_or_sponsored_context_never_enables_the_indexed_read_handler() {
+fn source_write_or_unverified_agent_context_never_enables_the_indexed_read_handler() {
     let (_scratch, mut backend, _) = seeded(GitHashAlgorithm::Sha1, true);
     let before = head_bytes(&backend);
     let hostile = Object::new();
@@ -301,7 +301,7 @@ fn source_write_or_sponsored_context_never_enables_the_indexed_read_handler() {
     assert_eq!(super::call(&backend, &hostile).unwrap_err().code, "tool_not_granted");
     backend.options.source = true;
     backend.options.agent_token_file = Some(PathBuf::from("must-not-open"));
-    assert_eq!(super::call(&backend, &hostile).unwrap_err().code, "tool_not_granted");
+    assert_eq!(super::call(&backend, &hostile).unwrap_err().code, "agent_request_required");
     backend.options.agent_token_file = None;
     backend.options.writes.source = false;
     backend.options.principal = None;

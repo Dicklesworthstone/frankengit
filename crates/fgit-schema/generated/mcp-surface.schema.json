@@ -4157,7 +4157,7 @@
     },
     "frankengit_source_search_index": {
       "title": "frankengit_source_search_index",
-      "description": "Page all matching documents in a persisted native content or path index under an ordinary source-read grant. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh. Sponsored profiles exclude this tool.",
+      "description": "Page all matching documents in a persisted native content or path index under a source-read grant. Sponsored calls require a current canonical source-read credential. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -4265,7 +4265,7 @@
     },
     "frankengit_source_symbols": {
       "title": "frankengit_source_symbols",
-      "description": "Find Rust declaration heads by exact or prefix ASCII name with the existing source scan or explicit persisted indexed-exact/indexed-current modes. Indexed modes preserve original/current provenance and report query completeness separately from corpus coverage; ordinary source grant only, no build or scan fallback.",
+      "description": "Find Rust declaration heads by exact or prefix ASCII name with the existing source scan or explicit persisted indexed-exact/indexed-current modes. Indexed modes preserve original/current provenance and report query completeness separately from corpus coverage; checked source-read authority, including canonical sponsored source-read requests, no build or scan fallback.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -4309,7 +4309,7 @@
             },
             "source_mode": {
               "type": "string",
-              "description": "Omitted or scan preserves direct search; indexed-exact requires original source authority, indexed-current independently revalidates the same visible native commit/tree. Indexed modes require the ordinary source grant.",
+              "description": "Omitted or scan preserves direct search; indexed-exact requires original source authority, indexed-current independently revalidates the same visible native commit/tree. Indexed modes require checked source-read authority, including canonical sponsored source-read requests.",
               "x-classification": "selector_position",
               "maxLength": 15,
               "pattern": "^(scan|indexed-exact|indexed-current)$"

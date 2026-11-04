@@ -7,11 +7,12 @@ search. It uses the same source selection, immutable generation reader,
 current-source verification and complete-page renderer as
 [the indexed HTTP API](INDEXED_SEARCH_HTTP.md).
 
-The tool requires an ordinary trusted-local `--allow-source` launch. Source-write,
-agent-context and artifact grants alone do not enable it. It is absent from the
-sponsored-agent catalogue; both the MCP handler and shared native entrypoint
-also refuse sponsored use. The operator fixes the storage root, tenant,
+The tool requires `--allow-source`. An ordinary trusted-local launch supplies
+operator source-read authority; a sponsored launch independently authenticates
+canonical `source-read` on every call. Source-write, agent-context and artifact
+grants alone do not enable it. The operator fixes the storage root, tenant,
 repository, incarnation and hash domain. Arguments cannot expand that scope.
+An index, generation checkpoint or cursor never replaces current source access.
 
 ## Launch and index availability
 
@@ -25,6 +26,16 @@ fg mcp "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" \
 
 Use `--object-format sha256` for a SHA-256 repository. Complete the normal MCP
 initialization handshake before calling the tool.
+
+A sponsored launch instead supplies `--agent-token-file` and the exact
+incarnation, as described in [sponsored credentials](SPONSORED_AGENT_CREDENTIALS.md#use-the-credential-with-mcp).
+The adapter requires the active verified `SOURCE_READ` request even when reached
+directly. A metadata request or completed response reservation cannot authorize
+another read. The original request lifetime and response-byte ceiling cover the
+entire read and disclosure; each page authenticates independently, so revocation
+affects the next call. Credential issuance or revocation advances metadata:
+revalidated mode can retain the original index when the current visible commit
+and tree match, while exact mode requires the index's original source authority.
 
 Build the index through the existing
 [trusted-local index owner](INDEXED_SEARCH_HTTP.md#build-an-existing-nodes-index),
@@ -196,7 +207,9 @@ repository failures are failed reads. Relevant stable codes include:
 
 | Refusal | Meaning |
 |---|---|
-| `tool_not_granted` | Ordinary source read was not granted, or the call uses sponsored context. |
+| `tool_not_granted` | The independent source-read launch ceiling is absent. |
+| `agent_operation_not_granted` | The canonical sponsored credential does not authorize source reads. |
+| `agent_credential_unavailable` | The sponsored credential is unavailable, expired or revoked. |
 | `index_continuation_requires_pins` | A cursor lacks original source head, commit or exact generation. |
 | `incomplete_index_generation` | Only one half of an exact generation or minimum checkpoint pair was supplied. |
 | `source_index_uninitialized` | No usable native index has been activated. |
@@ -215,13 +228,15 @@ transaction receipt. These reads have no publication or retry key.
 
 The adapter calls `fgit_node::source_index_json`, which shares the existing HTTP
 parser, native exact/current reader and renderer under a node-bound request
-context and deadline. The wrapper rejects caller object formats and sponsored
-contexts before source access. The HTTP form path retains its exact byte
-envelope boundary.
+context and deadline. The wrapper rejects caller object formats and mismatched
+node contexts before source access. Sponsored contexts originate in the
+canonical source-read verifier and retain its original deadline. The HTTP form
+path retains its exact byte envelope boundary.
 
 Regression sources cover closed schema/registry parity, source-only grants,
-sponsored exclusion, complete source/generation pins, full-width decimal
-positions, both native modes, omission preservation, output expansion bounds,
-persisted content/path page traversal and native failed-read behavior. They
+canonical sponsored scope and lifecycle checks, complete source/generation pins,
+full-width decimal positions, both native modes, omission preservation, output
+expansion bounds, persisted content/path page traversal and native failed-read
+behavior. They
 require the repository's permitted native build lane; the interface introduces
 no shell or alternate search implementation.

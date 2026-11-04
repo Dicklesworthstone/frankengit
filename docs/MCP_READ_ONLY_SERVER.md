@@ -61,8 +61,9 @@ fg mcp /absolute/path/to/existing-node TENANT_HEX REPOSITORY_HEX \
 ```
 
 The credential must independently grant `source-read`. The source ceiling exposes
-only current tree/blob reads, literal/regex and batch search, symbols, ref listing,
-Initial retrieval and source context. The separate agent-context ceiling exposes
+only current tree/blob reads, literal/regex and batch search, persisted
+lexical/path pages, scanned or indexed symbols, ref listing, Initial retrieval
+and source context. The separate agent-context ceiling exposes
 only `frankengit_agent_context`. Neither flag grants the other. Source history,
 candidate preparation, verified-blob streaming, bundles, queues and workflow
 artifacts remain outside the sponsored profile even when an operator source

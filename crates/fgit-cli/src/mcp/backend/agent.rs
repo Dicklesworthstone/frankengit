@@ -104,6 +104,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         | "frankengit_source_blob"
         | "frankengit_source_search"
         | "frankengit_source_search_batch"
+        | "frankengit_source_search_index"
         | "frankengit_source_symbols"
         | "frankengit_ref_list"
         | "frankengit_source_initial"

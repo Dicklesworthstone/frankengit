@@ -198,7 +198,7 @@ fg mcp ./repository TENANT_ID REPOSITORY_ID \
 
 | MCP launch ceiling | Exact sponsored tools |
 | --- | --- |
-| `--allow-source` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
+| `--allow-source` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_search_index`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
 | `--allow-agent-context` | `frankengit_agent_context` |
 
 Both ceilings require canonical `source-read` on every call. Neither launch flag
@@ -216,6 +216,19 @@ Current visible commit/tree identity must still match, and the response preserve
 both current disclosure and original index provenance. Actual source movement,
 visibility failure, missing required indexes and stale current-head pins refuse.
 This mode grants no additional operation and does not rebuild indexes.
+
+Dedicated persisted reads use the same verified source authority:
+`frankengit_source_search_index` supports content/path pages with `source_mode`
+`exact` or `revalidated`, and `frankengit_source_symbols` supports
+`indexed-exact` or `indexed-current` alongside its default scan. Revalidated
+modes retain current disclosure coordinates and original index provenance
+separately. Continuation pages require the original source and generation pins
+and independently authenticate the credential; a cursor cannot survive source
+movement or revocation by granting access itself. Both handlers verify an active
+source-read request before parsing or native reads, including direct dispatch.
+An authentic metadata request, an expired request, or a completed response
+reservation cannot substitute. Source/index budgets and whole-repository
+omission coverage are unchanged; query path prefixes only narrow matching.
 
 Sponsored MCP agent-context documents use
 `agent-context-mcp-sponsored-agent-v1` with
@@ -370,11 +383,15 @@ interrupted writes, flush, byte ceilings, and response-reservation cleanup. Thei
 presence is a coverage inventory, not a passing test result.
 
 The sponsored MCP source tests use real persisted native source and lexical and
-symbol indexes in both Git object formats. They cover the complete nine-tool
+symbol indexes in both Git object formats. They cover the complete ten-tool
 allowlist, independent launch ceilings, source-only and metadata-only scope
 isolation, exact sponsor provenance, missing indexes without implicit rebuilding,
 snapshot mismatch, revocation and rotation in the same process and after reopen,
-and original request expiry through response disclosure. Node bridge tests
+and original request expiry through response disclosure. Persisted-index cases
+also cover exact/current modes, content/path pagination, generation floors,
+metadata-only movement with retained provenance, changed or deleted source,
+direct-handler metadata-scope substitution and missing indexes without builds.
+Node bridge tests
 separately reject namespace, object-format, operation and lifetime substitution.
 Existing trusted-local document fields remain absent where no canonical agent
 witness exists; they are not replaced with synthetic null provenance.

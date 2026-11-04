@@ -1,5 +1,5 @@
 //! Complete, pinned pages over existing immutable lexical/path index owners.
-//! Ordinary source-read grant only; this does not expand the sponsored catalogue.
+//! Every host retains its independently checked source-read authority.
 mod input;
 mod output;
 #[cfg(test)]
@@ -19,17 +19,20 @@ const MAX_PAYLOAD: u64 = 32 * 1024 * 1024;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Page all matching documents in a persisted native content or path index under an ordinary source-read grant. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh. Sponsored profiles exclude this tool.",
+        description: "Page all matching documents in a persisted native content or path index under a source-read grant. Sponsored calls require a current canonical source-read credential. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh.",
         schema: input::schema(),
     }
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
-    if !backend.options.source || backend.options.agent_token_file.is_some() {
+    if !backend.options.source {
         return Err(ToolError::invalid("tool_not_granted"));
     }
-    let mut query = input::parse(args, backend.options.format)?;
+    // A configured agent must retain this invocation's verified SOURCE_READ
+    // request. Direct dispatch cannot borrow the ordinary host's authority or
+    // reuse a completed response reservation, even with valid index pins.
     let read = backend.source_read_context()?;
+    let mut query = input::parse(args, backend.options.format)?;
     let document = fgit_node::source_index_json(
         &backend.node,
         &read,

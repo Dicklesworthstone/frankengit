@@ -14,11 +14,15 @@ the existing native symbol owners.
 | `indexed-exact` | Read the active persisted symbol generation only if its original source authority still matches the selected current source. Unrelated repository metadata changes can make this mode stale. |
 | `indexed-current` | Independently select the currently visible ref and verify its native commit and root tree, then reuse the existing index only for that same source. Keep current and indexed provenance separately. |
 
-The indexed modes require the ordinary `--trusted-local --allow-source` profile.
-They return `tool_not_granted` under sponsored-agent launch profiles because the
-native persisted-symbol APIs currently retain a trusted-local contract. This does
-not change the existing scanner's sponsored behavior or grant new capabilities.
-Source-write permission does not imply source-read permission.
+The indexed modes require `--allow-source` and the selected host's source-read
+authority. An ordinary `--trusted-local` launch supplies operator authority; a
+sponsored launch authenticates canonical `source-read` on every invocation.
+Before calling the local native readers, the adapter verifies that an agent has
+an active source-read request for this repository namespace. Metadata authority,
+a completed response reservation, index generation or source-write permission
+does not imply source-read permission. The same original request deadline and
+response-byte reservation cover lookup and disclosure. Revocation takes effect
+on the next independently authenticated call, including after a process reopen.
 
 No mode builds or refreshes an index. The indexed modes never fall back to a
 source scan. An operator can initialize or refresh indexes through the existing
@@ -102,9 +106,10 @@ incomplete coverage cannot establish that a declaration is absent from omitted
 files.
 
 Coverage metadata covers the whole index even when query paths narrow matching.
-An out-of-query omission remains visible as part of that inventory. The ordinary
-trusted-local source profile authorizes that inventory; path prefixes are query
-filters, not narrower authorization grants. Unsupported non-Rust files and
+An out-of-query omission remains visible as part of that inventory. Both the
+ordinary source profile and canonical sponsored `source-read` authorize this
+whole-repository inventory for the selected visible source; path prefixes are
+query filters, not narrower authorization grants. Unsupported non-Rust files and
 non-regular entries have their own counters and are not represented as indexed
 Rust declarations.
 

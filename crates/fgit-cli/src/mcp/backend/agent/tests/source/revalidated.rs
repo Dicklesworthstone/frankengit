@@ -290,6 +290,16 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
             );
             assert!(backend.call(name, &current_query(name)).is_ok(), "{name}");
         }
+        for (name, mut args) in indexed::queries() {
+            args.insert(
+                "expected_head".into(),
+                field(&original, &["snapshot_token"]).clone(),
+            );
+            assert_eq!(
+                backend.call(name, &args).unwrap_err().code,
+                "source_snapshot_moved"
+            );
+        }
         let mut ranked = current_query(INDEXED[1]);
         ranked.insert(
             "context_selection".into(),
@@ -349,6 +359,13 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
                 "{name}"
             );
         }
+        for (name, args) in indexed::queries() {
+            assert_eq!(
+                backend.call(name, &args).unwrap_err().code,
+                indexed::stale(name),
+                "{name}"
+            );
+        }
         let after = backend
             .node
             .runtime()
@@ -380,6 +397,13 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
         for name in INDEXED {
             assert_eq!(
                 backend.call(name, &current_query(name)).unwrap_err().code,
+                "not_found",
+                "{name}"
+            );
+        }
+        for (name, args) in indexed::queries() {
+            assert_eq!(
+                backend.call(name, &args).unwrap_err().code,
                 "not_found",
                 "{name}"
             );

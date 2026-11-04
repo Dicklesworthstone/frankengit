@@ -116,7 +116,7 @@ pub(super) fn schema(mut properties: Object) -> Value {
     properties.insert("source_mode".into(), object([
         ("type", text("string")),
         ("enum", Value::Array(vec![text("indexed-exact"), text("indexed-current")])),
-        ("description", text("Explicit persisted read under an ordinary source grant. Exact requires the original source authority; current independently revalidates the visible native commit/tree while retaining indexed provenance. No refresh or scan fallback.")),
+        ("description", text("Explicit persisted read under checked source-read authority, including canonical sponsored source-read requests. Exact requires the original source authority; current independently revalidates the visible native commit/tree while retaining indexed provenance. No refresh or scan fallback.")),
     ]));
     properties.insert("max_payload_bytes".into(), object([
         ("type", text("integer")), ("minimum", json::number(1)),

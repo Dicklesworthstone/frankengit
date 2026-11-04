@@ -364,12 +364,14 @@ pub(super) fn execute(
     run(node, &context, &command, maximum, &mut live)
 }
 
-/// The existing paginated indexed read for an independently granted ordinary
+/// The existing paginated indexed read for an independently granted
 /// in-process host. Fields are the HTTP form pairs without object_format; the
 /// node supplies that launch-bound coordinate. This is not authentication:
 /// the caller must enforce its source-read grant before constructing read.
-/// Sponsored contexts are excluded from this interface. The current source,
-/// generation pins, complete-page validation and response limits remain the
+/// Sponsored contexts must originate in the verifier's SOURCE_READ bridge; the
+/// host still owns per-call authentication and response reservations. Their
+/// original lifetime is retained without granting index publication. Current
+/// source, generation pins, complete-page validation and response limits remain the
 /// HTTP route's own, under one node-bound request and cancellation deadline.
 /// Errors are stable route refusal codes; no query builds or refreshes an index.
 pub fn source_index_json(
@@ -380,9 +382,6 @@ pub fn source_index_json(
 ) -> Result<String, &'static str> {
     read.check_node(node)
         .map_err(|_| "source_read_context_mismatch")?;
-    if read.agent_authentication().is_some() {
-        return Err("tool_not_granted");
-    }
     if fields.iter().any(|(name, _)| name == "object_format") {
         return Err("unknown_index_field");
     }

@@ -578,7 +578,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
     entity_kind: McpEntityKind::Tool,
     owner_subsystem: "search",
     support_profile: SupportProfile::Active,
-    description: "Page all matching documents in a persisted native content or path index under an ordinary source-read grant. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh. Sponsored profiles exclude this tool.",
+    description: "Page all matching documents in a persisted native content or path index under a source-read grant. Sponsored calls require a current canonical source-read credential. Continuation requires the original source head, commit and exact index identity/number. Current-source mode preserves original index provenance; exact mode is explicit. Completeness describes the page sequence, while coverage separately identifies omitted source files. Missing, stale, corrupt or over-budget indexes refuse; no implicit build or refresh.",
     read_mutation: ReadMutationClass::ReadOnly,
     capability: CapabilityRequirement::READ_DERIVED_GENERATION,
     principal: PrincipalRequirement::None,
