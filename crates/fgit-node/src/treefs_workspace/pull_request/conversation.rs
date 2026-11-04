@@ -116,7 +116,7 @@ impl OneNode {
             inner: self
                 .durable_admission_projection(&context)
                 .map_err(map)?
-                .with_authenticated_session(authenticated),
+                .with_authentication(authenticated.authentication()),
             object_limits: MergeObjectLimits::default(),
             staging: None,
             workspace: None,

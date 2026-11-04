@@ -12,7 +12,6 @@ in committed and refused admission evidence.
 | --- | --- | --- |
 | Accepted HTTP token, including Basic token-as-password | `HttpToken` | `single_factor` |
 | Authorized SSH deploy-key command | `SshDeployKey` | `single_factor` |
-| Canonical sponsored agent credential, bounded metadata profile | `AgentCredential` with full witness | `single_factor` |
 | Configured raw Git principal, local CLI/MCP principal, or public session constructor | `OperatorAssertion` | `none` |
 | Historical principal snapshot 1.0 or compatibility projection without provenance | Unknown | Authentication policies refuse missing evidence. |
 
@@ -85,14 +84,10 @@ command that changes no references.
 
 ## Scope and verification
 
-The legacy transport-method receipts contain no credential secret or individual
-credential handle and do not establish issuer, expiry, sponsor chain, principal
-kind, membership, capability root, MFA, or hardware binding.
-[Sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md) add exact schema 1.2
-principal snapshots and schema 1.5 policy evidence for the bounded metadata
-profile. They retain the agent and sponsor witness without changing the older
-formats or permitting agent code, review, merge or administration effects.
-These profiles do not complete the full identity model in
+The receipt contains no credential secret or individual credential handle. It
+does not establish an issuer, expiry, sponsor chain, principal kind, membership,
+capability root, MFA, or hardware binding. This is the current transport-method
+integration, not completion of the full identity model in
 `frankengit-root-doctrine-x2mv.4.13`.
 
 Focused tests cover restricted policy evaluation, canonical event/evidence

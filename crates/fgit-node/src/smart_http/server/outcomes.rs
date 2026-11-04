@@ -10,7 +10,6 @@ mod sessions;
 use std::io::{self, Write};
 
 use fgit_admission::MAX_RECEIVE_SESSION_COMMANDS;
-use fgit_admission::evidence::{AdmissionAuthentication, PrincipalSnapshotRecord};
 use fgit_admission::policy_bridge::receive_session::non_atomic_command_key;
 use fgit_authority::key_recovery::RequestRecovery;
 use fgit_authority::{IdempotencyKey, OutcomeLookup};
@@ -171,7 +170,7 @@ fn authenticate(
         Selector::Command(index) => non_atomic_command_key(&original, index)
             .map_err(|_| ApiError::bad("invalid_command_index"))?,
     };
-    Ok(grant.session(key))
+    Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
 }
 
 /// Own one bounded lookup child, including explicit close on every result.
@@ -249,7 +248,7 @@ fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.authenticated_session_request_context(&deadline, session);
+    let context = node.session_request_context(&deadline);
     // The resolver preserves a terminal result even if cancellation arrives
     // after that decision was authenticated. No seal or binding is written.
     let report = drive_request_while(
@@ -259,27 +258,13 @@ fn execute(
         &mut || !deadline.expired(),
     )
     .map_err(|_| ApiError::from_status(Status::Unavailable))?;
-    let mut body = render(node, principal, request.selector.command_index(), &report);
+    let body = render(node, principal, request.selector.command_index(), &report);
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(MAX_REPLY_BYTES);
     if body.len() > maximum {
         return Err(ApiError::from_status(Status::TooLarge));
     }
-    let provenance = drive_request_while(
-        node,
-        &context,
-        node.recover_transaction_principal_in(&context, session, &report),
-        &mut || !deadline.expired(),
-    );
-    append_principal_provenance(
-        &mut body,
-        provenance
-            .as_ref()
-            .map(|value| value.as_ref())
-            .map_err(|_| ()),
-        maximum,
-    );
     let terminal_tx = match &report {
         RequestRecovery::Recovered(recovered) if report.terminal().is_some() => {
             Some(recovered.tx_id())
@@ -287,80 +272,6 @@ fn execute(
         _ => None,
     };
     Ok(Reply { body, terminal_tx })
-}
-
-fn append_principal_provenance(
-    body: &mut String,
-    provenance: Result<Option<&PrincipalSnapshotRecord>, ()>,
-    maximum: usize,
-) {
-    let (view, error) = match provenance {
-        Err(()) => (
-            "{\"state\":\"unavailable\"}".to_owned(),
-            "\"original_principal_evidence_unavailable\"",
-        ),
-        Ok(None) => ("{\"state\":\"not_terminal\"}".to_owned(), "null"),
-        Ok(Some(snapshot)) => {
-            let method = match snapshot.authentication() {
-                None => "null",
-                Some(AdmissionAuthentication::OperatorAssertion) => "\"operator_assertion\"",
-                Some(AdmissionAuthentication::HttpToken) => "\"http_token\"",
-                Some(AdmissionAuthentication::SshDeployKey) => "\"ssh_deploy_key\"",
-                Some(AdmissionAuthentication::AgentCredential(_)) => "\"agent_credential\"",
-            };
-            let witness = snapshot.agent_provenance().map_or_else(
-                || "null".to_owned(),
-                |agent| {
-                    let hex = |bytes: &[u8]| {
-                        bytes
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<String>()
-                    };
-                    format!(
-                        concat!(
-                            "{{\"agent\":{},\"sponsor\":{},\"sponsor_kind\":{},",
-                            "\"credential_id\":{},\"grant_root\":{{\"algorithm\":{},\"hex\":{}}},",
-                            "\"run_commitment\":{},\"authenticated_at\":{},\"expires_at\":{}}}"
-                        ),
-                        quote(&agent.agent().to_string()),
-                        quote(&agent.sponsor().to_string()),
-                        quote(agent.sponsor_kind().name()),
-                        quote(&agent.credential_id().to_string()),
-                        agent.grant_root().algorithm().code_point(),
-                        quote(&hex(agent.grant_root().bytes().as_bytes())),
-                        quote(&hex(agent.run_commitment())),
-                        agent.authenticated_at(),
-                        agent.expires_at()
-                    )
-                },
-            );
-            (
-                format!(
-                    "{{\"state\":{},\"principal_id\":{},\"authentication\":{},\"agent_provenance\":{}}}",
-                    quote(if snapshot.authentication().is_some() {
-                        "recorded"
-                    } else {
-                        "legacy_unknown"
-                    }),
-                    quote(&snapshot.principal_id().to_string()),
-                    method,
-                    witness
-                ),
-                "null",
-            )
-        }
-    };
-    let mut suffix = format!(",\"principal_provenance\":{view},\"provenance_error\":{error}}}");
-    if body.len() - 1 + suffix.len() > maximum {
-        suffix = ",\"principal_provenance\":{\"state\":\"unavailable\"},\"provenance_error\":\"response_limit\"}".into();
-    }
-    // Optional provenance must never suppress an already known terminal. If
-    // even its bounded error marker cannot fit, retain the original receipt.
-    if body.len() - 1 + suffix.len() <= maximum && body.ends_with('}') {
-        body.pop();
-        body.push_str(&suffix);
-    }
 }
 
 fn render(
@@ -488,25 +399,6 @@ mod observations;
 mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
-
-    #[test]
-    fn optional_provenance_failure_and_reply_limit_preserve_terminal_knowledge() {
-        let original =
-            "{\"state\":\"committed\",\"terminal\":true,\"decision\":{\"kind\":\"committed\"}}";
-        let mut complete = original.to_owned();
-        append_principal_provenance(&mut complete, Err(()), MAX_REPLY_BYTES);
-        assert!(complete.starts_with(&original[..original.len() - 1]));
-        assert!(complete.contains("\"principal_provenance\":{\"state\":\"unavailable\"}"));
-        assert!(complete.contains("original_principal_evidence_unavailable"));
-        assert!(!complete.contains("legacy_unknown"));
-        let mut bounded = original.to_owned();
-        append_principal_provenance(&mut bounded, Err(()), original.len());
-        assert_eq!(bounded, original);
-        let mut pending = "{\"terminal\":false}".to_owned();
-        append_principal_provenance(&mut pending, Ok(None), MAX_REPLY_BYTES);
-        assert!(pending.contains("\"state\":\"not_terminal\""));
-        assert!(pending.contains("\"provenance_error\":null"));
-    }
 
     #[test]
     fn selectors_are_bodyless_queries_with_explicit_original_wire_indices() {

@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-mod agent_credentials;
 mod artifact_command;
 mod bisect_command;
 mod branches;
@@ -61,21 +60,6 @@ fn main() -> ExitCode {
 }
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "agent-credential")
-    {
-        return match agent_credentials::run(&arguments[1..]) {
-            Ok(code) => ExitCode::from(code),
-            Err(error) => {
-                eprintln!(
-                    "{{\"type\":\"agent_credential_error\",\"schema_version\":1,\"error\":{}}}",
-                    publication_support::quote(&error)
-                );
-                ExitCode::from(2)
-            }
-        };
-    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "checkpoint")

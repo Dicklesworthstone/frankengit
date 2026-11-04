@@ -1,7 +1,7 @@
 //! Immutable fixed-width handoff from actual execution to later check publication.
 use super::{
-    File, Format, GitOid, MetadataExt, Path, Read, TrustedWorkflowDispatch,
-    TrustedWorkflowFailure, fs, hex, invalid, io, sha256_digest, write_new,
+    File, Format, GitOid, MetadataExt, Path, Read, TrustedWorkflowDispatch, TrustedWorkflowFailure,
+    fs, hex, invalid, io, sha256_digest, write_new,
 };
 use std::collections::BTreeSet;
 const MAGIC: &[u8; 8] = b"FGWCS001";
@@ -113,7 +113,9 @@ impl Sources {
                     && terminal.selected > 0
                     && !terminal.permits_empty_prefix())
         }) {
-            return Err(invalid("watch terminal prefix differs from selected dispatch"));
+            return Err(invalid(
+                "watch terminal prefix differs from selected dispatch",
+            ));
         }
         checkpoint(live)?;
         let mut body = Vec::new();
@@ -148,14 +150,18 @@ impl Sources {
                 || metadata.nlink() != 1
                 || metadata.len() < 72
             {
-                return Err(invalid("watch terminal journal is not bounded private custody"));
+                return Err(invalid(
+                    "watch terminal journal is not bounded private custody",
+                ));
             }
             journal_bytes = journal_bytes
                 .checked_sub(metadata.len())
                 .ok_or_else(|| invalid("watch terminal aggregate journal bound exceeded"))?;
             let journal = run.open_check_journal(None, live)?;
             if journal.pin().byte_len() != metadata.len() {
-                return Err(invalid("watch terminal journal changed during finalization"));
+                return Err(invalid(
+                    "watch terminal journal changed during finalization",
+                ));
             }
             body.extend(run.run_id);
             body.extend_from_slice(
@@ -224,7 +230,12 @@ impl Sources {
         } else {
             None
         };
-        let rows_end = end - if terminal.is_some() { TERMINAL_BYTES } else { 0 };
+        let rows_end = end
+            - if terminal.is_some() {
+                TERMINAL_BYTES
+            } else {
+                0
+            };
         let (format, width) = match bytes[72] {
             1 => (Format::Sha1, 20),
             2 => (Format::Sha256, 32),
@@ -363,7 +374,12 @@ mod tests {
     }
 
     fn empty_frame(format: Format, terminal: Option<TerminalDispatch>) -> Vec<u8> {
-        let mut bytes = if terminal.is_some() { TERMINAL_MAGIC } else { MAGIC }.to_vec();
+        let mut bytes = if terminal.is_some() {
+            TERMINAL_MAGIC
+        } else {
+            MAGIC
+        }
+        .to_vec();
         bytes.extend([1; 32]);
         bytes.extend([2; 32]);
         bytes.push(if format == Format::Sha1 { 1 } else { 2 });
@@ -397,7 +413,10 @@ mod tests {
             assert!(decoded.verify_selection(0, [9; 32]).is_ok());
             for reason in [0, 2, 3, 4, 5, 6, 255] {
                 let changed = empty_frame(format, Some(TerminalDispatch { reason, ..terminal }));
-                assert!(Sources::decode(&changed, &[1; 32], &key).is_err(), "reason {reason}");
+                assert!(
+                    Sources::decode(&changed, &[1; 32], &key).is_err(),
+                    "reason {reason}"
+                );
             }
             for length in 0..bytes.len() {
                 assert!(Sources::decode(&bytes[..length], &[1; 32], &key).is_err());
@@ -417,8 +436,11 @@ mod tests {
         assert!(TerminalDispatch::from_native(1, "", [1; 32]).is_err());
         assert!(TerminalDispatch::from_native(33, "request_stopped", [1; 32]).is_err());
         for reason in [
-            "request_stopped", "output_budget_exhausted", "workflow_refused",
-            "workflow_timed_out", "workflow_output_limit",
+            "request_stopped",
+            "output_budget_exhausted",
+            "workflow_refused",
+            "workflow_timed_out",
+            "workflow_output_limit",
         ] {
             assert!(TerminalDispatch::from_native(1, reason, [1; 32]).is_ok());
         }
