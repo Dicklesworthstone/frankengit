@@ -3,6 +3,7 @@
 //! lives in tests/protection_http.rs.
 
 mod candidate_checks;
+mod path_reviews;
 
 use super::*;
 use fgit_wire::smart_http::head;

@@ -6,6 +6,7 @@ use fgit_admission::merge::native::{NativeMergeIntent, objects::MergeObjectLimit
 
 pub(super) fn queue_only(name: RefName) -> ProtectedBranch {
     ProtectedBranch {
+        path_reviews: Vec::new(),
         name,
         reviewers: Vec::new(),
         required_approvals: 0,

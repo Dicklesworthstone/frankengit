@@ -123,6 +123,7 @@ fn public_native_policy_attachment_cannot_grant_queue_privilege_from_batch_shape
                     required_approvals: 0,
                     required_checks: Vec::new(),
                     required_candidate_checks: Vec::new(),
+                    path_reviews: Vec::new(),
                     require_merge_queue: true,
                 }],
                 ref_policy: Some(

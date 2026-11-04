@@ -29,6 +29,8 @@
       <form id="protection-edit">
         <label>Complete administrator set, one principal ID per line<textarea id="protection-administrators" rows="4" maxlength="2048" spellcheck="false" disabled></textarea></label>
         <label>Complete branch rules: reference hex, comma-separated eligible reviewer IDs, approval count or all, require merge queue true or false<textarea id="protection-rules" rows="8" maxlength="262144" spellcheck="false" disabled></textarea></label>
+        <label>Complete path review rules: branch hex, exact or subtree, path hex, approval count, comma-separated reviewer IDs<textarea id="protection-paths" rows="6" maxlength="262144" spellcheck="false" disabled></textarea></label>
+        <p class="hint">One path rule per line. Paths use exact lowercase hex bytes, without wildcards or text normalization. Subtree covers the named path and its slash-separated descendants. Every matching path quorum is required in addition to branch-wide reviews and checks. Exact directory rules cover structural replacement, addition or deletion; use subtree to require review of file changes inside a directory. At most 32 rules per branch, 256 total, and 64 KiB of decoded path bytes. To protect only selected paths, keep the branch rule above with - reviewers and 0 approvals. Removing a branch requires explicitly removing or retargeting its path rows.</p>
         <fieldset>
           <legend>Complete required workflow check set</legend>
           <p>Each selector requires a successful latest result for the exact proposed commit. Add or edit a selector below, or remove it explicitly. A check can protect a branch without requiring human reviewers.</p>

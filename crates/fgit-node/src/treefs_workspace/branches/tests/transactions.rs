@@ -327,6 +327,7 @@ fn mandatory_review_or_queue_protection_rejects_whole_transaction_not_just_prote
                     ref_policy: None,
                     administrators: vec![principal()],
                     branches: vec![ProtectedBranch {
+                        path_reviews: Vec::new(),
                         required_candidate_checks: Vec::new(),
                         require_merge_queue,
                         required_approvals: u16::from(!require_merge_queue),

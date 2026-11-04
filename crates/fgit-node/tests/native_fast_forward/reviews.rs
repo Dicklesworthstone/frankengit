@@ -101,6 +101,7 @@ fn protect(node: &OneNode) -> PolicyEpoch {
             ref_policy: None,
             administrators: vec![actor(1)],
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: false,
                 required_approvals: 1,

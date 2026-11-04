@@ -9,6 +9,10 @@ pub const MAX_PROTECTED_BRANCHES: usize = 64;
 pub const MAX_POLICY_ADMINISTRATORS: usize = 32;
 pub const MAX_BRANCH_REVIEWERS: usize = 32;
 pub const MAX_BRANCH_REQUIRED_CHECKS: usize = 32;
+pub const MAX_BRANCH_PATH_REVIEWS: usize = 32;
+pub const MAX_POLICY_PATH_REVIEWS: usize = 256;
+pub const MAX_PATH_REVIEW_PATH_BYTES: usize = 4096;
+pub const MAX_POLICY_PATH_REVIEW_BYTES: usize = 64 * 1024;
 pub const MAX_REF_POLICY_SOURCE_BYTES: usize = fgit_policy::syntax::MAX_SOURCE_LEN;
 pub const MAX_REF_POLICY_FRAME_BYTES: usize =
     fgit_policy::reference_profile::MAX_REFERENCE_POLICY_BYTES;
@@ -124,6 +128,58 @@ impl RequiredCandidateWorkflowCheck {
     }
 }
 
+/// Matching uses native Git path bytes, without Unicode or filesystem
+/// normalization. Subtree includes the named entry and slash-separated children.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum PathReviewScope {
+    Exact,
+    Subtree,
+}
+
+/// An additional independent approval quorum for the actual target-to-candidate
+/// tree delta. Every matching rule applies; ordering never selects a winner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathReviewRule {
+    pub path: Vec<u8>,
+    pub scope: PathReviewScope,
+    pub reviewers: Vec<PrincipalId>,
+    pub required_approvals: u16,
+}
+impl PathReviewRule {
+    pub fn validate(&self) -> Result<(), CodecRefusal> {
+        if self.path.is_empty()
+            || self.path.len() > MAX_PATH_REVIEW_PATH_BYTES
+            || self.path.contains(&0)
+            || self
+                .path
+                .split(|byte| *byte == b'/')
+                .any(|part| part.is_empty() || part == b"." || part == b"..")
+        {
+            return Err(invalid_native("review_protection.path"));
+        }
+        principals(&self.reviewers, MAX_BRANCH_REVIEWERS)?;
+        if self.required_approvals == 0
+            || usize::from(self.required_approvals) > self.reviewers.len()
+        {
+            return Err(invalid_native("review_protection.path_approvals"));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn selector_key(&self) -> (&[u8], PathReviewScope) {
+        (&self.path, self.scope)
+    }
+
+    #[must_use]
+    pub fn matches(&self, changed_path: &[u8]) -> bool {
+        changed_path == self.path.as_slice()
+            || (self.scope == PathReviewScope::Subtree
+                && changed_path.starts_with(&self.path)
+                && changed_path.get(self.path.len()) == Some(&b'/'))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectedBranch {
     pub name: RefName,
@@ -143,6 +199,9 @@ pub struct ProtectedBranch {
     /// targeting this branch. A caller-provided queue receipt is not authority.
     /// Historical policy encodings decode to false.
     pub require_merge_queue: bool,
+    /// Strictly sorted by (raw path bytes, scope), without duplicate selectors.
+    /// Historical policy encodings decode to an empty vector.
+    pub path_reviews: Vec<PathReviewRule>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewProtection {
@@ -173,6 +232,8 @@ impl ReviewProtection {
         {
             return Err(invalid_native("review_protection.branches"));
         }
+        let mut path_rules = 0_usize;
+        let mut path_bytes = 0_usize;
         for branch in &self.branches {
             if !branch.name.as_bytes().starts_with(b"refs/heads/") {
                 return Err(invalid_native("review_protection.branch_namespace"));
@@ -188,6 +249,7 @@ impl ReviewProtection {
             if (branch.reviewers.is_empty()
                 && branch.required_checks.is_empty()
                 && branch.required_candidate_checks.is_empty()
+                && branch.path_reviews.is_empty()
                 && !branch.require_merge_queue)
                 || branch
                     .required_checks
@@ -211,6 +273,25 @@ impl ReviewProtection {
             for check in &branch.required_candidate_checks {
                 check.validate()?;
             }
+            if branch.path_reviews.len() > MAX_BRANCH_PATH_REVIEWS
+                || branch
+                    .path_reviews
+                    .windows(2)
+                    .any(|pair| pair[0].selector_key() >= pair[1].selector_key())
+            {
+                return Err(invalid_native("review_protection.path_reviews"));
+            }
+            path_rules = path_rules
+                .checked_add(branch.path_reviews.len())
+                .filter(|total| *total <= MAX_POLICY_PATH_REVIEWS)
+                .ok_or_else(|| invalid_native("review_protection.path_reviews"))?;
+            for rule in &branch.path_reviews {
+                rule.validate()?;
+                path_bytes = path_bytes
+                    .checked_add(rule.path.len())
+                    .filter(|total| *total <= MAX_POLICY_PATH_REVIEW_BYTES)
+                    .ok_or_else(|| invalid_native("review_protection.path_bytes"))?;
+            }
         }
         Ok(())
     }
@@ -225,6 +306,14 @@ impl ReviewProtection {
         self.branches
             .iter()
             .any(|branch| !branch.required_candidate_checks.is_empty())
+    }
+    /// Path-scoped quorums require the explicit path-review wire kind. An old
+    /// reader must refuse that required kind instead of discarding its rules.
+    #[must_use]
+    pub fn has_path_reviews(&self) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| !branch.path_reviews.is_empty())
     }
     /// Queue-bearing policies require the explicit queue wire kind. Policies
     /// without this restriction retain every historical byte and identity.
@@ -274,12 +363,15 @@ impl NativeProtectionEvent {
     }
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
-        let with_candidates = self.protection.has_required_candidate_checks();
+        let with_paths = self.protection.has_path_reviews();
+        let with_candidates = with_paths || self.protection.has_required_candidate_checks();
         let with_queue = with_candidates || self.protection.has_required_merge_queue();
         // Kinds 16 through 18 wrap an explicitly named protection encoding.
         // No queue restriction means exactly the historical base and bytes.
         if self.protection.ref_policy.is_some() {
-            out.write_scalar(if with_candidates {
+            out.write_scalar(if with_paths {
+                26_u32
+            } else if with_candidates {
                 21_u32
             } else if with_queue {
                 19_u32
@@ -334,6 +426,21 @@ impl NativeProtectionEvent {
                     )?;
                 }
             }
+            if with_paths {
+                out.write_scalar(branch.path_reviews.len() as u32);
+                for rule in &branch.path_reviews {
+                    out.write_bytes("review_protection.path", &rule.path)?;
+                    out.write_scalar(match rule.scope {
+                        PathReviewScope::Exact => 0_u8,
+                        PathReviewScope::Subtree => 1_u8,
+                    });
+                    out.write_scalar(rule.reviewers.len() as u32);
+                    for id in &rule.reviewers {
+                        out.write_opaque_id(id.as_bytes());
+                    }
+                    out.write_scalar(rule.required_approvals);
+                }
+            }
         }
         if let Some(snapshot) = &self.protection.ref_policy {
             out.write_bytes("review_protection.ref_policy", &snapshot.encode()?)?;
@@ -364,16 +471,17 @@ impl NativeProtectionEvent {
         input: &mut Decoder<'_>,
         profile: fgit_policy::reference_profile::ReferencePolicyProfile,
     ) -> Result<Self, CodecRefusal> {
-        let (checks, quorum, queue, candidates) =
+        let (checks, quorum, queue, candidates, paths) =
             match input.read_scalar::<u32>("review_protection.base_kind")? {
-                9 => (false, false, false, false),
-                13 => (true, false, false, false),
-                14 => (true, true, false, false),
-                19 => (true, true, true, false),
-                21 => (true, true, true, true),
+                9 => (false, false, false, false, false),
+                13 => (true, false, false, false, false),
+                14 => (true, true, false, false, false),
+                19 => (true, true, true, false, false),
+                21 => (true, true, true, true, false),
+                26 => (true, true, true, true, true),
                 _ => return Err(invalid_native("review_protection.base_kind")),
             };
-        let mut value = Self::read_profile(input, checks, quorum, queue, candidates)?;
+        let mut value = Self::read_profile(input, checks, quorum, queue, candidates, paths)?;
         let frame = input.read_bytes("review_protection.ref_policy")?;
         let snapshot = decode_ref_policy_with_limits(frame, input.limits())?;
         if fgit_policy::reference_profile::classify(&snapshot).ok() != Some(profile) {
@@ -389,12 +497,15 @@ impl NativeProtectionEvent {
         with_quorum: bool,
         with_queue: bool,
     ) -> Result<Self, CodecRefusal> {
-        Self::read_profile(input, with_checks, with_quorum, with_queue, false)
+        Self::read_profile(input, with_checks, with_quorum, with_queue, false, false)
     }
     pub(super) fn read_with_candidate_checks(
         input: &mut Decoder<'_>,
     ) -> Result<Self, CodecRefusal> {
-        Self::read_profile(input, true, true, true, true)
+        Self::read_profile(input, true, true, true, true, false)
+    }
+    pub(super) fn read_with_path_reviews(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Self::read_profile(input, true, true, true, true, true)
     }
     fn read_profile(
         input: &mut Decoder<'_>,
@@ -402,6 +513,7 @@ impl NativeProtectionEvent {
         with_quorum: bool,
         with_queue: bool,
         with_candidates: bool,
+        with_paths: bool,
     ) -> Result<Self, CodecRefusal> {
         fn count(
             input: &mut Decoder<'_>,
@@ -437,6 +549,8 @@ impl NativeProtectionEvent {
         let administrators = people(input, MAX_POLICY_ADMINISTRATORS, false)?;
         let n = count(input, "review_protection.branches", MAX_PROTECTED_BRANCHES)?;
         let mut branches = Vec::new();
+        let mut remaining_path_rules = MAX_POLICY_PATH_REVIEWS;
+        let mut remaining_path_bytes = MAX_POLICY_PATH_REVIEW_BYTES;
         for _ in 0..n {
             let name = input.read_ref_name()?;
             let reviewers = people(input, MAX_BRANCH_REVIEWERS, with_checks)?;
@@ -505,6 +619,36 @@ impl NativeProtectionEvent {
                     });
                 }
             }
+            let mut path_reviews = Vec::new();
+            if with_paths {
+                let n = count(
+                    input,
+                    "review_protection.path_reviews",
+                    MAX_BRANCH_PATH_REVIEWS.min(remaining_path_rules),
+                )?;
+                remaining_path_rules -= n;
+                for _ in 0..n {
+                    let path = input.read_bytes("review_protection.path")?;
+                    if path.len() > MAX_PATH_REVIEW_PATH_BYTES.min(remaining_path_bytes) {
+                        return Err(invalid_native("review_protection.path_bytes"));
+                    }
+                    remaining_path_bytes -= path.len();
+                    let scope = match input.read_scalar::<u8>("review_protection.path_scope")? {
+                        0 => PathReviewScope::Exact,
+                        1 => PathReviewScope::Subtree,
+                        _ => return Err(invalid_native("review_protection.path_scope")),
+                    };
+                    let rule = PathReviewRule {
+                        path: path.to_vec(),
+                        scope,
+                        reviewers: people(input, MAX_BRANCH_REVIEWERS, false)?,
+                        required_approvals: input
+                            .read_scalar::<u16>("review_protection.path_approvals")?,
+                    };
+                    rule.validate()?;
+                    path_reviews.push(rule);
+                }
+            }
             branches.push(ProtectedBranch {
                 name,
                 reviewers,
@@ -512,6 +656,7 @@ impl NativeProtectionEvent {
                 required_checks,
                 required_candidate_checks,
                 require_merge_queue,
+                path_reviews,
             });
         }
         let value = Self {
@@ -526,7 +671,13 @@ impl NativeProtectionEvent {
         value.validate()?;
         // Queue kind 19 always carries quorum/check fields and at least one
         // true queue flag. Historical kinds retain their smallest encoding.
-        let canonical_kind = if with_candidates {
+        let canonical_kind = if with_paths {
+            with_candidates
+                && with_queue
+                && with_quorum
+                && with_checks
+                && value.protection.has_path_reviews()
+        } else if with_candidates {
             with_queue
                 && with_quorum
                 && with_checks
@@ -637,3 +788,6 @@ mod queue_tests;
 
 #[cfg(test)]
 mod candidate_check_tests;
+
+#[cfg(test)]
+mod path_review_tests;

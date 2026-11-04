@@ -87,6 +87,7 @@ pub(super) fn protect(node: &OneNode, data: &PullRequestData, principal: Princip
             administrators: vec![principal],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 name: data.target_ref.clone(),
                 reviewers: vec![REVIEWER],
                 required_approvals: 1,

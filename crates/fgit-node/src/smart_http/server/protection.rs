@@ -9,10 +9,11 @@ use std::io::Read;
 use fgit_admission::merge::native::protection::ProtectionState;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
-    MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-    MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, ProtectedBranch, ProtectionCommand,
-    RequiredCandidateWorkflowCheck, RequiredWorkflowCheck, ReviewProtection, compile_ref_policy,
-    decode_ref_policy,
+    MAX_BRANCH_PATH_REVIEWS, MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS,
+    MAX_PATH_REVIEW_PATH_BYTES, MAX_POLICY_ADMINISTRATORS, MAX_POLICY_PATH_REVIEWS,
+    MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, PathReviewRule, PathReviewScope,
+    ProtectedBranch, ProtectionCommand, RequiredCandidateWorkflowCheck, RequiredWorkflowCheck,
+    ReviewProtection, compile_ref_policy, decode_ref_policy,
 };
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, ForgeEventPayload};
 use fgit_types::{
@@ -36,6 +37,7 @@ const MAX_COMMAND_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_FIELDS: usize = 5
     + MAX_POLICY_ADMINISTRATORS
+    + MAX_POLICY_PATH_REVIEWS
     + MAX_PROTECTED_BRANCHES * (MAX_BRANCH_REVIEWERS + MAX_BRANCH_REQUIRED_CHECKS + 2);
 
 /// Recognize the API family before a malformed suffix can fall through to Git.
@@ -282,6 +284,7 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
             BTreeSet<RequiredWorkflowCheck>,
             bool,
             BTreeSet<RequiredCandidateWorkflowCheck>,
+            Vec<PathReviewRule>,
         ),
     >::new();
     for (name, value) in parse_form_with_field_limit(
@@ -335,6 +338,17 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
                     return Err(ApiError::bad("duplicate_required_approvals"));
                 }
                 if quorums.len() > MAX_PROTECTED_BRANCHES {
+                    return Err(ApiError::too_large());
+                }
+            }
+            "required_path_review" => {
+                let (name, rule) = path_review(&value)?;
+                let rules = &mut branches.entry(name).or_default().4;
+                if rules.len() == MAX_BRANCH_PATH_REVIEWS {
+                    return Err(ApiError::too_large());
+                }
+                rules.push(rule);
+                if branches.len() > MAX_PROTECTED_BRANCHES {
                     return Err(ApiError::too_large());
                 }
             }
@@ -461,17 +475,27 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
             .map(
                 |(
                     name,
-                    (reviewers, required_checks, require_merge_queue, required_candidate_checks),
-                )| ProtectedBranch {
-                    require_merge_queue,
-                    required_approvals: quorums
-                        .get(&name)
-                        .copied()
-                        .unwrap_or(reviewers.len() as u16),
-                    required_checks: required_checks.into_iter().collect(),
-                    required_candidate_checks: required_candidate_checks.into_iter().collect(),
-                    name,
-                    reviewers: reviewers.into_iter().collect(),
+                    (
+                        reviewers,
+                        required_checks,
+                        require_merge_queue,
+                        required_candidate_checks,
+                        mut path_reviews,
+                    ),
+                )| {
+                    path_reviews.sort_by(|a, b| (&a.path, a.scope).cmp(&(&b.path, b.scope)));
+                    ProtectedBranch {
+                        path_reviews,
+                        require_merge_queue,
+                        required_approvals: quorums
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(reviewers.len() as u16),
+                        required_checks: required_checks.into_iter().collect(),
+                        required_candidate_checks: required_candidate_checks.into_iter().collect(),
+                        name,
+                        reviewers: reviewers.into_iter().collect(),
+                    }
                 },
             )
             .collect(),
@@ -488,6 +512,39 @@ fn parse_command(bytes: &[u8]) -> Result<ProtectionCommand, ApiError> {
 
 fn principal(text: &str) -> Result<PrincipalId, ApiError> {
     PrincipalId::from_hex(text).map_err(|_| ApiError::bad("invalid_principal_id"))
+}
+
+fn path_review(value: &str) -> Result<(RefName, PathReviewRule), ApiError> {
+    let parts: Vec<_> = value.split(':').collect();
+    if parts.len() != 5 {
+        return Err(ApiError::bad("invalid_required_path_review"));
+    }
+    let name = reference(parts[0])?;
+    let scope = match parts[1] {
+        "exact" => PathReviewScope::Exact,
+        "subtree" => PathReviewScope::Subtree,
+        _ => return Err(ApiError::bad("invalid_path_review_scope")),
+    };
+    let path = hex_bytes(parts[2], MAX_PATH_REVIEW_PATH_BYTES)?;
+    let required_approvals = u16::try_from(parse_decimal(parts[3])?)
+        .map_err(|_| ApiError::bad("invalid_path_review_approvals"))?;
+    let mut reviewers = Vec::new();
+    for id in parts[4].split(',') {
+        if reviewers.len() == MAX_BRANCH_REVIEWERS {
+            return Err(ApiError::too_large());
+        }
+        reviewers.push(principal(id)?);
+    }
+    reviewers.sort();
+    let rule = PathReviewRule {
+        path,
+        scope,
+        reviewers,
+        required_approvals,
+    };
+    rule.validate()
+        .map_err(|_| ApiError::bad("invalid_required_path_review"))?;
+    Ok((name, rule))
 }
 
 fn reference(text: &str) -> Result<RefName, ApiError> {
@@ -585,7 +642,7 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
             .iter()
             .map(|branch| {
                 format!(
-                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}],\"required_candidate_checks\":[{}]}}",
+                "{{\"reference_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}],\"required_candidate_checks\":[{}],\"path_reviews\":[{}]}}",
                 quote(&hex(branch.name.as_bytes())),
                 branch
                     .reviewers
@@ -603,7 +660,14 @@ fn policy_json(protection: &ReviewProtection) -> Result<String, ApiError> {
                 branch.required_candidate_checks.iter().map(|check| format!(
                     "{{\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                     quote(&check.publisher.to_string()), quote(&hex(&check.graph_root)), quote(&check.job)
-                )).collect::<Vec<_>>().join(",")
+                )).collect::<Vec<_>>().join(","),
+                    branch.path_reviews.iter().map(|rule| format!(
+                        "{{\"path_hex\":{},\"scope\":{},\"required_reviewers\":[{}],\"required_approvals\":{}}}",
+                        quote(&hex(&rule.path)),
+                        quote(match rule.scope { PathReviewScope::Exact => "exact", PathReviewScope::Subtree => "subtree" }),
+                        rule.reviewers.iter().map(|id| quote(&id.to_string())).collect::<Vec<_>>().join(","),
+                        rule.required_approvals,
+                    )).collect::<Vec<_>>().join(",")
             )
             })
             .collect::<Vec<_>>()

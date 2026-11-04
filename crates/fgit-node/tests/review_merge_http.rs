@@ -428,6 +428,7 @@ fn a_merge_grant_and_weaker_requested_reviewer_list_cannot_bypass_mandatory_prot
                 ).unwrap()),
                 administrators: vec![OWNER],
                 branches: vec![ProtectedBranch {
+                    path_reviews: Vec::new(),
                     required_candidate_checks: Vec::new(),
                     require_merge_queue: false,
                     required_approvals: 2,

@@ -732,12 +732,18 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
     const checks = item(doc, group, 'div');
     const addCheck = item(doc, group, 'button', 'Add required workflow check'); addCheck.type = 'button';
     const candidateChecks = structuredClone(data.required_candidate_checks ?? []);
+    const pathReviews = structuredClone(data.path_reviews ?? []);
+    if (pathReviews.length) {
+      item(doc, group, 'h4', 'Required path reviews');
+      item(doc, group, 'p', 'These additional path quorums are retained while editing this branch. Use the protection administration page, CLI or API to change them. Removing this branch removes its path requirements; inspect the complete replacement preview.');
+      item(doc, group, 'pre', displayText(JSON.stringify(pathReviews, null, 2)));
+    }
     if (candidateChecks.length) {
       item(doc, group, 'h4', 'Required unpublished candidate checks');
       item(doc, group, 'p', 'These exact requirements are retained while editing this branch. Use the protection CLI or API to change the selectors. Removing this branch rule removes its candidate requirements; inspect the complete replacement preview.');
       item(doc, group, 'pre', displayText(JSON.stringify(candidateChecks, null, 2)));
     }
-    const row = { reference, reviewers, approvals, requireQueue, remove, checks: [], candidateChecks, addCheck }; rows.push(row);
+    const row = { reference, reviewers, approvals, requireQueue, remove, checks: [], candidateChecks, pathReviews, addCheck }; rows.push(row);
     let checkNumber = 0;
     function appendCheck(selected = { source_ref_hex: '', publisher: '', graph_root: '', job: '' }) {
       if (row.checks.length + row.candidateChecks.length >= 32) fail('At most 32 ordinary and candidate workflow checks combined can be required per branch.');
@@ -802,6 +808,7 @@ export function mountProtection(doc, { href = doc.defaultView.location.href, fet
         ...(row.checks.length ? { required_checks: row.checks.map(check => Object.fromEntries(
           Object.entries(check.fields).map(([name, input]) => [name, input.value]))) } : {}),
         ...(row.candidateChecks.length ? { required_candidate_checks: structuredClone(row.candidateChecks) } : {}),
+        ...(row.pathReviews.length ? { path_reviews: structuredClone(row.pathReviews) } : {}),
         ...(row.approvals.value !== '' ? { required_approvals: approvalCount(row.approvals.value) } : {}),
         ...(row.requireQueue.checked ? { require_merge_queue: true } : {}) })),
       ...(!clear.checked && client.observed?.policy?.ref_policy ? { ref_policy: client.observed.policy.ref_policy } : {}) }), clear: clear.checked };

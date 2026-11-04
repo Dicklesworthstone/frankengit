@@ -4,6 +4,7 @@
 use super::*;
 use crate::mcp::protocol;
 use fgit_node::index_maintenance::{IndexKind, MaintenanceConfig, MaintenanceGroup};
+use std::fs;
 use std::io::{self, Cursor, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};

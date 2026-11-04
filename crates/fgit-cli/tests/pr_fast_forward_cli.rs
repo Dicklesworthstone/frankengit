@@ -158,6 +158,7 @@ fn real_cli_does_not_turn_trusted_local_into_a_review_bypass() {
             administrators: vec![actor(2)],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: false,
                 required_approvals: 1,

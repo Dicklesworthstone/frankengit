@@ -85,7 +85,7 @@ event/evidence version; older readers refuse it rather than losing the actor
 restriction. Browser editors retain the exact observed profile and frame.
 Policy administrators are lowercase principal IDs. Each branch contains
 `reference_hex`, `required_reviewers`, `required_approvals`, `require_merge_queue`
-and `required_checks` plus `required_candidate_checks`; hex preserves exact
+and `required_checks` plus `required_candidate_checks` and `path_reviews`; hex preserves exact
 native branch bytes, including non-UTF-8 names. Each check contains
 `source_ref_hex`, `publisher`, `graph_root` and the exact UTF-8 `job`. Empty check
 arrays preserve review-only policies; check-only branches have empty reviewer
@@ -124,10 +124,11 @@ Every request is a complete replacement:
 | `expected_epoch` | Exact positive decimal predecessor policy epoch. |
 | Repeated `administrator` | One to 32 lowercase 32-hex-character principal IDs. |
 | Repeated `required_reviewer` | `REFERENCE_BYTES_HEX:PRINCIPAL_ID`, with lowercase hex and an exact `refs/heads/*` reference. |
-| Repeated `required_approvals` | `REFERENCE_BYTES_HEX:COUNT`; the default is all listed reviewers. Zero is valid only with no reviewers and a required check or queue. |
+| Repeated `required_approvals` | `REFERENCE_BYTES_HEX:COUNT`; the default is all listed reviewers. Zero is valid only with no reviewers and a path rule, required check or queue. |
 | Repeated `require_merge_queue` | Exact protected `refs/heads/*` bytes as lowercase hex, once per branch that requires queue landing. The value is a reference, not a boolean string. |
 | Repeated `required_check` | `TARGET_REF_HEX:SOURCE_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; refs name exact `refs/heads/*`, publisher is a 32-character principal ID, graph is 64 lowercase hex characters, and job is exact UTF-8 encoded as hex. |
 | Repeated `required_candidate_check` | `TARGET_REF_HEX:PUBLISHER:GRAPH_HEX:JOB_UTF8_HEX`; same exact target, publisher, graph and job bounds as ordinary checks, without a CI source ref. Omission removes candidate selectors in this complete replacement. |
+| Repeated `required_path_review` | `TARGET_REF_HEX:SCOPE:PATH_HEX:COUNT:ID[,ID...]` (scope `exact` or `subtree`); independent quorum for the verified actual candidate delta. See [path review ownership](PATH_REVIEW_OWNERSHIP.md). Omission removes these rules in a complete replacement. |
 | `ref_policy_source` | Optional UTF-8 policy source, at most 64 KiB, compiled and validated against the available reference facts and exact request `actor.id` before sealing. |
 | `ref_policy_frame_hex` | Optional canonical compiled policy frame as lowercase hex, at most 64 KiB decoded. Mutually exclusive with `ref_policy_source`. |
 | `clear` | Exactly `true` to disable branch and DSL requirements; mutually exclusive with reviewer, check, queue and DSL entries. |

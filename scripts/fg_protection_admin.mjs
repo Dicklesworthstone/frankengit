@@ -23,10 +23,16 @@ or saved intents. Preparation reads the complete native policy and writes only
 an immutable local intent; it sends no mutation. Remote bootstrap is refused.
 A complete replacement preserves ONLY its explicitly listed administrators and
 branches, including required_checks selectors, any numeric required_approvals quorum,
-and the optional boolean require_merge_queue. Omitted or false means no queue requirement;
+path_reviews and the optional boolean require_merge_queue. Omitted or false means no queue requirement;
 true requires an authenticated canonical landing for that target, with all reviews and checks.
 Omitted required_approvals requires all eligible reviewers; choose 1 through their count
-for N-of-M approval, or 0 for a check-only or queue-only branch. --clear is mandatory
+for N-of-M approval, or 0 for a check-only, queue-only or path-only branch.
+Each path_reviews rule contains path_hex (exact raw native bytes), scope (exact or subtree),
+required_reviewers and required_approvals (1 through that rule's reviewer count).
+All matching path quorums apply to the actual target-to-candidate change; subtree includes
+slash-separated descendants. Exact directory rules cover structural changes to that entry;
+use subtree to cover changes within it. Omitted or empty path_reviews removes those rules.
+--clear is mandatory
 for removing all branch rules when no repository ref policy remains. Preserve an
 active DSL policy by retaining its complete ref_policy descriptor from inspect,
 including its canonical frame_hex. Omitting it removes that DSL component.
@@ -90,6 +96,7 @@ export function intentSummary(intent) {
       const before = old.get(reference_hex), after = next.get(reference_hex);
       const checks = checkChanges(before?.required_checks, after?.required_checks);
       const candidateChecks = checkChanges(before?.required_candidate_checks, after?.required_candidate_checks);
+      const paths = checkChanges(before?.path_reviews, after?.path_reviews);
       const beforeApprovals = before?.required_approvals ?? before?.required_reviewers.length ?? null;
       const afterApprovals = after?.required_approvals ?? after?.required_reviewers.length ?? null;
       const quorumChanged = beforeApprovals !== afterApprovals &&
@@ -99,9 +106,11 @@ export function intentSummary(intent) {
         ...(checks.checks_added.length || checks.checks_removed.length ? checks : {}),
         ...(candidateChecks.checks_added.length || candidateChecks.checks_removed.length ? {
           candidate_checks_added: candidateChecks.checks_added, candidate_checks_removed: candidateChecks.checks_removed } : {}),
+        ...(paths.checks_added.length || paths.checks_removed.length ? {
+          path_reviews_added: paths.checks_added, path_reviews_removed: paths.checks_removed } : {}),
         ...(quorumChanged ? { required_approvals_before: beforeApprovals, required_approvals_after: afterApprovals } : {}),
         ...(beforeQueue !== afterQueue ? { require_merge_queue_before: beforeQueue, require_merge_queue_after: afterQueue } : {}) };
-    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || row.candidate_checks_added?.length || row.candidate_checks_removed?.length || Object.hasOwn(row, 'required_approvals_after') || Object.hasOwn(row, 'require_merge_queue_after')),
+    }).filter(row => row.added.length || row.removed.length || row.checks_added?.length || row.checks_removed?.length || row.candidate_checks_added?.length || row.candidate_checks_removed?.length || row.path_reviews_added?.length || row.path_reviews_removed?.length || Object.hasOwn(row, 'required_approvals_after') || Object.hasOwn(row, 'require_merge_queue_after')),
     ...(before.ref_policy || after.ref_policy ? { ref_policy: {
       before: before.ref_policy?.snapshot_id ?? null, after: after.ref_policy?.snapshot_id ?? null,
       changed: JSON.stringify(before.ref_policy ?? null) !== JSON.stringify(after.ref_policy ?? null),

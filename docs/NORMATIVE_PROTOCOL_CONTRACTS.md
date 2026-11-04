@@ -1216,8 +1216,8 @@ and an explicit `required_approvals: u16` to each protected branch. For a rule
 with (M > 0) reviewers, the count must be in `1..=M`; (M) remains bounded
 by 32. A check-only rule has no reviewers and count zero. Historical protection
 kinds require a reviewer or required check on every branch; the explicit
-queue-required extension in §20.4 also permits queue-only rules with zero
-reviewers and approvals. Administrator and branch limits,
+queue-required extension in §20.4 and path-review extension in §20.6 also permit
+queue-only and path-only rules with zero branch-wide reviewers and approvals. Administrator and branch limits,
 strictly increasing unique lists, ownership, exact predecessor versions and
 policy-epoch advancement retain their existing contracts.
 
@@ -1275,13 +1275,13 @@ default is false, including when decoding any historical protection kind. A
 true value requires a canonically validated queue landing targeting that exact
 branch. The requirement does not select a queue number: distinct queues may
 target the same branch, but each landing must independently validate its actual
-queue and selected head. A branch with no reviewers and no workflow checks is
-valid only when this flag is true; its `required_approvals` is zero. All existing
+queue and selected head. A branch with no reviewers, workflow checks or path
+rules is valid only when this flag is true; its `required_approvals` is zero. All existing
 administrator, reviewer, check, branch-namespace and sorted-set bounds remain
 mandatory.
 
 Required forge event kind **19** carries a policy with at least one queue-required
-branch. Its actor, predecessor policy epoch, administrator vector and branch
+branch and no later candidate-check or path-review extension. Its actor, predecessor policy epoch, administrator vector and branch
 vector prefixes retain their existing encodings. Each branch encodes its exact
 ref name and reviewer vector, an explicit big-endian `u16` approval count, the
 existing `u32` check count and check selectors, then one canonical boolean byte
@@ -1290,7 +1290,7 @@ fields are present on every branch, including queue-only branches and branches
 whose flag is false. Other boolean bytes, missing fields and an all-false
 kind-19 body refuse; no redundant spelling of an older policy is accepted.
 
-Policies without a true queue flag retain every byte of kinds **9**, **13** and
+Policies without a true queue flag or later required extension retain every byte of kinds **9**, **13** and
 **14** and continue to use their existing smallest encoding. The compiled DSL
 wrappers **16**, **17** and **18** may name base kind **19** in addition to their
 historical bases. They retain their exact reference-facts, actor-ID and
@@ -1376,7 +1376,7 @@ source ref. Ordinary and candidate selector counts **combined** are at most
 reviewer independence, queue requirements and any compiled ref policy.
 
 Required protection kind **21** is used exactly when at least one branch has a
-candidate selector. Each branch writes its existing name and reviewer vector,
+candidate selector and no branch has a path-review rule from §20.6. Each branch writes its existing name and reviewer vector,
 an explicit u16 approval count, ordinary check count and selectors, canonical
 queue boolean, then a u32 candidate-selector count and its publisher/graph/job
 entries. These fields occur on every branch. A kind-21 policy without any
@@ -1405,6 +1405,84 @@ policy clients preserve candidate selectors during unrelated edits and expose
 their removal in the complete replacement preview. The profile does not grant
 multi-PR prefix review or atomic prefix landing authority, independent runner
 attestation, or an implicit execution/retry permission.
+
+### 20.6 Native path-specific required reviews
+
+A protected branch may additionally require independent reviewer quorums for
+exact native source paths. Each `path_reviews` rule contains raw path bytes,
+`Exact` or `Subtree` scope, a strictly sorted unique eligible-principal vector,
+and a big-endian `u16` required approval count in `1..=reviewers.len()`. The
+reviewer bound remains 32. Rules are strictly sorted and unique by **(raw path
+bytes, scope)**, with `Exact` ordered before `Subtree`; changing the reviewer
+set cannot create a second rule for the same selector. There are at most 32
+rules per branch, 256 in one complete policy, 4096 bytes per selector path and
+64 KiB of selector path bytes across the policy. These aggregate limits are
+checked while decoding before allocating the corresponding path/rule data.
+
+A selector is a nonempty relative native Git path: no NUL, empty slash
+component, `.` component or `..` component is permitted. Non-UTF-8 names remain
+valid. Unicode normalization, case folding, host filesystem canonicalization,
+glob expansion and inferred ownership are not part of this profile. `Exact`
+matches identical path bytes. `Subtree` matches those identical bytes and any
+descendant separated by `/`; `src/security` never matches `src/security-old`.
+Every matching rule is required, alongside branch-wide reviews, required
+ordinary and candidate workflow checks, ref policy and queue requirements.
+There is no override, first-match, last-match or implicit fallback rule. The
+same independently eligible exact approval may satisfy several overlapping
+quorums. A path-only branch has zero branch-wide reviewers and approvals.
+
+Required forge payload kind **26** is owned by
+`fgit-forge/src/event/protection.rs`. It is used exactly when some branch has a
+path-review rule. Every branch first writes the complete kind-21 fields,
+including empty ordinary and candidate check counts and the queue boolean,
+then a big-endian `u32` path-rule count. Each rule writes the existing canonical
+byte-string encoding of its path, scope byte **0** (`Exact`) or **1**
+(`Subtree`), a big-endian `u32` reviewer count, raw 16-byte reviewer IDs and the
+big-endian `u16` approval count. Other scope bytes refuse. The actor, epoch,
+administrators and aggregate retain their existing encoding. A kind-26 policy
+with no path rules is a redundant spelling and refuses. Empty path vectors
+preserve every historical kind and byte. Compiled-policy wrappers **16**,
+**17** and **18** may name inner base kind 26; unknown required kinds or inner
+bases still fail closed. Existing writers/readers must be upgraded before
+activating this profile, and complete replacements must deliberately retain
+all requirements intended to remain.
+
+At each native merge attempt, the node independently authenticates the exact
+target-before and actual candidate commit and tree bytes, using the candidate
+staging source already subjected to native merge validation. It computes a
+complete direct target-to-candidate structural delta. It does not substitute
+the PR source diff, a merge-base comparison, a caller list, a search index,
+review recommendations, or a previously inspected candidate. Changes to blob,
+symlink and gitlink entry identity or mode count; gitlinks are not traversed.
+Directory additions, removals and type/mode changes count together with their
+affected descendants. A directory's OID-only change caused by descendants does
+not itself count as a change to that directory entry: use `Subtree` to cover
+descendants. Renames are represented by both removed and added paths. Missing,
+malformed, ambiguous or hash-mismatched required trees refuse. Equal tree OIDs
+can skip unchanged subtrees; no blob payload read is needed to compare entries.
+
+The path witness is constructed only by that native-byte verifier, binds all
+native merge coordinates and contains the complete bounded changed-path set.
+The profile limits path length to 4096 bytes, path depth to 64, changed paths to
+4096 and accumulated changed-path bytes to 1 MiB, in addition to independently
+bounded object, edge and metadata-byte work and live request cancellation.
+Exhaustion refuses; a truncated list never permits publication. Gate entry
+points without this witness refuse a path-bearing branch. The gate matches
+the witness to the exact intent and authenticates each matching quorum through
+the same current canonical review frontier as §20.3. PR/version, refs/tips,
+merge base, candidate and policy epoch remain exact, and the opener and merge
+submitter remain ineligible. Missing or corrupt accepted review evidence is
+not an absent vote.
+
+Ordinary direct ref updates, creation, deletion and rename cannot satisfy
+path-review protection, even if a caller claims their paths are unrelated.
+The first profile admits only the existing native reviewed merge and validated
+queue-landing routes. Merge-commit, fast-forward-only and squash methods all
+derive the actual candidate delta. A lost authority-head CAS repeats policy,
+source and vote validation at the new authenticated predecessor. Policy
+replacement advances the epoch and invalidates earlier approval applicability.
+Previously decided operations continue to recover their original terminal
+outcomes under their original principal and key.
 
 ## 21. Graph and search generations
 

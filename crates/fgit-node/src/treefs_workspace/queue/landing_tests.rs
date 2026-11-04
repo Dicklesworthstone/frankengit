@@ -537,6 +537,7 @@ fn queue_landing_requires_current_exact_candidate_approval_and_honors_withdrawal
         offered.expected_policy_epoch = protect(
             &node,
             vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
                 name: offered.target_ref.clone(),
@@ -600,6 +601,7 @@ fn queue_landing_cannot_bypass_a_required_workflow_check_with_a_live_source_ref(
     offered.expected_policy_epoch = protect(
         &node,
         vec![ProtectedBranch {
+            path_reviews: Vec::new(),
             required_candidate_checks: Vec::new(),
             require_merge_queue: true,
             name: offered.target_ref.clone(),

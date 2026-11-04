@@ -284,6 +284,7 @@ fn queue_landing_cannot_bypass_required_review_and_original_refusal_stays_final(
             administrators: vec![actor()],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: false,
                 name: reference("refs/heads/main"),

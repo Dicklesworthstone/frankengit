@@ -69,6 +69,21 @@ test('protection has an independent inert connection and no automatic reads or w
   assert.equal(h.calls[0].headers.Authorization, `Bearer ${TOKEN}`);
   assert.equal(h.doc.main.textContent.includes(TOKEN), false); assert.equal(h.node('status').attributes.get('role'), 'status');
 });
+
+test('PR protection panel preserves path-only rules while changing administrators', async () => {
+  const current = policy();
+  current.branches[0].required_reviewers = [];
+  current.branches[0].path_reviews = [{ path_hex: '7372632fff', scope: 'subtree', required_reviewers: [REVIEWER], required_approvals: 1 }];
+  const h = ui({ respond: call => call.method === 'GET' ? response(snapshot('sha1', { policy: current })) : null });
+  await h.ready();
+  assert.match(h.node('branches').textContent, /Required path reviews/);
+  h.node('administrators').value = `${ADMIN}\n${OTHER}`;
+  await h.stage();
+  assert.deepEqual(h.client.pending.intent.replacement.branches[0].path_reviews, current.branches[0].path_reviews);
+  assert.deepEqual(new URLSearchParams(h.client.pending.intent.body).getAll('required_path_review'),
+    [`${current.branches[0].reference_hex}:subtree:7372632fff:1:${REVIEWER}`]);
+  assert.equal(h.calls.length, 1);
+});
 for (const format of ['sha1', 'sha256']) {
   test(`${format}: full replacement preview, explicit stage, explicit send and exact u64 display`, async () => {
     const h = ui({ format }); await h.ready();

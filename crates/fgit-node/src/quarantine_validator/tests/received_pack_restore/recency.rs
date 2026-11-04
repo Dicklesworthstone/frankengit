@@ -2,7 +2,19 @@
 //! canonical body, current scope, native dependency and activation boundaries.
 
 use super::*;
-use fgit_pack::encode_entry_header;
+
+// The production writer's entry-header helper is private. Construct the two
+// fixture entry kinds independently; the native pack reader verifies them.
+fn append_entry_header(type_code: u8, mut size: usize, output: &mut Vec<u8>) {
+    assert!(matches!(type_code, 3 | 6));
+    output.push((type_code << 4) | u8::try_from(size & 0x0f).unwrap());
+    size >>= 4;
+    while size != 0 {
+        *output.last_mut().unwrap() |= 0x80;
+        output.push(u8::try_from(size & 0x7f).unwrap());
+        size >>= 7;
+    }
+}
 
 fn varint(mut value: usize, output: &mut Vec<u8>) {
     loop {
@@ -65,12 +77,12 @@ fn retained_history(node: &OneNode) -> History {
     for index in 0..=depth {
         let offset = raw.len();
         if index == 0 {
-            raw.extend(encode_entry_header(3, body.len()).unwrap());
+            append_entry_header(3, body.len(), &mut raw);
             raw.extend(zlib_stored(&body));
         } else {
             let next = u8::try_from(index).unwrap();
             let delta = append_delta(body.len(), next);
-            raw.extend(encode_entry_header(6, delta.len()).unwrap());
+            append_entry_header(6, delta.len(), &mut raw);
             raw.extend(ofs_distance(offset - previous_offset));
             raw.extend(zlib_stored(&delta));
             body.push(next);

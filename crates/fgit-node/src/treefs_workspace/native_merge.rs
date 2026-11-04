@@ -837,10 +837,18 @@ impl NodeNativeMergeProjection<'_> {
                 RefusalCode::ObjectClosureIncomplete,
             ));
         }
+        let needs_paths = fgit_admission::merge::native::protection::path_reviews_required_at(
+            authority,
+            cx,
+            basis,
+            &merge.target_ref,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
         // Finish all synchronous object reads before awaiting policy:
         // neither the reader nor its thread-local budget cell may cross
         // an asynchronous authority operation.
-        let closure = {
+        let (closure, paths) = {
             let exhaustion = Cell::new(None);
             let object_limits = MergeObjectLimits {
                 max_object_bytes: self
@@ -964,49 +972,82 @@ impl NodeNativeMergeProjection<'_> {
                     return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
                 }
             }
-            closure
+            let paths = if needs_paths {
+                let verified =
+                    fgit_admission::merge::native::protection::path_reviews::verify_merge_paths(
+                        &source,
+                        merge,
+                        object_limits,
+                        &mut live,
+                    );
+                if exhaustion.get().is_some() {
+                    return Err(ProjectionFailure::Unavailable(
+                        RefusalCode::ResourceBudgetExceeded,
+                    ));
+                }
+                Some(verified?)
+            } else {
+                None
+            };
+            (closure, paths)
         };
-        match (landing, self.inner.authentication) {
-            (Some(landing), authentication) => {
-                fgit_admission::merge::native::protection::enforce_queued_merge_at(
-                    authority,
-                    cx,
-                    basis,
-                    &selected.snapshot().refs,
-                    intent,
-                    self.inner.context.principal_id,
-                    authentication,
-                    landing,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-            }
-            (None, Some(authentication)) => {
-                fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
-                    authority,
-                    cx,
-                    basis,
-                    &selected.snapshot().refs,
-                    intent,
-                    self.inner.context.principal_id,
-                    authentication,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-            }
-            (None, None) => {
-                fgit_admission::merge::native::protection::enforce_merge_at(
-                    authority,
-                    cx,
-                    basis,
-                    &selected.snapshot().refs,
-                    intent,
-                    self.inner.context.principal_id,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-            }
-        }?;
+        if let Some(paths) = paths.as_ref() {
+            fgit_admission::merge::native::protection::enforce_merge_with_paths_at(
+                authority,
+                cx,
+                basis,
+                &selected.snapshot().refs,
+                intent,
+                self.inner.context.principal_id,
+                self.inner.authentication,
+                landing,
+                paths,
+                &|| self.merge_checkpoint(cx).is_err(),
+            )
+            .await?;
+        } else {
+            match (landing, self.inner.authentication) {
+                (Some(landing), authentication) => {
+                    fgit_admission::merge::native::protection::enforce_queued_merge_at(
+                        authority,
+                        cx,
+                        basis,
+                        &selected.snapshot().refs,
+                        intent,
+                        self.inner.context.principal_id,
+                        authentication,
+                        landing,
+                        &|| self.merge_checkpoint(cx).is_err(),
+                    )
+                    .await
+                }
+                (None, Some(authentication)) => {
+                    fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
+                        authority,
+                        cx,
+                        basis,
+                        &selected.snapshot().refs,
+                        intent,
+                        self.inner.context.principal_id,
+                        authentication,
+                        &|| self.merge_checkpoint(cx).is_err(),
+                    )
+                    .await
+                }
+                (None, None) => {
+                    fgit_admission::merge::native::protection::enforce_merge_at(
+                        authority,
+                        cx,
+                        basis,
+                        &selected.snapshot().refs,
+                        intent,
+                        self.inner.context.principal_id,
+                        &|| self.merge_checkpoint(cx).is_err(),
+                    )
+                    .await
+                }
+            }?;
+        }
         self.merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)

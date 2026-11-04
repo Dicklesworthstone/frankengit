@@ -390,6 +390,7 @@ fn canonical_queue_head_executes_actual_candidate_reports_checks_and_lands_atomi
                 administrators: vec![OWNER],
                 ref_policy: None,
                 branches: vec![ProtectedBranch {
+                    path_reviews: Vec::new(),
                     name: target_ref(),
                     reviewers: Vec::new(),
                     required_approvals: 0,

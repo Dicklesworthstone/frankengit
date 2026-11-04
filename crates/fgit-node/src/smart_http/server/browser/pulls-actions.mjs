@@ -237,6 +237,24 @@ function protectionChecks(values, candidate = false) {
   if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('Duplicate required workflow check.');
   return result;
 }
+function protectionPathReviews(values) {
+  if (!Array.isArray(values) || values.length > 32) fail('Select at most 32 path review rules per branch.');
+  const result = values.map(value => {
+    protectionFields(value, ['path_hex', 'scope', 'required_reviewers', 'required_approvals']);
+    const bytes = unhex(value.path_hex, 4096);
+    const raw = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+    if (!raw.length || raw.includes('\0') || raw.split('/').some(part => !part || part === '.' || part === '..')) fail('Invalid native path selector.');
+    if (!['exact', 'subtree'].includes(value.scope)) fail('Path review scope must be exact or subtree.');
+    const reviewers = protectionPeople(value.required_reviewers), count = value.required_approvals;
+    if (!Number.isSafeInteger(count) || count < 1 || count > reviewers.length) fail('Path approvals must be 1 through the eligible reviewer count.');
+    return { path_hex: value.path_hex, scope: value.scope, required_reviewers: reviewers, required_approvals: count };
+  });
+  const key = rule => `${rule.path_hex}:${rule.scope}`;
+  // Compare byte strings separately: ':' would sort after a longer hex path.
+  result.sort((a, b) => a.path_hex < b.path_hex ? -1 : a.path_hex > b.path_hex ? 1 : a.scope < b.scope ? -1 : a.scope > b.scope ? 1 : 0);
+  if (new Set(result.map(key)).size !== result.length) fail('Duplicate path review selector.');
+  return result;
+}
 function protectionRefPolicy(value) {
   protectionFields(value, ['snapshot_id', 'profile', 'mode', 'frame_hex']);
   const id = opaque(value.snapshot_id);
@@ -255,14 +273,16 @@ export function protectionPolicy(value) {
   const branches = value.branches.map(row => {
     protectionFields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
       ...(Object.hasOwn(row, 'required_candidate_checks') ? ['required_candidate_checks'] : []),
+      ...(Object.hasOwn(row, 'path_reviews') ? ['path_reviews'] : []),
       ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : []),
       ...(Object.hasOwn(row, 'require_merge_queue') ? ['require_merge_queue'] : [])]);
     const requireQueue = Object.hasOwn(row, 'require_merge_queue') ? row.require_merge_queue : false;
     if (typeof requireQueue !== 'boolean') fail('Merge queue requirement must be a boolean.');
     const checks = protectionChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
     const candidateChecks = protectionChecks(Object.hasOwn(row, 'required_candidate_checks') ? row.required_candidate_checks : [], true);
+    const pathReviews = protectionPathReviews(Object.hasOwn(row, 'path_reviews') ? row.path_reviews : []);
     if (checks.length + candidateChecks.length > 32) fail('Select at most 32 ordinary and candidate workflow checks combined.');
-    const reviewers = protectionPeople(row.required_reviewers, checks.length > 0 || candidateChecks.length > 0 || requireQueue);
+    const reviewers = protectionPeople(row.required_reviewers, checks.length > 0 || candidateChecks.length > 0 || pathReviews.length > 0 || requireQueue);
     const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
     if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
         approvals > reviewers.length) fail('Required approvals must be 1 through the number of eligible reviewers, or 0 for a check-only or queue-only branch.');
@@ -271,10 +291,13 @@ export function protectionPolicy(value) {
     return { reference_hex: protectionBranch(row.reference_hex), required_reviewers: reviewers,
       ...(checks.length ? { required_checks: checks } : {}),
       ...(candidateChecks.length ? { required_candidate_checks: candidateChecks } : {}),
+      ...(pathReviews.length ? { path_reviews: pathReviews } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
   if (new Set(branches.map(row => row.reference_hex)).size !== branches.length) fail('Duplicate protected branch.');
+  const paths = branches.flatMap(branch => branch.path_reviews ?? []);
+  if (paths.length > 256 || paths.reduce((sum, rule) => sum + rule.path_hex.length / 2, 0) > 64 * 1024) fail('Path review policy exceeds its total selector limit.');
   return { administrators: protectionPeople(value.administrators), branches,
     ...(value.ref_policy !== undefined && value.ref_policy !== null ? { ref_policy: protectionRefPolicy(value.ref_policy) } : {}) };
 }
@@ -312,16 +335,21 @@ export function protectionChanges(before, after) {
     const nextCandidateChecks = (next.get(name)?.required_candidate_checks ?? []).map(value => JSON.stringify(value));
     const candidateChecksAdded = difference(nextCandidateChecks, oldCandidateChecks).map(value => JSON.parse(value));
     const candidateChecksRemoved = difference(oldCandidateChecks, nextCandidateChecks).map(value => JSON.parse(value));
+    const oldPaths = (old.get(name)?.path_reviews ?? []).map(value => JSON.stringify(value));
+    const nextPaths = (next.get(name)?.path_reviews ?? []).map(value => JSON.stringify(value));
+    const pathsAdded = difference(nextPaths, oldPaths).map(value => JSON.parse(value));
+    const pathsRemoved = difference(oldPaths, nextPaths).map(value => JSON.parse(value));
     const oldApprovals = old.get(name)?.required_approvals ?? old.get(name)?.required_reviewers.length ?? null;
     const nextApprovals = next.get(name)?.required_approvals ?? next.get(name)?.required_reviewers.length ?? null;
     const quorumChanged = oldApprovals !== nextApprovals &&
       (Object.hasOwn(old.get(name) ?? {}, 'required_approvals') || Object.hasOwn(next.get(name) ?? {}, 'required_approvals'));
     const oldQueue = old.get(name)?.require_merge_queue ?? false, nextQueue = next.get(name)?.require_merge_queue ?? false;
     const queueChanged = oldQueue !== nextQueue;
-    if (added.length || removed.length || checksAdded.length || checksRemoved.length || candidateChecksAdded.length || candidateChecksRemoved.length || quorumChanged || queueChanged) branches.push({ reference_hex: name,
+    if (added.length || removed.length || checksAdded.length || checksRemoved.length || candidateChecksAdded.length || candidateChecksRemoved.length || pathsAdded.length || pathsRemoved.length || quorumChanged || queueChanged) branches.push({ reference_hex: name,
       change: !old.has(name) ? 'added' : !next.has(name) ? 'removed' : 'updated', added, removed,
       ...(checksAdded.length || checksRemoved.length ? { checks_added: checksAdded, checks_removed: checksRemoved } : {}),
       ...(candidateChecksAdded.length || candidateChecksRemoved.length ? { candidate_checks_added: candidateChecksAdded, candidate_checks_removed: candidateChecksRemoved } : {}),
+      ...(pathsAdded.length || pathsRemoved.length ? { path_reviews_added: pathsAdded, path_reviews_removed: pathsRemoved } : {}),
       ...(quorumChanged ? { required_approvals_before: oldApprovals, required_approvals_after: nextApprovals } : {}),
       ...(queueChanged ? { require_merge_queue_before: oldQueue, require_merge_queue_after: nextQueue } : {}) });
   }
@@ -341,6 +369,8 @@ function protectionBody(source, replacement, clear) {
       `${row.reference_hex}:${check.source_ref_hex}:${check.publisher}:${check.graph_root}:${hex(utf8.encode(check.job))}`)),
     required_candidate_check: replacement.branches.flatMap(row => (row.required_candidate_checks ?? []).map(check =>
       `${row.reference_hex}:${check.publisher}:${check.graph_root}:${hex(utf8.encode(check.job))}`)),
+    required_path_review: replacement.branches.flatMap(row => (row.path_reviews ?? []).map(rule =>
+      `${row.reference_hex}:${rule.scope}:${rule.path_hex}:${rule.required_approvals}:${rule.required_reviewers.join(',')}`)),
     required_approvals: replacement.branches.filter(row => Object.hasOwn(row, 'required_approvals'))
       .map(row => `${row.reference_hex}:${row.required_approvals}`),
     require_merge_queue: replacement.branches.filter(row => row.require_merge_queue === true).map(row => row.reference_hex),

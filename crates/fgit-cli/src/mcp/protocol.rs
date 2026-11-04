@@ -532,9 +532,8 @@ fn emit_response(
         .response_checkpoint(emitted)
         .map_err(io::Error::other)
 }
-/// Only the explicitly named policy source/frame may exceed the ordinary
-/// string limit. Reparse a redacted envelope under the original limits so a
-/// larger policy cannot enlarge unrelated arguments, metadata, or tools.
+/// Only a policy source/frame or bounded native path selectors may enlarge the
+/// protection request envelope. Reparse everything else under ordinary limits.
 fn parse_request(input: &[u8]) -> Result<Value, &'static str> {
     match json::parse(input) {
         Ok(value) => return Ok(value),
@@ -565,28 +564,79 @@ fn parse_request(input: &[u8]) -> Result<Value, &'static str> {
     let Some(Value::Object(arguments)) = params.get_mut("arguments") else {
         return Err("policy_request_required");
     };
-    let (field, maximum) = match (
+    let policy_field = match (
         arguments.contains_key("ref_policy_source"),
         arguments.contains_key("ref_policy_frame_hex"),
     ) {
-        (true, false) => (
+        (true, false) => Some((
             "ref_policy_source",
             fgit_forge::event::protection::MAX_REF_POLICY_SOURCE_BYTES,
-        ),
-        (false, true) => (
+        )),
+        (false, true) => Some((
             "ref_policy_frame_hex",
             fgit_forge::event::protection::MAX_REF_POLICY_FRAME_BYTES * 2,
-        ),
-        _ => return Err("one_policy_input_required"),
+        )),
+        (false, false) => None,
+        (true, true) => return Err("one_policy_input_required"),
     };
-    if arguments
-        .get(field)
-        .and_then(Value::text)
-        .is_none_or(|text| text.len() > maximum)
-    {
-        return Err("policy_string_limit");
+    if let Some((field, maximum)) = policy_field {
+        if arguments
+            .get(field)
+            .and_then(Value::text)
+            .is_none_or(|text| text.len() > maximum)
+        {
+            return Err("policy_string_limit");
+        }
+        arguments.insert(field.into(), text(""));
     }
-    arguments.insert(field.into(), text(""));
+    let mut paths = 0;
+    let mut path_bytes = 0;
+    if let Some(Value::Array(branches)) = arguments.get_mut("branches") {
+        use fgit_forge::event::protection::{
+            MAX_BRANCH_PATH_REVIEWS, MAX_PATH_REVIEW_PATH_BYTES, MAX_POLICY_PATH_REVIEW_BYTES,
+            MAX_POLICY_PATH_REVIEWS, MAX_PROTECTED_BRANCHES,
+        };
+        if branches.len() > MAX_PROTECTED_BRANCHES {
+            return Err("path_review_limit");
+        }
+        for branch in branches {
+            let Value::Object(branch) = branch else {
+                return Err("policy_branch_required");
+            };
+            let Some(rules) = branch.get_mut("path_reviews") else {
+                continue;
+            };
+            let Value::Array(rules) = rules else {
+                return Err("path_reviews_required");
+            };
+            if rules.len() > MAX_BRANCH_PATH_REVIEWS {
+                return Err("path_review_limit");
+            }
+            for rule in rules {
+                let Value::Object(rule) = rule else {
+                    return Err("path_review_required");
+                };
+                let encoded = rule
+                    .get("path_hex")
+                    .and_then(Value::text)
+                    .ok_or("path_hex_required")?;
+                paths += 1;
+                path_bytes += encoded.len();
+                if encoded.len() > 2 * MAX_PATH_REVIEW_PATH_BYTES
+                    || paths > MAX_POLICY_PATH_REVIEWS
+                    || path_bytes > 2 * MAX_POLICY_PATH_REVIEW_BYTES
+                {
+                    return Err("path_review_limit");
+                }
+                // Native policy parsing validates the actual selector bytes,
+                // quorum and order. Only this named byte string gets an exception.
+                rule.insert("path_hex".into(), text(""));
+            }
+        }
+    }
+    if policy_field.is_none() && paths == 0 {
+        return Err("one_policy_input_required");
+    }
     json::parse(envelope.encode(json::MAX_INPUT)?.as_bytes())?;
     Ok(value)
 }
