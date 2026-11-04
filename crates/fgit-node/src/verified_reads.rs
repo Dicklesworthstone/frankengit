@@ -18,8 +18,7 @@ mod configuration_tests;
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityFailure, HeadBodyRefusal, HeadReadReceipt, OutcomeFailure,
     RepositoryIncarnationConfigurationEvidence, TerminalOutcome, authority_head_identity,
-    next_batch_to_replay, outcome_index_proof, outcome_index_root, read_authority_head_body_async,
-    read_decision_batch_body_async, read_repository_configuration_async,
+    outcome_index_proof, outcome_index_root, read_repository_configuration_async,
     read_repository_incarnation_configuration_evidence_async,
 };
 use fgit_chronicle::PublicationBasis;
@@ -358,7 +357,7 @@ impl OneNode {
                     .await?
             }
             VerifiedReadQuery::Outcome(tx_id) => {
-                self.serve_outcome_verified_read_in(request, &head, capability, tx_id)
+                self.serve_outcome_verified_read_in(request, &materialized, capability, tx_id)
                     .await?
             }
             VerifiedReadQuery::Object(oid) => {
@@ -476,11 +475,14 @@ impl OneNode {
     async fn serve_outcome_verified_read_in(
         &self,
         request: &NodeRequestContext,
-        head: &fgit_codec::RepositoryAuthorityHeadBody,
+        materialized: &MaterializedAdmission,
         capability: VerifiedReadCapability,
         tx_id: TxId,
     ) -> Result<ReadResponse, VerifiedReadServingRefusal> {
-        let entries = self.outcome_entries_at_head_in(request, head).await?;
+        let head = materialized.basis().body();
+        let entries = self
+            .outcome_entries_at_head_in(request, materialized)
+            .await?;
         let root = outcome_index_root(&entries)
             .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?;
         if root != head.outcome_index_root {
@@ -565,19 +567,23 @@ impl OneNode {
     async fn outcome_entries_at_head_in(
         &self,
         request: &NodeRequestContext,
-        selected_head: &fgit_codec::RepositoryAuthorityHeadBody,
+        materialized: &MaterializedAdmission,
     ) -> Result<Vec<(TxId, TerminalOutcome)>, VerifiedReadServingRefusal> {
-        let mut head = selected_head.clone();
-        let mut walked = 0_usize;
-        let mut entries = Vec::new();
-        while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)
-            .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?
-        {
-            let batch =
-                read_decision_batch_body_async(&self.authority, request.authority(), batch_id)
-                    .await
-                    .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?;
-            entries.extend(batch.decisions.iter().map(|decision| {
+        let authenticated = materialized.authenticated();
+        let cumulative = super::outcome_collection::collect_at_head(
+            &self.authority,
+            request.authority(),
+            authenticated,
+            &self.outcome_checkpoint_fabric,
+        )
+        .await
+        .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?;
+        let decisions = cumulative
+            .checkpoint_decisions_against(authenticated.receipt().token())
+            .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?;
+        Ok(decisions
+            .into_iter()
+            .map(|decision| {
                 (
                     decision.tx_id,
                     TerminalOutcome {
@@ -585,16 +591,8 @@ impl OneNode {
                         outcome: decision.outcome,
                     },
                 )
-            }));
-            head = read_authority_head_body_async(
-                &self.authority,
-                request.authority(),
-                batch.predecessor_head_id,
-            )
-            .await
-            .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?;
-        }
-        Ok(entries)
+            })
+            .collect())
     }
 
     async fn serve_object_verified_read_in(

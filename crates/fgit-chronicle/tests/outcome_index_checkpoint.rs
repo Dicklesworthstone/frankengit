@@ -53,6 +53,9 @@ macro_rules! derived {
     };
 }
 
+#[path = "outcome_index_checkpoint/exact_snapshot.rs"]
+mod exact_snapshot;
+
 const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x61; OPAQUE_ID_LEN])
 }

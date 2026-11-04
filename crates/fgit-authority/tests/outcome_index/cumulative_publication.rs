@@ -1,6 +1,9 @@
 //! Reference-store publication and adversarial receipt coverage. The async
 //! view delegates to the same atomic store primitive; this is not a benchmark.
 
+#[path = "exact_snapshot.rs"]
+mod exact_snapshot;
+
 use super::*;
 use fgit_authority::{
     CumulativeOutcomes, collect_cumulative_outcomes, collect_cumulative_outcomes_async,

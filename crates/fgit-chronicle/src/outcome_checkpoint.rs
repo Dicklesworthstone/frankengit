@@ -13,8 +13,9 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, CumulativeOutcomes,
     HeadKey, HeadRead, ImmutableRead, OutcomeFailure, PutOutcome, body_key_for_id,
     canonical_outcome_index_decisions, collect_cumulative_outcomes,
-    collect_cumulative_outcomes_async, collect_cumulative_outcomes_from_checkpoint,
-    collect_cumulative_outcomes_from_checkpoint_async,
+    collect_cumulative_outcomes_async, collect_cumulative_outcomes_at_authenticated_head_async,
+    collect_cumulative_outcomes_from_checkpoint, collect_cumulative_outcomes_from_checkpoint_async,
+    collect_cumulative_outcomes_from_checkpoint_at_authenticated_head_async,
 };
 use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::{
@@ -1064,9 +1065,112 @@ where
 {
     let head = authenticated_head.body()?;
     collect_cumulative_outcomes_from_checkpoint_hint_with_fabric_async(
-        store, cx, fabric, identity, head_key, &head,
+        store,
+        cx,
+        fabric,
+        identity,
+        OutcomeSelection::Current(head_key),
+        &head,
     )
     .await
+}
+
+/// Collect retained outcome leaves and their tail at one exact authentic head.
+///
+/// Receipt authentication precedes capsule inspection. Every retained-leaf or
+/// bounded-genesis path uses that same snapshot, never the mutable head slot.
+/// A missing, malformed, or unusable optional checkpoint retains the complete
+/// bounded-genesis fallback required by the checkpoint contract. This does not
+/// replace the caller's strict validation of selected capsule/admission state.
+pub async fn collect_cumulative_outcomes_at_authenticated_head_with_fabric_async<S, I, F>(
+    store: &S,
+    cx: &S::Context,
+    fabric: &F,
+    identity: &I,
+    authenticated_head: &AuthenticatedHead,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let authenticated = store
+        .authenticate_head_receipt(cx, authenticated_head.receipt())
+        .await?;
+    let head = authenticated.body()?;
+    collect_cumulative_outcomes_from_checkpoint_hint_with_fabric_async(
+        store,
+        cx,
+        fabric,
+        identity,
+        OutcomeSelection::Snapshot(&authenticated),
+        &head,
+    )
+    .await
+}
+
+/// Keep all optional-evidence fallbacks on the caller's intended selection.
+/// Publication callers deliberately reread current state; snapshot callers must
+/// neither discover nor substitute a newer mutable head.
+#[derive(Clone, Copy)]
+enum OutcomeSelection<'a> {
+    Current(&'a HeadKey),
+    Snapshot(&'a AuthenticatedHead),
+}
+
+impl OutcomeSelection<'_> {
+    async fn collect<S>(
+        self,
+        store: &S,
+        cx: &S::Context,
+    ) -> Result<CumulativeOutcomes, OutcomeFailure>
+    where
+        S: AsyncAuthorityStore + ?Sized,
+    {
+        match self {
+            Self::Current(head_key) => collect_cumulative_outcomes_async(store, cx, head_key).await,
+            Self::Snapshot(authenticated) => {
+                collect_cumulative_outcomes_at_authenticated_head_async(store, cx, authenticated)
+                    .await
+            }
+        }
+    }
+
+    async fn collect_from_checkpoint<S>(
+        self,
+        store: &S,
+        cx: &S::Context,
+        decisions: &[RepositoryDecision],
+        checkpoint: &OutcomeIndexCheckpointBody,
+    ) -> Result<CumulativeOutcomes, OutcomeFailure>
+    where
+        S: AsyncAuthorityStore + ?Sized,
+    {
+        match self {
+            Self::Current(head_key) => {
+                collect_cumulative_outcomes_from_checkpoint_async(
+                    store,
+                    cx,
+                    head_key,
+                    decisions,
+                    checkpoint.decision_tail_id,
+                    checkpoint.latest_decision_sequence,
+                )
+                .await
+            }
+            Self::Snapshot(authenticated) => {
+                collect_cumulative_outcomes_from_checkpoint_at_authenticated_head_async(
+                    store,
+                    cx,
+                    authenticated,
+                    decisions,
+                    checkpoint.decision_tail_id,
+                    checkpoint.latest_decision_sequence,
+                )
+                .await
+            }
+        }
+    }
 }
 
 async fn collect_cumulative_outcomes_from_checkpoint_hint_with_fabric_async<S, I, F>(
@@ -1074,7 +1178,7 @@ async fn collect_cumulative_outcomes_from_checkpoint_hint_with_fabric_async<S, I
     cx: &S::Context,
     fabric: &F,
     identity: &I,
-    head_key: &HeadKey,
+    selection: OutcomeSelection<'_>,
     head: &fgit_codec::RepositoryAuthorityHeadBody,
 ) -> Result<CumulativeOutcomes, OutcomeFailure>
 where
@@ -1083,41 +1187,35 @@ where
     F: ImmutableObjectFabric + ?Sized,
 {
     let Some(capsule_id) = head.last_checkpoint_id else {
-        return collect_cumulative_outcomes_async(store, cx, head_key).await;
+        return selection.collect(store, cx).await;
     };
     let Some(capsule) = load_capsule_at_id_async(store, cx, identity, capsule_id).await? else {
-        return collect_cumulative_outcomes_async(store, cx, head_key).await;
+        return selection.collect(store, cx).await;
     };
     if capsule.repository_id != head.repository_id {
-        return collect_cumulative_outcomes_async(store, cx, head_key).await;
+        return selection.collect(store, cx).await;
     }
     let Some(root) = capsule.outcome_index_checkpoint_root else {
-        return collect_cumulative_outcomes_async(store, cx, head_key).await;
+        return selection.collect(store, cx).await;
     };
     let (checkpoint, decisions) =
         match load_verified_outcome_index_checkpoint_async(store, cx, identity, fabric, root).await
         {
             Ok(value) if value.0.repository_id == head.repository_id => value,
             Ok(_) => {
-                return collect_cumulative_outcomes_async(store, cx, head_key).await;
+                return selection.collect(store, cx).await;
             }
             Err(OutcomeIndexCheckpointRefusal::Authority(error)) => return Err(error.into()),
-            Err(_) => return collect_cumulative_outcomes_async(store, cx, head_key).await,
+            Err(_) => return selection.collect(store, cx).await,
         };
-    match collect_cumulative_outcomes_from_checkpoint_async(
-        store,
-        cx,
-        head_key,
-        &decisions,
-        checkpoint.decision_tail_id,
-        checkpoint.latest_decision_sequence,
-    )
-    .await
+    match selection
+        .collect_from_checkpoint(store, cx, &decisions, &checkpoint)
+        .await
     {
         Ok(outcomes) => Ok(outcomes),
         Err(
             OutcomeFailure::CheckpointPositionMismatch | OutcomeFailure::CheckpointRootMismatch,
-        ) => collect_cumulative_outcomes_async(store, cx, head_key).await,
+        ) => selection.collect(store, cx).await,
         Err(error) => Err(error),
     }
 }

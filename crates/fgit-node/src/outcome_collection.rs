@@ -160,6 +160,31 @@ pub async fn collect(
     result
 }
 
+/// Collect a proof's leaf set without replacing its materialized snapshot.
+///
+/// The retained archive and every optional-evidence fallback share the request
+/// lifetime and the same authentic head receipt. No mutable head key is accepted.
+pub(super) async fn collect_at_head(
+    authority: &FsqliteAuthorityStore,
+    cx: &FsqliteCx,
+    authenticated: &AuthenticatedHead,
+    fabric: &LocalFilesystemFabric,
+) -> Result<CumulativeOutcomes, OutcomeFailure> {
+    live(cx)?;
+    let guarded = RequestFabric { fabric, cx };
+    let result =
+        fgit_chronicle::collect_cumulative_outcomes_at_authenticated_head_with_fabric_async(
+            authority,
+            cx,
+            &guarded,
+            &CryptoBodyIdentity,
+            authenticated,
+        )
+        .await;
+    live(cx)?;
+    result
+}
+
 fn live(cx: &FsqliteCx) -> Result<(), OutcomeFailure> {
     match checkpoint_pack_context(cx) {
         PackContextCheckpoint::Live => Ok(()),

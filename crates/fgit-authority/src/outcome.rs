@@ -1913,8 +1913,40 @@ where
             entries: Vec::new(),
         });
     };
+    collect_cumulative_outcomes_at_receipt_async(store, cx, &receipt).await
+}
+
+/// Collect the complete outcome set at one authentic, possibly superseded head.
+///
+/// The supplied receipt is authenticated again by `store`; this function never
+/// reads the mutable head slot. Its result remains bound to that exact receipt's
+/// version token, including when a newer decision is published during the walk.
+/// The same bounded genesis replay as [`collect_cumulative_outcomes_async`]
+/// applies, and incomplete history is a refusal rather than a partial answer.
+pub async fn collect_cumulative_outcomes_at_authenticated_head_async<S>(
+    store: &S,
+    cx: &S::Context,
+    authenticated_head: &AuthenticatedHead,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let authenticated = store
+        .authenticate_head_receipt(cx, authenticated_head.receipt())
+        .await?;
+    collect_cumulative_outcomes_at_receipt_async(store, cx, authenticated.receipt()).await
+}
+
+async fn collect_cumulative_outcomes_at_receipt_async<S>(
+    store: &S,
+    cx: &S::Context,
+    receipt: &HeadReadReceipt,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
     let observed = receipt.token();
-    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(receipt)?;
     let mut walked = 0_usize;
     let mut collected: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
@@ -2049,8 +2081,62 @@ where
             entries: Vec::new(),
         });
     };
+    collect_cumulative_outcomes_from_checkpoint_at_receipt_async(
+        store,
+        cx,
+        &receipt,
+        checkpoint_decisions,
+        checkpoint_tail_id,
+        checkpoint_latest_decision_sequence,
+    )
+    .await
+}
+
+/// Collect retained outcomes and their newer tail at one authentic head.
+///
+/// This exact-snapshot counterpart of
+/// [`collect_cumulative_outcomes_from_checkpoint_async`] never substitutes the
+/// current head. The store reauthenticates the supplied receipt before reading
+/// history. Retained leaves must match the root at their exact tail and sequence
+/// in that snapshot's history; [`MAX_REPLAY_BATCHES`] bounds only the newer tail.
+pub async fn collect_cumulative_outcomes_from_checkpoint_at_authenticated_head_async<S>(
+    store: &S,
+    cx: &S::Context,
+    authenticated_head: &AuthenticatedHead,
+    checkpoint_decisions: &[RepositoryDecision],
+    checkpoint_tail_id: Option<RepositoryDecisionBatchId>,
+    checkpoint_latest_decision_sequence: Option<DecisionSequence>,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let authenticated = store
+        .authenticate_head_receipt(cx, authenticated_head.receipt())
+        .await?;
+    collect_cumulative_outcomes_from_checkpoint_at_receipt_async(
+        store,
+        cx,
+        authenticated.receipt(),
+        checkpoint_decisions,
+        checkpoint_tail_id,
+        checkpoint_latest_decision_sequence,
+    )
+    .await
+}
+
+async fn collect_cumulative_outcomes_from_checkpoint_at_receipt_async<S>(
+    store: &S,
+    cx: &S::Context,
+    receipt: &HeadReadReceipt,
+    checkpoint_decisions: &[RepositoryDecision],
+    checkpoint_tail_id: Option<RepositoryDecisionBatchId>,
+    checkpoint_latest_decision_sequence: Option<DecisionSequence>,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
     let observed = receipt.token();
-    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(receipt)?;
     let mut walked = 0_usize;
     let canonical = canonical_outcome_index_decisions(checkpoint_decisions)?;
     let mut collected: Vec<(TxId, TerminalOutcome)> = canonical
