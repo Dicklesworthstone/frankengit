@@ -4,6 +4,8 @@ use fgit_crypto::{
 };
 use fgit_types::{CodecVersion, SchemaId};
 
+#[path = "index_capacity_tests.rs"]
+mod capacity;
 #[path = "index_omission_tests.rs"]
 mod omissions;
 fn source(format: Format) -> Source {

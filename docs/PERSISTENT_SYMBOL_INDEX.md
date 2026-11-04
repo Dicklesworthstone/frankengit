@@ -93,8 +93,9 @@ charged. Shared work/declaration exhaustion is fatal; it cannot be relabeled as
 a local omission. The full current inventory still fits 20,000 regular files,
 64 MiB of Rust source including omissions, the existing native fetch/allocation
 ceiling, and existing manifest/index byte limits. A blob that cannot be read
-within those independent limits still refuses the whole operation. No ceiling
-was increased and no metadata list is silently truncated.
+within those independent limits still refuses the whole operation. Omission
+handling does not increase those inventory/storage bounds, and no metadata
+list is silently truncated.
 
 Paths in the omission list use strict raw-byte order, have valid `.rs` paths and
 nonzero native IDs in the source format, and cannot duplicate or overlap a
@@ -326,8 +327,28 @@ type checking, cfg evaluation, macro expansion, references or calls. Literal,
 comment, attribute and macro-body contents cannot fabricate declarations.
 Unsupported code identifiers and malformed Rust files produce explicit whole-file
 omissions in persistent builds; the separate live scanner still refuses them.
-The profile retains 20,000 declarations, 128-byte names, 20,000 regular
-files, 64 MiB Rust source, 8 MiB per file, 1 MiB payloads and 32 MiB encoded data.
+Persistent preparation admits up to **131,072 declarations across the repository**
+and charges at most **256 MiB of scanner work**. These build limits are separate
+from the live scanner's aggregate 20,000-declaration and 64 MiB work ceilings.
+UTF-8 validation and syntax traversal both consume work; valid cumulative work
+above the former 64 MiB build ceiling no longer makes an otherwise bounded
+repository impossible to index. Fresh and authenticated reused declarations
+consume the same aggregate allowance. Failed-file declarations are discarded;
+their consumed work is never refunded. Global exhaustion still refuses the build.
+
+Each file retains its 20,000-declaration limit and each encoded table its 1 MiB
+limit. The profile also retains 128-byte names, 20,000 regular files, 64 MiB Rust
+source, 8 MiB per file and 32 MiB complete encoded data. The 131,072-declaration
+ceiling is subject to all those independent bounds. Manifest and response
+validation enforce both the repository ceiling and the per-file implied count.
+The 1 MiB name directory may still be too large for a corpus with many distinct
+names; the existing complete scalar-table layout remains the size-only fallback.
+Interactive query work, payload and response limits are unchanged, so admitting
+a larger index is not a promise that every broad query fits its budget.
+
+Previously admitted canonical bytes and profile identities are unchanged.
+Older readers with the former aggregate bounds refuse larger new manifests;
+upgrade the readers together with the builder when using the larger corpus.
 Retained result names/paths/excerpts share 2 MiB; results are bounded to 1-4096.
 Generation ancestry has its own bounded read contract. No dependencies were added.
 

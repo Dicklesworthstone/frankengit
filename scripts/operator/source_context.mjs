@@ -6,6 +6,10 @@ import { request as httpsRequest } from 'node:https';
 import { isCredentialToken } from './credential_token.mjs';
 import { CURRENT_INDEX_SOURCE, contextProvenance } from './source_context_provenance.mjs';
 
+// Match the persistent symbol corpus profile without widening per-file tables
+// or any initial query, response, work, source-byte or excerpt allowance.
+const SYMBOL_INDEX_DECLARATIONS = 131_072, SYMBOL_TABLE_DECLARATIONS = 20_000;
+
 export const LIMITS = Object.freeze({ response: 8 * 1024 * 1024, request: 256 * 1024,
   files: 32, anchors: 4096, windows: 128, source: 64 * 1024 * 1024, file: 8 * 1024 * 1024,
   excerpts: 1024 * 1024, results: 100, work: 16 * 1024 * 1024, payload: 32 * 1024 * 1024 });
@@ -290,7 +294,9 @@ function symbols(channel, vector, q, selected, sourceHead, check, evidence) {
       value.max_matches !== limits.max_results_per_channel || typeof value.complete !== 'boolean' ||
       value.completion !== (value.complete ? 'complete' : 'match_limit') || !Array.isArray(value.matches) ||
       value.matches.length > limits.max_results_per_channel || value.returned_matches !== value.matches.length) fail('invalid_context_symbol_channel');
-  count(value.indexed_files, 20000); count(value.indexed_declarations, 20000); count(value.indexed_source_bytes, LIMITS.source);
+  count(value.indexed_files, 20000);
+  count(value.indexed_declarations, Math.min(SYMBOL_INDEX_DECLARATIONS, value.indexed_files * SYMBOL_TABLE_DECLARATIONS));
+  count(value.indexed_source_bytes, LIMITS.source);
   count(value.unsupported_language_files, 20000 - value.indexed_files); count(value.non_regular_entries, 50000);
   count(value.tables_read, value.indexed_files); count(value.payload_bytes_read, channelShare(limits.max_payload_bytes, q, 2), 1);
   // The native renderer echoes the query's fixed scanner ceiling; actual

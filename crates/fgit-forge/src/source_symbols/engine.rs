@@ -9,6 +9,11 @@
 pub const MAX_WORK: u64 = 64 * 1024 * 1024;
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECLARATIONS: usize = 20_000;
+/// Repository-wide persisted-index preparation, including UTF-8 validation
+/// and lexical traversal. Interactive scans retain `MAX_WORK`.
+pub const MAX_INDEX_BUILD_WORK: u64 = 256 * 1024 * 1024;
+/// Aggregate persisted rows across bounded per-file declaration tables.
+pub const MAX_INDEX_DECLARATIONS: usize = 131_072;
 pub const MAX_NAME_BYTES: usize = 128;
 const MAX_DEPTH: usize = 128;
 
@@ -84,10 +89,12 @@ pub struct Scan {
     pub macro_bodies_skipped: usize,
     pub attributes_skipped: usize,
 }
-/// Shared across every file in a query; callers may narrow but not widen it.
+/// Shared across every file in one operation. Query callers may narrow but
+/// not widen their ceiling; persisted preparation has its own closed budget.
 #[derive(Clone, Debug)]
 pub struct Budget {
     maximum: u64,
+    maximum_declarations: usize,
     pub work: u64,
     pub declarations: usize,
 }
@@ -101,9 +108,18 @@ impl Budget {
         }
         Ok(Self {
             maximum,
+            maximum_declarations: MAX_DECLARATIONS,
             work: 0,
             declarations: 0,
         })
+    }
+    pub(super) const fn for_index_build() -> Self {
+        Self {
+            maximum: MAX_INDEX_BUILD_WORK,
+            maximum_declarations: MAX_INDEX_DECLARATIONS,
+            work: 0,
+            declarations: 0,
+        }
     }
     fn charge(&mut self, n: usize, at: usize, cancelled: &dyn Fn() -> bool) -> Result<(), Error> {
         if cancelled() {
@@ -554,7 +570,9 @@ impl Lexer<'_, '_> {
         Err(self.error(ErrorKind::UnbalancedDelimiter))
     }
     fn emit(&mut self, out: &mut Scan, kind: Kind, name: Token) -> Result<(), Error> {
-        if self.budget.declarations == MAX_DECLARATIONS {
+        if self.budget.declarations >= self.budget.maximum_declarations
+            || out.declarations.len() >= MAX_DECLARATIONS
+        {
             return Err(self.error(ErrorKind::DeclarationLimit));
         }
         self.budget.declarations += 1;
@@ -733,3 +751,7 @@ mod tests;
 #[cfg(test)]
 #[path = "engine_opaque_tests.rs"]
 mod opaque_tests;
+
+#[cfg(test)]
+#[path = "engine_index_budget_tests.rs"]
+mod index_budget_tests;

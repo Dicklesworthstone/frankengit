@@ -20,6 +20,7 @@ use fgit_types::{
 };
 use std::collections::BTreeMap;
 
+pub use super::engine::{MAX_INDEX_BUILD_WORK, MAX_INDEX_DECLARATIONS};
 pub use super::table::Error as TableError;
 #[path = "index_reuse.rs"]
 mod reuse;
@@ -259,6 +260,7 @@ impl Manifest {
                 || doc.blob.is_zero()
                 || doc.blob.algorithm() != self.source.format
                 || doc.source_bytes > engine::MAX_FILE_BYTES
+                || doc.declarations > engine::MAX_DECLARATIONS
                 || doc.macros > doc.source_bytes
                 || doc.attributes > doc.source_bytes
                 || doc.encoded_bytes == 0
@@ -275,7 +277,7 @@ impl Manifest {
             add(
                 &mut declarations,
                 doc.declarations,
-                engine::MAX_DECLARATIONS,
+                MAX_INDEX_DECLARATIONS,
                 "declarations",
             )?;
             add(
@@ -687,8 +689,7 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
     });
     let mut files: Vec<_> = found.files.into_iter().collect();
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    let mut budget =
-        engine::Budget::new(engine::MAX_WORK).map_err(|e| Error::Table(table::Error::Syntax(e)))?;
+    let mut budget = engine::Budget::for_index_build();
     corpus.reuse_scope = reuse.map(|prior| prior.source().clone());
     let (mut encoded, mut referenced, mut declarations) = (0, 0, 0);
     for (path, blob) in files {
@@ -722,7 +723,7 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
             add(
                 &mut declarations,
                 previous.declarations,
-                engine::MAX_DECLARATIONS,
+                MAX_INDEX_DECLARATIONS,
                 "declarations",
             )?;
             let mut doc = previous.clone();
@@ -807,7 +808,7 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
         add(
             &mut declarations,
             table.rows().len(),
-            engine::MAX_DECLARATIONS,
+            MAX_INDEX_DECLARATIONS,
             "declarations",
         )?;
         add(
@@ -858,6 +859,11 @@ impl Report {
     pub fn validate_coverage(&self) -> Result<usize, Error> {
         if self.coverage_complete != self.omissions.is_empty()
             || self.indexed_source_bytes > 64 * 1024 * 1024
+            || self.indexed_declarations > MAX_INDEX_DECLARATIONS
+            || self
+                .indexed_files
+                .checked_mul(engine::MAX_DECLARATIONS)
+                .is_none_or(|maximum| self.indexed_declarations > maximum)
             || self
                 .indexed_files
                 .checked_add(self.unsupported_language_files)
