@@ -749,6 +749,7 @@ dependencies = [
  "fgit-ssh",
  "fgit-types",
  "fgit-verified-read",
+ "fgit-wire",
 ]
 
 [[package]]

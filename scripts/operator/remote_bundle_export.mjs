@@ -65,6 +65,7 @@ function download(selected, token, life, ca) {
       req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, rejectUnauthorized: true, maxHeaderSize: 16384, ...(ca ? { ca } : {}),
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           'Content-Length': String(Buffer.byteLength(encoded)), Accept: 'application/x-git-bundle',
           'Accept-Encoding': 'identity', Connection: 'close', 'Cache-Control': 'no-store' },
       });

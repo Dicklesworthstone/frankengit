@@ -6,7 +6,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init operator-source-workspace
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
-fge_context non_claim 'Seventeen source/context entrypoints with actual native acquisition, bundle verification/import/recovery, offline compiler consumption and composition/replay; not every operator, broad search completeness, retained authority proofs, TLS or deployment.'
+fge_context non_claim 'Nineteen source/context entrypoints with native acquisition, remote bundle transfer, detached approval, recovery and source publication; not every operator, broad search completeness, retained authority proofs, TLS or deployment.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
@@ -60,13 +60,18 @@ for format in sha1 sha256; do
     fge_assert_eq "OPERATOR-WORKSPACE-$format-native-bundle-$property" true "$(fact "${format}_native_bundle_cli_$property")" "actual native bundle CLI $property"
   done
 done
+for format in sha1 sha256; do
+  for property in remote_bundle_native_export detached_attestation_native_source remote_bundle_native_import_recovery remote_bundle_native_fetch_leases; do
+    fge_assert_eq "OPERATOR-WORKSPACE-$format-$property" true "$(fact "${format}_$property")" "actual native remote transfer/approval: $property"
+  done
+done
 fge_capture entrypoint-receipts python3 - "$SUMMARY" "$BINARY_DIGEST" <<'PY' || true
 import json, re, sys
 with open(sys.argv[1], encoding='utf-8') as source:
     summary = json.load(source)
 rows = summary['entrypoint_runs']
-assert summary['complete'] is True and len(rows) == len(summary['entrypoints']) == 17
-assert len({r['path'] for r in rows}) == 17 and {r['path'] for r in rows} == set(summary['entrypoints'])
+assert summary['complete'] is True and len(rows) == len(summary['entrypoints']) == 19
+assert len({r['path'] for r in rows}) == 19 and {r['path'] for r in rows} == set(summary['entrypoints'])
 assert all(r['binary_sha256'] == sys.argv[2] and re.fullmatch('[0-9a-f]{64}', r['client_sha256'])
            and r['success_count'] > 0 and r['expected_nonzero_count'] > 0 for r in rows)
 PY
