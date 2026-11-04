@@ -21,6 +21,7 @@ export function postBundle(request, payload, token, { timeoutMs, signal, ca }) {
       req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
         method: 'POST', agent: false, rejectUnauthorized: true, maxHeaderSize: 16384, ...(ca ? { ca } : {}),
         headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': request.key, Accept: 'application/json',
+          'User-Agent': 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)',
           'Content-Type': contentType, 'Content-Length': String(parts.reduce((n, p) => n + p.length, 0)),
           'Accept-Encoding': 'identity', Connection: 'close', 'Cache-Control': 'no-store' },
       });

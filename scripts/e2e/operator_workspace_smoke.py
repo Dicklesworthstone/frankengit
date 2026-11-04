@@ -696,7 +696,8 @@ def main() -> None:
         "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs",
         "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs", "scripts/fg_source_patch.mjs",
         "scripts/fg_source_refactor.mjs", "scripts/verify_git_bundle_native.mjs",
-        "scripts/import_git_bundle_native.mjs", "scripts/recover_git_bundle.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/import_git_bundle_native.mjs", "scripts/recover_git_bundle.mjs", "scripts/remote_bundle.mjs",
+        "scripts/attest_git_bundle.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 

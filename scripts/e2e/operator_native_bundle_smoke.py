@@ -5,6 +5,7 @@ import os
 
 from full_bundle_smoke import decode_export
 from patch_smoke import oid
+from operator_remote_bundle_smoke import run_remote_bundle_case
 from scoped_events_smoke import PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,11 +27,12 @@ def run_native_bundle_case(c, home, fmt, source, base, base_tree, objects, files
     def authority(node):
         return c.run("at", node, TENANT, REPOSITORY, "latest")
 
-    def canonical(node):
+    def canonical(node, expected_refs=None):
+        expected_refs = {REF.encode(): base} if expected_refs is None else expected_refs
         refs = json.loads(c.run("refs", node, TENANT, REPOSITORY, "--trusted-local", "--object-format", fmt))
         require(refs["node_closed"] is True and refs["has_more"] is False
                 and {bytes.fromhex(r["reference_hex"]): r["tip"] for r in refs["references"]}
-                == {REF.encode(): base}, "source import/recovery changed independently selected refs")
+                == expected_refs, "source import/recovery changed independently selected refs")
         for path, (mode, body) in files.items():
             row = json.loads(c.run("show", node, TENANT, REPOSITORY, "--trusted-local", "--object-format", fmt,
                 "--ref", REF, "--path-hex", path.hex(), "--max-bytes", "4096"))
@@ -198,3 +200,4 @@ process.kill = function (pid, signal) {
     c.run("import", restored_node, TENANT, REPOSITORY, PRINCIPAL, "native-bundle-recovered", recovered)
     canonical(restored_node)
     c.facts[f"{fmt}_native_bundle_cli_recovery"] = True
+    run_remote_bundle_case(c, home, fmt, donor, base, objects, canonical, oracle)

@@ -12,6 +12,8 @@ The repository must already exist, and source/read, receive and outcomes-read
 grants must be independently enabled on the native HTTP service. An exported
 artifact is not permission to write the destination. Use private selection files
 and retain the returned independent pins at each step.
+HTTP bundle downloads and uploads identify this project with the same
+`frankengit-agent` User-Agent used by the original-key outcome client.
 
 A source selection contains the exact source endpoint and four-field identity;
 `expected_head` is optional but prevents substituting a later snapshot:
@@ -232,3 +234,22 @@ transfer, and recovery after SIGTERM/SIGINT/SIGKILL during a committed response
 peer. It exercises actual 64 MiB HTTP downloads and multipart uploads, and the
 32-attempt cumulative bound. Those are operator transport/custody capacity tests,
 not 64 MiB native Git acceptance, native-server performance or a release gate.
+
+The existing `scripts/e2e/suites/operator/source_workspace.sh` separately invokes
+the actual remote-bundle and detached-attestation CLIs over native-exported source
+in both hash domains. Independently framed Git objects, pinned sandboxed Git and
+separate canonical Rust reads check the selected bytes, refs and modes. The
+approval uses an externally selected key and exact wide sequence floor before
+native verification and transfer; it is not canonical publication authority.
+
+An explicit test-only HTTP hook truncates an import response after headers from
+the real native server. Original-key recovery must resolve the actual committed
+import without its local payload. The trace distinguishes the single upload
+from the two read-only outcome POSTs. An unavailable old object remains an
+unresolved pre-admission failure, with read-only original-key recovery and no
+inferred noncommit. Mapped fetch separately exercises a canonical stale lease
+and its permitted twin. Stopped-service terminal recovery needs neither credentials nor
+payload and performs no network work. This selected loopback source path does
+not establish TLS, hostile isolation, power-loss durability, every-entrypoint
+coverage, a new Rust build or independent acceptance. Receipts bind the selected
+native image and client source separately.
