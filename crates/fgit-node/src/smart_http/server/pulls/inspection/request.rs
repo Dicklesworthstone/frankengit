@@ -3,9 +3,10 @@
 
 use super::super::super::issues::{ApiError, parse_decimal, parse_form};
 use super::super::collaboration::{CANDIDATE_UPLOAD_BYTES, candidate_boundary};
+use super::super::subject::reference;
 use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
 use fgit_forge::{AggregateVersion, PullRequestNumber};
-use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, PolicyEpoch, RefName};
+use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
@@ -123,38 +124,6 @@ impl<'a> Request<'a> {
         Ok((subject, candidate))
     }
 }
-fn reference(
-    fields: &mut BTreeMap<String, String>,
-    plain: &str,
-    encoded: &str,
-) -> Result<RefName, ApiError> {
-    let bytes = match (fields.remove(plain), fields.remove(encoded)) {
-        (Some(value), None) if value.len() <= MAX_REF_NAME_LEN => value.into_bytes(),
-        (None, Some(value))
-            if !value.is_empty()
-                && value.len() <= MAX_REF_NAME_LEN * 2
-                && value.len().is_multiple_of(2)
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
-        {
-            let digit = |byte: u8| {
-                if byte.is_ascii_digit() {
-                    byte - b'0'
-                } else {
-                    byte - b'a' + 10
-                }
-            };
-            value
-                .as_bytes()
-                .chunks_exact(2)
-                .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
-                .collect()
-        }
-        _ => return Err(ApiError::bad("exactly_one_ref_encoding_required")),
-    };
-    RefName::try_new(&bytes).map_err(|_| ApiError::bad("invalid_ref"))
-}
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
     fields
         .remove(name)
@@ -178,6 +147,7 @@ fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgit_types::MAX_REF_NAME_LEN;
     use fgit_wire::smart_http::{HttpLimits, head};
     fn form(format: GitHashAlgorithm) -> String {
         let width = format.digest_len() * 2;

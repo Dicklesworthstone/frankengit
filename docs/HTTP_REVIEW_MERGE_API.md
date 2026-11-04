@@ -86,6 +86,21 @@ The caller supplies these nine common fields explicitly:
 | `merge_base` | Exact native base commit of the candidate. |
 | `candidate_commit` | Exact proposed merge commit, including its tree and metadata. |
 
+Each branch accepts exactly one encoding: `source_ref` or `source_ref_hex`, and
+`target_ref` or `target_ref_hex`. Hex values contain the exact native bytes in
+nonempty, even-length lowercase hexadecimal, at most 1,024 decoded bytes. The
+same native branch-name validation applies to both encodings. Mixed encodings
+across source and target are valid; two aliases for one side refuse even when
+they spell identical bytes. No Unicode normalization or display-label decoding
+occurs. These aliases match candidate preparation, resolution and inspection,
+so non-UTF-8 branches can complete the independent review and reviewed merge
+workflow. PR metadata mutation and the separate fast-forward endpoint retain
+their existing text-only form contracts.
+
+Keep the selected alias and exact encoded body in portable retry receipts. The
+existing text form order and request keys are unchanged. All native review and
+merge preconditions bind the decoded branch bytes, never an escaped UI label.
+
 Review actions also require `expected_version`, the predecessor version of
 THIS REVIEWER'S stream (`0` for its first vote), and `reason`. Withdrawal needs
 a positive predecessor version and the exact subject and candidate of the vote

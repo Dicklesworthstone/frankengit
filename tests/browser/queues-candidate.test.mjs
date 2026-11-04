@@ -7,7 +7,7 @@ import { queuePreparationRequest, queuePreparationReply, queueCandidateRequest, 
 import { queuePublication, CANDIDATE_RECEIPT_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/queues-protocol.mjs';
 import { BUNDLE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-candidate.mjs';
 import { token, actor, json, webcrypto, deferred, show as prShow, row, data } from './pulls-fixtures.mjs';
-import { recovered } from './pulls-candidate-fixtures.mjs';
+import { recovered, terminal } from './pulls-candidate-fixtures.mjs';
 import { queueFixture, candidatePublication } from './queues-candidate-fixtures.mjs';
 
 const href = 'https://forge.example/team/repo.git/ui/queues/';
@@ -124,17 +124,38 @@ test('queue inspection retains full native hash, parent order, byte-ref and comp
   await h.connect(); await assert.rejects(h.prepare()); assert.equal(h.client.candidateReady, false); await assert.rejects(h.stage());
 });
 
-test('the exported text-ref queue candidate is re-inspected by the actual independent PR client', async () => {
-  const h = harness(); await h.connect(); await h.prepare(); const serialized = h.client.exportReviewCandidate();
-  let inspections = 0;
-  const reviewer = new PullClient({ href: href.replace('/queues/', '/pulls/'), cryptoImpl: webcrypto, fetchImpl: async url => {
-    if (String(url).endsWith('/inspect')) { inspections++; return json(h.f.inspection); }
-    return json(prShow({ pull_request: row(1, { version: 4, data: data() }) }));
-  } });
-  await reviewer.connect('d'.repeat(64)); await reviewer.show(1);
-  await reviewer.importCandidate(serialized); assert.equal(inspections, 1);
-  const raw = harness(queueFixture('sha1', true)); await raw.connect(); await raw.prepare();
-  assert.throws(() => raw.client.exportReviewCandidate(), /text branch references/);
+test('queue candidates transfer to independent PR inspection/review and retain the exact landing in both hash domains and raw refs', async () => {
+  for (const algorithm of ['sha1', 'sha256']) for (const raw of [false, true]) {
+    const h = harness(queueFixture(algorithm, raw)); await h.connect(); await h.prepare();
+    const serialized = h.client.exportReviewCandidate(), receipt = JSON.parse(serialized), calls = [];
+    let reviewer;
+    reviewer = new PullClient({ href: href.replace('/queues/', '/pulls/'), cryptoImpl: webcrypto, fetchImpl: async (url, options) => {
+      const path = new URL(url).pathname; calls.push({ path, ...options });
+      if (path.endsWith('/inspect')) return json(h.f.inspection);
+      if (path.endsWith('/approve')) {
+        const { pull_request, ...subject } = h.f.inspection.subject;
+        return json(terminal(reviewer.pending, { subject: { number: pull_request, ...subject } }));
+      }
+      return json(prShow({ object_format: algorithm, pull_request: row(1, { version: 4, data: data({ ...h.f.refs,
+        object_format: algorithm, source_tip: h.f.fields.expected_source_tip, target_tip: h.f.fields.expected_target_tip }) }) }));
+    } });
+    await reviewer.connect('d'.repeat(64)); await reviewer.show(1);
+    await reviewer.importCandidate(serialized);
+    assert.equal(calls.filter(call => call.path.endsWith('/inspect')).length, 1);
+    assert.deepEqual(JSON.parse(reviewer.exportCandidate()), receipt);
+    const pending = await reviewer.stageReview('approve', 0, 'Independently inspected every candidate path.');
+    assert.equal(pending.fields.candidate_commit, h.f.landingFields.expected_commit);
+    assert.equal(Object.hasOwn(pending.fields, 'source_ref_hex'), raw);
+    assert.equal(Object.hasOwn(pending.fields, 'source_ref'), !raw);
+    assert.equal(calls.length, 2, 'export, import and review staging never publish');
+    assert.equal((await reviewer.send()).outcome, 'committed');
+    assert.equal(calls[2].headers['Idempotency-Key'], pending.key);
+    const landing = await h.stage();
+    assert.equal(landing.fields.expected_commit, pending.fields.candidate_commit);
+    assert.equal(landing.fields.merge_base, pending.fields.merge_base);
+    assert.deepEqual(h.client.exportCandidateBundle(), h.f.bundle);
+    assert.equal((await h.client.send()).outcome, 'committed');
+  }
 });
 
 test('lost candidate replies, changed draft and reconnect preserve exact original body/key and historical outcomes', async () => {

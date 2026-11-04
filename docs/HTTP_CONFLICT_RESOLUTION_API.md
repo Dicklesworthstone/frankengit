@@ -47,6 +47,13 @@ source_ref, target_ref, source_tip, target_tip,
 author, committer, timestamp, message
 ```
 
+The reference fields accept the same exactly-one aliases as `/prepare`:
+`source_ref` or `source_ref_hex`, and `target_ref` or `target_ref_hex`. Hex is
+nonempty even-length lowercase hexadecimal, capped at 1,024 decoded bytes per
+reference and validated as the exact native branch name. This applies to both
+form-only side choices and multipart file resolutions. Preserve the chosen
+aliases through subsequent inspection, independent reviews and merge retries.
+
 An optional `method` selects `merge-commit` (the default) or `squash`. Preserve
 the method selected during conflict preparation. Merge-commit records target
 then source as its two parents; squash records only the exact target parent.

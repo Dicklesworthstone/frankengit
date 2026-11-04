@@ -1,5 +1,5 @@
 // Native browser queue consumer. Exact observations never become landing authority.
-import { Transport, copy, fail, hex, integer, keys, principal, showReply, snapshot, subject, text, utf8 } from './pulls-core.mjs';
+import { Transport, copy, fail, hex, integer, keys, principal, showReply, snapshot, subject, subjectReferences, text, utf8 } from './pulls-core.mjs';
 import { base64, fromBase64, recovery } from './pulls-actions.mjs';
 import { makeBoundary, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { queueCandidateRequest, queueCandidateSummary, queueInspectionReply, queueInspectionRequest, queuePreparationReply, queuePreparationRequest } from './queues-candidate.mjs';
@@ -149,8 +149,8 @@ export class QueueClient {
     this.#ordinary();
     if (!this.candidateReady || this.#busy) fail('Prepare and completely inspect a queue candidate first.');
     const a = this.#artifact, raw = a.metadata.subject;
-    if (raw.source_ref === null || raw.target_ref === null) fail('The PR browser review import requires text branch references. Download the exact native bundle and inspection for byte-reference tooling.');
-    const fields = { ...subject({ ...a.fields, source_ref: raw.source_ref, target_ref: raw.target_ref }),
+    const fields = { ...subject({ object_format: a.scope.format, pull_request_version: a.fields.pull_request_version,
+      policy_epoch: a.fields.policy_epoch, ...subjectReferences(raw), source_tip: a.fields.source_tip, target_tip: a.fields.target_tip }),
       merge_base: a.fields.merge_base, candidate_commit: a.fields.candidate_commit };
     return JSON.stringify({ schema: 'frankengit-browser-candidate-v1', number: a.number, scope: a.scope, method: a.method,
       fields, bundle_base64: base64(a.bundle), sha256: a.sha256 });

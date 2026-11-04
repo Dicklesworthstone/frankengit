@@ -282,7 +282,8 @@ test('selecting a byte-only PR cannot leave another PR metadata proposal under i
   });
   await h.connect(); await h.open(); assert.equal(h.nodes.title.value, 'Title 🦀'); await h.open();
   assert.equal(h.nodes.title.value, ''); assert.equal(h.nodes['pr-number'].value, '');
-  assert.match(h.nodes.selected.textContent, /Byte-only refs/); assert.equal(h.nodes['prepare-candidate'].disabled, true);
+  assert.match(h.nodes.selected.textContent, /Byte-only refs/); assert.equal(h.nodes['prepare-candidate'].disabled, false);
+  assert.match(h.nodes.selected.textContent, /Metadata editing through the text form is unavailable/);
 });
 test('oversized receipt files are rejected before their bytes are read', async () => {
   const h = harness(); await h.connect(); let read = false;

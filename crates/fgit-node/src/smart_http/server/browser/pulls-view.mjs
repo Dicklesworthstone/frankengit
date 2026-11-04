@@ -2,7 +2,7 @@
 // preparing, inspecting and displaying approvals never submits a mutation.
 import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
-import { decimal, oid, unhex, fail, showReply } from './pulls-core.mjs';
+import { decimal, oid, unhex, fail, showReply, subjectReferences } from './pulls-core.mjs';
 import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, protectionChanges } from './pulls-actions.mjs';
 import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
@@ -46,6 +46,8 @@ export function renderInspection(doc, parent, report) {
   parent.replaceChildren();
   item(doc, parent, 'h3', `Inspected candidate ${report.candidate_commit}`);
   item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
+    `Source: ${nativeRef(report.subject, 'source_ref')}\nSource reference bytes: ${report.subject.source_ref_hex}\nSource tip: ${report.subject.source_tip}\n` +
+    `Target: ${nativeRef(report.subject, 'target_ref')}\nTarget reference bytes: ${report.subject.target_ref_hex}\nTarget tip: ${report.subject.target_tip}\n` +
     `Base: ${report.merge_base}\nNative parents: ${report.parents.join(', ')}\n` +
     `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
@@ -173,7 +175,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is submitted.';
     for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit']) nodes[id].disabled = !connected || busy;
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
-    nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open' || selected.row.data.source_ref === null || selected.row.data.target_ref === null;
+    nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open';
     nodes['reviews-load'].disabled = !connected || busy || !selected;
     nodes['comments-load'].disabled = !connected || busy || !selected;
     nodes['comments-limit'].disabled = !connected || busy || !selected;
@@ -197,12 +199,16 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
     const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash';
+    const rawFastForward = inspectedFastForward && (Object.hasOwn(candidate.fields, 'source_ref_hex') || Object.hasOwn(candidate.fields, 'target_ref_hex'));
+    if (rawFastForward) nodes['merge-stage'].disabled = true;
     nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : squash ? 'Reviewed squash' : 'Reviewed merge';
     nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
     nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
     nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
     nodes['required-reviewers'].required = !inspectedFastForward;
-    nodes['merge-method-guidance'].textContent = inspectedFastForward
+    nodes['merge-method-guidance'].textContent = rawFastForward
+      ? 'This source-tip candidate can be reviewed with its exact reference bytes. Fast-forward publication through this form requires text branch references.'
+      : inspectedFastForward
       ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
       : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
         : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
@@ -368,7 +374,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       if (row.data.source_ref !== null && row.data.target_ref !== null) {
         for (const [name, value] of Object.entries(fieldsFromRow(row, result.binding.format))) nodes[metadataIds[name]].value = String(value);
         nodes['pr-number'].value = String(row.number); nodes['metadata-action'].value = 'update';
-      } else item(doc, nodes.selected, 'p', 'Byte-only refs are displayed without conversion. Metadata editing and candidate preparation through this text form are unavailable.');
+      } else item(doc, nodes.selected, 'p', 'Byte-only refs retain their exact native bytes for candidate preparation, conflict resolution and review. Metadata editing through the text form is unavailable.');
     }
     if (row.merge) item(doc, nodes.selected, 'pre', `Merged commit: ${row.merge.merge_commit}\nOriginal target: ${row.merge.target_tip_before}`);
   }
@@ -526,10 +532,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     status('Metadata request prepared locally. Review the exact saved request, then explicitly send it.');
   }));
   on('prepare', 'submit', () => run('candidate', async guard => {
-    if (!selected || selected.row.state !== 'open') fail('Select an open PR first.');
-    const data = fieldsFromRow(selected.row, selected.format);
-    const fields = { object_format: data.object_format, pull_request_version: data.expected_version, policy_epoch: number('policy-epoch', 1),
-      source_ref: data.source_ref, target_ref: data.target_ref, source_tip: data.source_tip, target_tip: data.target_tip };
+    if (!selected?.row?.data || selected.row.state !== 'open') fail('Select an open PR first.');
+    const data = selected.row.data;
+    const fields = { object_format: selected.format, pull_request_version: selected.row.version, policy_epoch: number('policy-epoch', 1),
+      ...subjectReferences(data), source_tip: data.source_tip, target_tip: data.target_tip };
     const metadata = { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value };
     nodes.candidate.replaceChildren(); resolution.clear();
     const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value); guard();

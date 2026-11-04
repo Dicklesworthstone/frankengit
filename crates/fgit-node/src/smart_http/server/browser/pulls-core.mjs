@@ -54,14 +54,40 @@ export function branch(value) {
       value.endsWith('.') || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native branch reference is required.');
   return value;
 }
+function branchBytes(value) {
+  const bytes = unhex(value, 1024), raw = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+  if (!raw.startsWith('refs/heads/') || /[\x00-\x20\x7f~^:?*\[\\]/.test(raw) || raw.includes('..') || raw.includes('@{') ||
+      raw.endsWith('.') || raw.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native branch reference is required.');
+  return value;
+}
+// Preserve the selected wire encoding. In particular, existing text commands
+// must keep their original form bytes and credential-bound idempotency keys.
+function commandReference(fields, name) {
+  const encoded = `${name}_hex`, hasText = Object.hasOwn(fields, name), hasHex = Object.hasOwn(fields, encoded);
+  if (hasText === hasHex) fail(`Supply exactly one ${name} encoding.`);
+  if (hasHex) return { name: encoded, value: fields[encoded], hex: branchBytes(fields[encoded]) };
+  const value = text(fields[name], 1024, 'branch reference');
+  return { name, value, hex: branchBytes(hex(utf8.encode(value))) };
+}
 export function reference(row, name) {
-  const bytes = unhex(row[`${name}_hex`], 1024);
-  if (!bytes.length || bytes.includes(0)) fail('Invalid native ref bytes.');
+  record(row);
+  const bytes = branchBytes(row[`${name}_hex`]);
   if (row[name] !== null) {
-    branch(row[name]);
-    if (hex(utf8.encode(row[name])) !== row[`${name}_hex`]) fail('Ref text and native bytes disagree.');
+    text(row[name], 1024, 'native branch text');
+    if (hex(utf8.encode(row[name])) !== bytes) fail('Ref text and native bytes disagree.');
   }
-  return row[name]; // null is a byte-only ref; readable, but not this form API's input.
+  return row[name];
+}
+// Native responses always carry both display text (possibly null) and raw bytes.
+// Requests carry exactly one alias per side; never encode an escaped label.
+export function subjectReferences(row) {
+  const result = {};
+  for (const name of ['source_ref', 'target_ref']) {
+    const label = reference(row, name);
+    if (label === null) result[`${name}_hex`] = row[`${name}_hex`];
+    else result[name] = label;
+  }
+  return result;
 }
 export function binding(reply, previous = null) {
   record(reply);
@@ -117,15 +143,15 @@ export function showReply(reply, number, { head = null, scope = null } = {}) {
   else if (reply.pull_request !== null) fail('Missing PR disclosed another record.');
   return { ...selected, reply };
 }
-export const SUBJECT_FIELDS = ['object_format', 'pull_request_version', 'policy_epoch', 'source_ref', 'target_ref', 'source_tip', 'target_tip'];
+export const SUBJECT_FIELDS = ['object_format', 'pull_request_version', 'policy_epoch', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip'];
 export function subject(fields) {
-  const algorithm = format(fields.object_format);
+  const algorithm = format(fields.object_format), source = commandReference(fields, 'source_ref'), target = commandReference(fields, 'target_ref');
   const result = { object_format: algorithm,
     pull_request_version: integer(fields.pull_request_version, 'PR version', 1, Number.MAX_SAFE_INTEGER - 1),
     policy_epoch: integer(fields.policy_epoch, 'policy epoch', 1),
-    source_ref: branch(fields.source_ref), target_ref: branch(fields.target_ref),
+    [source.name]: source.value, [target.name]: target.value,
     source_tip: oid(fields.source_tip, algorithm), target_tip: oid(fields.target_tip, algorithm) };
-  if (result.source_ref === result.target_ref) fail('Source and target must differ.');
+  if (source.hex === target.hex) fail('Source and target must differ.');
   return result;
 }
 export function matchSubject(raw, expected, number, algorithm, numberField = 'number') {
@@ -135,9 +161,12 @@ export function matchSubject(raw, expected, number, algorithm, numberField = 'nu
   integer(raw.pull_request_version, 'PR version', 1); integer(raw.policy_epoch, 'policy epoch', 1);
   oid(raw.source_tip, algorithm); oid(raw.target_tip, algorithm);
   if (expected) {
-    for (const key of SUBJECT_FIELDS.filter(key => key !== 'object_format')) {
+    const selected = subject(expected);
+    if (selected.object_format !== algorithm || ['source_ref', 'target_ref'].some(name =>
+      raw[`${name}_hex`] !== commandReference(selected, name).hex)) fail('Review subject changed; no implicit version, reference or tip refresh.');
+    for (const key of ['pull_request_version', 'policy_epoch', 'source_tip', 'target_tip']) {
       const value = key.endsWith('_tip') ? oid(raw[key], algorithm) : raw[key];
-      if (value !== expected[key]) fail('Review subject changed; no implicit version or tip refresh.');
+      if (value !== selected[key]) fail('Review subject changed; no implicit version or tip refresh.');
     }
   }
 }

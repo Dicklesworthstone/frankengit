@@ -76,13 +76,19 @@ path and hunk using literal text. Binary changes retain exact object identities
 and sizes; the native report excludes their object bodies.
 
 Download the exact bundle and complete inspection with the original native
-landing form. For text branch references, **Export candidate for independent PR
-review** produces the existing PR browser's import format. A reviewer uses
-their own credential on the Pull requests page; import performs native
-reinspection before any explicit review. The PR browser's review-import form
-still requires text refs; byte-only refs remain available in the native bundle
-and inspection downloads. Preparation and inspection do not manufacture
-reviews, workflow checks, or a landing grant.
+landing form. **Export candidate for independent PR review** produces the PR
+browser's import format for text and byte-only branch references. A reviewer
+uses their own credential on the Pull requests page; import performs native
+reinspection before any explicit approval, changes requested or withdrawal.
+The subject retains exactly one text or hex encoding per reference. Native
+reply validation compares exact bytes, including when a reference has no text
+label. The candidate commit, merge base and exact bundle remain unchanged
+through export, reinspection and subsequent candidate sharing. The queue owner
+retains the original landing guards and stages that same candidate after its
+independent reviews. Preparation and inspection do not manufacture reviews,
+workflow checks, or a landing grant. See the
+[PR review workflow](PR_BROWSER_MERGE_WORKFLOW.md) for its separate metadata
+editing and fast-forward publication limits.
 
 **Stage this inspected candidate landing** prepares a local multipart request
 to `queues/{number}/land-candidate`. Save its private recovery receipt, review
@@ -149,7 +155,9 @@ temporary object URLs that are revoked on disconnect and page exit.
 Focused client and controller tests live in
 `tests/browser/queues-native.test.mjs`,
 `tests/browser/queues-candidate.test.mjs`, and
-`tests/browser/queues-view.test.mjs`. Run each directly with the selected Node
+`tests/browser/queues-view.test.mjs`; raw-reference independent review and
+recovery coverage also lives in `tests/browser/pulls-raw-references.test.mjs`.
+Run each directly with the selected Node
 runtime to see its registered cases. These tests use explicit API/DOM doubles.
 They do not establish live-browser interoperability or native queue correctness.
 The existing `queue_http`, `queue_landing_http` and `queue_preparation_http`

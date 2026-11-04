@@ -61,6 +61,14 @@ version defaults:
 | `timestamp` | Explicit positive Git timestamp, emitted with UTC offset `+0000`. |
 | `message` | Exact nonempty UTF-8 commit-message bytes, including any desired final newline. |
 
+For an existing PR with raw branch bytes, replace either reference field with
+its lowercase hexadecimal alias: `source_ref_hex` or `target_ref_hex`. Exactly
+one encoding per side is required, with at most 1,024 decoded bytes and the same
+native `refs/heads/...` validation. Text and hex can be mixed across sides; a
+display label is never a reference input. Preparation, explicit resolution,
+candidate inspection and reviewed publication use this same byte-preserving
+subject decoder. The metadata open/update routes keep their separate grammar.
+
 Two optional fields select independent construction semantics. `method` accepts
 `merge-commit` (the default) or `squash`. A merge commit records the ordered
 target/source parents; a squash commit records only the exact target parent and

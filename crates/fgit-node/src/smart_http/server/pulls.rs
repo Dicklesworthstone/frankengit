@@ -11,6 +11,7 @@ mod inspection;
 mod output;
 mod preparation;
 mod request;
+mod subject;
 
 // Queue preparation shares only the bounded artifact formatter and native
 // read-error mapping. Queue selection and its independent grants remain local.
