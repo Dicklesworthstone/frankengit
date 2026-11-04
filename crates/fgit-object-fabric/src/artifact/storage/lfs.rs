@@ -13,6 +13,8 @@ use std::fmt;
 use std::io::Read;
 use std::path::Path;
 
+pub mod transfer;
+
 pub const TRUST_DOMAIN: &str = "git-lfs-basic-v1";
 pub const MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const VERSION: &str = "version https://git-lfs.github.com/spec/v1";

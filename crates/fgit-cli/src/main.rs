@@ -61,6 +61,28 @@ fn main() -> ExitCode {
 }
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
+    if arguments.first().is_some_and(|argument| argument == "lfs") {
+        #[cfg(target_os = "linux")]
+        {
+            use fgit_node::source_retrieval::lfs_transfer;
+            return match lfs_transfer::run_with_timeout(
+                &arguments[1..],
+                &mut std::io::stdout().lock(),
+                fgit_cli::command_timeout_override_duration(),
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{}", lfs_transfer::error_json(&error));
+                    ExitCode::from(2)
+                }
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("LFS custody portability requires the Linux artifact storage profile");
+            return ExitCode::from(2);
+        }
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "agent-credential")

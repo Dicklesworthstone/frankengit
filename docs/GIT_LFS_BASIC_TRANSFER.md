@@ -119,11 +119,14 @@ normal Git LFS pre-push hook is responsible for uploading its objects first.
 This implementation is a bounded part of `frankengit-fg053-lfs-i3h`, not closure
 of that bead's complete acceptance criteria.
 
-Back up the artifact directory separately from repository authority/source
-bundles: those bundles do not currently include LFS payloads. Restore custody
-together with the matching tenant, repository, and incarnation; a newly created
-incarnation cannot read another incarnation's custody. The service performs no
-implicit migration, automatic replication, or deletion of retained payloads.
+Repository authority/source bundles do not include LFS payloads. Use the
+[portable LFS companion](GIT_LFS_PORTABILITY.md) to export every supported
+pointer selected by native authority and import verified payloads into an
+explicitly pinned destination, including a new incarnation. Alternatively,
+back up the artifact directory separately and restore it with its matching
+tenant, repository, and incarnation. A new incarnation cannot directly read
+another incarnation's custody. The service performs no implicit migration,
+automatic replication, or deletion of retained payloads.
 
 ## Focused verification
 

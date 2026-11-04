@@ -55,10 +55,10 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     hash.update(bytes);
     hash.finish()
 }
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {
@@ -184,7 +184,7 @@ fn generation(bundle: &ExportBundle) -> String {
 /// Build and verify through one private read/write handle. The callback must
 /// finish its source verification and node close before any final path exists.
 /// The result is retained until file sync and no-replace publication succeed.
-fn publish_streamed<T>(
+pub(crate) fn publish_streamed<T>(
     destination: &Path,
     build: impl FnOnce(&mut File) -> Result<T, String>,
     mut live: impl FnMut() -> Result<(), String>,
