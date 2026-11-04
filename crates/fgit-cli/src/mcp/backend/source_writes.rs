@@ -1,6 +1,7 @@
 //! Source mutations are ordinary native receive admission, not MCP-local refs.
 //! The launch sponsor grants writes explicitly; source bytes grant no authority.
 mod initial;
+mod rebase;
 mod transaction;
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
@@ -18,6 +19,7 @@ pub(super) const DELETE: &str = "frankengit_branch_delete";
 pub(super) const RENAME: &str = "frankengit_branch_rename";
 pub(super) const TRANSACTION: &str = "frankengit_branch_transaction";
 pub(super) const PUBLISH: &str = "frankengit_source_publish";
+pub(super) const PUBLISH_REBASE: &str = rebase::NAME;
 const MAX_CHUNKS: usize = 3;
 const CHUNK_BYTES: usize = 8 * 1024;
 const MAX_BUNDLE_BYTES: usize = MAX_CHUNKS * CHUNK_BYTES;
@@ -25,7 +27,7 @@ const MAX_BUNDLE_BYTES: usize = MAX_CHUNKS * CHUNK_BYTES;
 pub(super) fn is_tool(name: &str) -> bool {
     matches!(
         name,
-        CREATE | UPDATE | DELETE | RENAME | PUBLISH | TRANSACTION
+        CREATE | UPDATE | DELETE | RENAME | PUBLISH | PUBLISH_REBASE | TRANSACTION
     )
 }
 pub(super) fn tools() -> Vec<Tool> {
@@ -36,9 +38,13 @@ pub(super) fn tools() -> Vec<Tool> {
         (RENAME, "Atomically delete an exact-tip branch and create an absent destination at that SAME tip. No partial rename, overwrite, default-branch rename or PR retargeting."),
         (TRANSACTION, "Atomically create, advance or delete 1..4096 distinct branches. All commands share one exact durable key and canonical decision; stale or protected members cannot publish a partial prefix."),
         (PUBLISH, "Publish a reviewed native Git bundle. The default requires an exact base and single parent; initial:true explicitly creates zero-parent history at an absent branch and forbids expected_base. At most 24 KiB in three hex chunks. Native quarantine verifies objects before ordinary admission; no merge approval."),
+        (PUBLISH_REBASE, "Publish an independently inspected native linear-rebase bundle through ordinary atomic admission. The exact old SOURCE tip is the branch lease; onto is only the bundle prerequisite. Requires the original retry key and explicit source-write grant. Retains native protection and complete-series validation; recovered outcomes are historical decisions, not new bundle or replay-equivalence attestations. Sponsored profiles exclude this tool."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }
 fn schema(name: &str) -> Value {
+    if name == PUBLISH_REBASE {
+        return rebase::schema();
+    }
     if name == TRANSACTION {
         return transaction::schema();
     }
@@ -246,6 +252,9 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     if !backend.options.writes.source || !is_tool(name) {
         return Err(ToolError::invalid("tool_not_granted"));
     }
+    if name == PUBLISH_REBASE {
+        return rebase::call(backend, args);
+    }
     if name == PUBLISH && args.contains_key("initial") {
         return initial::call(backend, args);
     }
@@ -298,6 +307,26 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             ))
     }
     .map_err(|_| ToolError::uncertain("source_mutation_outcome_unknown"))?;
+    let action = match name {
+        CREATE => "create",
+        UPDATE => "update",
+        DELETE => "delete",
+        RENAME => "rename",
+        TRANSACTION => "transaction",
+        _ => "publish",
+    };
+    publication_receipt(backend, principal, action, &input.commands, &admitted).map(Value::Object)
+}
+
+// One receipt contract for branch, initial, single-commit and linear-series
+// publication. A historical terminal never attests today's refs or new bytes.
+fn publication_receipt(
+    backend: &NodeTools,
+    principal: fgit_types::PrincipalId,
+    action: &str,
+    commands: &[RefCommand],
+    admitted: &fgit_admission::AdmissionResult,
+) -> Result<Object, ToolError> {
     // An atomic result must have ONE verified decision for every submitted ref.
     // Do not accept a per-command partial result as a successful rename.
     let observations: Vec<_> = admitted
@@ -309,21 +338,14 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         admitted.session.atomic,
         &admitted.session.tx_ids,
         &observations,
-        input.commands.len(),
+        commands.len(),
     )?;
     let mut result = common::binding(backend, principal, false);
     result.extend(common::terminal(tx, &terminal));
     result.insert("type".into(), text("source_publication"));
     result.insert(
         "action".into(),
-        text(match name {
-            CREATE => "create",
-            UPDATE => "update",
-            DELETE => "delete",
-            RENAME => "rename",
-            TRANSACTION => "transaction",
-            _ => "publish",
-        }),
+        text(action),
     );
     result.insert("atomic".into(), Value::Bool(true));
     result.insert("complete".into(), Value::Bool(true));
@@ -339,8 +361,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     result.insert(
         "submitted_commands".into(),
         Value::Array(
-            input
-                .commands
+            commands
                 .iter()
                 .map(|c| {
                     object([
@@ -367,7 +388,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     );
     // A recovered decision does not attest a newly supplied pack encoding.
     result.insert("bundle_validation_receipt".into(), Value::Null);
-    Ok(Value::Object(result))
+    Ok(result)
 }
 fn atomic_terminal(
     atomic: bool,

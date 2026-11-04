@@ -15,6 +15,7 @@ mod milestones;
 mod notifications;
 mod pull_append;
 mod queues;
+mod rebase;
 mod tags;
 use super::types;
 use types::{FieldClassification, McpField, McpToolEntry};
@@ -78,7 +79,7 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 47] = [
+const ADDITIONS: [McpToolEntry; 48] = [
     agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,
@@ -121,6 +122,7 @@ const ADDITIONS: [McpToolEntry; 47] = [
     queues::LIST,
     queues::REORDER,
     queues::SHOW,
+    rebase::PUBLISH,
     indexed_search::ENTRY,
     tags::ANNOTATE,
     tags::CREATE,

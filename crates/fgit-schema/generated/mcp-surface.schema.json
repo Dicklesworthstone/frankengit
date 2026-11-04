@@ -3954,6 +3954,68 @@
       },
       "additionalProperties": false
     },
+    "frankengit_source_publish_rebase": {
+      "title": "frankengit_source_publish_rebase",
+      "description": "Publish an independently inspected native linear-rebase bundle with the exact old source lease, onto prerequisite, final candidate and original durable key. Ordinary source-write grant only; sponsored profiles exclude this operator adapter. Native quarantine, bounded series validation and ordinary atomic admission retain policy and historical retry semantics.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Exact SOURCE refs/heads/* branch, at most 1024 UTF-8 bytes. Supply exactly one of reference/reference_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "reference_hex": {
+              "type": "string",
+              "description": "Exact raw SOURCE branch, at most 1024 decoded bytes; mutually exclusive with reference.",
+              "x-classification": "selector_position",
+              "maxLength": 2048,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_source": {
+              "type": "string",
+              "description": "Exact old SOURCE branch tip: the publication lease, independent of onto.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "onto": {
+              "type": "string",
+              "description": "Exact nonzero sole bundle prerequisite in the launch hash domain. Not the old-source lease or a current-tip selector.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_candidate": {
+              "type": "string",
+              "description": "Exact independently inspected final candidate. May equal onto for a zero-commit series.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "bundle_hex_chunks": {
+              "type": "array",
+              "description": "One complete native Git bundle: 1..3 ordered lowercase-hex chunks of at most 8192 decoded bytes each, at most 24576 decoded bytes total. Native quarantine and dedicated complete-series validation own acceptance.",
+              "x-classification": "untrusted_content",
+              "maxLength": 49164
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original 1..256-byte printable ASCII durable key for the exact old-source/new-candidate ref transaction. Retry identical submitted inputs; JSON-RPC IDs are independent.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["expected_source", "onto", "expected_candidate", "bundle_hex_chunks", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_source_search": {
       "title": "frankengit_source_search",
       "description": "Search literal bytes or linear regex spans across regular files of a visible ref in one authority snapshot.",

@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 94,
-  "active_count": 90,
+  "total_count": 95,
+  "active_count": 91,
   "unsupported_count": 4,
   "tools": [
     {
@@ -2358,6 +2358,34 @@
       "refusal_codes": ["predecessor_tip_mismatch", "corrupt_bundle", "bundle_byte_limit", "idempotency_key_reused"],
       "cli_command": "fg workspace apply",
       "rest_api_path": "POST /repos/{id}/commits"
+    },
+    {
+      "name": "frankengit_source_publish_rebase",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "description": "Publish an independently inspected native linear-rebase bundle with the exact old source lease, onto prerequisite, final candidate and original durable key. Ordinary source-write grant only; sponsored profiles exclude this operator adapter. Native quarantine, bounded series validation and ordinary atomic admission retain policy and historical retry semantics.",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "exact_predecessor_commit",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "unknown_argument", "required_argument_missing", "expected_string", "invalid_idempotency_key", "exactly_one_branch_encoding_required", "full_branch_required", "invalid_branch", "invalid_native_oid", "invalid_hex_bytes", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "source_mutation_outcome_unknown", "inconsistent_atomic_outcome"],
+      "cli_command": "fg rebase apply",
+      "rest_api_path": "/api/v1/source/rebase/apply"
     },
     {
       "name": "frankengit_source_search",

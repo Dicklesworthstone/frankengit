@@ -102,46 +102,19 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             Default::default(),
         ))
         .map_err(|_| ToolError::uncertain("source_mutation_outcome_unknown"))?;
-    let observations: Vec<_> = admitted
-        .commands
-        .iter()
-        .map(|c| (c.tx_id, c.terminal))
-        .collect();
-    let (tx, terminal) = atomic_terminal(
-        admitted.session.atomic,
-        &admitted.session.tx_ids,
-        &observations,
-        1,
+    let mut result = publication_receipt(
+        backend,
+        principal,
+        "publish_initial",
+        &[RefCommand {
+            name: input.reference,
+            expected_old: ExpectedOld::Absent,
+            proposed_new: ProposedNew::Update(input.candidate),
+            force: false,
+        }],
+        &admitted,
     )?;
-    let mut result = common::binding(backend, principal, false);
-    result.extend(common::terminal(tx, &terminal));
-    result.extend([
-        ("type".into(), text("source_publication")),
-        ("action".into(), text("publish_initial")),
-        ("initial".into(), Value::Bool(true)),
-        ("atomic".into(), Value::Bool(true)),
-        ("complete".into(), Value::Bool(true)),
-        ("historical_outcome".into(), Value::Bool(true)),
-        ("current_refs_asserted".into(), Value::Bool(false)),
-        (
-            "ref_transaction_committed".into(),
-            Value::Bool(matches!(
-                terminal.outcome,
-                DecisionOutcome::Committed { .. }
-            )),
-        ),
-        (
-            "submitted_commands".into(),
-            Value::Array(vec![object([
-                ("reference_hex", text(hex(input.reference.as_bytes()))),
-                ("expected_old", Value::Null),
-                ("proposed_new", text(input.candidate.to_string())),
-                ("force", Value::Bool(false)),
-            ])]),
-        ),
-        // A historical retry recovers its seal, not a new pack-validation claim.
-        ("bundle_validation_receipt".into(), Value::Null),
-    ]);
+    result.insert("initial".into(), Value::Bool(true));
     Ok(Value::Object(result))
 }
 
