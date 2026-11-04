@@ -1,5 +1,15 @@
 # Whole-collection GitHub PR destination migration
 
+The [native destination campaign](../scripts/e2e/suites/operator/github_pull_migration.sh)
+drives this CLI against the operator lane's real `fg`, using synthetic source
+observations passed through production collection validation. Separate Rust
+reads check PR metadata, every attributed observation, absent imported approvals
+and exact branch effects. The campaign includes whole-plan source custody,
+independent branch credentials, paused/resumed operation budgets, grant refusals,
+original-key retry, occupied destinations and stopped-service completion. This
+bounded coverage does not claim live GitHub, maximum populations, power-loss,
+independent batch verification or the complete `.4.59` entrypoint matrix.
+
 FG-049 (`frankengit-fg049-github-compat-xdo`), comprehensive plan §31.3.
 A completed [GitHub PR collection](GITHUB_PULL_COLLECTION.md) can now select one
 bounded destination migration instead of requiring separately numbered manual

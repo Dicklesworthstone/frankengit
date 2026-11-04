@@ -167,3 +167,17 @@ Opaque payload fixtures are NOT native `fg` archives. These tests do not establi
 Rust compilation, native archive/forge restoration, complete capsule recovery,
 whole-workspace acceptance, public-provider interoperability, hardware power-loss
 behavior, independent failure domains or global checkpoint currentness.
+
+The separate `scripts/e2e/suites/operator/backup_https.sh` campaign retrieves real
+signed native SHA-1 and SHA-256 archives previously published by the shipped
+uploader/upload-job CLIs. It checks wrong-checkpoint and untrusted-TLS refusal,
+corrupt-mirror failover constrained to the original approval, exact acquired
+bytes, actual native signed restore and independent Rust Git/forge readback.
+The recovery CLI also acquires over HTTPS, then resumes from its verified cache
+with the fixture stopped and source-URL file absent. The object service is a
+bounded disk-backed loopback TLS transport fixture, not a native forge or public
+provider. A separately qualified prebuilt `FG_BIN` digest, pinned Node, sandboxed
+Git 2.54.0, Python and test-only OpenSSL are required. Diagnostic originals remain
+retained; this does not establish independent storage, destructive/hardware
+faults, a full capsule, independent review, a fresh-current-main build or the
+whole workspace gate.

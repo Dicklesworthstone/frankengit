@@ -273,3 +273,15 @@ observations. Fresh Node CLI processes are interrupted by SIGTERM/SIGINT/SIGKILL
 during committed peer replies and recover without duplicate mutation POSTs.
 The peer does not implement Git or native authority: no native Rust server,
 reachability/admission/CAS, full-workspace, live GitHub or release gate is claimed.
+
+The separate [native GitHub PR destination campaign](../scripts/e2e/suites/operator/github_pull_migration.sh)
+is discovered by `./scripts/verify.sh operator`. It supplies explicitly synthetic
+GitHub source observations to the production discovery/capture/collection
+validators, then executes this CLI and the branch-bootstrap CLI against the
+lane's real `fg`. A sandboxed Git oracle checks the unchanged fixture object IDs;
+separate Rust ref, PR, comment and review reads check destination publication.
+The campaign covers independent branch/PR principals, denied grants and exact-key
+retry, operation budgets, literal attributed observations, occupied destinations,
+stopped-service completion and refusal of SHA-256 destination translation. It
+does not contact live GitHub, import approvals, qualify maximum populations or
+complete `.4.59`'s every-entrypoint/independent-verification requirements.

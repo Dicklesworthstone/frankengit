@@ -159,3 +159,19 @@ with child reaping, exact restart after original source/control deletion, the
 real persisted witness, and broken output pipes. Payloads are opaque operator
 test bytes, not native `fg` archives. Rust compilation, full-workspace gates,
 native restore and hardware faults require separate evidence.
+
+The separate `scripts/e2e/suites/operator/backup_jobs.sh` campaign drives this
+shipped CLI with actual signed native SHA-1 and SHA-256 archives. It checks
+immutable seal retries, required-witness and byte-budget refusal/permitted pairs,
+loss of the original approval before the first copy, loss of all original source
+paths, designated-replica failover, unchanged healthy inodes on exact restart,
+and corrupt-output preservation with confirmed partial receipts. Replenished
+copies enter the actual native signed restore adapter, followed by separate Rust
+reads of exact Git identities, binary bytes, executable modes and issue history.
+A later native checkpoint retained in the witness blocks the old job after that
+newer archive's input paths disappear. The campaign requires a separately
+qualified prebuilt `FG_BIN`, pinned Node and sandboxed Git 2.54.0; its receipt
+records the selected binary digest. Original diagnostic bytes remain retained
+elsewhere. This is local sequential recovery evidence, not destructive process
+death/power-loss, independent storage, HTTPS, a complete capsule, independent
+verification or a full workspace gate.
