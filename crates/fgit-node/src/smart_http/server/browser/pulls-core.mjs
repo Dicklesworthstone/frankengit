@@ -247,7 +247,7 @@ export function apiError(status) {
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
-    /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(route) ||
+    /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land|land-candidate)$/.test(route) ||
     (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments(?:\/append)?$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename|transaction)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
@@ -330,10 +330,14 @@ export class Transport {
     if (this.#queues) {
       const list = /^queues(?:\?[^#]*)?$/.test(path);
       const selected = /^(?:queues|pulls)\/[1-9][0-9]*(?:\?[^#]*)?$/.test(path);
-      const publication = /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(path);
+      const candidate = /^queues\/[1-9][0-9]*\/land-candidate$/.test(path);
+      const prepare = /^queues\/[1-9][0-9]*\/prepare$/.test(path);
+      const inspect = /^pulls\/[1-9][0-9]*\/inspect$/.test(path);
+      const publication = candidate || /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(path);
       const outcome = path === 'outcomes';
-      if (binary || contentType !== 'application/x-www-form-urlencoded' || headerNames.length ||
-          !(list || selected || publication || outcome)) fail('Invalid queue-profile route.');
+      const multipart = /^multipart\/form-data; boundary=[A-Za-z0-9-_.]{1,70}$/.test(contentType);
+      if (headerNames.length || !(list || selected || publication || outcome || prepare || inspect) ||
+          binary !== prepare || ((candidate || inspect) ? !multipart : contentType !== 'application/x-www-form-urlencoded')) fail('Invalid queue-profile route.');
       if (list || selected) {
         if (method !== 'GET' || body !== undefined || key !== undefined || !read ||
             statuses.length !== (list ? 1 : 2) || statuses[0] !== 200 || (selected && statuses[1] !== 404)) fail('Queue and PR observations are read-only.');
@@ -346,11 +350,19 @@ export class Transport {
         }
         if (Number(url.searchParams.get('after') ?? 0) > 0 && !seen.has('expected_head')) fail('Queue continuation requires its original snapshot.');
         integer(maximum, 'queue response limit', 1, REPLY_LIMIT);
+      } else if (prepare || inspect) {
+        const bodyLimit = prepare ? FORM_LIMIT : 16 * 1024 * 1024 + FORM_LIMIT + 4096;
+        if (method !== 'POST' || !read || key !== undefined ||
+            statuses.length !== (prepare ? 2 : 1) || statuses[0] !== 200 || (prepare && statuses[1] !== 409) ||
+            !((typeof body === 'string' && utf8.encode(body).length <= bodyLimit) ||
+              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= bodyLimit))) fail('Queue candidate preparation and inspection are bounded read-only requests.');
+        integer(maximum, 'queue candidate response limit', 1, prepare ? 18 * 1024 * 1024 + 16 * 1024 : REPLY_LIMIT);
       } else {
+        const bodyLimit = candidate ? 16 * 1024 * 1024 + FORM_LIMIT + 4096 : 64 * 1024;
         if (method !== 'POST' || read || typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key) ||
             statuses.length !== (outcome ? 1 : 2) || statuses[0] !== 200 || (publication && statuses[1] !== 409) ||
-            (outcome ? body !== undefined : !((typeof body === 'string' && utf8.encode(body).length <= 64 * 1024) ||
-              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= 64 * 1024)))) fail('Queue publication needs the exact form and original recovery key.');
+            (outcome ? body !== undefined : !((typeof body === 'string' && utf8.encode(body).length <= bodyLimit) ||
+              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= bodyLimit)))) fail('Queue publication needs the exact form and original recovery key.');
         integer(maximum, 'queue terminal response limit', 1, REPLY_LIMIT);
       }
     }
@@ -405,7 +417,7 @@ export class Transport {
     const allowed = this.#artifacts
       ? /^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path)
       : this.#queues
-      ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\?[^#]*)?|outcomes)$/.test(path)
+      ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land|prepare|land-candidate))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\/inspect)?(?:\?[^#]*)?|outcomes)$/.test(path)
       : this.#checkEvidence
       ? /^pulls\/[1-9][0-9]*\/checks\/evidence\?[^#]+$/.test(path)
       : this.#rebase

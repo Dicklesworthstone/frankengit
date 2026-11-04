@@ -46,7 +46,7 @@
         <label>Expected queue version<input id="queue-version" inputmode="numeric" autocomplete="off" required></label>
         <label>Target reference format<select id="target-kind"><option value="text">Text</option><option value="hex">Native bytes as lowercase hex</option></select></label>
         <label>Full target branch reference<input id="target-ref" autocomplete="off" maxlength="2048" spellcheck="false" required placeholder="refs/heads/main"></label>
-        <label>Action<select id="queue-action"><option value="enqueue">Enqueue PR</option><option value="dequeue">Dequeue PR</option><option value="reorder">Replace complete queue order</option><option value="land">Land queue head by fast-forward</option></select></label>
+        <label>Action<select id="queue-action"><option value="enqueue">Enqueue PR</option><option value="dequeue">Dequeue PR</option><option value="reorder">Replace complete queue order</option><option value="land">Land queue head by fast-forward</option><option value="land-candidate">Prepare, inspect and land a queue-head merge commit</option></select></label>
 
         <fieldset id="pr-fields">
           <legend>Exact pull request coordinates</legend>
@@ -73,10 +73,31 @@
         <fieldset id="landing-fields" hidden disabled>
           <legend>Explicit queue-head landing</legend>
           <label>Expected policy epoch<input id="policy-epoch" inputmode="numeric" autocomplete="off" required></label>
-          <p>This page submits a fast-forward-only landing of the selected head. The node checks the queue and PR versions, both branch tips, ancestry, current policy, independent reviews, and required checks. A failed gate does not move the branch or remove the queued PR.</p>
+          <p>The node checks the queue and PR versions, both branch tips, ancestry, current policy, independent reviews, and required checks. A failed gate does not move the branch or remove the queued PR. Fast-forward landing and an inspected two-parent merge commit are separate explicit choices.</p>
+        </fieldset>
+        <fieldset id="candidate-fields" hidden disabled>
+          <legend>Construct the diverged queue head's merge commit</legend>
+          <label>Author<input id="candidate-author" maxlength="1024" autocomplete="off" required placeholder="Name &lt;email&gt;"></label>
+          <label>Committer<input id="candidate-committer" maxlength="1024" autocomplete="off" required placeholder="Name &lt;email&gt;"></label>
+          <label>Commit timestamp (Unix seconds)<input id="candidate-timestamp" inputmode="numeric" autocomplete="off" required></label>
+          <label>Commit message format<select id="candidate-message-kind"><option value="text">Text</option><option value="hex">Native bytes as lowercase hex</option></select></label>
+          <label>Explicit commit message<textarea id="candidate-message" rows="5" maxlength="131072" autocomplete="off" spellcheck="false" required></textarea></label>
+          <label>Native merge profile<select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option></select></label>
+          <button id="candidate-prepare" type="button">Prepare and inspect complete candidate</button>
+          <p class="hint">Preparation requires independent repository read, PR-read and queue-read grants. It preserves the selected queue version, head, refs, tips and policy epoch. It creates no transaction and grants no landing permission. Conflicts stop here; update the source explicitly and reselect the queue.</p>
         </fieldset>
         <button id="prepare" type="submit">Prepare exact request — do not send</button>
       </form>
+    </section>
+
+    <section id="candidate-section" aria-labelledby="candidate-heading" hidden>
+      <h2 id="candidate-heading">Complete native candidate inspection</h2>
+      <p>The entire bundle and every reported changed path pass native inspection before this candidate can be staged. The commit hash and ordered target/source parents are checked. Binary bodies remain excluded. Any draft edit clears this candidate; it never changes an unresolved prepared request.</p>
+      <div id="candidate-report"></div>
+      <button id="candidate-bundle-download" type="button">Save exact candidate bundle</button>
+      <button id="candidate-inspection-download" type="button">Save complete inspection and native landing form</button>
+      <button id="candidate-review-download" type="button">Export candidate for independent PR review</button>
+      <p class="hint">For text branch refs, a reviewer can import that candidate on the Pull requests page using their own credential. Reviews and checks bind this exact candidate and remain separate from landing. Native byte refs are retained in the bundle and inspection downloads.</p>
     </section>
 
     <section id="pending-section" aria-labelledby="pending-heading" hidden>
@@ -93,7 +114,7 @@
       <h2 id="restore-heading">Restore the original request</h2>
       <p>Connect the original credential, or explicitly choose recovery-only mode with the original principal. Importing never sends a request. Unknown outcomes retain the original body and key for recovery or an explicit identical retry.</p>
       <form id="receipt-import">
-        <label>Private recovery receipt (256 KiB maximum)<input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
+        <label>Private recovery receipt (24 MiB for candidate landings; 256 KiB for queue management and fast-forward)<input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
         <button id="receipt-import-submit" type="submit">Restore without sending</button>
       </form>
     </section>
