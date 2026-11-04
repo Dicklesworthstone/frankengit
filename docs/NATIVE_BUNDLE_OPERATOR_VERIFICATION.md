@@ -148,8 +148,11 @@ full/release qualification. The receipt binds the selected native digest; a
 standalone run does not establish a new Rust build.
 
 For each listed entrypoint, the workspace receipt derives its counts from actual
-recorded CLI calls. Each row carries the client-file hash, selected native digest and observed
-success/refusal counts. The suite rejects a listed path without both outcomes.
+recorded CLI calls. Each row carries the client-file hash, selected native digest
+and success/expected-nonzero counts. The suite rejects a listed path without both.
+Expected nonzero exits can include unresolved outcomes; the counter never proves
+canonical refusal or non-commit. Specific refusal semantics are checked by the
+campaign's cases and canonical readback.
 This also exercises the offline package verifier's plain-text wrong-blob refusal;
 it does not turn an inventory of this source group into a whole-project census.
 

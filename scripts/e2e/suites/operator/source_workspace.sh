@@ -68,9 +68,9 @@ rows = summary['entrypoint_runs']
 assert summary['complete'] is True and len(rows) == len(summary['entrypoints']) == 17
 assert len({r['path'] for r in rows}) == 17 and {r['path'] for r in rows} == set(summary['entrypoints'])
 assert all(r['binary_sha256'] == sys.argv[2] and re.fullmatch('[0-9a-f]{64}', r['client_sha256'])
-           and r['success_count'] > 0 and r['refusal_count'] > 0 for r in rows)
+           and r['success_count'] > 0 and r['expected_nonzero_count'] > 0 for r in rows)
 PY
-fge_assert_exit OPERATOR-WORKSPACE-ENTRYPOINT-001 0 "$FGE_LAST_EXIT" 'every listed source entrypoint has actual success/refusal calls and its selected native digest'
+fge_assert_exit OPERATOR-WORKSPACE-ENTRYPOINT-001 0 "$FGE_LAST_EXIT" 'every listed source entrypoint has actual success/expected-nonzero calls and its selected native digest'
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" operator-workspace-summary; fi
 if [ -f "$ORACLE_RUN/work/campaign/commands.jsonl" ]; then
   fge_artifact "$ORACLE_RUN/work/campaign/commands.jsonl" native-operator-and-oracle-command-journal

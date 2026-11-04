@@ -716,10 +716,10 @@ def main() -> None:
         for path in summary["entrypoints"]:
             calls = [r for r in commands if r.get("kind") == "operator" and r["command"][1] == str(ROOT / path)]
             successes = sum(r["exit"] == 0 for r in calls)
-            refusals = sum(r["exit"] != 0 for r in calls)
-            require(successes > 0 and refusals > 0, "listed source entrypoint lacks an actual success/refusal pair: " + path)
+            nonzero = sum(r["exit"] != 0 for r in calls)
+            require(successes > 0 and nonzero > 0, "listed source entrypoint lacks actual success/expected-nonzero calls: " + path)
             summary["entrypoint_runs"].append({"path": path, "binary_sha256": summary["binary_sha256"],
-                "client_sha256": file_sha256(ROOT / path), "success_count": successes, "refusal_count": refusals})
+                "client_sha256": file_sha256(ROOT / path), "success_count": successes, "expected_nonzero_count": nonzero})
         summary["complete"] = True
     except BaseException as error:
         summary["failure"] = f"{type(error).__name__}: {error}"
