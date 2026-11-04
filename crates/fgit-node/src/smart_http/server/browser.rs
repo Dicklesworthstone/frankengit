@@ -12,6 +12,7 @@ mod branches;
 mod export_verify;
 mod history;
 mod initial;
+mod milestones;
 mod rebase;
 mod replay;
 mod search;
@@ -80,7 +81,9 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str, Asse
             ISSUES_VIEW,
             AssetScope::Issues,
         )),
-        _ => None,
+        _ => {
+            milestones::asset(route, target).map(|(media, body)| (media, body, AssetScope::Issues))
+        }
     }
 }
 

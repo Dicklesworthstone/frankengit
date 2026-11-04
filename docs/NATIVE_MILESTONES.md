@@ -161,6 +161,53 @@ An issue-only subscription does not silently gain milestone lifecycle events.
 The existing scoped `issues-pulls-v1` event API retains its declared families;
 milestone history is available through the milestone read surface.
 
+## Browser planning
+
+With `--allow-issues` enabled, open `<repository-route>/ui/milestones/` from
+the source browser or issue page. The page and its complete module graph use
+the existing issue service switch. Source or pull-request enablement alone
+does not enable milestone assets, and loading the static page grants no access
+to repository data. Connect an explicitly scoped issue token to read or change
+milestones; outcome recovery retains its separate `outcomes-read` requirement.
+
+The milestone list shows each selected milestone's state, due date and open/
+closed issue counts. Opening a milestone shows its current summary at the
+selected snapshot and exact paged lifecycle actions. List and history
+continuations retain their original snapshot and applied page size. Reloading
+explicitly selects current state. Counts are canonical snapshot projections;
+the browser does not maintain or increment a second set of counters.
+
+Create a milestone with an explicit positive number and expected version zero.
+Editing, closing and reopening use the exact displayed positive predecessor.
+An edit preserves fields that were not selected for replacement; clearing a
+description or due date is explicit. Dates retain native UTC Unix-second
+semantics. Closing preserves issue membership. Titles and canonical bodies
+remain data; any provided Markdown presentation uses the existing bounded safe
+renderer without executing repository markup.
+
+Every mutation is prepared before sending. Review the exact request and save
+its token-free recovery receipt before sending it. A lost response retains
+the original bytes, expected version and idempotency key for an explicit retry
+or outcome lookup. Restoring a receipt prepares the same unresolved request
+without sending it. Cancellation, disconnect and absent outcome evidence never
+prove non-commit. Authentication stays in page memory; no credential enters a
+URL, download, cookie or persistent browser storage.
+
+The issue page at `<repository-route>/ui/issues/` shows current milestone
+membership and can filter issues by a milestone number or by no membership.
+Attaching or moving an issue selects an open milestone and its exact version
+along with the issue's predecessor. Clearing membership requires the exact
+issue predecessor. Search continuation retains the original milestone filter
+and snapshot after form edits. The server rechecks every membership transition
+at publication, including whether the chosen milestone was changed or closed
+after selection.
+
+The browser supports exact JavaScript safe integers and refuses larger native
+identifiers or versions before rounding them. Existing response, form, text,
+pagination and lifecycle bounds remain in force. The static gateway serves
+only exact bounded GET routes with the existing CSP and `no-store` policy;
+native mutations continue through the authenticated APIs.
+
 ## Compatibility and verification scope
 
 The [normative byte and publication contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2024-native-milestones-and-issue-membership)
@@ -178,8 +225,8 @@ uses an explicit source/destination map, issue capture v3 and a versioned phased
 migration plan. It creates all mapped milestones, imports current issue
 membership, and then closes source-closed milestones. Original source actors and
 versions remain attribution; the destination admits new ordinary commands.
-Dedicated browser milestone controls and standalone discussions remain separate
-product work. [Native issue notifications](NATIVE_NOTIFICATIONS.md) now provide
+Browser milestone controls use those same native lifecycle and membership
+commands. [Native issue notifications](NATIVE_NOTIFICATIONS.md) now provide
 principal-owned preferences and a selected-source issue inbox; email delivery
 and PR notifications remain outside that profile.
 
@@ -191,3 +238,11 @@ milestone refusals, locked/closed issue maintenance, pagination, malformed body
 files and stable-key recovery after source files disappear. Core and adapter
 tests cover canonical encodings, independent admission and grants. Checked-in
 coverage is not an executed result; use revision-bound verification outcomes.
+
+Browser client/controller tests exercise snapshot pagination, exact prepared
+requests and recovery, issue membership selection, stale asynchronous results,
+and safe rendering with HTTP/DOM doubles. The Rust milestone asset tests invoke
+the native static handler for the complete page/module closure, independent
+profile switches, response types and security headers, exact route boundaries,
+framing and response size. They do not substitute for a real listener/browser
+deployment run; their checked-in source is not a claim that they executed.
