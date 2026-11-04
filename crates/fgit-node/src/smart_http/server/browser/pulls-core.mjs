@@ -249,7 +249,7 @@ function requirePublicationEnvelope(path, method, body, key, read) {
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
     /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(route) ||
     (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments(?:\/append)?$/.test(route)) ||
-    /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
+    /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename|transaction)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
       typeof key !== 'string' || !key || (recovery ? body !== undefined : body === undefined))) {
@@ -408,7 +408,7 @@ export class Transport {
       : this.#search
       ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|commit|tree|blob)$/.test(path)
       : this.#branches
-      ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
+      ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename|transaction))|outcomes)$/.test(path)
       : this.#initial
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source

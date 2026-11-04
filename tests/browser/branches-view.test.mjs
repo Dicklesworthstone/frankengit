@@ -9,7 +9,7 @@ const html = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/
 const token = 'a'.repeat(64), href = 'https://example.invalid/repo.git/ui/branches/';
 const row = (name, b = 'a') => ({ ref: name, ref_hex: hex(utf8.encode(name)), object_id: `sha1:${b.repeat(40)}` });
 const scope = { schema_version: 1, tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32), object_format: 'sha1' };
-const page = () => ({ ...scope, type: 'source_refs', namespace: 'branches', source_head: 'head-id', snapshot_token: `alg:1:${'a'.repeat(64)}`,
+const page = () => ({ ...scope, type: 'source_refs', namespace: 'branches', cursor_encoding: 'hex', source_head: 'head-id', snapshot_token: `alg:1:${'a'.repeat(64)}`,
   after: null, limit: 50, next_after: null, read_only: true, transaction_created: false, published: false, direct_refs_only: true,
   refs: [row('refs/heads/main'), row('refs/heads/topic', 'b')] });
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
@@ -73,17 +73,17 @@ test('unknown send retains exact original key and requires confirmation again to
 });
 test('next page retains applied namespace and cursor even when controls change', async () => {
   const s = fixture(); s.el('token').value = token; await s.el('connect').fire(); s.el('page-size').value = '1';
-  s.responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: 'refs/heads/main' })); await s.el('load').fire();
+  s.responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: hex(utf8.encode('refs/heads/main')) })); await s.el('load').fire();
   s.el('namespace').value = 'tags'; s.el('page-size').value = '100';
-  s.responses.push(json({ ...page(), limit: 1, after: 'refs/heads/main', refs: [row('refs/heads/topic')] })); await s.el('more').fire();
+  s.responses.push(json({ ...page(), limit: 1, after: hex(utf8.encode('refs/heads/main')), refs: [row('refs/heads/topic')] })); await s.el('more').fire();
   const body = new URLSearchParams(s.calls.at(-1).body); assert.equal(body.get('namespace'), 'branches'); assert.equal(body.get('limit'), '1'); assert.ok(body.get('expected_head'));
   assert.match(s.el('page-state').textContent, /2 retained/); assert.equal(s.el('more').disabled, true);
 });
 test('failed pagination keeps old snapshot without silently falling back to current state', async () => {
   const s = await ready(); s.el('page-size').value = '1';
-  s.responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: 'refs/heads/main' })); await s.el('load').fire();
+  s.responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: hex(utf8.encode('refs/heads/main')) })); await s.el('load').fire();
   s.responses.push(json({ code: 'snapshot_moved' }, 409)); await s.el('more').fire();
-  assert.equal(s.client.page.next_after, 'refs/heads/main'); assert.match(s.el('status').textContent, /snapshot changed/); assert.equal(s.calls.length, 3);
+  assert.equal(s.client.page.next_after, hex(utf8.encode('refs/heads/main'))); assert.match(s.el('status').textContent, /snapshot changed/); assert.equal(s.calls.length, 3);
 });
 test('hostile ref text, directional controls and byte-only names are inert and visibly byte-bound', async () => {
   const s = await ready();
@@ -139,4 +139,98 @@ test('script and shell do not inject executable repository content or persist to
   assert.ok(!html.includes('<script>'));
   const script = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/branches-view.mjs', import.meta.url), 'utf8');
   for (const forbidden of ['innerHTML', 'localStorage', 'sessionStorage', 'document.write']) assert.ok(!script.includes(forbidden));
+});
+
+async function stage(s, operation, selected = 'refs/heads/topic', target = 'refs/heads/main', destination = 'refs/heads/new') {
+  s.el('operation').value = operation; s.el('selected').value = selected; s.el('target').value = target; s.el('destination').value = destination;
+  await s.el('operation').fire('change'); await s.el('batch-add').fire();
+}
+test('UI stages a mixed batch, reviews every exact effect and sends one confirmed atomic request', async () => {
+  const s = await ready(); await stage(s, 'create'); await stage(s, 'update'); await stage(s, 'delete', 'refs/heads/main');
+  assert.equal(s.calls.length, 1); assert.equal(s.client.stagedChanges.length, 3); assert.equal(s.client.pending, null);
+  assert.match(s.el('batch-state').textContent, /3 of 32/); assert.equal(s.el('batch-changes').children.length, 3);
+  assert.equal(s.el('prepare').disabled, true); assert.equal(s.el('batch-prepare').disabled, false);
+  assert.ok(s.el('batch-changes').textContent.includes('"expected_commit": null')); assert.ok(s.el('batch-changes').textContent.includes('"new_commit": null'));
+  const frozen = structuredClone(s.client.stagedChanges); s.el('selected').value = 'refs/heads/topic'; s.el('destination').value = 'refs/heads/changed-after-staging';
+  await s.el('batch-prepare').fire(); const pending = s.client.pending;
+  assert.equal(pending.operation, 'transaction'); assert.deepEqual(pending.fields.changes, frozen); assert.deepEqual(s.client.stagedChanges, []);
+  assert.equal(s.el('batch-add').disabled, true); assert.equal(s.el('batch-clear').disabled, true); assert.equal(s.el('batch-prepare').disabled, true);
+  assert.equal(s.el('confirm-send').checked, false); await s.el('send').fire(); assert.equal(s.calls.length, 1);
+  s.responses.push(json(publication(pending))); s.el('confirm-send').checked = true; await s.el('send').fire();
+  assert.equal(s.calls.length, 2); assert.match(s.calls[1].url, /\/source\/branches\/transaction$/);
+  assert.equal(new URLSearchParams(s.calls[1].body).getAll('create').length, 1); assert.equal(s.client.pending, null);
+  assert.match(s.el('status').textContent, /Canonical committed/); assert.equal(s.el('refs').textContent, '');
+});
+
+test('UI duplicate staging is refused without losing prior effects and supports individual removal', async () => {
+  const s = await ready(); await stage(s, 'create'); await stage(s, 'delete'); await stage(s, 'update');
+  assert.match(s.el('status').textContent, /only once/); assert.equal(s.client.stagedChanges.length, 2);
+  const first = s.el('batch-changes').children[0]; await first.children.at(-1).fire();
+  assert.equal(s.client.stagedChanges.length, 1); assert.equal(s.client.stagedChanges[0].operation, 'delete');
+  assert.match(s.el('batch-state').textContent, /1 of 32/); assert.equal(s.calls.length, 1);
+  await s.el('batch-clear').fire(); assert.deepEqual(s.client.stagedChanges, []); assert.equal(s.el('batch-prepare').disabled, true);
+  assert.equal(s.el('prepare').disabled, false); assert.match(s.el('status').textContent, /No request was sent/);
+});
+
+test('rename remains a single native action and cannot enter a staged batch', async () => {
+  const s = await ready(); s.el('operation').value = 'rename'; await s.el('operation').fire('change');
+  assert.equal(s.el('batch-add').disabled, true); assert.equal(s.el('prepare').disabled, false);
+  await s.el('batch-add').fire(); assert.deepEqual(s.client.stagedChanges, []);
+  await s.el('prepare').fire(); assert.equal(s.client.pending.operation, 'rename'); assert.equal(s.calls.length, 1);
+});
+
+test('byte-only branch selections use exact hex in batches and cannot enter text-only actions', async () => {
+  const s = await ready(), raw = { ref: null, ref_hex: hex(utf8.encode('refs/heads/x')) + 'ff', object_id: `sha1:${'c'.repeat(40)}` };
+  s.responses.push(json({ ...page(), refs: [...page().refs, raw] })); await s.el('load').fire();
+  s.el('selected').value = `hex:${raw.ref_hex}`; s.el('operation').value = 'delete'; await s.el('operation').fire('change');
+  assert.match(s.el('selection').textContent, /byte-only name/); assert.ok(s.el('selection').textContent.includes(raw.ref_hex));
+  assert.equal(s.el('prepare').disabled, true); assert.equal(s.el('batch-add').disabled, false);
+  await s.el('batch-add').fire(); assert.equal(s.client.stagedChanges[0].ref_hex, raw.ref_hex);
+  assert.match(s.el('batch-changes').textContent, /"ref": null/); await s.el('batch-prepare').fire();
+  s.responses.push(json(publication(s.client.pending))); s.el('confirm-send').checked = true; await s.el('send').fire();
+  assert.equal(new URLSearchParams(s.calls.at(-1).body).get('delete'), `${raw.ref_hex}:${'c'.repeat(40)}`);
+});
+
+test('staged hostile names remain inert and directional controls stay escaped in both previews', async () => {
+  const s = await ready(); await stage(s, 'create', 'refs/heads/main', 'refs/heads/main', 'refs/heads/<img>\u202ex');
+  assert.equal(s.el('batch-changes').children[0].children[0].tagName, 'PRE');
+  assert.ok(s.el('batch-changes').textContent.includes('<img>')); assert.ok(s.el('batch-changes').textContent.includes('\\u202e'));
+  await s.el('batch-prepare').fire(); assert.ok(s.el('pending').textContent.includes('\\u202e'));
+  assert.ok(!s.el('pending').textContent.includes('\u202e')); assert.equal(s.calls.length, 1);
+});
+
+for (const action of ['load', 'cancel', 'disconnect']) test(`UI ${action} clears unprepared batch without fabricating a request`, async () => {
+  const s = await ready(); await stage(s, 'delete'); s.el('confirm-send').checked = true;
+  await s.el(action).fire(); assert.deepEqual(s.client.stagedChanges, []); assert.equal(s.client.pending, null);
+  assert.equal(s.el('batch-changes').textContent, ''); assert.equal(s.el('batch-prepare').disabled, true); assert.equal(s.el('confirm-send').checked, false);
+  assert.equal(s.calls.length, action === 'load' ? 2 : 1);
+});
+
+test('next pinned page preserves a staged source tip and never follows edited pagination controls', async () => {
+  const s = fixture(); s.el('token').value = token; await s.el('connect').fire(); s.el('page-size').value = '1';
+  s.responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: hex(utf8.encode('refs/heads/main')) })); await s.el('load').fire();
+  await stage(s, 'create', 'refs/heads/main'); const staged = s.client.stagedChanges;
+  s.el('page-size').value = '100'; s.el('namespace').value = 'tags';
+  s.responses.push(json({ ...page(), limit: 1, after: hex(utf8.encode('refs/heads/main')), refs: [row('refs/heads/topic', 'b')] })); await s.el('more').fire();
+  assert.deepEqual(s.client.stagedChanges, staged); assert.equal(new URLSearchParams(s.calls[1].body).get('limit'), '1');
+  assert.equal(new URLSearchParams(s.calls[1].body).get('namespace'), 'branches'); assert.match(s.el('batch-state').textContent, /1 of 32/);
+});
+
+test('batch recovery download restores every original effect without reads or automatic send', async () => {
+  const a = await ready(); await stage(a, 'create'); await stage(a, 'delete'); await a.el('batch-prepare').fire(); await a.el('save').fire();
+  assert.match(a.el('status').textContent, /offered for download/); assert.equal(a.el('discard').disabled, true);
+  const s = fixture(); s.el('token').value = token; await s.el('connect').fire(); s.el('receipt-file').files = [new Blob([a.saved()])];
+  await s.el('restore').fire(); assert.equal(s.calls.length, 0); assert.equal(s.client.pending.key, a.client.pending.key);
+  assert.deepEqual(s.client.pending.fields, a.client.pending.fields); assert.equal(s.el('confirm-send').checked, false);
+  assert.equal(s.el('batch-add').disabled, true); assert.equal(s.el('discard').disabled, true); assert.match(s.el('pending').textContent, /transaction/);
+});
+
+test('unknown atomic send keeps the complete batch unchanged and requires a new confirmation to retry', async () => {
+  const s = await ready(); await stage(s, 'create'); await stage(s, 'delete'); await s.el('batch-prepare').fire(); const pending = s.client.pending;
+  s.responses.push(new Error('lost reply')); s.el('confirm-send').checked = true; await s.el('send').fire();
+  assert.equal(s.client.pending.key, pending.key); assert.equal(s.el('confirm-send').checked, false); assert.match(s.el('status').textContent, /Outcome unknown/);
+  await s.el('send').fire(); assert.equal(s.calls.length, 2);
+  s.responses.push(json(publication(pending))); s.el('confirm-send').checked = true; await s.el('send').fire();
+  assert.equal(s.calls[1].body, s.calls[2].body); assert.equal(s.calls[1].headers['Idempotency-Key'], s.calls[2].headers['Idempotency-Key']);
+  assert.equal(s.client.pending, null); assert.deepEqual(s.client.stagedChanges, []);
 });

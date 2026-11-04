@@ -22,7 +22,7 @@ const publications = [
   ...['approve', 'request-changes', 'withdraw'].map(action => ['pulls', `pulls/1/reviews/${action}`]),
   ['source', 'source/apply'], ['initial', 'source/initial/apply'],
   ['replay', 'source/apply'], ['rebase', 'source/rebase/apply'],
-  ...['create', 'update', 'delete', 'rename'].map(action => ['branches', `source/branches/${action}`]),
+  ...['create', 'update', 'delete', 'rename', 'transaction'].map(action => ['branches', `source/branches/${action}`]),
   ...['import', 'fetch'].map(action => ['transfers', `source/bundle/${action}`]),
   ...['lightweight', 'annotated', 'delete'].map(action => ['tags', `source/tags/${action}`]),
 ];
@@ -179,4 +179,22 @@ test('a valid publication envelope does not expand the page route allowlist', as
   await assert.rejects(transport.request('outcomes', { method: 'POST', key: 'key', read: false }), Error);
   assert.equal(calls, 0);
   transport.disconnect();
+});
+
+test('atomic branch transactions remain isolated to the branch profile and survive view cancellation', async () => {
+  const held = heldFetch(), transport = await client('branches', held.fetch);
+  const write = transport.request('source/branches/transaction', envelope());
+  transport.cancelReads();
+  assert.equal(held.sent.length, 1);
+  assert.equal(held.sent[0].options.signal.aborted, false);
+  held.sent[0].finish();
+  await write;
+  transport.disconnect();
+  for (const profile of ['pulls', 'source', 'initial', 'transfers', 'tags', 'replay', 'rebase', 'search']) {
+    let calls = 0;
+    const other = await client(profile, async () => { calls++; return response(); });
+    await assert.rejects(other.request('source/branches/transaction', envelope()), Error);
+    assert.equal(calls, 0, `${profile} cannot transmit a branch transaction`);
+    other.disconnect();
+  }
 });

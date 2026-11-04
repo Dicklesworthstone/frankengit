@@ -10,13 +10,16 @@ object store, dependency, listener, runtime, or alternative branch policy.
 Connect with an operator-provisioned repository token and load an explicit
 SHA-1 or SHA-256 reference snapshot. Branches, tags or all direct references
 can be listed. Every continuation retains the original namespace, page size,
-last-ref cursor, repository incarnation and authority-head comparison. A
+last-ref cursor, repository incarnation and authority-head comparison. Branch
+list requests explicitly select native hex cursors, so a nonfinal page ending
+at a byte-only branch can continue without inventing a text name. A
 snapshot conflict refuses rather than silently switching to a current page.
 Rows are compared as exact bytes. Valid UTF-8 names and non-UTF-8 names are
 both displayed with their hex identity; directional display controls are
-escaped. Byte-only names cannot be submitted through the native text-form API.
-The native list encoder also refuses an unrepresentable byte-only continuation
-rather than reporting an invented end of listing.
+escaped. Single-operation text commands require UTF-8 names; the atomic batch
+path keeps raw `ref_hex` identities and accepts listed byte-only branches.
+The default UTF-8 cursor validator remains available for callers selecting that
+legacy profile; a response cannot silently switch cursor encodings.
 
 Select a listed branch and explicitly prepare one operation:
 
@@ -35,12 +38,44 @@ exact ref effects and original key, then requires a separate confirmation to
 send. Read permission does not imply receive permission. The operator must
 also enable Git writes. Existing source, issue, PR, initial-history and history
 profiles keep their own API ceilings. The branch transport permits only
-`source/refs`, the four named `source/branches/*` operations, and `outcomes`.
+`source/refs`, the four named single-operation `source/branches/*` routes,
+`source/branches/transaction`, and `outcomes`.
+
+## Coordinated branch changes
+
+The same page stages a bounded mixed batch over the existing native
+[atomic branch transaction API](HTTP_BRANCH_TRANSACTIONS.md). Select a create,
+update or delete, then choose **Add exact change to atomic batch**. Each addition
+immediately captures its target's expected old OID and its new OID, where
+applicable, from the pinned reference listing. Every target is an exact raw
+reference-byte identity. Each branch can appear once; duplicate targets,
+unchanged updates, unlisted sources, tags and unsupported operations refuse
+locally. New destination names use validated UTF-8 text. A byte-only listed
+branch can supply a new tip or be updated or deleted through the batch.
+
+Up to 32 changes can be staged. Individual changes can be removed, or the
+unprepared batch cleared, without submitting a request. Loading a continuation
+at the same snapshot preserves every captured tip. Loading a fresh snapshot,
+cancelling the view or disconnecting clears unprepared staging. Preparation
+then freezes all changes as one pending request; controls cannot substitute
+later tips. Existing single-operation preparation requires an empty staging
+list, so it cannot silently discard staged work.
+
+The full effects preview includes every expected absence, old OID, new OID,
+deletion, raw reference identity and the original key. A separate confirmation
+sends exactly one native request. The form contains one `object_format` and
+ordered repeated `create`, `update` and `delete` fields, with raw hex names and
+canonical bare OIDs. The gateway makes one native atomic admission: the entire
+batch commits or refuses together. No series of independent publications or
+client-side rollback is used. This browser profile intentionally excludes a
+rename batch item; the existing single atomic rename remains available.
 
 A result is accepted only as a complete native `branch_publication`: correct
 scope, operation, principal, transaction, terminal outcome, HTTP status and all
 ordered expected/new ref effects. A partial, reordered, forced, non-atomic or
-inconsistent rename response remains unresolved. No result changes forge state,
+inconsistent rename or batch response remains unresolved. In particular, every
+ordered batch effect must match, including exact byte-only names and both OIDs;
+a successful subset cannot settle the whole request. No result changes forge state,
 retargets PRs, or implicitly changes the default branch. Protected/default
 branch constraints remain native admission decisions.
 
@@ -69,13 +104,28 @@ Exported/restored or sent requests cannot be discarded as unsent local work.
 The page warns before leaving with outstanding responsibility. Disconnect
 clears tokens and views while preserving the pending request for recovery.
 
+Single-operation receipts retain the existing `frankengit-branch-retry-v1`
+schema and key commitment without changes. Atomic batches use the distinct
+`frankengit-branch-transaction-retry-v1` schema with a closed ordered array of
+raw-hex changes. Relabelling either receipt type as the other is rejected.
+The key binds the operation and complete original serialized body, including
+batch order. An imported batch restores all original effects without listing
+refs or sending anything. Preparation checks that the whole batch, including
+space for the largest JSON-escaped transaction/principal recovery observations, will fit a
+downloadable receipt. An oversized batch stays unprepared so changes can be
+removed. Download status asks the user to verify that the offered file was
+saved; it does not claim durable storage.
+
 ## Bounds and exclusions
 
 Native list pages are limited to 100 rows and 1 MiB. The browser retains at most
 2,048 rows from one namespace snapshot, with explicit refusal before exhausting
-that session budget. Native names are at most 4,096 bytes. Command encoding
-uses the existing 256 KiB ceiling, terminal receipts at most 64 KiB, outcome
-responses 32 KiB, and downloaded/restored retry records 64 KiB. File size is
+that session budget. Transaction names enforce the native 1,024-byte reference
+ceiling. Command encoding uses the existing 256 KiB ceiling. Single-operation
+decision responses are at most 64 KiB and complete batch decisions at most
+512 KiB; outcome responses are 32 KiB and downloaded/restored retry records
+64 KiB. A batch can hit the receipt byte limit before its 32-operation count
+limit. File size is
 checked before receipt I/O. Delayed reads cannot restore data after disconnect.
 
 No force push, arbitrary-OID source selection, symbolic-ref/default-branch
@@ -87,19 +137,17 @@ claim independent verification of the owning admission work.
 ## Validation boundary
 
 ```
-node --test tests/browser/branches.test.mjs tests/browser/branches-view.test.mjs
+node --test tests/browser/branches.test.mjs tests/browser/branches-transaction.test.mjs tests/browser/branches-view.test.mjs
 node --test tests/browser/*.test.mjs
 ```
 
-The implementation run passed 94 new branch tests: 77 client/adversarial cases
-and 17 controller/UI cases. The restored selected-file browser fixture passed
-326 tests with no failures or skips. Both native hash formats, pinned
-pagination, complete atomic rename receipts, hostile ref bytes, closed routes,
-frozen retries, all outcome states, tampered receipts and cancellation are
-covered. Module syntax and changed-file whitespace checks passed.
+The focused suites cover both native hash formats, pinned pagination, complete
+atomic rename and mixed-batch receipts, byte-only branches, hostile display
+text, closed routes, exact frozen retries, all outcome states, tampered receipts,
+historical v1 receipt compatibility, preparation and in-flight cancellation,
+operation/byte limits, and controller confirmation and recovery flows.
 
-HTTP, DOM and File fixtures are test doubles. This was not a complete current
-checkout, a real browser session or a live native node. Three Rust static-route
-regression tests are supplied but were not executed: Rust/Cargo was unavailable.
-Rust compilation, native end-to-end interoperability, full-workspace, Clippy,
-independent batch verification and release gates remain unverified.
+HTTP, DOM and File fixtures are test doubles. Passing them establishes the
+browser client's contract under those fixtures, not a live native-node or real
+browser end-to-end result. Native admission remains the existing API's
+responsibility; this browser addition changes no backend policy or route.
