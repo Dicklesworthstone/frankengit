@@ -242,3 +242,15 @@ The file-backed command cases include a genuine fixture pack containing a
 profiles, refusal after prepublication approval expiry, and completion after
 postpublication expiry. The native child remains explicitly fake in those
 operator tests; optional `FG_NATIVE_BIN` tests exercise a supplied real build.
+
+The separate existing `scripts/e2e/suites/operator/source_workspace.sh` campaign
+invokes `recover_git_bundle.mjs` with an explicit native backend in both hash
+domains. Its native-exported bundle must match independently framed Git objects.
+A wrong reference pin refuses before creating the destination. Permitted
+file-backed recovery completes the existing HEAD-last owner; occupied-target
+refusal and buffered resume preserve the exact plan and published HEAD inode.
+Pinned sandboxed Git checks the recovered repository, and a separate Rust import
+and reads verify the original refs, objects, file bytes and modes. This selected
+unsigned source path does not establish signed approval, forge/authority restore,
+power-loss durability, complete entrypoint coverage or independent acceptance.
+Standalone runs remain bounded to the recorded native image.

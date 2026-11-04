@@ -134,6 +134,17 @@ parsing, native CAS, power-loss durability or native recovery correctness.
 The actual `fg` test is separate and explicitly skipped without `FG_NATIVE_BIN`.
 No full-workspace, production-readiness, full-capsule or bead-closure claim follows.
 
+The existing `scripts/e2e/suites/operator/source_workspace.sh` campaign also
+invokes the actual import CLI on native-exported, independently framed Git
+source in both hash domains. It checks a wrong reference pin before custody or
+publication, canonical reads after import, original-key `status` and `retry`
+after the original input and retained snapshot disappear, a wrong intent pin,
+and a fresh existing-ref refusal. The original intent bytes and canonical
+source identities remain fixed. This is unsigned, caller-pinned source import;
+it does not certify signed approval, fault recovery, every entrypoint or
+independent verification. Standalone receipts bind the selected native image;
+they do not infer its source revision from a filename.
+
 ## Signed source approval and explicit retry
 
 Add all four options to the initial `import` command:
