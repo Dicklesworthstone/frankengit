@@ -21,6 +21,16 @@ export function fixture(algorithm = 'sha1', path = '66696c65') {
     read_only: true, transaction_created: false, published: false };
   const calls = [], config = { mutate: null, respond: null };
   function log(form) {
+    if (form.get('first_parent') === 'true') {
+      const after = Number(form.get('cursor')?.split('/').at(-1) ?? 0), limit = Number(form.get('limit') ?? 20);
+      const end = Math.min(after + limit, records.length), visited = records.slice(0, end), root = end === records.length;
+      return { ...common, type: 'source_first_parent_log', profile: 'first-parent-prefix-v1', ordering: 'stored-first-parent-v1',
+        author_identity_verified: false, page_complete: true, after, limit, root_reached: root, visited_commits: end,
+        visited_parent_edges: visited.reduce((count, row) => count + row.parents.length, 0),
+        metadata_bytes: visited.reduce((count, row) => count + row.body_hex.length / 2, 0),
+        next_cursor: root ? null : `fgfp1/${head}/${hex(bytes(ref))}/${algorithm}/${tip.object_id}/${end}`,
+        commits: records.slice(after, end) };
+    }
     const selected = form.has('path_hex'), queryPath = form.get('path_hex'), all = selected && queryPath !== path ? [] : records;
     const after = Number(form.get('after') ?? 0), limit = Number(form.get('limit') ?? 20), end = Math.min(after + limit, all.length);
     return { ...common, type: selected ? 'source_path_log' : 'source_log', author_identity_verified: false,

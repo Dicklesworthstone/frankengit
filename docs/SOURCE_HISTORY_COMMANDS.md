@@ -76,9 +76,14 @@ bounded recent-history access, not constant-cost arbitrary-depth pagination.
 accounting describes visited native bodies, not total physical I/O.
 
 `--first-parent` cannot be combined with a path filter or `--after`; use its
-returned cursor. Default log, path history, blame, HTTP and MCP behavior retain
-their existing profiles. Both native hash formats and raw reference bytes are
-supported.
+returned cursor. Default log, path history and blame retain their existing
+profiles. Both native hash formats and raw reference bytes are supported.
+The same explicit profile is available through
+[HTTP `source/log`](SOURCE_HISTORY_HTTP.md),
+[MCP `frankengit_source_log`](MCP_SOURCE_HISTORY.md), and the
+[browser history view](BROWSER_SOURCE_HISTORY.md). These adapters share the
+canonical `fgfp1` cursor codec with the CLI. They retain their own response and
+metadata ceilings; a cursor never enlarges a receiving interface's budget.
 
 ### History of one exact path
 

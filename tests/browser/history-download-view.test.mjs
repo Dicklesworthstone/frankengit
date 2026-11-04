@@ -22,7 +22,7 @@ function button(root, prefix) {
 }
 function view(f, respond = null) {
   const h = harness(f, respond), nodes = Object.fromEntries([...html.matchAll(/id="history-([^"]+)"/g)].map(m => [m[1], new Element()]));
-  nodes.ref.value = f.afterRef; nodes.format.value = f.algorithm;
+  nodes.ref.value = f.afterRef; nodes.format.value = f.algorithm; nodes.mode.value = 'all';
   const files = [], events = new Element(), doc = { createElement: tag => new Element(tag), body: new Element('body'), getElementById: id => nodes[id.slice(8)] };
   const app = mountHistory(doc, { client: h.client, events, downloadFile: (name, bytes) => files.push({ name, bytes }) });
   const open = async () => { nodes.token.value = token; await nodes.connect.fire('submit'); };

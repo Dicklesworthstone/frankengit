@@ -22,7 +22,7 @@ function components(path) {
 export function mountHistory(doc, options = {}) {
   const client = options.client ?? new HistoryClient({ href: options.href ?? globalThis.location.href, fetchImpl: options.fetchImpl, cryptoImpl: options.cryptoImpl });
   const get = id => { const node = doc.getElementById(id); if (!node) throw new Error(`Missing history control ${id}`); return node; };
-  const ids = ['connect', 'token', 'ref', 'format', 'open', 'disconnect', 'snapshot', 'query', 'path', 'path-kind', 'limit',
+  const ids = ['connect', 'token', 'ref', 'format', 'mode', 'open', 'disconnect', 'snapshot', 'query', 'path', 'path-kind', 'limit',
     'log', 'first', 'end', 'blame', 'status', 'cancel', 'download', 'breadcrumbs', 'content', 'paging',
     'compare', 'before-ref', 'before-tip', 'compare-mode', 'compare-paths', 'compare-path-kind', 'compare-run'];
   const ui = Object.fromEntries(ids.map(id => [id, get(`history-${id}`)]));
@@ -65,6 +65,17 @@ export function mountHistory(doc, options = {}) {
     return section;
   }
   function renderLog(result) {
+    if (result.first_parent) {
+      ui.content.append(node('h2', 'Recent first-parent history'),
+        node('p', `Showing ${result.after}–${result.after + result.commits.length} on the stored first-parent chain (zero-based, end exclusive). Native commit IDs checked; author identities are not authenticated.`),
+        node('p', `${result.visitedCommits} commits and ${result.visitedParentEdges} parent headers visited; ${result.metadataBytes} native metadata bytes. Side-parent history is omitted. ${result.rootReached ? 'The first-parent root was reached.' : 'Older ancestry remains unread; no total history count is claimed.'}`));
+      for (const commit of result.commits) ui.content.append(commitView(commit));
+      if (!result.commits.length) ui.content.append(node('p', 'The pinned first-parent chain ends at this offset.'));
+      if (result.after > 0) ui.paging.append(button('Restart first-parent pages', () => log({ first_parent: true, limit: result.limit })));
+      if (result.nextCursor !== null) ui.paging.append(button('Next first-parent page', () => log({ first_parent: true, limit: result.limit, cursor: result.nextCursor })));
+      ui.status.textContent = 'First-parent page checked. Continuations retain the exact snapshot, reference and tip; prefix and page share the traversal budget.';
+      return;
+    }
     ui.content.append(node('h2', result.path_hex === null ? 'Commit ancestry' : `Exact path history: ${pathLabel(result.path_hex)}`),
       node('p', `${result.total} ${result.path_hex === null ? 'reachable' : 'matching-path'} commits; showing ${result.after}–${result.after + result.commits.length} (zero-based, end exclusive). Native commit IDs checked; author identities are not authenticated.`));
     for (const commit of result.commits) ui.content.append(commitView(commit));
@@ -226,7 +237,12 @@ export function mountHistory(doc, options = {}) {
   }), renderComparison); };
   const log = options => run(() => client.log(options), renderLog);
   const historical = (kind, commit, path = null, options = {}) => run(() => client.historical(kind, commit, path, options), renderSource);
-  const open = () => { compared = null; return run(() => client.open(ui.ref.value, ui.format.value), renderLog); };
+  function modeOptions() {
+    if (ui.mode.value === 'first-parent') return { first_parent: true };
+    if (ui.mode.value !== 'all') throw new Error('Choose a history view.');
+    return {};
+  }
+  const open = () => { compared = null; return run(() => client.open(ui.ref.value, ui.format.value, modeOptions()), renderLog); };
   ui.connect.addEventListener('submit', event => {
     event.preventDefault(); const token = ui.token.value; ui.token.value = '';
     try { client.connect(token); return open(); } catch (error) { disconnect(); ui.status.textContent = error.message; }
@@ -235,7 +251,11 @@ export function mountHistory(doc, options = {}) {
   ui.compare.addEventListener('submit', event => { event.preventDefault(); return compare(); });
   ui.disconnect.addEventListener('click', disconnect); ui.cancel.addEventListener('click', cancel);
   ui.query.addEventListener('submit', event => {
-    event.preventDefault(); return run(() => client.log({ path_hex: path(true), limit: decimal(ui.limit.value, 'history page size', 1) }), renderLog);
+    event.preventDefault(); return run(() => {
+      const mode = modeOptions(), selectedPath = path(true);
+      if (mode.first_parent && selectedPath !== null) throw new Error('Clear the path filter or choose all-parent history.');
+      return client.log({ ...mode, ...(mode.first_parent ? {} : { path_hex: selectedPath }), limit: decimal(ui.limit.value, 'history page size', 1) });
+    }, renderLog);
   });
   ui.blame.addEventListener('click', () => run(() => client.blame(path(), { first: decimal(ui.first.value, 'first line'),
     end: ui.end.value === '' ? null : decimal(ui.end.value, 'end line') }), renderBlame));

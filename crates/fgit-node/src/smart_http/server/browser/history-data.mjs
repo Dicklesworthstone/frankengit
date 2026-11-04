@@ -89,6 +89,47 @@ export async function logPage(reply, request, previous, options, crypto, check) 
   if (path_hex === null && after === 0 && commits[0]?.id !== selection.tip) fail('History does not start at its selected tip.');
   check(); return { selection, commits, after, limit, path_hex, total: reply.total_commits, next: reply.next_after, raw: reply };
 }
+// The cursor is a comparison pin, not a new object selector. Bind every field
+// before sending it, and accept only the exact continuation for a checked page.
+export function firstParentCursor(value, selection) {
+  text(value, 4096, 'first-parent cursor', true);
+  const parts = value.split('/');
+  if (parts.length !== 6 || parts[0] !== 'fgfp1' || parts[1] !== selection.head ||
+      parts[2] !== hex(utf8.encode(selection.ref)) || parts[3] !== selection.object_format ||
+      parts[4] !== selection.tip || !/^[1-9][0-9]*$/.test(parts[5])) fail('First-parent cursor changed its snapshot, reference, tip or profile.');
+  return integer(Number(parts[5]), 'first-parent offset', 1, HISTORY_LIMITS.commits);
+}
+export async function firstParentPage(reply, request, previous, query, crypto, check) {
+  const selection = selected(reply, request, previous);
+  const after = query.cursor === null ? 0 : firstParentCursor(query.cursor, selection), { limit } = query;
+  if (reply.type !== 'source_first_parent_log' || reply.profile !== 'first-parent-prefix-v1' ||
+      reply.ordering !== 'stored-first-parent-v1' || reply.author_identity_verified !== false ||
+      reply.page_complete !== true || reply.after !== after || reply.limit !== limit ||
+      typeof reply.root_reached !== 'boolean' || Object.hasOwn(reply, 'total_commits') || Object.hasOwn(reply, 'next_after') ||
+      !Array.isArray(reply.commits) || reply.commits.length > limit ||
+      (!reply.root_reached && reply.commits.length !== limit)) fail('Invalid first-parent history page.');
+  const end = integer(after + reply.commits.length, 'visited first-parent prefix', 1, HISTORY_LIMITS.commits);
+  if (reply.visited_commits !== end) fail('First-parent visited prefix changed.');
+  integer(reply.visited_parent_edges, 'visited parent headers', end - Number(reply.root_reached), HISTORY_LIMITS.edges);
+  integer(reply.metadata_bytes, 'visited metadata bytes', 1, HISTORY_LIMITS.metadata);
+  const next = reply.root_reached ? null : `fgfp1/${selection.head}/${hex(utf8.encode(selection.ref))}/${selection.object_format}/${selection.tip}/${end}`;
+  if (reply.next_cursor !== next) fail('Invalid first-parent continuation.');
+  const seen = new Set(), commits = []; let metadata = 0, edges = 0;
+  for (const row of reply.commits) {
+    check();
+    if (typeof row?.body_hex !== 'string' || (metadata += row.body_hex.length / 2) > reply.metadata_bytes) fail('First-parent metadata accounting mismatch.');
+    const commit = await commitRecord(row, selection.object_format, crypto, check);
+    edges += commit.parents.length;
+    if (edges > reply.visited_parent_edges || seen.has(commit.id) || commit.parents.some(parent => seen.has(parent) || parent === commit.id) ||
+        (commits.length && commits.at(-1).parents[0] !== commit.id)) fail('Invalid stored first-parent chain.');
+    seen.add(commit.id); commits.push(commit);
+  }
+  if ((after === 0 && (commits[0]?.id !== selection.tip || metadata !== reply.metadata_bytes || edges !== reply.visited_parent_edges)) ||
+      (commits.length && (commits.at(-1).parents.length === 0) !== reply.root_reached)) fail('First-parent tip or root boundary changed.');
+  check(); return { selection, first_parent: true, commits, after, limit, rootReached: reply.root_reached,
+    visitedCommits: reply.visited_commits, visitedParentEdges: reply.visited_parent_edges,
+    metadataBytes: reply.metadata_bytes, nextCursor: reply.next_cursor, raw: reply };
+}
 export async function blamePage(reply, selection, query, crypto, check) {
   selected(reply, selection, selection);
   if (reply.type !== 'source_blame' || reply.author_identity_verified !== false || reply.profile !== 'exact-lines-all-parents-v1' ||

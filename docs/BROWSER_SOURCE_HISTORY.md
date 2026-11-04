@@ -1,6 +1,6 @@
 # Native source-history investigation
 
-Related product bridge: `frankengit-asa3` and comprehensive-plan source/forge
+Related product scope: FG-050 Web UI and comprehensive-plan source/forge
 interfaces. This is read-only composition, not a new history authority or a
 completion claim for the broader forge.
 
@@ -19,6 +19,37 @@ Exact path filtering includes changes against any parent and does not claim
 rename following or simplified history. A filtered path can have zero matches;
 an empty full ancestry cannot be fabricated as a successful empty repository.
 Pagination applies the original filter and authority head before disclosure.
+
+### Recent first-parent history
+
+Choose **Recent first-parent chain — large repositories** before connecting or
+explicitly reopening a reference. This uses `source/log` with
+`first_parent=true` immediately; opening does not first require a complete DAG
+read. **All parents** remains the default view. The API client equivalent is
+`client.open(ref, objectFormat, { first_parent: true })`.
+
+The recent view follows only the first parent stored in each commit. Merge
+records still show every original parent, but side-parent histories are not
+included. Each page reports the visited prefix's commit count, parent-header
+count and logical metadata bytes, and whether its root was reached. It makes no
+claim about the total reachable history. The client checks every native commit
+hash, decoded parent order, first-parent link, root boundary and work counter
+before displaying the page.
+
+**Next first-parent page** retains the validated opaque cursor and applied page
+size, even if the form is edited. Its head, raw ref, hash domain, tip and offset
+must match the exact selection before a request is sent. The server independently
+authorizes that current ref and re-walks its prefix. A cursor does not grant
+arbitrary object access or make deep pagination constant cost. Prefix and page
+share the existing 4,096-commit, 16,384-parent-header and 4 MiB metadata budgets;
+older pages can still refuse. **Restart first-parent pages** starts again at the
+same pinned tip; selecting a new head requires an explicit reopen.
+
+Exact-path filtering requires **All parents**. Combining it with first-parent
+mode is refused before networking. Existing blame, historical-file and
+comparison tools keep their own traversal limits and all-parent semantics;
+opening a recent page does not relax those limits. Scoped sponsored-agent
+credentials still have no history grant.
 
 The client recomputes each returned commit's native SHA-1/SHA-256 identity and
 checks its tree/parent summary against the exact body. Arbitrary message and
@@ -44,7 +75,8 @@ are not followed.
 ## Resource and lifecycle contract
 
 Native history ceilings remain 4,096 commits, 16,384 parent headers, 4 MiB
-returned commit metadata, 64 KiB per commit, 20,000 file lines, 1 MiB blame
+logical commit metadata (including the skipped first-parent prefix), 64 KiB
+per commit, 20,000 file lines, 1 MiB blame
 content, and 128 content comparisons. Client responses are streamed under
 8 MiB. Historical file pages are at most 1 MiB and are never presented as an
 unread complete file. Bounds are checked before retaining derived records.
@@ -87,10 +119,14 @@ interpreted as HTML, Markdown, paths on the host, or executable commands.
 Static assets use the existing CSP/no-store/same-origin policy and require the
 source endpoint switch. Existing PR, issue, initial-authoring, and source-write
 gates are unchanged. Three Rust handler tests exercise exact routes, disabled
-profiles, framing, body limits and inert assets; Rust/Cargo was unavailable in
-this implementation environment, so these tests were not executed.
+profiles, framing, body limits and inert assets. The pinned Rust toolchain is
+available, but workspace resource exhaustion stopped native checks before
+source validation; these Rust tests remain unexecuted.
 
 The focused JavaScript suite is
-`node --test tests/browser/history.test.mjs tests/browser/history-view.test.mjs`.
+`node --test --test-concurrency=1 tests/browser/history*.test.mjs` with the
+repository's pinned Node version. It includes direct first-parent opening,
+cursor/profile conflicts, both native hashes, merge-parent order, malformed
+accounting, stale snapshots, cancellation and form-independent continuation.
 It exercises actual client, validator and controller modules with HTTP/DOM
 doubles, not browser-rendering or native-node deployment evidence.

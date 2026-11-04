@@ -15,9 +15,11 @@
       <label>Source-read token<input id="history-token" type="password" autocomplete="off" maxlength="64" spellcheck="false" required></label>
       <label>Full reference<input id="history-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
       <label>Object format<select id="history-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+      <label>History view<select id="history-mode"><option value="all">All parents — complete bounded graph</option><option value="first-parent">Recent first-parent chain — large repositories</option></select></label>
       <button type="submit">Connect and open</button><button id="history-open" type="button">Reopen reference explicitly</button><button id="history-disconnect" type="button">Disconnect</button>
     </form>
     <p class="hint">Tokens remain only in page memory. HTTPS is required outside trusted loopback. Changing the reference field does not change the selected snapshot until you reopen it.</p>
+    <p class="hint">Recent first-parent history reads only the prefix needed for a page, so a long repository can open without a complete ancestry walk. Side-parent history is omitted. Continuations re-walk the prefix within the same finite budget; older pages can still exceed it. Choose all parents for exact-path history.</p>
     <pre id="history-snapshot" aria-label="Pinned repository snapshot"></pre>
     <form id="history-query">
       <label>Exact file or directory path (blank means all history)<input id="history-path" autocomplete="off" spellcheck="false" maxlength="8192"></label>

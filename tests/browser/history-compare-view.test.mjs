@@ -25,7 +25,7 @@ function find(root, label) {
 async function click(root, label) { const button = find(root, label); assert.ok(button, label); await button.fire('click'); return button; }
 function view(f = fixture(), respond = null) {
   const h = harness(f, respond), nodes = Object.fromEntries([...html.matchAll(/id="history-([^"]+)"/g)].map(match => [match[1], new Element()]));
-  Object.assign(nodes.ref, { value: f.afterRef }); nodes.format.value = f.algorithm; nodes.limit.value = '20'; nodes.first.value = '0'; nodes['path-kind'].value = 'text';
+  Object.assign(nodes.ref, { value: f.afterRef }); nodes.format.value = f.algorithm; nodes.mode.value = 'all'; nodes.limit.value = '20'; nodes.first.value = '0'; nodes['path-kind'].value = 'text';
   nodes['before-ref'].value = f.beforeRef; nodes['compare-mode'].value = 'direct'; nodes['compare-path-kind'].value = 'text';
   const events = new Element(), downloads = [], files = [];
   const doc = { getElementById: id => nodes[id.replace(/^history-/, '')], createElement: tag => new Element(tag), body: new Element('body') };
