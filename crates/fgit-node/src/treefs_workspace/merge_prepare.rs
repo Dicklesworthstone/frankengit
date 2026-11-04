@@ -551,6 +551,11 @@ impl FrontierObjectHeaders for CandidateFrontierHeaders<'_, '_, '_> {
             .header_with_blob_limit(id, self.maximum_blob_bytes)
     }
 }
+impl CanonicalObjectSource for CandidateFrontierHeaders<'_, '_, '_> {
+    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        self.source.load(id)
+    }
+}
 impl CandidateSource<'_, '_> {
     fn header_with_blob_limit(
         &self,

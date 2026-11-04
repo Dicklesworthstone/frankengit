@@ -20,7 +20,7 @@ use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{GitHashAlgorithm, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
-use super::{CandidateSource, SelectedSource};
+use super::{CandidateFrontierHeaders, CandidateSource, SelectedSource};
 use crate::{
     AdmissionMaterializationRefusal, NodeRequestContext, OneNode, VerifiedFabricPackSource,
 };
@@ -82,6 +82,7 @@ impl ReplayPreparationRefusal {
         matches!(
             self,
             Self::BudgetExceeded
+                | Self::Source(MergeSourceError::BudgetExceeded)
                 | Self::Validation(ProjectionFailure::Unavailable(
                     fgit_types::RefusalCode::ResourceBudgetExceeded
                 ))
@@ -291,7 +292,13 @@ impl OneNode {
         };
         let (bundle, pack_objects, borrowed_objects) = match &outcome {
             ReplayPreparation::Clean(plan) => {
-                let (bytes, count, borrowed) = replay_bundle(&original, target, plan, limits)?;
+                let (bytes, count, borrowed) = replay_bundle(
+                    &original,
+                    target,
+                    plan,
+                    limits,
+                    self.reused_merge_blob_limit(),
+                )?;
                 (Some(bytes), count, borrowed)
             }
             ReplayPreparation::Conflicted { .. } | ReplayPreparation::NoChange { .. } => {
@@ -317,9 +324,11 @@ fn replay_bundle(
     reference: &RefName,
     plan: &PreparedReplay,
     limits: PreparationLimits,
+    maximum_reused_blob_bytes: usize,
 ) -> Result<(Vec<u8>, usize, usize), ReplayPreparationRefusal> {
     let validation_limits = MergeObjectLimits {
         max_object_bytes: original.limits.max_object_bytes,
+        max_reused_blob_bytes: maximum_reused_blob_bytes,
         ..MergeObjectLimits::default()
     };
     let mut live = || original.checkpoint().is_ok();
@@ -330,6 +339,10 @@ fn replay_bundle(
             .iter()
             .map(|object| (object.id, object))
             .collect(),
+    };
+    let headers = CandidateFrontierHeaders {
+        source: &candidate,
+        maximum_blob_bytes: maximum_reused_blob_bytes,
     };
     for object in &plan.objects {
         original.checkpoint()?;
@@ -346,7 +359,7 @@ fn replay_bundle(
         })?;
     }
     let needed = super::sparse_bundle::objects_above_target(
-        &candidate,
+        &headers,
         plan.coordinates.request.target,
         plan.commit,
         1,

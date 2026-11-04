@@ -1,5 +1,5 @@
 //! Read-only, exact-snapshot linear rebase and complete onto-only artifacts.
-use super::{CandidateSource, SelectedSource};
+use super::{CandidateFrontierHeaders, CandidateSource, SelectedSource};
 use crate::{
     AdmissionMaterializationRefusal, NodeRequestContext, OneNode, VerifiedFabricPackSource,
 };
@@ -313,7 +313,13 @@ impl OneNode {
         let outcome = resolved.preparation;
         let (bundle, pack_objects, borrowed_objects) = match &outcome {
             RebasePreparation::Clean(plan) => {
-                let (bytes, count, borrowed) = rebase_bundle(&original, source_ref, plan, limits)?;
+                let (bytes, count, borrowed) = rebase_bundle(
+                    &original,
+                    source_ref,
+                    plan,
+                    limits,
+                    self.reused_merge_blob_limit(),
+                )?;
                 (Some(bytes), count, borrowed)
             }
             RebasePreparation::Stopped { .. } => (None, 0, 0),
@@ -410,11 +416,16 @@ fn rebase_bundle(
     reference: &RefName,
     plan: &PreparedRebase,
     limits: PreparationLimits,
+    maximum_reused_blob_bytes: usize,
 ) -> Result<(Vec<u8>, usize, usize), RebasePreparationRefusal> {
     verify_chain(original, plan)?;
     let candidate = CandidateSource {
         original,
         generated: plan.objects.iter().map(|o| (o.id, o)).collect(),
+    };
+    let headers = CandidateFrontierHeaders {
+        source: &candidate,
+        maximum_blob_bytes: maximum_reused_blob_bytes,
     };
     for object in &plan.objects {
         original.checkpoint()?;
@@ -432,11 +443,12 @@ fn rebase_bundle(
     }
     let validation = MergeObjectLimits {
         max_object_bytes: original.limits.max_object_bytes,
+        max_reused_blob_bytes: maximum_reused_blob_bytes,
         ..MergeObjectLimits::default()
     };
     let mut live = || original.checkpoint().is_ok();
     let needed = super::sparse_bundle::objects_above_target(
-        &candidate,
+        &headers,
         plan.request.onto,
         plan.commit,
         limits.max_commits,
