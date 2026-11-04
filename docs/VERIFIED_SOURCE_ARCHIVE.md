@@ -1,7 +1,7 @@
 # Verified source archives
 
 The external operator module `scripts/operator/source_archive.mjs` acquires a
-complete, bounded source snapshot from the existing authenticated `source/log`,
+complete, bounded source snapshot from the authenticated `source/commit`,
 `source/tree` and `source/blob` HTTP APIs. It does not invoke Git, stage objects,
 move refs, publish forge events, or change native authorization.
 
@@ -19,9 +19,12 @@ expected commit must be obtained independently to establish a meaningful trust
 anchor. A commit-valued reference is required; annotated tags are not implicitly
 peeled. This operation reads the current ref, not an arbitrary historical OID.
 
-The first bounded log page verifies the original commit bytes and its tree and
-parent summaries. Every subsequent request retains the selected head, commit,
-reference, scope and source record. Directory pages are assembled and hashed in
+The [current-commit read](HTTP_SOURCE_API.md#selected-current-commit) supplies the
+complete original commit body, bounded to 64 KiB. The client independently hashes
+those bytes and verifies their tree and ordered parent summaries. Parent IDs
+remain metadata; no parent-commit bodies or ancestry walk are required. Every
+subsequent request retains the selected head, commit, reference, scope and source
+record. Directory pages are assembled and hashed in
 native Git order, which differs from the API's raw-name pagination order for
 names that prefix directory names. The root tree is bound to the hashed commit;
 every child tree is bound to its parent. Every directory must verify before blob
@@ -31,8 +34,10 @@ acquisition begins. Complete files are then read in native ranges of at most
 No successful prefix is returned. Missing pages, entries, objects, changed
 snapshots, unsafe native traversal components, wrong modes, mismatching blobs,
 resource exhaustion, cancellation, or unavailable native reads refuse the whole
-operation. There is no re-selection or network retry. The node's native history
-bounds can also refuse the initial log read even when the requested tip exists.
+operation. There is no re-selection or network retry. A server must expose the
+current-commit endpoint; refusal does not fall back to `source/log`. Existing
+authority selection, source-tree traversal, object and transport limits still
+apply. The saved capture and archive formats are unchanged.
 
 The result contains a capture (original commit bytes, reconstructed exact tree
 bytes, raw hexadecimal paths and file buffers) and separately computed read
@@ -85,9 +90,11 @@ permission/admission test, a real-browser test, or the full workspace gate.
 
 The complete command is `scripts/fg_source_archive.mjs`. Filesystem operations
 require Node 22.16 or later on the POSIX private-file profile. The service must
-already expose the native source APIs and the token must have the existing source
-read/upload-pack grant. Archive capture does not need receive, PR, outcome, or
-administrator permission.
+already expose the native source APIs. Use an ordinary token with `read` or a
+canonical sponsored token with explicit `source-read`. Metadata grants do not
+imply source access. Sponsored capture uses only current commit/tree/blob reads;
+history, Git transport and `verified-blob` access remain excluded. Archive capture
+does not need receive, PR, outcome, or administrator permission.
 
 Keep the selection, token, optional CA and optional limit files in owner-private
 0700 directories outside untrusted workspaces. Each input must be a private,
@@ -108,9 +115,10 @@ commit placeholder with an independently obtained full native ID):
 }
 ```
 
-The token file contains exactly 64 lowercase hexadecimal characters and an
-optional single newline. It is never included as archive metadata. Source itself
-may contain secrets: the exporter is not a redaction service or a permission to
+The token file contains 64 lowercase hexadecimal characters or `fgagent_` followed
+by 64 lowercase hexadecimal characters, with an optional final LF or CRLF. It is
+never included as archive metadata. Source itself may contain secrets: the
+exporter is not a redaction service or a permission to
 redistribute repository content.
 
 ```sh

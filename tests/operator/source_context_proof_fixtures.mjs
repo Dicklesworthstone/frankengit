@@ -7,8 +7,8 @@ export const definitions = [
   { path: Buffer.from('src/\xff.rs', 'latin1'), data: Buffer.from('pub struct Other;\n') },
   { path: 'elsewhere/many/ignored', data: Buffer.alloc(200000, 9) },
 ];
-export async function setup(t, format = 'sha1', defs = definitions) {
-  const f = await fixture(t, { format, definitions: defs });
+export async function setup(t, format = 'sha1', defs = definitions, options = {}) {
+  const f = await fixture(t, { ...options, format, definitions: defs });
   const files = [...f.repo.files].filter(([path]) => !path.startsWith(hex('elsewhere/'))).map(([path, row]) => {
     const from = Math.min(4, row.data.length), end = Math.min(from + 9, row.data.length);
     return { path_hex: path, blob: `${format}:${row.id}`, source_bytes: row.data.length, anchors: [],

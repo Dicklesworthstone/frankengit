@@ -53,6 +53,9 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(receipt.selected_path_membership_verified, true); assert.equal(receipt.excerpt_bytes_verified, true);
     for (const field of ['search_evidence_verified', 'complete_repository', 'authority_verified', 'freshness_verified', 'agent_context_packet']) assert.equal(receipt[field], false);
     assert.equal(receipt.source_material_untrusted, true);
+    assert.equal(f.calls[0].operation, 'commit');
+    assert.deepEqual([...f.calls[0].form.keys()].sort(), ['expected_commit', 'expected_head', 'object_format', 'ref']);
+    assert.equal(f.calls.some(call => call.operation === 'log'), false);
     assert.deepEqual(f.calls.filter(c => c.operation === 'tree').map(c => c.form.get('path_hex')), [null, hex('src')]);
     assert.equal(f.calls.filter(c => c.operation === 'blob').length, 2);
     assert.equal(JSON.stringify(receipt).includes('preamble'), false);

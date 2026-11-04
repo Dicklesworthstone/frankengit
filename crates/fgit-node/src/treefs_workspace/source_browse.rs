@@ -2,6 +2,7 @@
 //! No host paths, worktree, object-ID lookup oracle, or publication effects.
 
 mod ancestor;
+mod commit;
 
 use super::{NodeTreeSource, NodeWorkspaceRefusal, workspace_request_live};
 use crate::{ClosureSelectionSource, NodeRequestContext, OneNode, VerifiedFabricPackSource};

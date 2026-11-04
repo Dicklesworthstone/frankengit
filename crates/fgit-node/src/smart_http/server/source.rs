@@ -130,6 +130,8 @@ impl<'a> Request<'a> {
     /// Closed source-understanding profile for sponsored credentials. Several
     /// other nonmutating routes prepare candidate objects or disclose historical
     /// bundles; classifying every read as source access would widen this grant.
+    /// The current-commit reader belongs to the same ref-selected source surface
+    /// as tree/blob; it cannot traverse parents or select an arbitrary object.
     pub(super) fn agent_operation(&self) -> Option<u16> {
         let allowed = match &self.0 {
             RequestKind::Read(_)
@@ -499,6 +501,21 @@ pub(super) fn execute(
     // repository boundary; query paths only narrow selection. Current canonical
     // hidden refs remain undisclosable.
     let body = match &command {
+        Command::Commit { selection } => {
+            let report = drive_request_while(
+                node,
+                &context,
+                node.read_source_commit_local_in(
+                    &context,
+                    &selection.reference,
+                    selection.expected_head,
+                    selection.expected_commit,
+                ),
+                &mut live,
+            )
+            .map_err(read_error)?;
+            output::current_commit(node, selection, &report, maximum, &mut live)?
+        }
         Command::Browse { selection, query } => {
             let report = drive_request_while(
                 node,
@@ -619,6 +636,32 @@ fn read_error(error: NodeWorkspaceRefusal) -> ApiError {
 mod tests {
     use super::*;
     #[test]
+    fn current_commit_source_grant_does_not_open_history_or_binary_authority_proofs() {
+        for (raw, expected) in [
+            (
+                "POST /repo/api/v1/source/commit HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+                Some(fgit_identity::agent::SOURCE_READ),
+            ),
+            (
+                "POST /repo/api/v1/source/log HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+                None,
+            ),
+            (
+                "GET /repo/api/v1/source/verified-blob?ref_hex=726566732f68656164732f6d61696e HTTP/1.1\r\nHost: local\r\n\r\n",
+                None,
+            ),
+        ] {
+            let envelope =
+                fgit_wire::smart_http::head::parse(raw.as_bytes(), HttpLimits::default())
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                Request::parse(&envelope).unwrap().agent_operation(),
+                expected
+            );
+        }
+    }
+    #[test]
     fn read_failures_never_imply_mutation_ambiguity_or_complete_empty_results() {
         for error in [
             NodeWorkspaceRefusal::RefUnavailable,
@@ -644,6 +687,7 @@ mod tests {
     #[test]
     fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [
+            ("commit", "application/x-www-form-urlencoded", false),
             ("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
             ("search-batch", "application/x-www-form-urlencoded", false),

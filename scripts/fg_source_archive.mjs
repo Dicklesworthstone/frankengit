@@ -7,6 +7,7 @@ import { captureSource, archiveSelection, archiveLimits, sha256 } from './operat
 import { buildSourceArchive, inspectSourceArchive, restoreSourceCapture, TAR_LIMIT } from './operator/source_archive_tar.mjs';
 import { parse } from './operator/source_archive_transport.mjs';
 import { absolute, directory, readPrivate, writeNew } from './operator/workflow_watch_io.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES, isCredentialToken } from './operator/credential_token.mjs';
 
 const USAGE = `usage:
   node scripts/fg_source_archive.mjs capture --selection <private-json-file>
@@ -78,9 +79,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       if (!['portable', 'objects'].includes(fields.get('--layout'))) throw new Error(USAGE);
       const selection = archiveSelection(parse(await privateFile(fields.get('--selection'), 32768)));
       const limits = archiveLimits(fields.has('--limits') ? parse(await privateFile(fields.get('--limits'), 32768)) : {});
-      const tokenBytes = await privateFile(fields.get('--token-file'), 66);
-      if (!/^[0-9a-f]{64}(?:\r?\n)?$/.test(tokenBytes.toString('utf8'))) throw new Error('Invalid private source token.');
-      const token = tokenBytes.subarray(0, 64).toString('ascii');
+      const tokenBytes = await privateFile(fields.get('--token-file'), MAX_CREDENTIAL_TOKEN_BYTES + 2);
+      let token;
+      try {
+        token = tokenBytes.toString('ascii').replace(/\r?\n$/, '');
+        if (tokenBytes.some(byte => byte > 127) || !isCredentialToken(token)) throw new Error('Invalid private source token.');
+      } finally { tokenBytes.fill(0); }
       const ca = fields.has('--ca-file') ? await privateFile(fields.get('--ca-file'), 128 * 1024) : undefined;
       const deadline = performance.now() + limits.timeoutMs;
       const reuseHash = fields.get('--reuse-sha256');

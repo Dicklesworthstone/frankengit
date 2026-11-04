@@ -118,11 +118,21 @@ repository's `/api/v1/source/` route. All use the existing bounded form grammar.
 
 | Route suffix | Read surface |
 | --- | --- |
+| `commit` | Exact current visible commit body, at most 64 KiB; parent identities only, without ancestry traversal |
 | `tree`, `blob` | Selected current visible tree and exact file bytes |
 | `refs`, `tags/inspect` | Current visible references and selected tag target/annotation inspection |
 | `search`, `search-batch`, `search-regex` | Bounded native literal and byte-regex source search |
 | `search-index`, `search-symbols`, `search-symbols-index` | Lexical index and Rust declaration search with current source checks |
 | `search-initial`, `context-initial`, `agent-context` | Generation-bound retrieval, source context and Agent Protocol context documents |
+
+The [current-commit route](HTTP_SOURCE_API.md#selected-current-commit) lets a
+source-only agent acquire [portable source packages](SELECTED_SOURCE_PACKAGE_OPERATOR.md),
+[context byte proofs](SPARSE_SOURCE_PROOFS.md), and
+[verified source archives](VERIFIED_SOURCE_ARCHIVE.md) using pinned commit/tree/blob
+reads. It accepts only the current ref and optional head/commit comparisons;
+it cannot select a historical or arbitrary object. The package command's optional
+`--native-fg` authority-proof mode rejects sponsored tokens before acquisition
+because `verified-blob` remains outside this grant. No new MCP tool is introduced.
 
 A source grant covers the repository's visible current source. Path selectors
 and query limits narrow an individual request; they are not a stored sparse-path

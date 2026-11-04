@@ -52,7 +52,7 @@ test('a destination created while reading is preserved and output is explicitly 
 });
 test('simultaneous exporters cannot overwrite or corrupt one another', async t => {
   const f = await setup(t); let arrivals = 0, release; const gate = new Promise(resolve => { release = resolve; });
-  f.control.mutate = async (_r, c) => { if (c.operation === 'log') { if (++arrivals === 2) release(); await gate; } };
+  f.control.mutate = async (_r, c) => { if (c.operation === 'commit') { if (++arrivals === 2) release(); await gate; } };
   const results = await Promise.all([child(f.args).done, child(f.args).done]);
   assert.deepEqual(results.map(r => r.code).sort(), [0, 4]);
   const receipt = JSON.parse(results.find(r => r.code === 0).stdout);

@@ -21,9 +21,9 @@ for (const format of ['sha1', 'sha256']) {
       assert.equal(call.method, 'POST'); assert.equal(call.headers['idempotency-key'], undefined);
       assert.equal(call.headers.cookie, undefined); assert.equal(call.headers['accept-encoding'], 'identity');
       assert.equal(call.form.get('expected_commit'), f.repo.commit);
-      if (call.operation !== 'log') assert.equal(call.form.get('expected_head'), f.repo.snapshot);
+      if (call.operation !== 'commit') assert.equal(call.form.get('expected_head'), f.repo.snapshot);
     }
-    assert.deepEqual(f.calls.map(c => c.operation), ['log', 'tree', 'tree', 'blob', 'blob', 'blob']);
+    assert.deepEqual(f.calls.map(c => c.operation), ['commit', 'tree', 'tree', 'blob', 'blob', 'blob']);
   });
   test(`${format}: independently installed Git hashes the exact captured tree and commit bytes`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'fg-archive-oracle-')); t.after(() => rm(root, { recursive: true, force: true }));
@@ -42,7 +42,30 @@ for (const format of ['sha1', 'sha256']) {
     assert.deepEqual(f.calls.filter(c => c.operation === 'blob').map(c => c.form.get('offset')), ['0', '1048576', '2097152']);
     assert.equal(result.metrics.blob_bytes, data.length);
   });
+  test(`${format}: selected commit preserves parent order without acquiring history`, async t => {
+    const parents = ['a', 'c'].map(value => value.repeat(format === 'sha1' ? 40 : 64));
+    const f = await fixture(t, { format, parents }), { capture } = await captureSource(f.selection, token);
+    assert.equal(capture.commit.body_hex, hex(f.repo.body));
+    assert.deepEqual(f.calls.map(call => call.operation), ['commit', 'tree', 'tree', 'blob', 'blob', 'blob']);
+    f.calls.length = 0;
+    f.control.mutate = (reply, call) => { if (call.operation === 'commit') reply.parents.reverse(); };
+    await assert.rejects(captureSource(f.selection, token), /Commit summary/);
+    assert.deepEqual(f.calls.map(call => call.operation), ['commit']);
+  });
 }
+
+test('current commit source record binds every subsequent tree before any blob read', async t => {
+  const f = await fixture(t);
+  f.control.mutate = (reply, call) => { if (call.operation === 'commit') reply.source_rcr = 'different-current-rcr'; };
+  await assert.rejects(captureSource(f.selection, token), /Source root or record changed/);
+  assert.deepEqual(f.calls.map(call => call.operation), ['commit', 'tree']);
+});
+test('independently pinned current head refuses a changed commit response before tree discovery', async t => {
+  const f = await fixture(t);
+  f.control.mutate = reply => { reply.snapshot_token = `alg:2:${'e'.repeat(64)}`; };
+  await assert.rejects(captureSource({ ...f.selection, expected_head: f.repo.snapshot }, token), /Source snapshot moved/);
+  assert.deepEqual(f.calls.map(call => call.operation), ['commit']);
+});
 
 test('empty root and empty files are complete, not unavailable', async t => {
   for (const definitions of [[], [{ path: 'empty', data: Buffer.alloc(0) }], [{ path: 'empty-dir', kind: 'directory' }]]) {
@@ -78,9 +101,11 @@ for (const [name, mutate] of [
   await assert.rejects(captureSource(f.selection, token)); assert.ok(!f.calls.some(c => c.operation === 'blob'));
 });
 for (const [name, mutate] of [
-  ['body hash', r => r.commits[0].body_hex += '00'], ['summary tree', r => r.commits[0].tree = 'e'.repeat(40)],
-  ['summary parents', r => r.commits[0].parents = ['e'.repeat(40)]], ['missing commit', r => r.commits = []],
-  ['ordering', r => r.ordering = 'date'], ['incomplete page', r => r.page_complete = false],
+  ['body hash', r => r.body_hex += '00'], ['summary tree', r => r.root_tree = 'e'.repeat(40)],
+  ['summary parents', r => r.parents = ['e'.repeat(40)]], ['missing commit', r => delete r.object_id],
+  ['missing body', r => delete r.body_hex], ['missing parents', r => delete r.parents],
+  ['history reply', r => r.type = 'source_log'], ['author claim', r => r.author_identity_verified = true],
+  ['missing source record', r => delete r.source_rcr], ['missing source head', r => delete r.source_head],
 ]) test(`invalid initial ${name} refuses before tree discovery`, async t => {
   const f = await fixture(t); f.control.mutate = mutate; await assert.rejects(captureSource(f.selection, token)); assert.equal(f.calls.length, 1);
 });

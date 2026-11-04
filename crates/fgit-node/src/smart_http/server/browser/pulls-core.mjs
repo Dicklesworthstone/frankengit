@@ -286,7 +286,11 @@ export class Transport {
     this.disconnect(); const epoch = this.#epoch;
     const selected = recovery === null ? null : recoverySelection(recovery);
     if (selected && (this.#search || this.#checkEvidence)) fail('This read-only connection has no outcome recovery profile.');
-    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
+    // Sponsored credentials enter only the existing closed source-read profile.
+    // Mutation, recovery and workflow-evidence profiles retain ordinary tokens.
+    if (typeof token !== 'string' || !(/^[0-9a-f]{64}$/.test(token) ||
+        (this.#search && /^fgagent_[0-9a-f]{64}$/.test(token)))) fail(this.#search
+      ? 'A canonical source-read credential is required.' : 'A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
     if (!selected && requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
@@ -402,7 +406,7 @@ export class Transport {
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
       : this.#search
-      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|log|tree|blob)$/.test(path)
+      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|commit|tree|blob)$/.test(path)
       : this.#branches
       ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
       : this.#initial

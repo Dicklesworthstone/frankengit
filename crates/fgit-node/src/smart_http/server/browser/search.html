@@ -13,7 +13,7 @@
     <h1>Search source. Inspect exact bytes.</h1>
     <p>Search one repository snapshot using literals, a shared batch of terms, bounded native byte regexes, persisted whole-word indexes, indexed Rust declarations, or a combined content/path/declaration view. Open a result to verify its complete file against the returned native blob identity.</p>
     <form id="connection" autocomplete="off">
-      <label>Read token<input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <label>Read token<input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="72" required></label>
       <label>Reference<input id="reference" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
       <label>Object format<select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
       <div class="actions"><button type="submit">Connect</button><button type="button" id="disconnect">Disconnect</button></div>

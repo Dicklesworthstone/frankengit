@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 //! Canonical sponsored credentials cross the real HTTP/source/index boundary.
 
+mod commit;
+
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_identity::agent::SOURCE_READ;

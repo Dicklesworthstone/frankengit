@@ -5,7 +5,8 @@ use super::super::issues::{ApiError, quote, ref_fields};
 use super::request::Selection;
 use crate::OneNode;
 use fgit_forge::source_browse::{
-    SourceBrowseAction, SourceBrowseContent, SourceBrowseQuery, SourceBrowseReport, SourceEntryKind,
+    MAX_SOURCE_COMMIT_BYTES, SourceBrowseAction, SourceBrowseContent, SourceBrowseQuery,
+    SourceBrowseReport, SourceCommitReport, SourceEntryKind,
 };
 use fgit_forge::source_search::batch::{
     SourceQueryBatch, SourceQueryResult, SourceSearchBatchReport,
@@ -86,6 +87,61 @@ fn selection(
         quote(&commit.to_string()),
         quote(&tree.to_string())
     ))
+}
+
+pub(super) fn current_commit(
+    node: &OneNode,
+    requested: &Selection,
+    report: &SourceCommitReport,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    checkpoint(live)?;
+    if report.repository_id != node.repository_id
+        || report.body.is_empty()
+        || report.body.len() > MAX_SOURCE_COMMIT_BYTES
+        || report
+            .parents
+            .iter()
+            .any(|id| id.is_zero() || id.algorithm() != node.object_format)
+    {
+        return Err(ApiError::unavailable());
+    }
+    let identity = selection(
+        node,
+        requested,
+        report.source_head,
+        report.source_rcr,
+        report.source_commit,
+        report.root_tree,
+    )?;
+    let mut out = String::new();
+    append(
+        &mut out,
+        &format!(
+            "{{\"type\":\"source_commit\",{},\"object_id\":{},\"author_identity_verified\":false,\"parents\":[",
+            identity,
+            quote(&report.source_commit.to_string()),
+        ),
+        maximum,
+    )?;
+    for (index, parent) in report.parents.iter().enumerate() {
+        checkpoint(live)?;
+        if index != 0 {
+            append(&mut out, ",", maximum)?;
+        }
+        append(&mut out, &quote(&parent.to_string()), maximum)?;
+    }
+    append(&mut out, "],\"body_hex\":\"", maximum)?;
+    // The same finite output allowance and original request liveness apply
+    // during encoding; no partial response is sent on refusal.
+    for chunk in report.body.chunks(4096) {
+        checkpoint(live)?;
+        append(&mut out, &hex(chunk), maximum)?;
+    }
+    append(&mut out, "\"}", maximum)?;
+    checkpoint(live)?;
+    Ok(out)
 }
 
 pub(super) fn browse(

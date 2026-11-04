@@ -3,6 +3,7 @@
 import { createHash, webcrypto } from 'node:crypto';
 import { prepareNativePackageRead, verifyNativePackageRead } from './source_package_native.mjs';
 import { contextProvenance } from './source_context_provenance.mjs';
+import { isAgentCredentialToken, isCredentialToken } from './credential_token.mjs';
 import { Transport, keys, oid, principal, rootFor, snapshot, integer } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { coordinates, selection as sourceSelection, pathHex, FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/search-data.mjs';
 import { acquireContextPackage, contextPackageCost, readSourcePackage, sourcePackageLimits,
@@ -170,6 +171,11 @@ function operation(options, allowNative = false) {
 export async function captureSourcePackage(contextBytes, contextHash, selected, expected, token, options = {}) {
   const { limits, signal, check, deadline, nativeFg } = operation(options, true);
   if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') fail('TLS verification must not be disabled.');
+  if (!isCredentialToken(token)) fail('invalid source-read credential.');
+  if (nativeFg !== undefined && isAgentCredentialToken(token)) {
+    throw Object.assign(new Error('The optional native authority-proof route requires an ordinary credential; sponsored source reads do not grant it.'),
+      { code: 'native_source_proof_agent_scope_unsupported' });
+  }
   const plan = contextPlan(contextBytes, contextHash, selected, expected, limits, check);
   const native = nativeFg === undefined ? null : await prepareNativePackageRead(nativeFg, plan, limits.package.maxBlobRequests, check);
   const transport = new Transport({ href: `${plan.selected.endpoint}/ui/search/`, pageSuffix: '/ui/search/',

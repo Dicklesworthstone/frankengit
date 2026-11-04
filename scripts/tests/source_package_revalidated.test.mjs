@@ -131,6 +131,8 @@ test('current package retains one operation deadline while a source response sta
   const p = await currentFixture(t, 'sha256', (_value, call) => {
     call.res.writeHead(200, { 'Content-Type': 'application/json' }); call.res.write('{'); return false;
   });
-  const start = performance.now(); await assert.rejects(capture(p, { limits: { timeoutMs: 100 } }));
+  // Leave time for the pinned context checks and connection under concurrent
+  // test load so this exercises expiry of the stalled response, not pre-I/O expiry.
+  const start = performance.now(); await assert.rejects(capture(p, { limits: { timeoutMs: 1000 } }));
   assert.ok(performance.now() - start < 3000); assert.equal(p.requests.length, 1);
 });

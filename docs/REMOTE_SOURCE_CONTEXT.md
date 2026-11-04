@@ -16,8 +16,10 @@ Newer ranked context APIs do not change this profile implicitly.
 The saved `capture.json` and its retained `capture_sha256` can feed the existing
 [source package command](SELECTED_SOURCE_PACKAGE_OPERATOR.md) directly. It
 understands the native joined source envelopes and declared excerpt lineage,
-rechecks the selected full source bytes, and optionally verifies each file through
-Rust `verify-read` at an independently retained authority head. The resulting
+rechecks the selected full source bytes through current commit/tree/blob reads,
+and accepts the same sponsored `source-read` credential for ordinary package
+capture. Its optional Rust `verify-read` authority-head mode requires an ordinary
+read credential and rejects a sponsored token before acquisition. The resulting
 portable package can create an existing sparse source workspace. Opaque context
 labels grant no effects and are not retained as authority proofs. Both Node
 acquisition clients send an explicit FrankenGit project User-Agent.
@@ -139,7 +141,7 @@ head. A subsequent metadata change therefore requires a separately explicit new
 capture. Existing session reservations are not renewed or refunded by a refusal.
 
 Saved revalidated captures and raw native responses also feed the source package
-and byte-proof commands under those commands' existing credential requirements.
+and byte-proof commands with an ordinary read or sponsored `source-read` credential.
 They independently verify the selected current commit, paths, complete blobs and
 saved excerpt bytes. Index provenance remains untrusted search evidence; accepting
 the new profile does not turn a source-only proof into an authority or search

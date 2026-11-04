@@ -1,9 +1,10 @@
 # Repository source browsing and literal search over HTTP
 
-The bounded repository gateway exposes tree listing, file byte ranges and
-literal-byte code search through the existing native source readers. A client
-can search a repository, open a matching path and continue file/directory reads
-with explicit source coordinates, without opening local node storage.
+The bounded repository gateway exposes the selected current commit, tree
+listing, file byte ranges and literal-byte code search through the native source
+readers. A client can search a repository, open a matching path and acquire the
+commit bytes needed to verify source membership, without opening local node
+storage.
 
 These are read-only operations. They do not import objects, bind retry keys,
 seal transactions, move refs, change forge metadata or publish outbox work.
@@ -13,8 +14,10 @@ search engine, not a checkout, another Git engine, index or database.
 For complete blob bytes cryptographically bound to an independently supplied
 authority head, use the separate authenticated binary
 [`verified-blob` endpoint and `fg verify-read`](VERIFIED_BLOB_READS.md).
-That endpoint uses the same source-read grant and requires an explicit Merkle
-ref layout; range responses described here are not complete blob proofs.
+That endpoint requires an ordinary repository-read credential and an explicit
+Merkle ref layout. Canonical sponsored `source-read` credentials do not grant
+`verified-blob` access; the source responses described here are not authority-head
+proofs.
 
 This describes implementation interfaces, not a passing Rust build, completed
 compatibility campaign or production release. The full fastapi_rust/OpenAPI,
@@ -30,19 +33,30 @@ fg serve-http "$STORAGE" "$TENANT" "$REPOSITORY" 127.0.0.1:8080 \
 The repository must already exist. The readiness record includes `source_enabled`
 and its canonical repository URL. Use that URL as `REPO_URL` below.
 
-The credential must explicitly grant `read`, the existing repository Git-fetch
-permission. This is a repository-wide source-read grant, not a path-scoped agent
-capability. `receive`, issue, PR, review, merge and outcome grants do not imply
-`read`. The source deployment switch does not enable any mutation or another
-native API. Other APIs retain their own switches and grants. Static-token and
-older node serving entry points leave source endpoints disabled.
+An ordinary credential must explicitly grant `read`, the existing repository
+Git-fetch permission. A [canonical sponsored agent credential](SPONSORED_AGENT_CREDENTIALS.md)
+instead requires the independent `source-read` operation. Both profiles grant
+repository-level source access subject to canonical hidden-ref policy; request
+paths narrow the selection. Metadata and receive permissions do not imply source
+access. The source deployment switch does not enable mutations or other native
+APIs. Other APIs retain their own switches and grants. Static-token and older
+node serving entry points leave source endpoints disabled.
 
-Provision the existing private, incarnation-bound credential file using
-`--print-credentials-header`. Source access introduces no new scope spelling.
-The private file is reloaded for each authentication; token rotation can retain
-the same principal, while removal revokes later authentications. Existing
-in-flight requests retain their bounded grant. A file that is missing, malformed
+Provision ordinary tokens in the private, incarnation-bound credential file
+using `--print-credentials-header`. The private file is reloaded for each
+authentication; token rotation can retain the same principal, while removal
+revokes later authentications. Existing in-flight requests retain their bounded
+grant. A file that is missing, malformed
 or bound to another incarnation does not fall back to cached permissions.
+
+Sponsored tokens have the form `fgagent_` followed by 64 lowercase hexadecimal
+characters. Their grants, expiry and revocation are authenticated from canonical
+repository state on every request. Source work and response disclosure retain
+the original bounded request lifetime and byte reservation. These tokens permit
+the closed current-source read routes, including `commit`, `tree` and `blob`;
+they do not permit `source/log`, historical browsing, Git transport or
+`verified-blob`. A missing or invalid canonical grant cannot fall back to an
+ordinary token with a matching digest.
 
 Every request carries `Authorization: Bearer <token>`. Forwarded-user headers,
 request paths, OIDs and search text never supply an authenticated identity.
@@ -54,12 +68,13 @@ gateway that preserves real authentication rather than trusting client headers.
 ## Common read envelope and source selection
 
 ```text
+POST {REPO_URL}/api/v1/source/commit
 POST {REPO_URL}/api/v1/source/tree
 POST {REPO_URL}/api/v1/source/blob
 POST {REPO_URL}/api/v1/source/search
 ```
 
-All three are body-bearing reads, not mutations. POST keeps paths and search
+These are body-bearing reads, not mutations. POST keeps paths and search
 needles out of the URL. Send a complete `application/x-www-form-urlencoded`
 body, optionally declaring `charset=utf-8`. Fixed-length and chunked framing
 are supported. Query parameters and `Git-Protocol` are not accepted.
@@ -68,7 +83,7 @@ Do not send `Idempotency-Key`: the endpoint rejects it rather than pretending
 that a read creates a mutation or durable search session. Repeating a query
 repeats a read and cannot reexecute a previous publication.
 
-Every request requires:
+The common source-selection fields are:
 
 | Field | Meaning |
 |---|---|
@@ -97,6 +112,44 @@ mixes old and new pages or substitutes the latest head. The same token works
 after reopening only while that head is still current. `expected_commit` can
 separately require the same ref tip, but does not replace the head requirement
 for nonzero cursors. Restart a walk explicitly after a moved-snapshot error.
+
+## Selected current commit
+
+`POST /api/v1/source/commit` accepts only the four common source-selection
+fields. The current visible ref must select a commit; `expected_commit` compares
+that tip and cannot select an ancestor or another admitted object. Path, object
+ID, pagination and history fields are refused. Annotated tags are not peeled.
+
+```sh
+curl --fail-with-body --header @/secure/source-reader.headers \
+  --data-urlencode 'object_format=sha256' \
+  --data-urlencode 'ref=refs/heads/main' \
+  --data-urlencode "expected_commit=$INDEPENDENT_COMMIT" \
+  "$REPO_URL/api/v1/source/commit"
+```
+
+A `source_commit` response retains the common source envelope and adds
+`object_id` (equal to `source_commit`), `body_hex`, `parents`, and
+`author_identity_verified:false`. `body_hex` is the complete original native
+commit body, including its headers and message, with a fixed **65,536-byte raw
+body ceiling**. `parents` contains native identities in original header order;
+it does not imply that parent bodies were read or that ancestry was walked.
+The reader verifies only the selected commit body and reads no tree body.
+Commit messages, signature headers and author fields remain untrusted data.
+
+The body ceiling is enforced before fabric body allocation. Oversized bodies
+refuse with 413 rather than returning a truncated commit. Current authority
+materialization, original request lifetime, server output and source quotas
+retain their independent bounds. This endpoint removes the history walk from
+current commit acquisition; later source-tree traversal remains separately
+bounded.
+
+[Source packages](SELECTED_SOURCE_PACKAGE_OPERATOR.md),
+[context byte proofs](SPARSE_SOURCE_PROOFS.md) and
+[verified source archives](VERIFIED_SOURCE_ARCHIVE.md) use this endpoint before
+their pinned tree/blob reads. They independently hash the original commit and
+its selected source. The response itself is not an authority-head, authorship
+or freshness proof, and it grants no execution or publication rights.
 
 ## Tree listing
 

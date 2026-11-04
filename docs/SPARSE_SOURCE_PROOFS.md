@@ -31,14 +31,23 @@ are supported; symlinks are never followed. Directory or gitlink targets and
 missing paths refuse before any file body is fetched. Context consumers should
 additionally require regular/executable kinds rather than interpreting symlinks.
 
-The log reader authenticates the explicitly pinned native commit bytes. Every
-needed directory is fully paged and reconstructed in native Git tree order, then
-checked against its committed identity. All sibling entries in those parent
+The [current-commit reader](HTTP_SOURCE_API.md#selected-current-commit) returns
+the explicitly pinned tip body under a 64 KiB raw-byte ceiling; the client checks
+its native hash and tree/parent summaries. Parent commit bodies are never read.
+Every needed directory is fully paged and reconstructed in native Git tree order,
+then checked against its committed identity. All sibling entries in those parent
 trees are necessary proof material. Unrelated subtrees are not traversed and
 unselected blobs are not requested. Thus path membership can be established
 without hydrating a complete repository; this is not logarithmic proof size when
-a required directory is very wide. Existing ancestry-page and resource limits
-still apply.
+a required directory is very wide. Canonical authority selection and the existing
+source/tree, request, byte and deadline limits still apply.
+
+Capture accepts an ordinary read token or a canonical `fgagent_` token with
+explicit `source-read` permission. The server must enable source reads and expose
+`source/commit`; acquisition does not fall back to `source/log`. Metadata-only
+credentials, historical reads and `verified-blob` authority proofs remain outside
+this sponsored profile. The portable proof schema and offline verifier are
+unchanged, and the proof itself carries no credential or reusable access grant.
 
 Only after every requested file is found does acquisition read its complete blob
 through bounded native ranges. Repeated blobs are downloaded once within the

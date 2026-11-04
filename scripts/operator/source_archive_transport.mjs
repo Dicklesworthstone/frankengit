@@ -2,6 +2,7 @@
 import { request as http } from 'node:http';
 import { request as https } from 'node:https';
 import { outcomeEndpoint } from './transaction_outcome.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 export const fail = message => { throw new Error(message); };
 export function integer(value, min, max, label = 'counter') {
@@ -30,7 +31,7 @@ export class SourceReader {
   requests = 0; wireBytes = 0;
   constructor(endpoint, token, limits, { signal, ca } = {}) {
     this.#endpoint = outcomeEndpoint(endpoint);
-    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('Invalid source-read token.');
+    if (!isCredentialToken(token)) fail('Invalid source-read token.');
     if (signal !== undefined && !(signal instanceof AbortSignal)) fail('Invalid archive cancellation signal.');
     if (ca !== undefined && (!Buffer.isBuffer(ca) || !ca.length || ca.length > 128 * 1024)) fail('Invalid private CA bundle.');
     this.#token = token; this.#ca = ca === undefined ? undefined : Buffer.from(ca);
@@ -42,7 +43,7 @@ export class SourceReader {
   }
   async read(operation, values, maximum = 3 * 1024 * 1024) {
     this.check();
-    if (!['log', 'tree', 'blob'].includes(operation)) fail('Unsupported source-read operation.');
+    if (!['commit', 'tree', 'blob'].includes(operation)) fail('Unsupported source-read operation.');
     if (++this.requests > this.#limits.maxRequests) fail('Source archive request budget exceeded.');
     maximum = Math.min(integer(maximum, 1, 3 * 1024 * 1024), this.#limits.maxWireBytes - this.wireBytes);
     if (maximum <= 0) fail('Source archive wire budget exceeded.');

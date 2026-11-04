@@ -27,7 +27,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.deepEqual(answer.package, packageFor(f.repo));
     assert.deepEqual(answer.metrics, { metadataRequests: 3, blobRequests: 2,
       sourceBytesRead: definitions[0].data.length + definitions[1].data.length });
-    assert.deepEqual(f.calls.map(c => c.operation), ['log', 'tree', 'tree', 'blob', 'blob']);
+    assert.deepEqual(f.calls.map(c => c.operation), ['commit', 'tree', 'tree', 'blob', 'blob']);
     for (const c of f.calls) {
       assert.equal(c.method, 'POST'); assert.equal(c.form.get('expected_head'), f.repo.snapshot);
       assert.equal(c.form.get('expected_commit'), f.repo.commit); assert.equal(c.headers['idempotency-key'], undefined);

@@ -73,8 +73,11 @@ but cannot attest where an operator obtained those inputs.
 `context.json` may be the original `source_context_initial` HTTP response or the
 existing `frankengit-source-context-capture-v1` wrapper. Retain its SHA-256 when
 saving it; do not substitute a freshly changed file and silently refresh its pin.
-The token file contains exactly 64 lowercase hex characters, optionally followed
-by LF or CRLF. Tokens are not command-line arguments or package fields.
+The token file contains an ordinary 64-character lowercase hexadecimal read
+token or `fgagent_` followed by 64 lowercase hexadecimal characters, optionally
+followed by LF or CRLF. Sponsored credentials require the explicit `source-read`
+operation and the server's source-read switch. Metadata permissions do not imply
+source access. Tokens are not command-line arguments or package fields.
 
 Native joined Initial responses carry the complete source-read envelope in their
 content and path channels. Acquisition checks both envelopes against each other
@@ -105,12 +108,21 @@ node scripts/fg_source_package.mjs capture \
   --output /private/session/source-package.json
 ```
 
-Capture performs additional authenticated reads of the selected commit, all
-needed parent-tree pages, and every selected full blob. It neither descends into
-unselected subtrees nor follows symlinks. The same repository/incarnation/ref,
+Capture obtains the selected current commit through
+[`POST /api/v1/source/commit`](HTTP_SOURCE_API.md#selected-current-commit), then
+reads all needed parent-tree pages and every selected full blob. The complete
+raw commit body is bounded to 64 KiB. Parent IDs are checked against that body;
+parent commits are not traversed. A sponsored `source-read` credential can
+complete this acquisition without history or Git transport access. It neither
+descends into unselected subtrees nor follows symlinks. The same repository/incarnation/ref,
 commit, snapshot and source coordinates must hold throughout. An expired pin,
 revocation, malformed response or exhausted budget refuses the operation rather
 than retrying or changing the base.
+
+Capture requires a server exposing the current-commit endpoint; refusal does
+not fall back to `source/log`. Saved package/proof formats and offline verification
+remain unchanged. Source acquisition does not grant candidate publication or
+authority-proof access.
 
 Stdout is one bounded JSON receipt, not source text. Retain `package_sha256` and
 `context_sha256` separately from the files. `expected_input_sha256` hashes the
@@ -159,6 +171,13 @@ publication authority; the existing stage/apply/recover steps remain separate.
 ## Native authority-head verification at capture
 
 The same capture command accepts an explicit `--native-fg /absolute/path/to/fg`.
+This optional mode requires an ordinary repository-read credential because it
+uses the separate `verified-blob` authority-proof route. Combining `--native-fg`
+(or the module's `nativeFg` option) with a sponsored token refuses with
+`native_source_proof_agent_scope_unsupported` before source requests or native
+execution. Use ordinary package capture for sponsored source reads; there is no
+silent downgrade of a requested authority-proof mode.
+
 Use an owner-controlled executable without symlink aliases or group/other write
 permissions. In this mode, `selection.json` must include an independently retained
 `expected_head`; a head copied from the response being checked is not a trust

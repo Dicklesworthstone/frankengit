@@ -49,7 +49,7 @@ for (const format of ['sha1', 'sha256']) for (const layout of ['portable', 'obje
     assert.equal(receipt.reuse_archive_sha256, f.archive.receipt.archive_sha256);
     assert.equal(receipt.read_metrics.blob_requests, 0); assert.equal(receipt.read_metrics.reused_files, 3);
     assert.equal(receipt.read_metrics.downloaded_blob_bytes, 0);
-    assert.deepEqual(f.calls.map(c => c.operation), ['log', 'tree', 'tree']);
+    assert.deepEqual(f.calls.map(c => c.operation), ['commit', 'tree', 'tree']);
     assert.deepEqual(await readFile(f.output), f.archive.bytes);
     assert.deepEqual(await readFile(f.base), f.archive.bytes);
     await rm(f.base); await rm(f.credential); await rm(f.selected); const count = f.calls.length;

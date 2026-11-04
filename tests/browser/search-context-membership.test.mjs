@@ -20,8 +20,8 @@ const definitions = [
   { path: 'link', kind: 'symlink', data: Buffer.from('/outside') },
   { path: 'submodule', kind: 'gitlink', target: 'c'.repeat(40) },
 ];
-async function setup(t, format = 'sha1', defs = definitions, paths = ['src/main.rs', 'src/other.rs']) {
-  const f = await fixture(t, { format, definitions: defs.map(row => row.kind === 'gitlink' ? { ...row, target: 'c'.repeat(format === 'sha1' ? 40 : 64) } : row) });
+async function setup(t, format = 'sha1', defs = definitions, paths = ['src/main.rs', 'src/other.rs'], parents = []) {
+  const f = await fixture(t, { format, parents, definitions: defs.map(row => row.kind === 'gitlink' ? { ...row, target: 'c'.repeat(format === 'sha1' ? 40 : 64) } : row) });
   const client = new Transport({ href: `${f.selection.endpoint}/ui/search/`, pageSuffix: '/ui/search/', cryptoImpl: webcrypto, timeoutMs: 500 });
   await client.connect(token); t.after(() => client.disconnect());
   const result = { query: { mode: 'initial' }, scope: { tenant: f.repo.scope.tenant_id, repository: f.repo.scope.repository_id,
@@ -37,11 +37,12 @@ for (const format of ['sha1', 'sha256']) {
   test(`commit-bound sparse parent acquisition and offline replay ${format}`, async t => {
     const f = await setup(t, format); const original = clone(f.result), answer = await f.acquire();
     assert.deepEqual(f.result, original); assert.equal(answer.requests, 3);
-    assert.deepEqual(f.calls.map(c => [c.operation, c.form.get('path_hex')]), [['log', null], ['tree', null], ['tree', hex('src')]]);
+    assert.deepEqual(f.calls.map(c => [c.operation, c.form.get('path_hex')]), [['commit', null], ['tree', null], ['tree', hex('src')]]);
     for (const call of f.calls) {
       assert.equal(call.method, 'POST'); assert.equal(call.headers.authorization, `Bearer ${token}`);
       assert.equal(call.headers['idempotency-key'], undefined); assert.equal(call.form.get('expected_commit'), f.repo.commit);
       assert.equal(call.form.get('expected_head'), f.repo.snapshot);
+      if (call.operation === 'commit') assert.deepEqual([...call.form.keys()].sort(), ['expected_commit', 'expected_head', 'object_format', 'ref']);
     }
     assert.equal(answer.verified.commitMembershipVerified, true); assert.equal(answer.verified.blobBytesVerified, false);
     for (const name of ['authorityVerified', 'freshnessVerified', 'searchCoverageVerified', 'signatureVerified']) assert.equal(answer.verified[name], false);
@@ -66,6 +67,17 @@ for (const format of ['sha1', 'sha256']) {
     }
     assert.equal(git(['hash-object', '-t', 'commit', '--stdin'], f.repo.body), answer.proof.commit.oid);
     assert.equal(answer.proof.files.length, 2); assert.equal(f.calls.some(c => c.operation === 'blob'), false);
+  });
+  test(`selected commit preserves ordered parents without requesting ancestry ${format}`, async t => {
+    const parents = ['a', 'b'].map(value => value.repeat(format === 'sha1' ? 40 : 64));
+    const f = await setup(t, format, undefined, undefined, parents), answer = await f.acquire();
+    assert.equal(answer.proof.commit.bodyHex, hex(f.repo.body));
+    assert.deepEqual(f.calls.map(call => call.operation), ['commit', 'tree', 'tree']);
+    assert.equal((await verifyMembershipProof(answer.proof, f.expected(), webcrypto)).commitMembershipVerified, true);
+    f.calls.length = 0;
+    f.control.mutate = (reply, call) => { if (call.operation === 'commit') reply.parents.reverse(); };
+    await assert.rejects(f.acquire(), /commit bytes or summary/);
+    assert.deepEqual(f.calls.map(call => call.operation), ['commit']);
   });
   test(`exact tree limits pass and one-under limits refuse ${format}`, async t => {
     const f = await setup(t, format); const first = await f.acquire();
@@ -110,10 +122,14 @@ for (const [label, change] of [
   ['file/ancestor overlap', f => { f.result.context.files = [{ pathHex: hex('src'), blob: '1'.repeat(40) }, f.result.context.files[0]]; }],
 ]) test(`pre-I/O refusal: ${label}`, async t => { const f = await setup(t); change(f); await assert.rejects(f.acquire()); assert.equal(f.calls.length, 0); });
 for (const [label, change] of [
-  ['commit body', (r, c) => { if (c.operation === 'log') r.commits[0].body_hex += '20'; }],
-  ['commit summary', (r, c) => { if (c.operation === 'log') r.commits[0].tree = 'a'.repeat(40); }],
-  ['parent summary', (r, c) => { if (c.operation === 'log') r.commits[0].parents = ['a'.repeat(40)]; }],
-  ['log page', (r, c) => { if (c.operation === 'log') r.page_complete = false; }],
+  ['commit body', (r, c) => { if (c.operation === 'commit') r.body_hex += '20'; }],
+  ['commit summary', (r, c) => { if (c.operation === 'commit') r.root_tree = 'a'.repeat(40); }],
+  ['parent summary', (r, c) => { if (c.operation === 'commit') r.parents = ['a'.repeat(40)]; }],
+  ['commit identity', (r, c) => { if (c.operation === 'commit') r.object_id = 'a'.repeat(40); }],
+  ['commit body absent', (r, c) => { if (c.operation === 'commit') delete r.body_hex; }],
+  ['commit author claim', (r, c) => { if (c.operation === 'commit') r.author_identity_verified = true; }],
+  ['commit source record', (r, c) => { if (c.operation === 'commit') r.source_rcr = 'changed'; }],
+  ['history response', (r, c) => { if (c.operation === 'commit') r.type = 'source_log'; }],
   ['source scope', r => { r.repository_incarnation = '4'.repeat(32); }],
   ['source head', r => { r.snapshot_token = 'alg:2:' + 'e'.repeat(64); }],
   ['source read flag', r => { r.published = true; }],
@@ -167,14 +183,14 @@ for (const [label, options] of [
   ['GET', { method: 'GET', body: undefined }], ['key', { key: 'mutation' }], ['write lifecycle', { read: false }],
   ['binary', { binary: true }], ['alternative success', { statuses: [200, 409] }],
 ]) test(`membership metadata keeps closed search envelope: ${label}`, async t => {
-  const f = await setup(t); for (const path of ['source/log', 'source/tree']) await assert.rejects(f.client.request(path, { method: 'POST', body: 'x=1', ...options }));
+  const f = await setup(t); for (const path of ['source/commit', 'source/tree']) await assert.rejects(f.client.request(path, { method: 'POST', body: 'x=1', ...options }));
   assert.equal(f.calls.length, 0);
 });
 test('metadata support does not admit writes, arbitrary objects or other profiles', async t => {
   const f = await setup(t);
-  for (const path of ['source/apply', 'outcomes', 'source/object', 'source/tree?path=x', 'source/log/../apply']) {
+  for (const path of ['source/apply', 'outcomes', 'source/object', 'source/log', 'source/tree?path=x', 'source/commit/../apply']) {
     await assert.rejects(f.client.request(path, { method: 'POST', body: 'x=1' }));
   }
   const other = new Transport({ href: `${f.selection.endpoint}/ui/pulls/`, cryptoImpl: webcrypto }); await other.connect(token); t.after(() => other.disconnect());
-  await assert.rejects(other.request('source/log', { method: 'POST', body: 'x=1' })); assert.equal(f.calls.length, 0);
+  await assert.rejects(other.request('source/commit', { method: 'POST', body: 'x=1' })); assert.equal(f.calls.length, 0);
 });
