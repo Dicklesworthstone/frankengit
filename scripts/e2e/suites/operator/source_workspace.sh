@@ -56,7 +56,7 @@ for format in sha1 sha256; do
   done
 done
 for format in sha1 sha256; do
-  for property in verification import_custody recovery; do
+  for property in verification import_custody recovery containment_diagnostics; do
     fge_assert_eq "OPERATOR-WORKSPACE-$format-native-bundle-$property" true "$(fact "${format}_native_bundle_cli_$property")" "actual native bundle CLI $property"
   done
 done

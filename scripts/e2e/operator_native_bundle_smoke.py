@@ -1,6 +1,7 @@
 """Actual source-bundle CLIs joined to the existing independent Git fixture."""
 from pathlib import Path
 import json
+import os
 
 from full_bundle_smoke import decode_export
 from patch_smoke import oid
@@ -114,6 +115,63 @@ def run_native_bundle_case(c, home, fmt, source, base, base_tree, objects, files
             and collision["key_digest"] != terminal["key_digest"], "fresh existing-ref import did not canonically refuse")
     canonical(destination)
     c.facts[f"{fmt}_native_bundle_cli_import_custody"] = True
+
+    uncertain, custody = work / "uncertain-node", work / "uncertain-custody"
+    initialize(uncertain)
+    # Explicit test-only observation fault. The real Rust import executes and
+    # exits; only its owner's group-liveness probe is denied. Signals and reaping
+    # remain real. This is not a missing native route or hostile-child sandbox.
+    hook = work / "deny-import-observation.mjs"
+    hook.write_text("""import childProcess from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+let importedPid;
+const spawn = childProcess.spawn, kill = process.kill;
+childProcess.spawn = function (...args) {
+  const child = Reflect.apply(spawn, this, args);
+  if (args[1]?.[0] === 'bundle' && args[1]?.[1] === 'import' && child.pid) {
+    importedPid = child.pid;
+    writeFileSync(new URL('./owner-child.pid', import.meta.url), String(child.pid), { mode: 0o600 });
+  }
+  return child;
+};
+syncBuiltinESMExports();
+process.kill = function (pid, signal) {
+  if (importedPid && pid === -importedPid && signal === 0) {
+    throw Object.assign(new Error('planted liveness observation failure'), { code: 'EPERM' });
+  }
+  return Reflect.apply(kill, this, [pid, signal]);
+};
+""", encoding="utf-8")
+    hook.chmod(0o600)
+    uncertain_args = initial.copy()
+    uncertain_args[uncertain_args.index("--storage") + 1] = uncertain
+    failed = c.node_command(Path("--import"), list(map(str, [hook, ROOT / "scripts" / importer,
+        *uncertain_args, "--recovery-directory", custody, *pins])), 2, error_reply=True)
+    details = failed["details"]
+    require(failed["error"] == "native_import_containment_failed" and details["process_failure"] == {
+        "reason": "native_process_descendants_remaining", "leader_exited": True, "output_closed": True,
+        "process_group": "unknown", "scope": "posix-process-group"}, "CLI erased native owner containment facts")
+    require(details["outcome"] == "unknown_pending" and details["submission_attempted"] is True
+            and details["absence_proves_non_commit"] is False and details["automatic_retry"] is False
+            and details["recovery_directory"] == str(custody)
+            and details["intent_sha256"] == file_sha256(custody / "intent.json"),
+            "containment diagnostics lost retained request identity or claimed rollback")
+    pid = int((work / "owner-child.pid").read_text())
+    dead = False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        dead = True
+    require(dead, "faulted native import child was not actually reaped")
+    canonical(uncertain)
+    before = authority(uncertain)
+    found = operator(importer, ["status", custody, "--trusted-local", "--fg", c.fg,
+        "--intent-sha256", details["intent_sha256"]])
+    require(found["outcome"] == "committed" and found["node_closed"] is True
+            and found["submission_attempted"] is False and authority(uncertain) == before,
+            "original-key lookup failed to resolve an actual committed import after containment ambiguity")
+    c.facts[f"{fmt}_native_bundle_cli_containment_diagnostics"] = True
 
     recovered = work / "recovered.git"
     restore = [bundle, recovered, "--native-fg", c.fg, "--head", REF, "--expect-format", fmt, *pins]
