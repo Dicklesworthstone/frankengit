@@ -59,6 +59,95 @@ def file_tree(fmt: str, files: dict[bytes, tuple[bytes, bytes]], emit) -> tuple[
     return directory(b""), trees
 
 
+def offline_compilers_case(c, home, fmt, source, base, result_tree, candidate, commit_body, expected_objects, oracle):
+    """Consume the shipped offline CLIs' exact outputs in isolated native nodes."""
+    for label, script in (("patch", "fg_source_patch.mjs"), ("refactor", "fg_source_refactor.mjs")):
+        work = home / ("offline-" + label)
+        work.mkdir(mode=0o700)
+        rows = []
+        for path in (EDIT, REMOVE, MODE, CREATE):
+            before = after = None
+            if path in BEFORE:
+                original = work / ("before-" + path.hex())
+                original.write_bytes(BEFORE[path][1])
+                before = {"file": str(original), "blob": oid(fmt, "blob", BEFORE[path][1]), "mode": int(BEFORE[path][0], 8)}
+            if path in AFTER:
+                desired = work / ("after-" + path.hex())
+                desired.write_bytes(AFTER[path][1])
+                after = {"file": str(desired), "mode": int(AFTER[path][0], 8)}
+            rows.append({"path_hex": path.hex(), "before": before, "after": after})
+        if label == "refactor":
+            # Explicit original-coordinate text -> edited binary move, plus the
+            # other edit/mode effects, yields the SAME independently built tree.
+            rows[1]["destination_hex"] = CREATE.hex()
+            rows[1]["after"] = rows[3]["after"]
+            rows.pop()
+        plan = {"schema": "frankengit-source-refactoring-v1" if label == "refactor" else "frankengit-source-replacements-v1",
+                "object_format": fmt, "changes": rows}
+        plan_path, bad_plan, patch = work / "plan.json", work / "bad-plan.json", work / "change.patch"
+        plan_path.write_text(json.dumps(plan))
+        bad = json.loads(json.dumps(plan)); bad["changes"][0]["before"]["blob"] = "0" * (40 if fmt == "sha1" else 64)
+        bad_plan.write_text(json.dumps(bad))
+        inputs = {path: path.read_bytes() for path in work.iterdir()}
+        flag = "--plan-file" if label == "refactor" else "--changes-file"
+        compile_args = ["compile", flag, str(plan_path), "--output", str(patch), "--binary", "literal"]
+        if label == "refactor":
+            compile_args.extend(["--profile", "exact-tree-binary-v1"])
+        wrong = compile_args.copy(); wrong[wrong.index(flag) + 1] = str(bad_plan)
+        refused = c.node_command(ROOT / "scripts" / script, wrong, 2, error_reply=True)
+        require(refused["code"] == "source_replacement_preimage" and not patch.exists(), "wrong independent preimage published an offline patch")
+        compiled = c.node_command(ROOT / "scripts" / script, compile_args)
+        identity = patch.stat().st_ino, file_sha256(patch)
+        require(compiled["patch_sha256"] == identity[1] and compiled["patch_bytes"] == patch.stat().st_size
+                and compiled["source_membership_verified"] is False and compiled["publication_attempted"] is False,
+                "offline compiler changed exact bytes or claimed native authority")
+        if label == "refactor":
+            require(compiled["move_count"] == 1 and compiled["changed_paths"] == 4
+                    and compiled["native_patch_profile"] == "exact-tree-binary-v1", "explicit edited move/profile was lost")
+        refused = c.node_command(ROOT / "scripts" / script, compile_args, 2, error_reply=True)
+        require(refused["code"] == f"source_{label}_destination_exists" and (patch.stat().st_ino, file_sha256(patch)) == identity
+                and all(path.read_bytes() == body for path, body in inputs.items()), "compiler retry overwrote output or changed source/plan bytes")
+        repository, bundle = work / "repository", work / "candidate.bundle"
+        c.run("init", repository, TENANT, REPOSITORY, fmt)
+        c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "offline-" + label + "-import", source)
+        authority = c.run("at", repository, TENANT, REPOSITORY, "latest")
+        prepared = json.loads(c.run("patch", "prepare", repository, TENANT, REPOSITORY, REF, patch, bundle,
+            "--trusted-local", "--profile", "exact-tree-binary-v1", "--workspace-id", "44" * 16,
+            "--expected-base", base, "--expected-result-tree", result_tree, "--author", AUTHOR,
+            "--timestamp", "2", "--message", MESSAGE))
+        require(prepared["node_closed"] is True and prepared["published_to_repository"] is False
+                and prepared["patch_sha256"] == identity[1] and prepared["candidate_commit"] == candidate
+                and prepared["root_tree"] == result_tree and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
+                "native preparation changed source state or independently selected candidate")
+        packed = bundle_objects(bundle.read_bytes(), fmt, base, candidate)
+        effects = {oid(fmt, "blob", AFTER[p][1]) for p in (EDIT, MODE, CREATE)}
+        inventory = {key: value for key, value in expected_objects.items() if value[0] != "blob" or key in effects}
+        require(packed == inventory and packed[candidate] == ("commit", commit_body), "native compiler consumer changed exact candidate objects")
+        oracle("offline-" + label + "-bundle", "bundle", "verify", "../offline-" + label + "/candidate.bundle")
+        apply = ["patch", "apply", repository, TENANT, REPOSITORY, REF, bundle, "--trusted-local", "--principal", PRINCIPAL,
+                 "--key-stdin", "--expected-base", base, "--expected-commit", candidate]
+        key = ("offline-" + label + "-publication\n").encode()
+        terminal = json.loads(c.run(*apply, input_bytes=key))
+        require(terminal["node_closed"] is True and terminal["outcome"] == "committed"
+                and terminal["published_to_repository"] is True and terminal["candidate_commit"] == candidate,
+                "actual compiled patch failed native publication")
+        authority = c.run("at", repository, TENANT, REPOSITORY, "latest")
+        require(json.loads(c.run(*apply, input_bytes=key)) == terminal
+                and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority, "same-key compiler publication replay changed native authority")
+        for path, (mode, body) in AFTER.items():
+            page = json.loads(c.run("show", repository, TENANT, REPOSITORY, "--trusted-local", "--object-format", fmt,
+                "--ref", REF, "--path-hex", path.hex(), "--max-bytes", "4096"))
+            require(page["node_closed"] is True and page["source_commit"] == candidate and page["root_tree"] == result_tree
+                    and page["object_id"] == oid(fmt, "blob", body) and bytes.fromhex(page["bytes_hex"]) == body
+                    and page["kind"] == ("executable" if mode == b"100755" else "file") and page["has_more"] is False,
+                    "canonical compiler result lost source bytes, identity, mode or unselected sibling")
+        directory = json.loads(c.run("tree", repository, TENANT, REPOSITORY, "--trusted-local", "--object-format", fmt,
+            "--ref", REF, "--path", "dir"))
+        require(directory["node_closed"] is True and {bytes.fromhex(row["name_hex"]) for row in directory["entries"]}
+                == {b"edit", b"kept", b"tool"}, "compiled deletion/move left its original path")
+        c.facts[f"{fmt}_offline_{label}_compiler_native_publication"] = True
+
+
 def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     home = c.work / fmt
     home.mkdir(mode=0o700)
@@ -112,6 +201,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(result.returncode == 0, "pinned Git rejected the fixture or candidate bundle")
 
     oracle("fsck", "fsck", "--full", "--strict", "--no-reflogs")
+    offline_compilers_case(c, home, fmt, source, base, result_tree, candidate, commit_body, expected_objects, oracle)
     c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "operator-workspace-import", source)
     initial_index = json.loads(c.run("index", repository, TENANT, REPOSITORY, fmt, REF, "build", "genesis"))
@@ -595,7 +685,8 @@ def main() -> None:
         "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
         "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs",
         "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs",
-        "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs", "scripts/fg_source_patch.mjs",
+        "scripts/fg_source_refactor.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 

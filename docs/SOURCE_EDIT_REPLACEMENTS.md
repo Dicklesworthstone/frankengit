@@ -236,3 +236,15 @@ files, mixed raw paths/modes/empty files, exact byte-limit twins, competing writ
 pre-cancellation and lost stdout. Loopback HTTP tests use native-schema fixtures,
 not Rust `fg`. Rust/native service, full-workspace, release and physical power-loss
 gates have not been run for this delta slice.
+
+The separate `scripts/e2e/suites/operator/source_workspace.sh` campaign invokes
+the actual offline CLI in both Git hash formats and consumes its exact output
+with native `fg patch prepare` and `fg patch apply` in isolated fixture nodes.
+Wrong preimages and occupied outputs refuse; the permitted binary/text/mode,
+creation and deletion patch must produce independently calculated commit/tree
+and blob identities. Separate Rust reads check exact bytes, modes, untouched
+siblings and same-key replay without another authority transition. The campaign
+uses pinned sandboxed Git as a fixture/bundle oracle and records the selected
+prebuilt native digest; a standalone run is bounded to that image. This is
+author-executed integration evidence, not every-entrypoint, independent review,
+full/release, hostile-host or physical-power-loss qualification.
