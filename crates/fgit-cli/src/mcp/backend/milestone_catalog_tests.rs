@@ -23,6 +23,7 @@ fn options() -> Options {
         artifact_root: None,
         agent_token_file: None,
         max_messages: 10,
+        index_maintenance: None,
     }
 }
 struct Catalog(Options);

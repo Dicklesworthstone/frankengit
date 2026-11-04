@@ -83,6 +83,7 @@ impl Fixture {
             artifact_root: None,
             agent_token_file: None,
             max_messages: 128,
+            index_maintenance: None,
         }
     }
 }
@@ -357,6 +358,7 @@ fn grants_identity_and_stopped_intake_do_not_override_canonical_recovery() {
     writer.close().unwrap();
     let mut stopped = NodeTools {
         agent: None,
+        maintenance: None,
         node: OneNode::open_existing(f.config()).unwrap(),
         options: f.options(true, true, false, 0xa3),
     };
@@ -695,6 +697,7 @@ fn explicit_append_survives_independent_edits_and_recovers_once_after_reopen_in_
         // Historical append recovery precedes current service-intake gates.
         let mut stopped = NodeTools {
             agent: None,
+            maintenance: None,
             node: OneNode::open_existing(f.config()).unwrap(),
             options: f.options(true, true, true, 0xa3),
         };

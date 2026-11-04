@@ -176,6 +176,31 @@ single-profile HTTP entrypoints accept a `MaintenanceConfig` or a group. The
 also compose a group with the native workflow controller; the original
 single-profile workflow methods retain their signatures.
 
+## Maintain indexes while serving MCP
+
+`fg mcp` and `fg-mcp` accept the same explicit profile, format, ref, progress,
+interval and attempt-timeout options. The
+[MCP launch guide](MCP_READ_ONLY_SERVER.md#keep-source-indexes-current-during-an-mcp-session)
+shows a complete sponsored-agent example. The operator must enable source or
+agent-context reads and pin the repository incarnation. These controllers are
+independent of remote tool permissions; read calls never create or renew them.
+
+The shared `fgit_node::SourceIndexService` owns the existing durable controllers
+for HTTP and MCP. `start` authenticates all configured progress owners and keeps
+their launch gates closed; `activate` releases them after service readiness;
+`finished` observes a terminal child; `finish` stops and joins the complete group
+and returns its maintenance receipts before parent-node shutdown.
+The parent runtime reserves room for the children and at least one request lane.
+This owner adds no index publication, checkpoint, recovery or scheduling protocol.
+
+MCP activation follows successful initialization-response output and flush.
+Initial EOF or output failure cannot start indexing. Subsequent EOF, framing or
+output failure, and message exhaustion drain original active attempts before
+node shutdown. A terminal controller requests sibling cancellation even while
+stdin is idle; the synchronous protocol observes the failure at its next I/O
+boundary. Native cancellation still polls each original future through its
+terminal result, preserving pending candidates and checkpoint floors.
+
 ## Candidate recording BEFORE publication
 
 Maintenance now calls `reconcile_source_index_guarded_local_in`, which carries

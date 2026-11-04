@@ -230,6 +230,7 @@ impl Fixture {
             artifact_root: None,
             agent_token_file: None,
             max_messages: 64,
+            index_maintenance: None,
         };
         options.writes.pulls = true;
         let mut backend = NodeTools::open(options.clone()).unwrap();

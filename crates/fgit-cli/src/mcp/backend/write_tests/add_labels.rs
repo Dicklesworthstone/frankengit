@@ -111,6 +111,7 @@ fn label_additions_recover_without_readding_labels_removed_by_later_replacement(
 
         let mut stopped = NodeTools {
             agent: None,
+            maintenance: None,
             node: OneNode::open_existing(fixture.config()).unwrap(),
             options: fixture.options(true, true, true, 0xa3),
         };

@@ -488,6 +488,14 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+MCP index maintenance is a separate local-operator launch responsibility. It
+requires an exact incarnation, explicit ref/profile scope and private progress
+ownership; neither a source credential nor a tool call starts or configures it.
+All controller launch gates stay closed until initialization output is flushed.
+Exit and output failure stop and join the existing controllers before node
+shutdown, preserving original deadlines, checkpoint floors and unresolved
+publication candidates. Background failure signals sibling cancellation and is
+reported at the next synchronous stdio boundary; idle input is not preempted.
 Explicit `current-native-v1` index reuse independently authenticates current
 visibility and native commit/tree identity. Each immutable index retains its
 original source positions and generations; those old positions cannot replace

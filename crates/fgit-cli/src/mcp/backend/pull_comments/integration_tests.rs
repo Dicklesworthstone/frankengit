@@ -59,6 +59,7 @@ impl Fixture {
             artifact_root: None,
             agent_token_file: None,
             max_messages: 64,
+            index_maintenance: None,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -300,6 +301,7 @@ fn append_comments_keep_one_original_outcome_across_other_comments_and_stopped_i
         node.shutdown().unwrap();
         let mut stopped = NodeTools {
             agent: None,
+            maintenance: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };
@@ -396,6 +398,7 @@ fn comments_are_durable_independent_and_identical_retries_survive_stopped_intake
         node.shutdown().unwrap();
         let mut stopped = NodeTools {
             agent: None,
+            maintenance: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };

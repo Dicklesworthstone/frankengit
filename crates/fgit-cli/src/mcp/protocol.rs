@@ -65,6 +65,15 @@ impl ToolError {
 /// The historical internal trait name is retained for the existing read adapters.
 /// The immutable registry classifies mutations; hints never replace authorization.
 pub trait ReadTools {
+    /// Activate locally configured services only after initialization output is
+    /// acknowledged by the transport. The default profile has no background work.
+    fn service_ready(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    /// Observe owned-service failure at each synchronous transport boundary.
+    fn service_checkpoint(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn tools(&self) -> Vec<Tool>;
     fn call(&mut self, name: &str, arguments: &Object) -> Result<Value, ToolError>;
     fn is_mutation(&self, _name: &str) -> bool {
@@ -448,11 +457,15 @@ pub fn serve(
     }
     let mut server = Server::new(backend).map_err(str::to_owned)?;
     for _ in 0..max_messages {
+        backend.service_checkpoint().map_err(|_| "MCP background service stopped; session closed; prior mutations may have committed")?;
         let message = read_message(reader).map_err(|_| "MCP input failed or exceeded its framing bound; prior mutations may have committed")?;
+        backend.service_checkpoint().map_err(|_| "MCP background service stopped; session closed; prior mutations may have committed")?;
         let Some(message) = message else {
             return Ok(());
         };
+        let before = server.state;
         if let Some(response) = server.receive(backend, &message) {
+            let initialized = before == State::New && server.state == State::AwaitingInitialized;
             let emitted = (|| {
                 backend.response_checkpoint(0).map_err(|_| {
                     "MCP response authority expired; session closed; submitted mutations may have committed"
@@ -466,6 +479,9 @@ pub fn serve(
             })();
             backend.finish_response();
             emitted?;
+            if initialized {
+                backend.service_ready().map_err(|_| "MCP background service activation failed after initialization; session closed")?;
+            }
         }
     }
     Ok(())
@@ -817,3 +833,6 @@ mod protection_tests;
 
 #[cfg(test)]
 mod agent_response_tests;
+
+#[cfg(test)]
+mod service_tests;

@@ -255,6 +255,7 @@ fn seeded(format: GitHashAlgorithm, indexes: bool) -> (Scratch, NodeTools) {
         artifact_root: None,
         agent_token_file: None,
         max_messages: 16,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend)

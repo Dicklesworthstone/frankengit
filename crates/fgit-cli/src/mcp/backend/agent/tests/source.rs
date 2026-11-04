@@ -6,6 +6,7 @@ use fgit_forge::preparation::MergeMetadata;
 use fgit_identity::agent::{AgentCredentialId, SOURCE_READ};
 use fgit_types::{DecisionOutcome, GitOid, RefName};
 
+mod maintenance;
 mod revalidated;
 
 const REFERENCE: &str = "refs/heads/source";

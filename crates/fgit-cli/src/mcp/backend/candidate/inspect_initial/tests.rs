@@ -218,6 +218,7 @@ fn empty(format: GitHashAlgorithm) -> (Scratch, NodeTools) {
         artifact_root: None,
         agent_token_file: None,
         max_messages: 32,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend)

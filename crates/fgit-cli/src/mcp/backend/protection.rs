@@ -113,6 +113,7 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
             artifact_root: None,
             agent_token_file: None,
             max_messages: maximum as usize,
+            index_maintenance: None,
             issues: false,
             discussions: false,
             pulls: false,

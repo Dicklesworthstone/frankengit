@@ -174,6 +174,7 @@ fn native_queue_lifecycle_and_atomic_landing_cross_real_mcp_without_other_grants
         // and outcome recovery still resolve before the native intake gate.
         let mut backend = NodeTools {
             agent: None,
+            maintenance: None,
             node: fgit_node::OneNode::open_existing(fixture.config()).unwrap(),
             options: fixture.options.clone(),
         };

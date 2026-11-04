@@ -163,6 +163,7 @@ impl Fixture {
             outcomes: true,
             principal: Some(actor()),
             max_messages: 64,
+            index_maintenance: None,
         };
         let (mut node, _) = OneNode::init(configuration(&options)).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();

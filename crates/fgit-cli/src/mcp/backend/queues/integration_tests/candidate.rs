@@ -238,6 +238,7 @@ fn divergent_candidate_lands_atomically_and_replays_without_upload_or_current_in
         backend.close().unwrap();
         let mut backend = NodeTools {
             agent: None,
+            maintenance: None,
             node: fgit_node::OneNode::open_existing(fixture.config()).unwrap(),
             options: fixture.options.clone(),
         };

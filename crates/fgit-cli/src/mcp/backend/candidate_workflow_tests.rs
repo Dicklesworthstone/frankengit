@@ -94,6 +94,7 @@ impl Fixture {
             artifact_root: None,
             agent_token_file: None,
             max_messages: 128,
+            index_maintenance: None,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -443,6 +444,7 @@ fn missing_review_refusal_exact_approval_coupled_merge_and_stopped_recovery_in_b
         merger.close().unwrap();
         let mut stopped = NodeTools {
             agent: None,
+            maintenance: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };

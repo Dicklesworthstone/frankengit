@@ -37,6 +37,9 @@ use fgit_types::{
 };
 
 pub(super) struct NodeTools {
+    // Field order is the unwind backstop: stop/join children before dropping
+    // the parent runtime. Normal shutdown consumes their terminal results.
+    maintenance: Option<fgit_node::SourceIndexService>,
     node: OneNode,
     options: Options,
     agent: Option<agent::Profile>,
@@ -108,16 +111,57 @@ impl NodeTools {
                 Err(_) => Err(format!("{error}; MCP node shutdown also failed")),
             };
         }
+        let maintenance = match options.index_maintenance.clone() {
+            Some(group) => match fgit_node::SourceIndexService::start(&node, group, None) {
+                Ok(Some(service)) => Some(service),
+                result => {
+                    let detail = match result {
+                        Err(error) => error.to_string(),
+                        _ => "maintenance stopped during startup".into(),
+                    };
+                    let error = format!("MCP index maintenance startup failed: {detail}");
+                    return match node.shutdown() {
+                        Ok(()) => Err(error),
+                        Err(_) => Err(format!("{error}; MCP node shutdown also failed")),
+                    };
+                }
+            },
+            None => None,
+        };
         Ok(Self {
+            maintenance,
             node,
             options,
             agent,
         })
     }
-    pub(super) fn close(self) -> Result<(), String> {
-        self.node.shutdown().map_err(|_| {
-            "MCP node shutdown failed; do not infer rollback of submitted mutations".into()
-        })
+    pub(super) fn close(mut self) -> Result<(), String> {
+        // An EOF or failed response does not abandon an original candidate.
+        // Signal/drain/join all children before closing the parent database/runtime.
+        let maintenance = self
+            .maintenance
+            .take()
+            .map(|service| service.finish())
+            .transpose()
+            .map_err(|error| format!("MCP index maintenance drain failed: {error}"));
+        let shutdown = self.node.shutdown().map_err(|_| {
+            "MCP node shutdown failed; do not infer rollback of submitted mutations".to_owned()
+        });
+        match (maintenance, shutdown) {
+            (Ok(_), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+        }
+    }
+    fn maintenance_checkpoint(&self) -> Result<(), &'static str> {
+        if self
+            .maintenance
+            .as_ref()
+            .is_some_and(fgit_node::SourceIndexService::finished)
+        {
+            return Err("index_maintenance_stopped");
+        }
+        Ok(())
     }
     fn header(&self, head: RepositoryAuthorityHeadId) -> Object {
         let Value::Object(fields) = object([
@@ -271,6 +315,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         outcomes: true,
         principal: Some(fgit_types::PrincipalId::from_bytes([0x44; 16])),
         max_messages: 1,
+        index_maintenance: None,
     };
     let mut names: Vec<&'static str> = tools_for_options(&full_options)
         .into_iter()
@@ -281,12 +326,25 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
 }
 
 impl ReadTools for NodeTools {
+    fn service_ready(&mut self) -> Result<(), &'static str> {
+        self.maintenance_checkpoint()?;
+        if let Some(service) = &mut self.maintenance {
+            service
+                .activate()
+                .map_err(|_| "index_maintenance_activation_failed")?;
+        }
+        Ok(())
+    }
+    fn service_checkpoint(&self) -> Result<(), &'static str> {
+        self.maintenance_checkpoint()
+    }
     fn begin_message(&mut self) {
         if let Some(profile) = &mut self.agent {
             profile.response = None;
         }
     }
     fn response_checkpoint(&self, output_bytes: u64) -> Result<(), &'static str> {
+        self.maintenance_checkpoint()?;
         if let Some(profile) = &self.agent {
             agent::response_checkpoint(profile, output_bytes)?;
         }
@@ -323,6 +381,7 @@ impl ReadTools for NodeTools {
                 == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        self.maintenance_checkpoint().map_err(ToolError::failed)?;
         if self.options.agent_token_file.is_some() {
             return agent::call(self, name, args);
         }

@@ -155,6 +155,7 @@ impl Fixture {
             principal: None,
             agent_token_file: Some(root.join("agent.token")),
             max_messages: 256,
+            index_maintenance: None,
         };
         private_token(options.agent_token_file.as_ref().unwrap(), &token(0xaa));
         let config = config(&options);

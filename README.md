@@ -334,6 +334,11 @@ Git publication, reviews, merges and administration remain outside this profile.
 credentials. Its independent `--allow-source` and `--allow-agent-context` ceilings
 expose current source retrieval and authenticated context while preserving the
 actual agent/sponsor and original request lifetime through response output.
+An explicitly configured MCP process can also own the existing lexical and
+symbol index-maintenance workers, allowing its indexed tools to catch up after
+code changes. Workers start after successful initialization output and drain
+before node shutdown; [MCP maintenance options](docs/MCP_READ_ONLY_SERVER.md#keep-source-indexes-current-during-an-mcp-session)
+remain independent of every tool and credential grant.
 For Initial, source-context and agent-context reads, explicit
 `index_source=current-native-v1` reuses existing indexes after metadata-only
 changes while retaining their original provenance and checking current visible

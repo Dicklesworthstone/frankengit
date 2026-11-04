@@ -579,6 +579,7 @@ fn mcp_mutation_annotations_notifications_and_stopped_intake_preserve_outcome_se
             node,
             options,
             agent: None,
+            maintenance: None,
         },
         read: false,
         write: true,

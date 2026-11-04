@@ -110,6 +110,7 @@ fn real_mcp_reads_reopened_sha1_and_sha256_nodes_without_publishing() {
             artifact_root: None,
             agent_token_file: None,
             max_messages: 16,
+            index_maintenance: None,
         })
         .unwrap();
         let mut server = Server::new(&backend).unwrap();
@@ -324,6 +325,7 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
             artifact_root: None,
             agent_token_file: None,
             max_messages: 32,
+            index_maintenance: None,
         })
         .unwrap();
         let mut server = Server::new(&backend).unwrap();

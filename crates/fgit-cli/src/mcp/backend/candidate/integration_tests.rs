@@ -104,6 +104,7 @@ fn setup(format: GitHashAlgorithm) -> (Scratch, NodeTools, GitOid) {
         artifact_root: None,
         agent_token_file: None,
         max_messages: 32,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend, plan.commit)

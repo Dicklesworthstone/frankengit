@@ -70,6 +70,7 @@ impl Fixture {
                 outcomes: false,
                 principal: None,
                 max_messages: 32,
+                index_maintenance: None,
             },
             root,
         }

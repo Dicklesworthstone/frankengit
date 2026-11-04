@@ -1,12 +1,33 @@
 //! Explicit operator or sponsored-agent MCP process; no ambient repository discovery.
 mod backend;
 mod json;
+mod maintenance;
 mod protocol;
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes (--allow-issues|--allow-discussions)]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Discussion reads and writes each require their own\nexplicit grant; issue access never implies discussion access.\nRead groups, issue/discussion/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require the selected kind's --allow-issues or --allow-discussions\ngrant plus the launch-bound principal and incarnation; kind defaults to issue.\nNotification writes additionally require --allow-notification-writes; content-write\npermission does not grant them. Read acknowledgements supply an explicit observed\nthread prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+
+const MAINTENANCE_USAGE: &str = "Optional operator-owned index maintenance for either profile:
+  --expected-incarnation <id> (--allow-source|--allow-agent-context)
+  --index-profile lexical|symbols|both --index-format sha1|sha256
+  --index-state init|resume --index-state-dir <existing-private-directory>
+  [--index-symbol-state-dir <separate-private-directory>] (required only for both)
+  --index-ref <full-ref> [--index-ref <full-ref> ...]
+  [--index-interval-secs <1..3600>] [--index-attempt-timeout-secs <1..3600>]
+
+Index format must equal --object-format. Use 1-32 unique refs and existing 0700
+Unix progress directories. Interval defaults to 5 seconds; attempt ceiling to
+300 seconds, met with the inherited background budget. Resume preserves the
+exact profile/ref/namespace binding and unresolved original candidates.
+These launch options grant the local operator maintenance responsibility; no
+MCP tool or source credential grants index writes. Read scopes remain independent.
+All progress owners are acquired before serving; index attempts start only after
+the initialization response is successfully flushed. Readiness does not promise
+fresh indexes. EOF, framing/output failure and the message bound stop and join
+all controllers before node shutdown. A failed controller stops its siblings;
+blocking stdio reports the failure at its next input/output boundary.";
 
 const AGENT_USAGE: &str = "Sponsored-agent source and metadata profile:
   fg-mcp <storage-root> <tenant-id> <repository-id>
@@ -98,6 +119,7 @@ struct Options {
     principal: Option<PrincipalId>,
     agent_token_file: Option<PathBuf>,
     max_messages: usize,
+    index_maintenance: Option<fgit_node::index_maintenance::MaintenanceGroup>,
 }
 impl Options {
     fn validate_access(&self) -> Result<(), String> {
@@ -112,6 +134,21 @@ impl Options {
             || self.outcomes)
         {
             return Err("at least one explicit MCP grant is required".into());
+        }
+        if let Some(group) = &self.index_maintenance {
+            if !cfg!(unix) {
+                return Err("MCP index maintenance requires Unix progress ownership".into());
+            }
+            if !(self.source || self.agent_context) || self.incarnation.is_none() {
+                return Err("MCP index maintenance requires --expected-incarnation and an independent --allow-source or --allow-agent-context grant".into());
+            }
+            if group
+                .configs()
+                .iter()
+                .any(|config| config.format() != self.format)
+            {
+                return Err("MCP index format must match --object-format".into());
+            }
         }
         if let Some(path) = &self.agent_token_file {
             if path.as_os_str().is_empty() || self.incarnation.is_none() {
@@ -186,7 +223,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     }
     if arguments == ["--help"] {
         eprintln!(
-            "{USAGE}\n\n{AGENT_USAGE}\n\nSeparate policy-inspection profile with independent write/recovery grants: fg-mcp --protection-admin --help"
+            "{USAGE}\n\n{AGENT_USAGE}\n\n{MAINTENANCE_USAGE}\n\nSeparate policy-inspection profile with independent write/recovery grants: fg-mcp --protection-admin --help"
         );
         return Ok(());
     }
@@ -207,8 +244,8 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     }
 }
 fn parse_options(arguments: &[String]) -> Result<Options, String> {
-    if arguments.len() < 3 || arguments.len() > 33 {
-        return Err(format!("{USAGE}\n\n{AGENT_USAGE}"));
+    if arguments.len() < 3 || arguments.len() > 128 {
+        return Err(format!("{USAGE}\n\n{AGENT_USAGE}\n\n{MAINTENANCE_USAGE}"));
     }
     if arguments.iter().any(|s| s.len() > 4096) || arguments[0].is_empty() {
         return Err("invalid bounded MCP arguments".into());
@@ -216,10 +253,23 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
     let tenant = TenantId::from_hex(&arguments[1]).map_err(|_| "invalid tenant ID")?;
     let repository = RepositoryId::from_hex(&arguments[2]).map_err(|_| "invalid repository ID")?;
     let mut flags = BTreeMap::new();
+    let mut index_refs = Vec::new();
     let mut at = 3;
     while at < arguments.len() {
         let name = arguments[at].as_str();
         at += 1;
+        if name == "--index-ref" {
+            let value = arguments.get(at).ok_or("missing index reference")?;
+            at += 1;
+            if index_refs.len() == 32 {
+                return Err("index maintenance accepts at most 32 explicit references".into());
+            }
+            index_refs.push(
+                fgit_types::RefName::try_new(value.as_bytes())
+                    .map_err(|_| "invalid index reference")?,
+            );
+            continue;
+        }
         let value = match name {
             "--trusted-local"
             | "--allow-issues"
@@ -244,7 +294,14 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             | "--max-messages"
             | "--principal"
             | "--artifact-root"
-            | "--agent-token-file" => {
+            | "--agent-token-file"
+            | "--index-profile"
+            | "--index-format"
+            | "--index-state"
+            | "--index-state-dir"
+            | "--index-symbol-state-dir"
+            | "--index-interval-secs"
+            | "--index-attempt-timeout-secs" => {
                 let value = arguments.get(at).ok_or("missing option value")?;
                 at += 1;
                 value.as_str()
@@ -314,6 +371,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
             .get("--agent-token-file")
             .map(|value| PathBuf::from(*value)),
         max_messages: maximum as usize,
+        index_maintenance: maintenance::parse(&flags, index_refs, format)?,
     };
     options.validate_access()?;
     if options.queues.mutation()

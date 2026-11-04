@@ -95,6 +95,64 @@ positions and generations remain separate evidence. The default strict profile
 is unchanged; missing indexes and actual source changes still refuse. The mode
 uses the existing read grants and supports raw-path-prefix context selection.
 
+## Keep source indexes current during an MCP session
+
+An operator can explicitly attach the existing lexical and Rust-symbol
+maintenance controllers to `fg mcp` or `fg-mcp`. This lets indexed source and
+agent-context tools catch up after real source changes without a separate HTTP
+service or finite worker invocation. The controllers remain local background
+work; no MCP tool starts an index build or configures their scope.
+
+For a sponsored SHA-1 repository, create separate private progress directories
+and launch with both profiles:
+
+```sh
+mkdir -m 700 "$LEXICAL_PROGRESS_DIR" "$SYMBOL_PROGRESS_DIR"
+fg mcp "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" \
+  --agent-token-file "$AGENT_TOKEN_FILE" \
+  --expected-incarnation "$INCARNATION_HEX" \
+  --allow-source --allow-agent-context --object-format sha1 \
+  --index-profile both --index-format sha1 --index-state init \
+  --index-state-dir "$LEXICAL_PROGRESS_DIR" \
+  --index-symbol-state-dir "$SYMBOL_PROGRESS_DIR" \
+  --index-ref refs/heads/main --index-interval-secs 5 \
+  --index-attempt-timeout-secs 300
+```
+
+The credential still needs `source-read`; these launch options grant it no new
+operation. Trusted-local launches use the same maintenance options and retain
+their existing principal requirements for agent context. Either source or
+agent-context reads must be enabled, and maintenance always requires the exact
+repository incarnation. `--index-format` must match `--object-format`.
+
+Select `lexical`, `symbols`, or `both`. A single profile uses only
+`--index-state-dir`; `both` requires the separate symbol directory. Repeat
+`--index-ref` for at most 32 unique full refs. Interval and attempt timeout each
+accept 1–3600 whole seconds, defaulting to 5 and 300. Every attempt also retains
+the inherited background-controller timeout and other resource bounds.
+
+All progress directories must already exist with the Unix private-directory
+ownership required by the [index worker](SOURCE_INDEX_WORKER.md). Use `resume`
+with the same namespace, profiles, ref set and directories after initialization.
+Startup can retain initialized progress even if no index attempt ran; inspect
+that progress and resume it rather than clearing it or repeating `init` blindly.
+Pending original candidates and generation floors survive clean stop and restart.
+
+The server acquires every progress owner before serving, but holds the first
+index attempts until its initialization response has been fully written,
+flushed and checked. EOF before initialization or initialization-output failure
+therefore drains without an index attempt. Readiness does not promise freshness: both generations
+publish independently, and a required-symbol query can refuse while they catch
+up. Once current, unchanged-source observations do not create new generations.
+
+EOF, framing/output failure and the message limit request stop and join every
+controller before the parent node shuts down. A terminal controller signals its
+siblings through their existing cancellation path. Blocking stdio reports that
+failure at its next input/output boundary; an idle stdin read is not interrupted.
+An interrupted or failed response does not prove rollback of a submitted mutation
+or index candidate. The runtime must have capacity for the maintenance children
+and one request lane; insufficient capacity refuses before worker startup.
+
 ## Issue read tools
 
 `frankengit_issue_list` accepts optional `limit` (integer, 1..20, default 5),

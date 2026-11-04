@@ -21,9 +21,12 @@ pub mod agent_credentials;
 pub mod agent_journal;
 
 /// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
-/// service lane. The standalone worker and HTTP service share this controller.
+/// service lane. Standalone, HTTP and MCP services share this controller.
 #[path = "bin/fg-index-maintain.rs"]
 pub mod index_maintenance;
+
+mod source_index_service;
+pub use source_index_service::SourceIndexService;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
