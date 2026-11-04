@@ -188,7 +188,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/', '/ui/artifacts/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -267,13 +267,14 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
     if (typeof checkEvidenceOnly !== 'boolean' || (checkEvidenceOnly && pageSuffix !== '/ui/pulls/')) fail('Invalid workflow evidence browser profile.');
     this.#checkEvidence = checkEvidenceOnly;
     this.#queues = pageSuffix === '/ui/queues/';
+    this.#artifacts = pageSuffix === '/ui/artifacts/';
     this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#rebase = pageSuffix === '/ui/rebase/'; this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
@@ -285,7 +286,7 @@ export class Transport {
   async connect(token, requiredFingerprint = null, recovery = null) {
     this.disconnect(); const epoch = this.#epoch;
     const selected = recovery === null ? null : recoverySelection(recovery);
-    if (selected && (this.#search || this.#checkEvidence)) fail('This read-only connection has no outcome recovery profile.');
+    if (selected && (this.#search || this.#checkEvidence || this.#artifacts)) fail('This read-only connection has no outcome recovery profile.');
     // Sponsored credentials enter only the existing closed source-read profile.
     // Mutation, recovery and workflow-evidence profiles retain ordinary tokens.
     if (typeof token !== 'string' || !(/^[0-9a-f]{64}$/.test(token) ||
@@ -301,7 +302,7 @@ export class Transport {
   disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; this.#recovery = null; }
   restrictToRecovery(selection) {
     const selected = recoverySelection(selection);
-    if (!this.connected || this.#search || this.#checkEvidence || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
+    if (!this.connected || this.#search || this.#checkEvidence || this.#artifacts || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
     if (this.#recovery && (selected.key !== this.#recovery.key || selected.principal !== this.#recovery.principal)) fail('Reconnect explicitly before selecting another recovery identity.');
     // Receipt restoration invokes this only after verifying its original key.
     this.#recovery = selected;
@@ -318,6 +319,14 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#artifacts) {
+      const content = /^artifacts\/[0-9a-f]{64}\/content$/.test(path);
+      if (!/^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path) || method !== 'GET' ||
+          body !== undefined || key !== undefined || read !== true || binary !== content ||
+          contentType !== 'application/x-www-form-urlencoded' || !Array.isArray(statuses) ||
+          statuses.length !== 1 || statuses[0] !== 200) fail('Artifacts are a closed, bodyless, read-only profile.');
+      integer(maximum, 'artifact response limit', content ? 0 : 1, content ? 16 * 1024 * 1024 : 16 * 1024);
+    }
     if (this.#queues) {
       const list = /^queues(?:\?[^#]*)?$/.test(path);
       const selected = /^(?:queues|pulls)\/[1-9][0-9]*(?:\?[^#]*)?$/.test(path);
@@ -393,7 +402,9 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#queues
+    const allowed = this.#artifacts
+      ? /^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path)
+      : this.#queues
       ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\?[^#]*)?|outcomes)$/.test(path)
       : this.#checkEvidence
       ? /^pulls\/[1-9][0-9]*\/checks\/evidence\?[^#]+$/.test(path)
@@ -418,7 +429,7 @@ export class Transport {
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
-    const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
+    const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#artifacts && binary ? 'application/octet-stream' : this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
     if (body !== undefined) headers['Content-Type'] = contentType;
     if (key) headers['Idempotency-Key'] = key;
     let response;
@@ -430,6 +441,7 @@ export class Transport {
       if (response.redirected || (response.url && response.url !== url.href)) fail('API redirect refused.');
       if (!statuses.includes(response.status)) {
         const error = apiError(response.status);
+        if (this.#artifacts && response.status === 404) error.message = 'Artifact or repository unavailable.';
         // Only this closed read endpoint exposes a small diagnostic code. Never
         // render server prose, accept an error as a result, or broaden statuses.
         if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial', 'source/context-initial'].includes(path) && response.status === 409
@@ -448,13 +460,16 @@ export class Transport {
       }
       const type = response.headers.get('Content-Type') ?? '';
       if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
+      if (this.#artifacts && (response.headers.get('X-Content-Type-Options') !== 'nosniff' ||
+          (binary && (type !== 'application/octet-stream' || response.headers.get('Content-Disposition') !==
+            `attachment; filename="artifact-${path.split('/')[1]}"`)))) fail('Expected inert native artifact response headers.');
       const bytes = await readBytes(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
       const value = binary ? bytes : json(bytes);
       if (recovery && principal(record(value).principal_id) !== recovery.principal) fail('Recovery credential does not identify the selected original principal. Outcome remains unknown.');
       return { status: response.status, type, value,
         ...(capturedHeaders.length ? { headers: Object.fromEntries(capturedHeaders.map(name => [name, response.headers.get(name)])) } : {}) };
-    } catch (error) { if (epoch === this.#epoch && error.status === 401) this.disconnect(); throw error; }
+    } catch (error) { if (epoch === this.#epoch && (error.status === 401 || (this.#artifacts && error.status === 403))) this.disconnect(); throw error; }
     finally {
       clearTimeout(timer); this.#all.delete(controller); this.#reads.delete(controller);
       if (response?.body && !response.body.locked) cancelBody(response.body);

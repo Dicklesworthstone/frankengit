@@ -8,6 +8,8 @@ mod pulls;
 mod queues;
 
 mod activity;
+#[cfg(target_os = "linux")]
+mod artifacts;
 mod branches;
 mod export_verify;
 mod history;
@@ -132,6 +134,10 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    #[cfg(target_os = "linux")]
+    if artifacts::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
     if discussions::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }
