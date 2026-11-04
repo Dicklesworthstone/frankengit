@@ -1,7 +1,7 @@
 //! One historical change, through the native replay planner and ordinary
 //! single-parent candidate workflow. A replay never admits or stages objects.
-mod input;
-mod output;
+pub(super) mod input;
+pub(super) mod output;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -73,7 +73,7 @@ const fn kind(value: ConflictKind) -> &'static str {
         ConflictKind::AttributesRequireDriver => "attributes_require_driver",
     }
 }
-pub(super) fn conflict(
+pub(in super::super) fn conflict(
     value: &MergeConflict,
     format: GitHashAlgorithm,
     max_path: usize,
@@ -103,7 +103,7 @@ const fn choice_name(choice: ResolutionKind) -> &'static str {
         ResolutionKind::File => "file",
     }
 }
-pub(super) fn receipts(
+pub(in super::super) fn receipts(
     requested: &[ConflictResolution],
     observed: &[ResolvedPath],
     format: GitHashAlgorithm,

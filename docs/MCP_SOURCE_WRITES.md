@@ -117,7 +117,8 @@ including with an empty pack; `expected_candidate == onto` is permitted.
 The original one-commit workspace publisher retains its own contract.
 
 Obtain and independently inspect the complete artifact using the
-[native rebase workflow](NATIVE_LINEAR_REBASE.md) or
+[complete MCP rebase workflow](MCP_SOURCE_REBASE.md),
+[native rebase workflow](NATIVE_LINEAR_REBASE.md), or
 [rebase inspection API](SOURCE_REBASE_INSPECTION_HTTP.md). Preparation and an
 inspection report do not grant publication or bypass protection. The mutation
 uses ordinary atomic receive admission, current policy, visibility and quota.

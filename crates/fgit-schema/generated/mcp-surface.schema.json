@@ -3505,7 +3505,7 @@
     },
     "frankengit_source_candidate": {
       "title": "frankengit_source_candidate",
-      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_replay and resolve_replay apply one exact cherry-pick or revert through the native path-v1 planner, preserve the target as sole parent, require the original snapshot for conflict resolution, and return bounded handoffs to the existing inspector and source publisher. Replay requires source read and remains outside the sponsored-agent profile. Queue preparation additionally requires source, PR and queue read and constructs the exact canonical queue-head two-parent candidate.",
+      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. Queue preparation additionally requires PR and queue read.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3513,7 +3513,7 @@
           "properties": {
             "operation": {
               "type": "string",
-              "description": "Candidate operation selector (prepare_patch, prepare_initial, inspect, inspect_initial, prepare_pull_merge, inspect_pull_merge, resolve_pull_merge, prepare_queue_merge, prepare_replay, resolve_replay).",
+              "description": "Candidate operation selector (prepare_patch, prepare_initial, inspect, inspect_initial, prepare_pull_merge, inspect_pull_merge, resolve_pull_merge, prepare_queue_merge, prepare_replay, resolve_replay, prepare_rebase, resolve_rebase, inspect_rebase).",
               "x-classification": "selector_position",
               "maxLength": 64
             },
@@ -3525,7 +3525,7 @@
             },
             "expected_head": {
               "type": "string",
-              "description": "Exact authority snapshot token pin. resolve_replay requires the original preparation snapshot; it is optional for prepare_replay and other supported candidate reads.",
+              "description": "Exact authority snapshot token pin. resolve_replay and resolve_rebase require the original preparation snapshot; optional for other supported candidate reads.",
               "x-classification": "selector_position",
               "maxLength": 140
             },
@@ -3552,10 +3552,10 @@
             },
             "profile": {
               "type": "string",
-              "description": "Required for prepare_replay and resolve_replay: explicit path-v1 native single-commit replay profile.",
+              "description": "Required for replay: path-v1. Required for prepare_rebase, resolve_rebase and inspect_rebase: linear-v1.",
               "x-classification": "selector_position",
               "maxLength": 16,
-              "pattern": "^path-v1$"
+              "pattern": "^(path-v1|linear-v1)$"
             },
             "direction": {
               "type": "string",
@@ -3586,7 +3586,7 @@
             },
             "expected_source": {
               "type": "string",
-              "description": "Exact current source branch tip. The selected historical replay commit must be reachable from this tip.",
+              "description": "Exact current source branch tip. Authorizes historical replay selection; for rebase it ends the original suffix and is the later publication lease.",
               "x-classification": "selector_position",
               "maxLength": 64,
               "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
@@ -3631,28 +3631,106 @@
             },
             "max_commits": {
               "type": "integer",
-              "description": "Optional replay history-commit ceiling from 1 through 4096; default 4096.",
+              "description": "Optional native history-commit ceiling: replay 1 through 4096, default 4096; rebase 1 through 256, default 256.",
               "x-classification": "selector_position"
             },
             "max_edges": {
               "type": "integer",
-              "description": "Optional replay parent-edge ceiling from 1 through 16384; default 16384.",
+              "description": "Optional replay or rebase parent-edge ceiling from 1 through 16384; default 16384.",
               "x-classification": "selector_position"
             },
             "max_tree_entries": {
               "type": "integer",
-              "description": "Optional replay tree-entry ceiling from 1 through 100000; default 100000.",
+              "description": "Optional replay or rebase tree-entry ceiling from 1 through 100000; default 100000.",
               "x-classification": "selector_position"
             },
             "max_preparation_bytes": {
               "type": "integer",
-              "description": "Optional replay generated/packed expanded-byte ceiling from 1 through 1048576; default 262144. The separate MCP bundle cap remains 24576 bytes.",
+              "description": "Optional replay or rebase generated/packed expanded-byte ceiling from 1 through 1048576; default 262144. The separate MCP bundle cap remains 24576 bytes.",
               "x-classification": "selector_position"
             },
             "resolutions": {
               "type": "array",
-              "description": "Required only for resolve_replay and resolve_pull_merge: every and only actual conflict, at most 64 choices, with 24 KiB aggregate decoded paths and regular-file bytes. Empty file chunks=[] is distinct from deletion.",
+              "description": "Required for explicit resolution. Replay and pull merge use path choices; rebase uses original-commit-bound rows {original, paths}. At most 64 paths and 24 KiB aggregate decoded paths plus regular-file bytes across the whole series. Empty file chunks=[] is distinct from deletion.",
               "x-classification": "untrusted_content"
+            },
+            "onto_reference": {
+              "type": "string",
+              "description": "Distinct visible onto branch for all rebase operations; exactly one onto reference encoding is required.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "onto_reference_hex": {
+              "type": "string",
+              "description": "Lossless onto branch bytes, alternative to onto_reference.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_onto": {
+              "type": "string",
+              "description": "Exact current onto tip, the new series first parent and sole bundle prerequisite.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "upstream": {
+              "type": "string",
+              "description": "Required for rebase preparation/resolution: exclusive original ancestor selecting the entire linear suffix ending at expected_source.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "empty": {
+              "type": "string",
+              "description": "Required for rebase preparation/resolution: explicit stop, drop or keep policy for newly empty changes. Originally empty commits remain preserved.",
+              "x-classification": "selector_position",
+              "maxLength": 8,
+              "pattern": "^(stop|drop|keep)$"
+            },
+            "expected_candidate": {
+              "type": "string",
+              "description": "Exact uploaded candidate commit required by inspection; for inspect_rebase, the tip of the complete linear series ending at expected_onto.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "bundle_hex_chunks": {
+              "type": "array",
+              "description": "Complete uploaded bundle for inspection, one through three lowercase hex chunks of at most 8192 decoded bytes each; 24576 decoded bytes total.",
+              "x-classification": "untrusted_content"
+            },
+            "expected_bundle_sha256": {
+              "type": "string",
+              "description": "Optional independent SHA-256 pin over the exact uploaded bundle bytes for inspect_rebase.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "context_lines": {
+              "type": "integer",
+              "description": "Inspection context per hunk from 0 through 20; default 3.",
+              "x-classification": "selector_position"
+            },
+            "max_changes": {
+              "type": "integer",
+              "description": "For inspect_rebase, cumulative changed-entry ceiling across net and per-commit comparisons, 1 through 64; default 64.",
+              "x-classification": "selector_position"
+            },
+            "max_blob_bytes": {
+              "type": "integer",
+              "description": "For inspect_rebase, per-blob byte ceiling from 1 through 1048576; default 1048576.",
+              "x-classification": "selector_position"
+            },
+            "max_output_bytes": {
+              "type": "integer",
+              "description": "For inspect_rebase, cumulative retained path/hunk-byte ceiling from 1 through 131072; default 65536. Raw commit bodies separately share 131072 bytes.",
+              "x-classification": "selector_position"
+            },
+            "max_diff_work": {
+              "type": "integer",
+              "description": "For inspect_rebase, native per-text comparison work ceiling from 1 through 1000000; default 1000000. At most 32 text comparisons across the whole series and net change.",
+              "x-classification": "selector_position"
             }
           },
           "required": ["operation"],

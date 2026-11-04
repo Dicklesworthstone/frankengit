@@ -133,7 +133,7 @@ fn charge(total: &mut usize, bytes: usize) -> Result<(), ToolError> {
         .ok_or(ToolError::invalid("resolution_byte_limit"))?;
     Ok(())
 }
-fn resolutions(args: &Object) -> Result<Vec<ConflictResolution>, ToolError> {
+pub(in super::super) fn resolutions(args: &Object) -> Result<Vec<ConflictResolution>, ToolError> {
     let Some(Value::Array(rows)) = args.get("resolutions") else {
         return Err(ToolError::invalid("resolutions_required"));
     };
@@ -267,7 +267,7 @@ pub(super) fn schema(resolving: bool) -> Value {
     )
 }
 
-fn resolution_schema() -> Value {
+pub(in super::super) fn resolution_schema() -> Value {
     let simple = object([
         ("type", text("object")),
         ("additionalProperties", Value::Bool(false)),
