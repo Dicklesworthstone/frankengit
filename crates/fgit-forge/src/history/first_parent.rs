@@ -9,6 +9,8 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use std::collections::BTreeSet;
 
+mod cursor;
+
 /// A selection precondition, not an authentication credential. The node must
 /// check all bindings and traverse from its authenticated visible reference.
 #[derive(Clone, Debug, Eq, PartialEq)]

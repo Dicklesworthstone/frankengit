@@ -2,6 +2,7 @@
 //! headers identify objects; their author/signature strings authenticate nobody.
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id};
+use fgit_forge::history::first_parent::FirstParentPage;
 use fgit_forge::history::{BlameResult, HistoryCommit, HistoryPage};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,6 +91,7 @@ pub(super) fn log(
     // start at the tip; the unfiltered DAG always contains and starts at it.
     let filtered = query.log_path.is_some();
     if query.path.is_some()
+        || query.first_parent.is_some()
         || report.after != query.after
         || (report.total_commits == 0 && !filtered)
         || report.total_commits > query.limits.max_commits
@@ -152,6 +154,110 @@ pub(super) fn log(
             .map_or(Value::Null, |n| text(n.to_string())),
     );
     result.insert("complete".into(), Value::Bool(report.next_after.is_none()));
+    Ok(result)
+}
+
+pub(super) fn first_parent(
+    format: GitHashAlgorithm,
+    query: &Query,
+    head: RepositoryAuthorityHeadId,
+    report: &FirstParentPage,
+) -> Result<Object, ToolError> {
+    let options = query.first_parent.as_ref().ok_or_else(invalid)?;
+    check_pin(query, format, head, report.tip)?;
+    let end = query
+        .after
+        .checked_add(report.commits.len())
+        .ok_or_else(invalid)?;
+    if query.path.is_some()
+        || query.log_path.is_some()
+        || query.after != options.log_options().after
+        || report.after != query.after
+        || report.visited_commits != end
+        || report.visited_commits == 0
+        || report.visited_commits > query.limits.max_commits
+        || report.visited_parent_edges > query.limits.max_edges
+        || report.metadata_bytes > query.limits.max_metadata_bytes
+        || report.metadata_bytes == 0
+        || report.commits.len() > query.limit
+        || (!report.root_reached && report.commits.len() != query.limit)
+        || report.next_after != (!report.root_reached).then_some(end)
+        || (query.after == 0 && report.commits.first().map(|row| row.id) != Some(report.tip))
+        || options.cursor.as_ref().is_some_and(|cursor| {
+            cursor.source_head != head
+                || cursor.reference != query.reference
+                || cursor.tip != report.tip
+        })
+        || report
+            .commits
+            .windows(2)
+            .any(|pair| pair[0].parents.first() != Some(&pair[1].id))
+        || report
+            .commits
+            .last()
+            .is_some_and(|last| last.parents.is_empty() != report.root_reached)
+        || report
+            .commits
+            .last()
+            .and_then(|last| last.parents.first())
+            .is_some_and(|next| report.commits.iter().any(|row| row.id == *next))
+    {
+        return Err(invalid());
+    }
+    records(format, query.limits, &report.commits)?;
+    let (returned_bytes, returned_edges) = report
+        .commits
+        .iter()
+        .try_fold((0_usize, 0_usize), |(bytes, edges), commit| {
+            Some((
+                bytes.checked_add(commit.body.len())?,
+                edges.checked_add(commit.parents.len())?,
+            ))
+        })
+        .ok_or_else(invalid)?;
+    // Work counters include the skipped prefix. A fresh page has no skipped
+    // records, so its accounting must be exact; continuation never fabricates
+    // a whole-history total from that prefix.
+    if returned_bytes > report.metadata_bytes
+        || returned_edges > report.visited_parent_edges
+        || report.visited_parent_edges < end.saturating_sub(usize::from(report.root_reached))
+        || (query.after == 0
+            && (returned_bytes != report.metadata_bytes
+                || returned_edges != report.visited_parent_edges))
+    {
+        return Err(invalid());
+    }
+    let mut result = common("source_history_page", &query.reference, report.tip);
+    result.insert("profile".into(), text("first-parent-prefix-v1"));
+    result.insert("scope".into(), text("first_parent_chain"));
+    result.insert("order".into(), text("first-parent-stored-order"));
+    result.insert("path_hex".into(), Value::Null);
+    result.insert("after".into(), text(report.after.to_string()));
+    result.insert("limit".into(), text(query.limit.to_string()));
+    result.insert("root_reached".into(), Value::Bool(report.root_reached));
+    result.insert(
+        "visited_commits".into(),
+        text(report.visited_commits.to_string()),
+    );
+    result.insert(
+        "visited_parent_edges".into(),
+        text(report.visited_parent_edges.to_string()),
+    );
+    result.insert(
+        "metadata_bytes".into(),
+        text(report.metadata_bytes.to_string()),
+    );
+    result.insert(
+        "commits".into(),
+        Value::Array(report.commits.iter().map(record).collect()),
+    );
+    result.insert(
+        "next_cursor".into(),
+        report
+            .continuation(head, &query.reference)
+            .map_or(Value::Null, |cursor| text(cursor.encode())),
+    );
+    result.insert("complete".into(), Value::Bool(true));
     Ok(result)
 }
 
