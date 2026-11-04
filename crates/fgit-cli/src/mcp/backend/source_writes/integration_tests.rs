@@ -533,13 +533,23 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
             .iter()
             .map(|tool| tool.name)
             .collect::<std::collections::BTreeSet<_>>(),
-        [CREATE, UPDATE, DELETE, RENAME, PUBLISH, TRANSACTION]
-            .into_iter()
-            .collect()
+        [
+            CREATE,
+            UPDATE,
+            DELETE,
+            RENAME,
+            PUBLISH,
+            TRANSACTION,
+            super::super::tags::CREATE,
+            super::super::tags::ANNOTATE,
+            super::super::tags::DELETE
+        ]
+        .into_iter()
+        .collect()
     );
-    assert_eq!(writer.tools().len(), 6);
+    assert_eq!(writer.tools().len(), 9);
     for tool in writer.tools() {
-        assert!(is_tool(tool.name));
+        assert!(is_tool(tool.name) || super::super::tags::is_write(tool.name));
         assert!(writer.is_mutation(tool.name));
     }
     for name in [

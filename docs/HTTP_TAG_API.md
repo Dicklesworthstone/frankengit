@@ -7,6 +7,10 @@ tag database, external Git process, alternate publication mechanism, or new
 transaction identity. Metadata becomes native Git tag bytes, which the existing
 quarantine validates before ordinary sealed ref admission.
 
+The same native operations are exposed by the [MCP tag tools](MCP_TAGS.md),
+which retain independent source-read/source-write grants and enforce their own
+smaller message, object-read and encoded-result ceilings.
+
 This documents implemented interfaces, not a passing Rust build or executed HTTP
 acceptance result. The deployment remains the bounded, loopback-only,
 operator-managed credential profile. Full hosted IAM, TLS, release assets,
@@ -60,7 +64,7 @@ framing boundary must complete before command parsing or native admission.
 Every request requires `object_format` (`sha1` or `sha256`, matching the repo)
 and EXACTLY ONE of `ref` or `ref_hex`. The latter is lowercase hexadecimal for
 the complete raw ref name, allowing non-UTF-8 names without lossy conversion.
-The name must be a valid full `refs/tags/*` ref of at most 4,096 bytes. Responses
+The name must be a valid full `refs/tags/*` ref of at most 1,024 bytes. Responses
 use `ref_hex` as the authoritative name encoding; do not assume it is UTF-8.
 
 Every OID is lowercase, nonzero and in the declared native hash domain.

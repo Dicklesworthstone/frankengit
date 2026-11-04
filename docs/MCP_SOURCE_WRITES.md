@@ -1,10 +1,12 @@
 # Native source publication through MCP
 
-`--allow-source-writes` enables six narrow, operator-sponsored source mutations:
+`--allow-source-writes` enables nine narrow, operator-sponsored source mutations:
 `frankengit_branch_create`, `frankengit_branch_update`,
 `frankengit_branch_delete`, `frankengit_branch_rename`,
-`frankengit_branch_transaction`, and
-`frankengit_source_publish`. None launches Git, a shell or a host-file reader.
+`frankengit_branch_transaction`, `frankengit_source_publish`,
+`frankengit_tag_create`, `frankengit_tag_annotate`, and `frankengit_tag_delete`.
+See [MCP tags](MCP_TAGS.md) for the tag lifecycle and exact outer-object deletion
+lease. None launches Git, a shell or a host-file reader.
 Every command uses the existing node quarantine/admission/recovery boundary.
 
 ```sh
@@ -24,7 +26,7 @@ broker. Do not forward the channel to an untrusted remote principal.
 
 The four lifecycle tools require `reference` and `idempotency_key`. `reference_hex` is the
 lossless alternative for non-UTF-8 ref names; exactly one encoding is required.
-Refs must be full `refs/heads/...` names, bounded to 4096 bytes. Native OIDs
+Refs must be full `refs/heads/...` names, bounded to 1024 bytes. Native OIDs
 are nonzero lowercase hex in the repository's SHA-1 or SHA-256 domain.
 
 | Tool | Additional fields and conditions |
