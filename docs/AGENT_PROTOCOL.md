@@ -443,6 +443,8 @@ A checked external-effect path retains two separate authorizations:
 
 The second authorization is reconstructed from the exact retained `EffectRequest`. It must preserve the verified ancestry and leaf capability used at acceptance and use a fresh revocation receipt for the actual dispatch instant. A refusal returns the live reservation. A post-commit journal failure returns the deferred obligation. Neither path loses cleanup ownership.
 
+Outbox reservation and dispatch MUST use the broker that owns the accepted effect's journal and resource ledger. Equality of run, agent, or region IDs—even equality of the complete Intent Run—does not transfer that custody. Dispatch also MUST preserve the complete run commitment recorded at acceptance. A custody or run mismatch refuses before journal, budget, or dispatch-proof mutation and returns the original live grant or reservation; cleanup still acts on its original obligation.
+
 ---
 
 ## 10. Evidence-Carrying Change

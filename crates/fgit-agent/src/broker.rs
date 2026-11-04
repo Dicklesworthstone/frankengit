@@ -1017,6 +1017,11 @@ pub enum ExternalEffectOutcome {
 /// A typed outbox-reservation refusal.
 #[derive(Debug)]
 pub enum OutboxReservationRefused {
+    /// The grant belongs to another broker's journal and resource ledger.
+    BrokerMismatch {
+        /// The still-live grant, recoverable by its issuing broker.
+        grant: Box<EffectGrant>,
+    },
     /// A non-external effect cannot be silently repurposed as an outbox effect.
     WrongEffectClass {
         /// The still-live grant the caller must resolve.
@@ -1045,7 +1050,9 @@ impl OutboxReservationRefused {
     #[must_use]
     pub fn into_grant(self) -> Option<EffectGrant> {
         match self {
-            Self::WrongEffectClass { grant, .. } | Self::Journal { grant, .. } => Some(*grant),
+            Self::BrokerMismatch { grant }
+            | Self::WrongEffectClass { grant, .. }
+            | Self::Journal { grant, .. } => Some(*grant),
             Self::Resource { .. } => None,
         }
     }
@@ -1054,6 +1061,9 @@ impl OutboxReservationRefused {
 impl fmt::Display for OutboxReservationRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BrokerMismatch { .. } => {
+                formatter.write_str("outbox grant belongs to another broker")
+            }
             Self::WrongEffectClass { observed, .. } => write!(
                 formatter,
                 "only an external effect may reserve an outbox obligation; observed {observed}"
@@ -1431,12 +1441,23 @@ impl EffectBroker {
         Ok(receipt)
     }
 
-    /// Converts an external-effect grant into the shared outbox obligation.
+    /// Whether a live reservation belongs to this broker's actual journal and
+    /// resource ledger. Public run, agent, and region IDs do not prove custody.
+    pub(crate) fn owns_outbox(&self, effect: &ReservedOutboxEffect) -> bool {
+        Rc::ptr_eq(&self.journal, &effect.journal)
+    }
+
+    /// Converts this broker's external-effect grant into the shared outbox obligation.
     pub fn reserve_outbox(
         &mut self,
         grant: EffectGrant,
         dispatch: OutboxDispatch,
     ) -> Result<ReservedOutboxEffect, OutboxReservationRefused> {
+        if !Rc::ptr_eq(&self.journal, &grant.journal) {
+            return Err(OutboxReservationRefused::BrokerMismatch {
+                grant: Box::new(grant),
+            });
+        }
         if grant.record.effect_class != EffectClass::ExternalEffect {
             return Err(OutboxReservationRefused::WrongEffectClass {
                 observed: grant.record.effect_class,
