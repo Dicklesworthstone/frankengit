@@ -1,10 +1,11 @@
 # Native source history over HTTP
 
 This is the bounded one-repository source gateway's history profile, composing
-`OneNode::read_commit_history_in` and `OneNode::blame_source_in` with the existing
+`OneNode::read_commit_history_in`, `OneNode::read_first_parent_history_in` and
+`OneNode::blame_source_in` with the existing
 authenticated listener. It is not a separate history database, an arbitrary-object
-API, or hosted IAM. The owning product work remains the native API bridge
-(`frankengit-asa3`) and FG-048b; these slices do not complete that broader scope.
+API, or hosted IAM. The broader native API work remains FG-048b; these slices
+do not complete that broader scope.
 
 ## Commit log
 
@@ -48,6 +49,67 @@ order**. `total_commits` describes the entire successfully traversed graph.
 page; it does not claim that all history fits into that response. A valid offset
 exactly at the graph's end returns an empty complete page. Missing ancestors,
 corruption, limits or cancellation are errors, never a silently truncated page.
+
+### Bounded recent first-parent history
+
+The same log route accepts the explicit `first_parent=true` mode. It reads the
+visible tip and follows only the first stored parent until the requested page
+is full or a root is reached. Recent pages therefore work on repositories whose
+total ancestry exceeds the full-DAG profile's 4,096-commit ceiling. Side-parent
+headers remain in each exact commit record and count against the edge budget;
+their bodies, trees and blobs are not read by this traversal.
+
+```text
+object_format=sha256&ref=refs%2Fheads%2Fmain&first_parent=true&limit=20
+object_format=sha256&ref=refs%2Fheads%2Fmain&first_parent=true&limit=20&cursor=<opaque-next-cursor>
+```
+
+The response retains the ordinary source coordinates, snapshot token, exact
+`object_id`/`tree`/ordered `parents`/`body_hex` records and read-only fields. Its
+distinct closed profile is:
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `source_first_parent_log` |
+| `schema_version` | `1` |
+| `profile` | `first-parent-prefix-v1` |
+| `ordering` | `stored-first-parent-v1` |
+| `page_complete` | The complete requested page was read; not a claim that all history was traversed. |
+| `after`, `limit` | The cursor's skipped prefix length and requested page bound. |
+| `root_reached` | The visited first-parent chain reached its root. |
+| `visited_commits` | Skipped prefix plus returned commits, charged to this request. |
+| `visited_parent_edges` | Every parent header in those visited commits, including side parents. |
+| `metadata_bytes` | Logical native commit-body bytes visited, including the skipped prefix. |
+| `next_cursor` | An opaque continuation, or null when the root was reached. |
+
+This profile has no `total_commits` or `next_after`: it does not traverse older
+history to compute a total. It retains `author_identity_verified=false`; parent
+order and exact native metadata establish neither human authorship nor review
+approval.
+
+The shared `fgfp1` cursor binds the exact original authority head, raw reference,
+native object format, selected tip and offset. It is the same canonical token
+used by `fg log --first-parent` and MCP. It is a selection precondition, not a
+credential. Every request authenticates independently, rechecks current ref
+visibility and the exact head, then starts from that authenticated visible tip.
+Substituting a cursor's object cannot authorize an unrelated object read. A
+moved authority head, including a forge-only write with an unchanged tip,
+returns 409; restart explicitly instead of combining snapshots.
+
+The skipped prefix and page share the ordinary per-call limits: 4,096 commits,
+16,384 parent headers and 4 MiB of logical commit metadata, with a 64 KiB body
+ceiling enforced before the native commit allocation. `max_commits`, `max_edges`
+and `max_metadata_bytes` may lower these limits; `limit` remains 1–100, default
+50. Continuing farther into history repeats the prefix work and can exhaust a
+limit even when an earlier page succeeded. The cursor does not provide
+constant-cost arbitrary-depth pagination or a guarantee that the next page can
+complete within the selected budgets.
+
+`first_parent` accepts only `true`. It cannot be combined with any `after`
+field, including `after=0`, a path filter, `max_tree_entries` or
+`max_cached_bytes`. `cursor` without this mode is refused. Unknown, duplicate,
+oversized or noncanonical fields and cursor/ref/format/pin conflicts return
+400. The ordinary log and exact-path profiles keep their existing behavior.
 
 ## Line provenance
 
@@ -108,6 +170,11 @@ incarnation binding, request quotas, loopback-only and external-TLS boundaries.
 Already admitted requests retain their bounded grant; instantaneous revocation
 of in-flight work is not claimed.
 
+The first-parent mode uses this same history grant. Sponsored agent
+`SOURCE_READ` credentials remain excluded from history; their bounded current
+commit/source-package profile does not acquire ancestor access through a log
+option or cursor.
+
 Reads reject `Idempotency-Key`, never seal a request, publish a ref or forge
 event, stage candidate objects, or create a terminal transaction. Responses
 carry `read_only=true`, `transaction_created=false` and `published=false`.
@@ -142,6 +209,17 @@ resource exhaustion and the same authenticated restart/revocation boundaries.
 Focused module tests cover closed input, byte encoding, output bounds,
 partial/duplicate pages, corrupted records and inconsistent line attribution.
 
-These implementations were source-reviewed when introduced; Rust tooling was
-not available in the editing environment, so no compile, test, Clippy,
-performance, full Git compatibility or release-gate pass is asserted here.
+`crates/fgit-node/tests/source_log_first_parent_http.rs` adds the actual listener
+path for both native hash formats, cursor continuation/reopen, exact metadata,
+request scopes before ingress, rotation/disable, authority movement, shared
+prefix budgets and a 4,099-commit merge graph whose recent page succeeds while
+the ordinary DAG profile refuses its unchanged bound. Focused first-parent
+module tests cover conflicting options, cursor substitutions, profile fields,
+parent-edge/metadata accounting, exact response size, cancellation and corrupt
+native records. Existing native history tests retain hidden-reference,
+missing-object and cancelled-request refusal coverage.
+
+The pinned Rust toolchain is available. Native checks were terminated by
+workspace memory/resource exhaustion before source validation, and the tests
+remain unexecuted. No successful compile, test, Clippy, performance, full Git
+compatibility or release-gate result is asserted here.

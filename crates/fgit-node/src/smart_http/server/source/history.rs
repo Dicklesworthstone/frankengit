@@ -3,6 +3,7 @@
 //! object selector is a current visible ref; pagination binds its exact head.
 
 mod blame;
+mod first_parent;
 
 #[cfg(test)]
 mod path_tests;
@@ -11,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 use fgit_crypto::{GitObjectKind, git_object_id};
+use fgit_forge::history::first_parent::FirstParentOptions;
 use fgit_forge::history::path::PathLogOptions;
 use fgit_forge::history::{HistoryCommit, HistoryError, HistoryLimits, HistoryPage, LogOptions};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
@@ -93,6 +95,7 @@ struct Command {
     selection: Selection,
     options: LogOptions,
     path: Option<Vec<u8>>,
+    first_parent: Option<FirstParentOptions>,
 }
 impl Command {
     fn parse(bytes: &[u8], format: GitHashAlgorithm) -> Result<Self, ApiError> {
@@ -112,6 +115,8 @@ impl Command {
                     | "path_hex"
                     | "max_tree_entries"
                     | "max_cached_bytes"
+                    | "first_parent"
+                    | "cursor"
             ) {
                 return Err(ApiError::bad("unknown_or_inapplicable_field"));
             }
@@ -120,6 +125,14 @@ impl Command {
             }
         }
         let selection = selection(&mut fields, format)?;
+        if let Some(options) = first_parent::parse(&mut fields, &selection, format)? {
+            return Ok(Self {
+                selection,
+                options: options.log_options(),
+                path: None,
+                first_parent: Some(options),
+            });
+        }
         let path = fields
             .remove("path_hex")
             .map(|text| path_hex(&text))
@@ -159,6 +172,7 @@ impl Command {
             selection,
             options,
             path,
+            first_parent: None,
         })
     }
 }
@@ -264,6 +278,36 @@ pub(super) fn execute(
     );
     let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
+    let maximum = usize::try_from(maximum_response)
+        .unwrap_or(usize::MAX)
+        .min(MAX_REPLY_BYTES);
+    if let Some(options) = &command.first_parent {
+        let (head, page) = drive_request_while(
+            node,
+            &context,
+            node.read_first_parent_history_in(
+                &context,
+                &command.selection.reference,
+                &RefVisibility::new(),
+                command.selection.expected_head,
+                options,
+            ),
+            &mut live,
+        )
+        .map_err(|error| {
+            failure(
+                error.is_snapshot_moved(),
+                error.is_unavailable(),
+                error.is_unpinned_continuation(),
+                error.history_error(),
+            )
+        })?;
+        return Ok(Reply {
+            status: Status::Success,
+            body: first_parent::render(node, &command, head, &page, maximum, &mut live)?,
+            terminal: None,
+        });
+    }
     let result = if let Some(path) = &command.path {
         let options = PathLogOptions {
             path: path.clone(),
@@ -303,9 +347,6 @@ pub(super) fn execute(
             error.history_error(),
         )
     })?;
-    let maximum = usize::try_from(maximum_response)
-        .unwrap_or(usize::MAX)
-        .min(MAX_REPLY_BYTES);
     let body = render_log(node, &command, head, &page, maximum, &mut live)?;
     Ok(Reply {
         status: Status::Success,
@@ -627,7 +668,7 @@ mod tests {
                 "&ref=refs/heads/other",
                 "&commit=abcd",
                 "&principal=admin",
-                "&first_parent=true",
+                "&first_parent=false",
                 "&path_prefix_hex=61",
             ] {
                 assert!(
