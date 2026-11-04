@@ -314,6 +314,13 @@ pub enum EffectJournalRefusal {
         /// The malformed effect identity.
         effect_id: EffectId,
     },
+    /// A live request names itself, an absent parent, or a parent accepted later.
+    InvalidParentEffect {
+        /// Child effect whose parentage was refused before acceptance.
+        effect_id: EffectId,
+        /// Parent that must already have been accepted at or before the child.
+        parent_effect_id: EffectId,
+    },
     /// One journal mixed numeric run identities.
     MixedRun {
         /// Effect that crossed the journal's run boundary.
@@ -389,6 +396,13 @@ impl fmt::Display for EffectJournalRefusal {
                     "effect journal acceptance for {effect_id} is malformed"
                 )
             }
+            Self::InvalidParentEffect {
+                effect_id,
+                parent_effect_id,
+            } => write!(
+                formatter,
+                "effect {effect_id} requires a distinct, previously accepted parent {parent_effect_id} at or before its acceptance time"
+            ),
             Self::MixedRun {
                 effect_id,
                 expected,
@@ -453,6 +467,33 @@ struct EffectJournal {
 impl EffectJournal {
     fn contains(&self, effect_id: EffectId) -> bool {
         self.positions.contains_key(&effect_id)
+    }
+
+    // New live requests require an already accepted parent so every newly
+    // produced prefix remains causally complete. Historical replay keeps its
+    // existing semantics: complete-inventory reconciliation validates parentage.
+    fn validate_parent_effect(
+        &self,
+        effect_id: EffectId,
+        parent_effect_id: Option<EffectId>,
+        accepted_at: LogicalTime,
+    ) -> Result<(), EffectJournalRefusal> {
+        let Some(parent_effect_id) = parent_effect_id else {
+            return Ok(());
+        };
+        let parent = self
+            .positions
+            .get(&parent_effect_id)
+            .and_then(|position| self.records.get(*position));
+        if parent_effect_id == effect_id
+            || parent.is_none_or(|record| record.accepted_at > accepted_at)
+        {
+            return Err(EffectJournalRefusal::InvalidParentEffect {
+                effect_id,
+                parent_effect_id,
+            });
+        }
+        Ok(())
     }
 
     fn records(&self) -> &[EffectRecord] {
@@ -1387,6 +1428,11 @@ impl EffectBroker {
         if let Some(deficit) = capability.quota().first_deficit(&request.cost) {
             return Err(BrokerRefusal::CapabilityQuotaExceeded { deficit });
         }
+
+        self.journal
+            .borrow()
+            .validate_parent_effect(request.effect_id, request.parent_effect_id, now)
+            .map_err(|source| BrokerRefusal::Journal { source })?;
 
         let budget = self
             .ledger
