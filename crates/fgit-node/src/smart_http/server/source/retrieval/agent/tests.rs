@@ -4,7 +4,7 @@ const BASE: &str = "object_format=sha1&ref=refs/heads/main&term_hex=6e6565646c65
 
 fn parse(input: &str, maximum: usize) -> Result<AgentCommand, ApiError> {
     command_fields(
-        parse_form(input.as_bytes(), 199)?,
+        parse_form(input.as_bytes(), 200)?,
         GitHashAlgorithm::Sha1,
         maximum,
     )
@@ -86,4 +86,54 @@ fn agent_route_is_a_source_read_and_preserves_framing_and_method_rules() {
             .unwrap();
         assert!(super::super::Request::parse(&envelope).is_err());
     }
+}
+
+#[test]
+fn agent_context_index_mode_is_explicit_and_retains_the_closed_grammar() {
+    assert_eq!(
+        parse(BASE, 1024 * 1024)
+            .unwrap()
+            .context
+            .initial
+            .index_source,
+        IndexSource::Exact
+    );
+    let current = format!("{BASE}&index_source=current-native-v1");
+    assert_eq!(
+        parse(&current, 1024 * 1024)
+            .unwrap()
+            .context
+            .initial
+            .index_source,
+        IndexSource::Current
+    );
+    for value in ["", "exact", "strict", "revalidated", "current-native-v2"] {
+        assert_eq!(
+            parse(&format!("{BASE}&index_source={value}"), 1024 * 1024)
+                .err()
+                .unwrap()
+                .code,
+            "unsupported_index_source"
+        );
+    }
+    assert_eq!(
+        parse(
+            &format!("{current}&index_source=current-native-v1"),
+            1024 * 1024
+        )
+        .err()
+        .unwrap()
+        .code,
+        "duplicate_field"
+    );
+    assert_eq!(
+        parse(
+            &format!("{current}&context_selection=context-weighted-rrf-q16-v1"),
+            1024 * 1024
+        )
+        .err()
+        .unwrap()
+        .code,
+        "unsupported_context_selection"
+    );
 }

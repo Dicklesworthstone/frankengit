@@ -41,7 +41,8 @@ function harness(respond = () => json(page())) {
     'title-field', 'body-field', 'labels-field', 'assignees-field', 'replace-body-label', 'prepared-change', 'prepared-summary', 'prepare-change',
     'save-receipt', 'send-change', 'check-outcome', 'discard-change', 'restore-receipt',
     'issue-search', 'issue-search-query', 'issue-search-state', 'issue-search-opener',
-    'issue-search-labels', 'issue-search-case', 'issue-search-scan', 'issue-search-cancel'];
+    'issue-search-labels', 'issue-search-case', 'issue-search-scan', 'issue-search-cancel', 'issue-search-milestone',
+    'milestone-field', 'load-milestones', 'selected-milestone', 'milestone-choices', 'milestone-paging'];
   const elements = Object.fromEntries(names.map(name => [name, new Element()])); elements['change-action'].value = 'open';
   const lifecycle = new Element(); const document = { getElementById: id => elements[id], createElement: tag => new Element(tag), defaultView: lifecycle };
   const calls = [], receipts = [];

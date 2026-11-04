@@ -2,8 +2,9 @@
 use crate::publication_support::{describe, quote, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::protection::{
-    MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-    MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES,
+    MAX_BRANCH_PATH_REVIEWS, MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS,
+    MAX_PATH_REVIEW_PATH_BYTES, MAX_POLICY_ADMINISTRATORS, MAX_PROTECTED_BRANCHES,
+    MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES, PathReviewRule, PathReviewScope,
     ProtectedBranch, ProtectionCommand, RequiredCandidateWorkflowCheck, RequiredWorkflowCheck,
     ReviewProtection, compile_ref_policy, decode_ref_policy,
 };
@@ -25,6 +26,7 @@ usage: fg protection set <storage-root> <tenant-id> <repository-id> --trusted-lo
   --admin <id> [--admin <id> ...]\n\
   [--require-reviewer <refs/heads/branch>:<id> ...]\n\
   [--require-approvals <refs/heads/branch>:<count> ...]\n\
+  [--require-path-review <target-ref>:<exact|subtree>:<path-hex>:<count>:<id>[,<id>...] ...]\n\
   [--require-merge-queue <refs/heads/branch> ...]\n\
   [--require-check <target-ref>:<source-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
   [--require-candidate-check <target-ref>:<publisher-id>:<graph-sha256>:<job> ...]\n\
@@ -36,7 +38,9 @@ Set replaces the COMPLETE policy, including its optional DSL component. Omission
 The DSL may constrain reference names, creation/deletion and the request's actor.id; other actor attributes, ancestry, time and evidence facts refuse.\n\
 Listed reviewers are eligible approvers; the default requires all.\n\
 --require-approvals selects N approvals from that branch's eligible reviewers (1 through their count).\n\
-A check-only or queue-only branch has zero required approvals. Opener and submitter cannot contribute votes.\n\
+--require-path-review adds an independent reviewer quorum for actual candidate changes at an exact path or subtree.\n\
+Paths use lowercase hex of native Git bytes; subtree includes its root and slash-separated descendants. Every matching rule applies.\n\
+A path-only, check-only or queue-only branch has zero global required approvals. Opener and submitter cannot contribute votes.\n\
 --require-merge-queue requires an authenticated canonical queue landing targeting that branch.\n\
 Direct ref writes and ordinary PR merges cannot satisfy this requirement; existing reviews and checks still apply.\n\
 Every check requires the latest trusted publisher result for the exact NEW commit.\n\
@@ -73,7 +77,7 @@ fn number(s: &str) -> Result<u64, String> {
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 5
         || args.len() > 8576
-        || args.iter().any(|s| s.len() > 4096)
+        || args.iter().any(|s| s.len() > 12 * 1024)
         || args.iter().map(String::len).sum::<usize>() > 256 * 1024
     {
         return Err(USAGE.into());
@@ -98,6 +102,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             Vec<RequiredWorkflowCheck>,
             bool,
             Vec<RequiredCandidateWorkflowCheck>,
+            Vec<PathReviewRule>,
         ),
     >::new();
     let mut quorums = BTreeMap::<RefName, u16>::new();
@@ -130,6 +135,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         | "--admin"
                         | "--require-reviewer"
                         | "--require-approvals"
+                        | "--require-path-review"
                         | "--require-merge-queue"
                         | "--require-check"
                         | "--require-candidate-check"
@@ -190,6 +196,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if quorums.len() > MAX_PROTECTED_BRANCHES {
                     return Err("too many branch approval counts".into());
                 }
+            }
+            "--require-path-review" => {
+                let (name, rule) = path_review(value)?;
+                if !branches.contains_key(&name) && branches.len() == MAX_PROTECTED_BRANCHES {
+                    return Err("too many protected branches".into());
+                }
+                let rules = &mut branches.entry(name).or_default().4;
+                if rules.len() == MAX_BRANCH_PATH_REVIEWS {
+                    return Err("too many required path review rules".into());
+                }
+                rules.push(rule);
             }
             "--require-merge-queue" => {
                 let name = RefName::try_new(value.as_bytes())
@@ -324,7 +341,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         };
         if clear == (!branches.is_empty() || ref_policy.is_some()) {
             return Err(
-                "supply review/check/queue/DSL requirements OR explicit --clear, never both/neither"
+                "supply review/path/check/queue/DSL requirements OR explicit --clear, never both/neither"
                     .into(),
             );
         }
@@ -342,12 +359,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         mut required_checks,
                         require_merge_queue,
                         mut required_candidate_checks,
+                        mut path_reviews,
                     ),
                 )| {
                     reviewers.sort();
                     required_checks.sort();
                     required_candidate_checks.sort();
+                    path_reviews.sort_by(|a, b| (&a.path, a.scope).cmp(&(&b.path, b.scope)));
                     ProtectedBranch {
+                        path_reviews,
                         require_merge_queue,
                         required_approvals: quorums
                             .get(&name)
@@ -423,6 +443,52 @@ fn graph_bytes(text: &str) -> Result<[u8; 32], String> {
     }
     Ok(bytes)
 }
+fn path_review(value: &str) -> Result<(RefName, PathReviewRule), String> {
+    let parts: Vec<_> = value.split(':').collect();
+    if parts.len() != 5 {
+        return Err(
+            "path review must be target-ref:exact|subtree:path-hex:count:id[,id...]".into(),
+        );
+    }
+    let name = RefName::try_new(parts[0].as_bytes()).map_err(|_| "invalid target branch")?;
+    let scope = match parts[1] {
+        "exact" => PathReviewScope::Exact,
+        "subtree" => PathReviewScope::Subtree,
+        _ => return Err("path review scope must be exact or subtree".into()),
+    };
+    let encoded = parts[2];
+    if encoded.is_empty()
+        || encoded.len() > 2 * MAX_PATH_REVIEW_PATH_BYTES
+        || !encoded.len().is_multiple_of(2)
+        || !encoded
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("path must be bounded, nonempty lowercase hexadecimal bytes".into());
+    }
+    let path = (0..encoded.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16).map_err(|_| "invalid path hex"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let required_approvals =
+        u16::try_from(number(parts[3])?).map_err(|_| "invalid path approval count")?;
+    let mut reviewers = Vec::new();
+    for id in parts[4].split(',') {
+        if reviewers.len() == MAX_BRANCH_REVIEWERS {
+            return Err("too many path reviewers".into());
+        }
+        reviewers.push(PrincipalId::from_hex(id).map_err(|_| "invalid path reviewer")?);
+    }
+    reviewers.sort();
+    let rule = PathReviewRule {
+        path,
+        scope,
+        reviewers,
+        required_approvals,
+    };
+    rule.validate().map_err(|_| "invalid path review rule")?;
+    Ok((name, rule))
+}
 fn bytes_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -464,7 +530,7 @@ fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
                 format!(
-                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}],\"required_candidate_checks\":[{}]}}",
+                    "{{\"ref\":{},\"ref_hex\":{},\"required_reviewers\":[{}],\"required_approvals\":{},\"require_merge_queue\":{},\"required_checks\":[{}],\"required_candidate_checks\":[{}],\"path_reviews\":[{}]}}",
                     name,
                     quote(&hex),
                     ids(&branch.reviewers),
@@ -478,6 +544,13 @@ fn policy_json(policy: &ReviewProtection) -> Result<String, String> {
                     branch.required_candidate_checks.iter().map(|check| format!(
                         "{{\"publisher\":{},\"graph_root\":{},\"job\":{}}}",
                         quote(&check.publisher.to_string()), quote(&bytes_hex(&check.graph_root)), quote(&check.job)
+                    )).collect::<Vec<_>>().join(","),
+                    branch.path_reviews.iter().map(|rule| format!(
+                        "{{\"path_hex\":{},\"scope\":{},\"required_reviewers\":[{}],\"required_approvals\":{}}}",
+                        quote(&bytes_hex(&rule.path)),
+                        quote(match rule.scope { PathReviewScope::Exact => "exact", PathReviewScope::Subtree => "subtree" }),
+                        rule.reviewers.iter().map(|id| quote(&id.to_string())).collect::<Vec<_>>().join(","),
+                        rule.required_approvals,
                     )).collect::<Vec<_>>().join(",")
                 )
             })

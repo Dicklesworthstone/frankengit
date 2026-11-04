@@ -1,6 +1,7 @@
-//! Operator-granted source retrieval over the node's single-snapshot reader.
+//! Explicitly granted source retrieval over the node's single-snapshot reader.
 //! Query paths narrow the launch grant; they never mint authority or host access.
 mod batch;
+mod indexed;
 mod regex;
 mod symbols;
 
@@ -28,10 +29,16 @@ pub(super) fn tools() -> Vec<Tool> {
         },
         batch::tool(),
         symbols::tool(),
+        indexed::tool(),
     ]
 }
 
+pub(super) use indexed::NAME as INDEXED_NAME;
 pub(super) use symbols::NAME as SYMBOLS_NAME;
+
+pub(super) fn call_indexed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    indexed::call(backend, args)
+}
 
 pub(super) fn call_symbols(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     symbols::call(backend, args)
@@ -57,7 +64,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         return regex::call(backend, args);
     }
     let (selection, query) = parse(args, backend.options.format)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let (source_head, report) = backend
         .node
         .runtime()

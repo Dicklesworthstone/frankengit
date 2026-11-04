@@ -84,6 +84,7 @@ fn install_with_queue_requirement(
             branches: ["main", "release"]
                 .into_iter()
                 .map(|name| ProtectedBranch {
+                    path_reviews: Vec::new(),
                     require_merge_queue,
                     required_approvals: 0,
                     name: branch(name),

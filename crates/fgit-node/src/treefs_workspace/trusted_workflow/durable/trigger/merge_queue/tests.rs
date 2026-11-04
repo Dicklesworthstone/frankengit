@@ -28,6 +28,7 @@ fn selected(format: GitHashAlgorithm) -> Selected {
         head: head(1),
         commit: oid(format, 2),
         previous_commit: None,
+        tag_update: None,
         batch: RepositoryDecisionBatchId::from_digest(
             DigestAlgorithm::Sha256.id(),
             CANONICAL_CODEC_VERSION,

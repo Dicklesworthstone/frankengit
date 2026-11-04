@@ -2,6 +2,7 @@
 // server cursor, authorization grant, or cross-query completeness claim.
 import { acquire, query, endpoint, fail } from './source_context.mjs';
 import { loadBundle } from './source_context_export.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 const LIMIT_NAMES = ['max_results_per_channel', 'max_work', 'max_payload_bytes', 'max_result_bytes',
   'context_max_files', 'context_radius_bytes', 'context_max_source_bytes', 'context_max_excerpt_bytes'];
@@ -75,7 +76,7 @@ export async function continueCapture(bundle, expectedManifest, credential, foll
   const timeout = options.timeoutMs ?? 30000, signal = options.signal;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300000) fail('invalid_context_cli_timeout');
   if (signal !== undefined && !(signal instanceof AbortSignal)) fail('invalid_context_signal');
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('invalid_source_read_token');
+  if (!isCredentialToken(credential)) fail('invalid_source_read_token');
   if (options.ca !== undefined && (!(options.ca instanceof Uint8Array) || !options.ca.length || options.ca.length > 262144)) fail('invalid_context_ca');
   const started = performance.now(), check = () => {
     signal?.throwIfAborted();
@@ -93,6 +94,12 @@ export async function continueCapture(bundle, expectedManifest, credential, foll
   // Native expected_head/expected_commit pins are necessary but do not excuse
   // inconsistent RCR/tree metadata in a response claiming the same head.
   if (JSON.stringify(capture.summary.source) !== JSON.stringify(previous.capture.summary.source)) fail('context_followup_source_changed');
+  // A revalidated capture also retains the forge position bound by this exact
+  // authority head. Different original index observations are allowed, but a
+  // new read cannot replace the capture's current disclosure observation.
+  if (capture.summary.index_source !== previous.capture.summary.index_source ||
+      (previous.capture.summary.index_source &&
+        JSON.stringify(capture.summary.current_source) !== JSON.stringify(previous.capture.summary.current_source))) fail('context_followup_source_changed');
   return { capture, continued_from: { manifest_sha256: expectedManifest, capture_sha256: previous.receipt.capture_sha256,
     source: previous.capture.summary.source, lexical_checkpoint: previous.capture.summary.lexical_checkpoint,
     ...(previous.capture.summary.symbols?.generation ? { symbol_checkpoint: previous.capture.summary.symbols.generation } : {}) } };

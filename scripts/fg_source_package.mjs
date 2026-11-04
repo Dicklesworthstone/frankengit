@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
 import { lstat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { MAX_CREDENTIAL_TOKEN_BYTES, isCredentialToken } from './operator/credential_token.mjs';
 import { absolute, directory, readPrivate, parseJson, writeNew } from './operator/workflow_watch_io.mjs';
 import { captureSourcePackage, inspectSourcePackage, packageAcquisitionLimits, packageAcquisitionSelection,
   PACKAGE_CONTEXT_BYTES, SOURCE_PACKAGE_BYTES } from './operator/source_package.mjs';
@@ -107,10 +108,10 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const output = f.get('--output'); await directory(dirname(output)); check();
       const exists = await lstat(output).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
       if (exists) fail(); // Before any credential use or network request.
-      const raw = await read(f.get('--token-file'), 66, check); let token;
+      const raw = await read(f.get('--token-file'), MAX_CREDENTIAL_TOKEN_BYTES + 2, check); let token;
       try {
-        if (!/^[0-9a-f]{64}(?:\r?\n)?$/.test(raw.toString('utf8'))) fail();
-        token = raw.subarray(0, 64).toString('ascii');
+        token = raw.toString('ascii').replace(/\r?\n$/, '');
+        if (raw.some(byte => byte > 127) || !isCredentialToken(token)) fail();
       } finally { raw.fill(0); }
       phase = 'capture';
       const result = await captureSourcePackage(context, contextHash, selected, expected, token, local()); check();

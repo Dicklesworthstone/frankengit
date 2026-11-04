@@ -8,9 +8,9 @@ const head = `alg:1:${'1'.repeat(64)}`, actor = '4'.repeat(32);
 const scope = algorithm => ({ schema_version: 1, tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32), object_format: algorithm });
 const oid = (algorithm, byte = 'a') => byte.repeat(algorithm === 'sha1' ? 40 : 64);
 const row = (name, algorithm = 'sha1', byte = 'a') => ({ ref: name, ref_hex: hex(utf8.encode(name)), object_id: `${algorithm}:${oid(algorithm, byte)}` });
-const query = (algorithm = 'sha1') => ({ object_format: algorithm, namespace: 'branches', limit: 50 });
+const query = (algorithm = 'sha1') => ({ object_format: algorithm, namespace: 'branches', limit: 50, cursor_encoding: 'hex' });
 const page = (algorithm = 'sha1', rows = [row('refs/heads/main', algorithm), row('refs/heads/topic', algorithm, 'b')]) => ({
-  ...scope(algorithm), type: 'source_refs', namespace: 'branches', source_head: 'head-id', snapshot_token: head,
+  ...scope(algorithm), type: 'source_refs', namespace: 'branches', cursor_encoding: 'hex', source_head: 'head-id', snapshot_token: head,
   after: null, limit: 50, next_after: null, read_only: true, transaction_created: false, published: false, direct_refs_only: true, refs: rows,
 });
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
@@ -77,13 +77,33 @@ for (const algorithm of ['sha1', 'sha256']) {
 }
 test('continuations retain the selected namespace, cursor and authority head across pages', async () => {
   const { client, responses, calls } = rig(); await client.connect(token);
-  responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: 'refs/heads/main' }));
+  responses.push(json({ ...page(), limit: 1, refs: [row('refs/heads/main')], next_after: hex(utf8.encode('refs/heads/main')) }));
   await client.list({ limit: 1 });
-  responses.push(json({ ...page(), limit: 1, after: 'refs/heads/main', refs: [row('refs/heads/topic', 'sha1', 'b')] }));
+  responses.push(json({ ...page(), limit: 1, after: hex(utf8.encode('refs/heads/main')), refs: [row('refs/heads/topic', 'sha1', 'b')] }));
   await client.list({ next: true, namespace: 'tags', objectFormat: 'sha256', limit: 100 });
-  assert.equal(calls[1].body, form({ ...query(), limit: 1, after: 'refs/heads/main', expected_head: head }));
+  assert.equal(calls[1].body, form({ ...query(), limit: 1, after: hex(utf8.encode('refs/heads/main')), expected_head: head }));
   assert.equal(client.knownRefs.length, 2); await client.prepare('create', { ref: 'refs/heads/new', sourceRef: 'refs/heads/main' });
   assert.equal(client.pending.fields.new_commit, oid('sha1')); // selection remains available from the previous pinned page
+});
+test('default refsPage callers retain the native UTF-8 cursor profile', () => {
+  const legacy = { ...page(), refs: [row('refs/heads/main')], limit: 1, next_after: 'refs/heads/main' };
+  delete legacy.cursor_encoding;
+  const selected = { object_format: 'sha1', namespace: 'branches', limit: 1 };
+  assert.doesNotThrow(() => refsPage(legacy, selected));
+  assert.doesNotThrow(() => refsPage({ ...legacy, after: 'refs/heads/main', next_after: null, refs: [row('refs/heads/topic')] },
+    { ...selected, after: 'refs/heads/main', expected_head: head }));
+  assert.throws(() => refsPage({ ...legacy, cursor_encoding: 'hex' }, selected), /cursor encoding/);
+});
+test('hex pages require exact encoding markers and last-row byte cursors', () => {
+  const selected = { ...query(), limit: 1 }, raw = { ref: null, ref_hex: hex(utf8.encode('refs/heads/x')) + 'ff', object_id: oid('sha1') };
+  const pinnedPage = { ...page('sha1', [raw]), limit: 1, next_after: raw.ref_hex };
+  assert.doesNotThrow(() => refsPage(pinnedPage, selected));
+  for (const edit of [
+    p => { delete p.cursor_encoding; }, p => { p.cursor_encoding = 'utf8'; },
+    p => { p.next_after = raw.ref_hex.toUpperCase(); }, p => { p.next_after = 'refs/heads/x'; },
+    p => { p.next_after = hex(utf8.encode('refs/heads/other')); }, p => { p.next_after = ''; },
+  ]) { const changed = structuredClone(pinnedPage); edit(changed); assert.throws(() => refsPage(changed, selected)); }
+  assert.throws(() => refsPage(pinnedPage, { ...selected, cursor_encoding: 'unsupported' }));
 });
 for (const [label, change] of [
   ['scope', p => { p.object_format = 'sha256'; }], ['snapshot', p => { p.snapshot_token = `alg:1:${'2'.repeat(64)}`; }],

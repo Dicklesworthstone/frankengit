@@ -5,7 +5,7 @@
 <script type="module" src="branches-view.mjs"></script></head>
 <body><main>
 <header><h1>Branches and references</h1><p><a href="../">Browse source</a> · <a href="../source/">Edit files</a> · <a href="../initial/">Create initial history</a> · <a href="../pulls/">Pull requests</a></p></header>
-<p>Create a feature branch before editing, advance an existing branch to a selected tip, or atomically rename/delete a branch. Native permissions and policy still apply. No force option, default-branch change, PR retargeting, or tag mutation is performed.</p>
+<p>Create a feature branch before editing, advance an existing branch to a selected tip, rename a branch, or submit several creates, updates and deletions as one atomic transaction. Native permissions and policy still apply.</p>
 <section><h2>Connect</h2><label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64"></label>
 <button id="connect" type="button">Connect</button> <button id="disconnect" type="button">Disconnect and clear views</button>
 <p>Read access lists references. Changes additionally require receive permission and operator Git-write enablement. Outcome recovery requires outcomes-read. Tokens stay in this page's memory.</p></section>
@@ -15,14 +15,20 @@
 <label>Page size <input id="page-size" type="number" min="1" max="100" value="50"></label>
 <button id="load" type="button">Load a fresh snapshot</button> <button id="more" type="button">Next pinned page</button> <button id="cancel" type="button">Cancel reads and clear snapshot</button>
 <pre id="snapshot"></pre><p id="page-state"></p><ul id="refs"></ul>
-<p>A page is not a complete repository inventory. Hidden references are not disclosed. Byte-only reference names are displayed as hex and cannot be submitted through this text-form API.</p></section>
+<p>A page is not a complete repository inventory. Hidden references are not disclosed. Byte-only names are displayed as exact hex and can be selected for an atomic batch. Single-operation text commands require UTF-8 branch names.</p></section>
 <section><h2>Prepare a branch change</h2>
 <label>Operation <select id="operation"><option value="create">Create a branch from the selected branch tip</option><option value="update">Advance the selected branch to another listed tip</option><option value="rename">Rename the selected branch atomically</option><option value="delete">Delete the selected branch</option></select></label>
 <label>Selected branch <select id="selected"><option value="">Choose a listed branch</option></select></label>
 <label>New full branch name (create/rename) <input id="destination" placeholder="refs/heads/my-feature" maxlength="4096" spellcheck="false"></label>
 <label>New tip from branch (update only) <select id="target"><option value="">Choose a listed branch</option></select></label>
-<pre id="selection"></pre><button id="prepare" type="button">Prepare exact request — do not send</button>
+<pre id="selection"></pre><button id="prepare" type="button">Prepare single request — do not send</button>
+<button id="batch-add" type="button">Add exact change to atomic batch</button>
 <p>Creating or renaming requires an absent destination at admission, not merely absence from this page. Updating/deleting requires the exact old tip. A rename is one atomic delete-and-create. Protected/default branches may be refused; this page never bypasses those checks.</p></section>
+<section aria-labelledby="batch-heading"><h2 id="batch-heading">Stage an atomic batch</h2>
+<p>Add up to 32 creates, updates or deletions from the pinned snapshot. Each branch may appear once. Every staged change captures its exact old and new tip immediately. Rename uses the separate single-request action.</p>
+<p id="batch-state" aria-live="polite"></p><ol id="batch-changes"></ol>
+<button id="batch-prepare" type="button">Prepare atomic batch — do not send</button> <button id="batch-clear" type="button">Clear unprepared batch</button>
+<p>The complete batch commits or refuses together. Loading a fresh snapshot, cancelling reads or disconnecting clears unprepared staging. Loading another page at the same snapshot keeps staged changes. Preparation freezes the complete request for confirmation and recovery.</p></section>
 <section><h2>Review and send the frozen request</h2><pre id="pending">No outstanding branch request.</pre>
 <label><input id="confirm-send" type="checkbox"> I reviewed these exact ref changes, including any deletion.</label>
 <button id="send" type="button">Send exact request</button> <button id="recover" type="button">Look up original outcome — read only</button>

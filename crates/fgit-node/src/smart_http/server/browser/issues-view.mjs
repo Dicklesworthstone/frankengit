@@ -1,4 +1,5 @@
 import { IssueClient, MAX_RECEIPT_BYTES, decimal, issueSearchQuery, issueLocked } from './issues.mjs';
+import { MilestoneClient } from './milestones.mjs';
 import { markdownBody } from './markdown.mjs';
 
 function visible(value) {
@@ -7,15 +8,25 @@ function visible(value) {
 }
 export function mountIssues(document, location, options = {}) {
   const client = options.client ?? new IssueClient({ href: location.href, fetchImpl: options.fetchImpl, cryptoImpl: options.cryptoImpl });
+  const milestones = options.milestoneClient ?? new MilestoneClient({ href: location.href, fetchImpl: options.fetchImpl, cryptoImpl: options.cryptoImpl });
   const byId = id => document.getElementById(id);
   const node = (tag, value = '') => { const element = document.createElement(tag); element.textContent = visible(value); return element; };
   const button = (label, action) => { const element = node('button', label); element.type = 'button'; element.addEventListener('click', action); return element; };
   const status = value => { byId('issue-status').textContent = value; };
-  let session = 0, view = 0;
+  let session = 0, view = 0, milestoneView = 0, selectedIssue = null, selectedMilestone = null;
   const visibleLocks = new Map();
   const commentLocked = () => byId('change-action').value === 'append-comment' &&
     visibleLocks.get(byId('change-number').value) === true;
+  const matchesIssue = issue => issue !== null && issue === selectedIssue &&
+    byId('change-number').value === String(issue.number) && byId('change-version').value === String(issue.version);
+  const milestoneReady = () => selectedMilestone !== null && matchesIssue(selectedMilestone.issue);
+  function clearMilestones() {
+    milestoneView += 1; milestones.cancelReads(); selectedMilestone = null;
+    byId('milestone-choices').replaceChildren(); byId('milestone-paging').replaceChildren();
+    byId('selected-milestone').textContent = 'No milestone selected.';
+  }
   const clearView = () => {
+    selectedIssue = null; clearMilestones();
     visibleLocks.clear();
     ['issue-content', 'issue-paging', 'issue-snapshot'].forEach(id => byId(id).replaceChildren());
     syncPending();
@@ -23,7 +34,9 @@ export function mountIssues(document, location, options = {}) {
   function syncPending() {
     const pending = client.pending;
     byId('prepared-change').hidden = !pending;
-    byId('prepare-change').disabled = !client.connected || Boolean(pending) || client.busy || commentLocked();
+    byId('prepare-change').disabled = !client.connected || Boolean(pending) || client.busy || commentLocked() ||
+      (byId('change-action').value === 'set-milestone' && !milestoneReady());
+    byId('load-milestones').disabled = !client.connected || !milestones.connected || !matchesIssue(selectedIssue);
     byId('change-body').disabled = commentLocked();
     byId('send-change').disabled = !pending || !client.connected || client.busy;
     byId('check-outcome').disabled = !pending || !client.connected || client.busy;
@@ -39,6 +52,7 @@ export function mountIssues(document, location, options = {}) {
     ].join('\n') : '';
   }
   function configureEditor() {
+    clearMilestones();
     const action = byId('change-action').value;
     const full = ['open', 'edit'].includes(action);
     const independent = ['append-comment', 'add-assignees', 'add-labels'].includes(action);
@@ -49,8 +63,47 @@ export function mountIssues(document, location, options = {}) {
     byId('replace-labels').disabled = action !== 'edit';
     byId('body-field').hidden = !full && action !== 'append-comment';
     byId('assignees-field').hidden = !['assign', 'add-assignees', 'unassign'].includes(action);
+    byId('milestone-field').hidden = action !== 'set-milestone';
     byId('replace-body-label').hidden = action !== 'edit';
     syncPending();
+  }
+  async function readMilestones(after = 0, target = selectedIssue) {
+    if (!matchesIssue(target) || byId('change-action').value !== 'set-milestone') {
+      status('Open the issue, then choose Set or move milestone before loading its snapshot.'); return;
+    }
+    clearMilestones(); const currentSession = session, currentView = milestoneView;
+    syncPending(); status('Reading milestones at the selected issue snapshot…');
+    try {
+      const result = await milestones.read(null, { after, limit: 20, head: target.head });
+      if (session !== currentSession || milestoneView !== currentView || !matchesIssue(target)) return;
+      if (result.head !== target.head || result.binding.tenant !== target.binding.tenant ||
+          result.binding.repository !== target.binding.repository) throw new Error('Milestones and issue do not belong to the same repository snapshot.');
+      const table = node('table'), heading = node('tr');
+      heading.append(node('th', 'Milestone'), node('th', 'State / progress / version')); table.append(heading);
+      for (const milestone of result.reply.milestones) {
+        const row = node('tr'), choice = node('td');
+        const select = button(`Use #${milestone.number} ${milestone.title}`, () => {
+          if (session !== currentSession || milestoneView !== currentView || !matchesIssue(target) ||
+              byId('change-action').value !== 'set-milestone' || milestone.state !== 'open') return;
+          selectedMilestone = { issue: target, number: milestone.number, version: milestone.version };
+          byId('selected-milestone').textContent = visible(`#${milestone.number} ${milestone.title} · milestone version ${milestone.version} · issue version ${target.version}`);
+          syncPending(); status('Milestone selected from the issue snapshot. Prepare and review the exact request before sending.');
+        });
+        select.disabled = milestone.state !== 'open'; choice.append(select);
+        row.append(choice, node('td', `${milestone.state} · ${milestone.open_issues} open / ${milestone.closed_issues} closed issues · version ${milestone.version}`));
+        table.append(row);
+      }
+      byId('milestone-choices').append(table);
+      if (!result.reply.milestones.length) byId('milestone-choices').append(node('p', 'No milestones on this snapshot page.'));
+      if (result.reply.next_after !== null) byId('milestone-paging').append(button('Next milestone choices', () => {
+        if (session === currentSession && milestoneView === currentView) void readMilestones(result.reply.next_after, target);
+      }));
+      status('Choose an open milestone. Closed milestones retain their existing members and cannot receive new assignments.');
+    } catch (error) {
+      if (session !== currentSession || milestoneView !== currentView) return;
+      if (!milestones.connected) disconnect(); else clearMilestones();
+      status(error.message);
+    } finally { syncPending(); }
   }
   function edit(issue, action) {
     if (action === 'append-comment' && issueLocked(issue)) {
@@ -107,6 +160,7 @@ export function mountIssues(document, location, options = {}) {
         content.append(node('p', `Issue #${number} was not found at this snapshot.`));
       } else {
         const issue = reply.issue;
+        selectedIssue = { number: issue.number, version: issue.version, head: result.head, binding: { ...result.binding } };
         const locked = issueLocked(issue); visibleLocks.set(String(issue.number), locked);
         byId('show-number').value = String(number);
         content.append(node('h2', `#${number} ${issue.title}`),
@@ -114,12 +168,17 @@ export function mountIssues(document, location, options = {}) {
           node('p', `Opened by ${issue.opened_by} · last changed by ${issue.last_actor}`),
           node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`),
           node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
-        content.append(node('p', `Milestone: ${issue.milestone == null ? '(none)' : `#${issue.milestone}`}`));
+        const membership = node('p', `Milestone: ${issue.milestone == null ? '(none)' : `#${issue.milestone}`}`);
+        if (issue.milestone != null) membership.append(button('Show milestone issues', () => {
+          if (session === currentSession && view === currentView) void search({ milestone: issue.milestone }, 0, result.head);
+        }));
+        content.append(membership);
         const actions = node('div'); actions.className = 'issue-actions';
         for (const [label, action] of [['Comment', 'append-comment'], ['Edit issue', 'edit'], ['Add labels', 'add-labels'], ['Add assignees', 'add-assignees'], ['Remove assignees', 'unassign'],
           [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen'],
-          [locked ? 'Unlock discussion' : 'Lock discussion', locked ? 'unlock' : 'lock']]) {
-          const control = button(label, () => edit(issue, action));
+          [locked ? 'Unlock discussion' : 'Lock discussion', locked ? 'unlock' : 'lock'],
+          ['Set or move milestone', 'set-milestone'], ['Clear milestone', 'clear-milestone']]) {
+          const control = button(label, () => { if (session === currentSession && view === currentView) edit(issue, action); });
           control.disabled = action === 'append-comment' && locked;
           actions.append(control);
         }
@@ -185,9 +244,9 @@ export function mountIssues(document, location, options = {}) {
     status('Issue read cancelled. Any prepared or dispatched change is unchanged.');
   }
   function disconnect() {
-    session += 1; view += 1; client.disconnect(); clearView();
+    session += 1; view += 1; client.disconnect(); milestones.disconnect(); clearView();
     for (const id of ['issue-token', 'change-title', 'change-body', 'change-labels', 'change-assignees', 'change-number', 'change-version', 'show-number', 'restore-receipt',
-      'issue-search-query', 'issue-search-labels', 'issue-search-opener']) byId(id).value = '';
+      'issue-search-query', 'issue-search-labels', 'issue-search-opener', 'issue-search-milestone']) byId(id).value = '';
     byId('issue-search-state').value = 'all'; byId('issue-search-case').checked = false;
     byId('issue-search-scan').value = '200';
     status(client.pending ? 'Disconnected. An unresolved request is retained locally; save its recovery receipt before leaving.' : 'Disconnected. Token and displayed issue data discarded.');
@@ -198,12 +257,12 @@ export function mountIssues(document, location, options = {}) {
     const token = byId('issue-token').value; byId('issue-token').value = '';
     disconnect(); const current = session;
     try {
-      await client.connect(token);
+      await Promise.all([client.connect(token), milestones.connect(token)]);
       if (current !== session) return;
       syncPending();
       if (client.pending) status('Original credential connected. Resolve the retained exact request before starting another change.');
       else await read(null);
-    } catch (error) { if (current === session) { status(error.message); syncPending(); } }
+    } catch (error) { if (current === session) { client.disconnect(); milestones.disconnect(); status(error.message); syncPending(); } }
   });
   byId('issue-disconnect').addEventListener('click', disconnect);
   byId('issue-list').addEventListener('click', () => { void read(null); });
@@ -216,17 +275,20 @@ export function mountIssues(document, location, options = {}) {
     try {
       const labels = byId('issue-search-labels').value;
       const state = byId('issue-search-state').value;
+      const milestone = byId('issue-search-milestone').value;
       void search({ state: state === 'all' ? null : state,
         text: byId('issue-search-query').value || null,
         opened_by: byId('issue-search-opener').value || null,
         labels: labels === '' ? [] : labels.split('\n'),
-        case_sensitive: byId('issue-search-case').checked }, 0, null,
+        case_sensitive: byId('issue-search-case').checked,
+        ...(milestone === '' ? {} : { milestone: milestone === 'none' ? 'none' : decimal(milestone, 'milestone number', 1) }) }, 0, null,
         decimal(byId('issue-search-scan').value, 'search scan limit', 1));
     } catch (error) { cancelView(); status(error.message); }
   });
   byId('issue-search-cancel').addEventListener('click', cancelView);
   byId('change-action').addEventListener('change', configureEditor);
-  byId('change-number').addEventListener('input', syncPending);
+  for (const id of ['change-number', 'change-version']) byId(id).addEventListener('input', () => { clearMilestones(); syncPending(); });
+  byId('load-milestones').addEventListener('click', () => { void readMilestones(); });
   byId('issue-change').addEventListener('submit', async event => {
     event.preventDefault();
     const current = session;
@@ -247,6 +309,10 @@ export function mountIssues(document, location, options = {}) {
       else if (['assign', 'add-assignees', 'unassign'].includes(action)) {
         const ids = byId('change-assignees').value;
         fields.assignees = ids === '' ? [] : ids.split('\n');
+      }
+      else if (action === 'set-milestone') {
+        if (!milestoneReady()) throw new Error('Select an open milestone from this issue snapshot before preparing its membership.');
+        fields.milestone = selectedMilestone.number; fields.expected_milestone_version = selectedMilestone.version;
       }
       await client.stage(decimal(byId('change-number').value, 'issue number', 1),
         ['append-comment', 'add-assignees', 'add-labels'].includes(action) ? null : decimal(byId('change-version').value, 'expected version'), action, fields);
@@ -312,6 +378,6 @@ export function mountIssues(document, location, options = {}) {
     if (client.pending) { event.preventDefault(); event.returnValue = ''; }
   });
   configureEditor(); syncPending();
-  return { client, disconnect, read, search };
+  return { client, milestoneClient: milestones, disconnect, read, search, readMilestones };
 }
 if (typeof document !== 'undefined') mountIssues(document, window.location);

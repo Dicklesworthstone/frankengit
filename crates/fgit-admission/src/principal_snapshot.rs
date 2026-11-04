@@ -640,7 +640,7 @@ mod tests {
         );
         let frame = record.encode().unwrap();
         let (_, decoder) = read_frame_header(&frame, DecodeLimits::DEFAULT).unwrap();
-        let payload = decoder.offset() + 4;
+        let payload = usize::try_from(decoder.offset()).unwrap() + 4;
         let identity_len = fgit_codec::canonical_body_bytes(record.identity())
             .unwrap()
             .len();

@@ -98,7 +98,9 @@ function entryIdentity(value, algorithm) {
   if (value === null) return;
   record(value); integer(value.mode, 'entry mode', 1, 0xffffffff); oid(value.oid, algorithm);
 }
-export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit') {
+// Shared wire framing only. Callers retain their own native subject, profile,
+// authority and publication checks after this complete bounded envelope.
+export function preparationEnvelope(response) {
   let metadata, bundle = null;
   if (/^application\/json(?:\s*;|$)/i.test(response.type)) {
     if (response.value.length > METADATA_LIMIT) fail('Preparation metadata exceeds limit.');
@@ -117,6 +119,10 @@ export async function preparationReply(response, number, expected, scope, crypto
     checkedBundle(bundle);
     if (findBytes(bundle, utf8.encode(`--${boundary}`)) !== -1) fail('Ambiguous binary candidate boundary.');
   }
+  return { metadata, bundle };
+}
+export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit') {
+  const { metadata, bundle } = preparationEnvelope(response);
   const selected = pinned(metadata, scope); noEffects(metadata);
   if (metadata.type !== 'merge_preparation' || metadata.profile !== 'path-merge-v1' || !Array.isArray(metadata.conflicts)) fail('Unsupported merge preparation.');
   if (mergeMethod(metadata.method === undefined ? 'merge-commit' : metadata.method) !== mergeMethod(method)) fail('Preparation method changed.');
@@ -176,12 +182,12 @@ function matchCommitParents(body, parents, algorithm) {
   // native parser; do not narrow the accepted existing source commit syntax.
   if (index !== parents.length) fail('Reported parents differ from native candidate commit bytes.');
 }
-export async function inspectionReply(reply, artifact, crypto) {
+export async function inspectionReply(reply, artifact, crypto, checkSubject = matchSubject) {
   const selected = pinned(reply, artifact.scope); noEffects(reply);
   if (reply.type !== 'candidate_inspection' || reply.all_changed_paths !== true || reply.binary_bodies_included !== false ||
       reply.comparison_profile !== 'full-tree-direct-path-myers-v1' || reply.context_lines !== 3) fail('Unsupported or incomplete candidate inspection.');
   const fields = artifact.fields, algorithm = fields.object_format;
-  matchSubject(reply.subject, fields, artifact.number, algorithm, 'pull_request');
+  checkSubject(reply.subject, fields, artifact.number, algorithm, 'pull_request');
   const method = candidateMethod(artifact), fastForward = method === 'fast-forward-only', squash = method === 'squash';
   if (oid(reply.merge_base, algorithm) !== fields.merge_base || oid(reply.candidate_commit, algorithm) !== fields.candidate_commit ||
       fields.source_tip === fields.target_tip || fields.candidate_commit === fields.target_tip ||

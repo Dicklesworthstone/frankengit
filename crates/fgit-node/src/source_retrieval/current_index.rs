@@ -238,8 +238,12 @@ impl OneNode {
         }
         let rcr = match selected.selected_closure().source() {
             ClosureSelectionSource::RepositoryCommit(rcr)
-            | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. } => rcr,
-            ClosureSelectionSource::EmptyGenesis => {
+            | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. }
+            | ClosureSelectionSource::CapsuleCheckpoint {
+                latest: Some(rcr), ..
+            } => rcr,
+            ClosureSelectionSource::EmptyGenesis
+            | ClosureSelectionSource::CapsuleCheckpoint { latest: None, .. } => {
                 return Err(NodeWorkspaceRefusal::RefUnavailable);
             }
         };

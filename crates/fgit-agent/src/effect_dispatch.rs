@@ -173,8 +173,9 @@ impl RevocationCheckedEffectBroker {
     ///
     /// # Errors
     ///
-    /// Refuses stale/revoked/substituted authorization, a different capability
-    /// ancestry or leaf than the accepted grant, evidence-capacity exhaustion,
+    /// Refuses another complete run or broker's reservation,
+    /// stale/revoked/substituted authorization, a different capability ancestry
+    /// or leaf than the accepted grant, evidence-capacity exhaustion,
     /// and ordinary resource/journal commit failures. Every refusal retains the
     /// live reservation or committed deferred obligation for cleanup.
     pub fn dispatch_authorized_outbox(
@@ -186,6 +187,19 @@ impl RevocationCheckedEffectBroker {
         attempt: u32,
         actual: &ResourceVector,
     ) -> Result<RevocationAuthorizedDeferredOutboxEffect, AuthorizedOutboxDispatchRefused> {
+        let expected = effect.initial_authorization.run_commitment();
+        if self.run_commitment != expected {
+            return Err(AuthorizedOutboxDispatchRefused::RunCommitmentChanged {
+                effect: Box::new(effect),
+                expected,
+                observed: self.run_commitment,
+            });
+        }
+        if !self.inner.owns_outbox(&effect.outbox) {
+            return Err(AuthorizedOutboxDispatchRefused::BrokerMismatch {
+                effect: Box::new(effect),
+            });
+        }
         if self.dispatch_authorizations.len()
             >= crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS
         {
@@ -750,6 +764,20 @@ impl core::error::Error for RevocationAuthorizedEscalationResolutionRefused {}
 #[must_use]
 #[derive(Debug)]
 pub enum AuthorizedOutboxDispatchRefused {
+    /// The dispatching broker serves a different complete machine-enforced run.
+    RunCommitmentChanged {
+        /// Still-live reservation belonging to the original run.
+        effect: Box<RevocationAuthorizedOutboxEffect>,
+        /// Complete run that authorized initial acceptance.
+        expected: IntentRunCommitment,
+        /// Complete run served by the dispatching broker.
+        observed: IntentRunCommitment,
+    },
+    /// Even an identical complete run cannot transfer another broker's custody.
+    BrokerMismatch {
+        /// Still-live reservation recoverable by its issuing broker.
+        effect: Box<RevocationAuthorizedOutboxEffect>,
+    },
     /// Fresh revocation or scope authorization failed before dispatch.
     Authorization {
         /// Still-live reservation.
@@ -813,7 +841,9 @@ impl AuthorizedOutboxDispatchRefused {
     #[must_use]
     pub fn into_reserved(self) -> Option<RevocationAuthorizedOutboxEffect> {
         match self {
-            Self::Authorization { effect, .. }
+            Self::RunCommitmentChanged { effect, .. }
+            | Self::BrokerMismatch { effect }
+            | Self::Authorization { effect, .. }
             | Self::CapabilityChainChanged { effect, .. }
             | Self::LeafCapabilityChanged { effect, .. }
             | Self::AuthorizationWindowInvalid { effect, .. }
@@ -851,7 +881,9 @@ impl AuthorizedOutboxDispatchRefused {
                     request,
                     deferred,
                 }),
-            Self::Authorization { .. }
+            Self::RunCommitmentChanged { .. }
+            | Self::BrokerMismatch { .. }
+            | Self::Authorization { .. }
             | Self::CapabilityChainChanged { .. }
             | Self::LeafCapabilityChanged { .. }
             | Self::AuthorizationWindowInvalid { .. }
@@ -863,6 +895,15 @@ impl AuthorizedOutboxDispatchRefused {
 impl fmt::Display for AuthorizedOutboxDispatchRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RunCommitmentChanged {
+                expected, observed, ..
+            } => write!(
+                formatter,
+                "outbox dispatch run {observed} differs from accepted run {expected}"
+            ),
+            Self::BrokerMismatch { .. } => {
+                formatter.write_str("outbox reservation belongs to another broker")
+            }
             Self::Authorization { source, .. } => {
                 write!(formatter, "outbox dispatch authorization refused: {source}")
             }

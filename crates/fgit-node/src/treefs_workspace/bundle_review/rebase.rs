@@ -119,6 +119,7 @@ impl OneNode {
         };
         let limits = MergeObjectLimits {
             max_object_bytes: maximum,
+            max_reused_blob_bytes: self.reused_merge_blob_limit(),
             ..MergeObjectLimits::default()
         };
         // This source proves each original from onto alone. The old source

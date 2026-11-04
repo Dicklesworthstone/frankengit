@@ -101,6 +101,8 @@ export function renderText(value, check = () => {}) {
     check(); const line = quote(value); size += Buffer.byteLength(line) + 1;
     if (size > TEXT_LIMIT) fail('context_text_export_limit'); lines.push(line);
   };
+  if (summary.index_source) append({ index_source: summary.index_source,
+    current_source: summary.current_source, index_sources: summary.index_sources });
   if (summary.symbols) append({ symbol_query: summary.query.symbols, symbols: summary.symbols,
     symbol_omissions: capture.native_response.retrieval.symbols.result?.omissions ?? [] });
   if (summary.ranking) append({ selection: summary.ranking.profile, ranking: summary.ranking });
@@ -127,6 +129,8 @@ function receipt(path, manifest, manifestBytes, summary) {
     complete: summary.complete, source: summary.source, lexical_checkpoint: summary.lexical_checkpoint,
     returned_files: summary.returned_files, omitted_files: summary.omitted_files, excerpt_bytes: summary.excerpt_bytes,
     source_material_untrusted: true, authority_verified: false, agent_context_packet: false,
+    ...(summary.index_source ? { index_source: summary.index_source,
+      current_source: summary.current_source, index_sources: summary.index_sources } : {}),
     ...(summary.symbols ? { symbols: summary.symbols } : {}),
     ...(summary.ranking ? { selection: summary.ranking.profile } : {}) };
 }

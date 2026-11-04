@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
+    Commit,
     Tree,
     Blob,
     Search,
@@ -43,6 +44,7 @@ impl<'a> Request<'a> {
             return Err(ApiError::not_found());
         }
         let operation = match action {
+            "commit" => Operation::Commit,
             "tree" => Operation::Tree,
             "blob" => Operation::Blob,
             "search" => Operation::Search,
@@ -103,6 +105,7 @@ impl<'a> Request<'a> {
                 "ref" | "object_format" | "expected_head" | "expected_commit"
             );
             let applicable = match self.operation {
+                Operation::Commit => false,
                 Operation::Tree => matches!(name.as_str(), "path_hex" | "after_hex" | "limit"),
                 Operation::Blob => matches!(name.as_str(), "path_hex" | "offset" | "limit"),
                 Operation::Search | Operation::SearchBatch => matches!(
@@ -137,6 +140,9 @@ impl<'a> Request<'a> {
             expected_head,
             expected_commit,
         };
+        if self.operation == Operation::Commit {
+            return Ok(Command::Commit { selection });
+        }
         if matches!(self.operation, Operation::Search | Operation::SearchBatch) {
             let case = match fields.remove("case").as_deref().unwrap_or("exact") {
                 "exact" => SearchCase::Exact,
@@ -206,7 +212,9 @@ impl<'a> Request<'a> {
                     .unwrap_or(0),
                 limit: positive(&mut fields, "limit", 64 * 1024, 1024 * 1024)? as u32,
             },
-            Operation::Search | Operation::SearchBatch => return Err(ApiError::unavailable()),
+            Operation::Commit | Operation::Search | Operation::SearchBatch => {
+                return Err(ApiError::unavailable());
+            }
         };
         let query = SourceBrowseQuery {
             path,
@@ -229,6 +237,9 @@ pub(super) struct Selection {
 }
 #[derive(Debug)]
 pub(super) enum Command {
+    Commit {
+        selection: Selection,
+    },
     Browse {
         selection: Selection,
         query: SourceBrowseQuery,
@@ -396,6 +407,47 @@ mod tests {
                 .unwrap();
             assert!(Request::parse(&head).is_err());
         }
+    }
+    #[test]
+    fn current_commit_has_only_current_ref_and_comparison_fields() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let common = form(format);
+            let id = "a".repeat(format.digest_len() * 2);
+            let Command::Commit { selection } = request(Operation::Commit)
+                .command(format!("{common}&expected_commit={id}").as_bytes(), format)
+                .unwrap()
+            else {
+                panic!("current commit")
+            };
+            assert_eq!(selection.reference.as_bytes(), b"refs/heads/main");
+            assert_eq!(
+                selection.expected_commit,
+                Some(GitOid::from_hex(format, &id).unwrap())
+            );
+            for extra in [
+                "&object_id=aa",
+                "&commit=aa",
+                "&ancestor=aa",
+                "&path_hex=61",
+                "&after=0",
+                "&limit=1",
+                "&offset=0",
+                "&principal=admin",
+                "&expected_commit=00",
+                "&ref=refs/heads/other",
+                "&expected_head=invalid",
+            ] {
+                assert!(
+                    request(Operation::Commit)
+                        .command(format!("{common}{extra}").as_bytes(), format)
+                        .is_err(),
+                    "{extra}"
+                );
+            }
+        }
+        let raw = b"POST /r.git/api/v1/source/commit HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n";
+        let head = head::parse(raw, HttpLimits::default()).unwrap().unwrap();
+        assert_eq!(Request::parse(&head).unwrap().operation, Operation::Commit);
     }
 }
 

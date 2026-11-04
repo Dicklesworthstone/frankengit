@@ -17,12 +17,16 @@
 extern crate self as fgit_node;
 
 mod admission_authentication;
+pub mod agent_credentials;
 pub mod agent_journal;
 
 /// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
-/// service lane. The standalone worker and HTTP service share this controller.
+/// service lane. Standalone, HTTP and MCP services share this controller.
 #[path = "bin/fg-index-maintain.rs"]
 pub mod index_maintenance;
+
+mod source_index_service;
+pub use source_index_service::SourceIndexService;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -189,7 +193,7 @@ mod node_lanes;
 mod pack_spool;
 mod smart_http;
 /// HTTP `search-initial`/`context-initial` for an in-process host (see the fn).
-pub use smart_http::{source_agent_context_json, source_retrieval_json};
+pub use smart_http::{source_agent_context_json, source_index_json, source_retrieval_json};
 mod termination;
 pub use smart_http::{
     HttpTrustedOrigin, HttpTrustedOriginRefusal, NodeSmartHttpDiscovery, NodeSmartHttpRefusal,
@@ -861,8 +865,9 @@ struct MaterializedAdmissionState {
     cache_permit: CachePermit,
     ref_state: CanonicalRefState,
     selected_closure: Arc<AuthoritySelectedClosure>,
-    /// Distinct committed roots in the verified prefix, not object authority
-    /// independently of `basis` and the cache permit.
+    /// Distinct closure roots in the verified prefix: individual RCR roots or
+    /// an explicitly declared cumulative checkpoint plus its suffix. They are
+    /// not object authority independently of `basis` and the cache permit.
     closure_roots: Arc<BTreeSet<Digest>>,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
@@ -904,12 +909,25 @@ pub enum ClosureSelectionSource {
         /// Distinct closure roots united, for audit.
         united_roots: usize,
     },
+    /// A cumulative admitted-membership checkpoint reached through verified
+    /// authority edges, plus the closures of every later committed RCR.
+    /// Legacy capsule profiles never select this source.
+    CapsuleCheckpoint {
+        /// The exact authority-selected capsule declaring the retained union.
+        capsule: fgit_types::RepositoryCapsuleId,
+        /// The newest committed record, absent for genesis/refusal-only history.
+        latest: Option<RepositoryCommitId>,
+        /// Distinct selected closure bodies united, including the checkpoint.
+        /// This is not the number of original RCR roots in the retained prefix.
+        united_roots: usize,
+    },
 }
 
 /// A permitted object set selected from authenticated authority history.
 ///
 /// This is not a local reachability cache: `root` is re-derived from `closure`,
-/// and `source` names the genesis rule or exact RCR that selected it.
+/// and `source` names the genesis rule, exact RCR history or authenticated
+/// cumulative checkpoint that selected it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthoritySelectedClosure {
     root: Digest,
@@ -2558,6 +2576,7 @@ pub struct DurableAsyncAdmissionProjection<'materializer> {
     outcome_checkpoint_fabric: Option<&'materializer LocalFilesystemFabric>,
     context: AdmissionContext,
     authentication: Option<AdmissionAuthentication>,
+    agent_deadline: Option<std::time::Instant>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
     /// A receive's staged objects, published before its first commit's
     /// frames (frankengit-tz5z).
@@ -2583,6 +2602,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             outcome_checkpoint_fabric: None,
             context,
             authentication: None,
+            agent_deadline: None,
             prepared: Mutex::new(None),
             publication: None,
         }
@@ -2595,6 +2615,15 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         authentication: AdmissionAuthentication,
     ) -> Self {
         self.authentication = Some(authentication);
+        self
+    }
+
+    pub(crate) const fn with_authenticated_session(
+        mut self,
+        session: &AuthenticatedReceiveSession,
+    ) -> Self {
+        self.authentication = Some(session.authentication);
+        self.agent_deadline = session.agent_deadline;
         self
     }
 
@@ -3289,7 +3318,7 @@ where
                     RefusalCode::EvidenceInvalid,
                 ));
             }
-            capsule_history::HistoryStep::Checkpoint { predecessor } => {
+            capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                 successor = predecessor.body().clone();
                 continue;
             }
@@ -3499,7 +3528,7 @@ where
                     )),
                 };
             }
-            capsule_history::HistoryStep::Checkpoint { predecessor } => {
+            capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                 successor = predecessor.body().clone();
                 continue;
             }
@@ -4934,6 +4963,7 @@ pub struct AuthenticatedReceiveSession {
     principal_id: PrincipalId,
     client_idempotency_key: IdempotencyKey,
     authentication: AdmissionAuthentication,
+    agent_deadline: Option<std::time::Instant>,
     ref_write_scope: Option<Arc<ref_write_scope::RefWriteScope>>,
 }
 
@@ -4946,6 +4976,7 @@ impl AuthenticatedReceiveSession {
             principal_id,
             client_idempotency_key,
             authentication: AdmissionAuthentication::OperatorAssertion,
+            agent_deadline: None,
             ref_write_scope: None,
         }
     }
@@ -4964,6 +4995,14 @@ impl AuthenticatedReceiveSession {
     #[must_use]
     pub const fn authentication(&self) -> AdmissionAuthentication {
         self.authentication
+    }
+
+    pub(crate) const fn with_agent_deadline(
+        mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        self.agent_deadline = deadline;
+        self
     }
 
     /// Narrow the existing authentication boundary's code-write grant. This is
@@ -6067,25 +6106,54 @@ impl<F: Fn() -> Option<bool>> ClientLiveness<F> {
 struct DeadlineTcpStream<'stream> {
     stream: &'stream mut TcpStream,
     deadline: GitDaemonSessionDeadline,
+    hard_deadline: Option<Instant>,
 }
 
 impl<'stream> DeadlineTcpStream<'stream> {
     const fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
-        Self { stream, deadline }
+        Self {
+            stream,
+            deadline,
+            hard_deadline: None,
+        }
     }
 
     fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
         self.deadline = deadline;
     }
 
+    /// Credential/run expiry is independent of the transport's phase budget.
+    /// A report restart or work extension must never reopen this ceiling.
+    fn cap_deadline(&mut self, deadline: Instant) {
+        self.hard_deadline = Some(
+            self.hard_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+    }
+
+    fn capped_remaining(&self, remaining: Duration) -> io::Result<Duration> {
+        let Some(deadline) = self.hard_deadline else {
+            return Ok(remaining);
+        };
+        let remaining = remaining.min(deadline.saturating_duration_since(Instant::now()));
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "request authority deadline elapsed",
+            ));
+        }
+        Ok(remaining)
+    }
+
     fn prepare_read(&self) -> io::Result<()> {
         self.stream
-            .set_read_timeout(Some(self.deadline.remaining()?))
+            .set_read_timeout(Some(self.capped_remaining(self.deadline.remaining()?)?))
     }
 
     fn prepare_write(&self) -> io::Result<()> {
-        self.stream
-            .set_write_timeout(Some(self.deadline.remaining_write()?))
+        self.stream.set_write_timeout(Some(
+            self.capped_remaining(self.deadline.remaining_write()?)?,
+        ))
     }
 }
 
@@ -9081,8 +9149,34 @@ impl OneNode {
         &self,
         deadline: &GitDaemonSessionDeadline,
     ) -> NodeRequestContext {
+        self.session_request_context_with_timeout(deadline.budget())
+    }
+
+    /// Carry a verified request's authority ceiling into awaited database work.
+    /// A fresh HTTP phase cannot extend an agent run, and a rich witness without
+    /// its verifier-owned monotonic deadline supplies no live request authority.
+    pub(crate) fn authenticated_session_request_context(
+        &self,
+        deadline: &GitDaemonSessionDeadline,
+        session: &LoopbackReceiveSession,
+    ) -> NodeRequestContext {
+        let Some(session) = session
+            .authenticated_session()
+            .filter(|session| session.authentication.agent_provenance().is_some())
+        else {
+            return self.session_request_context(deadline);
+        };
+        let remaining = session.agent_deadline.map_or(Duration::ZERO, |limit| {
+            limit.saturating_duration_since(Instant::now())
+        });
+        self.session_request_context_with_timeout(
+            remaining.min(deadline.remaining().unwrap_or(Duration::ZERO)),
+        )
+    }
+
+    fn session_request_context_with_timeout(&self, timeout: Duration) -> NodeRequestContext {
         let limits = ClassLimits {
-            timeout: Some(deadline.budget()),
+            timeout: Some(timeout),
             ..self
                 .service_config
                 .runtime_budgets
@@ -9093,7 +9187,11 @@ impl OneNode {
             self.runtime
                 .request_cx_with_budget(limits.at(self.runtime.now())),
         );
-        NodeRequestContext { authority }
+        let context = NodeRequestContext { authority };
+        if timeout.is_zero() {
+            context.cancel();
+        }
+        context
     }
 
     /// Mints the authority context for one operator command (CLI or MCP).
@@ -9411,7 +9509,7 @@ impl OneNode {
             .await?
             {
                 capsule_history::HistoryStep::Genesis => break,
-                capsule_history::HistoryStep::Checkpoint { predecessor } => {
+                capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
                     // The verified edge preserves ref/forge state. Retain the
                     // real predecessor's identity for the actual batch below;
                     // the checkpoint does not create a historical batch row.
@@ -16111,6 +16209,46 @@ mod session_envelope_tests {
     fn timeout_seconds(seconds: u64) -> GitDaemonSessionTimeout {
         GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds))
             .expect("a non-zero test session budget is admitted")
+    }
+
+    #[test]
+    fn socket_authority_expiry_survives_report_restart_and_cannot_be_extended() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let fresh = || {
+            GitDaemonSessionDeadline::new(timeout_seconds(60), GitDaemonSessionWorkScaling::FLAT)
+        };
+        let mut stream = DeadlineTcpStream::new(&mut server, fresh());
+        stream.write_all(b"before").unwrap();
+        let mut received = [0; 6];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"before");
+
+        // Buffered input would be readable, and this socket was writable.
+        // Setting an already elapsed ceiling avoids a sleep/timing race.
+        client.write_all(b"input").unwrap();
+        let expired = Instant::now();
+        stream.cap_deadline(expired);
+        stream.restart_deadline(fresh());
+        stream.cap_deadline(expired + Duration::from_secs(300));
+        assert_eq!(stream.hard_deadline, Some(expired));
+        stream.deadline.begin_terminal_response();
+        assert_eq!(
+            stream.read(&mut received).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            stream.write(b"after").unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(stream.flush().unwrap_err().kind(), io::ErrorKind::TimedOut);
+        client.set_nonblocking(true).unwrap();
+        assert_eq!(
+            client.read(&mut received).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "no response byte is sent after the hard deadline"
+        );
     }
 
     #[test]

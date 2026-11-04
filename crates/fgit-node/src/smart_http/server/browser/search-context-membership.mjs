@@ -321,17 +321,16 @@ export async function acquireContextMembership(result, reference, independentCom
     if (value.ref_hex !== wantedRef || (Object.hasOwn(value, 'ref') && value.ref !== reference) ||
         value.snapshot_token !== pin.head || value.source_head !== pin.sourceHead || oid(value.source_commit, scope.format) !== selected.commit ||
         value.read_only !== true || value.transaction_created !== false || value.published !== false) refuse('source or read scope changed.');
-    if (kind === 'tree' && (value.source_rcr !== pin.rcr || oid(value.root_tree, scope.format) !== oid(pin.tree, scope.format))) refuse('tree source root changed.');
+    if (value.source_rcr !== pin.rcr || oid(value.root_tree, scope.format) !== oid(pin.tree, scope.format)) refuse('source root changed.');
     return value;
   };
-  const log = await read('log', { after: 0, limit: 1 }, 256 * 1024);
-  integer(log.total_commits, 'log size', 1, 4096);
-  if (log.type !== 'source_log' || log.ordering !== 'child-before-parent-native-id-v1' || log.author_identity_verified !== false ||
-      log.page_complete !== true || log.after !== 0 || log.limit !== 1 || !Array.isArray(log.commits) || log.commits.length !== 1 ||
-      log.next_after !== (log.total_commits > 1 ? 1 : null)) refuse('invalid selected commit page.');
-  const row = record(log.commits[0]), commit = { oid: oid(row.object_id, scope.format), bodyHex: row.body_hex };
+  // Membership needs this one current commit, not an ancestry walk. The same
+  // read-only endpoint is available to a sponsored repository source reader.
+  const row = await read('commit', {}, 256 * 1024);
+  if (row.type !== 'source_commit' || row.author_identity_verified !== false) refuse('invalid selected source commit.');
+  const commit = { oid: oid(row.object_id, scope.format), bodyHex: row.body_hex };
   const body = unhex(commit.bodyHex, 65536), original = commitRoot(body, scope.format);
-  if (commit.oid !== selected.commit || original.root !== oid(pin.tree, scope.format) || oid(row.tree, scope.format) !== original.root ||
+  if (commit.oid !== selected.commit || original.root !== oid(pin.tree, scope.format) || oid(row.root_tree, scope.format) !== original.root ||
       !Array.isArray(row.parents) || !same(row.parents.map(parent => oid(parent, scope.format)), original.parents) ||
       await digest('commit', body, scope.format, crypto, check) !== selected.commit) refuse('commit bytes or summary changed.');
   const proof = { schema: MEMBERSHIP_PROFILE, objectFormat: scope.format, commit, trees: [], files: [] };

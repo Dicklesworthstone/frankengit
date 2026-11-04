@@ -40,6 +40,11 @@ pub(super) struct Binding {
 // No Debug implementation: credentials must not be printed in diagnostics.
 #[derive(Clone)]
 pub(super) enum CredentialSource {
+    /// Verified against canonical state for one request, never saved as config.
+    AgentRequest {
+        digest: [u8; 32],
+        grant: Grant,
+    },
     Static {
         digest: [u8; 32],
         principal: PrincipalId,
@@ -75,6 +80,7 @@ enum Scope {
     NotificationsWrite,
     DiscussionsRead,
     DiscussionsWrite,
+    SourceRead,
 }
 
 impl Scope {
@@ -132,13 +138,47 @@ pub(super) struct Grant {
     pub principal: PrincipalId,
     scopes: Scopes,
     ref_write_scope: Option<Arc<RefWriteScope>>,
+    authentication: AdmissionAuthentication,
+    agent_deadline: Option<std::time::Instant>,
 }
 impl Grant {
+    pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
+        use fgit_identity::agent::{
+            DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
+            PULLS_READ, PULLS_WRITE, SOURCE_READ,
+        };
+        let mut scopes = Scopes::default();
+        let scope = match request.operation {
+            ISSUES_READ => Scope::IssuesRead,
+            ISSUES_WRITE => Scope::IssuesWrite,
+            PULLS_READ => Scope::PullsRead,
+            PULLS_WRITE => Scope::PullsWrite,
+            DISCUSSIONS_READ => Scope::DiscussionsRead,
+            DISCUSSIONS_WRITE => Scope::DiscussionsWrite,
+            OUTCOMES_READ => Scope::OutcomesRead,
+            SOURCE_READ => Scope::SourceRead,
+            _ => unreachable!("node authenticated a closed operation"),
+        };
+        scopes.insert(scope);
+        Self {
+            principal: request.authentication.agent(),
+            scopes,
+            ref_write_scope: None,
+            authentication: AdmissionAuthentication::AgentCredential(request.authentication),
+            agent_deadline: Some(request.deadline()),
+        }
+    }
     pub const fn permits(&self, service: Service) -> bool {
         match service {
             Service::UploadPack => self.scopes.contains(Scope::Read),
             Service::ReceivePack => self.scopes.contains(Scope::Receive),
         }
+    }
+    /// Source API disclosure is separate from Git transport access. Existing
+    /// operator read grants retain their scope; sponsored source readers never
+    /// acquire upload-pack authority by passing this check.
+    pub const fn permits_source_read(&self) -> bool {
+        self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceRead)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -242,7 +282,8 @@ impl Grant {
     pub(super) fn session(&self, key: IdempotencyKey) -> LoopbackReceiveSession {
         LoopbackReceiveSession::Authenticated(
             AuthenticatedReceiveSession::new(self.principal, key)
-                .with_authentication(AdmissionAuthentication::HttpToken)
+                .with_authentication(self.authentication)
+                .with_agent_deadline(self.agent_deadline)
                 .with_ref_write_scope(self.ref_write_scope.clone()),
         )
     }
@@ -279,14 +320,31 @@ impl Error for CredentialFailure {}
 impl CredentialSource {
     pub fn validate(&self) -> Result<(), CredentialFailure> {
         match self {
+            Self::AgentRequest { .. } => Ok(()),
             Self::Static { .. } => Ok(()),
             Self::File { path, binding } => load(path, *binding).map(|_| ()),
         }
     }
 
     pub fn authenticate(&self, authorization: Option<&str>) -> Result<Grant, CredentialFailure> {
+        if let Self::AgentRequest { digest, grant } = self {
+            let token = authorization
+                .and_then(|value| value.split_once(' '))
+                .filter(|(scheme, token)| {
+                    scheme.eq_ignore_ascii_case("bearer")
+                        && crate::agent_credentials::valid_agent_credential_token(token.as_bytes())
+                })
+                .map(|(_, token)| token)
+                .ok_or(CredentialFailure::UnknownCredential)?;
+            return if verify_mac(digest, &sha256_digest(token.as_bytes())) {
+                Ok(grant.clone())
+            } else {
+                Err(CredentialFailure::UnknownCredential)
+            };
+        }
         let candidate = credential_digest(authorization)?;
         match self {
+            Self::AgentRequest { .. } => Err(CredentialFailure::UnknownCredential),
             Self::Static { digest, principal } => {
                 if !verify_mac(digest, &candidate) {
                     return Err(CredentialFailure::UnknownCredential);
@@ -297,6 +355,8 @@ impl CredentialSource {
                     principal: *principal,
                     scopes: Scopes::git_transport(),
                     ref_write_scope: None,
+                    authentication: AdmissionAuthentication::HttpToken,
+                    agent_deadline: None,
                 })
             }
             Self::File { path, binding } => {
@@ -490,6 +550,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
         principal,
         scopes: Scopes::default(),
         ref_write_scope: None,
+        authentication: AdmissionAuthentication::HttpToken,
+        agent_deadline: None,
     };
     let mut previous = None;
     for name in scopes.split(',') {
@@ -572,6 +634,36 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_read_permission_does_not_grant_git_or_metadata_services() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let mut value = grant(principal, "read").unwrap();
+        assert!(value.permits_source_read());
+        assert!(value.permits(Service::UploadPack));
+
+        value.scopes = Scopes(Scope::SourceRead.mask());
+        assert!(value.permits_source_read());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_discussions(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_lfs(mutation));
+            assert!(!value.permits_queues(mutation));
+        }
+        assert!(!value.permits_outcomes());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        assert!(!value.permits_artifact_read());
+
+        for scopes in ["receive", "issues-read", "pulls-read", "discussions-read"] {
+            assert!(!grant(principal, scopes).unwrap().permits_source_read());
+        }
+    }
 
     #[test]
     fn discussion_scopes_are_independent_and_keep_canonical_credential_order() {

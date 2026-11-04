@@ -3,13 +3,14 @@
 
 use super::super::super::issues::{ApiError, MAX_FORM_BYTES, parse_decimal, parse_form};
 use super::super::collaboration::resolution_upload::{self, FileParts};
+use super::super::subject::reference;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::resolution::{
     ConflictResolution, ResolutionChoice, ResolutionError, validate_resolutions,
 };
 use fgit_forge::preparation::{MergeCommitStyle, MergeMetadata, MergeProfile, PreparationLimits};
 use fgit_forge::{AggregateVersion, PullRequestNumber};
-use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch, RefName};
+use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
@@ -259,7 +260,9 @@ impl<'a> Request<'a> {
                     | "pull_request_version"
                     | "policy_epoch"
                     | "source_ref"
+                    | "source_ref_hex"
                     | "target_ref"
+                    | "target_ref_hex"
                     | "source_tip"
                     | "target_tip"
                     | "author"
@@ -298,10 +301,8 @@ impl<'a> Request<'a> {
             pull_request_version: version,
             policy_epoch: PolicyEpoch::try_new(parse_decimal(&take(&mut fields, "policy_epoch")?)?)
                 .map_err(|_| ApiError::bad("invalid_policy_epoch"))?,
-            source_ref: RefName::try_new(take(&mut fields, "source_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?,
-            target_ref: RefName::try_new(take(&mut fields, "target_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?,
+            source_ref: reference(&mut fields, "source_ref", "source_ref_hex")?,
+            target_ref: reference(&mut fields, "target_ref", "target_ref_hex")?,
             source_tip: oid(&take(&mut fields, "source_tip")?, format)?,
             target_tip: oid(&take(&mut fields, "target_tip")?, format)?,
         };
@@ -401,6 +402,103 @@ mod tests {
             assert_eq!(command.profile, MergeProfile::PathMergeV1);
             assert_eq!(command.style, MergeCommitStyle::TwoParent);
             assert_eq!(request.command(input.as_bytes(), format).unwrap(), command);
+        }
+    }
+
+    #[test]
+    fn raw_reference_preparation_and_resolution_keep_identical_subjects_and_metadata() {
+        let encode =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let text = form(format);
+            let legacy = request(false).command(text.as_bytes(), format).unwrap();
+            let equivalent = text
+                .replace(
+                    "source_ref=refs/heads/topic",
+                    &format!("source_ref_hex={}", encode(b"refs/heads/topic")),
+                )
+                .replace(
+                    "target_ref=refs/heads/main",
+                    &format!("target_ref_hex={}", encode(b"refs/heads/main")),
+                );
+            assert_eq!(
+                request(false)
+                    .command(equivalent.as_bytes(), format)
+                    .unwrap(),
+                legacy
+            );
+            for (source, target) in [
+                (
+                    b"refs/heads/topic-\xff".as_slice(),
+                    b"refs/heads/main".as_slice(),
+                ),
+                (
+                    b"refs/heads/topic".as_slice(),
+                    b"refs/heads/main-\xfe".as_slice(),
+                ),
+                (
+                    b"refs/heads/topic-\xff".as_slice(),
+                    b"refs/heads/main-\xfe".as_slice(),
+                ),
+            ] {
+                let raw = text
+                    .replace(
+                        "source_ref=refs/heads/topic",
+                        &format!("source_ref_hex={}", encode(source)),
+                    )
+                    .replace(
+                        "target_ref=refs/heads/main",
+                        &format!("target_ref_hex={}", encode(target)),
+                    );
+                for method in ["merge-commit", "squash"] {
+                    let prepared = request(false)
+                        .command(
+                            (raw.clone() + &format!("&method={method}&profile=exact-renames-v1"))
+                                .as_bytes(),
+                            format,
+                        )
+                        .unwrap();
+                    let resolved = request(true)
+                        .resolved_command(
+                            (raw.clone()
+                                + &format!(
+                                    "&method={method}&merge_base={}&resolution=ff:ours",
+                                    "c".repeat(format.digest_len() * 2)
+                                ))
+                                .as_bytes(),
+                            BTreeMap::new(),
+                            format,
+                        )
+                        .unwrap();
+                    assert_eq!(prepared.subject.source_ref.as_bytes(), source);
+                    assert_eq!(prepared.subject.target_ref.as_bytes(), target);
+                    assert_eq!(prepared.subject, resolved.subject);
+                    assert_eq!(prepared.metadata, resolved.metadata);
+                    assert_eq!(prepared.metadata, legacy.metadata);
+                    assert_eq!(prepared.style, resolved.style);
+                    assert_eq!(resolved.choices[0].path, [255]);
+                }
+                for ambiguous in [
+                    raw.clone() + "&source_ref=refs/heads/topic",
+                    raw.clone() + "&target_ref=refs/heads/main",
+                ] {
+                    assert!(
+                        request(false)
+                            .command(ambiguous.as_bytes(), format)
+                            .is_err()
+                    );
+                    let resolution = ambiguous
+                        + &format!(
+                            "&merge_base={}&resolution=ff:ours",
+                            "c".repeat(format.digest_len() * 2)
+                        );
+                    assert!(
+                        request(true)
+                            .resolved_command(resolution.as_bytes(), BTreeMap::new(), format)
+                            .is_err()
+                    );
+                }
+            }
         }
     }
     #[test]

@@ -162,3 +162,24 @@ A fully backpressured 32 MiB PUT also exercises producer/socket drain without
 waiting for an unread remote handler. The SIGTERM peer test consumes incoming
 bytes and awaits an explicit bounded close event; an arbitrary 30 ms sleep is
 not used as evidence that remote closure has completed.
+
+The separate `scripts/e2e/suites/operator/backup_https.sh` campaign uploads actual
+signed native SHA-1 and SHA-256 archives with this shipped CLI. It checks exact
+budget/pin refusals, archive readback before approval publication and GET-only
+exact retries. The upload-job path also loses an approval response after writing
+its bytes, retains partial completion, and resumes with renewed capabilities
+without another PUT. Downloaded bytes enter actual native signed restore and
+separate Rust Git/forge reads. The HTTPS object service is a bounded disk-backed
+loopback transport fixture; it is not a native forge or public-provider proof.
+The campaign binds a separately qualified prebuilt `FG_BIN` digest and requires
+pinned Node, sandboxed Git 2.54.0, Python and test-only OpenSSL for its ephemeral
+CA. Original diagnostic bytes remain retained. No independent storage,
+destructive/hardware fault, full capsule, independent review, fresh-current-main
+build or full-workspace qualification is established.
+
+`python3 scripts/e2e/selftests/test_backup_https_fixture.py` checks the campaign's
+TLS owner using real sockets and filesystem failures. A startup journal failure
+must drain its thread/listener before propagating the original error: failed
+Python context entry does not automatically call `__exit__`. The tests also
+exercise a permitted HTTPS request, body failure and terminal journal failure.
+These are harness ownership regressions, not native or provider evidence.

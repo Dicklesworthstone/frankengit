@@ -5,13 +5,18 @@ use super::super::indexed::hex;
 use super::evidence_failure as failure;
 use super::{
     ApiError, BTreeMap, BodyFraming, Command, GitDaemonSessionDeadline,
-    GitDaemonSessionWorkScaling, GitHashAlgorithm, HttpLimits, JsonReply, LoopbackReceiveSession,
-    NodeWorkspaceRefusal, OneNode, Read, RetrievalError, SourceReadContext, Status, append, check,
-    drive_request_while, parse_form, positive, quote, read_form,
+    GitDaemonSessionWorkScaling, GitHashAlgorithm, HttpLimits, IndexSource, JsonReply,
+    LoopbackReceiveSession, NodeWorkspaceRefusal, OneNode, Read, RetrievalError, SourceReadContext,
+    Status, append, check, drive_request_while, parse_form, positive, quote, read_form,
 };
 #[cfg(test)]
 use super::{InitialLimits, SymbolPolicy};
-use crate::source_retrieval::context::{ContextLimits, InitialContext, PROFILE as CONTEXT_PROFILE};
+use crate::source_retrieval::context::{
+    ContextLimits, InitialContext, PROFILE as CONTEXT_PROFILE, REVALIDATED_PROFILE,
+    RevalidatedInitialContext,
+};
+mod view;
+use view::ContextView;
 
 use crate::source_retrieval::context::ranked::{self, ContextRanking};
 
@@ -21,13 +26,13 @@ pub(super) struct ContextCommand {
     pub(super) ranked: bool,
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<ContextCommand, ApiError> {
-    command_fields(parse_form(bytes, 197)?, format)
+    command_fields(parse_form(bytes, 198)?, format)
 }
 pub(super) fn command_fields(
     parsed: Vec<(String, String)>,
     format: GitHashAlgorithm,
 ) -> Result<ContextCommand, ApiError> {
-    if parsed.len() > 197 {
+    if parsed.len() > 198 {
         return Err(ApiError::too_large());
     }
     let mut fields = BTreeMap::new();
@@ -91,6 +96,9 @@ pub(super) fn command_fields(
         .validate()
         .map_err(|_| ApiError::bad("invalid_context_limits"))?;
     let initial = super::command_fields(initial, format)?;
+    if ranked && initial.index_source == IndexSource::Current {
+        return Err(ApiError::bad("unsupported_context_selection"));
+    }
     Ok(ContextCommand {
         initial,
         limits,
@@ -133,8 +141,49 @@ pub(super) fn run(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let request = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let request = read.request_context(node, &deadline);
+    let mut live = || !deadline.expired() && read.is_live();
+    if command.initial.index_source == IndexSource::Current {
+        if command.ranked {
+            return Err(ApiError::bad("unsupported_context_selection"));
+        }
+        let context = drive_request_while(
+            node,
+            &request,
+            async {
+                let initial = node
+                    .search_source_initial_revalidated_local_in(
+                        &request,
+                        read,
+                        &command.initial.selection.reference,
+                        command.initial.selection.expected_head,
+                        command.initial.selection.expected_commit,
+                        &command.initial.checkpoints,
+                        &command.initial.query,
+                        command.initial.limits,
+                    )
+                    .await?;
+                node.hydrate_source_initial_revalidated_local_in(
+                    &request,
+                    read,
+                    initial,
+                    command.limits,
+                )
+                .await
+            },
+            &mut live,
+        )
+        .map_err(failure)?;
+        return render_view(
+            node,
+            read,
+            command,
+            ContextView::Current(&context),
+            None,
+            maximum,
+            &mut live,
+        );
+    }
     let (context, ranking) = drive_request_while(
         node,
         &request,
@@ -209,7 +258,30 @@ fn render(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
+    render_view(
+        node,
+        read,
+        command,
+        ContextView::Exact(context),
+        ranking,
+        maximum,
+        live,
+    )
+}
+
+fn render_view(
+    node: &OneNode,
+    read: &SourceReadContext,
+    command: &ContextCommand,
+    context: ContextView<'_>,
+    ranking: Option<&ContextRanking>,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
     check(live)?;
+    if !context.matches(command.initial.index_source) {
+        return Err(ApiError::unavailable());
+    }
     let maximum = maximum.min(super::super::output::MAX_REPLY_BYTES);
     let limits = command.limits;
     if context.files().len() > limits.max_files
@@ -228,10 +300,9 @@ fn render(
                 "\"read_only\":true,\"transaction_created\":false,\"source_material_untrusted\":true,\"complete\":{},",
                 "\"candidate_files\":{},\"returned_files\":{},\"omitted_files\":{},\"selection\":{},",
                 "\"source_blobs_read\":{},\"source_bytes_read\":{},\"excerpt_bytes\":{},\"source_file_limit\":{},\"lineage_metadata_bytes\":{},",
-                "\"context_max_files\":{},\"context_radius_bytes\":{},\"context_max_source_bytes\":{},\"context_max_excerpt_bytes\":{},",
-                "\"retrieval\":"
+                "\"context_max_files\":{},\"context_radius_bytes\":{},\"context_max_source_bytes\":{},\"context_max_excerpt_bytes\":{},"
             ),
-            quote(CONTEXT_PROFILE),
+            quote(context.profile()),
             context.complete(),
             context.candidate_files(),
             context.files().len(),
@@ -253,13 +324,17 @@ fn render(
         ),
         maximum,
     )?;
-    // Do not duplicate or weaken the original channel and coverage validators.
-    let retrieval = super::render(
+    if command.initial.index_source == IndexSource::Current {
+        append(&mut out, "\"index_source\":\"current-native-v1\",", maximum)?;
+    }
+    append(&mut out, "\"retrieval\":", maximum)?;
+    // Keep each report's owning validator and its original channel provenance.
+    let retrieval = super::render_view(
         node,
         read,
         &command.initial,
         context.retrieval(),
-        context.retrieval().authorization(),
+        context.labels(),
         maximum.saturating_sub(out.len()),
         live,
     )?;
@@ -270,16 +345,17 @@ fn render(
         if file.source_bytes() > context.source_file_limit() {
             return Err(ApiError::unavailable());
         }
-        file.validate_lineage(context.retrieval(), &mut || {
-            if live() {
-                Ok(())
-            } else {
-                Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
-                    exhaustion: None,
-                }))
-            }
-        })
-        .map_err(failure)?;
+        context
+            .validate_file(file, &mut || {
+                if live() {
+                    Ok(())
+                } else {
+                    Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
+                        exhaustion: None,
+                    }))
+                }
+            })
+            .map_err(failure)?;
         append(
             &mut out,
             &format!(
@@ -346,7 +422,8 @@ fn render(
     }
     append(&mut out, "]", maximum)?;
     if let Some(ranking) = ranking {
-        append_ranking(&mut out, context, ranking, maximum, live)?;
+        let exact = context.exact().ok_or_else(ApiError::unavailable)?;
+        append_ranking(&mut out, exact, ranking, maximum, live)?;
     }
     append(&mut out, "}", maximum)?;
     check(live)?;

@@ -320,6 +320,35 @@ The discussion browser links to `/{repository}/ui/discussion-notifications/`,
 with unread/muted filters, observed-version actions and recoverable requests.
 Email delivery and PR notifications remain separate work.
 
+### Sponsored agent source and metadata credentials
+
+`fg agent-credential generate-token|issue|revoke|show` manages immutable,
+repository-incarnation-bound credentials with an explicit agent and human or
+service sponsor. Native HTTP requests authenticate the current canonical grant
+and run under finite operation scopes, byte envelopes and expiry. An independent
+`source-read` grant enables current source browsing, search, reference/tag reads
+and authority-bound context with the actual agent and sponsor retained. Issue, PR
+metadata/conversation, discussion and individual outcome operations are supported;
+Git publication, reviews, merges and administration remain outside this profile.
+`fg mcp --agent-token-file ... --expected-incarnation ...` uses the same canonical
+credentials. Its independent `--allow-source` and `--allow-agent-context` ceilings
+expose current source retrieval and authenticated context while preserving the
+actual agent/sponsor and original request lifetime through response output.
+An explicitly configured MCP process can also own the existing lexical and
+symbol index-maintenance workers, allowing its indexed tools to catch up after
+code changes. Workers start after successful initialization output and drain
+before node shutdown; [MCP maintenance options](docs/MCP_READ_ONLY_SERVER.md#keep-source-indexes-current-during-an-mcp-session)
+remain independent of every tool and credential grant.
+For Initial, source-context and agent-context reads, explicit
+`index_source=current-native-v1` reuses existing indexes after metadata-only
+changes while retaining their original provenance and checking current visible
+commit/tree identity. The CLI equivalent is `fg agent context --index-source
+current-native-v1`; unchanged strict reads still require exact index positions.
+Revocation is rechecked at the publication CAS basis, and outcome receipts retain
+the original agent/sponsor evidence across rotation and restart. See
+[sponsored agent credentials](docs/SPONSORED_AGENT_CREDENTIALS.md) for private token
+files, trusted-local administration, scope limits and validation status.
+
 ### Native merge queues
 
 `fg queue enqueue|dequeue|reorder|show|list` manages durable queue membership and
@@ -356,6 +385,17 @@ autonomous target landing remain work under FG-083a.
 See [Native merge queues](docs/NATIVE_MERGE_QUEUE.md) for exact commands,
 [branch protection](docs/MANDATORY_REVIEW_PROTECTION.md) for queue-required
 policies, and the HTTP guide for upload limits and recovery.
+
+### Release-tag workflows
+
+Native trusted-local workflows can follow an explicit `refs/tags/*` release tag,
+including lightweight, annotated, and nested tags in SHA-1 and SHA-256
+repositories. Bounded `push.tags` / `tags-ignore` filters select releases; the
+runner executes the verified peeled commit while retaining the raw tag identity
+through dispatch, attempt custody, and restart recovery. Finite polling,
+continuous watching, and the HTTP workflow controller share this selection.
+Tag watches do not publish branch checks or select PR/queue candidates. See
+[native tag workflows](docs/NATIVE_TAG_WORKFLOW_WATCH.md) for commands and bounds.
 
 ### Retained outcome checkpoints
 

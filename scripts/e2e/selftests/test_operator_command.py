@@ -71,6 +71,22 @@ class OperatorCommandTests(unittest.TestCase):
         self.assertEqual(self.records()[0]["exit"], 7)
         self.assertEqual((self.work / "operator-001.stderr").read_text(), "original exit\n")
 
+    def test_text_reply_retains_plain_refusal_without_relaxing_exit(self):
+        value = self.campaign.node_command(Path("-e"), [
+            "console.error('plain refusal'); process.exitCode=1;"],
+            expected=1, error_reply=True, text_reply=True)
+        self.assertEqual(value, "plain refusal\n")
+        self.assertEqual(self.records()[0]["exit"], 1)
+        with self.assertRaisesRegex(AssertionError, "operator exit 7"):
+            self.campaign.node_command(Path("-e"), ["process.exitCode=7;"], expected=1, text_reply=True)
+        self.assertEqual(self.records()[-1]["exit"], 7)
+
+    def test_text_reply_and_ndjson_are_exclusive_before_spawn(self):
+        with self.assertRaises(ValueError):
+            self.campaign.node_command(Path("-e"), ["console.log('{}');"], json_lines=True, text_reply=True)
+        self.assertEqual(self.campaign.client_serial, 0)
+        self.assertFalse(self.campaign.journal.exists())
+
     def test_invalid_json_retains_artifacts(self):
         with self.assertRaises(json.JSONDecodeError):
             self.campaign.node_command(Path("-e"), ["console.log('not JSON')"])

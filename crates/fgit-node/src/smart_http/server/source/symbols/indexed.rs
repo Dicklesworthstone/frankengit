@@ -121,8 +121,8 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     let maximum = usize::try_from(maximum).unwrap_or(usize::MAX);
     let body = match source_mode {
         current::SourceMode::Exact => {
@@ -210,7 +210,7 @@ fn render_labeled(
         || source.reference != command.selection.reference
         || report.matches.len() > command.limits.max_matches
         || report.indexed_files + report.unsupported_language_files > 20_000
-        || report.indexed_declarations > 20_000
+        || report.indexed_declarations > data::MAX_INDEX_DECLARATIONS
         || report.indexed_source_bytes > 64 * 1024 * 1024
         || report.tables_read > report.indexed_files
         || report.payload_bytes_read > data::MAX_INDEX_BYTES

@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod candidate_checks;
 mod checks;
+pub mod path_reviews;
 mod queue_gate;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -303,7 +304,7 @@ where
         let has_protected = effects.refs.keys().any(|name| {
             policy
                 .branch(name)
-                .is_some_and(|rule| !rule.reviewers.is_empty())
+                .is_some_and(|rule| !rule.reviewers.is_empty() || !rule.path_reviews.is_empty())
         });
         if has_protected {
             // Evaluated through fg043 PolicySnapshot via evaluate_protection
@@ -312,7 +313,9 @@ where
                 policy
                     .branches
                     .iter()
-                    .filter(|branch| !branch.reviewers.is_empty())
+                    .filter(|branch| {
+                        !branch.reviewers.is_empty() || !branch.path_reviews.is_empty()
+                    })
                     .map(|branch| &branch.name),
             )?;
             let id = source.pin(compiled);
@@ -915,7 +918,7 @@ fn review_branches(selected: &ProtectionState) -> Vec<RefName> {
         policy
             .branches
             .iter()
-            .filter(|rule| !rule.reviewers.is_empty())
+            .filter(|rule| !rule.reviewers.is_empty() || !rule.path_reviews.is_empty())
             .map(|rule| rule.name.clone())
             .collect()
     })
@@ -957,7 +960,7 @@ where
     C: Fn() -> bool + Sync,
 {
     enforce_merge_selected_at(
-        store, cx, basis, refs, intent, submitter, None, None, cancelled,
+        store, cx, basis, refs, intent, submitter, None, None, None, cancelled,
     )
     .await
 }
@@ -986,6 +989,7 @@ where
         intent,
         submitter,
         Some(authentication),
+        None,
         None,
         cancelled,
     )
@@ -1019,6 +1023,65 @@ where
         submitter,
         authentication,
         Some(landing),
+        None,
+        cancelled,
+    )
+    .await
+}
+
+/// Whether the exact authority-selected target needs an authenticated source
+/// delta. This is an optimization hint, not evidence that can waive the final
+/// gate: enforcement reads the same canonical policy again on every attempt.
+pub async fn path_reviews_required_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    target: &RefName,
+    cancelled: &C,
+) -> Result<bool, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let selected = read_at(store, cx, basis, cancelled)
+        .await
+        .map_err(infrastructure)?;
+    Ok(selected
+        .protection()
+        .and_then(|policy| policy.branch(target))
+        .is_some_and(|rule| !rule.path_reviews.is_empty()))
+}
+
+/// The native object owner supplies the complete independently verified
+/// target-to-candidate delta. All installed branch, path, workflow and queue
+/// requirements remain additive. No caller-provided path list can construct
+/// this witness, and the legacy entry points refuse path-bearing rules.
+pub async fn enforce_merge_with_paths_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    refs: &BTreeMap<RefName, GitOid>,
+    intent: &NativeMergeIntent,
+    submitter: PrincipalId,
+    authentication: Option<AdmissionAuthentication>,
+    landing: Option<&super::queue::ValidatedQueueLanding>,
+    paths: &path_reviews::VerifiedMergePaths,
+    cancelled: &C,
+) -> Result<(), ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    enforce_merge_selected_at(
+        store,
+        cx,
+        basis,
+        refs,
+        intent,
+        submitter,
+        authentication,
+        landing,
+        Some(paths),
         cancelled,
     )
     .await
@@ -1033,6 +1096,7 @@ async fn enforce_merge_selected_at<S, C>(
     submitter: PrincipalId,
     authentication: Option<AdmissionAuthentication>,
     landing: Option<&super::queue::ValidatedQueueLanding>,
+    paths: Option<&path_reviews::VerifiedMergePaths>,
     cancelled: &C,
 ) -> Result<(), ProjectionFailure>
 where
@@ -1075,6 +1139,18 @@ where
         .protection()
         .and_then(|p| p.branch(&merge.target_ref))
     {
+        path_reviews::verify_at(
+            store,
+            cx,
+            basis,
+            intent,
+            submitter,
+            selected.policy_epoch,
+            &rule.path_reviews,
+            paths,
+            cancelled,
+        )
+        .await?;
         if !rule.reviewers.is_empty() {
             super::pull_request::reviews::gate::verify_quorum_at(
                 store,

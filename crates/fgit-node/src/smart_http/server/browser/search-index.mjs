@@ -4,6 +4,9 @@ import { copy, fail, form, hex, integer, keys, oid, record, snapshot, unhex, utf
 import { coordinates, fields, FILE_LIMIT, pathHex, same } from './search-data.mjs';
 import { compareCounters, currentSources, sourceMode, symbolSources, wireCounter } from './search-current.mjs';
 export const INDEX_WORK = 16 * 1024 * 1024, INDEX_PAYLOAD = 32 * 1024 * 1024;
+// Persistent corpus limits are independent of a single declaration table and
+// of the unchanged query work/output budgets (source_symbols::index in Rust).
+const SYMBOL_INDEX_DECLARATIONS = 131_072, SYMBOL_TABLE_DECLARATIONS = 20_000;
 export const INDEX_PAGE = 100;
 const word = b => (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b === 95;
 const fold = b => b >= 65 && b <= 90 ? b + 32 : b;
@@ -251,7 +254,7 @@ function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum 
   const index = activation(reply.index_token, reply.index_number, 'exact');
   atLeast(index, minimum);
   const stats = { files: integer(reply.indexed_files, 'indexed Rust files', 0, 20_000),
-    declarations: integer(reply.indexed_declarations, 'indexed declarations', 0, 20_000),
+    declarations: integer(reply.indexed_declarations, 'indexed declarations', 0, SYMBOL_INDEX_DECLARATIONS),
     sourceBytes: integer(reply.indexed_source_bytes, 'indexed Rust bytes', 0, 64 * 1024 * 1024),
     unsupported: integer(reply.unsupported_language_files, 'unsupported language files', 0, 20_000),
     nonRegular: integer(reply.non_regular_entries, 'non-regular entries', 0, 50_000),
@@ -259,6 +262,7 @@ function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum 
     payloadBytes: integer(reply.payload_bytes_read, 'declaration payload bytes', 0, INDEX_PAYLOAD),
     work: integer(reply.work_units, 'declaration work', 0, q.maxWork) };
   if (stats.files + stats.unsupported > 20_000 || stats.tables > stats.files || stats.declarations < reply.matches.length ||
+      stats.declarations > stats.files * SYMBOL_TABLE_DECLARATIONS ||
       (!stats.files && (stats.declarations || stats.sourceBytes)) ||
       (reply.matches.length && (!stats.tables || !stats.payloadBytes)) ||
       (!reply.complete && (reply.matches.length !== q.maxMatches || reply.matches.length >= stats.declarations))) {

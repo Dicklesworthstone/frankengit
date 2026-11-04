@@ -353,7 +353,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         MutationCommand::AddAssignees(intent) => (intent.number, "add-assignees", Value::Null),
         MutationCommand::AddLabels(intent) => (intent.number, "add-labels", Value::Null),
     };
-    let context = fgit_cli::command_request_context(&backend.node);
+    let context = backend.command_context();
     // From here onward a failed response is not proof of non-commit. Native
     // admission recovers a prior terminal result before current intake gates.
     let (tx, outcome) = backend

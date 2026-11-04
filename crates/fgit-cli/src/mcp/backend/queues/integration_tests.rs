@@ -173,6 +173,8 @@ fn native_queue_lifecycle_and_atomic_landing_cross_real_mcp_without_other_grants
         // Reopen with no new-publication intake transition. Historical retries
         // and outcome recovery still resolve before the native intake gate.
         let mut backend = NodeTools {
+            agent: None,
+            maintenance: None,
             node: fgit_node::OneNode::open_existing(fixture.config()).unwrap(),
             options: fixture.options.clone(),
         };
@@ -282,6 +284,7 @@ fn queue_landing_cannot_bypass_required_review_and_original_refusal_stays_final(
             administrators: vec![actor()],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: false,
                 name: reference("refs/heads/main"),

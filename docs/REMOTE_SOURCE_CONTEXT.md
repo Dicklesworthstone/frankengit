@@ -16,8 +16,10 @@ Newer ranked context APIs do not change this profile implicitly.
 The saved `capture.json` and its retained `capture_sha256` can feed the existing
 [source package command](SELECTED_SOURCE_PACKAGE_OPERATOR.md) directly. It
 understands the native joined source envelopes and declared excerpt lineage,
-rechecks the selected full source bytes, and optionally verifies each file through
-Rust `verify-read` at an independently retained authority head. The resulting
+rechecks the selected full source bytes through current commit/tree/blob reads,
+and accepts the same sponsored `source-read` credential for ordinary package
+capture. Its optional Rust `verify-read` authority-head mode requires an ordinary
+read credential and rejects a sponsored token before acquisition. The resulting
 portable package can create an existing sparse source workspace. Opaque context
 labels grant no effects and are not retained as authority proofs. Both Node
 acquisition clients send an explicit FrankenGit project User-Agent.
@@ -30,8 +32,11 @@ applicable to the selected reference. A stale, uninitialized, unsupported or
 unavailable index is an error, not an empty successful context. This client
 never repairs that state or retries with weaker source expectations.
 
-Supply a source-read bearer token (the node's existing 64-character lowercase
-hex token format). Keep it in a regular, owner-owned `0600` file whose immediate
+Supply an ordinary 64-character lowercase hexadecimal read token or a native
+`fgagent_` token with an explicit `source-read` grant. Metadata grants do not
+imply source access. Capture, continuation and session commands accept both
+spellings and retain their existing source pins and budgets. Keep the token in
+a regular, owner-owned `0600` file whose immediate
 parent is an owner-owned `0700` directory. Query and optional CA files have the
 same requirements. Symlink components and multiply linked files are refused.
 Stable operator-controlled ancestors and a non-hostile same UID are assumed;
@@ -108,6 +113,40 @@ new explicit capture needs a different output directory and may select a newer
 source unless the original pins are supplied. Repeating a capture is a new read,
 not resumption of a prior snapshot.
 
+## Reuse indexes after metadata changes
+
+Add `"index_source": "current-native-v1"` to the query to use existing lexical
+and symbol generations after an unrelated metadata change, such as a credential
+rotation or issue comment. The native reader authenticates the current visible
+source and requires the original indexes to describe the same namespace, ref,
+Git commit and tree. A changed source still needs an applicable index.
+
+The client checks the distinct revalidated response profiles and their complete
+source records. `summary.source` continues to describe the current selection;
+`summary.current_source` retains its full native coordinates, and
+`summary.index_sources` retains the original lexical and optional symbol
+coordinates. The native response, `context.txt`, export receipt, and each query
+in a merged session preserve that distinction. Original generations, row labels,
+anchor lineage, omissions and resource accounting remain checked.
+
+The selector is explicit and closed. Omission retains the existing strict
+request and export encodings; other values refuse. Revalidated context supports
+`raw-path-prefix` selection. Combining it with ranked selection refuses before
+network dispatch.
+
+Continuation inherits the mode and pins the **current source observed by the
+saved capture**, together with its strongest observed generation floors. It
+cannot replace that pin with an index's older head or move to a newer authority
+head. A subsequent metadata change therefore requires a separately explicit new
+capture. Existing session reservations are not renewed or refunded by a refusal.
+
+Saved revalidated captures and raw native responses also feed the source package
+and byte-proof commands with an ordinary read or sponsored `source-read` credential.
+They independently verify the selected current commit, paths, complete blobs and
+saved excerpt bytes. Index provenance remains untrusted search evidence; accepting
+the new profile does not turn a source-only proof into an authority or search
+verification receipt.
+
 ## Query and source constraints
 
 Terms are 1–32 whole ASCII alphanumeric/underscore words, at most 128 bytes each.
@@ -137,8 +176,10 @@ from independently retained observations/configuration. The minimum generation
 is a decimal string so all u64 bits survive. A queried generation and the newest
 observed maintenance checkpoint are recorded separately: maintenance may advance
 an observed head without changing which generation answered the query. Conflicting
-or regressed heads are rejected. Source refs, heads, commits, trees, incarnations,
-corpus counts and document identities must agree across the joined response.
+or regressed heads are rejected. Source refs, commits, trees, incarnations, corpus
+counts and document identities must agree across the joined response. Strict
+mode also requires matching source authority positions; explicit revalidation
+retains and checks each original index position separately from the current one.
 
 ## Native read-result labels
 
@@ -157,6 +198,11 @@ an unexplained excess, missing field or mixed labelled/unlabelled result fails.
 The normalized summary records the declared descriptor and metadata count;
 `capture.json` retains all original wire labels and references in
 `native_response`.
+
+The sponsored HTTP descriptor retains the native
+`http-sponsored-agent-source-read-credential` host and nonzero agent principal.
+It remains opaque read-result evidence, not client authentication, a reusable
+grant or an Agent Protocol ContextPacket.
 
 Older schema-1 responses without a descriptor are explicitly handled as legacy,
 unlabelled data. Their summary representation remains unchanged so independently

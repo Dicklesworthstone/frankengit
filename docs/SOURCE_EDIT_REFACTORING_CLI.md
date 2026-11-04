@@ -137,3 +137,14 @@ compares the whole resulting tree against independently calculated bytes in both
 Git hash formats. This does not certify native Rust integration, remote source
 preparation, hostile-host isolation, full operator qualification, release gates
 or physical-power-loss recovery.
+
+The separate `scripts/e2e/suites/operator/source_workspace.sh` campaign compiles
+an explicit move with edited binary bytes plus another edit and executable-mode
+change using this actual CLI in SHA-1 and SHA-256. The exact emitted patch enters
+native preparation/publication in an isolated node; independently calculated
+Git objects and separate Rust reads verify the complete intended tree, original
+path removal, untouched siblings and same-key replay. Bad preimages and occupied
+outputs refuse without rewriting files. Pinned sandboxed Git checks the fixture
+and candidate bundle. The receipt binds the selected native digest; a standalone
+run is bounded to that image. This does not replace independent review,
+every-entrypoint, full/release, hostile-host or hardware-fault qualification.

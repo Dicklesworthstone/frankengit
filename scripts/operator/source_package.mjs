@@ -2,6 +2,8 @@
 // consumer. Saved search coordinates are candidates, never verification receipts.
 import { createHash, webcrypto } from 'node:crypto';
 import { prepareNativePackageRead, verifyNativePackageRead } from './source_package_native.mjs';
+import { contextProvenance } from './source_context_provenance.mjs';
+import { isAgentCredentialToken, isCredentialToken } from './credential_token.mjs';
 import { Transport, keys, oid, principal, rootFor, snapshot, integer } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { coordinates, selection as sourceSelection, pathHex, FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/search-data.mjs';
 import { acquireContextPackage, contextPackageCost, readSourcePackage, sourcePackageLimits,
@@ -69,18 +71,24 @@ function contextPlan(contextBytes, contextHash, selection, expected, limits, che
     if (context.endpoint !== selected.endpoint) fail('saved context endpoint differs from independent selection.');
     context = context.native_response;
   }
-  const source = context?.retrieval;
-  if (context?.type !== 'source_context_initial' || context.schema_version !== 1 || context.profile !== 'source-initial-context-v1' ||
-      context.read_only !== true || context.transaction_created !== false || context.source_material_untrusted !== true ||
-      source?.type !== 'source_search_initial' || source.schema_version !== 1 || source.profile !== 'source-initial-retrieval-v1' ||
-      !Array.isArray(context.files) || context.files.length < 1 || context.files.length > 32 || context.returned_files !== context.files.length) {
+  const provenance = contextProvenance(context, fail, check), source = context.retrieval;
+  if (!Array.isArray(context.files) || context.files.length < 1 || context.files.length > 32 || context.returned_files !== context.files.length) {
     fail('choose a nonempty saved native Initial context.');
   }
   const scope = { tenant: selected.tenant_id, repository: selected.repository_id,
     incarnation: selected.repository_incarnation, format: selected.object_format };
   const reference = sourceSelection(selected.ref, selected.object_format);
   let observed;
-  if (!Object.hasOwn(source, 'source_head') && !Object.hasOwn(source, 'published')) {
+  if (provenance !== null) {
+    const current = provenance.current;
+    if (['tenant_id', 'repository_id', 'repository_incarnation', 'object_format', 'ref']
+      .some(key => current[key] !== selected[key])) fail('current source differs from independent selection.');
+    // Source-only coordinates are taken directly from the validated current
+    // record. Do not relabel an original index or manufacture a strict envelope.
+    observed = { scope, pin: { head: current.snapshot_token, sourceHead: current.source_head,
+      rcr: current.source_rcr, commit: oid(current.source_commit, selected.object_format),
+      tree: oid(current.root_tree, selected.object_format) } };
+  } else if (!Object.hasOwn(source, 'source_head') && !Object.hasOwn(source, 'published')) {
     // The joined Initial response owns source coordinates, while each real
     // lexical channel carries the full read envelope. Verify both; never invent
     // missing publication/head fields or mix an older channel into this source.
@@ -163,6 +171,11 @@ function operation(options, allowNative = false) {
 export async function captureSourcePackage(contextBytes, contextHash, selected, expected, token, options = {}) {
   const { limits, signal, check, deadline, nativeFg } = operation(options, true);
   if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') fail('TLS verification must not be disabled.');
+  if (!isCredentialToken(token)) fail('invalid source-read credential.');
+  if (nativeFg !== undefined && isAgentCredentialToken(token)) {
+    throw Object.assign(new Error('The optional native authority-proof route requires an ordinary credential; sponsored source reads do not grant it.'),
+      { code: 'native_source_proof_agent_scope_unsupported' });
+  }
   const plan = contextPlan(contextBytes, contextHash, selected, expected, limits, check);
   const native = nativeFg === undefined ? null : await prepareNativePackageRead(nativeFg, plan, limits.package.maxBlobRequests, check);
   const transport = new Transport({ href: `${plan.selected.endpoint}/ui/search/`, pageSuffix: '/ui/search/',

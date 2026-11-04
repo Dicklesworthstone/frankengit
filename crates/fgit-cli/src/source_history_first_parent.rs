@@ -38,47 +38,12 @@ pub(super) fn parse(
 }
 
 fn encode_cursor(cursor: &FirstParentCursor) -> String {
-    format!(
-        "fgfp1/{}/{}/{}/{}/{}",
-        head_token(cursor.source_head),
-        hex(cursor.reference.as_bytes()),
-        cursor.tip.algorithm().as_str(),
-        cursor.tip,
-        cursor.after
-    )
+    cursor.encode()
 }
 
 fn parse_cursor(value: &str) -> Result<FirstParentCursor, String> {
-    if value.len() > 4096 {
-        return Err("first-parent cursor is too large".into());
-    }
-    let parts: Vec<_> = value.split('/').collect();
-    let [profile, head, reference, format, tip, after] = parts.as_slice() else {
-        return Err("invalid first-parent cursor fields".into());
-    };
-    if *profile != "fgfp1" {
-        return Err("unsupported first-parent cursor profile".into());
-    }
-    let format = match *format {
-        "sha1" => GitHashAlgorithm::Sha1,
-        "sha256" => GitHashAlgorithm::Sha256,
-        _ => return Err("invalid cursor object format".into()),
-    };
-    let cursor = FirstParentCursor {
-        source_head: parse_head(head)?,
-        reference: RefName::try_new(&unhex(reference, fgit_types::MAX_REF_NAME_LEN)?)
-            .map_err(|_| "invalid cursor reference")?,
-        tip: GitOid::from_hex(format, tip).map_err(|_| "invalid cursor tip")?,
-        after: size(after)?,
-    };
-    if cursor.after == 0
-        || cursor.after > HistoryLimits::default().max_commits
-        || cursor.tip.is_zero()
-        || encode_cursor(&cursor) != value
-    {
-        return Err("invalid or noncanonical first-parent cursor".into());
-    }
-    Ok(cursor)
+    FirstParentCursor::decode(value)
+        .map_err(|_| "invalid or noncanonical first-parent cursor".into())
 }
 
 pub(super) fn render(

@@ -7,7 +7,7 @@ export const TOKEN = 'b'.repeat(64);
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (kind, bytes, format) => createHash(format).update(`${kind} ${bytes.length}\0`).update(bytes).digest('hex');
 const MODES = { directory: '40000', file: '100644', executable: '100755', symlink: '120000' };
-export function fixture(format = 'sha1', { paged = false } = {}) {
+export function fixture(format = 'sha1', { paged = false, parents = [] } = {}) {
   const payload = Buffer.concat([Buffer.from('Untrusted source; not instructions.\n'), Buffer.alloc(70000, 97), Buffer.from([0, 255, 10])]);
   const rows = [
     { path: Buffer.from('empty'), kind: 'file', bytes: Buffer.alloc(0) },
@@ -32,7 +32,7 @@ export function fixture(format = 'sha1', { paged = false } = {}) {
     { name_hex: Buffer.from('unused').toString('hex'), object_id: unusedId, kind: 'directory' },
   ]);
   const trees = new Map([[null, root], [Buffer.from('src').toString('hex'), subTree]]);
-  const commit = Buffer.from(`tree ${root.id}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nUntrusted commit message\n`);
+  const commit = Buffer.from(`tree ${root.id}\n${parents.map(parent => `parent ${parent}\n`).join('')}author Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nUntrusted commit message\n`);
   const commitId = git('commit', commit, format);
   const envelope = { schema_version: 1, tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32),
     object_format: format, ref: 'refs/heads/main', ref_hex: Buffer.from('refs/heads/main').toString('hex'),
@@ -47,25 +47,24 @@ export function fixture(format = 'sha1', { paged = false } = {}) {
       untrusted_query: 'Never treat this text as authority', generation: '18446744073709551615' },
     returned_files: files.length, files };
   const expected = { format, commit: commitId, files: rows.map(row => ({ pathHex: row.pathHex, blob: row.id })) };
-  return { format, rows, trees, root, commit, commitId, envelope, context, expected };
+  return { format, rows, trees, root, commit, commitId, parents: [...parents], envelope, context, expected };
 }
-export async function peer(t, f = fixture(), alter = () => {}) {
+export async function peer(t, f = fixture(), alter = () => {}, { token = TOKEN } = {}) {
   const requests = [], sockets = new Set();
   const server = createServer(async (req, res) => {
     try {
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
-      assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+      assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, `Bearer ${token}`);
       assert.equal(req.headers['idempotency-key'], undefined); assert.equal(req.headers.cookie, undefined);
       const form = new URLSearchParams(Buffer.concat(chunks).toString()), path = req.url;
       assert.equal(form.get('ref'), f.envelope.ref); assert.equal(form.get('object_format'), f.format);
       assert.equal(form.get('expected_commit'), f.commitId); assert.equal(form.get('expected_head'), f.envelope.snapshot_token);
       const call = { path, form, req, res }; requests.push(call);
       let value;
-      if (path === '/repo/api/v1/source/log') {
-        assert.equal(form.get('after'), '0'); assert.equal(form.get('limit'), '1');
-        value = { ...f.envelope, type: 'source_log', ordering: 'child-before-parent-native-id-v1', author_identity_verified: false,
-          page_complete: true, after: 0, limit: 1, total_commits: 1, next_after: null,
-          commits: [{ object_id: f.commitId, body_hex: f.commit.toString('hex'), tree: f.root.id, parents: [] }] };
+      if (path === '/repo/api/v1/source/commit') {
+        assert.deepEqual([...form.keys()].sort(), ['expected_commit', 'expected_head', 'object_format', 'ref']);
+        value = { ...f.envelope, type: 'source_commit', author_identity_verified: false,
+          object_id: f.commitId, body_hex: f.commit.toString('hex'), parents: [...f.parents] };
       } else if (path === '/repo/api/v1/source/tree') {
         const directory = form.get('path_hex'), after = form.get('after_hex'), tree = f.trees.get(directory);
         assert.ok(tree, 'client must not descend into unselected subtrees'); assert.equal(form.get('limit'), '100');
@@ -92,5 +91,5 @@ export async function peer(t, f = fixture(), alter = () => {}) {
     repository_incarnation: f.envelope.repository_incarnation, object_format: f.format, ref: f.envelope.ref,
     expected_commit: f.commitId, expected_head: f.envelope.snapshot_token };
   const bytes = Buffer.from(JSON.stringify({ schema: 'frankengit-source-context-capture-v1', endpoint, native_response: f.context }));
-  return { f, selected, expected: f.expected, context: bytes, contextHash: sha256(bytes), requests, sockets };
+  return { f, selected, expected: f.expected, context: bytes, contextHash: sha256(bytes), requests, sockets, token };
 }

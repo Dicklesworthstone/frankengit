@@ -88,7 +88,7 @@ where
         .map_err(super::storage::history_step_refusal)?
         {
             HistoryStep::Genesis => break,
-            HistoryStep::Checkpoint { predecessor } => {
+            HistoryStep::Checkpoint { predecessor, .. } => {
                 successor = predecessor.body().clone();
                 continue;
             }

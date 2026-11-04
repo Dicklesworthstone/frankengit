@@ -3,6 +3,7 @@
 use super::*;
 use crate::source_retrieval::{GenerationVector, InitialQuery};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, internal_object_id};
+use fgit_forge::event::agent_credential::{AgentCredentialId, SponsorKind};
 use fgit_forge::source_search::SourceMatch;
 use fgit_forge::source_symbols::{SymbolKind, index as symbols};
 use fgit_graph::lexical::{IndexedLexicalReport, LexicalReport, LexicalSpan};
@@ -282,6 +283,144 @@ fn same_http_host_principal_substitution_refuses_beside_original() {
         assert!(labels.validate(&other, &original, &mut || Ok(())).is_err());
         labels.validate(&read, &original, &mut || Ok(())).unwrap();
     }
+}
+
+fn agent_authentication(
+    grant_root: Digest,
+    sponsor: u8,
+    credential: u8,
+    run: u8,
+    authenticated_at: u64,
+    expires_at: u64,
+) -> AgentAuthentication {
+    AgentAuthentication::try_new(
+        PrincipalId::from_bytes([6; 16]),
+        PrincipalId::from_bytes([sponsor; 16]),
+        SponsorKind::Human,
+        AgentCredentialId::try_new([credential; 32]).unwrap(),
+        grant_root,
+        [run; 32],
+        authenticated_at,
+        expires_at,
+    )
+    .unwrap()
+}
+
+#[test]
+fn sponsored_labels_bind_the_actual_sponsor_credential_and_original_request() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (base, report) = fixture(format);
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let original =
+            agent_authentication(report.source().forge_position_root, 7, 8, 9, 1, u64::MAX);
+        let read = model_agent_context(base.namespace, original, deadline);
+        assert_eq!(read.principal(), Some(original.agent()));
+        assert_eq!(read.sponsor(), Some(original.sponsor()));
+        assert_ne!(read.principal(), read.sponsor());
+        assert_eq!(read.agent_authentication(), Some(original));
+        let mut source = report.clone();
+        let labels = bind(&read, &mut source, 4096, &mut || Ok(())).unwrap();
+        assert_eq!(labels.sponsor(), Some(original.sponsor()));
+        assert_eq!(labels.agent_authentication(), Some(original));
+        for authentication in [
+            agent_authentication(original.grant_root(), 10, 8, 9, 1, u64::MAX),
+            agent_authentication(original.grant_root(), 7, 10, 9, 1, u64::MAX),
+            agent_authentication(original.grant_root(), 7, 8, 10, 1, u64::MAX),
+            agent_authentication(original.grant_root(), 7, 8, 9, 2, u64::MAX),
+            agent_authentication(original.grant_root(), 7, 8, 9, 1, u64::MAX - 1),
+        ] {
+            let changed = model_agent_context(base.namespace, authentication, deadline);
+            let mut same_rows = report.clone();
+            let other = bind(&changed, &mut same_rows, 4096, &mut || Ok(())).unwrap();
+            assert_ne!(labels.binding(), other.binding());
+            assert_ne!(labels.content, other.content);
+            assert!(labels.validate(&changed, &source, &mut || Ok(())).is_err());
+        }
+        labels.validate(&read, &source, &mut || Ok(())).unwrap();
+    }
+}
+
+#[test]
+fn mcp_agent_labels_preserve_sponsorship_without_reusing_http_or_local_authority() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (local, report) = fixture(format);
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let authentication =
+            agent_authentication(report.source().forge_position_root, 7, 8, 9, 1, u64::MAX);
+        let http = model_agent_context(local.namespace, authentication, deadline);
+        let mcp = model_mcp_agent_context(local.namespace, authentication, deadline);
+        let mut source = report.clone();
+        let labels = bind(&mcp, &mut source, 4096, &mut || Ok(())).unwrap();
+        assert_eq!(labels.host(), "mcp-sponsored-agent-source-read-credential");
+        assert_eq!(labels.principal(), Some(authentication.agent()));
+        assert_eq!(labels.sponsor(), Some(authentication.sponsor()));
+        assert_eq!(labels.agent_authentication(), Some(authentication));
+        labels.validate(&mcp, &source, &mut || Ok(())).unwrap();
+        for other_host in [http, local] {
+            let mut same_rows = report.clone();
+            let other = bind(&other_host, &mut same_rows, 4096, &mut || Ok(())).unwrap();
+            assert_ne!(labels.binding(), other.binding());
+            assert!(
+                labels
+                    .validate(&other_host, &source, &mut || Ok(()))
+                    .is_err()
+            );
+            assert!(other.validate(&mcp, &same_rows, &mut || Ok(())).is_err());
+        }
+    }
+}
+
+#[test]
+fn sponsored_source_lifetime_cannot_outlast_either_original_clock() {
+    let (base, report) = fixture(GitHashAlgorithm::Sha256);
+    let origin = Instant::now();
+    let authentication = agent_authentication(report.source().forge_position_root, 7, 8, 9, 10, 20);
+    let wall = Some(Duration::from_secs(15));
+    for read in [
+        model_agent_context(
+            base.namespace,
+            authentication,
+            origin + Duration::from_secs(10),
+        ),
+        model_mcp_agent_context(
+            base.namespace,
+            authentication,
+            origin + Duration::from_secs(10),
+        ),
+    ] {
+        assert_eq!(
+            read.remaining_at(origin, wall),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            read.remaining_at(origin + Duration::from_secs(8), wall),
+            Some(Duration::from_secs(2))
+        );
+        for (monotonic, wall) in [
+            (origin + Duration::from_secs(10), wall),
+            (origin, Some(Duration::from_secs(20))),
+            (origin, Some(Duration::from_secs(21))),
+            (origin, Some(Duration::from_secs(9))),
+            (origin, None),
+        ] {
+            assert_eq!(read.remaining_at(monotonic, wall), Some(Duration::ZERO));
+        }
+    }
+    assert_eq!(base.remaining_at(origin, None), None);
+
+    let expired = model_agent_context(
+        base.namespace,
+        agent_authentication(report.source().forge_position_root, 7, 8, 9, 1, u64::MAX),
+        origin,
+    );
+    let mut unchanged = report.clone();
+    assert!(matches!(
+        bind(&expired, &mut unchanged, 4096, &mut || Ok(())),
+        Err(RetrievalError::Source(
+            crate::NodeWorkspaceRefusal::Cancelled { exhaustion: None }
+        ))
+    ));
+    assert_eq!(unchanged.result_bytes(), report.result_bytes());
 }
 #[test]
 fn non_power_of_two_rows_do_not_retain_uncharged_digest_slots() {

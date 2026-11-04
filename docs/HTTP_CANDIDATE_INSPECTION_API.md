@@ -36,17 +36,22 @@ Unlike terminal mutation retries, inspection cannot omit the bytes being read.
 Send multipart/form-data with exactly one `command` part of type
 `application/x-www-form-urlencoded` and one nonempty `bundle` part of type
 `application/x-git-bundle` (or application/octet-stream). Part order does not
-matter. The command has exactly these nine required fields:
+matter. The command has these nine required coordinates:
 
 ```text
 object_format, pull_request_version, policy_epoch,
-source_ref, target_ref, source_tip, target_tip,
+source_ref OR source_ref_hex, target_ref OR target_ref_hex, source_tip, target_tip,
 merge_base, candidate_commit
 ```
 
 Coordinates are independently chosen by the client: nonzero lowercase native
 OIDs in the declared sha1/sha256 domain, distinct full branch names, and exact
 positive PR version and policy epoch. The candidate must not alias a parent.
+Each ref accepts exactly one text or lowercase even-length hex encoding, with
+at most 1,024 decoded bytes. Hex preserves non-UTF-8 native names through queue
+preparation, uploaded-candidate inspection, and queue landing. Supplying both
+encodings is refused even when they represent the same bytes. Lossy decoding,
+Unicode normalization, and display labels never select a different branch.
 No principal, review decision, path filter, whitespace option, generated proof,
 implicit tip refresh, or expected-head override is accepted.
 

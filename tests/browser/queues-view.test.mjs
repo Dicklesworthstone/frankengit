@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { mountQueues } from '../../crates/fgit-node/src/smart_http/server/browser/queues-view.mjs';
 import { token, actor, ids, head, hex, json, webcrypto, deferred, row, data, show as prShow } from './pulls-fixtures.mjs';
+import { queueFixture } from './queues-candidate-fixtures.mjs';
 
 const html = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/queues.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/queues-view.mjs', import.meta.url), 'utf8');
@@ -26,17 +27,18 @@ function publication(pending, extra = {}) {
     return { [name]: text, [`${name}_hex`]: value };
   };
   let action = { name: pending.action };
-  if (['enqueue', 'land'].includes(pending.action)) action = { ...action, pull_request: f.pull_request,
+  if (['enqueue', 'land', 'land-candidate'].includes(pending.action)) action = { ...action, pull_request: f.pull_request,
     expected_pull_request_version: f.expected_pull_request_version, ...ref('source_ref', f.source_ref_hex),
     expected_source_tip: f.expected_source_tip, expected_target_tip: f.expected_target_tip,
-    ...(pending.action === 'enqueue' ? { priority: f.priority } : { method: 'fast-forward-only', expected_policy_epoch: f.expected_policy_epoch }) };
+    ...(pending.action === 'enqueue' ? { priority: f.priority } : { method: pending.action === 'land-candidate' ? 'merge-commit' : 'fast-forward-only', expected_policy_epoch: f.expected_policy_epoch }),
+    ...(pending.action === 'land-candidate' ? { merge_base: f.merge_base, expected_commit: f.expected_commit } : {}) };
   else if (pending.action === 'dequeue') Object.assign(action, { pull_request: f.pull_request, reason: f.reason });
   else action.order = f.entry;
   return { ...ids, object_format: pending.scope.format, type: 'merge_queue_publication', principal_id: actor,
     number: pending.number, ...ref('target_ref', f.target_ref_hex), expected_version: f.expected_version,
     proposed_action: action, tx_id: 'queue-transaction', decision_sequence: 5, outcome: 'committed', committed: true,
     repository_commit_id: 'queue-rcr', refusal_record_id: null, refusal_code: null,
-    refs_changed: pending.action === 'land', delivery_acknowledged: null, historical_outcome: true, complete: true, ...extra };
+    refs_changed: ['land', 'land-candidate'].includes(pending.action), delivery_acknowledged: null, historical_outcome: true, complete: true, ...extra };
 }
 const outcome = (extra = {}) => ({ ...ids, type: 'transaction_outcome', principal_id: actor,
   selector: 'transaction', command_index: null, state: 'undecided', terminal: false,
@@ -334,8 +336,119 @@ test('a cancelled PR read cannot overwrite manually changed queue selection', as
 
 test('receipt restoration refuses oversize and malformed UTF-8 files before client interpretation', async () => {
   const h = harness(); await h.connect();
-  h.nodes['receipt-import-file'].files = [{ size: 256 * 1024 + 1, arrayBuffer() { assert.fail('oversize receipt read'); } }];
+  h.nodes['receipt-import-file'].files = [{ size: 24 * 1024 * 1024 + 1, arrayBuffer() { assert.fail('oversize receipt read'); } }];
   h.nodes['receipt-import'].fire('submit'); await settled(); assert.equal(h.app.client.pending, null);
   h.nodes['receipt-import-file'].files = [{ size: 1, arrayBuffer: async () => Uint8Array.of(255).buffer }];
   h.nodes['receipt-import'].fire('submit'); await settled(); assert.equal(h.app.client.pending, null); assert.equal(h.calls.length, 1);
+});
+
+async function candidateDraft(h) {
+  await h.connect(); await h.open(); await h.action('land-candidate');
+  h.nodes['load-pull'].fire('click'); await settled();
+  h.nodes['policy-epoch'].value = '1'; h.nodes['candidate-author'].value = 'Test <test@example.invalid>';
+  h.nodes['candidate-committer'].value = 'Test <test@example.invalid>'; h.nodes['candidate-timestamp'].value = '1';
+  h.nodes['candidate-message'].value = 'Exact candidate\n';
+}
+function candidateHarness(f = queueFixture(), extra = () => null) {
+  return harness(async (call, app) => {
+    const result = await extra(call, app); if (result !== null && result !== undefined) return result;
+    if (new URL(call.url).pathname.endsWith('/prepare')) return f.prepared();
+    if (new URL(call.url).pathname.endsWith('/inspect')) return json(f.inspection);
+    return null;
+  });
+}
+test('queue page executes candidate preparation, displays every native hunk as inert text and stages before explicit send', async () => {
+  const f = queueFixture(), before = 'before\n', after = '<script>inert</script>\n';
+  f.inspection.comparison.entries = [
+    { path_hex: hex('a<script>.txt'), kind: 'modified', before: { mode: 33188, oid: 'c'.repeat(40) }, after: { mode: 33188, oid: 'd'.repeat(40) },
+      content: { type: 'text', algorithm: 'myers', additions: 1, deletions: 1, before_bytes: before.length, after_bytes: after.length,
+        hunks: [{ old: { byte_start: 0, byte_end: before.length, line_start: 1, line_count: 1 }, new: { byte_start: 0, byte_end: after.length, line_start: 1, line_count: 1 },
+          before_hex: hex(before), after_hex: hex(after) }] } },
+    { path_hex: hex('binary'), kind: 'modified', before: { mode: 33188, oid: 'c'.repeat(40) }, after: { mode: 33188, oid: 'd'.repeat(40) },
+      content: { type: 'binary', before_bytes: 2, after_bytes: 3, body_included: false } },
+  ];
+  f.inspection.comparison.entry_count = 2;
+  const h = candidateHarness(f); await candidateDraft(h);
+  assert.equal(h.nodes.prepare.disabled, true); assert.equal(h.nodes['candidate-fields'].hidden, false);
+  h.nodes['candidate-prepare'].fire('click'); await settled();
+  assert.equal(h.app.client.candidateReady, true); assert.equal(h.app.client.pending, null); assert.equal(h.nodes.prepare.disabled, false);
+  assert.match(h.nodes['candidate-report'].textContent, /a<script>\.txt/); assert.ok(h.nodes['candidate-report'].textContent.includes(after));
+  assert.match(h.nodes['candidate-report'].textContent, /Hunk 1/); assert.match(h.nodes['candidate-report'].textContent, /Binary content: 2 → 3/);
+  assert.equal(h.calls.filter(call => call.headers['Idempotency-Key']).length, 0);
+  h.nodes['candidate-bundle-download'].fire('click'); await settled();
+  h.nodes['candidate-inspection-download'].fire('click'); await settled();
+  h.nodes['candidate-review-download'].fire('click'); await settled();
+  assert.deepEqual(h.downloads[0].contents, f.bundle);
+  assert.equal(JSON.parse(h.downloads[1].contents).preparation.landing.command_form, f.commandForm);
+  assert.equal(JSON.parse(h.downloads[2].contents).schema, 'frankengit-browser-candidate-v1');
+  h.nodes['queue-change'].fire('submit'); await settled();
+  assert.equal(h.app.client.pending.action, 'land-candidate'); assert.equal(h.calls.filter(call => call.headers['Idempotency-Key']).length, 0);
+  h.nodes['receipt-download'].fire('click'); await settled(); assert.equal(JSON.parse(h.downloads.at(-1).contents).request.command_form, f.commandForm);
+  await h.send(); assert.equal(h.app.client.pending, null); assert.match(h.nodes.status.textContent, /atomic|target update and PR merge together/);
+});
+
+test('editing candidate metadata clears inspected authority while retained landing bytes and key survive', async () => {
+  const h = candidateHarness(); await candidateDraft(h); h.nodes['candidate-prepare'].fire('click'); await settled();
+  h.nodes['queue-change'].fire('submit'); await settled(); const pending = h.app.client.pending;
+  h.nodes['candidate-message'].value = 'Different'; h.nodes['candidate-message'].fire('input'); await settled();
+  assert.equal(h.app.client.candidateReady, false); assert.equal(h.nodes['candidate-section'].hidden, true); assert.equal(h.nodes.prepare.disabled, true);
+  assert.equal(h.app.client.pending.key, pending.key); assert.equal(h.app.client.pending.body, pending.body);
+  h.app.disconnect(); assert.equal(h.app.client.pending.key, pending.key); assert.equal(h.nodes['candidate-message'].value, '');
+});
+
+test('conflicts remain a read-only stop and a failed full inspection never exposes candidate staging', async () => {
+  for (const kind of ['conflict', 'incomplete']) {
+    const f = queueFixture(), h = candidateHarness(f, call => {
+      const path = new URL(call.url).pathname;
+      if (kind === 'conflict' && path.endsWith('/prepare')) return json({ ...f.metadata, state: 'conflicted', merge_base: f.landingFields.merge_base,
+        candidate: null, bundle: null, landing: null, conflicts: [{ path_hex: '61ff', kind: 'binary', base: null, ours: null, theirs: null }] }, 409);
+      if (kind === 'incomplete' && path.endsWith('/inspect')) return json({ ...f.inspection, all_changed_paths: false });
+      return null;
+    });
+    await candidateDraft(h); h.nodes['candidate-prepare'].fire('click'); await settled();
+    assert.equal(h.app.client.candidateReady, false); assert.equal(h.nodes.prepare.disabled, true); assert.equal(h.app.client.pending, null);
+    if (kind === 'conflict') { assert.match(h.nodes['candidate-report'].textContent, /Path bytes: 61ff/); assert.equal(h.calls.some(call => call.url.endsWith('/inspect')), false); }
+    else assert.match(h.nodes.status.textContent, /incomplete/);
+  }
+});
+
+test('cancelling candidate preparation and editing during native inspection reject late view installation', async () => {
+  for (const cancel of ['button', 'edit']) {
+    const f = queueFixture(), late = deferred(), h = candidateHarness(f, call => call.url.endsWith('/inspect') ? late.promise : null);
+    await candidateDraft(h); h.nodes['candidate-prepare'].fire('click'); await settled();
+    const call = h.calls.at(-1); assert.ok(call.url.endsWith('/inspect'));
+    if (cancel === 'button') h.nodes['cancel-read'].fire('click');
+    else { h.nodes['candidate-message'].value = 'Edited during read'; h.nodes['candidate-message'].fire('input'); }
+    assert.equal(call.signal.aborted, true); late.resolve(json(f.inspection)); await settled();
+    assert.equal(h.app.client.candidateReady, false); assert.equal(h.nodes['candidate-section'].hidden, true); assert.equal(h.app.client.pending, null);
+    assert.equal(h.nodes.refresh.disabled, false); assert.equal(h.nodes['candidate-prepare'].disabled, false);
+    if (cancel === 'button') assert.match(h.nodes.status.textContent, /Read cancelled/);
+  }
+});
+
+test('obsolete candidate completion refreshes controls without clearing a newer read or disconnected state', async () => {
+  for (const next of ['read', 'disconnect']) {
+    const f = queueFixture(), inspection = deferred(), queued = deferred(); let blockQueue = false;
+    const h = candidateHarness(f, call => {
+      if (call.url.endsWith('/inspect')) return inspection.promise;
+      if (blockQueue && new URL(call.url).pathname.endsWith('/queues/7')) return queued.promise;
+      return null;
+    });
+    await candidateDraft(h); h.nodes['candidate-prepare'].fire('click'); await settled();
+    h.nodes['cancel-read'].fire('click');
+    if (next === 'disconnect') h.app.disconnect();
+    else { blockQueue = true; h.nodes['show-number'].value = '7'; h.nodes['show-form'].fire('submit'); await settled(); }
+    const status = h.nodes.status.textContent;
+    inspection.resolve(json(f.inspection)); await settled();
+    assert.equal(h.app.client.candidateReady, false); assert.equal(h.nodes.status.textContent, status);
+    assert.equal(h.nodes.refresh.disabled, true);
+    if (next === 'read') {
+      assert.equal(h.nodes['cancel-read'].disabled, false);
+      queued.resolve(json(show())); await settled();
+      assert.equal(h.nodes.refresh.disabled, false); assert.equal(h.nodes['cancel-read'].disabled, true);
+    } else {
+      assert.equal(h.app.client.connected, false); assert.equal(h.nodes['candidate-prepare'].disabled, true);
+      assert.equal(h.nodes['cancel-read'].disabled, true);
+    }
+  }
 });

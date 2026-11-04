@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Workflow artifacts</title>
+  <link rel="stylesheet" href="./browser.css">
+  <script type="module" src="./artifacts-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Workflow artifacts</span><span class="badge">Read only</span><a href="../">Source</a><a href="../pulls/">Pull requests</a></header>
+  <main>
+    <h1>Inspect and download a workflow artifact</h1>
+    <p>Open the exact artifact ID from a retained workflow receipt. Inspect its size, identity and retention policy, then verify the complete bytes before downloading.</p>
+    <form id="artifact-connection" autocomplete="off">
+      <label>Artifact-read token<input id="artifact-token" type="password" autocomplete="off" spellcheck="false" maxlength="64" placeholder="64 lowercase hexadecimal characters"></label>
+      <label>Expected repository incarnation<input id="artifact-incarnation" autocomplete="off" spellcheck="false" maxlength="32" placeholder="32 lowercase hexadecimal characters" aria-describedby="artifact-scope-help"></label>
+      <button id="artifact-connect" type="button">Connect</button>
+      <button id="artifact-disconnect" type="button">Disconnect and clear</button>
+    </form>
+    <p id="artifact-scope-help" class="hint">Use the incarnation from your workflow receipt, pinned link or node readiness information. The independent artifact-read grant covers this repository incarnation’s retained artifacts, including unpublished workflow outputs. Source and pull-request grants do not grant this access. The token stays in page memory until you disconnect or leave.</p>
+    <p id="artifact-connection-state" role="status">Disconnected.</p>
+    <form id="artifact-selection" autocomplete="off">
+      <label>Artifact ID<input id="artifact-id" autocomplete="off" spellcheck="false" maxlength="64" placeholder="64 lowercase hexadecimal characters"></label>
+      <label>Expected payload SHA-256 (optional)<input id="artifact-payload-sha256" autocomplete="off" spellcheck="false" maxlength="64" placeholder="From an independently trusted receipt"></label>
+      <label>Expected payload bytes (with SHA-256)<input id="artifact-payload-bytes" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="8" placeholder="Exact nonnegative byte count"></label>
+      <button id="artifact-inspect" type="button" disabled>Inspect metadata</button>
+      <button id="artifact-cancel" type="button" disabled>Cancel read and clear</button>
+    </form>
+    <div id="artifact-status" role="status" aria-live="polite">Connect with the expected incarnation to begin.</div>
+    <section id="artifact-summary" aria-label="Artifact metadata"></section>
+    <details id="artifact-details" hidden><summary>Identity and retained provenance</summary><div id="artifact-identities"></div></details>
+    <p><a id="artifact-link" hidden>Open pinned artifact link</a></p>
+    <nav aria-label="Verified artifact download">
+      <button id="artifact-verify" type="button" disabled>Load and verify complete bytes</button>
+      <button id="artifact-download" type="button" disabled>Download verified bytes</button>
+    </nav>
+    <p id="artifact-limit" class="hint">The browser loads artifacts up to 16 MiB. Larger retained artifacts can be inspected here and downloaded with the native artifact client. Loading and verification share a 30-second deadline.</p>
+    <section aria-label="Verified byte preview"><p id="artifact-preview-label"></p><pre id="artifact-preview" hidden></pre></section>
+    <p class="warning">Identity and payload verification establish which bytes were retained. They do not authenticate a producer, prove a successful check, publish repository state, or enforce the declared retention policy. HTML, scripts and other media are shown as inert text and downloaded as binary data.</p>
+  </main>
+  <footer>Exact-ID lookup only. No artifact listing, uploads, deletion or credential persistence.</footer>
+</body>
+</html>

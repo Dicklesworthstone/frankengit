@@ -120,7 +120,7 @@ admission evidence; knowledge of a snapshot ID is not an activation grant.
 Principal IDs are canonical 32-character lowercase hexadecimal strings.
 Administrator and reviewer lists must be strictly sorted and unique; the
 administrator list must be nonempty. A protected branch may have no reviewers
-only when it has at least one required workflow check or `require_merge_queue: true`. The policy accepts at
+only when it has at least one path review rule, required workflow check or `require_merge_queue: true`. The policy accepts at
 most 32 administrators, 64 exact branches, 32 reviewers and 32 checks per branch. Branches are strictly sorted by raw reference bytes and must name
 `refs/heads/*`; the `reference_hex` encoding preserves non-UTF-8 names and uses
 the native 1,024-byte reference limit. The adapter rejects duplicate entries
@@ -148,6 +148,16 @@ other fields. Reads always return the array, including when empty. A candidate
 check-only branch has no reviewers and zero required approvals. See
 [unpublished candidate checks](UNPUBLISHED_CANDIDATE_CHECKS.md) for exact subject
 validation and independently mandatory protection.
+
+Each branch also accepts optional `path_reviews`: strictly sorted, unique objects
+`{path_hex, scope, required_reviewers, required_approvals}`. Scope is `exact` or
+`subtree`; native path bytes are lowercase hex. Every matching rule adds an
+independent quorum for the actual target-to-candidate changes. A branch may use
+only path rules, empty global reviewers/checks and zero global approvals.
+Omission removes existing path rules on complete replacement; reads return the
+full array. Path hex selectors can use the bounded 256 KiB protection envelope
+without enlarging unrelated fields. See [path review ownership](PATH_REVIEW_OWNERSHIP.md)
+for exact path semantics, sorting, rule/byte limits and examples.
 
 Each branch must explicitly include `required_checks`, even when it is empty.
 This prevents a client unaware of checks from silently dropping them while

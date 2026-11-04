@@ -1,8 +1,8 @@
 //! Root-last immutable containers. Never use directory listings as artifact truth.
 use super::{
     ArtifactIdentity, ArtifactOperation, ArtifactPut, ArtifactScope, ArtifactStorageError,
-    CHUNK_BYTES, Digest, DigestHasher, File, HEADER_BYTES, MAGIC, Path, Sha256Hasher, codec,
-    finish, hex, io, valid_digest,
+    CHUNK_BYTES, Digest, DigestHasher, File, HEADER_BYTES, MAGIC, MAX_BUFFERED_PAYLOAD_BYTES, Path,
+    Sha256Hasher, VerifiedArtifactReader, codec, finish, hex, io, valid_digest,
 };
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -34,7 +34,7 @@ impl LocalArtifactStore {
         id: &Digest,
         op: &ArtifactOperation<'_>,
     ) -> Result<(ArtifactIdentity, Vec<u8>), ArtifactStorageError> {
-        if op.maximum_bytes > 64 * 1024 * 1024 {
+        if op.maximum_bytes > MAX_BUFFERED_PAYLOAD_BYTES {
             return Err(ArtifactStorageError::PayloadLimit);
         }
         struct Buffer {
@@ -201,6 +201,41 @@ impl LocalArtifactStore {
         let mut file = self.source(id)?;
         verify(&mut file, &self.scope, id, &mut std::io::sink(), op)
     }
+
+    pub(super) fn open_verified_payload_inner<'operation, 'live>(
+        &self,
+        id: &Digest,
+        op: &'operation ArtifactOperation<'live>,
+    ) -> Result<VerifiedArtifactReader<'operation, 'live>, ArtifactStorageError> {
+        op.checkpoint()?;
+        let mut source = self.source(id)?;
+        // Unlink before copying any payload. Once copying begins, cancellation,
+        // I/O failure, process exit or normal drop cannot leave named payload
+        // bytes to confuse with immutable custody. The descriptor stays private.
+        let mut spool = Stage::new(&self.root)?;
+        spool
+            .remove()
+            .map_err(|error| io("unlink artifact read spool", error))?;
+        let identity = verify(&mut source, &self.scope, id, &mut spool.file, op)?;
+        spool
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| io("rewind artifact read spool", error))?;
+        // Verify the retained copy, not only the source that supplied it.
+        // This temporary read custody is never a durable publication.
+        transfer(&mut spool.file, &mut std::io::sink(), &identity, op)?;
+        spool
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| io("rewind verified artifact read spool", error))?;
+        let file = spool
+            .file
+            .try_clone()
+            .map_err(|error| io("retain verified artifact read spool", error))?;
+        op.checkpoint()?;
+        Ok(VerifiedArtifactReader::new(identity, file, op))
+    }
+
     pub(super) fn export_inner(
         &self,
         id: &Digest,

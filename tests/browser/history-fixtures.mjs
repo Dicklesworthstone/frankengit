@@ -21,6 +21,16 @@ export function fixture(algorithm = 'sha1', path = '66696c65') {
     read_only: true, transaction_created: false, published: false };
   const calls = [], config = { mutate: null, respond: null };
   function log(form) {
+    if (form.get('first_parent') === 'true') {
+      const after = Number(form.get('cursor')?.split('/').at(-1) ?? 0), limit = Number(form.get('limit') ?? 20);
+      const end = Math.min(after + limit, records.length), visited = records.slice(0, end), root = end === records.length;
+      return { ...common, type: 'source_first_parent_log', profile: 'first-parent-prefix-v1', ordering: 'stored-first-parent-v1',
+        author_identity_verified: false, page_complete: true, after, limit, root_reached: root, visited_commits: end,
+        visited_parent_edges: visited.reduce((count, row) => count + row.parents.length, 0),
+        metadata_bytes: visited.reduce((count, row) => count + row.body_hex.length / 2, 0),
+        next_cursor: root ? null : `fgfp1/${head}/${hex(bytes(ref))}/${algorithm}/${tip.object_id}/${end}`,
+        commits: records.slice(after, end) };
+    }
     const selected = form.has('path_hex'), queryPath = form.get('path_hex'), all = selected && queryPath !== path ? [] : records;
     const after = Number(form.get('after') ?? 0), limit = Number(form.get('limit') ?? 20), end = Math.min(after + limit, all.length);
     return { ...common, type: selected ? 'source_path_log' : 'source_log', author_identity_verified: false,
@@ -35,7 +45,7 @@ export function fixture(algorithm = 'sha1', path = '66696c65') {
       { line: 1, byte_start: 5, byte_end: 8, origin_commit: base.object_id, origin_blob: oldBlob, origin_line: 1, origin_byte_start: 5, origin_byte_end: 8 },
     ].slice(first, end);
     const ids = new Set(lines.map(line => line.origin_commit));
-    return { ...common, type: 'source_blame', author_identity_verified: false, profile: 'exact-lines-all-parents-v1', scope: 'same_path',
+    return { ...common, type: 'source_blame', author_identity_verified: false, profile: 'exact-lines-all-parents-v1', traversal: 'line-frontier-v1', scope: 'same_path',
       range_complete: true, line_origin: 0, tree: tip.tree, blob, path_hex: path, total_lines: 2, first_line: first, end_line: end,
       content_byte_start: spans[first], content_hex: hex(current.subarray(spans[first], spans[end])), graph_commits: 2,
       comparisons: 1, max_diff_work: 1000000, algorithms: ['Myers'],

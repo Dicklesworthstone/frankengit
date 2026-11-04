@@ -41,6 +41,48 @@ test('native recovery accepts canonical refusal without pretending the key is pe
   assert.equal(readNativeOutcomeReceipt(processResult(v, 3), intent).outcome, 'refused');
   assert.throws(() => readNativeOutcomeReceipt(processResult(v, 0), intent));
 });
+test('native CLI principal evidence preserves the existing import observation schema', () => {
+  const committed = { ...outcome(), state: 'committed', terminal: true, transaction,
+    decision: { kind: 'committed', decision_sequence: 7, repository_commit_id: 'rcr:original' } };
+  const expected = readNativeOutcomeReceipt(processResult(committed, 0), intent);
+  for (const authentication of ['operator_assertion', 'http_token', 'ssh_deploy_key', null]) {
+    const principal_provenance = { state: authentication === null ? 'legacy_unknown' : 'recorded',
+      principal_id: intent.principal_id, authentication, agent_provenance: null };
+    assert.deepEqual(readNativeOutcomeReceipt(processResult({ ...committed, principal_provenance, provenance_error: null }, 0), intent), expected);
+  }
+  for (const provenance_error of ['original_principal_evidence_unavailable', 'response_limit']) {
+    assert.deepEqual(readNativeOutcomeReceipt(processResult({ ...committed, principal_provenance: { state: 'unavailable' }, provenance_error }, 0), intent), expected);
+  }
+  assert.deepEqual(readNativeOutcomeReceipt(processResult({ ...outcome(), principal_provenance: { state: 'not_terminal' }, provenance_error: null }, 4), intent),
+    readNativeOutcomeReceipt(processResult(outcome(), 4), intent));
+});
+test('native CLI principal evidence cannot bypass principal, key, cleanup or closed-shape checks', () => {
+  const v = { ...outcome(), state: 'committed', terminal: true, transaction,
+    decision: { kind: 'committed', decision_sequence: 7, repository_commit_id: 'rcr:original' },
+    principal_provenance: { state: 'recorded', principal_id: intent.principal_id, authentication: 'operator_assertion', agent_provenance: null },
+    provenance_error: null };
+  assert.equal(readNativeOutcomeReceipt(processResult(v, 0), intent).outcome, 'committed');
+  for (const mutate of [r => { delete r.provenance_error; }, r => { r.extra = true; },
+    r => { r.principal_provenance.principal_id = '9'.repeat(32); },
+    r => { r.principal_provenance.authentication = 'human'; },
+    r => { r.principal_provenance.agent_provenance = {}; },
+    r => { r.key_digest.hex = '9'.repeat(64); }, r => { r.node_closed = false; }]) {
+    const bad = structuredClone(v); mutate(bad); assert.throws(() => readNativeOutcomeReceipt(processResult(bad, 0), intent));
+  }
+});
+test('native CLI retained-agent witness validation preserves full-width u64 times', () => {
+  const v = { ...outcome(), state: 'committed', terminal: true, transaction,
+    decision: { kind: 'committed', decision_sequence: 7, repository_commit_id: 'rcr:original' },
+    principal_provenance: { state: 'recorded', principal_id: intent.principal_id, authentication: 'agent_credential',
+      agent_provenance: { agent: intent.principal_id, sponsor: '4'.repeat(32), sponsor_kind: 'human',
+        credential_id: '5'.repeat(64), grant_root: { algorithm: 2, hex: '6'.repeat(64) }, run_commitment: '7'.repeat(64),
+        authenticated_at: 18446744073709551315n, expires_at: 18446744073709551615n } }, provenance_error: null };
+  const result = () => ({ stdout: Buffer.from(JSON.stringify(v, (_key, value) =>
+    typeof value === 'bigint' ? JSON.rawJSON(String(value)) : value)), stderr: Buffer.alloc(0), code: 0 });
+  assert.equal(readNativeOutcomeReceipt(result(), intent).outcome, 'committed');
+  v.principal_provenance.agent_provenance.expires_at = v.principal_provenance.agent_provenance.authenticated_at;
+  assert.throws(() => readNativeOutcomeReceipt(result(), intent), { code: 'native_import_receipt_provenance' });
+});
 for (const patch of [{ read_only: false }, { request_reexecuted: true }, { absence_proves_non_commit: true },
   { key_digest: { algorithm: 1, hex: 'f'.repeat(64) } }, { principal_id: '9'.repeat(32) },
   { selector: 'receive_command', command_index: 0 }, { state: 'committed' }, { transaction },

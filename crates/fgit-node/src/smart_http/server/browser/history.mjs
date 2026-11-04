@@ -1,7 +1,7 @@
 // Read-only repository investigation. No arbitrary route, write key, mutation,
 // credential persistence, automatic retry, or client-side authorization oracle.
 import { fail, keys, integer, format, oid, utf8, hex, unhex, copy, form, readBytes, json } from './pulls-core.mjs';
-import { HISTORY_LIMITS, fullRef, bytePath, logPage, blamePage, historicalPage, comparisonQuery, comparisonPage, COMPARISON_LIMITS } from './history-data.mjs';
+import { HISTORY_LIMITS, fullRef, bytePath, logPage, firstParentCursor, firstParentPage, blamePage, historicalPage, comparisonQuery, comparisonPage, COMPARISON_LIMITS } from './history-data.mjs';
 export const HISTORICAL_FILE_LIMIT = 8 * 1024 * 1024;
 const ENDPOINTS = new Set(['log', 'blame', 'historical-tree', 'historical-blob', 'diff']);
 function rootFor(href) {
@@ -14,9 +14,20 @@ function rootFor(href) {
   return Object.freeze({ origin: page.origin, api: `${page.origin}${route}/api/v1/source/` });
 }
 function logOptions(options = {}) {
-  keys(options, ['after', 'limit', 'path_hex']);
+  keys(options, ['after', 'limit', 'path_hex', 'first_parent', 'cursor']);
+  if (Object.hasOwn(options, 'first_parent')) {
+    if (options.first_parent !== true || Object.hasOwn(options, 'after') || Object.hasOwn(options, 'path_hex')) fail('First-parent history cannot combine with an offset or path filter.');
+    const cursor = options.cursor ?? null;
+    if (cursor !== null && (typeof cursor !== 'string' || cursor.length > 4096)) fail('Invalid first-parent cursor.');
+    return { first_parent: true, cursor, limit: integer(options.limit ?? 20, 'history page limit', 1, 100) };
+  }
+  if (Object.hasOwn(options, 'cursor')) fail('A cursor requires explicit first-parent history.');
   return { after: integer(options.after ?? 0, 'history cursor', 0, HISTORY_LIMITS.commits),
     limit: integer(options.limit ?? 20, 'history page limit', 1, 100), path_hex: bytePath(options.path_hex ?? null, true) };
+}
+function logFields(query) {
+  if (query.first_parent) return { first_parent: 'true', limit: query.limit, ...(query.cursor === null ? {} : { cursor: query.cursor }) };
+  return { after: query.after, limit: query.limit, ...(query.path_hex === null ? {} : { path_hex: query.path_hex }) };
 }
 function httpError(status) {
   const error = new Error(({ 401: 'Credential rejected or revoked.', 403: 'Source read permission is missing or disabled.',
@@ -78,23 +89,24 @@ export class HistoryClient {
   #fields(selection) {
     return { ref: selection.ref, object_format: selection.object_format, expected_head: selection.head, expected_commit: selection.tip };
   }
-  async open(ref, algorithm) {
+  async open(ref, algorithm, options = {}) {
     this.#selection = null; this.#comparison = null; this.#beforePin = null;
     return this.#run(async (signal, check) => {
-      const request = { ref: fullRef(ref), object_format: format(algorithm) }, options = logOptions();
-      const raw = await this.#request('log', { ...request, after: 0, limit: options.limit }, signal); check();
-      const page = await logPage(raw, request, null, options, this.#crypto, check); check();
+      keys(options, ['first_parent', 'limit']);
+      const request = { ref: fullRef(ref), object_format: format(algorithm) }, query = logOptions(options);
+      const raw = await this.#request('log', { ...request, ...logFields(query) }, signal); check();
+      const page = await (query.first_parent ? firstParentPage : logPage)(raw, request, null, query, this.#crypto, check); check();
       if (this.#scope && Object.keys(page.selection.scope).some(key => page.selection.scope[key] !== this.#scope[key])) fail('Repository incarnation changed. Reconnect explicitly.');
       this.#scope = page.selection.scope; this.#selection = page.selection; return page;
     });
   }
   async log(options = {}) {
     const selection = this.#base(), query = logOptions(options);
+    if (query.first_parent && query.cursor !== null) firstParentCursor(query.cursor, selection);
     return this.#run(async (signal, check) => {
-      const fields = { ...this.#fields(selection), after: query.after, limit: query.limit };
-      if (query.path_hex !== null) fields.path_hex = query.path_hex;
+      const fields = { ...this.#fields(selection), ...logFields(query) };
       const raw = await this.#request('log', fields, signal); check();
-      return logPage(raw, selection, selection, query, this.#crypto, check);
+      return (query.first_parent ? firstParentPage : logPage)(raw, selection, selection, query, this.#crypto, check);
     });
   }
   // The first read selects the before tip at the already-pinned authority head.

@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 //! Public-path tests for complete Intent Run effect reconciliation.
 
+#[path = "reconcile/parentage.rs"]
+mod parentage;
+
 use fgit_agent::{
     AgentInstanceId, AuthorityReadReceipt, CapabilityId, ClassSet, EffectClass, EffectId,
     EffectRecord, EffectResolutionAction, EffectTerminalOutcome, IntentRun, LogicalTime,

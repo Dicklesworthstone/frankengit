@@ -1,18 +1,54 @@
 //! Bounded exact-byte context from a previously joined Initial retrieval.
 //! This is untrusted source material, not an Agent Protocol ContextPacket,
 //! a capability, a retention pin, or a claim that source instructions are safe.
-use super::{InitialReport, RetrievalError, SymbolChannel};
+use super::authorization::InitialAuthorization;
+use super::current_index::initial::RevalidatedInitialReport;
+use super::{IndexedLexicalReport, InitialReport, RetrievalError, SymbolChannel};
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_types::GitOid;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
 pub mod ranked;
+mod revalidated;
+
+pub use revalidated::RevalidatedInitialContext;
 
 pub const PROFILE: &str = "source-initial-context-v1";
+pub const REVALIDATED_PROFILE: &str = "source-initial-context-revalidated-v1";
 const MAX_FILES: usize = 32;
 const MAX_ANCHORS: usize = 4096;
 const MAX_WINDOWS: usize = 128;
+
+/// Borrow original rows and their labels without converting either sealed
+/// retrieval type or replacing its independent source/generation witnesses.
+#[derive(Clone, Copy)]
+struct ReportRows<'a> {
+    content: &'a IndexedLexicalReport,
+    path: &'a IndexedLexicalReport,
+    symbols: &'a SymbolChannel,
+    authorization: &'a InitialAuthorization,
+}
+impl<'a> From<&'a InitialReport> for ReportRows<'a> {
+    fn from(report: &'a InitialReport) -> Self {
+        Self {
+            content: report.content(),
+            path: report.path(),
+            symbols: report.symbols(),
+            authorization: report.authorization(),
+        }
+    }
+}
+impl<'a> From<&'a RevalidatedInitialReport> for ReportRows<'a> {
+    fn from(report: &'a RevalidatedInitialReport) -> Self {
+        Self {
+            content: report.content(),
+            path: report.path(),
+            symbols: report.symbols(),
+            authorization: report.authorization(),
+        }
+    }
+}
 
 /// Source decoding and retained excerpts have separate finite envelopes.
 /// Before reads, source bytes are divided evenly among the selected paths.
@@ -218,19 +254,35 @@ impl ContextFile {
         report: &InitialReport,
         live: &mut impl FnMut() -> Result<(), RetrievalError>,
     ) -> Result<(), RetrievalError> {
+        self.validate_report_lineage(report.into(), live)
+    }
+    /// Validate the same original row commitments after current native source
+    /// selection. A new head is never substituted for index provenance.
+    pub(crate) fn validate_revalidated_lineage(
+        &self,
+        report: &RevalidatedInitialReport,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<(), RetrievalError> {
+        self.validate_report_lineage(report.into(), live)
+    }
+    fn validate_report_lineage(
+        &self,
+        report: ReportRows<'_>,
+        live: &mut impl FnMut() -> Result<(), RetrievalError>,
+    ) -> Result<(), RetrievalError> {
         self.validate_saved_lineage(live)?;
         let mut observed = Vec::with_capacity(self.authorization_labels.len());
         for (results, labels) in [
             (
-                report.content(),
+                report.content,
                 report
-                    .authorization()
+                    .authorization
                     .lexical(fgit_graph::lexical::LexicalChannel::Content),
             ),
             (
-                report.path(),
+                report.path,
                 report
-                    .authorization()
+                    .authorization
                     .lexical(fgit_graph::lexical::LexicalChannel::Path),
             ),
         ] {
@@ -247,8 +299,8 @@ impl ContextFile {
                 }
             }
         }
-        if let SymbolChannel::Available(symbols) = report.symbols() {
-            for (row, label) in symbols.matches.iter().zip(report.authorization().symbols()) {
+        if let SymbolChannel::Available(symbols) = report.symbols {
+            for (row, label) in symbols.matches.iter().zip(report.authorization.symbols()) {
                 live()?;
                 if row.location.path != self.path {
                     continue;
@@ -274,15 +326,15 @@ impl ContextFile {
                         fgit_graph::lexical::LexicalChannel::Path
                     };
                     let results = if anchor.channel == ContextChannel::Content {
-                        report.content()
+                        report.content
                     } else {
-                        report.path()
+                        report.path
                     };
                     results
                         .results
                         .hits
                         .iter()
-                        .zip(report.authorization().lexical(channel))
+                        .zip(report.authorization.lexical(channel))
                         .any(|(row, label)| {
                             label == origin
                                 && row.path == self.path
@@ -293,11 +345,11 @@ impl ContextFile {
                                 })
                         })
                 }
-                ContextChannel::Symbol => match report.symbols() {
+                ContextChannel::Symbol => match report.symbols {
                     SymbolChannel::Available(symbols) => symbols
                         .matches
                         .iter()
-                        .zip(report.authorization().symbols())
+                        .zip(report.authorization.symbols())
                         .any(|(row, label)| {
                             label == origin
                                 && row.location.path == self.path
@@ -465,7 +517,14 @@ impl Plan {
         limits: ContextLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, RetrievalError> {
-        Self::with_ranking(report, limits, None, cancelled)
+        Self::with_ranking(report.into(), limits, None, cancelled)
+    }
+    pub(crate) fn revalidated(
+        report: &RevalidatedInitialReport,
+        limits: ContextLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, RetrievalError> {
+        Self::with_ranking(report.into(), limits, None, cancelled)
     }
     pub(crate) fn ranked(
         report: &InitialReport,
@@ -473,11 +532,11 @@ impl Plan {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Self, ranked::ContextRanking), RetrievalError> {
         let ranking = ranked::ContextRanking::build(report, limits, cancelled)?;
-        let plan = Self::with_ranking(report, limits, Some(&ranking), cancelled)?;
+        let plan = Self::with_ranking(report.into(), limits, Some(&ranking), cancelled)?;
         Ok((plan, ranking))
     }
     fn with_ranking(
-        report: &InitialReport,
+        report: ReportRows<'_>,
         limits: ContextLimits,
         ranking: Option<&ranked::ContextRanking>,
         cancelled: &dyn Fn() -> bool,
@@ -485,7 +544,7 @@ impl Plan {
         limits.validate()?;
         check(cancelled)?;
         let mut files = BTreeMap::new();
-        for channel in [report.content(), report.path()] {
+        for channel in [report.content, report.path] {
             for hit in &channel.results.hits {
                 check(cancelled)?;
                 identity(
@@ -496,7 +555,7 @@ impl Plan {
                 )?;
             }
         }
-        if let SymbolChannel::Available(channel) = report.symbols() {
+        if let SymbolChannel::Available(channel) = report.symbols {
             for hit in &channel.matches {
                 check(cancelled)?;
                 identity(&mut files, &hit.location.path, hit.location.blob, None)?;
@@ -528,16 +587,16 @@ impl Plan {
         for (channel, report, labels) in [
             (
                 ContextChannel::Content,
-                report.content(),
+                report.content,
                 report
-                    .authorization()
+                    .authorization
                     .lexical(fgit_graph::lexical::LexicalChannel::Content),
             ),
             (
                 ContextChannel::Path,
-                report.path(),
+                report.path,
                 report
-                    .authorization()
+                    .authorization
                     .lexical(fgit_graph::lexical::LexicalChannel::Path),
             ),
         ] {
@@ -568,7 +627,7 @@ impl Plan {
                 }
             }
         }
-        if let SymbolChannel::Available(channel) = report.symbols() {
+        if let SymbolChannel::Available(channel) = report.symbols {
             for (ordinal, hit) in channel.matches.iter().enumerate() {
                 check(cancelled)?;
                 if let Some(file) = files.get_mut(&hit.location.path) {
@@ -581,7 +640,7 @@ impl Plan {
                         &hit.name,
                         hit.raw_identifier,
                         *report
-                            .authorization()
+                            .authorization
                             .symbols()
                             .get(ordinal)
                             .ok_or(RetrievalError::Invalid("context symbol label count"))?,

@@ -52,6 +52,30 @@ while locked, including a comment prepared before another writer locks it.
 Edits, assignments, close and reopen remain available and preserve the lock.
 The UI never guesses a replacement predecessor after a stale-version refusal.
 
+## Milestone planning
+
+The **Milestones** page uses the same repository issue grants to create, edit,
+close and reopen milestones and inspect their snapshot-bound progress. In an
+issue's history, choose **Set or move milestone**, then **Load milestones for
+this issue**. The chooser reads the exact same repository snapshot as the issue,
+pages with its original cursor, and permits only open milestones. Selecting one
+pins both the displayed issue version and the selected milestone version.
+Changing the issue number or version invalidates that selection. A concurrent
+milestone edit/close or issue change can refuse publication; the browser never
+substitutes newer versions into the prepared request.
+
+**Clear milestone** needs only the exact issue version. Both operations remain
+available for closed or discussion-locked issues, and native admission preserves
+their other fields. The usual prepare, save, send and exact-key recovery flow
+applies. A saved membership request retains its original milestone version.
+
+The issue search form accepts a positive milestone number, `none` for unassigned
+issues, or a blank field for any membership. The filter combines with the other
+predicates and remains frozen across continuation, including empty scan-limited
+pages. **Show milestone issues** on an issue detail uses the selected issue's
+original snapshot. Repository text never supplies credentials or authority;
+rendered descriptions use the existing verified safe Markdown path.
+
 ## Ambiguous outcomes
 
 Only a validated native terminal decision settles a request. Canonical issue

@@ -414,7 +414,7 @@ fn cancellation_and_invalid_names_do_not_create_execution_custody() {
             n.runtime()
                 .block_on(n.poll_trusted_ref_workflows_in(
                     &request,
-                    &RefName::try_new(b"refs/tags/v1").unwrap(),
+                    &RefName::try_new(b"refs/notes/example").unwrap(),
                     b"ci",
                     &f.parent(),
                     &[b"ci".to_vec()],
@@ -443,8 +443,9 @@ fn a_completed_process_report_without_event_settlement_remains_unresolved_after_
         .parent()
         .unwrap();
     assert!(event.join("check-sources").is_file());
-    // Reproduce a crash prefix: real successful child reports and the immutable
-    // handoff exist, but the final event acknowledgement did not survive.
+    // Real successful child reports alone do not establish the watch completion
+    // handoff. Its absence must fence replay even after restart.
+    fs::remove_file(event.join("check-sources")).unwrap();
     fs::remove_file(event.join("settled")).unwrap();
     let before = f
         .node()

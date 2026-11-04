@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 const STOP_POLL: Duration = Duration::from_millis(10);
 mod pull_requests;
 
-/// Immutable operator selection for one trusted branch or same-repository PR.
+/// Immutable operator selection for one trusted branch, tag or same-repository PR.
 ///
 /// Constructing this configuration authorizes every future selected script to
 /// run with the host user's privileges. It must never be built from an HTTP,
@@ -58,7 +58,8 @@ impl WorkflowWatchConfig {
         inputs: Vec<Vec<u8>>,
         interval: Duration,
     ) -> io::Result<Self> {
-        if !reference.as_bytes().starts_with(b"refs/heads/")
+        if !(reference.as_bytes().starts_with(b"refs/heads/")
+            || reference.as_bytes().starts_with(b"refs/tags/"))
             || reference.as_bytes().len() > 4096
             || directory.len() > 4096
             || run_parent.as_os_str().as_bytes().len() > 4096
@@ -104,6 +105,8 @@ impl WorkflowWatchConfig {
 
     /// The caller must be authorized to publish as this principal. The first
     /// native publication binds it permanently to the existing custody scope.
+    /// Tag execution cannot publish checks; [`Self::validate`] and service
+    /// startup refuse that combination before opening storage or custody.
     #[must_use]
     pub const fn with_publisher(mut self, publisher: PrincipalId) -> Self {
         self.publisher = Some(publisher);
@@ -111,9 +114,13 @@ impl WorkflowWatchConfig {
     }
 
     pub fn with_pull_request(mut self, number: u64) -> io::Result<Self> {
-        if number == 0 || self.merge_queue.is_some() || self.pull_requests.is_some() {
+        if !self.reference.as_bytes().starts_with(b"refs/heads/")
+            || number == 0
+            || self.merge_queue.is_some()
+            || self.pull_requests.is_some()
+        {
             return Err(invalid(
-                "workflow service requires a positive PR number and excludes a queue selector",
+                "workflow service requires a branch and positive PR number and excludes a queue selector",
             ));
         }
         self.pull_request = Some(number);
@@ -125,13 +132,14 @@ impl WorkflowWatchConfig {
     /// this lifetime custody bound and is reconciled before new execution.
     /// This is source-head-only trusted host execution, never a merge profile.
     pub fn with_pull_requests(mut self, max_members: usize) -> io::Result<Self> {
-        if !(1..=64).contains(&max_members)
+        if !self.reference.as_bytes().starts_with(b"refs/heads/")
+            || !(1..=64).contains(&max_members)
             || self.pull_request.is_some()
             || self.merge_queue.is_some()
             || self.merge_candidate.is_some()
         {
             return Err(invalid(
-                "PR collection requires 1..64 retained members and excludes fixed PR, queue and merge-candidate selectors",
+                "PR collection requires a branch and 1..64 retained members and excludes fixed PR, queue and merge-candidate selectors",
             ));
         }
         self.pull_requests = Some(max_members);
@@ -143,9 +151,13 @@ impl WorkflowWatchConfig {
     /// configuration is mandatory before this service can start. Queue changes
     /// do not change its permanent custody scope or grant target publication.
     pub fn with_merge_queue(mut self, number: u64) -> io::Result<Self> {
-        if number == 0 || self.pull_request.is_some() || self.pull_requests.is_some() {
+        if !self.reference.as_bytes().starts_with(b"refs/heads/")
+            || number == 0
+            || self.pull_request.is_some()
+            || self.pull_requests.is_some()
+        {
             return Err(invalid(
-                "workflow service requires a positive queue number and excludes a PR selector",
+                "workflow service requires a branch and positive queue number and excludes a PR selector",
             ));
         }
         if self.merge_candidate.as_ref().is_some_and(|merge| {
@@ -163,7 +175,8 @@ impl WorkflowWatchConfig {
     /// The fixed CI ref must differ from the source; its target is checked when
     /// the current PR is selected. This authorizes ordinary exact-old rewrites.
     pub fn with_merge_candidate(mut self, config: PullRequestMergeWatchConfig) -> io::Result<Self> {
-        if self.pull_requests.is_some()
+        if !self.reference.as_bytes().starts_with(b"refs/heads/")
+            || self.pull_requests.is_some()
             || (self.pull_request.is_none() && self.merge_queue.is_none())
             || config.reference() == &self.reference
         {
@@ -180,6 +193,30 @@ impl WorkflowWatchConfig {
         .map_err(|error| invalid(error.to_string()))?;
         self.merge_candidate = Some(config);
         Ok(self)
+    }
+
+    /// Validate the complete operator configuration without opening storage,
+    /// acquiring custody or admitting execution. Call after composing operator
+    /// options; this final check also guards infallible publisher selection.
+    pub fn validate(&self) -> io::Result<()> {
+        if self.reference.as_bytes().starts_with(b"refs/tags/")
+            && (self.publisher.is_some()
+                || self.pull_request.is_some()
+                || self.pull_requests.is_some()
+                || self.merge_queue.is_some()
+                || self.merge_candidate.is_some())
+        {
+            return Err(invalid(
+                "tag workflow service supports ordinary execution only; check publication, PR and queue modes require a branch",
+            ));
+        }
+        merge_queue::validate_selection(
+            &self.reference,
+            self.pull_request,
+            self.merge_queue,
+            self.merge_candidate.as_ref(),
+        )
+        .map_err(|error| invalid(error.to_string()))
     }
 
     pub fn with_limits(mut self, limits: WorkflowLimits) -> io::Result<Self> {
@@ -314,6 +351,7 @@ impl WorkflowWatchReceipt {
 
 #[derive(Debug)]
 pub enum WorkflowWatchError {
+    Configuration(String),
     Open(String),
     Authority(String),
     Custody(String),
@@ -360,6 +398,7 @@ impl WorkflowWatchError {
 impl std::fmt::Display for WorkflowWatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Configuration(error) => write!(f, "configure workflow service: {error}"),
             Self::Open(error) => write!(f, "open workflow service: {error}"),
             Self::Authority(error) => write!(f, "authenticate workflow service: {error}"),
             Self::Custody(error) => write!(f, "workflow service custody: {error}"),
@@ -410,6 +449,9 @@ pub fn run_service_with_ready(
     control: WorkflowWatchControl,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> Result<WorkflowWatchReceipt, WorkflowWatchError> {
+    config
+        .validate()
+        .map_err(|error| WorkflowWatchError::Configuration(error.to_string()))?;
     let mut node = OneNode::open_existing(node_config.with_object_format(config.format))
         .map_err(|error| WorkflowWatchError::Open(error.to_string()))?;
     let mut custody = None;
@@ -1052,3 +1094,6 @@ impl Custody {
         check().map_err(|error| WorkflowWatchError::Custody(error.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests;

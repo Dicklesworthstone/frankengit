@@ -259,9 +259,10 @@ fn render(
     )?;
     out.append(&format!(
         concat!(
-            ",\"profile\":\"exact-lines-all-parents-v1\",\"scope\":\"same_path\",",
+            ",\"profile\":\"exact-lines-all-parents-v1\",\"traversal\":{},\"scope\":\"same_path\",",
             "\"range_complete\":true,\"line_origin\":0,\"tree\":{},\"blob\":{},\"path_hex\":"
         ),
+        quote(result.traversal.as_str()),
         quote(&result.tree.to_string()),
         quote(&result.blob.to_string())
     ))?;
@@ -387,6 +388,7 @@ mod tests {
             end_line: 2,
             content_byte_start: 5,
             content: b"two".to_vec(),
+            traversal: fgit_forge::history::BlameTraversal::LineFrontier,
             graph_commits: 1,
             comparisons: 0,
             algorithms: vec![],

@@ -102,7 +102,9 @@ fn setup(format: GitHashAlgorithm) -> (Scratch, NodeTools, GitOid) {
         agent_context: false,
         artifacts: false,
         artifact_root: None,
+        agent_token_file: None,
         max_messages: 32,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend, plan.commit)
@@ -252,9 +254,9 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    // The 84-tool catalog minus queues (7), agent context (1), artifacts (2),
+    // The 92-tool catalog minus queues (7), agent context (1), artifacts (3),
     // protection (2), notification writes (5), and independent discussions (9).
-    assert_eq!(backend.tools().len(), 58);
+    assert_eq!(backend.tools().len(), 65);
     assert!(
         backend
             .tools()

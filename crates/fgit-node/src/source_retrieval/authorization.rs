@@ -3,13 +3,15 @@
 //! of source authenticity. No client-supplied label can authorize a read.
 use super::current_index::initial::RevalidatedInitialReport;
 use super::{GenerationVector, InitialReport, RetrievalError, SymbolChannel, add_result};
-use crate::OneNode;
+use crate::{GitDaemonSessionDeadline, NodeRequestContext, OneNode};
+use fgit_admission::evidence::AgentAuthentication;
 use fgit_crypto::sha256_digest;
 use fgit_forge::source_symbols::SymbolMatch;
 use fgit_graph::lexical::{
     IndexedLexicalReport, LexicalChannel, LexicalHit, LexicalNamespace, LexicalSource,
 };
 use fgit_types::PrincipalId;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const PROFILE: &str = "source-read-result-labels-v1";
 // Retained binary commitments, their hexadecimal wire references, position
@@ -23,6 +25,14 @@ enum Host {
     TrustedLocalCli,
     TrustedLocalMcp,
     HttpCredential(PrincipalId),
+    HttpAgentCredential {
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    },
+    McpAgentCredential {
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    },
 }
 
 /// A host attestation for one node's whole-repository read boundary. The local
@@ -67,6 +77,37 @@ impl SourceReadContext {
     pub(crate) const fn http_credential(node: &OneNode, principal: PrincipalId) -> Self {
         Self::new(node, Host::HttpCredential(principal))
     }
+    // The source gateway checked the canonical SOURCE_READ operation for this
+    // request. Preserve its original sponsor and absolute deadline; a child
+    // retrieval or context document cannot mint a fresh credential lifetime.
+    pub(crate) const fn http_agent_credential(
+        node: &OneNode,
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    ) -> Self {
+        Self::new(
+            node,
+            Host::HttpAgentCredential {
+                authentication,
+                deadline,
+            },
+        )
+    }
+    // Only AgentRequest's namespace/scope/lifetime-checked MCP bridge may mint
+    // this host attestation. AgentAuthentication by itself is only provenance.
+    pub(crate) const fn mcp_agent_credential(
+        node: &OneNode,
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    ) -> Self {
+        Self::new(
+            node,
+            Host::McpAgentCredential {
+                authentication,
+                deadline,
+            },
+        )
+    }
     pub(crate) fn check_node(&self, node: &OneNode) -> Result<(), RetrievalError> {
         if self.namespace != Self::new(node, self.host.clone()).namespace {
             return Err(RetrievalError::Invalid("source read context namespace"));
@@ -80,13 +121,89 @@ impl SourceReadContext {
             Host::TrustedLocalCli => "trusted-local-cli",
             Host::TrustedLocalMcp => "trusted-local-mcp",
             Host::HttpCredential(_) => "http-repository-read-credential",
+            Host::HttpAgentCredential { .. } => "http-sponsored-agent-source-read-credential",
+            Host::McpAgentCredential { .. } => "mcp-sponsored-agent-source-read-credential",
         }
     }
     #[must_use]
     pub const fn principal(&self) -> Option<PrincipalId> {
         match self.host {
             Host::HttpCredential(principal) => Some(principal),
+            Host::HttpAgentCredential { authentication, .. }
+            | Host::McpAgentCredential { authentication, .. } => Some(authentication.agent()),
             _ => None,
+        }
+    }
+    /// Authenticated sponsorship, when supplied by a credential-backed host. An
+    /// ordinary HTTP credential attributes the read to its own principal;
+    /// an agent credential retains the independently authenticated sponsor.
+    #[must_use]
+    pub const fn sponsor(&self) -> Option<PrincipalId> {
+        match self.host {
+            Host::HttpCredential(principal) => Some(principal),
+            Host::HttpAgentCredential { authentication, .. }
+            | Host::McpAgentCredential { authentication, .. } => Some(authentication.sponsor()),
+            _ => None,
+        }
+    }
+    /// Verified request provenance only, never a reusable credential.
+    #[must_use]
+    pub const fn agent_authentication(&self) -> Option<AgentAuthentication> {
+        match self.host {
+            Host::HttpAgentCredential { authentication, .. }
+            | Host::McpAgentCredential { authentication, .. } => Some(authentication),
+            _ => None,
+        }
+    }
+    pub(crate) const fn agent_deadline(&self) -> Option<Instant> {
+        match self.host {
+            Host::HttpAgentCredential { deadline, .. }
+            | Host::McpAgentCredential { deadline, .. } => Some(deadline),
+            _ => None,
+        }
+    }
+    pub(crate) const fn is_mcp_agent_credential(&self) -> bool {
+        matches!(self.host, Host::McpAgentCredential { .. })
+    }
+    fn remaining_at(&self, monotonic: Instant, wall: Option<Duration>) -> Option<Duration> {
+        let authentication = self.agent_authentication()?;
+        let deadline = self.agent_deadline()?;
+        let remaining = wall
+            .filter(|now| *now >= Duration::from_secs(authentication.authenticated_at()))
+            .and_then(|now| Duration::from_secs(authentication.expires_at()).checked_sub(now))
+            .unwrap_or(Duration::ZERO);
+        Some(remaining.min(deadline.saturating_duration_since(monotonic)))
+    }
+    fn remaining(&self) -> Option<Duration> {
+        self.remaining_at(
+            Instant::now(),
+            SystemTime::now().duration_since(UNIX_EPOCH).ok(),
+        )
+    }
+    pub(crate) fn is_live(&self) -> bool {
+        self.remaining()
+            .is_none_or(|remaining| !remaining.is_zero())
+    }
+    fn check_live(&self) -> Result<(), RetrievalError> {
+        if !self.is_live() {
+            return Err(RetrievalError::Source(
+                crate::NodeWorkspaceRefusal::Cancelled { exhaustion: None },
+            ));
+        }
+        Ok(())
+    }
+    /// Retain the verifier's original authority ceiling through awaited index
+    /// and object reads. A new parsing/hydration phase cannot renew it.
+    pub(crate) fn request_context(
+        &self,
+        node: &OneNode,
+        deadline: &GitDaemonSessionDeadline,
+    ) -> NodeRequestContext {
+        match self.remaining() {
+            Some(remaining) => node.session_request_context_with_timeout(
+                remaining.min(deadline.remaining().unwrap_or(Duration::ZERO)),
+            ),
+            None => node.session_request_context(deadline),
         }
     }
 }
@@ -195,6 +312,25 @@ fn source_binding(
             .as_ref()
             .map_or(&[][..], |p| p.as_bytes()),
     );
+    // Retain the exact authenticated request, including its sponsor, without
+    // converting a source-result label into reusable authentication evidence.
+    // Other host profiles keep their existing commitment bytes.
+    if let Some(authentication) = context.agent_authentication() {
+        field(&mut out, authentication.sponsor().as_bytes());
+        number(
+            &mut out,
+            u64::from(authentication.sponsor_kind().code_point()),
+        );
+        field(&mut out, authentication.credential_id().as_bytes());
+        number(
+            &mut out,
+            u64::from(authentication.grant_root().algorithm().code_point()),
+        );
+        field(&mut out, authentication.grant_root().bytes().as_bytes());
+        field(&mut out, authentication.run_commitment());
+        number(&mut out, authentication.authenticated_at());
+        number(&mut out, authentication.expires_at());
+    }
     out.push(match input.mode {
         InitialSourceMode::Exact => 0,
         InitialSourceMode::Revalidated => 1,
@@ -333,6 +469,7 @@ impl InitialAuthorization {
         live: &mut impl FnMut() -> Result<(), RetrievalError>,
     ) -> Result<Self, RetrievalError> {
         live()?;
+        context.check_live()?;
         validate_joins(&input)?;
         let symbol_count = match input.symbols {
             SymbolChannel::Available(s) => s.matches.len(),
@@ -384,6 +521,7 @@ impl InitialAuthorization {
             }
         }
         live()?;
+        context.check_live()?;
         Ok(labels)
     }
     fn validate_input(
@@ -393,6 +531,7 @@ impl InitialAuthorization {
         live: &mut impl FnMut() -> Result<(), RetrievalError>,
     ) -> Result<(), RetrievalError> {
         live()?;
+        context.check_live()?;
         validate_joins(&input)?;
         if &self.context != context
             || self.binding != source_binding(context, &input)?
@@ -433,7 +572,8 @@ impl InitialAuthorization {
             }
             _ => {}
         }
-        live()
+        live()?;
+        context.check_live()
     }
     pub fn validate(
         &self,
@@ -488,6 +628,15 @@ impl InitialAuthorization {
         self.context.principal()
     }
     #[must_use]
+    pub const fn sponsor(&self) -> Option<PrincipalId> {
+        self.context.sponsor()
+    }
+    /// Descriptor facts from the already authorized request, not a new grant.
+    #[must_use]
+    pub const fn agent_authentication(&self) -> Option<AgentAuthentication> {
+        self.context.agent_authentication()
+    }
+    #[must_use]
     pub fn lexical(&self, channel: LexicalChannel) -> &[[u8; 32]] {
         match channel {
             LexicalChannel::Content => &self.content,
@@ -504,6 +653,34 @@ pub(super) const fn model_context(namespace: LexicalNamespace) -> SourceReadCont
     SourceReadContext {
         namespace,
         host: Host::TrustedLocalNative,
+    }
+}
+#[cfg(test)]
+pub(super) const fn model_agent_context(
+    namespace: LexicalNamespace,
+    authentication: AgentAuthentication,
+    deadline: Instant,
+) -> SourceReadContext {
+    SourceReadContext {
+        namespace,
+        host: Host::HttpAgentCredential {
+            authentication,
+            deadline,
+        },
+    }
+}
+#[cfg(test)]
+pub(super) const fn model_mcp_agent_context(
+    namespace: LexicalNamespace,
+    authentication: AgentAuthentication,
+    deadline: Instant,
+) -> SourceReadContext {
+    SourceReadContext {
+        namespace,
+        host: Host::McpAgentCredential {
+            authentication,
+            deadline,
+        },
     }
 }
 #[cfg(test)]

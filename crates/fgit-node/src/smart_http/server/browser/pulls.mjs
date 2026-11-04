@@ -329,6 +329,7 @@ export class PullClient {
     if (!this.connected || !this.#artifact) fail('Inspect the exact source-tip candidate before preparing a fast-forward.');
     const { number, fields } = this.#artifact;
     if (candidateMethod(this.#artifact) !== 'fast-forward-only') fail('Fast-forward requires the inspected source tip and its exact target base.');
+    if (Object.hasOwn(fields, 'source_ref_hex') || Object.hasOwn(fields, 'target_ref_hex')) fail('Fast-forward publication requires text branch references; this raw-reference candidate remains available for review.');
     const { object_format, pull_request_version, source_ref, source_tip, target_ref, target_tip } = fields;
     // This is the explicit native fast-forward schema. Current repository
     // protection supplies its review requirements; no bundle or caller-selected

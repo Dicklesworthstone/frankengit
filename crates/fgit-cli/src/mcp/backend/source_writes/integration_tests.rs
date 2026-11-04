@@ -56,7 +56,9 @@ impl Fixture {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             max_messages: 128,
+            index_maintenance: None,
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -395,9 +397,11 @@ fn source_publish_pr_review_and_atomic_branch_lifecycle_compose_in_both_hash_dom
         committed(&deleted);
         let held = state(&backend.node);
         assert!(!held.1.contains_key(&reference("refs/heads/renamed")));
-        let NodeTools { node, options } = backend;
+        let NodeTools { node, options, .. } = backend;
         node.shutdown().unwrap();
         let mut stopped = NodeTools {
+            agent: None,
+            maintenance: None,
             node: OneNode::open_existing(config(&options)).unwrap(),
             options,
         };
@@ -529,13 +533,23 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
             .iter()
             .map(|tool| tool.name)
             .collect::<std::collections::BTreeSet<_>>(),
-        [CREATE, UPDATE, DELETE, RENAME, PUBLISH, TRANSACTION]
-            .into_iter()
-            .collect()
+        [
+            CREATE,
+            UPDATE,
+            DELETE,
+            RENAME,
+            PUBLISH,
+            TRANSACTION,
+            super::super::tags::CREATE,
+            super::super::tags::ANNOTATE,
+            super::super::tags::DELETE
+        ]
+        .into_iter()
+        .collect()
     );
-    assert_eq!(writer.tools().len(), 6);
+    assert_eq!(writer.tools().len(), 9);
     for tool in writer.tools() {
-        assert!(is_tool(tool.name));
+        assert!(is_tool(tool.name) || super::super::tags::is_write(tool.name));
         assert!(writer.is_mutation(tool.name));
     }
     for name in [

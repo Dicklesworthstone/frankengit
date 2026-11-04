@@ -282,7 +282,7 @@ fn malformed_scope_refuses_before_custody_or_script_creation() {
     };
     assert!(
         make(
-            RefName::try_new(b"refs/tags/v1").unwrap(),
+            RefName::try_new(b"refs/notes/review").unwrap(),
             b"ci".to_vec(),
             f.parent(),
             vec![b"ci".to_vec()],

@@ -53,6 +53,48 @@ const fn valid_prototype() -> McpToolEntry {
 }
 
 #[test]
+fn current_native_index_reuse_is_explicit_and_retains_each_tools_read_grant() {
+    for (name, capability, principal) in [
+        (
+            "frankengit_source_initial",
+            CapabilityRequirement::READ_DERIVED_GENERATION,
+            PrincipalRequirement::None,
+        ),
+        (
+            "frankengit_source_context",
+            CapabilityRequirement::READ_DERIVED_GENERATION,
+            PrincipalRequirement::None,
+        ),
+        (
+            "frankengit_agent_context",
+            CapabilityRequirement::READ_AGENT_CONTEXT,
+            PrincipalRequirement::HostBound,
+        ),
+    ] {
+        let tool = find_tool(name).unwrap();
+        assert_eq!(tool.read_mutation, ReadMutationClass::ReadOnly);
+        assert_eq!(tool.capability, capability);
+        assert_eq!(tool.principal, principal);
+        let selectors: Vec<_> = tool
+            .input_fields
+            .iter()
+            .filter(|field| field.name == "index_source")
+            .collect();
+        assert_eq!(selectors.len(), 1);
+        let selector = selectors[0];
+        assert!(!selector.required, "absence must retain the strict profile");
+        assert_eq!(selector.field_type, "string");
+        assert_eq!(
+            selector.classification,
+            FieldClassification::SelectorPosition
+        );
+        assert_eq!(selector.pattern, Some("^current-native-v1$"));
+        assert!(selector.description.contains("original index provenance"));
+        assert!(tool.refusal_codes.contains(&"unsupported_index_source"));
+    }
+}
+
+#[test]
 fn protection_registry_describes_optional_queue_requirement_without_new_authority() {
     let tool = find_tool("frankengit_protection_set").unwrap();
     let branches = tool
@@ -79,7 +121,7 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 79);
+    assert_eq!(REGISTRY.len(), 88);
     // Milestone edits expose an explicit null date clear as a real JSON Schema
     // union; a literal "string|null" type would not describe callable input.
     assert!(fgit_schema::emit::mcp_schema().contains("\"type\": [\"string\", \"null\"]"));
@@ -400,8 +442,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 79"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 75"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 88"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 84"));
     assert!(
         mcp_tools
             .contents
@@ -419,7 +461,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 79"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 88"));
 }
 
 #[test]
@@ -429,7 +471,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 75);
+    assert_eq!(active_names.len(), 84);
     assert!(active_names.contains(&"frankengit_issue_add_assignees"));
     assert!(active_names.contains(&"frankengit_issue_add_labels"));
     assert!(active_names.contains(&"frankengit_pull_append_comment"));

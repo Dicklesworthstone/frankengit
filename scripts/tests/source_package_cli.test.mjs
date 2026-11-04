@@ -132,7 +132,7 @@ test('competing captures never overwrite: one complete package, no temporary deb
   let release, arrivals = 0;
   const gate = new Promise(resolveGate => { release = resolveGate; });
   const p = await peer(t, fixture(), async value => {
-    if (value.type === 'source_log') { if (++arrivals === 2) release(); await gate; }
+    if (value.type === 'source_commit') { if (++arrivals === 2) release(); await gate; }
   });
   const i = await inputs(t, p);
   const results = await Promise.all([run(t, i.capture), run(t, i.capture)]);

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Milestones · FrankenGit</title>
+  <link rel="stylesheet" href="../browser.css">
+  <script type="module" src="../milestones-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Milestone planning</span><a href="../issues/">Issues</a><a href="../notifications/">Inbox</a><a href="../">Source browser</a></header>
+  <main>
+    <h1>Repository milestones</h1>
+    <p>Plan work with due dates, issue counts and a complete authored history. Reads retain one repository snapshot; changes name the milestone version you observed.</p>
+    <section aria-labelledby="connection-title">
+      <h2 id="connection-title">Connect</h2>
+      <form id="milestone-connect">
+        <label>Repository token<input id="milestone-token" type="password" maxlength="64" autocomplete="off" spellcheck="false" required></label>
+        <button type="submit">Connect</button><button id="milestone-disconnect" type="button">Disconnect</button>
+      </form>
+      <p class="hint">Use issues-read to browse, issues-write to change milestones and memberships, and outcomes-read to recover. Tokens stay in this tab and never enter links or saved receipts.</p>
+    </section>
+    <p id="milestone-status" role="status" aria-live="polite">Connect an explicitly scoped repository token.</p>
+    <section aria-labelledby="browse-title">
+      <h2 id="browse-title">Milestones and progress</h2>
+      <nav aria-label="Milestone navigation"><button id="milestone-list" type="button">Reload milestone list</button><button id="milestone-cancel" type="button">Cancel read</button><button id="milestone-new" type="button">Open new milestone</button></nav>
+      <form id="milestone-show">
+        <label>Milestone number<input id="show-number" inputmode="numeric" autocomplete="off" required></label>
+        <label>Rows per page<select id="milestone-limit"><option value="5">5</option><option value="20" selected>20</option><option value="100">100</option></select></label>
+        <button type="submit">Reload milestone</button>
+      </form>
+      <p class="hint">Pagination keeps the original snapshot and applied page size. Counts include open and closed member issues at that snapshot. Use the Issues page to assign, move, remove or filter members.</p>
+      <p id="milestone-snapshot" aria-label="Selected snapshot"></p>
+      <div id="milestone-content" aria-label="Milestone list or history"></div>
+      <nav id="milestone-paging" aria-label="Milestone pagination"></nav>
+    </section>
+    <section aria-labelledby="editor-title">
+      <h2 id="editor-title">Prepare a milestone change</h2>
+      <form id="milestone-change">
+        <label>Milestone number<input id="change-number" inputmode="numeric" autocomplete="off" required></label>
+        <label>Action<select id="change-action"><option value="open">Open new milestone</option><option value="edit">Edit milestone</option><option value="close">Close milestone</option><option value="reopen">Reopen milestone</option></select></label>
+        <label>Expected version<input id="change-version" inputmode="numeric" autocomplete="off" value="0" required></label>
+        <p class="hint">Opening uses an unused number and version 0. Edit, close and reopen use the exact observed version. Closing preserves existing issue memberships; reopen before assigning new members.</p>
+        <fieldset id="title-field"><legend>Title · up to 256 UTF-8 bytes</legend><label id="replace-title-label"><input id="replace-title" type="checkbox" checked>Replace title when editing</label><label>Title<input id="change-title-text" maxlength="256" autocomplete="off"></label></fieldset>
+        <fieldset id="body-field"><legend>Description · up to 64 KiB</legend><label id="replace-body-label"><input id="replace-body" type="checkbox" checked>Replace description when editing</label><label>Description<textarea id="change-body" rows="8" maxlength="65536"></textarea></label></fieldset>
+        <fieldset id="due-field"><legend>Due date</legend>
+          <label>Date action<select id="change-due-mode"><option id="due-preserve" value="preserve">Keep current date</option><option value="set">Set UTC date and time</option><option value="clear" selected>No due date / clear existing date</option></select></label>
+          <label>UTC date and time<input id="change-due" type="datetime-local" step="1" min="1970-01-01T00:00:00" max="9999-12-31T23:59:59" autocomplete="off"></label>
+          <p class="hint">Times are UTC, independent of this computer's timezone. Keeping a date preserves its exact native timestamp. Clearing a date is an explicit edit.</p>
+        </fieldset>
+        <button id="prepare-change" type="submit">Prepare change — do not send yet</button>
+      </form>
+    </section>
+    <section id="prepared-change" aria-labelledby="prepared-title" hidden>
+      <h2 id="prepared-title">Exact prepared request</h2><pre id="prepared-summary"></pre>
+      <p class="warning">Save the recovery receipt before sending. It contains private draft text and the original retry key, but no token. A timeout or missing lookup result never proves that a change was not committed.</p>
+      <div class="issue-actions"><button id="save-receipt" type="button">Save recovery receipt</button><button id="send-change" type="button">Send prepared change</button><button id="check-outcome" type="button">Check canonical outcome</button><button id="discard-change" type="button">Discard unsent preparation</button></div>
+    </section>
+    <section aria-labelledby="restore-title">
+      <h2 id="restore-title">Restore an unresolved request</h2>
+      <p class="hint">Connect the original credential and select its saved receipt. Restoring does not send a change. Keep the original key even after other people edit or close the milestone.</p>
+      <label>Saved receipt<input id="restore-receipt" type="file" accept="application/json,.json"></label>
+    </section>
+  </main>
+  <footer>Disconnect clears visible repository data and private editor fields. An unresolved request retains its token-free recovery responsibility in memory; save the receipt before leaving.</footer>
+</body>
+</html>

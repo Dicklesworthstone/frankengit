@@ -394,7 +394,8 @@ export async function readJson(response, signal, maximum = MAX_REPLY_BYTES) {
 }
 function rootFor(href, kind = 'issue') {
   const page = new URL(href);
-  const suffix = kind === 'discussion_notification' ? '/ui/discussion-notifications/' : kind === 'discussion' ? '/ui/discussions/' : kind === 'notification' ? '/ui/notifications/' : '/ui/issues/';
+  const suffix = kind === 'discussion_notification' ? '/ui/discussion-notifications/' : kind === 'discussion' ? '/ui/discussions/' : kind === 'notification' ? '/ui/notifications/' :
+    kind === 'milestone' && page.pathname.endsWith('/ui/milestones/') ? '/ui/milestones/' : '/ui/issues/';
   if (page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix) ||
       !['https:', 'http:'].includes(page.protocol)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['127.0.0.1', '[::1]', 'localhost'].includes(page.hostname)) {

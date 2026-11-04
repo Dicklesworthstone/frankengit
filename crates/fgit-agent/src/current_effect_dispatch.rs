@@ -248,6 +248,8 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
     /// Dispatches a proof-carrying outbox effect after a fresh current-head
     /// authorization at the irreversible boundary.
     ///
+    /// The complete run must match initial acceptance; the ordinary core also
+    /// requires the reservation to belong to this broker's actual ledger.
     /// The same exact request, chain, and inner receipt are passed to the
     /// ordinary dispatch core after the ancestry-bound authorization succeeds.
     /// The resulting generic proof-carrying deferred effect remains intact
@@ -268,6 +270,16 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
         CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect,
         CurrentAuthorityOutboxDispatchRefused,
     > {
+        let expected = effect.outbox.initial_authorization().run_commitment();
+        if self.run_commitment != expected {
+            return Err(
+                CurrentAuthorityOutboxDispatchRefused::RunCommitmentChanged {
+                    effect: Box::new(effect),
+                    expected,
+                    observed: self.run_commitment,
+                },
+            );
+        }
         let request = effect.request();
         let dispatch_authorization = match CurrentAuthorityCapabilityEffectAuthorization::authorize(
             &self.run,
@@ -489,6 +501,15 @@ impl CurrentAuthorityRevocationAuthorizedOutboxEffect {
 #[must_use]
 #[derive(Debug)]
 pub enum CurrentAuthorityOutboxDispatchRefused {
+    /// The dispatching broker serves a different complete machine-enforced run.
+    RunCommitmentChanged {
+        /// Still-live reservation retaining both original proof layers.
+        effect: Box<CurrentAuthorityRevocationAuthorizedOutboxEffect>,
+        /// Complete run that authorized initial acceptance.
+        expected: IntentRunCommitment,
+        /// Complete run served by the dispatching broker.
+        observed: IntentRunCommitment,
+    },
     /// The fresh current-head authorization failed before dispatch was attempted.
     Authorization {
         /// Still-live proof-carrying reservation.
@@ -513,7 +534,9 @@ impl CurrentAuthorityOutboxDispatchRefused {
     #[must_use]
     pub fn into_reserved(self) -> Option<CurrentAuthorityRevocationAuthorizedOutboxEffect> {
         match self {
-            Self::Authorization { effect, .. } => Some(*effect),
+            Self::RunCommitmentChanged { effect, .. } | Self::Authorization { effect, .. } => {
+                Some(*effect)
+            }
             Self::Dispatch {
                 initial_authorization,
                 source,
@@ -545,7 +568,7 @@ impl CurrentAuthorityOutboxDispatchRefused {
                     deferred,
                 }
             }),
-            Self::Authorization { .. } => None,
+            Self::RunCommitmentChanged { .. } | Self::Authorization { .. } => None,
         }
     }
 }
@@ -553,6 +576,12 @@ impl CurrentAuthorityOutboxDispatchRefused {
 impl fmt::Display for CurrentAuthorityOutboxDispatchRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RunCommitmentChanged {
+                expected, observed, ..
+            } => write!(
+                formatter,
+                "current-authority dispatch run {observed} differs from accepted run {expected}"
+            ),
             Self::Authorization { source, .. } => write!(
                 formatter,
                 "current-authority dispatch authorization refused: {source}"

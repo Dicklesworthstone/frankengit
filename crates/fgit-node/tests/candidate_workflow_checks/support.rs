@@ -380,6 +380,7 @@ impl Case {
                 ref_policy: None,
                 administrators: vec![OWNER],
                 branches: vec![ProtectedBranch {
+                    path_reviews: Vec::new(),
                     name: target_ref(),
                     require_merge_queue,
                     required_approvals: u16::from(reviews),

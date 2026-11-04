@@ -22,7 +22,9 @@ use std::io::Read;
 
 mod agent;
 mod context;
+mod view;
 pub use agent::source_agent_context_json;
+use view::InitialView;
 
 #[derive(Debug)]
 pub(super) struct Request<'a> {
@@ -56,7 +58,23 @@ impl<'a> Request<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexSource {
+    Exact,
+    Current,
+}
+impl IndexSource {
+    fn parse(value: Option<&str>) -> Result<Self, ApiError> {
+        match value {
+            None => Ok(Self::Exact),
+            Some("current-native-v1") => Ok(Self::Current),
+            _ => Err(ApiError::bad("unsupported_index_source")),
+        }
+    }
+}
+
 struct Command {
+    index_source: IndexSource,
     selection: Selection,
     query: InitialQuery,
     checkpoints: Checkpoints,
@@ -69,13 +87,13 @@ fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, Api
         .ok_or_else(|| ApiError::bad("missing_initial_field"))
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
-    command_fields(parse_form(bytes, 192)?, format)
+    command_fields(parse_form(bytes, 193)?, format)
 }
 fn command_fields(
     parsed: Vec<(String, String)>,
     format: GitHashAlgorithm,
 ) -> Result<Command, ApiError> {
-    if parsed.len() > 192 {
+    if parsed.len() > 193 {
         return Err(ApiError::too_large());
     }
     let mut fields = BTreeMap::new();
@@ -106,6 +124,7 @@ fn command_fields(
                 continue;
             }
             "object_format"
+            | "index_source"
             | "ref"
             | "expected_head"
             | "expected_commit"
@@ -134,6 +153,7 @@ fn command_fields(
     if !reference.as_bytes().starts_with(b"refs/") {
         return Err(ApiError::bad("invalid_ref"));
     }
+    let index_source = IndexSource::parse(fields.remove("index_source").as_deref())?;
     let expected_head = fields
         .remove("expected_head")
         .map(|s| parse_snapshot(&s))
@@ -227,6 +247,7 @@ fn command_fields(
         return Err(ApiError::bad("unused_initial_field"));
     }
     Ok(Command {
+        index_source,
         selection: Selection {
             reference,
             expected_head,
@@ -336,8 +357,35 @@ fn run(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = read.request_context(node, &deadline);
+    let mut live = || !deadline.expired() && read.is_live();
+    if command.index_source == IndexSource::Current {
+        let report = drive_request_while(
+            node,
+            &context,
+            node.search_source_initial_revalidated_local_in(
+                &context,
+                read,
+                &command.selection.reference,
+                command.selection.expected_head,
+                command.selection.expected_commit,
+                &command.checkpoints,
+                &command.query,
+                command.limits,
+            ),
+            &mut live,
+        )
+        .map_err(evidence_failure)?;
+        return render_view(
+            node,
+            read,
+            command,
+            InitialView::Current(&report),
+            report.authorization(),
+            maximum,
+            &mut live,
+        );
+    }
     let report = drive_request_while(
         node,
         &context,
@@ -381,9 +429,32 @@ fn render(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
+    render_view(
+        node,
+        read,
+        command,
+        InitialView::Exact(report),
+        labels,
+        maximum,
+        live,
+    )
+}
+
+fn render_view(
+    node: &OneNode,
+    read: &SourceReadContext,
+    command: &Command,
+    report: InitialView<'_>,
+    labels: &InitialAuthorization,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
     check(live)?;
-    labels
-        .validate(read, report, &mut || {
+    if !report.matches(command.index_source) {
+        return Err(ApiError::unavailable());
+    }
+    report
+        .validate_labels(read, labels, &mut || {
             if live() {
                 Ok(())
             } else {
@@ -432,9 +503,9 @@ fn render(
                 "\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"root_tree\":{},",
                 "\"generation_vector\":{{\"lexical\":{},\"symbols\":{}}},",
                 "\"max_results_per_channel\":{},\"max_work\":{},\"max_payload_bytes\":{},\"max_result_bytes\":{},",
-                "\"retained_result_bytes\":{},\"completed_payload_bytes_read\":{},\"completed_work_units\":{},\"authorization\":{},\"content\":"
+                "\"retained_result_bytes\":{},\"completed_payload_bytes_read\":{},\"completed_work_units\":{},\"authorization\":{},"
             ),
-            quote(PROFILE),
+            quote(report.profile()),
             report.complete(),
             quote(&source.namespace.tenant.to_string()),
             quote(&source.namespace.repository.to_string()),
@@ -462,6 +533,8 @@ fn render(
         ),
         maximum,
     )?;
+    report.append_provenance(&mut out, maximum, live)?;
+    append(&mut out, "\"content\":", maximum)?;
     let content = super::indexed::render_initial(
         node,
         report.content(),
@@ -553,6 +626,47 @@ mod tests {
         assert_eq!(
             evidence_failure(RetrievalError::MixedSource).status,
             Status::Conflict
+        );
+    }
+    #[test]
+    fn index_source_is_explicit_closed_and_single_valued() {
+        assert_eq!(
+            command(BASE.as_bytes(), GitHashAlgorithm::Sha1)
+                .unwrap()
+                .index_source,
+            IndexSource::Exact
+        );
+        assert_eq!(
+            command(
+                format!("{BASE}&index_source=current-native-v1").as_bytes(),
+                GitHashAlgorithm::Sha1
+            )
+            .unwrap()
+            .index_source,
+            IndexSource::Current
+        );
+        for value in ["", "exact", "strict", "revalidated", "current-native-v2"] {
+            assert_eq!(
+                command(
+                    format!("{BASE}&index_source={value}").as_bytes(),
+                    GitHashAlgorithm::Sha1
+                )
+                .err()
+                .unwrap()
+                .code,
+                "unsupported_index_source"
+            );
+        }
+        assert_eq!(
+            command(
+                format!("{BASE}&index_source=current-native-v1&index_source=current-native-v1")
+                    .as_bytes(),
+                GitHashAlgorithm::Sha1
+            )
+            .err()
+            .unwrap()
+            .code,
+            "duplicate_field"
         );
     }
     #[test]

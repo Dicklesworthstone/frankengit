@@ -174,10 +174,15 @@ impl fmt::Display for CapabilityRequirement {
 /// Principal and sponsor requirements for operation execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PrincipalRequirement {
-    /// No authenticated principal required (e.g. public anonymous read).
+    /// No additional tool-specific principal requirement. The selected host
+    /// profile may still require canonical authentication before every call.
     None,
     /// Requires an explicit operator-bound principal at launch (not client-supplied).
     OperatorBound,
+    /// Requires a principal bound by the host: either explicit trusted-local
+    /// operator attribution or a sponsor from a verified canonical agent grant.
+    /// Request arguments never supply or replace this identity.
+    HostBound,
     /// Requires a verified delegated agent token.
     DelegatedAgent,
 }
@@ -189,6 +194,7 @@ impl PrincipalRequirement {
         match self {
             Self::None => "none",
             Self::OperatorBound => "operator_bound",
+            Self::HostBound => "host_bound",
             Self::DelegatedAgent => "delegated_agent",
         }
     }

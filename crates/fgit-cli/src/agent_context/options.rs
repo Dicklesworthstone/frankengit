@@ -19,6 +19,7 @@ pub(super) struct Options {
     pub sponsor: PrincipalId,
     pub query: InitialQuery,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
+    pub current_native: bool,
     pub retrieval_limits: InitialLimits,
     pub context_limits: ContextLimits,
     pub expires_after: Duration,
@@ -27,7 +28,7 @@ pub(super) struct Options {
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 370
+        || args.len() > 372
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -65,6 +66,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 | "--path-hex"
                 | "--object-format"
                 | "--expected-head"
+                | "--index-source"
                 | "--expires-after-secs"
                 | "--max-results"
                 | "--max-work"
@@ -202,6 +204,11 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             .get("--expected-head")
             .map(|value| head(value))
             .transpose()?,
+        current_native: match flags.get("--index-source").copied() {
+            None => false,
+            Some("current-native-v1") => true,
+            Some(_) => return Err("index source must be current-native-v1 when supplied".into()),
+        },
         retrieval_limits,
         context_limits,
         expires_after: Duration::from_secs(
@@ -296,6 +303,7 @@ mod tests {
     fn bounded_operator_input_and_permitted_twins() {
         let good = parse(&args(&[])).unwrap();
         assert_eq!(good.expires_after, Duration::from_secs(30));
+        assert!(!good.current_native);
         assert_eq!(good.query.content().terms(), &[b"needle".to_vec()]);
         for extra in [
             vec!["--trusted-local"],
@@ -310,6 +318,16 @@ mod tests {
             vec!["--run-id", "1"],
             vec!["--grant", "publish"],
             vec!["--expected-head", "not-a-head"],
+            vec!["--index-source", ""],
+            vec!["--index-source", "latest"],
+            vec!["--index-source", "current-native-v2"],
+            vec!["--index-source"],
+            vec![
+                "--index-source",
+                "current-native-v1",
+                "--index-source",
+                "current-native-v1",
+            ],
         ] {
             assert!(parse(&args(&extra)).is_err(), "{extra:?}");
         }
@@ -334,5 +352,33 @@ mod tests {
         let mut missing_sponsor = args(&[]);
         missing_sponsor.drain(5..7);
         assert!(parse(&missing_sponsor).is_err());
+    }
+
+    #[test]
+    fn current_native_index_reuse_keeps_the_exact_head_and_operator_boundary() {
+        let head = format!("alg:2:{}", "35".repeat(32));
+        let input = args(&[
+            "--index-source",
+            "current-native-v1",
+            "--expected-head",
+            &head,
+        ]);
+        let options = parse(&input).unwrap();
+        assert!(options.current_native);
+        assert_eq!(options.expected_head, Some(super::head(&head).unwrap()));
+        assert_eq!(
+            options.sponsor,
+            PrincipalId::from_hex(&"33".repeat(16)).unwrap()
+        );
+        assert_eq!(
+            options.retrieval_limits.max_result_bytes,
+            InitialLimits::default().max_result_bytes
+        );
+        assert_eq!(options.expires_after, Duration::from_secs(30));
+        let without_trust: Vec<_> = input
+            .into_iter()
+            .filter(|arg| arg != "--trusted-local")
+            .collect();
+        assert!(parse(&without_trust).is_err());
     }
 }

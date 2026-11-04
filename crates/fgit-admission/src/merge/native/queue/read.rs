@@ -286,7 +286,7 @@ where
                     }
                     break;
                 }
-                HistoryStep::Checkpoint { predecessor } => {
+                HistoryStep::Checkpoint { predecessor, .. } => {
                     successor = predecessor.body().clone();
                 }
                 HistoryStep::Decision { predecessor, batch } => {

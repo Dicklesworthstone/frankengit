@@ -87,6 +87,7 @@ fn fixture(format: GitHashAlgorithm, before: u64, policy: bool) -> PreparedNativ
                 administrators: vec![actor],
                 branches: vec![ProtectedBranch {
                     required_candidate_checks: Vec::new(),
+                    path_reviews: Vec::new(),
                     require_merge_queue: false,
                     required_approvals: 1,
                     required_checks: Vec::new(),

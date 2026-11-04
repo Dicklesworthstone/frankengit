@@ -13,7 +13,7 @@ use fgit_authority::authority_head_identity;
 use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody, encode_body};
 
 use crate::{
-    CapsuleInspectionRefusal, PublicationBasis, RestoreOutcome,
+    CapsuleInspectionRefusal, PublicationBasis, RepositoryCapsuleBody, RestoreOutcome,
     inspect_capsule_against_authority_head_bytes,
 };
 
@@ -87,6 +87,16 @@ pub fn verify_checkpoint_successor(
     successor: &RepositoryAuthorityHeadBody,
     capsule_bytes: &[u8],
 ) -> Result<(), CheckpointTransitionRefusal> {
+    verified_checkpoint_successor(predecessor, successor, capsule_bytes).map(|_| ())
+}
+
+/// Keep the exact body that passed the transition verifier. History consumers
+/// must not decode a second, independently selected capsule as prefix evidence.
+fn verified_checkpoint_successor(
+    predecessor: &PublicationBasis,
+    successor: &RepositoryAuthorityHeadBody,
+    capsule_bytes: &[u8],
+) -> Result<RepositoryCapsuleBody, CheckpointTransitionRefusal> {
     let identity = authority_head_identity(predecessor.body())
         .map_err(|_| CheckpointTransitionRefusal::PredecessorIdentity)?;
     if identity != predecessor.id() {
@@ -120,7 +130,7 @@ pub fn verify_checkpoint_successor(
     if inspection.classification().outcome() != RestoreOutcome::Restorable {
         return Err(CheckpointTransitionRefusal::CapsuleMismatch);
     }
-    Ok(())
+    Ok(inspection.capsule().clone())
 }
 
 #[cfg(test)]

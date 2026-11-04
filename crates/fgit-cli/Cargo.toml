@@ -32,6 +32,9 @@ fgit-ssh.workspace = true
 fgit-types.workspace = true
 fgit-verified-read.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+fgit-runner.workspace = true
+
 [dev-dependencies]
 fgit-pack.workspace = true
 

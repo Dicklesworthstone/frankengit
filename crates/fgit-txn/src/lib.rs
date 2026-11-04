@@ -613,6 +613,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(12);
             out.write_text("ForgeEntityId", preference.label().as_str())?;
         }
+        ForgeEventKind::AgentCredentialChanged { credential } => {
+            out.write_raw_byte(14);
+            out.write_text("ForgeEntityId", credential.label().as_str())?;
+        }
         ForgeEventKind::WorkflowCheckObserved { check, source } => {
             out.write_raw_byte(8);
             out.write_text("ForgeEntityId", check.label().as_str())?;
@@ -652,6 +656,7 @@ mod tests {
     include!("milestone_normal_form_tests.rs");
     include!("discussion_normal_form_tests.rs");
     include!("notification_normal_form_tests.rs");
+    include!("agent_credential_normal_form_tests.rs");
     include!("workflow_check_normal_form_tests.rs");
     include!("pull_request_comment_normal_form_tests.rs");
     include!("merge_queue_normal_form_tests.rs");
@@ -1287,6 +1292,56 @@ mod tests {
                 "invalid normal form for seed {seed}"
             );
         }
+    }
+
+    #[test]
+    fn agent_credential_event_has_the_reference_tag_and_exact_canonical_bytes() {
+        let event = ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(label("agent-credential/7")),
+        };
+        // The independently defined reference trace freezes this literal too.
+        // Never reinterpret a historical tag or omit the entity from a seal.
+        let literal = b"\x0e\0\0\0\x12agent-credential/7";
+        let mut encoder = Encoder::new();
+        write_forge_event(&mut encoder, &event).unwrap();
+        assert_eq!(encoder.as_bytes(), literal);
+        assert_eq!(event.required_ref_effect(), None);
+
+        let stream = ForgeStreamId::new(label("agent-credential/7"));
+        let make = |event| {
+            request(vec![Statement {
+                mismatch_policy: MismatchPolicy::TxnAbort,
+                intents: vec![Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::new(1),
+                    event,
+                })],
+            }])
+        };
+        let (refs, mut positions, retention, outbox) = empty_basis();
+        positions.insert(stream, ForgeStreamPosition::new(1));
+        let original = make(event.clone());
+        let evaluate = |request: &TransactionRequest| {
+            IntentEvaluator.evaluate(basis_of(&refs, &positions, &retention, &outbox), request)
+        };
+        let report = evaluate(&original);
+        IntentEvaluator.validate_report(&original, &report).unwrap();
+        assert!(report.is_total_for(&original));
+        let effects = report.effects().unwrap();
+        assert!(effects.refs.is_empty());
+        assert_eq!(effects.forge.get(&stream), Some(&vec![event]));
+        let bytes = canonical_fold_bytes(&original, &report).unwrap();
+        assert_eq!(
+            bytes,
+            canonical_fold_bytes(&original, &evaluate(&original)).unwrap()
+        );
+        let different = make(ForgeEventKind::AgentCredentialChanged {
+            credential: ForgeEntityId::new(label("agent-credential/8")),
+        });
+        assert_ne!(
+            bytes,
+            canonical_fold_bytes(&different, &evaluate(&different)).unwrap()
+        );
     }
 
     #[test]

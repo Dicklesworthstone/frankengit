@@ -1,4 +1,4 @@
-//! Read-side agent invocation over the real CLI and authenticated HTTP surfaces.
+//! Read-side agent invocation over the native CLI, HTTP and MCP surfaces.
 use super::types::{
     BudgetDimensions, CancellationBehavior, CapabilityRequirement, DisclosureClass,
     EvidenceReceiptClass, FieldClassification, IdempotencyRequirement,
@@ -64,10 +64,10 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
     entity_kind: McpEntityKind::Tool,
     owner_subsystem: "agent",
     support_profile: SupportProfile::Active,
-    description: "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Returns authority, run and packet commitments, index generations and explicit omissions under a launch-bound operator sponsor. Requires an independent agent-context read grant; grants no publication, process execution or durable run.",
+    description: "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Returns authority, run and packet commitments, index generations and explicit omissions under a trusted-local operator or canonically authenticated agent sponsor. Requires an independent agent-context read grant; canonical agent credentials additionally require source-read. Grants no publication, process execution or durable run.",
     read_mutation: ReadMutationClass::ReadOnly,
     capability: CapabilityRequirement::READ_AGENT_CONTEXT,
-    principal: PrincipalRequirement::OperatorBound,
+    principal: PrincipalRequirement::HostBound,
     idempotency: IdempotencyRequirement::NotApplicable,
     authority_root: InputAuthorityRootRequirement::CurrentRepositoryIncarnation,
     budget: BudgetDimensions {
@@ -120,6 +120,15 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
             "Optional exact authenticated authority-head token; mismatch refuses before source disclosure.",
             256,
         ),
+        McpField {
+            name: "index_source",
+            field_type: "string",
+            classification: FieldClassification::SelectorPosition,
+            description: "Optional current-native-v1 reuses existing index generations after metadata-only movement when the current visible native commit and tree still match. Absence retains exact source-position matching; original index provenance is never rewritten.",
+            required: false,
+            max_bytes: Some(32),
+            pattern: Some("^current-native-v1$"),
+        },
         selector(
             "symbol_name_hex",
             "Exact symbol name bytes as lowercase hex.",
@@ -219,7 +228,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
             "profile",
             "string",
             FieldClassification::SystemMetadata,
-            "agent-context-trusted-local-v1 on the MCP host.",
+            "agent-context-trusted-local-v1 or agent-context-mcp-sponsored-agent-v1 according to the authenticated MCP host.",
             true,
             Some(64),
         ),
@@ -241,7 +250,15 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         output(
             "sponsor",
             "object",
-            "Launch-bound principal, operator-asserted authentication and trusted-local-mcp authorization host.",
+            "Host-bound sponsor principal, authentication class and source-read authorization host. Canonical agent credentials retain their actual sponsor independently of the agent identity.",
+        ),
+        field(
+            "agent_authentication",
+            "object",
+            FieldClassification::SystemMetadata,
+            "Canonical agent principal, sponsor, credential, grant root, request-run commitment and original lifetime; absent for the trusted-local operator profile.",
+            false,
+            None,
         ),
         output(
             "run",
@@ -256,7 +273,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         output(
             "request",
             "object",
-            "Complete normalized bounded request and its source-read host.",
+            "Complete normalized bounded request and its source-read host; explicit index_source is committed when current-native-v1 is selected.",
         ),
         output(
             "context_packet",
@@ -266,7 +283,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         output(
             "retrieval_evidence",
             "object",
-            "Exact source identity, native generations, channel and selection omissions, source counters and file lineage.",
+            "Exact current source identity, original native index sources and generations, channel and selection omissions, source counters and file lineage. Current-native-v1 preserves current disclosure and original index positions separately.",
         ),
         field(
             "evidence_commitment",
@@ -286,10 +303,16 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         ),
     ],
     refusal_codes: &[
+        "agent_authentication_unavailable",
         "agent_context_incarnation_mismatch",
         "agent_context_sponsor_mismatch",
         "agent_context_sponsor_required",
         "agent_context_unavailable",
+        "agent_credential_unavailable",
+        "agent_operation_not_granted",
+        "agent_request_expired",
+        "agent_request_limit",
+        "agent_request_required",
         "caller_selected_agent_identity",
         "duplicate_field",
         "expected_array",
@@ -347,6 +370,7 @@ pub(super) const ENTRY: McpToolEntry = McpToolEntry {
         "unsupported_agent_context_precondition",
         "unsupported_agent_context_selection",
         "unsupported_context_selection",
+        "unsupported_index_source",
         "unsupported_symbol_kind",
         "unsupported_symbol_match",
         "unsupported_symbol_policy",
@@ -362,7 +386,7 @@ mod tests {
     use crate::mcp::{admit_call, validate_tool_entry};
 
     #[test]
-    fn independent_context_grant_and_real_operator_identity_are_required() {
+    fn independent_context_grant_and_host_bound_identity_are_required() {
         validate_tool_entry(&ENTRY).unwrap();
         let arguments = r#"{"reference":"refs/heads/main","terms_hex":["6167656e74"]}"#;
         let permitted = admit_call(
@@ -381,6 +405,8 @@ mod tests {
             assert!(admit_call(ENTRY.name, 1, arguments, capabilities, Some("operator")).is_err());
         }
         assert!(admit_call(ENTRY.name, 1, arguments, &["read_agent_context"], None).is_err());
+        assert_eq!(ENTRY.principal, PrincipalRequirement::HostBound);
+        assert_eq!(ENTRY.principal.as_str(), "host_bound");
         assert_eq!(ENTRY.read_mutation, ReadMutationClass::ReadOnly);
         assert_eq!(ENTRY.budget.max_duration_ms, 300_000);
         assert_eq!(ENTRY.budget.max_output_bytes, 1_048_576);
@@ -400,6 +426,17 @@ mod tests {
         assert_eq!(
             ENTRY.output_fields.last().unwrap().classification,
             FieldClassification::UntrustedContent
+        );
+        let authentication = ENTRY
+            .output_fields
+            .iter()
+            .find(|field| field.name == "agent_authentication")
+            .unwrap();
+        assert_eq!(authentication.field_type, "object");
+        assert!(!authentication.required);
+        assert_eq!(
+            authentication.classification,
+            FieldClassification::SystemMetadata
         );
     }
 }

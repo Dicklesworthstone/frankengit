@@ -54,14 +54,40 @@ export function branch(value) {
       value.endsWith('.') || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native branch reference is required.');
   return value;
 }
+function branchBytes(value) {
+  const bytes = unhex(value, 1024), raw = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+  if (!raw.startsWith('refs/heads/') || /[\x00-\x20\x7f~^:?*\[\\]/.test(raw) || raw.includes('..') || raw.includes('@{') ||
+      raw.endsWith('.') || raw.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native branch reference is required.');
+  return value;
+}
+// Preserve the selected wire encoding. In particular, existing text commands
+// must keep their original form bytes and credential-bound idempotency keys.
+function commandReference(fields, name) {
+  const encoded = `${name}_hex`, hasText = Object.hasOwn(fields, name), hasHex = Object.hasOwn(fields, encoded);
+  if (hasText === hasHex) fail(`Supply exactly one ${name} encoding.`);
+  if (hasHex) return { name: encoded, value: fields[encoded], hex: branchBytes(fields[encoded]) };
+  const value = text(fields[name], 1024, 'branch reference');
+  return { name, value, hex: branchBytes(hex(utf8.encode(value))) };
+}
 export function reference(row, name) {
-  const bytes = unhex(row[`${name}_hex`], 1024);
-  if (!bytes.length || bytes.includes(0)) fail('Invalid native ref bytes.');
+  record(row);
+  const bytes = branchBytes(row[`${name}_hex`]);
   if (row[name] !== null) {
-    branch(row[name]);
-    if (hex(utf8.encode(row[name])) !== row[`${name}_hex`]) fail('Ref text and native bytes disagree.');
+    text(row[name], 1024, 'native branch text');
+    if (hex(utf8.encode(row[name])) !== bytes) fail('Ref text and native bytes disagree.');
   }
-  return row[name]; // null is a byte-only ref; readable, but not this form API's input.
+  return row[name];
+}
+// Native responses always carry both display text (possibly null) and raw bytes.
+// Requests carry exactly one alias per side; never encode an escaped label.
+export function subjectReferences(row) {
+  const result = {};
+  for (const name of ['source_ref', 'target_ref']) {
+    const label = reference(row, name);
+    if (label === null) result[`${name}_hex`] = row[`${name}_hex`];
+    else result[name] = label;
+  }
+  return result;
 }
 export function binding(reply, previous = null) {
   record(reply);
@@ -117,15 +143,15 @@ export function showReply(reply, number, { head = null, scope = null } = {}) {
   else if (reply.pull_request !== null) fail('Missing PR disclosed another record.');
   return { ...selected, reply };
 }
-export const SUBJECT_FIELDS = ['object_format', 'pull_request_version', 'policy_epoch', 'source_ref', 'target_ref', 'source_tip', 'target_tip'];
+export const SUBJECT_FIELDS = ['object_format', 'pull_request_version', 'policy_epoch', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip'];
 export function subject(fields) {
-  const algorithm = format(fields.object_format);
+  const algorithm = format(fields.object_format), source = commandReference(fields, 'source_ref'), target = commandReference(fields, 'target_ref');
   const result = { object_format: algorithm,
     pull_request_version: integer(fields.pull_request_version, 'PR version', 1, Number.MAX_SAFE_INTEGER - 1),
     policy_epoch: integer(fields.policy_epoch, 'policy epoch', 1),
-    source_ref: branch(fields.source_ref), target_ref: branch(fields.target_ref),
+    [source.name]: source.value, [target.name]: target.value,
     source_tip: oid(fields.source_tip, algorithm), target_tip: oid(fields.target_tip, algorithm) };
-  if (result.source_ref === result.target_ref) fail('Source and target must differ.');
+  if (source.hex === target.hex) fail('Source and target must differ.');
   return result;
 }
 export function matchSubject(raw, expected, number, algorithm, numberField = 'number') {
@@ -135,9 +161,12 @@ export function matchSubject(raw, expected, number, algorithm, numberField = 'nu
   integer(raw.pull_request_version, 'PR version', 1); integer(raw.policy_epoch, 'policy epoch', 1);
   oid(raw.source_tip, algorithm); oid(raw.target_tip, algorithm);
   if (expected) {
-    for (const key of SUBJECT_FIELDS.filter(key => key !== 'object_format')) {
+    const selected = subject(expected);
+    if (selected.object_format !== algorithm || ['source_ref', 'target_ref'].some(name =>
+      raw[`${name}_hex`] !== commandReference(selected, name).hex)) fail('Review subject changed; no implicit version, reference or tip refresh.');
+    for (const key of ['pull_request_version', 'policy_epoch', 'source_tip', 'target_tip']) {
       const value = key.endsWith('_tip') ? oid(raw[key], algorithm) : raw[key];
-      if (value !== expected[key]) fail('Review subject changed; no implicit version or tip refresh.');
+      if (value !== selected[key]) fail('Review subject changed; no implicit version or tip refresh.');
     }
   }
 }
@@ -188,7 +217,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/', '/ui/artifacts/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -247,9 +276,9 @@ export function apiError(status) {
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
-    /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(route) ||
+    /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land|land-candidate)$/.test(route) ||
     (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments(?:\/append)?$/.test(route)) ||
-    /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
+    /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename|transaction)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
       typeof key !== 'string' || !key || (recovery ? body !== undefined : body === undefined))) {
@@ -267,13 +296,14 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
     if (typeof checkEvidenceOnly !== 'boolean' || (checkEvidenceOnly && pageSuffix !== '/ui/pulls/')) fail('Invalid workflow evidence browser profile.');
     this.#checkEvidence = checkEvidenceOnly;
     this.#queues = pageSuffix === '/ui/queues/';
+    this.#artifacts = pageSuffix === '/ui/artifacts/';
     this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#rebase = pageSuffix === '/ui/rebase/'; this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
@@ -285,8 +315,12 @@ export class Transport {
   async connect(token, requiredFingerprint = null, recovery = null) {
     this.disconnect(); const epoch = this.#epoch;
     const selected = recovery === null ? null : recoverySelection(recovery);
-    if (selected && (this.#search || this.#checkEvidence)) fail('This read-only connection has no outcome recovery profile.');
-    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
+    if (selected && (this.#search || this.#checkEvidence || this.#artifacts)) fail('This read-only connection has no outcome recovery profile.');
+    // Sponsored credentials enter only the existing closed source-read profile.
+    // Mutation, recovery and workflow-evidence profiles retain ordinary tokens.
+    if (typeof token !== 'string' || !(/^[0-9a-f]{64}$/.test(token) ||
+        (this.#search && /^fgagent_[0-9a-f]{64}$/.test(token)))) fail(this.#search
+      ? 'A canonical source-read credential is required.' : 'A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
     if (!selected && requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
@@ -297,7 +331,7 @@ export class Transport {
   disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; this.#recovery = null; }
   restrictToRecovery(selection) {
     const selected = recoverySelection(selection);
-    if (!this.connected || this.#search || this.#checkEvidence || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
+    if (!this.connected || this.#search || this.#checkEvidence || this.#artifacts || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
     if (this.#recovery && (selected.key !== this.#recovery.key || selected.principal !== this.#recovery.principal)) fail('Reconnect explicitly before selecting another recovery identity.');
     // Receipt restoration invokes this only after verifying its original key.
     this.#recovery = selected;
@@ -314,13 +348,25 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#artifacts) {
+      const content = /^artifacts\/[0-9a-f]{64}\/content$/.test(path);
+      if (!/^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path) || method !== 'GET' ||
+          body !== undefined || key !== undefined || read !== true || binary !== content ||
+          contentType !== 'application/x-www-form-urlencoded' || !Array.isArray(statuses) ||
+          statuses.length !== 1 || statuses[0] !== 200) fail('Artifacts are a closed, bodyless, read-only profile.');
+      integer(maximum, 'artifact response limit', content ? 0 : 1, content ? 16 * 1024 * 1024 : 16 * 1024);
+    }
     if (this.#queues) {
       const list = /^queues(?:\?[^#]*)?$/.test(path);
       const selected = /^(?:queues|pulls)\/[1-9][0-9]*(?:\?[^#]*)?$/.test(path);
-      const publication = /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(path);
+      const candidate = /^queues\/[1-9][0-9]*\/land-candidate$/.test(path);
+      const prepare = /^queues\/[1-9][0-9]*\/prepare$/.test(path);
+      const inspect = /^pulls\/[1-9][0-9]*\/inspect$/.test(path);
+      const publication = candidate || /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land)$/.test(path);
       const outcome = path === 'outcomes';
-      if (binary || contentType !== 'application/x-www-form-urlencoded' || headerNames.length ||
-          !(list || selected || publication || outcome)) fail('Invalid queue-profile route.');
+      const multipart = /^multipart\/form-data; boundary=[A-Za-z0-9-_.]{1,70}$/.test(contentType);
+      if (headerNames.length || !(list || selected || publication || outcome || prepare || inspect) ||
+          binary !== prepare || ((candidate || inspect) ? !multipart : contentType !== 'application/x-www-form-urlencoded')) fail('Invalid queue-profile route.');
       if (list || selected) {
         if (method !== 'GET' || body !== undefined || key !== undefined || !read ||
             statuses.length !== (list ? 1 : 2) || statuses[0] !== 200 || (selected && statuses[1] !== 404)) fail('Queue and PR observations are read-only.');
@@ -333,11 +379,19 @@ export class Transport {
         }
         if (Number(url.searchParams.get('after') ?? 0) > 0 && !seen.has('expected_head')) fail('Queue continuation requires its original snapshot.');
         integer(maximum, 'queue response limit', 1, REPLY_LIMIT);
+      } else if (prepare || inspect) {
+        const bodyLimit = prepare ? FORM_LIMIT : 16 * 1024 * 1024 + FORM_LIMIT + 4096;
+        if (method !== 'POST' || !read || key !== undefined ||
+            statuses.length !== (prepare ? 2 : 1) || statuses[0] !== 200 || (prepare && statuses[1] !== 409) ||
+            !((typeof body === 'string' && utf8.encode(body).length <= bodyLimit) ||
+              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= bodyLimit))) fail('Queue candidate preparation and inspection are bounded read-only requests.');
+        integer(maximum, 'queue candidate response limit', 1, prepare ? 18 * 1024 * 1024 + 16 * 1024 : REPLY_LIMIT);
       } else {
+        const bodyLimit = candidate ? 16 * 1024 * 1024 + FORM_LIMIT + 4096 : 64 * 1024;
         if (method !== 'POST' || read || typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key) ||
             statuses.length !== (outcome ? 1 : 2) || statuses[0] !== 200 || (publication && statuses[1] !== 409) ||
-            (outcome ? body !== undefined : !((typeof body === 'string' && utf8.encode(body).length <= 64 * 1024) ||
-              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= 64 * 1024)))) fail('Queue publication needs the exact form and original recovery key.');
+            (outcome ? body !== undefined : !((typeof body === 'string' && utf8.encode(body).length <= bodyLimit) ||
+              (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= bodyLimit)))) fail('Queue publication needs the exact form and original recovery key.');
         integer(maximum, 'queue terminal response limit', 1, REPLY_LIMIT);
       }
     }
@@ -389,8 +443,10 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#queues
-      ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\?[^#]*)?|outcomes)$/.test(path)
+    const allowed = this.#artifacts
+      ? /^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path)
+      : this.#queues
+      ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land|prepare|land-candidate))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\/inspect)?(?:\?[^#]*)?|outcomes)$/.test(path)
       : this.#checkEvidence
       ? /^pulls\/[1-9][0-9]*\/checks\/evidence\?[^#]+$/.test(path)
       : this.#rebase
@@ -402,9 +458,9 @@ export class Transport {
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
       : this.#search
-      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|log|tree|blob)$/.test(path)
+      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|commit|tree|blob)$/.test(path)
       : this.#branches
-      ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
+      ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename|transaction))|outcomes)$/.test(path)
       : this.#initial
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
@@ -414,7 +470,7 @@ export class Transport {
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
-    const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
+    const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#artifacts && binary ? 'application/octet-stream' : this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
     if (body !== undefined) headers['Content-Type'] = contentType;
     if (key) headers['Idempotency-Key'] = key;
     let response;
@@ -426,6 +482,7 @@ export class Transport {
       if (response.redirected || (response.url && response.url !== url.href)) fail('API redirect refused.');
       if (!statuses.includes(response.status)) {
         const error = apiError(response.status);
+        if (this.#artifacts && response.status === 404) error.message = 'Artifact or repository unavailable.';
         // Only this closed read endpoint exposes a small diagnostic code. Never
         // render server prose, accept an error as a result, or broaden statuses.
         if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial', 'source/context-initial'].includes(path) && response.status === 409
@@ -444,13 +501,16 @@ export class Transport {
       }
       const type = response.headers.get('Content-Type') ?? '';
       if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
+      if (this.#artifacts && (response.headers.get('X-Content-Type-Options') !== 'nosniff' ||
+          (binary && (type !== 'application/octet-stream' || response.headers.get('Content-Disposition') !==
+            `attachment; filename="artifact-${path.split('/')[1]}"`)))) fail('Expected inert native artifact response headers.');
       const bytes = await readBytes(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
       const value = binary ? bytes : json(bytes);
       if (recovery && principal(record(value).principal_id) !== recovery.principal) fail('Recovery credential does not identify the selected original principal. Outcome remains unknown.');
       return { status: response.status, type, value,
         ...(capturedHeaders.length ? { headers: Object.fromEntries(capturedHeaders.map(name => [name, response.headers.get(name)])) } : {}) };
-    } catch (error) { if (epoch === this.#epoch && error.status === 401) this.disconnect(); throw error; }
+    } catch (error) { if (epoch === this.#epoch && (error.status === 401 || (this.#artifacts && error.status === 403))) this.disconnect(); throw error; }
     finally {
       clearTimeout(timer); this.#all.delete(controller); this.#reads.delete(controller);
       if (response?.body && !response.body.locked) cancelBody(response.body);

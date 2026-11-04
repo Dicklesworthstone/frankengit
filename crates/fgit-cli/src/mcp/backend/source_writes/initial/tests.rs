@@ -161,12 +161,13 @@ fn schema_keeps_creation_and_incremental_predecessors_disjoint_in_one_tool() {
             DELETE,
             RENAME,
             PUBLISH,
+            super::super::PUBLISH_REBASE,
             super::super::TRANSACTION
         ]
         .into_iter()
         .collect()
     );
-    assert_eq!(tools().len(), 6);
+    assert_eq!(tools().len(), 7);
     assert!(
         super::super::schema(CREATE)
             .object()
@@ -220,7 +221,9 @@ fn empty(format: GitHashAlgorithm) -> (Scratch, NodeTools) {
         agent_context: false,
         artifacts: false,
         artifact_root: None,
+        agent_token_file: None,
         max_messages: 32,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend)

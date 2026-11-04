@@ -18,6 +18,7 @@ const USAGE: &str = "usage: fg agent context <storage-root> <tenant-id> <reposit
   [--object-format sha1|sha256] [--path <prefix> | --path-hex <bytes>]...
   [--symbol <Rust-name> --symbol-match exact|prefix --symbol-policy required|optional]
   [--expected-head alg:<algorithm>:<digest>] [--expires-after-secs <1..300>]
+  [--index-source current-native-v1]
   [--max-results <1..1024>] [--max-work <units>] [--max-index-bytes <bytes>]
   [--max-files <1..32>] [--radius-bytes <0..4096>]
   [--max-source-bytes <1..67108864>] [--max-excerpt-bytes <1..1048576>]
@@ -25,7 +26,11 @@ const USAGE: &str = "usage: fg agent context <storage-root> <tenant-id> <reposit
 
 Opens a fresh read-only IntentRun at an authenticated authority head and returns
 its ContextPacket plus exact source/index/omission evidence as JSON. Requires
-existing lexical indexes (and symbol indexes when required). The sponsor is an
+existing lexical indexes (and symbol indexes when required). The optional
+current-native-v1 index source reuses their original generations after unrelated
+metadata changes only when the current visible native commit and tree match;
+source changes still refuse. Without it, exact index authority positions must
+match. Original index provenance is retained in either mode. The sponsor is an
 operator assertion; path prefixes narrow selection, not repository authority.
 Repository excerpts are untrusted data. No task, durable run, effect, index,
 workspace or repository mutation is created. Global --timeout-secs can shorten
@@ -60,17 +65,38 @@ pub async fn read_agent_context_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
 ) -> Result<AgentContextDocument, String> {
-    if !matches!(
-        input.authorization.host(),
-        "trusted-local-cli" | "trusted-local-mcp" | "trusted-local-native"
-    ) {
-        return Err("agent context requires independently authorized trusted-local reads".into());
-    }
+    require_trusted_local(input.authorization)?;
     fgit_node::source_retrieval::agent_context::document::read_agent_context_in(
         node, request, input,
     )
     .await
     .map_err(|error| error.to_string())
+}
+
+/// Explicit current-source index reuse under the same trusted-local boundary.
+/// Current native source is authenticated independently; each reused index
+/// retains its original provenance and no missing index is constructed.
+pub async fn read_agent_context_revalidated_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+) -> Result<AgentContextDocument, String> {
+    require_trusted_local(input.authorization)?;
+    fgit_node::source_retrieval::agent_context::document::read_agent_context_revalidated_in(
+        node, request, input,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+fn require_trusted_local(authorization: &SourceReadContext) -> Result<(), String> {
+    if !matches!(
+        authorization.host(),
+        "trusted-local-cli" | "trusted-local-mcp" | "trusted-local-native"
+    ) {
+        return Err("agent context requires independently authorized trusted-local reads".into());
+    }
+    Ok(())
 }
 
 /// Actual `fg agent context` command. Success is buffered until the local node
@@ -107,22 +133,25 @@ fn run_with(arguments: &[String], output: &mut impl Write) -> Result<u8, String>
             .map_err(|error| error.to_string())?;
         let authorization = SourceReadContext::trusted_local_cli(&node);
         let checkpoints = Checkpoints::default();
-        node.runtime().block_on(read_agent_context_in(
-            &node,
-            &request,
-            AgentContextRequest {
-                authorization: &authorization,
-                reference: &options.reference,
-                query: &options.query,
-                checkpoints: &checkpoints,
-                retrieval_limits: options.retrieval_limits,
-                context_limits: options.context_limits,
-                sponsor: options.sponsor,
-                expected_head: options.expected_head,
-                expires_after,
-                max_output_bytes: options.max_output_bytes,
-            },
-        ))
+        let input = AgentContextRequest {
+            authorization: &authorization,
+            reference: &options.reference,
+            query: &options.query,
+            checkpoints: &checkpoints,
+            retrieval_limits: options.retrieval_limits,
+            context_limits: options.context_limits,
+            sponsor: options.sponsor,
+            expected_head: options.expected_head,
+            expires_after,
+            max_output_bytes: options.max_output_bytes,
+        };
+        if options.current_native {
+            node.runtime()
+                .block_on(read_agent_context_revalidated_in(&node, &request, input))
+        } else {
+            node.runtime()
+                .block_on(read_agent_context_in(&node, &request, input))
+        }
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     let document = match (operation, cleanup) {

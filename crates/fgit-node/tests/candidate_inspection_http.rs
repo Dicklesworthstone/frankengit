@@ -3,6 +3,8 @@
 //! review/merge remain separate transactions; no canned inspection engine.
 #[path = "candidate_inspection_http/fast_forward.rs"]
 mod fast_forward;
+#[path = "candidate_inspection_http/raw_refs.rs"]
+mod raw_refs;
 #[path = "candidate_inspection_http/support.rs"]
 mod support;
 use support::*;

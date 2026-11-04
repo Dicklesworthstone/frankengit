@@ -48,6 +48,9 @@ pub(super) fn session(
     backend: &NodeTools,
     key: IdempotencyKey,
 ) -> Result<LoopbackReceiveSession, ToolError> {
+    if backend.options.agent_token_file.is_some() {
+        return super::agent::session(backend, key);
+    }
     let principal = backend
         .options
         .principal

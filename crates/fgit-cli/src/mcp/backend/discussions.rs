@@ -145,7 +145,7 @@ pub(super) fn write(backend: &NodeTools, name: &str, args: &Object) -> Result<Va
     command
         .proposed_event(principal)
         .map_err(|_| ToolError::invalid("invalid_discussion_command"))?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let (tx, outcome) = backend
         .node
         .runtime()
@@ -262,7 +262,7 @@ pub(super) fn read(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     let after = decimal(args, if show { "after_version" } else { "after" }, 0)?;
     let limit = limit(args)?;
     let expected = head(args, after)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     if show {
         let number = DiscussionNumber::try_new(decimal(args, "number", 0)?)
             .ok_or(ToolError::invalid("positive_discussion_number_required"))?;

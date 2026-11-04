@@ -178,12 +178,22 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "trigger.paths",
         status: ConstructStatus::Accepted,
-        reason: "ordered bounded path patterns select complete canonical push ref differences or PR merge-base changes; missing, incomplete or over-budget evidence refuses",
+        reason: "ordered bounded path patterns select complete canonical push branch differences or PR merge-base changes; missing, incomplete or over-budget evidence refuses; tag pushes do not evaluate path filters",
     },
     Construct {
         key: "trigger.paths-ignore",
         status: ConstructStatus::Accepted,
-        reason: "push and PR execution require at least one changed path outside the exclusions; empty changes create no jobs or passing checks",
+        reason: "push branch and PR execution require at least one changed path outside the exclusions; empty changes create no jobs or passing checks; tag pushes do not evaluate path filters",
+    },
+    Construct {
+        key: "trigger.tags",
+        status: ConstructStatus::Accepted,
+        reason: "ordered bounded literal, *, ** and leading ! patterns select only push refs/tags names; branch and tag filters select their own namespaces; PR and dispatch tag filters refuse",
+    },
+    Construct {
+        key: "trigger.tags-ignore",
+        status: ConstructStatus::Accepted,
+        reason: "bounded exclusion-only push tag patterns; mutually exclusive with tags; a tag-only declaration never selects branches or grants check publication",
     },
     Construct {
         key: "workflow.concurrency",
@@ -208,7 +218,7 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "workflow.on",
         status: ConstructStatus::Accepted,
-        reason: "scalar/sequence trigger names retain their bytes; block mappings admit push/pull_request branch and path filters and explicitly empty event scalars",
+        reason: "scalar/sequence trigger names retain their bytes; block mappings admit push branch/tag filters, pull_request branch filters, branch/PR path filters and explicitly empty event scalars",
     },
     Construct {
         key: "workflow.secrets",

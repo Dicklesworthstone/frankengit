@@ -596,6 +596,7 @@ fn candidate_landing_requires_an_approval_for_the_actual_prepared_merge() {
         protect(
             &node,
             vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
                 name: pulls[0].data.target_ref.clone(),

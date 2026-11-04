@@ -7,6 +7,47 @@ const NAME: &str = "frankengit_protection_set";
 const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"policy-bounds","version":"1"}}}"#;
 const READY: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
 
+#[test]
+fn large_path_policy_envelope_does_not_enlarge_unrelated_arguments_or_selectors() {
+    let rules = (0..16)
+        .map(|_| object([("path_hex", text("61".repeat(4096)))]))
+        .collect();
+    let mut request = wire(NAME, "unused", "", 2);
+    let Value::Object(envelope) = &mut request else {
+        panic!()
+    };
+    let Value::Object(params) = envelope.get_mut("params").unwrap() else {
+        panic!()
+    };
+    params.insert(
+        "arguments".into(),
+        object([(
+            "branches",
+            Value::Array(vec![object([("path_reviews", Value::Array(rules))])]),
+        )]),
+    );
+    let encoded = request.encode(MAX_MESSAGE_BYTES).unwrap();
+    assert!(encoded.len() > json::MAX_INPUT);
+    assert_eq!(parse_request(encoded.as_bytes()).unwrap(), request);
+    let Value::Object(envelope) = &mut request else {
+        panic!()
+    };
+    let Value::Object(params) = envelope.get_mut("params").unwrap() else {
+        panic!()
+    };
+    let Value::Object(arguments) = params.get_mut("arguments").unwrap() else {
+        panic!()
+    };
+    arguments.insert(
+        "unrelated".into(),
+        text("x".repeat(json::REQUEST_LIMITS.string + 1)),
+    );
+    assert!(parse_request(request.encode(MAX_MESSAGE_BYTES).unwrap().as_bytes()).is_err());
+    let bad = encoded.replace(&"61".repeat(4096), &"61".repeat(4097));
+    assert!(parse_request(bad.as_bytes()).is_err());
+    assert!(parse_request(encoded.replace(NAME, "other_tool").as_bytes()).is_err());
+}
+
 fn wire(name: &str, field: &str, value: &str, id: u64) -> Value {
     object([
         ("jsonrpc", text("2.0")),

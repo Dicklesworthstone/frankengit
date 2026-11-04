@@ -102,6 +102,7 @@ pub use origin::{PublicationBasis, ResultingRoots};
 pub use outcome_checkpoint::{
     MAX_CHECKPOINT_PREDECESSORS, MAX_OUTCOME_INDEX_LEAF_CHUNK_DECISIONS,
     OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal, OutcomeIndexLeafArchive,
+    collect_cumulative_outcomes_at_authenticated_head_with_fabric_async,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_with_fabric,

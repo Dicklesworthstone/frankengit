@@ -155,7 +155,10 @@ fn assert_checkpoint(receipt: &Value, decisions: u64, published: bool) {
     assert_eq!(string(receipt, "type"), "outcome_checkpoint");
     assert_eq!(field(receipt, "complete"), &Value::Bool(true));
     assert_eq!(field(receipt, "published"), &Value::Bool(published));
-    assert_eq!(string(receipt, "backup_profile"), "DecisionHistoryOnly");
+    assert_eq!(
+        string(receipt, "backup_profile"),
+        "decision_history_with_admission_closure_v1"
+    );
     assert_eq!(string(receipt, "scope"), "outcome_index_maintenance");
     assert_eq!(count(receipt, "decisions"), decisions);
     assert!(string(receipt, "source_head").starts_with("alg:"));
@@ -174,7 +177,7 @@ fn help_and_invalid_arguments_do_not_initialize_storage() {
         let output = fg(&args, 0);
         let help = String::from_utf8(output.stdout).unwrap();
         assert!(help.starts_with("usage: fg checkpoint outcomes"));
-        assert!(help.contains("DecisionHistoryOnly"));
+        assert!(help.contains("DecisionHistoryWithAdmissionClosureV1"));
         assert!(help.contains("does not prove non-publication"));
     }
     refused(fg(

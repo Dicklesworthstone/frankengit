@@ -104,6 +104,7 @@ fn mixed_candidate_ordinary_quorum_queue_and_raw_ref_rules_keep_every_restrictio
         required_approvals: 0,
         required_checks: vec![required_check()],
         required_candidate_checks: Vec::new(),
+        path_reviews: Vec::new(),
         require_merge_queue: false,
     });
     settings.branches.push(ProtectedBranch {
@@ -112,6 +113,7 @@ fn mixed_candidate_ordinary_quorum_queue_and_raw_ref_rules_keep_every_restrictio
         required_approvals: 0,
         required_checks: Vec::new(),
         required_candidate_checks: vec![selector(9)],
+        path_reviews: Vec::new(),
         require_merge_queue: false,
     });
     let expected = event(settings);

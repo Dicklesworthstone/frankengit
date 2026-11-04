@@ -6,6 +6,7 @@ import { binding, copy, fail, form, format, hex, integer, keys, oid, opaque, pin
 export const MAX_QUEUE_ENTRIES = 1024;
 export const COMMAND_LIMIT = 64 * 1024;
 export const RECEIPT_LIMIT = 256 * 1024;
+export const CANDIDATE_RECEIPT_LIMIT = 24 * 1024 * 1024;
 const SCOPE_FIELDS = ['schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format'];
 const READ_FIELDS = [...SCOPE_FIELDS, 'source_head', 'snapshot_token'];
 const REASONS = ['withdrawn', 'conflict', 'check-failed', 'base-moved', 'evicted', 'admin-override'];
@@ -98,24 +99,30 @@ export function queueShow(reply, number, { head = null, scope = null } = {}) {
   return { ...result, reply };
 }
 export function normalizeQueueFields(action, fields, algorithm) {
+  const landing = action === 'land' || action === 'land-candidate';
   const common = ['expected_version', 'target_ref', 'target_ref_hex'];
   const candidate = ['pull_request', 'expected_pull_request_version', 'source_ref', 'source_ref_hex', 'expected_source_tip', 'expected_target_tip'];
-  const extra = ({ enqueue: [...candidate, 'priority'], dequeue: ['pull_request', 'reason'], reorder: ['entry'], land: [...candidate, 'expected_policy_epoch'] })[action];
+  const extra = ({ enqueue: [...candidate, 'priority'], dequeue: ['pull_request', 'reason'], reorder: ['entry'], land: [...candidate, 'expected_policy_epoch'],
+    'land-candidate': [...candidate, 'expected_policy_epoch', 'merge_base', 'expected_commit'] })[action];
   if (!extra) fail('Unsupported queue action.');
   keys(fields, [...common, ...extra]); format(algorithm);
   const normalized = { expected_version: queueInteger(fields.expected_version, 'expected queue version', action === 'enqueue' ? 0 : 1,
-    Number.MAX_SAFE_INTEGER - (action === 'land' ? 2 : 1)), target_ref_hex: branchField(fields, 'target_ref') };
-  if (action === 'enqueue' || action === 'land') {
+    Number.MAX_SAFE_INTEGER - (landing ? 2 : 1)), target_ref_hex: branchField(fields, 'target_ref') };
+  if (action === 'enqueue' || landing) {
     Object.assign(normalized, { pull_request: queueInteger(fields.pull_request, 'PR number', 1),
       expected_pull_request_version: queueInteger(fields.expected_pull_request_version, 'expected PR version', 1,
-        Number.MAX_SAFE_INTEGER - (action === 'land' ? 1 : 0)),
+        Number.MAX_SAFE_INTEGER - (landing ? 1 : 0)),
       source_ref_hex: branchField(fields, 'source_ref'), expected_source_tip: oid(fields.expected_source_tip, algorithm),
       expected_target_tip: oid(fields.expected_target_tip, algorithm) });
     if (normalized.source_ref_hex === normalized.target_ref_hex) fail('Queue source and target branches must differ.');
     if (action === 'enqueue') normalized.priority = queueInteger(fields.priority === undefined ? 0 : fields.priority, 'priority', 0, 0xffffffff);
     else {
       normalized.expected_policy_epoch = queueInteger(fields.expected_policy_epoch, 'policy epoch', 1);
-      if (normalized.expected_source_tip === normalized.expected_target_tip) fail('Fast-forward landing requires distinct source and target tips.');
+      if (normalized.expected_source_tip === normalized.expected_target_tip) fail('Landing requires distinct source and target tips.');
+      if (action === 'land-candidate') {
+        normalized.merge_base = oid(fields.merge_base, algorithm); normalized.expected_commit = oid(fields.expected_commit, algorithm);
+        if ([normalized.merge_base, normalized.expected_source_tip, normalized.expected_target_tip].includes(normalized.expected_commit)) fail('A queue merge candidate must be a distinct new commit.');
+      }
     }
   } else if (action === 'dequeue') {
     normalized.pull_request = queueInteger(fields.pull_request, 'PR number', 1);
@@ -134,6 +141,7 @@ export function queueCommand(action, fields, scope) {
     ...normalizeQueueFields(action, fields, selected.format) };
 }
 export function queueMutationRequest(number, action, fields, scope) {
+  if (action === 'land-candidate') fail('Candidate landing requires its inspected binary envelope.');
   queueInteger(number, 'queue number', 1);
   const command = queueCommand(action, fields, scope), normalized = normalizeQueueFields(action, fields, scope.format);
   const body = form(command), bytes = utf8.encode(body);
@@ -152,14 +160,16 @@ export async function queueRequestKey(root, fingerprint, scope, number, action, 
 function sameAction(reply, pending) {
   const { action, fields: f, scope } = pending, proposed = reply.proposed_action;
   const base = ['name'];
-  if (action === 'enqueue' || action === 'land') {
+  if (action === 'enqueue' || action === 'land' || action === 'land-candidate') {
     closed(proposed, [...base, 'pull_request', 'expected_pull_request_version', 'source_ref', 'source_ref_hex', 'expected_source_tip', 'expected_target_tip',
-      ...(action === 'enqueue' ? ['priority'] : ['method', 'expected_policy_epoch'])]);
+      ...(action === 'enqueue' ? ['priority'] : ['method', 'expected_policy_epoch']),
+      ...(action === 'land-candidate' ? ['merge_base', 'expected_commit'] : [])]);
     if (proposed.pull_request !== f.pull_request || proposed.expected_pull_request_version !== f.expected_pull_request_version ||
         queueReference(proposed, 'source_ref') !== f.source_ref_hex || oid(proposed.expected_source_tip, scope.format) !== f.expected_source_tip ||
         oid(proposed.expected_target_tip, scope.format) !== f.expected_target_tip) fail('Queue publication changed the exact PR or tips.');
     if (action === 'enqueue') queueInteger(proposed.priority, 'returned queue priority', 0, 0xffffffff);
-    if (action === 'enqueue' ? proposed.priority !== f.priority : proposed.method !== 'fast-forward-only' || proposed.expected_policy_epoch !== f.expected_policy_epoch) fail('Queue publication changed priority, method or policy.');
+    if (action === 'enqueue' ? proposed.priority !== f.priority : proposed.method !== (action === 'land-candidate' ? 'merge-commit' : 'fast-forward-only') || proposed.expected_policy_epoch !== f.expected_policy_epoch) fail('Queue publication changed priority, method or policy.');
+    if (action === 'land-candidate' && (oid(proposed.merge_base, scope.format) !== f.merge_base || oid(proposed.expected_commit, scope.format) !== f.expected_commit)) fail('Queue publication changed the inspected candidate.');
   } else if (action === 'dequeue') {
     closed(proposed, [...base, 'pull_request', 'reason']);
     if (proposed.pull_request !== f.pull_request || proposed.reason !== f.reason) fail('Queue removal command changed.');
@@ -180,7 +190,7 @@ export function queuePublication(reply, pending, status) {
       queueReference(reply, 'target_ref') !== pending.fields.target_ref_hex || reply.complete !== true || reply.historical_outcome !== true ||
       reply.delivery_acknowledged !== null || !['committed', 'refused'].includes(reply.outcome) ||
       reply.committed !== (reply.outcome === 'committed') || status !== (reply.committed ? 200 : 409) ||
-      reply.refs_changed !== (pending.action === 'land' && reply.committed)) fail('Response is not the matching canonical queue decision.');
+      reply.refs_changed !== (['land', 'land-candidate'].includes(pending.action) && reply.committed)) fail('Response is not the matching canonical queue decision.');
   sameAction(reply, pending);
   if (pending.observedTx !== null && pending.observedTx !== reply.tx_id) fail('Queue transaction identity changed.');
   if (pending.observedPrincipal !== null && pending.observedPrincipal !== reply.principal_id) fail('Queue recovery principal changed.');

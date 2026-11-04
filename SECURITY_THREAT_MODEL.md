@@ -476,9 +476,34 @@ object envelopes (`VERIFY_SPEC.md` §12).
 
 The implemented agent-context read boundary uses the native authenticated
 receipt, invocation-only read run and ContextPacket across CLI, HTTP and MCP.
-HTTP sponsorship is fixed by the current repository-read credential; MCP
-requires an independent launch grant, principal and incarnation pin. Caller
-fields and repository text cannot replace these identities or add operations.
+Ordinary HTTP sponsorship is fixed by the current repository-read credential;
+trusted-local MCP requires an independent launch grant, principal and incarnation
+pin. Canonical sponsored HTTP and MCP instead retain the verified agent and
+human or service sponsor as distinct identities and require the independent
+`SOURCE_READ` operation. MCP also intersects its exact source/context tool
+allowlist with separate launch ceilings. Neither metadata permission nor a
+completed response reservation can become source authority for another call.
+The MCP bridge checks the original request lifetime and exact tenant, repository,
+incarnation and object format; missing active requests cannot fall back to local
+operator attribution. Canonical revocation is checked on every call, and nested
+retrieval and response disclosure retain the original finite deadline.
+Caller fields and repository text cannot replace these identities or add operations.
+MCP index maintenance is a separate local-operator launch responsibility. It
+requires an exact incarnation, explicit ref/profile scope and private progress
+ownership; neither a source credential nor a tool call starts or configures it.
+All controller launch gates stay closed until initialization output is flushed.
+Exit and output failure stop and join the existing controllers before node
+shutdown, preserving original deadlines, checkpoint floors and unresolved
+publication candidates. Background failure signals sibling cancellation and is
+reported at the next synchronous stdio boundary; idle input is not preempted.
+Explicit `current-native-v1` index reuse independently authenticates current
+visibility and native commit/tree identity. Each immutable index retains its
+original source positions and generations; those old positions cannot replace
+the current run receipt. Hydration rechecks current path/blob membership and
+original row/anchor lineage before returning exact bytes. Missing backing,
+changed source, substituted labels, expired requests and budget exhaustion abort
+the entire result. The selector adds no source-read capability or index-writing
+permission, and an absent selector retains strict source-position matching.
 Exact source bytes remain separate untrusted data, and omissions remain visible.
 This read path grants no durable agent credential, effect or publication right.
 

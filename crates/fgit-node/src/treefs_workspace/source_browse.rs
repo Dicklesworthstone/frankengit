@@ -2,6 +2,7 @@
 //! No host paths, worktree, object-ID lookup oracle, or publication effects.
 
 mod ancestor;
+mod commit;
 
 use super::{NodeTreeSource, NodeWorkspaceRefusal, workspace_request_live};
 use crate::{ClosureSelectionSource, NodeRequestContext, OneNode, VerifiedFabricPackSource};
@@ -174,8 +175,12 @@ impl OneNode {
         }
         let rcr = match selected.selected_closure().source() {
             ClosureSelectionSource::RepositoryCommit(rcr)
-            | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. } => rcr,
-            ClosureSelectionSource::EmptyGenesis => {
+            | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. }
+            | ClosureSelectionSource::CapsuleCheckpoint {
+                latest: Some(rcr), ..
+            } => rcr,
+            ClosureSelectionSource::EmptyGenesis
+            | ClosureSelectionSource::CapsuleCheckpoint { latest: None, .. } => {
                 return Err(NodeWorkspaceRefusal::RefUnavailable);
             }
         };

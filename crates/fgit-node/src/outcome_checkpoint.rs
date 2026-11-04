@@ -59,6 +59,8 @@ pub struct OutcomeCheckpointReceipt {
     pub generation: HeadGeneration,
     pub capsule_id: RepositoryCapsuleId,
     pub checkpoint_root: Digest,
+    /// Stable coverage name of the selected or newly published capsule.
+    pub backup_profile: &'static str,
     pub decisions: usize,
     pub leaf_objects: usize,
     pub leaf_bytes: u64,
@@ -137,6 +139,7 @@ fn retained_bytes(
 pub(crate) struct Predecessor {
     pointer: Option<CapsulePointer>,
     current_root: Option<Digest>,
+    current_admission_closure: Option<Digest>,
     pub(crate) retained: Option<(Digest, OutcomeIndexCheckpointBody)>,
     outcomes: Option<CumulativeOutcomes>,
 }
@@ -260,9 +263,19 @@ impl OneNode {
         live(request)?;
         if let Some((root, _)) = exact
             && predecessor.current_root == Some(*root)
+            && predecessor.current_admission_closure == Some(selected.selected_closure().root())
         {
             // The predecessor loader verifies the actual retained objects;
             // collector fallback alone would not justify this no-op receipt.
+            // Reread the selected membership evidence even if admission used
+            // its verified cache. A no-op must not silently repair or overlook
+            // missing/corrupt newest checkpoint evidence.
+            self.verify_checkpoint_closure_in(
+                request,
+                selected.selected_closure().root(),
+                selected.selected_closure().closure(),
+            )
+            .await?;
             self.require_checkpoint_head_in(request, &selected).await?;
             let pointer = predecessor
                 .pointer
@@ -273,6 +286,7 @@ impl OneNode {
                 generation: basis.generation(),
                 capsule_id: pointer.capsule_id(),
                 checkpoint_root: *root,
+                backup_profile: BackupProfile::DecisionHistoryWithAdmissionClosureV1.as_str(),
                 decisions: decisions.len(),
                 leaf_objects,
                 leaf_bytes,
@@ -281,8 +295,9 @@ impl OneNode {
         }
 
         let checkpoint_body = if let Some((_, body)) = exact {
-            // A generic intervening capsule can omit the outcome hint. Rebind
-            // the already verified checkpoint, without a same-position link.
+            // A generic intervening capsule can omit the outcome hint or the
+            // cumulative-membership declaration. Rebind the already verified
+            // checkpoint without a same-position outcome predecessor link.
             body.clone()
         } else {
             let mut previous_root = predecessor.retained.as_ref().map(|(root, _)| *root);
@@ -343,35 +358,12 @@ impl OneNode {
         live(request)?;
         // Read back the exact cumulative closure before publishing a capsule
         // that names it. Staging success alone is not retained evidence.
-        let closure_key = admission_immutable_key(
-            ADMISSION_CLOSURE_KEY_PREFIX,
-            self.repository_id,
+        self.verify_checkpoint_closure_in(
+            request,
             object_root,
+            selected.selected_closure().closure(),
         )
-        .map_err(|error| selection(AdmissionMaterializationRefusal::Key(error)))?;
-        // Select the authority protocol adapter, including its bounded retry
-        // and failure classification, rather than the inherent engine read.
-        let closure_read =
-            AsyncAuthorityStore::read_immutable(&self.authority, request.authority(), &closure_key)
-                .await
-                .map_err(OutcomeCheckpointRefusal::Authority)?;
-        live(request)?;
-        let ImmutableRead::Present(closure_bytes) = closure_read else {
-            return Err(selection(AdmissionMaterializationRefusal::ImmutableAbsent(
-                object_root,
-            )));
-        };
-        let closure: PermittedObjectClosure = decode_body(&closure_bytes, DecodeLimits::DEFAULT)
-            .map_err(|error| selection(AdmissionMaterializationRefusal::CanonicalFrame(error)))?;
-        if permitted_object_closure_root(&closure)
-            .map_err(|error| selection(AdmissionMaterializationRefusal::CanonicalRoot(error)))?
-            != object_root
-            || closure != *selected.selected_closure().closure()
-        {
-            return Err(selection(
-                AdmissionMaterializationRefusal::ImmutableConflict,
-            ));
-        }
+        .await?;
         let manifest_id = checkpoint_body
             .leaf_archive_manifest
             .as_internal_object_id();
@@ -390,7 +382,7 @@ impl OneNode {
             CapsuleClosure {
                 object_closure_root: object_root,
                 segment_manifest_root: manifest_root,
-                backup_profile: BackupProfile::DecisionHistoryOnly,
+                backup_profile: BackupProfile::DecisionHistoryWithAdmissionClosureV1,
             },
             &checkpoint_body,
         )
@@ -425,11 +417,51 @@ impl OneNode {
             generation: activated.head().generation(),
             capsule_id: activated.pointer().capsule_id(),
             checkpoint_root: root,
+            backup_profile: frozen.capsule().backup_profile.as_str(),
             decisions: decisions.len(),
             leaf_objects,
             leaf_bytes,
             published: true,
         })
+    }
+
+    async fn verify_checkpoint_closure_in(
+        &self,
+        request: &NodeRequestContext,
+        object_root: Digest,
+        expected: &PermittedObjectClosure,
+    ) -> Result<(), OutcomeCheckpointRefusal> {
+        live(request)?;
+        let closure_key = admission_immutable_key(
+            ADMISSION_CLOSURE_KEY_PREFIX,
+            self.repository_id,
+            object_root,
+        )
+        .map_err(|error| selection(AdmissionMaterializationRefusal::Key(error)))?;
+        // Select the authority protocol adapter, including its bounded retry
+        // and failure classification, rather than the inherent engine read.
+        let closure_read =
+            AsyncAuthorityStore::read_immutable(&self.authority, request.authority(), &closure_key)
+                .await
+                .map_err(OutcomeCheckpointRefusal::Authority)?;
+        live(request)?;
+        let ImmutableRead::Present(closure_bytes) = closure_read else {
+            return Err(selection(AdmissionMaterializationRefusal::ImmutableAbsent(
+                object_root,
+            )));
+        };
+        let closure: PermittedObjectClosure = decode_body(&closure_bytes, DecodeLimits::DEFAULT)
+            .map_err(|error| selection(AdmissionMaterializationRefusal::CanonicalFrame(error)))?;
+        if permitted_object_closure_root(&closure)
+            .map_err(|error| selection(AdmissionMaterializationRefusal::CanonicalRoot(error)))?
+            != object_root
+            || &closure != expected
+        {
+            return Err(selection(
+                AdmissionMaterializationRefusal::ImmutableConflict,
+            ));
+        }
+        live(request)
     }
 
     async fn require_checkpoint_head_in(
@@ -462,6 +494,7 @@ impl OneNode {
         let mut id = selected.basis().body().last_checkpoint_id;
         let mut pointer = None;
         let mut current_root = None;
+        let mut current_admission_closure = None;
         let mut seen = BTreeSet::new();
         let mut previous_generation = selected.basis().generation();
         while let Some(capsule_id) = id {
@@ -497,6 +530,9 @@ impl OneNode {
                 // for an explicitly restored namespace with external history.
                 pointer = Some(CapsulePointer::restored_root(capsule_id, &capsule));
                 current_root = capsule.outcome_index_checkpoint_root;
+                current_admission_closure = (capsule.backup_profile
+                    == BackupProfile::DecisionHistoryWithAdmissionClosureV1)
+                    .then_some(capsule.object_closure_root);
             }
             if let Some(root) = capsule.outcome_index_checkpoint_root {
                 let (retained, leaves) = load_verified_outcome_index_checkpoint_async(
@@ -531,6 +567,7 @@ impl OneNode {
                 return Ok(Predecessor {
                     pointer,
                     current_root,
+                    current_admission_closure,
                     retained: Some((root, retained)),
                     outcomes: Some(outcomes),
                 });
@@ -541,6 +578,7 @@ impl OneNode {
         Ok(Predecessor {
             pointer,
             current_root,
+            current_admission_closure,
             retained: None,
             outcomes: None,
         })

@@ -104,7 +104,9 @@ impl Fixture {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             max_messages: 64,
+            index_maintenance: None,
         })
         .unwrap();
         Self {

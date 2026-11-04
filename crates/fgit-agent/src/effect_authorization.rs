@@ -1000,6 +1000,11 @@ impl RevocationCheckedEffectBroker {
             })
     }
 
+    /// Whether the reservation still belongs to the ledger served by this facade.
+    pub(crate) fn owns_outbox(&self, effect: &ReservedOutboxEffect) -> bool {
+        self.broker.owns_outbox(effect)
+    }
+
     /// Accepted broker records in acceptance order.
     #[must_use]
     pub fn records(&self) -> Vec<EffectRecord> {

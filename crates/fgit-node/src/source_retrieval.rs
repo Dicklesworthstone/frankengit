@@ -550,6 +550,10 @@ pub mod integrity;
 /// Trusted-local source archive export, preflight and root-last recovery.
 pub mod backup;
 
+/// Trusted-local, pinned native-pointer LFS inventory and portable byte custody.
+#[cfg(target_os = "linux")]
+pub mod lfs_transfer;
+
 /// Read-only lexical reuse with separately retained current-source evidence.
 pub mod current_index;
 

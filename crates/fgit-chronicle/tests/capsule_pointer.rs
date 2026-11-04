@@ -136,6 +136,7 @@ fn an_unknown_backup_profile_is_refused_rather_than_defaulted() {
         BackupProfile::DecisionHistoryOnly,
         BackupProfile::FullClosure,
         BackupProfile::FullClosureWithRepair,
+        BackupProfile::DecisionHistoryWithAdmissionClosureV1,
     ] {
         assert_eq!(
             BackupProfile::from_discriminant(profile.discriminant()),
@@ -144,6 +145,46 @@ fn an_unknown_backup_profile_is_refused_rather_than_defaulted() {
             profile.as_str()
         );
     }
+}
+
+#[test]
+fn admitted_membership_profile_is_an_additive_identity_bound_declaration() {
+    let mut capsule = capsule_at(4, None);
+    let mut legacy_frames = Vec::new();
+    for (profile, codepoint) in [
+        (BackupProfile::DecisionHistoryOnly, 1),
+        (BackupProfile::FullClosure, 2),
+        (BackupProfile::FullClosureWithRepair, 3),
+    ] {
+        capsule.backup_profile = profile;
+        let bytes = encode_body(&capsule).unwrap();
+        assert_eq!(bytes.last(), Some(&codepoint));
+        assert_eq!(
+            decode_body::<RepositoryCapsuleBody>(&bytes, DecodeLimits::default()).unwrap(),
+            capsule
+        );
+        legacy_frames.push((bytes, identity_of(&capsule)));
+    }
+    capsule.backup_profile = BackupProfile::DecisionHistoryWithAdmissionClosureV1;
+    let declared = encode_body(&capsule).unwrap();
+    assert_eq!(declared.last(), Some(&4));
+    assert_eq!(
+        decode_body::<RepositoryCapsuleBody>(&declared, DecodeLimits::default()).unwrap(),
+        capsule
+    );
+    for (legacy, id) in legacy_frames {
+        assert_eq!(legacy.len(), declared.len());
+        assert_eq!(&legacy[..legacy.len() - 1], &declared[..declared.len() - 1]);
+        assert_ne!(
+            id,
+            identity_of(&capsule),
+            "coverage cannot change without a new capsule identity"
+        );
+    }
+    assert_eq!(
+        capsule.backup_profile.as_str(),
+        "decision_history_with_admission_closure_v1"
+    );
 }
 
 // ---------------------------------------------------------------------------

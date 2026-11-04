@@ -521,7 +521,7 @@ impl OneNode {
 
 /// The existing asynchronous projection plus real native-object validation.
 /// This deliberately does not implement synchronous staging callbacks.
-pub(super) struct NodeNativeMergeProjection<'node> {
+pub(crate) struct NodeNativeMergeProjection<'node> {
     pub(super) node: &'node OneNode,
     pub(super) inner: DurableAsyncAdmissionProjection<'node>,
     pub(super) object_limits: MergeObjectLimits,
@@ -531,6 +531,28 @@ pub(super) struct NodeNativeMergeProjection<'node> {
     pub(super) workspace_clock_floor: u64,
     /// Private candidate objects owned by this bundle operation, if any.
     pub(super) staging: Option<&'node ReceiveStaging>,
+}
+
+impl<'node> NodeNativeMergeProjection<'node> {
+    /// Construct the metadata-only projection without exposing workspace or
+    /// staged-object capabilities outside their owning module.
+    pub(crate) fn metadata(
+        node: &'node OneNode,
+        context: &AdmissionContext,
+        session: &crate::AuthenticatedReceiveSession,
+    ) -> Result<Self, AdmissionError> {
+        Ok(Self {
+            node,
+            inner: node
+                .durable_admission_projection(context)?
+                .with_authenticated_session(session),
+            object_limits: MergeObjectLimits::default(),
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
+            staging: None,
+        })
+    }
 }
 
 impl NodeNativeMergeProjection<'_> {
@@ -611,6 +633,10 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         self.inner.authentication
     }
 
+    fn agent_credential_now(&self) -> Option<u64> {
+        crate::agent_credentials::epoch_seconds()
+    }
+
     fn validate_comment_anchor_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -665,6 +691,23 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
     }
     fn merge_publication_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         self.merge_checkpoint(cx)?;
+        if let Some(authentication) = self.inner.authentication
+            && let Some(agent) = authentication.agent_provenance()
+        {
+            if self
+                .inner
+                .agent_deadline
+                .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+            {
+                return Err(RefusalCode::CapabilityExpired);
+            }
+            let now = self
+                .agent_credential_now()
+                .ok_or(RefusalCode::CapabilityExpired)?;
+            if now < agent.authenticated_at() || now >= agent.expires_at() {
+                return Err(RefusalCode::CapabilityExpired);
+            }
+        }
         self.workspace_live()
     }
 
@@ -794,10 +837,18 @@ impl NodeNativeMergeProjection<'_> {
                 RefusalCode::ObjectClosureIncomplete,
             ));
         }
+        let needs_paths = fgit_admission::merge::native::protection::path_reviews_required_at(
+            authority,
+            cx,
+            basis,
+            &merge.target_ref,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
         // Finish all synchronous object reads before awaiting policy:
         // neither the reader nor its thread-local budget cell may cross
         // an asynchronous authority operation.
-        let closure = {
+        let (closure, paths) = {
             let exhaustion = Cell::new(None);
             let object_limits = MergeObjectLimits {
                 max_object_bytes: self
@@ -921,49 +972,82 @@ impl NodeNativeMergeProjection<'_> {
                     return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
                 }
             }
-            closure
+            let paths = if needs_paths {
+                let verified =
+                    fgit_admission::merge::native::protection::path_reviews::verify_merge_paths(
+                        &source,
+                        merge,
+                        object_limits,
+                        &mut live,
+                    );
+                if exhaustion.get().is_some() {
+                    return Err(ProjectionFailure::Unavailable(
+                        RefusalCode::ResourceBudgetExceeded,
+                    ));
+                }
+                Some(verified?)
+            } else {
+                None
+            };
+            (closure, paths)
         };
-        match (landing, self.inner.authentication) {
-            (Some(landing), authentication) => {
-                fgit_admission::merge::native::protection::enforce_queued_merge_at(
-                    authority,
-                    cx,
-                    basis,
-                    &selected.snapshot().refs,
-                    intent,
-                    self.inner.context.principal_id,
-                    authentication,
-                    landing,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-            }
-            (None, Some(authentication)) => {
-                fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
-                    authority,
-                    cx,
-                    basis,
-                    &selected.snapshot().refs,
-                    intent,
-                    self.inner.context.principal_id,
-                    authentication,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-            }
-            (None, None) => {
-                fgit_admission::merge::native::protection::enforce_merge_at(
-                    authority,
-                    cx,
-                    basis,
-                    &selected.snapshot().refs,
-                    intent,
-                    self.inner.context.principal_id,
-                    &|| self.merge_checkpoint(cx).is_err(),
-                )
-                .await
-            }
-        }?;
+        if let Some(paths) = paths.as_ref() {
+            fgit_admission::merge::native::protection::enforce_merge_with_paths_at(
+                authority,
+                cx,
+                basis,
+                &selected.snapshot().refs,
+                intent,
+                self.inner.context.principal_id,
+                self.inner.authentication,
+                landing,
+                paths,
+                &|| self.merge_checkpoint(cx).is_err(),
+            )
+            .await?;
+        } else {
+            match (landing, self.inner.authentication) {
+                (Some(landing), authentication) => {
+                    fgit_admission::merge::native::protection::enforce_queued_merge_at(
+                        authority,
+                        cx,
+                        basis,
+                        &selected.snapshot().refs,
+                        intent,
+                        self.inner.context.principal_id,
+                        authentication,
+                        landing,
+                        &|| self.merge_checkpoint(cx).is_err(),
+                    )
+                    .await
+                }
+                (None, Some(authentication)) => {
+                    fgit_admission::merge::native::protection::enforce_merge_with_authentication_at(
+                        authority,
+                        cx,
+                        basis,
+                        &selected.snapshot().refs,
+                        intent,
+                        self.inner.context.principal_id,
+                        authentication,
+                        &|| self.merge_checkpoint(cx).is_err(),
+                    )
+                    .await
+                }
+                (None, None) => {
+                    fgit_admission::merge::native::protection::enforce_merge_at(
+                        authority,
+                        cx,
+                        basis,
+                        &selected.snapshot().refs,
+                        intent,
+                        self.inner.context.principal_id,
+                        &|| self.merge_checkpoint(cx).is_err(),
+                    )
+                    .await
+                }
+            }?;
+        }
         self.merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)

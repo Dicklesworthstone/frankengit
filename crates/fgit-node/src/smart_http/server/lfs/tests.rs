@@ -21,6 +21,8 @@ use crate::{
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, NodeConfig, PushQuota, WriterGate,
 };
 
+mod streaming;
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const TENANT: TenantId = TenantId::from_bytes([1; 16]);
 const REPO: RepositoryId = RepositoryId::from_bytes([2; 16]);
@@ -79,7 +81,11 @@ impl Fixture {
                 .with(RepositoryHttpService::Outcomes, false)
                 .with(RepositoryHttpService::Pulls, false)
                 .with(RepositoryHttpService::Source, false),
-            http: HttpLimits::default(),
+            http: HttpLimits {
+                max_body_bytes: MAX_OBJECT_BYTES,
+                max_body_wire_bytes: MAX_OBJECT_BYTES + 4 * 1024 * 1024,
+                ..HttpLimits::default()
+            },
             maximum_response_bytes: 128 * 1024 * 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,
             quota: Arc::new(PushQuota::default()),
@@ -629,7 +635,11 @@ fn credentials_and_declared_limits_are_checked_before_continue_or_body_read() {
             "PUT {path} HTTP/1.1\r\nHost: localhost:9418\r\nAuthorization: Bearer {}\r\nContent-Type: {BINARY_MEDIA}\r\nContent-Length: {size}\r\nExpect: 100-continue\r\n\r\n",
             token.to_string().repeat(64)
         );
-        let envelope = head::parse(header.as_bytes(), fixture.profile.http)
+        // Exercise the endpoint's own object limit under a looser framing
+        // envelope. The production head parser can refuse this even earlier.
+        let mut head_limits = fixture.profile.http;
+        head_limits.max_body_bytes = MAX_OBJECT_BYTES + 1;
+        let envelope = head::parse(header.as_bytes(), head_limits)
             .unwrap()
             .unwrap();
         let deadline = GitDaemonSessionDeadline::new(

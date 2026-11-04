@@ -1,9 +1,12 @@
 //! Native retrieval and hydration for an already authenticated, read-scoped run.
 //! No run is minted here and a ContextPacket is never a publication capability.
 
-use super::{AgentContextRefusal, context_packet_for_run, match_run_source, run_receipt};
+use super::{
+    AgentContextRefusal, context_packet_for_revalidated_run, context_packet_for_run,
+    match_run_current_source, match_run_source, run_receipt,
+};
 use crate::source_retrieval::authorization::SourceReadContext;
-use crate::source_retrieval::context::{ContextLimits, InitialContext};
+use crate::source_retrieval::context::{ContextLimits, InitialContext, RevalidatedInitialContext};
 use crate::source_retrieval::{Checkpoints, InitialLimits, InitialQuery, RetrievalError, live};
 use crate::{NodeRequestContext, OneNode};
 use fgit_agent::{ContextControl, ContextPacket, IntentRun, LogicalTime};
@@ -48,6 +51,30 @@ impl AgentSourceContext {
 
     #[must_use]
     pub fn into_parts(self) -> (InitialContext, ContextPacket) {
+        (self.context, self.packet)
+    }
+}
+
+/// Current-source hydration and its Agent Protocol packet, preserving the
+/// original, independently dated index sources and exact row lineage.
+#[derive(Clone, Debug)]
+pub struct RevalidatedAgentSourceContext {
+    context: RevalidatedInitialContext,
+    packet: ContextPacket,
+}
+impl RevalidatedAgentSourceContext {
+    #[must_use]
+    pub const fn context(&self) -> &RevalidatedInitialContext {
+        &self.context
+    }
+
+    #[must_use]
+    pub const fn packet(&self) -> &ContextPacket {
+        &self.packet
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (RevalidatedInitialContext, ContextPacket) {
         (self.context, self.packet)
     }
 }
@@ -177,4 +204,68 @@ impl OneNode {
         clock.check(request)?;
         Ok(AgentSourceContext { context, packet })
     }
+
+    /// Explicitly revalidate persisted indexes against the run's ORIGINAL
+    /// authenticated current source before hydrating exact bytes.
+    ///
+    /// Metadata-only movement since indexing is allowed only by the native
+    /// revalidation joins. Code, visibility or authority movement during this
+    /// invocation refuses. Original index sources/generations/labels remain in
+    /// the typed result; no index is rebuilt and no run or deadline is renewed.
+    pub async fn retrieve_agent_context_revalidated_local_in<C>(
+        &self,
+        request: &NodeRequestContext,
+        input: AgentContextRead<'_>,
+        now: &C,
+    ) -> Result<RevalidatedAgentSourceContext, AgentContextReadError>
+    where
+        C: Fn() -> LogicalTime + ?Sized,
+    {
+        live(request)?;
+        input.authorization.check_node(self)?;
+        let receipt = run_receipt(input.run, &input.control)?;
+        if receipt.repository_id() != self.repository_id {
+            return Err(AgentContextRefusal::NodeRepositoryMismatch.into());
+        }
+        if receipt.latest_repository_commit_id().is_none() {
+            return Err(AgentContextRefusal::RepositoryCommitMissing.into());
+        }
+        input.retrieval_limits.validate(input.query)?;
+        input.context_limits.validate()?;
+        let mut clock = ReadClock {
+            run: input.run,
+            now,
+            floor: receipt.verified_at_logical_time(),
+        };
+        clock.check(request)?;
+        let initial = self
+            .search_source_initial_revalidated_local_in(
+                request,
+                input.authorization,
+                input.reference,
+                Some(receipt.authority_head_id()),
+                None,
+                input.checkpoints,
+                input.query,
+                input.retrieval_limits,
+            )
+            .await?;
+        clock.check(request)?;
+        match_run_current_source(receipt, initial.current_source())?;
+        let context = self
+            .hydrate_source_initial_revalidated_local_in(
+                request,
+                input.authorization,
+                initial,
+                input.context_limits,
+            )
+            .await?;
+        clock.check(request)?;
+        let packet = context_packet_for_revalidated_run(input.run, &context, input.control)?;
+        clock.check(request)?;
+        Ok(RevalidatedAgentSourceContext { context, packet })
+    }
 }
+
+#[cfg(test)]
+mod tests;

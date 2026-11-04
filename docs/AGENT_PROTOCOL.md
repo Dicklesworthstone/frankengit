@@ -421,6 +421,15 @@ EffectRecord {
 
 The broker computes `run_commitment` before budget moves. Its append-only journal establishes numeric and complete run identity from the first accepted effect and refuses a later record from another complete run, even when `run_id` is equal. Reconciliation and cancellation preserve the same commitment.
 
+New live requests may name a parent only when that distinct effect has already
+been accepted by the same broker at or before the child's logical acceptance
+time. This check happens before budget reservation or journal mutation; a
+refused child identity remains available for a corrected retry. Parent identities
+need not be numerically increasing, and terminal parents remain valid historical
+causes. Historical journal replay retains its existing semantics: complete
+inventory reconciliation still checks missing parents, self-parenting, time
+inversions, and cycles, without requiring parent-before-child record order.
+
 Obligation states follow the normative lifecycle: `Reserved -> Committed -> Acknowledged`, or `Reserved -> Aborted`, exactly as defined in `CALM_AND_OBLIGATIONS.md` §6. Region closure requires every obligation to be settled or terminally quarantined.
 
 The ledger distinguishes:
@@ -442,6 +451,8 @@ A checked external-effect path retains two separate authorizations:
 2. dispatch-time authorization immediately before the downstream-visible obligation commits.
 
 The second authorization is reconstructed from the exact retained `EffectRequest`. It must preserve the verified ancestry and leaf capability used at acceptance and use a fresh revocation receipt for the actual dispatch instant. A refusal returns the live reservation. A post-commit journal failure returns the deferred obligation. Neither path loses cleanup ownership.
+
+Outbox reservation and dispatch MUST use the broker that owns the accepted effect's journal and resource ledger. Equality of run, agent, or region IDs—even equality of the complete Intent Run—does not transfer that custody. Dispatch also MUST preserve the complete run commitment recorded at acceptance. A custody or run mismatch refuses before journal, budget, or dispatch-proof mutation and returns the original live grant or reservation; cleanup still acts on its original obligation.
 
 ---
 

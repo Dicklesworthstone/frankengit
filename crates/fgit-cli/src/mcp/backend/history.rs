@@ -1,10 +1,13 @@
 //! Read-only native commit-DAG pages and exact line ancestry. Native author
 //! and signature fields remain untrusted metadata, never authenticated identity.
+#[cfg(test)]
+mod first_parent_tests;
 mod output;
 #[cfg(test)]
 mod tests;
 
 use super::*;
+use fgit_forge::history::first_parent::{FirstParentCursor, FirstParentOptions};
 use fgit_forge::history::path::PathLogOptions;
 use fgit_forge::history::{BlameOptions, HistoryError, HistoryLimits, LogOptions};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
@@ -21,12 +24,12 @@ pub(super) fn tools() -> Vec<Tool> {
     vec![
         Tool {
             name: LOG,
-            description: "Page the complete bounded commit DAG of a visible ref in child-before-parent order, or with path_hex only the commits whose exact path entry differs from a parent (unsimplified; no rename inference). Exact commit bytes and parent order; continuation requires the same snapshot. Author headers are not authentication.",
+            description: "Page the complete bounded commit DAG of a visible ref in child-before-parent order, path_hex changes, or explicit first_parent:true recent history without a total-history traversal. First-parent continuation uses its cursor and cannot combine with after or path_hex. Omit first_parent for default history; explicit false refuses. Exact commit bytes and parent order; all continuations require the same snapshot. Author headers are not authentication.",
             schema: input_schema(false),
         },
         Tool {
             name: BLAME,
-            description: "Read a bounded line range with exact same-path ancestry across all merge parents. Byte-exact content and native origin IDs; no rename/whitespace guesses or human-authorship claims. Continuation requires the same snapshot.",
+            description: "Read a bounded line range with exact same-path ancestry across all merge parents. Demand-driven traversal follows only the selected lines and reports visited commits explicitly. Byte-exact content and native origin IDs; no rename/whitespace guesses or human-authorship claims. Continuation requires the same snapshot.",
             schema: input_schema(true),
         },
     ]
@@ -42,6 +45,8 @@ struct Query {
     path: Option<Vec<u8>>,
     /// Log's optional exact-path filter.
     log_path: Option<Vec<u8>>,
+    /// Explicit recent-history profile; its cursor owns the continuation pin.
+    first_parent: Option<FirstParentOptions>,
 }
 fn bound(args: &Object, field: &str, default: usize, max: usize) -> Result<usize, ToolError> {
     let value = args
@@ -85,9 +90,22 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
                 "expected_commit",
                 "max_commits",
                 "path_hex",
+                "first_parent",
+                "cursor",
             ]
         },
     )?;
+    let first_parent = match args.get("first_parent") {
+        None => false,
+        Some(Value::Bool(true)) => true,
+        _ => return Err(ToolError::invalid("invalid_first_parent")),
+    };
+    if first_parent && (args.contains_key("after") || args.contains_key("path_hex")) {
+        return Err(ToolError::invalid("conflicting_history_modes"));
+    }
+    if !first_parent && args.contains_key("cursor") {
+        return Err(ToolError::invalid("cursor_requires_first_parent"));
+    }
     let reference = match (string(args, "reference")?, string(args, "reference_hex")?) {
         (Some(value), None) if value.len() <= 4096 => value.as_bytes().to_vec(),
         (None, Some(value)) => unhex(value, 4096)?,
@@ -100,7 +118,8 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
         RefName::try_new(&reference).map_err(|_| ToolError::invalid("invalid_reference"))?;
     let after = decimal(args, if blame { "first_line" } else { "after" }, 0)?;
     let expected_head = head(args, after)?;
-    let after = usize::try_from(after).map_err(|_| ToolError::invalid("invalid_history_offset"))?;
+    let mut after =
+        usize::try_from(after).map_err(|_| ToolError::invalid("invalid_history_offset"))?;
     let expected_commit = string(args, "expected_commit")?
         .map(|value| {
             if value.len() != format.digest_len() * 2 {
@@ -176,6 +195,37 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
     limits
         .validate()
         .map_err(|_| ToolError::invalid("invalid_history_limits"))?;
+    let first_parent = if first_parent {
+        let cursor = string(args, "cursor")?
+            .map(|value| {
+                FirstParentCursor::decode(value)
+                    .map_err(|_| ToolError::invalid("invalid_first_parent_cursor"))
+            })
+            .transpose()?;
+        if let Some(cursor) = &cursor {
+            if cursor.reference != reference || cursor.tip.algorithm() != format {
+                return Err(ToolError::invalid("invalid_first_parent_cursor"));
+            }
+            if expected_head.is_some_and(|head| head != cursor.source_head) {
+                return Err(ToolError::invalid("cursor_head_mismatch"));
+            }
+            if expected_commit.is_some_and(|commit| commit != cursor.tip) {
+                return Err(ToolError::invalid("cursor_commit_mismatch"));
+            }
+        }
+        let options = FirstParentOptions {
+            cursor,
+            limit,
+            limits,
+        };
+        options
+            .validate()
+            .map_err(|_| ToolError::invalid("invalid_history_options"))?;
+        after = options.log_options().after;
+        Some(options)
+    } else {
+        None
+    };
     Ok(Query {
         reference,
         expected_head,
@@ -185,6 +235,7 @@ fn parse(args: &Object, blame: bool, format: GitHashAlgorithm) -> Result<Query, 
         limit,
         path,
         log_path,
+        first_parent,
     })
 }
 
@@ -278,6 +329,31 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         (
             actual_head,
             output::blame(backend.options.format, &query, &report)?,
+        )
+    } else if let Some(options) = &query.first_parent {
+        let (head, report) = backend
+            .node
+            .runtime()
+            .block_on(backend.node.read_first_parent_history_in(
+                &request,
+                &query.reference,
+                &Default::default(),
+                query.expected_head,
+                options,
+            ))
+            .map_err(|error| {
+                if error.is_snapshot_moved() {
+                    ToolError::failed("snapshot_moved")
+                } else if error.is_unavailable() {
+                    ToolError::failed("reference_unavailable")
+                } else {
+                    failure(error.history_error())
+                }
+            })?;
+        check_pin(&query, backend.options.format, head, report.tip)?;
+        (
+            head,
+            output::first_parent(backend.options.format, &query, head, &report)?,
         )
     } else {
         let options = LogOptions {
@@ -412,6 +488,19 @@ fn input_schema(blame: bool) -> Value {
             integer_schema(1_048_576, 1_048_576),
         );
         properties.insert("max_diff_work".into(), integer_schema(1_000_000, 1_000_000));
+    } else {
+        properties.insert(
+            "first_parent".into(),
+            object([("type", text("boolean")), ("const", Value::Bool(true))]),
+        );
+        properties.insert(
+            "cursor".into(),
+            object([
+                ("type", text("string")),
+                ("maxLength", json::number(4096)),
+                ("pattern", text("^fgfp1/")),
+            ]),
+        );
     }
     object([
         ("type", text("object")),

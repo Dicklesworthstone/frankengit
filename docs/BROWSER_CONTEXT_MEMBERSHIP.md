@@ -12,7 +12,7 @@ blank, and neither a search result nor an imported proof populates it. It must
 match the context's retained source commit. Review the metadata limits and consent,
 then choose **Acquire and verify selected membership**.
 
-The existing authenticated `source/log` and `source/tree` read APIs provide the
+The authenticated `source/commit` and `source/tree` read APIs provide the
 original commit bytes and the complete parent trees needed for the selected
 paths. Every request carries the original reference, commit and snapshot. The
 client hashes the commit, reconstructs each tree's native Git byte ordering,
@@ -20,6 +20,14 @@ hashes every parent, and joins each selected raw path, regular-file mode and blo
 identity through that hierarchy. Both SHA-1 and SHA-256 are supported. Complete
 parent trees include sibling names and IDs, but unrelated subtrees are not
 traversed and no blob body is downloaded by this operation.
+
+The commit reader is bounded to 64 KiB of original body bytes and returns parent
+IDs without reading parent commits. The source-search connection accepts an
+ordinary read token or a canonical sponsored token with explicit `source-read`
+permission. Current head/commit pins, visibility and request bounds remain in
+force. A server without the current-commit route refuses acquisition; the client
+does not fall back to history access. Portable proof bytes and offline replay
+retain their existing schema.
 
 A missing page, omitted sibling, changed source, detached parent, wrong blob,
 unknown mode or selected symlink/gitlink fails the whole operation. There is no

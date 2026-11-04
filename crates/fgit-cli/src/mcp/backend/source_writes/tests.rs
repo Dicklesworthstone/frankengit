@@ -248,11 +248,11 @@ fn discovery_requires_each_semantic_pin_and_has_no_force_or_host_path_field() {
             .iter()
             .map(|tool| tool.name)
             .collect::<std::collections::BTreeSet<_>>(),
-        [CREATE, UPDATE, DELETE, RENAME, PUBLISH, TRANSACTION]
+        [CREATE, UPDATE, DELETE, RENAME, PUBLISH, PUBLISH_REBASE, TRANSACTION]
             .into_iter()
             .collect()
     );
-    assert_eq!(tools().len(), 6);
+    assert_eq!(tools().len(), 7);
     for tool in tools() {
         assert!(is_tool(tool.name));
         let schema = tool.schema.object().unwrap();

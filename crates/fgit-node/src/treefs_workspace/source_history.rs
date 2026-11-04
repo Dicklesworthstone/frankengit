@@ -12,7 +12,7 @@ use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};
 use fgit_forge::history::path::{PathLogOptions, path_history};
 use fgit_forge::history::{
     BlameOptions, BlameResult, HistoryError, HistoryLimits, HistoryPage, HistorySource, LogOptions,
-    blame, commit_history,
+    blame_frontier, commit_history,
 };
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};
@@ -127,8 +127,10 @@ impl OneNode {
     }
 
     /// Exact same-path line ancestry, including second and later merge parents.
-    /// A line range narrows returned data, never object authority. Missing or
-    /// malformed history cannot be reinterpreted as an attribution boundary.
+    /// A line range narrows returned data and the ancestry work needed for its
+    /// attribution, never object authority. Missing or malformed required
+    /// history cannot be reinterpreted as an attribution boundary. The report's
+    /// LineFrontier traversal counts touched commits, not total ancestry.
     pub async fn blame_source_in(
         &self,
         request: &NodeRequestContext,
@@ -144,7 +146,7 @@ impl OneNode {
             visibility,
             expected_head,
             options.limits,
-            |source, tip| blame(source, self.object_format, tip, options),
+            |source, tip| blame_frontier(source, self.object_format, tip, options),
         )
         .await
     }

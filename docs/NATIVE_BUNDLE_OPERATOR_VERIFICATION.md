@@ -135,6 +135,27 @@ SHA-256 `01d378218157c3b5c21f41ba164d60827ba4d574689c66a7e9a37946bb1af7d0`.
 Synthetic adapter/process tests remain distinct from the enabled native cells;
 neither qualifies a current-source Rust build.
 
+The existing `scripts/e2e/suites/operator/source_workspace.sh` campaign separately
+invokes the actual `verify_git_bundle_native.mjs` CLI on native-exported source
+in SHA-1 and SHA-256. Independent object framing and pinned sandboxed Git check
+the exported objects and refs. Wrong reference pins and a lower object-count
+budget refuse; buffered and file-backed verification must return the same
+content identities, with finalized file-backed scratch. The same exact bundle
+then enters the actual source-import and native bare-recovery CLIs with separate
+canonical Rust readback. This is selected unsigned-source integration evidence,
+not signed approval, every-entrypoint completeness, independent verification or
+full/release qualification. The receipt binds the selected native digest; a
+standalone run does not establish a new Rust build.
+
+For each listed entrypoint, the workspace receipt derives its counts from actual
+recorded CLI calls. Each row carries the client-file hash, selected native digest
+and success/expected-nonzero counts. The suite rejects a listed path without both.
+Expected nonzero exits can include unresolved outcomes; the counter never proves
+canonical refusal or non-commit. Specific refusal semantics are checked by the
+campaign's cases and canonical readback.
+This also exercises the offline package verifier's plain-text wrong-blob refusal;
+it does not turn an inventory of this source group into a whole-project census.
+
 The discovered live suite exercises the signed operator command with a prebuilt
 Rust verifier, including valid bundles larger than 16 MiB in both hash domains:
 

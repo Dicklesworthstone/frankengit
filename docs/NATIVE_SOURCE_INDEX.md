@@ -62,6 +62,16 @@ this conservative profile. It never silently rebuilds, scans files, or substitut
 old-source results for current ones. A missing index reports `Uninitialized`, not
 an empty successful query.
 
+The explicit current-native readers support immutable-index reuse after
+metadata-only changes while retaining those original source positions. Joined
+Initial, hydrated context and agent-context HTTP/MCP requests select this mode
+with `index_source=current-native-v1`; `fg agent context` uses
+`--index-source current-native-v1`. They authenticate current visibility and
+require the original native commit and tree to match. Current disclosure
+positions and original index positions are both preserved in response evidence.
+Source changes remain stale until indexed. See [exact source context](SOURCE_CONTEXT.md#reuse-after-metadata-only-changes)
+for hydration, provenance and budget rules. The strict reader above is unchanged.
+
 An optional exact index activation and independent minimum checkpoint use the
 existing `read_at`/anti-rollback machinery. Same-source rebuilds can advance the
 active index while a continuation retains the original index. A continuation

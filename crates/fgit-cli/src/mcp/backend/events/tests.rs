@@ -195,7 +195,9 @@ fn open(scratch: &Scratch, format: GitHashAlgorithm, body: &str) -> NodeTools {
         agent_context: false,
         artifacts: false,
         artifact_root: None,
+        agent_token_file: None,
         max_messages: 64,
+        index_maintenance: None,
     })
     .unwrap()
 }

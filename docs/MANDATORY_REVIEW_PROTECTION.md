@@ -8,8 +8,10 @@ runtime verification are separate gates, not implied by this document.
 
 ## Scope and deployment boundary
 
-The supported policy names exact `refs/heads/*` references and requires every
-listed reviewer to approve the exact native merge candidate. It supports current
+The supported policy names exact `refs/heads/*` references and requires the
+configured eligible-reviewer quorum to approve the exact native merge candidate.
+[Path review ownership](PATH_REVIEW_OWNERSHIP.md) adds independently required
+quorums for exact paths and subtrees, derived from the actual candidate delta. It supports current
 policy administrators, replacement, disabling, and ownership rotation. The
 [required workflow check profile](REQUIRED_WORKFLOW_CHECK_PROTECTION.md) also
 lets these administrators require exact-candidate results from explicitly named
@@ -62,7 +64,7 @@ an uncertain retry. Add `--object-format sha256` for a SHA-256 node.
 and workflow check selectors are sorted before sealing; duplicates refuse rather
 than silently disappearing. At most 32 administrators, 64 exact branches, 32
 reviewers and 32 workflow checks per branch are accepted. Each protected branch
-requires at least one reviewer, check or merge queue requirement. The first administrator set must contain the installing principal.
+requires at least one reviewer, path rule, check or merge queue requirement. The first administrator set must contain the installing principal.
 Subsequent changes are authorized by the **old** administrator set. Supplying a
 new administrator list cannot authorize its own installation.
 

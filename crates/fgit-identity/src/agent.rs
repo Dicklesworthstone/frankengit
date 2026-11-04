@@ -2,7 +2,7 @@
 //!
 //! The caller supplies a grant read from the exact authenticated repository
 //! frontier and fresh revocation evidence. A successful result identifies the
-//! agent and its finite metadata ceiling; it does not create an IntentRun,
+//! agent and its finite read/metadata ceiling; it does not create an IntentRun,
 //! authorize code publication, or widen the sponsor's authority.
 
 use fgit_crypto::{sha256_digest, verify_mac};
@@ -13,7 +13,7 @@ pub use fgit_forge::event::agent_credential::{
     ALL_OPERATIONS, AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
     AgentCredentialId, AgentCredentialSnapshot, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MAX_LIFETIME_SECONDS, NativeAgentCredentialEvent, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SponsorKind,
+    PULLS_WRITE, SOURCE_READ, SponsorKind,
 };
 
 /// Fixed finite input bound before hashing untrusted bearer bytes.
@@ -58,7 +58,7 @@ pub fn agent_credential_id(bearer: &[u8]) -> Result<AgentCredentialId, AgentCred
     AgentCredentialId::try_new(sha256_digest(bearer)).ok_or(AgentCredentialRefusal::InvalidBearer)
 }
 
-/// An authenticated identity and its explicit metadata ceiling. Fields are
+/// An authenticated identity and its explicit operation ceiling. Fields are
 /// private so callers cannot construct this result without authentication.
 /// A host must additionally create and enforce its sponsored IntentRun.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -57,6 +57,7 @@ fn install(node: &OneNode) -> u64 {
             ref_policy: None,
             administrators: vec![OWNER],
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 require_merge_queue: false,
                 required_approvals: 1,
                 required_checks: Vec::new(),
@@ -112,6 +113,55 @@ fn post_policy(endpoint: &Endpoint, token: char, key: Option<&str>, body: &str) 
         &request(endpoint, "POST", PATH, token, &headers, body.as_bytes()),
         true,
     )
+}
+
+#[test]
+fn path_only_rules_are_authorized_preserved_on_retry_and_retained_after_restart() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let node = init(&root, format, true);
+        let epoch = install(&node);
+        let credentials = root.0.join("credentials");
+        replace(
+            &credentials,
+            &(header(&node)
+                + &row('a', OWNER, "protection-read,protection-write")
+                + &row('b', FOREIGN, "protection-write")),
+        );
+        let server = Server::start(node, &credentials, 4, false, false);
+        let reference: String = b"refs/heads/main"
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let body = format!(
+            "expected_version=1&expected_epoch={epoch}&administrator={OWNER}&required_path_review={reference}:subtree:7372632fff:1:{FOREIGN}"
+        );
+        status(
+            &post_policy(&server.client, 'b', Some("foreign-path-policy"), &body),
+            409,
+        );
+        let installed = post_policy(&server.client, 'a', Some("http-path-policy"), &body);
+        assert_committed(&installed);
+        let shown = get(&server.client, PATH, 'a');
+        status(&shown, 200);
+        assert!(shown.body.contains("\"required_reviewers\":[]"));
+        assert!(shown.body.contains("\"path_hex\":\"7372632fff\""));
+        assert!(shown.body.contains("\"scope\":\"subtree\""));
+        let retry = post_policy(&server.client, 'a', Some("http-path-policy"), &body);
+        assert_eq!(retry.body, installed.body);
+        assert_eq!(server.finish().accepted_sessions(), 4);
+        let mut reopened = reopen(&root.config(format).with_http_protection_admin());
+        let selected = reopened
+            .runtime()
+            .block_on(reopened.read_review_protection_in(&reopened.request_context()))
+            .unwrap();
+        let branch = &selected.protection().unwrap().branches[0];
+        assert!(branch.reviewers.is_empty());
+        assert_eq!(branch.required_approvals, 0);
+        assert_eq!(branch.path_reviews[0].path, b"src/\xff");
+        assert_eq!(branch.path_reviews[0].reviewers, vec![FOREIGN]);
+        reopened.shutdown().unwrap();
+    }
 }
 
 #[test]

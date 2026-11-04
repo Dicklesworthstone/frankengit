@@ -81,6 +81,113 @@ impl std::fmt::Display for TrustedWorkflowFailure {
 }
 impl std::error::Error for TrustedWorkflowFailure {}
 
+impl OneNode {
+    // Tag execution is a read-only workflow selection. It does not widen the
+    // generic workspace editor, trusted tool, or candidate publication paths.
+    async fn workflow_tag_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<fgit_forge::tags::TagRead, NodeWorkspaceRefusal> {
+        let tag = self
+            .read_tag_in(
+                request,
+                reference,
+                &Default::default(),
+                expected_head,
+                fgit_forge::tags::TagReadLimits::default(),
+            )
+            .await
+            .map_err(|error| match error {
+                NodeWorkspaceRefusal::Tag(fgit_forge::tags::TagRefusal::SnapshotMoved) => {
+                    NodeWorkspaceRefusal::SourceBrowse(Box::new(
+                        fgit_forge::source_browse::SourceBrowseError::SnapshotMoved,
+                    ))
+                }
+                error => error,
+            })?;
+        if tag.peeled_kind != fgit_crypto::GitObjectKind::Commit {
+            return Err(NodeWorkspaceRefusal::CommitRequired);
+        }
+        Ok(tag)
+    }
+
+    async fn with_workflow_snapshot_in<A: GitHashAlgorithm, T>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        visibility: &fgit_wire::visibility::RefVisibility,
+        capability: &mut TreeCapability,
+        now: u64,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        expected_commit: Option<GitOid>,
+        maximum_object_bytes: usize,
+        consume: impl FnOnce(
+            &BaseView<A>,
+            &NodeTreeSource<'_>,
+            &mut TreeCapability,
+            RepositoryAuthorityHeadId,
+            u64,
+            Option<GitOid>,
+        ) -> Result<T, NodeWorkspaceRefusal>
+        + Send,
+    ) -> Result<T, NodeWorkspaceRefusal> {
+        if !reference.as_bytes().starts_with(b"refs/tags/") {
+            return self
+                .with_workspace_snapshot_in(
+                    request,
+                    reference,
+                    visibility,
+                    capability,
+                    now,
+                    expected_head,
+                    expected_commit,
+                    maximum_object_bytes,
+                    |base, source, capability, head, bytes| {
+                        consume(base, source, capability, head, bytes, None)
+                    },
+                )
+                .await;
+        }
+        if capability.repository_id() != self.repository_id() {
+            return Err(NodeWorkspaceRefusal::RepositoryMismatch);
+        }
+        if visibility.hides(reference.as_bytes()) {
+            return Err(NodeWorkspaceRefusal::RefUnavailable);
+        }
+        capability.authorize_root(now).map_err(|error| {
+            NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
+        })?;
+        let tag = self
+            .workflow_tag_in(request, reference, expected_head)
+            .await?;
+        let annotation_bytes = tag
+            .annotations
+            .iter()
+            .map(|tag| tag.body.len() as u64)
+            .sum();
+        capability.charge_fetch(annotation_bytes).map_err(|error| {
+            NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
+        })?;
+        self.with_workspace_snapshot_from_in(
+            request,
+            reference,
+            visibility,
+            capability,
+            now,
+            Some(tag.head),
+            expected_commit,
+            Some((tag.tip, tag.peeled)),
+            maximum_object_bytes,
+            |base, source, capability, head, bytes| {
+                consume(base, source, capability, head, bytes, Some(tag.tip))
+            },
+        )
+        .await
+    }
+}
+
 /// Exact unpublished inputs, not an RCR admitting their native identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TrustedWorkflowCandidate {
@@ -102,6 +209,9 @@ pub struct TrustedWorkflowRun {
     pub source_commit: GitOid,
     pub source_tree: GitOid,
     pub source_reference: Vec<u8>,
+    /// Canonical raw tag tip, distinct from the peeled source commit. Absent
+    /// for branch and candidate inputs to preserve their historical identity.
+    pub source_tag_tip: Option<GitOid>,
     pub candidate: Option<TrustedWorkflowCandidate>,
     /// Both branch selections and native ancestry checked before merge execution.
     /// This is not a PR-version attestation or authorization to publish.
@@ -186,6 +296,10 @@ impl TrustedWorkflowRun {
             candidate,
             candidate::merge_json(self.merge.as_ref(), self.merge_style)
         );
+        if let Some(tip) = self.source_tag_tip {
+            write!(identity, ",\"source_tag_tip\":\"{tip}\"")
+                .expect("writing to a String cannot fail");
+        }
         if let Some(contract) = &self.artifact_contract {
             write!(identity, ",\"artifact_contract\":{}", contract.to_json())
                 .expect("writing to a String cannot fail");
@@ -420,7 +534,7 @@ impl OneNode {
         // notices cancellation at its final checkpoint. Nothing is published.
         let observed = Mutex::new(None);
         let selected = self
-            .with_workspace_snapshot_in::<A, _>(
+            .with_workflow_snapshot_in::<A, _>(
                 request,
                 reference,
                 &Default::default(),
@@ -429,7 +543,7 @@ impl OneNode {
                 expected.0,
                 expected.1,
                 SOURCE_LIMITS.max_entry_bytes,
-                |base, source, capability, head, _| {
+                |base, source, capability, head, _, tag_tip| {
                     let result = run_at(
                         self,
                         request,
@@ -445,6 +559,7 @@ impl OneNode {
                         limits,
                         started,
                         artifacts,
+                        tag_tip,
                     );
                     *observed
                         .lock()
@@ -537,6 +652,7 @@ fn run_at<A: GitHashAlgorithm>(
     limits: WorkflowLimits,
     started: Instant,
     artifacts: Option<&TrustedWorkflowArtifactConfig>,
+    tag_tip: Option<GitOid>,
 ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
     if !workspace_request_live(request) || started.elapsed() >= limits.run_timeout {
         return Err(TrustedWorkflowFailure::InvalidInput(
@@ -565,6 +681,7 @@ fn run_at<A: GitHashAlgorithm>(
         limits,
         started,
         artifact_session.as_ref(),
+        tag_tip,
     )
 }
 
@@ -582,6 +699,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     limits: WorkflowLimits,
     started: Instant,
     artifact_session: Option<&artifacts::Session<'_>>,
+    tag_tip: Option<GitOid>,
 ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
     if !live() {
@@ -662,6 +780,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         merge: inputs.merge().cloned(),
         merge_style: inputs.merge_style(),
         source_reference: reference.as_bytes().to_vec(),
+        source_tag_tip: tag_tip,
         workflow_blob: native(entry.source_oid().digest_bytes())?,
         workflow_path: workflow_path.to_vec(),
         read_prefixes: declared.to_vec(),

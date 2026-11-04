@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 88,
+  "total_tools": 96,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -536,6 +536,16 @@
       "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/comments/append"
     },
     {
+      "tool": "frankengit_pull_check_evidence",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_workflow_artifact",
+      "cli_command": "fg-mcp (frankengit_pull_check_evidence)",
+      "rest_api_path": "GET /{repository}/api/v1/pulls/{number}/checks/evidence"
+    },
+    {
       "tool": "frankengit_pull_checks",
       "version": 1,
       "owner_subsystem": "forge",
@@ -823,7 +833,7 @@
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
       "cli_command": "fg log",
-      "rest_api_path": "GET /repos/{id}/commits"
+      "rest_api_path": "/api/v1/source/log"
     },
     {
       "tool": "frankengit_source_publish",
@@ -834,6 +844,16 @@
       "capability": "prepare_publication",
       "cli_command": "fg workspace apply",
       "rest_api_path": "POST /repos/{id}/commits"
+    },
+    {
+      "tool": "frankengit_source_publish_rebase",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg rebase apply",
+      "rest_api_path": "/api/v1/source/rebase/apply"
     },
     {
       "tool": "frankengit_source_search",
@@ -856,6 +876,16 @@
       "rest_api_path": "POST /repos/{id}/search/batch"
     },
     {
+      "tool": "frankengit_source_search_index",
+      "version": 1,
+      "owner_subsystem": "search",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_derived_generation",
+      "cli_command": "fg search --indexed-current",
+      "rest_api_path": "POST /{repository}/api/v1/source/search-index"
+    },
+    {
       "tool": "frankengit_source_symbols",
       "version": 1,
       "owner_subsystem": "search",
@@ -874,6 +904,56 @@
       "capability": "read_canonical_object",
       "cli_command": "fg tree",
       "rest_api_path": "GET /repos/{id}/trees"
+    },
+    {
+      "tool": "frankengit_source_verified_blob",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg verify-read",
+      "rest_api_path": "/api/v1/source/verified-blob"
+    },
+    {
+      "tool": "frankengit_tag_annotate",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg tag annotate",
+      "rest_api_path": "POST /{repository}/api/v1/source/tags/annotated"
+    },
+    {
+      "tool": "frankengit_tag_create",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg tag create",
+      "rest_api_path": "POST /{repository}/api/v1/source/tags/lightweight"
+    },
+    {
+      "tool": "frankengit_tag_delete",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "prepare_publication",
+      "cli_command": "fg tag delete",
+      "rest_api_path": "POST /{repository}/api/v1/source/tags/delete"
+    },
+    {
+      "tool": "frankengit_tag_inspect",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg tag show",
+      "rest_api_path": "POST /{repository}/api/v1/source/tags/inspect"
     },
     {
       "tool": "frankengit_transaction_outcome",

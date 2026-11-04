@@ -34,6 +34,15 @@ It does not migrate an existing repository or reinterpret a historical root.
 An existing legacy repository returns the typed HTTP 409
 `verified_blob_layout_unavailable` when asked for this proof profile.
 
+Proofs retain the exact authority-selected incarnation configuration, including
+schemas 2.0, 2.1 and revocation-aware 2.2. In schema 2.2, both the hidden-ref policy
+root and capability-revocation root remain bound to the independently trusted
+head. An absent revocation root still identifies a 2.2 body; the server does not
+downgrade it to 2.1. The same exact-body selection applies to native ref and
+object membership and absence proofs. A cumulative admission-closure checkpoint
+does not change proof eligibility: a cold node uses the verified checkpoint and
+later admitted objects while retaining the selected configuration and head.
+
 ## Obtain a trusted head separately
 
 The required `--trusted-head` is an exact algorithm-qualified authority-head
@@ -65,6 +74,11 @@ Proof requests use the existing source-read deployment switch and repository
 `read` credential grant. See [the source HTTP profile](HTTP_SOURCE_API.md#enable-source-access-deliberately)
 for credential rotation and the incarnation-bound credential table. A receive
 or metadata grant does not imply source read access.
+
+The verified-blob endpoint uses the repository `read` credential. Canonical
+sponsored `SOURCE_READ` credentials retain their existing closed route set;
+supporting revocation-aware proof configuration does not add this endpoint to
+that set or bypass current credential revocation.
 
 For new private credential files, the following creates a read-only token and
 binds its hash to the chosen principal. The credential parent directory must

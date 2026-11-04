@@ -3,8 +3,9 @@
 use fgit_forge::{
     AggregateVersion, ExpectedVersion,
     event::protection::{
-        MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS, MAX_POLICY_ADMINISTRATORS,
-        MAX_PROTECTED_BRANCHES, MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES,
+        MAX_BRANCH_PATH_REVIEWS, MAX_BRANCH_REQUIRED_CHECKS, MAX_BRANCH_REVIEWERS,
+        MAX_PATH_REVIEW_PATH_BYTES, MAX_POLICY_ADMINISTRATORS, MAX_PROTECTED_BRANCHES,
+        MAX_REF_POLICY_FRAME_BYTES, MAX_REF_POLICY_SOURCE_BYTES, PathReviewRule, PathReviewScope,
         ProtectedBranch, ProtectionCommand, RequiredCandidateWorkflowCheck, RequiredWorkflowCheck,
         ReviewProtection, compile_ref_policy, decode_ref_policy,
     },
@@ -83,7 +84,7 @@ pub(super) fn tool() -> Tool {
             ("type", text("integer")),
             ("minimum", json::number(0)),
             ("maximum", json::number(MAX_BRANCH_REVIEWERS as u64)),
-            ("description", text("Number of distinct eligible reviewers who must approve the exact candidate. Omitted means all listed reviewers. Use 1 through the reviewer count, or 0 only with no reviewers and a required check or merge queue. The PR opener and merge submitter never contribute votes.")),
+            ("description", text("Number of distinct eligible reviewers who must approve the exact candidate. Omitted means all listed reviewers. Use 1 through the reviewer count, or 0 only with no reviewers and a path rule, required check or merge queue. The PR opener and merge submitter never contribute votes.")),
         ]),
     );
     branch.insert(
@@ -94,6 +95,30 @@ pub(super) fn tool() -> Tool {
             ("description", text("Require an authenticated canonical queue landing targeting this branch. Any validated queue for that target qualifies; direct ref writes and ordinary PR merges do not. Reviews and checks remain required. Omitted means false, including historical policies.")),
         ]),
     );
+    branch.insert("path_reviews".into(), object([
+        ("type", text("array")),
+        ("maxItems", json::number(MAX_BRANCH_PATH_REVIEWS as u64)),
+        ("uniqueItems", Value::Bool(true)),
+        ("items", mutations::input_schema(Object::from([
+            ("path_hex".into(), object([
+                ("type", text("string")),
+                ("minLength", json::number(2)),
+                ("maxLength", json::number((MAX_PATH_REVIEW_PATH_BYTES * 2) as u64)),
+                ("pattern", text("^(?:[0-9a-f]{2})+$")),
+            ])),
+            ("scope".into(), object([
+                ("type", text("string")),
+                ("enum", Value::Array(vec![text("exact"), text("subtree")])),
+            ])),
+            ("required_reviewers".into(), principals_schema(MAX_BRANCH_REVIEWERS, 1)),
+            ("required_approvals".into(), object([
+                ("type", text("integer")),
+                ("minimum", json::number(1)),
+                ("maximum", json::number(MAX_BRANCH_REVIEWERS as u64)),
+            ])),
+        ]), &["path_hex", "scope", "required_reviewers", "required_approvals"])),
+        ("description", text("Independent exact-candidate review quorums for actual changed paths. Strictly sorted by native path bytes then scope (exact before subtree), with no duplicate selectors. Subtree includes its root and slash-separated descendants; all matching rules apply in addition to branch reviews/checks/queue requirements. At most 256 rules and 64 KiB of selector bytes across the policy. Omitted means empty on this complete replacement.")),
+    ]));
     let mut check = Object::new();
     check.insert("source_ref_hex".into(), branch["reference_hex"].clone());
     check.insert("publisher".into(), principal_schema());
@@ -135,7 +160,7 @@ pub(super) fn tool() -> Tool {
         ("type", text("array")), ("maxItems", json::number(MAX_BRANCH_REQUIRED_CHECKS as u64)),
         ("uniqueItems", Value::Bool(true)),
         ("items", mutations::input_schema(check, &["source_ref_hex", "publisher", "graph_root", "job"])),
-        ("description", text("Explicit trusted publishers, strictly sorted by source reference bytes, publisher, graph bytes, then UTF-8 job bytes. Empty grants no check authority. Each branch needs reviewers, checks, or require_merge_queue true.")),
+        ("description", text("Explicit trusted publishers, strictly sorted by source reference bytes, publisher, graph bytes, then UTF-8 job bytes. Empty grants no check authority. Each branch needs reviewers, path rules, checks, or require_merge_queue true.")),
     ]));
     let mut properties = Object::new();
     properties.insert("idempotency_key".into(), mutations::key_schema());
@@ -275,6 +300,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
                 "required_candidate_checks",
                 "required_approvals",
                 "require_merge_queue",
+                "path_reviews",
             ],
         )?;
         let raw = unhex(mutations::required(fields, "reference_hex")?, MAX_REF_BYTES)?;
@@ -358,12 +384,60 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             }
             required_candidate_checks.push(check);
         }
+        let raw_path_reviews = match fields.get("path_reviews") {
+            None => &[][..],
+            Some(_) => array(fields, "path_reviews", MAX_BRANCH_PATH_REVIEWS)?,
+        };
+        let mut path_reviews: Vec<PathReviewRule> = Vec::with_capacity(raw_path_reviews.len());
+        for value in raw_path_reviews {
+            let rule = value
+                .object()
+                .ok_or(ToolError::invalid("path_review_object_required"))?;
+            require_fields(
+                rule,
+                &[
+                    "path_hex",
+                    "scope",
+                    "required_reviewers",
+                    "required_approvals",
+                ],
+            )?;
+            let scope = match mutations::required(rule, "scope")? {
+                "exact" => PathReviewScope::Exact,
+                "subtree" => PathReviewScope::Subtree,
+                _ => return Err(ToolError::invalid("invalid_path_review_scope")),
+            };
+            let path = unhex(
+                mutations::required(rule, "path_hex")?,
+                MAX_PATH_REVIEW_PATH_BYTES,
+            )?;
+            let required_approvals = rule
+                .get("required_approvals")
+                .and_then(Value::unsigned)
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or(ToolError::invalid("invalid_path_review_approvals"))?;
+            let rule = PathReviewRule {
+                path,
+                scope,
+                required_approvals,
+                reviewers: principals(rule, "required_reviewers", MAX_BRANCH_REVIEWERS, false)?,
+            };
+            rule.validate()
+                .map_err(|_| ToolError::invalid("invalid_path_review"))?;
+            if path_reviews.last().is_some_and(|previous| {
+                (&previous.path, previous.scope) >= (&rule.path, rule.scope)
+            }) {
+                return Err(ToolError::invalid("path_reviews_not_canonical"));
+            }
+            path_reviews.push(rule);
+        }
         let reviewers = principals(
             fields,
             "required_reviewers",
             MAX_BRANCH_REVIEWERS,
             !required_checks.is_empty()
                 || !required_candidate_checks.is_empty()
+                || !path_reviews.is_empty()
                 || require_merge_queue,
         )?;
         let required_approvals = match fields.get("required_approvals") {
@@ -376,6 +450,7 @@ pub(super) fn parse(args: &Object) -> Result<ProtectionCommand, ToolError> {
             None => reviewers.len() as u16,
         };
         branches.push(ProtectedBranch {
+            path_reviews,
             require_merge_queue,
             required_approvals,
             required_checks,

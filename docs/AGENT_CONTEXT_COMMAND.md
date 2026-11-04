@@ -31,6 +31,40 @@ The repository and lexical index must already exist. Reading context does not
 build or refresh an index. A missing or stale required index refuses the read;
 an empty source result is never substituted for that failure.
 
+### Read after unrelated metadata changes
+
+Add `--index-source current-native-v1` when existing indexes should remain usable
+after an issue comment, credential rotation, or another metadata-only change:
+
+```sh
+fg agent context /srv/frankengit/repository \
+  TENANT_ID REPOSITORY_ID refs/heads/main \
+  --trusted-local --sponsor SPONSOR_ID --term cancellation \
+  --index-source current-native-v1 --max-files 8
+```
+
+This explicit mode authenticates the current visible native source and requires
+the original indexes to describe that same tenant, repository, incarnation,
+object format, ref, commit and tree. Their old authority heads, repository commits,
+forge positions and generation IDs remain recorded as original index provenance.
+Source changes still require an index covering the new source. Missing or corrupt
+indexes, hidden refs, unsatisfied generation floors and changed current-head pins
+remain refusals. Reading never builds indexes or retries against a newer head.
+
+Omitting the selector retains the original strict behavior: index authority
+positions must coincide with the selected current source. Only the exact value
+`current-native-v1` is accepted when supplied. The mode supports raw-path-prefix
+context selection; it does not implicitly select ranked retrieval.
+
+The current source authenticates the run and packet. The new request commits
+`index_source: "current-native-v1"`; `retrieval_evidence.current_source` retains
+the current disclosure observation, while each channel's `index_source` records
+its original index observation. The `source` field remains the current source.
+Original generation positions, row labels, anchor membership, omissions and exact
+excerpt bytes remain bound into the evidence commitment. Lineage metadata uses
+the original retrieval result-byte ceiling before any source hydration; this mode
+does not introduce a fresh resource allowance or request lifetime.
+
 `--term` selects complete lexical tokens and can be repeated up to 32 times.
 Terms use the existing Initial retrieval token normalization. They are not
 regular expressions or a natural-language prompt. `--path` is a raw byte prefix
@@ -136,26 +170,40 @@ The read-only run permits only `read_canonical_object` and
 The shared Rust implementation is
 `fgit_node::source_retrieval::agent_context::document::read_agent_context_in`.
 Hosts supply an independently obtained `SourceReadContext`, a sponsor, and one
-bounded `NodeRequestContext`. An HTTP source-read context requires the sponsor
-to equal its authenticated principal. The existing
+bounded `NodeRequestContext`. An ordinary HTTP source-read context requires the
+sponsor to equal its authenticated principal. A canonical sponsored HTTP or MCP
+context instead requires the grant's verified sponsor while retaining the agent
+as the independently authenticated principal. The existing
 `fgit_cli::agent_context::read_agent_context_in` API remains a trusted-local
 wrapper, and `bounded_request_context` supplies that command's deadline.
 Neither entry point accepts a bearer token or widens a source grant.
+The native and CLI `read_agent_context_revalidated_in` siblings select the
+explicit current-native mode with the same request type and authorization checks.
 
 ## Authenticated HTTP context
 
 `POST <repository-route>/api/v1/source/agent-context` returns the same native
 Agent Protocol document through the source-read gateway. It requires the
-server's source API switch and the current credential's `read` service grant.
+server's source API switch and the current ordinary credential's `read` service
+grant or a canonical agent credential's independent `source-read` scope.
 A receive-only credential cannot acquire source context. Credentials are read
 again for each request, so revocation affects the next request.
 
-The response profile is `agent-context-http-credential-v1`. Its sponsor is the
+For an ordinary credential, the response profile is
+`agent-context-http-credential-v1`. Its sponsor is the
 principal selected by the authenticated repository source-read credential;
 `sponsor.authentication` is `http-repository-read-credential`. The request cannot
 choose a sponsor, principal, or run ID. This records the existing HTTP host's
 credential mapping. It does not claim a canonical agent credential, sponsor
 delegation chain, persistent run, or publication authority.
+
+A canonical sponsored credential uses
+`agent-context-http-sponsored-agent-v1` and `canonical-agent-credential`
+authentication. Its sponsor is the grant's human or service sponsor. The separate
+`agent_authentication` witness names the actual agent, sponsor kind, credential,
+grant root, request-run commitment and original finite lifetime. The same witness
+is committed into `request.agent_authentication`. Metadata-only credentials do
+not grant source context, and neither profile accepts caller-selected identities.
 
 Requests use `application/x-www-form-urlencoded`, with these fields:
 
@@ -165,6 +213,7 @@ Requests use `application/x-www-form-urlencoded`, with these fields:
 | `term_hex` | Repeated exact lexical token bytes, at most 32 terms. |
 | `path_prefix_hex` | Repeated raw path prefixes narrowing selection, at most 128. |
 | `expected_head` | Optional exact authority-head token from a previous response. |
+| `index_source` | Optional `current-native-v1` to reuse unchanged-source indexes after metadata movement; absence retains strict matching. |
 | `symbol_name_hex`, `symbol_match`, `symbol_policy`, `symbol_kind` | The existing Initial symbol grammar; match is exact/prefix and policy required/optional. |
 | `minimum_lexical_token`, `minimum_lexical_number` | Optional paired lexical-generation floor. |
 | `minimum_symbol_token`, `minimum_symbol_number` | Optional paired symbol-generation floor. |
@@ -225,6 +274,26 @@ request arguments cannot replace it. The MCP host records
 `agent-context-trusted-local-v1` and `operator-asserted` sponsorship, with
 `trusted-local-mcp` source authorization.
 
+Alternatively, launch with a canonical agent credential whose operation mask
+includes `source-read`:
+
+```sh
+fg-mcp /srv/frankengit/repository "$TENANT_ID" "$REPOSITORY_ID" \
+  --agent-token-file /private/agent.token --allow-agent-context \
+  --expected-incarnation "$INCARNATION_ID"
+```
+
+This mode rejects `--principal` and `--trusted-local`. It independently intersects
+the launch context ceiling with the current canonical grant on every call. The
+document records `agent-context-mcp-sponsored-agent-v1`,
+`canonical-agent-credential` sponsorship and
+`mcp-sponsored-agent-source-read-credential` source authorization. Top-level and
+request-bound `agent_authentication` witnesses preserve the actual agent and
+sponsor rather than attributing the read to a local operator. An expired request
+cannot obtain a fresh source context or renew its lifetime during retrieval;
+response encoding and output retain that original deadline. Revocation and
+credential rotation use the same canonical checks as the HTTP profile.
+
 After the normal initialization handshake, a tool request is:
 
 ```json
@@ -238,6 +307,11 @@ node supplies `object_format`; clients cannot replace it. The complete native
 JSON document is limited to 1 MiB, including all source and evidence, and the
 existing MCP transport envelope remains independently bounded. No truncated
 JSON or successful empty substitute is returned when a required index is absent.
+Add `"index_source":"current-native-v1"` to the same tool arguments to retain
+usable context after unrelated metadata changes. It uses the same source-read
+credential and independent launch ceiling, and commits the selector into the
+request. The host authentication profile and original credential lifetime remain
+unchanged; the retrieval evidence distinguishes current source from index origins.
 
 A partial packet remains a successful read with `complete: false` and explicit
 omissions in `structuredContent`; it grants no publication rights. Cancellation

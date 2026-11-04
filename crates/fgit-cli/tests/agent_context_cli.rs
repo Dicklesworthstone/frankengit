@@ -3,14 +3,16 @@
 #[path = "../../fgit-node/tests/source_http/support.rs"]
 mod support;
 
+use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_cli::agent_context::{
     AgentContextRequest, bounded_request_context, read_agent_context_in,
+    read_agent_context_revalidated_in,
 };
 use fgit_node::source_retrieval::authorization::SourceReadContext;
 use fgit_node::source_retrieval::{Checkpoints, InitialQuery};
-use fgit_node::{NodeConfig, OneNode};
+use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_schema::json::{self, Value};
-use fgit_types::{GitHashAlgorithm, RefName, RepositoryId, TenantId};
+use fgit_types::{DecisionOutcome, GitHashAlgorithm, RefName, RepositoryId, TenantId};
 use std::process::{Command, Output};
 use std::time::Duration;
 use support::*;
@@ -282,6 +284,107 @@ fn actual_command_returns_authenticated_untrusted_context_for_both_formats() {
 }
 
 #[test]
+fn explicit_current_native_command_reuses_original_indexes_after_unrelated_publication() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, commit) = fixture_with_text(&root, format, config.clone(), SOURCE);
+        build_index(&node);
+        node.shutdown().unwrap();
+        let strict_args = arguments(&root, format);
+        let original = decode(&invoke(&strict_args, 0).stdout);
+        let original_head = field(field(&original, "authority_receipt"), "head").clone();
+        let original_lexical =
+            field(field(&original, "retrieval_evidence"), "lexical_generation").clone();
+        let original_symbols =
+            field(field(&original, "retrieval_evidence"), "symbol_generation").clone();
+
+        let node = reopen(&config);
+        let request = node.command_request_context(None);
+        let session = LoopbackReceiveSession::authenticated(
+            OWNER,
+            IdempotencyKey::new(b"context-unrelated-branch".to_vec()).unwrap(),
+        );
+        let accepted = node
+            .runtime()
+            .block_on(node.admit_branch_updates_durable_in(
+                &request,
+                &session,
+                &[RefCommand {
+                    name: RefName::try_new(b"refs/heads/unrelated-context").unwrap(),
+                    expected_old: ExpectedOld::Absent,
+                    proposed_new: ProposedNew::Update(commit),
+                    force: false,
+                }],
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            accepted.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let moved_generation = generation(&node);
+        node.shutdown().unwrap();
+        assert!(
+            field(&refused(&strict_args), "error")
+                .text()
+                .unwrap()
+                .contains("SourceIndexStale")
+        );
+
+        let mut args = strict_args.clone();
+        args.extend(["--index-source".into(), "current-native-v1".into()]);
+        let document = decode(&invoke(&args, 0).stdout);
+        assert_eq!(
+            field(field(&document, "request"), "index_source").text(),
+            Some("current-native-v1")
+        );
+        let receipt = field(&document, "authority_receipt");
+        assert_ne!(field(receipt, "head"), &original_head);
+        assert_eq!(
+            field(receipt, "generation").text(),
+            Some(moved_generation.to_string().as_str())
+        );
+        let evidence = field(&document, "retrieval_evidence");
+        assert_eq!(field(evidence, "source"), field(evidence, "current_source"));
+        assert_eq!(
+            field(field(evidence, "current_source"), "head"),
+            field(receipt, "head")
+        );
+        assert_eq!(field(evidence, "lexical_generation"), &original_lexical);
+        assert_eq!(field(evidence, "symbol_generation"), &original_symbols);
+        for channel in ["content_channel", "path_channel"] {
+            assert_eq!(
+                field(field(field(evidence, channel), "index_source"), "head"),
+                &original_head
+            );
+        }
+        let source = array(field(&document, "untrusted_sources"))
+            .iter()
+            .find(|source| field(source, "path_hex").text() == Some("616c7068612e747874"))
+            .unwrap();
+        assert_eq!(
+            field(source, "untrusted_bytes_hex").text(),
+            Some(hex(SOURCE).as_str())
+        );
+        args.extend([
+            "--expected-head".into(),
+            original_head.text().unwrap().into(),
+        ]);
+        assert!(
+            field(&refused(&args), "error")
+                .text()
+                .unwrap()
+                .contains("expected authority head changed")
+        );
+        refused(&strict_args);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), moved_generation);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn absent_indexes_and_missing_explicit_grants_refuse_before_disclosure() {
     let root = Scratch::new();
     let format = GitHashAlgorithm::Sha1;
@@ -366,6 +469,37 @@ fn shared_host_helper_obeys_cancellation_and_namespace_before_returning_context(
         .unwrap();
     assert!(allowed.complete);
     assert!(!array(field(&decode(allowed.json.as_bytes()), "untrusted_sources")).is_empty());
+    assert!(
+        node.runtime()
+            .block_on(read_agent_context_revalidated_in(
+                &node,
+                &cancelled,
+                input(&own)
+            ))
+            .is_err()
+    );
+    assert!(
+        node.runtime()
+            .block_on(read_agent_context_revalidated_in(
+                &node,
+                &live,
+                input(&wrong)
+            ))
+            .is_err()
+    );
+    let revalidated = node
+        .runtime()
+        .block_on(read_agent_context_revalidated_in(&node, &live, input(&own)))
+        .unwrap();
+    assert!(revalidated.complete);
+    assert_eq!(
+        field(
+            field(&decode(revalidated.json.as_bytes()), "request"),
+            "index_source"
+        )
+        .text(),
+        Some("current-native-v1")
+    );
     foreign.shutdown().unwrap();
     node.shutdown().unwrap();
 }

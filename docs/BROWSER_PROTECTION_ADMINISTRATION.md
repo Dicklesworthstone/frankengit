@@ -25,6 +25,21 @@ policy. Errors and stale asynchronous replies do not manufacture a snapshot.
 The displayed expected principal does not prove token ownership or authorize a
 policy change; native credentials and policy administrators retain that role.
 
+## Configure path review ownership
+
+The complete path-rule textarea is populated from native `path_reviews` and
+accepts one `BRANCH_HEX exact|subtree PATH_HEX COUNT ID[,ID...]` rule per line.
+Each branch must also appear in the branch-rule editor; use `-` reviewers and
+zero global approvals for path-only protection. All matching path quorums apply
+in addition to branch-wide reviews, checks and queue requirements. Exact native
+bytes, independent quorum semantics and bounded structural-delta enforcement
+are described in [path review ownership](PATH_REVIEW_OWNERSHIP.md).
+
+Removing or retargeting a branch requires explicitly updating its path rows.
+The frozen preview shows every path addition/removal, and saved receipts bind
+the complete original rules. The smaller PR protection panel displays and
+preserves existing path rules; use this independent page to edit them.
+
 ## Configure required workflow checks
 
 The editor manages the complete administrator set, branch review rules, merge

@@ -111,7 +111,9 @@ fn parse(arguments: &[String]) -> Result<Launch, String> {
             agent_context: false,
             artifacts: false,
             artifact_root: None,
+            agent_token_file: None,
             max_messages: maximum as usize,
+            index_maintenance: None,
             issues: false,
             discussions: false,
             pulls: false,
@@ -266,6 +268,18 @@ fn policy_value(policy: &ReviewProtection) -> Result<Value, ToolError> {
                             (
                                 "require_merge_queue",
                                 Value::Bool(branch.require_merge_queue),
+                            ),
+                            (
+                                "path_reviews",
+                                Value::Array(branch.path_reviews.iter().map(|rule| object([
+                                    ("path_hex", text(hex(&rule.path))),
+                                    ("scope", text(match rule.scope {
+                                        fgit_forge::event::protection::PathReviewScope::Exact => "exact",
+                                        fgit_forge::event::protection::PathReviewScope::Subtree => "subtree",
+                                    })),
+                                    ("required_reviewers", Value::Array(rule.reviewers.iter().map(|id| text(id.to_string())).collect())),
+                                    ("required_approvals", json::number(u64::from(rule.required_approvals))),
+                                ])).collect()),
                             ),
                             (
                                 "required_checks",

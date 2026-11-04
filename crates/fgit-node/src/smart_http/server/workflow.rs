@@ -40,6 +40,9 @@ impl Worker {
         on_drained: &dyn Fn(&WorkflowWatchReceipt) -> io::Result<()>,
         should_stop: Option<&dyn Fn() -> io::Result<bool>>,
     ) -> Result<Option<Self>, NodeSmartHttpRefusal> {
+        config
+            .validate()
+            .map_err(|error| io_error("configure workflow service", error))?;
         let node_config = node
             .service_config
             .clone()

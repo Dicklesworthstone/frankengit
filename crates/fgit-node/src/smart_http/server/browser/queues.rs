@@ -14,6 +14,10 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
             "text/javascript; charset=utf-8",
             include_str!("queues-protocol.mjs"),
         )),
+        b"/ui/queues/queues-candidate.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("queues-candidate.mjs"),
+        )),
         b"/ui/queues/queues-view.mjs" => Some((
             "text/javascript; charset=utf-8",
             include_str!("queues-view.mjs"),
@@ -116,6 +120,7 @@ mod tests {
             "",
             "queues.mjs",
             "queues-protocol.mjs",
+            "queues-candidate.mjs",
             "queues-view.mjs",
             "pulls-core.mjs",
             "pulls-actions.mjs",

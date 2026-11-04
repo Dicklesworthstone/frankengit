@@ -22,6 +22,9 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "tag_tests.rs"]
+mod tag_tests;
+
 const SOURCE: &str = "name: custody\non: push\njobs:\n  first:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf one > generated; printf first\n      - run: test \"$(cat generated)\" = one; printf second\n  next:\n    runs-on: fgit-trusted-local\n    needs: first\n    steps:\n      - run: test ! -e generated; printf dependent\n";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Temp(pub(super) PathBuf);
@@ -75,6 +78,7 @@ pub(super) fn report(temp: &Temp) -> TrustedWorkflowRun {
         source_commit: GitOid::Sha1(GitOidSha1::from_bytes([4; 20])),
         source_tree: GitOid::Sha1(GitOidSha1::from_bytes([5; 20])),
         source_reference: b"refs/heads/main".to_vec(),
+        source_tag_tip: None,
         candidate: None,
         merge: None,
         merge_style: Default::default(),

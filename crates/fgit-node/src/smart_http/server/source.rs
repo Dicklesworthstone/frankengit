@@ -16,6 +16,7 @@ mod regex;
 mod replay;
 mod request;
 mod retrieval;
+pub use indexed::source_index_json;
 pub use retrieval::{source_agent_context_json, source_retrieval_json};
 pub(super) mod review;
 mod symbols;
@@ -127,6 +128,32 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.is_mutation(),
         }
     }
+    /// Closed source-understanding profile for sponsored credentials. Several
+    /// other nonmutating routes prepare candidate objects or disclose historical
+    /// bundles; classifying every read as source access would widen this grant.
+    /// The current-commit reader belongs to the same ref-selected source surface
+    /// as tree/blob; it cannot traverse parents or select an arbitrary object.
+    pub(super) fn agent_operation(&self) -> Option<u16> {
+        let allowed = match &self.0 {
+            RequestKind::Read(_)
+            | RequestKind::Regex(_)
+            | RequestKind::Indexed(_)
+            | RequestKind::Symbols(_)
+            | RequestKind::Retrieval(_) => true,
+            RequestKind::Refs(request) => !request.is_mutation(),
+            RequestKind::Tags(request) => !request.is_mutation(),
+            RequestKind::Change(_)
+            | RequestKind::Initial(_)
+            | RequestKind::History(_)
+            | RequestKind::Historical(_)
+            | RequestKind::Review(_)
+            | RequestKind::Replay(_)
+            | RequestKind::Rebase(_)
+            | RequestKind::Bundle(_)
+            | RequestKind::VerifiedBlob(_) => false,
+        };
+        allowed.then_some(fgit_identity::agent::SOURCE_READ)
+    }
     const fn route(&self) -> &str {
         match &self.0 {
             RequestKind::Read(request) => request.repository_route,
@@ -187,19 +214,29 @@ impl Reply {
 }
 
 // Retained separately from a principal session: only source reads that passed
-// the actual route, credential and UploadPack grant can create this value.
+// the actual route, credential and source-read grant can create this value.
 pub(super) struct HttpReadGrant {
     principal: fgit_types::PrincipalId,
+    agent: Option<(
+        fgit_admission::evidence::AgentAuthentication,
+        std::time::Instant,
+    )>,
 }
 impl HttpReadGrant {
-    const fn context(
-        &self,
-        node: &OneNode,
-    ) -> crate::source_retrieval::authorization::SourceReadContext {
-        crate::source_retrieval::authorization::SourceReadContext::http_credential(
-            node,
-            self.principal,
-        )
+    fn context(&self, node: &OneNode) -> crate::source_retrieval::authorization::SourceReadContext {
+        match self.agent {
+            Some((authentication, deadline)) => {
+                crate::source_retrieval::authorization::SourceReadContext::http_agent_credential(
+                    node,
+                    authentication,
+                    deadline,
+                )
+            }
+            None => crate::source_retrieval::authorization::SourceReadContext::http_credential(
+                node,
+                self.principal,
+            ),
+        }
     }
 }
 pub(super) fn authenticate(
@@ -218,7 +255,7 @@ pub(super) fn authenticate(
     let permitted = if request.is_mutation() {
         profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else {
-        grant.permits(Service::UploadPack)
+        grant.permits_source_read()
     };
     if !profile.allow_source() || !permitted {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
@@ -233,16 +270,33 @@ pub(super) fn authenticate(
         // Transport identity only: reads never pass it into seal/key binding.
         b"read-only-source-query".as_slice()
     };
+    let session = grant.session(
+        IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
+    );
+    let authenticated = session
+        .authenticated_session()
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    let agent = match authenticated.authentication() {
+        fgit_admission::evidence::AdmissionAuthentication::AgentCredential(authentication) => {
+            if request.agent_operation() != Some(fgit_identity::agent::SOURCE_READ) {
+                return Err(ApiError::new(Status::Forbidden, "forbidden"));
+            }
+            // Both values originate in the same bounded credential request.
+            // Missing deadline cannot be substituted with a fresh lifetime.
+            Some((
+                authentication,
+                authenticated
+                    .agent_deadline
+                    .ok_or_else(ApiError::unavailable)?,
+            ))
+        }
+        _ => None,
+    };
     let read = (!request.is_mutation()).then_some(HttpReadGrant {
         principal: grant.principal,
+        agent,
     });
-    Ok((
-        grant.session(
-            IdempotencyKey::new(key.to_vec())
-                .map_err(|_| ApiError::bad("invalid_idempotency_key"))?,
-        ),
-        read,
-    ))
+    Ok((session, read))
 }
 
 pub(super) fn execute(
@@ -438,15 +492,31 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);
     // Native readers derive path grants from the SAME verified selected tree.
-    // This operator-managed profile grants whole-repository reads, not a remote
-    // agent's sparse capability. Current canonical hidden refs still apply.
+    // Both operator reads and explicit sponsored source-read grants have the
+    // repository boundary; query paths only narrow selection. Current canonical
+    // hidden refs remain undisclosable.
     let body = match &command {
+        Command::Commit { selection } => {
+            let report = drive_request_while(
+                node,
+                &context,
+                node.read_source_commit_local_in(
+                    &context,
+                    &selection.reference,
+                    selection.expected_head,
+                    selection.expected_commit,
+                ),
+                &mut live,
+            )
+            .map_err(read_error)?;
+            output::current_commit(node, selection, &report, maximum, &mut live)?
+        }
         Command::Browse { selection, query } => {
             let report = drive_request_while(
                 node,
@@ -567,6 +637,32 @@ fn read_error(error: NodeWorkspaceRefusal) -> ApiError {
 mod tests {
     use super::*;
     #[test]
+    fn current_commit_source_grant_does_not_open_history_or_binary_authority_proofs() {
+        for (raw, expected) in [
+            (
+                "POST /repo/api/v1/source/commit HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+                Some(fgit_identity::agent::SOURCE_READ),
+            ),
+            (
+                "POST /repo/api/v1/source/log HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+                None,
+            ),
+            (
+                "GET /repo/api/v1/source/verified-blob?ref_hex=726566732f68656164732f6d61696e HTTP/1.1\r\nHost: local\r\n\r\n",
+                None,
+            ),
+        ] {
+            let envelope =
+                fgit_wire::smart_http::head::parse(raw.as_bytes(), HttpLimits::default())
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                Request::parse(&envelope).unwrap().agent_operation(),
+                expected
+            );
+        }
+    }
+    #[test]
     fn read_failures_never_imply_mutation_ambiguity_or_complete_empty_results() {
         for error in [
             NodeWorkspaceRefusal::RefUnavailable,
@@ -592,6 +688,7 @@ mod tests {
     #[test]
     fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [
+            ("commit", "application/x-www-form-urlencoded", false),
             ("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
             ("search-batch", "application/x-www-form-urlencoded", false),

@@ -5,6 +5,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { performance } from 'node:perf_hooks';
 import { lookupOutcome, outcomeEndpoint, outcomeScope, validateOutcomeReply, OutcomeError } from './transaction_outcome.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 export const ISSUE_LIMITS = Object.freeze({ form: 256 * 1024, reply: 16 * 1024, intent: 512 * 1024,
   body: 64 * 1024, title: 256, labels: 32, assignees: 16 });
@@ -50,7 +51,10 @@ function text(value, maximum, single = false) {
 function opaque(value) { text(value, 256, true); if (/\s/u.test(value)) fail('invalid_issue_identity'); return value; }
 function identity(value) { if (typeof value !== 'string' || !ID.test(value)) fail('invalid_issue_principal'); return value; }
 function digest(value) { if (typeof value !== 'string' || !HASH.test(value)) fail('invalid_issue_digest'); return value; }
-export function issueTokenFingerprint(token) { digest(token); return issueHash(token); }
+export function issueTokenFingerprint(token) {
+  if (!isCredentialToken(token)) fail('invalid_issue_digest');
+  return issueHash(token);
+}
 function list(value, maximum, check) {
   if (!Array.isArray(value) || value.length > maximum) fail('issue_list_limit');
   const result = Array.from(value, check).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));

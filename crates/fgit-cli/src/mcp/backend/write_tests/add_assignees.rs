@@ -119,6 +119,8 @@ fn additions_preserve_independent_changes_and_recover_without_readding_removed_a
 
         // Historical recovery still precedes current service-intake eligibility.
         let mut stopped = NodeTools {
+            agent: None,
+            maintenance: None,
             node: OneNode::open_existing(fixture.config()).unwrap(),
             options: fixture.options(true, true, true, 0xa3),
         };

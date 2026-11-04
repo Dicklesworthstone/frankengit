@@ -460,3 +460,6 @@ fn hidden_missing_over_limit_and_cancelled_frontiers_never_publish_candidates() 
         node.shutdown().unwrap();
     }
 }
+
+#[path = "frontier_reuse_tests/replay_rebase.rs"]
+mod replay_rebase;

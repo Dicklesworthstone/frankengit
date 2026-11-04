@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod agent_credentials;
 mod artifact_command;
 mod bisect_command;
 mod branches;
@@ -60,6 +61,43 @@ fn main() -> ExitCode {
 }
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
+    if arguments.first().is_some_and(|argument| argument == "lfs") {
+        #[cfg(target_os = "linux")]
+        {
+            use fgit_node::source_retrieval::lfs_transfer;
+            return match lfs_transfer::run_with_timeout(
+                &arguments[1..],
+                &mut std::io::stdout().lock(),
+                fgit_cli::command_timeout_override_duration(),
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{}", lfs_transfer::error_json(&error));
+                    ExitCode::from(2)
+                }
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("LFS custody portability requires the Linux artifact storage profile");
+            return ExitCode::from(2);
+        }
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "agent-credential")
+    {
+        return match agent_credentials::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"agent_credential_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "checkpoint")

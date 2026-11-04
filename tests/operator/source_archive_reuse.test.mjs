@@ -18,7 +18,7 @@ function advance(f, definitions) {
   const answer = next.answer;
   next.answer = (operation, form) => {
     const value = answer(operation, form);
-    if (operation !== 'log') value.source_rcr = 'later-rcr';
+    value.source_rcr = 'later-rcr';
     return value;
   };
   Object.assign(f.repo, next); f.selection.expected_commit = next.commit; f.calls.length = 0;
@@ -28,7 +28,7 @@ for (const format of ['sha1', 'sha256']) {
     const f = await fixture(t, { format }), cold = await captureSource(f.selection, token); f.calls.length = 0;
     const warm = await captureSource(f.selection, token, { reuse: cold.capture });
     assert.deepEqual(warm.capture, cold.capture);
-    assert.deepEqual(operations(f), ['log', 'tree', 'tree']);
+    assert.deepEqual(operations(f), ['commit', 'tree', 'tree']);
     assert.equal(warm.metrics.reused_files, 3); assert.equal(warm.metrics.blob_requests, 0);
     assert.equal(warm.metrics.reused_blob_bytes, cold.metrics.blob_bytes);
     assert.equal(warm.metrics.downloaded_blob_bytes, 0); assert.ok(warm.metrics.wire_bytes < cold.metrics.wire_bytes);
@@ -37,7 +37,7 @@ for (const format of ['sha1', 'sha256']) {
       assert.equal(call.headers.authorization, `Bearer ${token}`); assert.equal(call.headers['idempotency-key'], undefined);
       assert.equal(call.headers['user-agent'], 'frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)');
       assert.equal(call.form.get('expected_commit'), f.repo.commit);
-      if (call.operation !== 'log') assert.equal(call.form.get('expected_head'), f.repo.snapshot);
+      if (call.operation !== 'commit') assert.equal(call.form.get('expected_head'), f.repo.snapshot);
     }
   });
   test(`${format}: new commit downloads only changed content and preserves current rename, mode and deletion`, async t => {
@@ -77,13 +77,13 @@ for (const format of ['sha1', 'sha256']) {
     f.calls.length = 0; const next = await captureSource(f.selection, token, { reuse: first.capture });
     assert.equal(next.metrics.reused_files, 2); assert.equal(next.metrics.reused_blob_bytes, 0);
     assert.equal(validateCapture(next.capture).gitlinks, 1); assert.deepEqual(next.capture, first.capture);
-    assert.deepEqual(operations(f), ['log', 'tree']); metrics(next);
+    assert.deepEqual(operations(f), ['commit', 'tree']); metrics(next);
   });
   test(`${format}: already possessed multi-range file uses no content requests`, async t => {
     const f = await fixture(t, { format, definitions: [{ path: 'large', data: Buffer.alloc(1024 * 1024 + 19, 7) }] });
     const old = await captureSource(f.selection, token); assert.equal(old.metrics.blob_requests, 2); f.calls.length = 0;
     const warm = await captureSource(f.selection, token, { reuse: old.capture });
-    assert.deepEqual(operations(f), ['log', 'tree']); assert.deepEqual(warm.capture, old.capture); metrics(warm);
+    assert.deepEqual(operations(f), ['commit', 'tree']); assert.deepEqual(warm.capture, old.capture); metrics(warm);
   });
 }
 for (const [name, mutate] of [
@@ -125,7 +125,7 @@ test('fresh tree omission is not repaired from a valid older tree', async t => {
   const f = await fixture(t), old = await captureSource(f.selection, token); f.calls.length = 0;
   f.control.mutate = (value, call) => { if (call.operation === 'tree') value.entries.pop(); };
   await assert.rejects(captureSource(f.selection, token, { reuse: old.capture }), /reconstruct/);
-  assert.deepEqual(operations(f), ['log', 'tree']);
+  assert.deepEqual(operations(f), ['commit', 'tree']);
 });
 for (const [name, change] of [
   ['snapshot', v => v.snapshot_token = `alg:2:${'f'.repeat(64)}`], ['incarnation', v => v.repository_incarnation = 'f'.repeat(32)],
@@ -133,13 +133,13 @@ for (const [name, change] of [
 ]) test(`current ${name} mismatch still refuses with all blobs cached`, async t => {
   const f = await fixture(t), old = await captureSource(f.selection, token); f.calls.length = 0;
   f.control.mutate = (value, call) => { if (call.operation === 'tree') change(value); };
-  await assert.rejects(captureSource(f.selection, token, { reuse: old.capture })); assert.deepEqual(operations(f), ['log', 'tree']);
+  await assert.rejects(captureSource(f.selection, token, { reuse: old.capture })); assert.deepEqual(operations(f), ['commit', 'tree']);
 });
 for (const status of [401, 403, 409, 429, 503]) test(`HTTP ${status} does not fall back to an offline archive`, async t => {
   const f = await fixture(t), old = await captureSource(f.selection, token); f.calls.length = 0;
   f.control.respond = (_request, response) => { response.writeHead(status); response.end('{}'); };
   await assert.rejects(captureSource(f.selection, token, { reuse: old.capture }), error => error.status === status);
-  assert.deepEqual(operations(f), ['log']);
+  assert.deepEqual(operations(f), ['commit']);
 });
 test('tight current limits still count every reused path and file size', async t => {
   const f = await fixture(t), old = await captureSource(f.selection, token), proof = validateCapture(old.capture);

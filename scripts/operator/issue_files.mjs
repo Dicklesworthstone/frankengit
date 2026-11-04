@@ -4,6 +4,7 @@ import { open, lstat, mkdir, realpath, link, unlink } from 'node:fs/promises';
 import { dirname, basename, resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { ISSUE_LIMITS, IssueError, issueCanonical, parseIssueJson, validateIssueIntent, issueTokenFingerprint } from './remote_issue.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES } from './credential_token.mjs';
 const fail = code => { throw new IssueError(code, { phase: 'files' }); };
 function privateStat(stat, directory = false) {
   if (typeof process.getuid !== 'function' || constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined ||
@@ -63,10 +64,11 @@ export async function readIssuePrivate(path, maximum = ISSUE_LIMITS.intent, resy
   } finally { await file.close(); }
 }
 export async function readIssueToken(path) {
-  const bytes = await readIssuePrivate(path, 65);
+  const bytes = await readIssuePrivate(path, MAX_CREDENTIAL_TOKEN_BYTES + 1);
   try {
-    if (bytes.length !== 64 && !(bytes.length === 65 && bytes[64] === 10)) fail('issue_invalid_token_file');
-    const token = bytes.subarray(0, 64).toString('utf8'); issueTokenFingerprint(token); return token;
+    const end = bytes.at(-1) === 10 ? bytes.length - 1 : bytes.length;
+    if (![64, MAX_CREDENTIAL_TOKEN_BYTES].includes(end)) fail('issue_invalid_token_file');
+    const token = bytes.subarray(0, end).toString('utf8'); issueTokenFingerprint(token); return token;
   } finally { bytes.fill(0); }
 }
 async function writeNew(path, bytes) {

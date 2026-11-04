@@ -82,6 +82,7 @@ fn protect(
         protection: ReviewProtection {
             administrators: vec![OWNER],
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 name: data.target_ref.clone(),
                 reviewers: if reviewed { vec![REVIEWER] } else { Vec::new() },
                 required_approvals: if reviewed { 1 } else { 0 },

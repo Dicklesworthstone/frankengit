@@ -129,3 +129,18 @@ through the real CLI. Payloads are opaque test bytes, **not native `fg` archives
 No Rust build, native archive/forge restore, whole-workspace gate, independent
 failure-domain assurance, hardware-power-loss guarantee, global-currentness or
 complete capsule recovery is established by these operator tests.
+
+The separate `scripts/e2e/suites/operator/backup_jobs.sh` campaign joins the
+shipped replenishment CLI to actual signed native archives in both Git hash
+formats. After all original source paths disappear and one designated job output
+is deliberately damaged, it replenishes fresh private locations from the intact
+copy with exact approval/key pins. Wrong-pin and insufficient-budget attempts
+must leave both fresh locations empty; permitted copies and exact retries must
+retain original signed bytes and healthy file identities while preserving the
+damaged original. A copy then enters the actual signed native restore adapter,
+and separate Rust reads check exact Git bytes/IDs/modes and canonical issue
+history. This campaign requires a separately qualified prebuilt `FG_BIN`, pinned
+Node and sandboxed Git 2.54.0, and binds the native digest in its receipt. Local
+copies and retained diagnostic originals do not establish destructive fault,
+independent failure-domain, hardware-power-loss, HTTPS, full-capsule, independent
+verification or full-workspace qualification.

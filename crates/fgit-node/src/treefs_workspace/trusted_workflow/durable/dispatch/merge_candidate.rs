@@ -179,6 +179,7 @@ impl OneNode {
                             ComparisonMode::MergeBase,
                             None,
                         )),
+                        None,
                     );
                     *observed
                         .lock()

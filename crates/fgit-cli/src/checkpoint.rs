@@ -31,9 +31,10 @@ The maintenance request uses the shorter of this deadline and a leading global
 fg --timeout-secs policy. Each invocation has one deadline, not one per stage.
 
 This trusted-local operation requires authority over the entire repository.
-Its capsule profile is DecisionHistoryOnly: this is outcome-index maintenance,
-not a complete repository backup or a restore drill. It does not prune history,
-collect garbage, or remove every other history/materialization limit.
+Its capsule profile is DecisionHistoryWithAdmissionClosureV1. It checkpoints
+terminal outcomes and cumulative admitted-object membership; object payloads
+still require another source. This is not a complete backup or restore drill.
+It does not prune history, collect garbage, or remove every history limit.
 
 Exit 0: a verified checkpoint receipt after successful node shutdown.
 Exit 2: invalid input, refusal, incomplete shutdown, or receipt output failure.
@@ -164,7 +165,7 @@ fn render(options: &Options, receipt: &OutcomeCheckpointReceipt) -> String {
             "\"source_head\":{},\"published_head\":{},\"authority_generation\":{},",
             "\"capsule_id\":{},\"checkpoint_root\":{},",
             "\"decisions\":{},\"leaf_objects\":{},\"leaf_bytes\":{},\"published\":{},",
-            "\"scope\":\"outcome_index_maintenance\",\"backup_profile\":\"DecisionHistoryOnly\",",
+            "\"scope\":\"outcome_index_maintenance\",\"backup_profile\":{},",
             "\"complete\":true,\"node_closed\":true}}"
         ),
         quote(&options.tenant.to_string()),
@@ -178,6 +179,7 @@ fn render(options: &Options, receipt: &OutcomeCheckpointReceipt) -> String {
         receipt.leaf_objects,
         receipt.leaf_bytes,
         receipt.published,
+        quote(receipt.backup_profile),
     )
 }
 
@@ -334,6 +336,7 @@ mod tests {
             generation: HeadGeneration::try_new(3).unwrap(),
             capsule_id: RepositoryCapsuleId::from_digest(algorithm, CANONICAL_CODEC_VERSION, bytes),
             checkpoint_root: Digest::new(algorithm, bytes),
+            backup_profile: "decision_history_with_admission_closure_v1",
             decisions: 7,
             leaf_objects: 1,
             leaf_bytes: 1024,
@@ -372,7 +375,10 @@ mod tests {
             assert_eq!(fields["published"], Value::Bool(published));
             assert_eq!(fields["complete"], Value::Bool(true));
             assert_eq!(fields["node_closed"], Value::Bool(true));
-            assert_eq!(fields["backup_profile"].text(), Some("DecisionHistoryOnly"));
+            assert_eq!(
+                fields["backup_profile"].text(),
+                Some(receipt.backup_profile)
+            );
             assert_eq!(
                 fields["published_head"].text(),
                 Some(head_token(receipt.published_head).as_str())

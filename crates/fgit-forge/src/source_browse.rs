@@ -5,6 +5,22 @@ use fgit_types::{
     RepositoryId,
 };
 pub const MAX_SOURCE_PAGE_BYTES: u32 = 1024 * 1024;
+/// Complete current-commit bodies have a separate finite metadata envelope.
+pub const MAX_SOURCE_COMMIT_BYTES: usize = 64 * 1024;
+
+/// The exact body of one current, visible ref tip. Parent identities are
+/// summaries of these bytes; no parent body or historical state was read.
+/// This is a source receipt, not an authorship or authority-head proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceCommitReport {
+    pub repository_id: RepositoryId,
+    pub source_head: RepositoryAuthorityHeadId,
+    pub source_rcr: RepositoryCommitId,
+    pub source_commit: Oid,
+    pub root_tree: Oid,
+    pub parents: Vec<Oid>,
+    pub body: Vec<u8>,
+}
 
 /// One level of a tree, or one exact byte range of a file/link payload.
 #[derive(Clone, Debug, Eq, PartialEq)]

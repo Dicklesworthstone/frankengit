@@ -222,6 +222,7 @@ impl OneNode {
             limits,
             started,
             artifact_session.as_ref(),
+            None,
         )
     }
 }

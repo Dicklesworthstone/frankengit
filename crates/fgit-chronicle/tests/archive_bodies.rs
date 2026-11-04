@@ -288,6 +288,7 @@ fn an_unknown_exported_profile_is_refused_rather_than_defaulted() {
         BackupProfile::DecisionHistoryOnly,
         BackupProfile::FullClosure,
         BackupProfile::FullClosureWithRepair,
+        BackupProfile::DecisionHistoryWithAdmissionClosureV1,
     ] {
         let capsule = capsule_at(4, None);
         let mut bundle = bundle_for(identity_of(&capsule));

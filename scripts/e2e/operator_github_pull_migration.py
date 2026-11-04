@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""Synthetic GitHub inputs -> shipped branch/PR CLIs -> real Rust authority.
+
+The existing sandboxed Git oracle checks fixture objects; separate Rust reads
+check publication. GitHub observations are input, never native authorization.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+from urllib.parse import urlsplit
+
+from operator_issue_smoke import OperatorCampaign, ROOT, TOKEN
+from operator_pull_smoke import check_fixture, PIN
+from pull_request_smoke import fixture
+from scoped_events_smoke import HttpServer, PRINCIPAL, TENANT, REPOSITORY, file_sha256, require
+
+BRANCH_PRINCIPAL, BRANCH_TOKEN = "66" * 16, "d" * 64
+PROFILE_FACTS = (
+    "offline_plan_owned_source", "branch_requirements_independent_principal",
+    "branch_refusal_and_exact_retry", "branch_budget_and_canonical_refs",
+    "pr_refusal_and_exact_retry", "pr_resume_and_canonical_attribution",
+    "collision_terminal_and_original_keys", "stopped_service_credential_free_completion",
+)
+FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained"] + [
+    f"{profile}_{fact}" for profile in ("single", "collection") for fact in PROFILE_FACTS]
+
+
+def private_json(path, value):
+    with path.open("x", encoding="utf-8") as out:
+        json.dump(value, out, ensure_ascii=False)
+    return path
+
+
+def request_hashes(path):
+    files = {str(p.relative_to(path)): file_sha256(p) for p in path.rglob("*")
+             if p.is_file() and (p.name == "intent.json" or p.name.startswith("request-"))}
+    require(bool(files), "original sealed request population is empty")
+    return files
+
+
+@contextmanager
+def native_service(campaign, root, credentials):
+    for attempt in range(16):
+        server = HttpServer(campaign, root, credentials, f"github-pr-{attempt}")
+        server.command.extend(["--allow-source", "--allow-receive", "--allow-outcomes"])
+        with server:
+            if urlsplit(server.url).port <= 10080:
+                continue
+            yield server
+            return
+    raise AssertionError("native Fetch-compatible listener selection exhausted")
+
+
+def run_case(c, oracle_run):
+    home = c.work
+    root, source = home / "repository", home / "git-source"
+    objects = fixture(source, "sha1")
+    (home / "reviewed.bundle").write_bytes(objects["bundle"])
+    check_fixture(c, oracle_run, source, objects)
+    c.facts["pinned_git_fixture"] = True
+    c.run("init", root, TENANT, REPOSITORY, "sha1")
+    c.run("import", root, TENANT, REPOSITORY, PRINCIPAL, "github-pr-native-fixture", source)
+
+    def read(operation, number=None):
+        args = ["pr", operation, root, TENANT, REPOSITORY]
+        if number is not None:
+            args.append(number)
+        args += ["--trusted-local", "--object-format", "sha1"]
+        if operation != "show":
+            args += ["--limit", 100]
+        page = json.loads(c.run(*args))
+        require(page["node_closed"] is True, "independent canonical reader did not close")
+        return page
+
+    def refs():
+        lines = c.run("at", root, TENANT, REPOSITORY, "latest", "refs").decode("ascii").splitlines()
+        header = re.fullmatch(r"references at latest \(([0-9]+) total\):", lines[0])
+        require(header is not None and int(header[1]) == len(lines) - 1, "canonical ref list is incomplete")
+        values = {}
+        for line in lines[1:]:
+            row = re.fullmatch(r"  (refs/heads/[A-Za-z0-9_/-]+) -> ([0-9a-f]{40})", line)
+            require(row is not None and row[1] not in values, "native ref row is malformed or repeated")
+            values[row[1]] = row[2]
+        require(list(values) == sorted(values), "canonical ref order changed")
+        return values
+
+    original_refs = refs()
+    inputs = home / "source-inputs"
+    inputs.mkdir(mode=0o700)
+    selected = c.node_command(ROOT / "scripts/e2e/helpers/github_pull_migration_source.mjs",
+                              [str(inputs), objects["source"], objects["target"]])
+    require(selected["source_class"] == "synthetic-github-input-only" and len(selected["pulls"]) == 2,
+            "synthetic source population is incomplete or misclassified")
+    c.facts["synthetic_source_collection"] = True
+    auth = home / "auth"
+    auth.mkdir(mode=0o700)
+    credentials, incarnation = c.credentials(root, auth)
+    header = credentials.read_text().splitlines()[0]
+    token, branch_token = auth / "pr-token", auth / "branch-token"
+    token.write_text(TOKEN, encoding="ascii")
+    branch_token.write_text(BRANCH_TOKEN, encoding="ascii")
+
+    def grants(branch="outcomes-read", pr="outcomes-read,pulls-read"):
+        pending = auth / "credentials.next"
+        rows = [(hashlib.sha256(BRANCH_TOKEN.encode()).hexdigest(), BRANCH_PRINCIPAL, branch),
+                (hashlib.sha256(TOKEN.encode()).hexdigest(), PRINCIPAL, pr)]
+        with pending.open("x", encoding="ascii") as out:
+            out.write(header + "\n")
+            for digest, principal, scopes in sorted(rows):
+                out.write(f"{digest} {principal} {scopes}\n")
+        pending.replace(credentials)
+
+    grants()
+    profiles = []
+    with native_service(c, root, credentials) as server:
+        for name, count, start in [("single", 1, 100), ("collection", 2, 200)]:
+            directory = home / name
+            directory.mkdir(mode=0o700)
+            script = ROOT / ("scripts/migrate_github_pulls.mjs" if name == "single" else "scripts/migrate_github_pull_collection.mjs")
+            scope = {"tenant_id": TENANT, "repository_id": REPOSITORY, "repository_incarnation": incarnation,
+                     "principal_id": PRINCIPAL, "object_format": "sha1"}
+            selection = {"endpoint": server.url, "scope": scope, "number_start": str(start),
+                         "namespace": f"refs/heads/import/{name}/"}
+            selection_file = private_json(directory / "selection.json", selection)
+            workdir = directory / "migration"
+
+            def preparation(job, selected_file, script=script, name=name):
+                source_args = (["--capture", selected["single_capture"], "--capture-confirm", selected["single_capture_sha256"]]
+                    if name == "single" else ["--collection-dir", selected["collection_dir"],
+                        "--collection-confirm", selected["collection_confirm"], "--complete-confirm", selected["complete_confirm"]])
+                return ["prepare", *source_args, "--selection", str(selected_file), "--workdir", str(job), "--token-file", str(token)]
+
+            if name == "single":
+                wrong = private_json(directory / "sha256-selection.json", {**selection, "scope": {**scope, "object_format": "sha256"}})
+                denied = c.node_command(script, preparation(directory / "sha256-refused", wrong), 2, error_reply=True)
+                require(denied["code"] == "github_pull_destination_hash_domain" and not (directory / "sha256-refused").exists(),
+                        "GitHub SHA-1 input was silently translated into a SHA-256 destination")
+                c.facts["sha256_destination_refusal"] = True
+            before = read("list")
+            prepared = c.node_command(script, preparation(workdir, selection_file))
+            common = ["--workdir", str(workdir), "--confirm", prepared["plan_sha256"]]
+            require(prepared["network_accessed"] is False and read("list") == before,
+                    "offline planning contacted or changed native authority")
+            profiles.append(dict(name=name, count=count, start=start, directory=directory, script=script,
+                selection=selection, selection_file=selection_file, workdir=workdir, common=common,
+                prepared=prepared, originals=request_hashes(workdir)))
+
+        # Each plan must own all input bytes before the source path disappears.
+        inputs.rename(home / "retained-source-inputs")
+        for p in profiles:
+            name, directory, script, common = p["name"], p["directory"], p["script"], p["common"]
+            c.node_command(script, ["inspect", *common])
+            c.facts[f"{name}_offline_plan_owned_source"] = True
+            jobs, expected_refs = [], dict(refs())
+            for index, entry in enumerate(selected["pulls"][:p["count"]], 1):
+                requirements = directory / f"requirements-{index}.json"
+                args = ["requirements", *common, *(["--batch", str(index)] if name == "collection" else []),
+                        "--principal", BRANCH_PRINCIPAL, "--out", str(requirements)]
+                c.node_command(script, args)
+                requirement = json.loads(requirements.read_text())
+                source_pull = entry["pull"]
+                wanted = {p["selection"]["namespace"] + f"pr-{source_pull['number']}/head": source_pull["head"]["sha"],
+                          p["selection"]["namespace"] + f"pr-{source_pull['number']}/base": source_pull["base"]["sha"]}
+                require(requirement["scope"]["principal_id"] == BRANCH_PRINCIPAL
+                        and {row["ref"]: row["new_commit"] for row in requirement["refs"]} == wanted,
+                        "derived branch requirements changed tips or copied source/PR authority")
+                expected_refs.update(wanted)
+                bootstrap = ROOT / "scripts/bootstrap_native_branches.mjs"
+                job = directory / f"branches-{index}"
+                created = c.node_command(bootstrap, ["prepare", "--workdir", str(job), "--selection", str(requirements),
+                    "--token-file", str(branch_token)])
+                branch_common = ["--workdir", str(job), "--confirm", created["plan_sha256"]]
+                originals = request_hashes(job)
+                if index == 1:
+                    grants()
+                    before = refs()
+                    refused = c.node_command(bootstrap, ["run", *branch_common, "--token-file", str(branch_token)], 3)
+                    require(refused["state"] == "unresolved" and refused["committed"] == 0 and refs() == before,
+                            "branch grant denial published a reference or lost uncertainty")
+                    key = refused["current"]["key"]
+                    grants("read,receive,outcomes-read")
+                    recover = c.node_command(bootstrap, ["run", *branch_common, "--token-file", str(branch_token)], 3)
+                    require(recover["current"]["key"] == key and recover["mutation_submitted"] is False and refs() == before,
+                            "restoring branch grants automatically resent an unresolved key")
+                    partial = c.node_command(bootstrap, ["run", *branch_common, "--token-file", str(branch_token),
+                        "--retry-key", key, "--max-operations", "1"], 3)
+                    require(partial["committed"] == 1 and partial["operations"] == 1,
+                            "explicit original-key branch retry did not preserve its one-operation prefix")
+                done = c.node_command(bootstrap, ["run", *branch_common, "--token-file", str(branch_token)])
+                require(done["complete"] is True and done["committed"] == created["branches"],
+                        "native branch bootstrap did not confirm all original creates")
+                require(request_hashes(job) == originals, "branch bootstrap replaced original request bodies")
+                jobs.append(dict(script=bootstrap, common=branch_common, requirements=requirements, originals=originals, root=job))
+            require(refs() == expected_refs and all(refs()[k] == v for k, v in original_refs.items()),
+                    "native branch bootstrap missed exact tips or moved a pre-existing branch")
+            c.facts[f"{name}_branch_requirements_independent_principal"] = True
+            c.facts[f"{name}_branch_refusal_and_exact_retry"] = True
+            c.facts[f"{name}_branch_budget_and_canonical_refs"] = True
+            p["branch_jobs"] = jobs
+            before = read("list")
+            denied = c.node_command(script, ["run", *common, "--token-file", str(token)], 3)
+            require(denied["state"] == "pending" and denied["committed_steps"] == 0 and read("list") == before,
+                    "denied PR writer published or claimed a committed prefix")
+            key = denied["current"]["key"]
+            grants("read,receive,outcomes-read", "outcomes-read,pulls-read,pulls-write")
+            recovered = c.node_command(script, ["run", *common, "--token-file", str(token)], 3)
+            require(recovered["current"]["key"] == key and recovered["mutations_dispatched"] == 0
+                    and read("list") == before, "restoring PR grants silently resent an original key")
+            partial = c.node_command(script, ["run", *common, "--token-file", str(token), "--retry-key", key,
+                "--max-operations", "1"], 3)
+            require(partial["committed_steps"] == 1 and partial["new_operations"] == 1,
+                    "PR retry exceeded its invocation operation allowance")
+            c.facts[f"{name}_pr_refusal_and_exact_retry"] = True
+            complete = c.node_command(script, ["run", *common, "--token-file", str(token)])
+            require(complete["complete"] is True and complete["committed_steps"] == p["prepared"]["steps"],
+                    "GitHub PR migration did not confirm every original native step")
+            observed = {}
+            for index, entry in enumerate(selected["pulls"][:p["count"]]):
+                number = p["start"] + index
+                row = read("show", number)["pull_request"]
+                source_pull = entry["pull"]
+                require(row["data"]["title"] == source_pull["title"] and row["data"]["body"] == source_pull["body"]
+                        and row["state"] == source_pull["state"] and row["opened_by"] == row["last_metadata_actor"] == PRINCIPAL,
+                        "canonical PR metadata lost source bytes/state or impersonated a source actor")
+                discussion, reviews = read("comments", number), read("reviews", number)
+                expected = [("pull-metadata", source_pull)] + [(kind, record) for kind, records in [
+                    ("discussion-comment", entry["discussion"]), ("review", entry["reviews"]),
+                    ("inline-review-comment", entry["inline"])] for record in records]
+                require(len(discussion["comments"]) == len(expected) and reviews["reviews"] == [],
+                        "canonical discussion lost observations or imported active approvals")
+                for comment, (kind, original) in zip(discussion["comments"], expected):
+                    envelope, payload = comment["body"].split("\n\n", 1)
+                    provenance = json.loads(envelope.split("\n", 1)[1])
+                    require(comment["actor"] == PRINCIPAL and provenance["kind"] == kind
+                            and provenance["part"] == provenance["parts"] == 1 and json.loads(payload) == original
+                            and hashlib.sha256(payload.encode()).hexdigest() == provenance["sha256"],
+                            "native attributed observation differs from the pinned source record")
+                observed[number] = (row, discussion["comments"])
+            require(refs() == expected_refs, "PR metadata migration moved Git references")
+            c.facts[f"{name}_pr_resume_and_canonical_attribution"] = True
+            # New independent occupied-ref intent, not replacement of an uncertain key.
+            first = jobs[0]
+            collision_job = directory / "branch-collision"
+            prepared = c.node_command(first["script"], ["prepare", "--workdir", str(collision_job),
+                "--selection", str(first["requirements"]), "--token-file", str(branch_token)])
+            collision_args = ["--workdir", str(collision_job), "--confirm", prepared["plan_sha256"]]
+            collision = c.node_command(first["script"], ["run", *collision_args, "--token-file", str(branch_token)], 1)
+            require(collision["state"] == "refused" and collision["committed"] == 0 and refs() == expected_refs,
+                    "occupied branch create was overwritten, skipped or falsely completed")
+            repeated = c.node_command(first["script"], ["run", *collision_args], 1)
+            require(repeated["current"]["key"] == collision["current"]["key"] and repeated["operations"] == 0,
+                    "occupied-branch recovery replaced its key or redispatched")
+            retained = home / "retained-source-inputs"
+            source_args = (["--capture", str(retained / Path(selected["single_capture"]).relative_to(inputs)),
+                            "--capture-confirm", selected["single_capture_sha256"]] if name == "single" else [
+                            "--collection-dir", str(retained / Path(selected["collection_dir"]).relative_to(inputs)),
+                            "--collection-confirm", selected["collection_confirm"], "--complete-confirm", selected["complete_confirm"]])
+            collision_plan = directory / "pr-collision"
+            prepared = c.node_command(script, ["prepare", *source_args, "--selection", str(p["selection_file"]),
+                "--workdir", str(collision_plan), "--token-file", str(token)])
+            collision_args = ["--workdir", str(collision_plan), "--confirm", prepared["plan_sha256"]]
+            collision = c.node_command(script, ["run", *collision_args, "--token-file", str(token)], 1)
+            require(collision["state"] == "refused" and collision["committed_steps"] == 0 and refs() == expected_refs,
+                    "occupied PR number did not stop the migration before successor work")
+            repeated = c.node_command(script, ["run", *collision_args], 1)
+            require(repeated["current"]["key"] == collision["current"]["key"] and repeated["new_operations"] == 0,
+                    "occupied-PR recovery replaced its key or redispatched")
+            require(request_hashes(p["workdir"]) == p["originals"], "PR migration replaced an original sealed request")
+            for number, (row, comments) in observed.items():
+                require(read("show", number)["pull_request"] == row and read("comments", number)["comments"] == comments,
+                        "branch collision changed existing PR content or discussion")
+            c.facts[f"{name}_collision_terminal_and_original_keys"] = True
+    token.rename(token.with_name("retained-pr-token"))
+    branch_token.rename(branch_token.with_name("retained-branch-token"))
+    for p in profiles:
+        for operation in ("inspect", "status", "recover", "run"):
+            settled = c.node_command(p["script"], [operation, *p["common"]])
+            require(settled.get("network_accessed") is False, "completed PR custody needed a stopped endpoint or token")
+        for job in p["branch_jobs"]:
+            for operation in ("inspect", "status", "recover", "run"):
+                settled = c.node_command(job["script"], [operation, *job["common"]])
+                require(settled.get("network_accessed") is False, "completed branch custody needed a stopped endpoint or token")
+        c.facts[f"{p['name']}_stopped_service_credential_free_completion"] = True
+    c.facts["all_services_drained"] = True
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("fg", "node", "work", "oracle-run", "summary"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    args = parser.parse_args()
+    os.umask(0o077)
+    args.work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    fg, node = args.fg.resolve(strict=True), args.node.resolve(strict=True)
+    c = OperatorCampaign(fg, node, args.work.resolve())
+    summary = {"complete": False, "facts": c.facts, "selected_facts": FACTS,
+        "binary_sha256": file_sha256(fg), "node_sha256": file_sha256(node), "artifacts": str(c.work),
+        "oracle_pin": PIN, "oracle_run": str(args.oracle_run),
+        "entrypoints": [{"path": "scripts/" + name, "binary_sha256": file_sha256(fg)} for name in (
+            "bootstrap_native_branches.mjs", "migrate_github_pulls.mjs", "migrate_github_pull_collection.mjs")],
+        "non_claim": "Synthetic GitHub source inputs and real native SHA-1 destination; not live GitHub, SHA-256 translation, every entrypoint, independent batch, D10 or full/release qualification."}
+
+    def stop(_number, _frame):
+        raise InterruptedError("GitHub PR campaign interrupted; draining native owners")
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        identity = c.node_command(ROOT / "scripts/verify_js.mjs", ["runtime"])
+        require(identity["type"] == "js_runtime_identity" and identity["corpus_started"] is False,
+                "runtime identity did not precede native dispatch")
+        summary["node_version"] = identity["node"]
+        run_case(c, args.oracle_run.resolve(strict=True))
+        require(set(c.facts) == set(FACTS) and all(c.facts.values()), "selected native facts are missing")
+        summary["complete"] = True
+    except BaseException as error:
+        summary["failure"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        args.summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()

@@ -48,14 +48,111 @@ authentication, per-issue ACLs, hostile process isolation, or a full Intent
 Run/effect-broker capability. Do not proxy stdio to untrusted remote clients or
 treat returned text as executable instructions.
 
-## Sponsored agent context
+## Sponsored credentials
 
-`--allow-agent-context --principal <id> --expected-incarnation <id>` independently
+A sponsored agent can use a canonical repository credential instead of the
+trusted-local operator profile:
+
+```sh
+fg mcp /absolute/path/to/existing-node TENANT_HEX REPOSITORY_HEX \
+  --agent-token-file /private/agent.token \
+  --expected-incarnation INCARNATION_HEX \
+  --allow-source --allow-agent-context
+```
+
+The credential must independently grant `source-read`. The source ceiling exposes
+only current tree/blob reads, literal/regex and batch search, persisted
+lexical/path pages, scanned or indexed symbols, ref listing, Initial retrieval
+and source context. The separate agent-context ceiling exposes
+only `frankengit_agent_context`. Neither flag grants the other. Source history,
+candidate preparation, verified-blob streaming, bundles, queues and workflow
+artifacts remain outside the sponsored profile even when an operator source
+launch supports them.
+
+Agent mode requires the exact incarnation and rejects `--trusted-local` and
+`--principal`. Every call verifies the current canonical grant and retains its
+agent, human or service sponsor, original deadline and response byte reservation.
+Revocation affects the next call; replacing the token file requires restarting
+the process. See [sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md#use-the-credential-with-mcp)
+for the exact tool inventory, independent metadata ceilings and response lifetime.
+
+## Agent context
+
+In a trusted-local launch, `--allow-agent-context --principal <id>
+--expected-incarnation <id>` independently
 enables `frankengit_agent_context`. It returns a real read-only IntentRun and
 ContextPacket with authenticated authority and exact native source evidence.
+In a sponsored launch, `--allow-agent-context` uses the canonical credential's
+sponsor and requires its `source-read` scope, without a launch principal.
 This grant enables no other tool group or write capability. See
 [the context command and HTTP/MCP contract](AGENT_CONTEXT_COMMAND.md#mcp-context)
 for arguments, explicit omissions, output limits and sponsorship semantics.
+
+Initial, source-context and agent-context tools accept the explicit
+`index_source: "current-native-v1"` selector. It keeps existing index generations
+usable after unrelated metadata changes by authenticating the current visible
+native source and requiring the same commit and tree. Original index authority
+positions and generations remain separate evidence. The default strict profile
+is unchanged; missing indexes and actual source changes still refuse. The mode
+uses the existing read grants and supports raw-path-prefix context selection.
+
+## Keep source indexes current during an MCP session
+
+An operator can explicitly attach the existing lexical and Rust-symbol
+maintenance controllers to `fg mcp` or `fg-mcp`. This lets indexed source and
+agent-context tools catch up after real source changes without a separate HTTP
+service or finite worker invocation. The controllers remain local background
+work; no MCP tool starts an index build or configures their scope.
+
+For a sponsored SHA-1 repository, create separate private progress directories
+and launch with both profiles:
+
+```sh
+mkdir -m 700 "$LEXICAL_PROGRESS_DIR" "$SYMBOL_PROGRESS_DIR"
+fg mcp "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" \
+  --agent-token-file "$AGENT_TOKEN_FILE" \
+  --expected-incarnation "$INCARNATION_HEX" \
+  --allow-source --allow-agent-context --object-format sha1 \
+  --index-profile both --index-format sha1 --index-state init \
+  --index-state-dir "$LEXICAL_PROGRESS_DIR" \
+  --index-symbol-state-dir "$SYMBOL_PROGRESS_DIR" \
+  --index-ref refs/heads/main --index-interval-secs 5 \
+  --index-attempt-timeout-secs 300
+```
+
+The credential still needs `source-read`; these launch options grant it no new
+operation. Trusted-local launches use the same maintenance options and retain
+their existing principal requirements for agent context. Either source or
+agent-context reads must be enabled, and maintenance always requires the exact
+repository incarnation. `--index-format` must match `--object-format`.
+
+Select `lexical`, `symbols`, or `both`. A single profile uses only
+`--index-state-dir`; `both` requires the separate symbol directory. Repeat
+`--index-ref` for at most 32 unique full refs. Interval and attempt timeout each
+accept 1–3600 whole seconds, defaulting to 5 and 300. Every attempt also retains
+the inherited background-controller timeout and other resource bounds.
+
+All progress directories must already exist with the Unix private-directory
+ownership required by the [index worker](SOURCE_INDEX_WORKER.md). Use `resume`
+with the same namespace, profiles, ref set and directories after initialization.
+Startup can retain initialized progress even if no index attempt ran; inspect
+that progress and resume it rather than clearing it or repeating `init` blindly.
+Pending original candidates and generation floors survive clean stop and restart.
+
+The server acquires every progress owner before serving, but holds the first
+index attempts until its initialization response has been fully written,
+flushed and checked. EOF before initialization or initialization-output failure
+therefore drains without an index attempt. Readiness does not promise freshness: both generations
+publish independently, and a required-symbol query can refuse while they catch
+up. Once current, unchanged-source observations do not create new generations.
+
+EOF, framing/output failure and the message limit request stop and join every
+controller before the parent node shuts down. A terminal controller signals its
+siblings through their existing cancellation path. Blocking stdio reports that
+failure at its next input/output boundary; an idle stdin read is not interrupted.
+An interrupted or failed response does not prove rollback of a submitted mutation
+or index candidate. The runtime must have capacity for the maintenance children
+and one request lane; insufficient capacity refuses before worker startup.
 
 ## Issue read tools
 

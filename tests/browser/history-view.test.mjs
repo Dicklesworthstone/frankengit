@@ -24,7 +24,7 @@ function harness(f = fixture()) {
     const node = new Element(match[1]); node.value = /\bvalue="([^"]*)"/.exec(match[0])?.[1] ?? ''; return [match[2], node];
   }));
   const get = name => { const value = elements.get(`history-${name}`); assert.ok(value, `missing ${name}`); return value; };
-  get('format').value = f.algorithm; get('path-kind').value = 'text'; get('ref').value = f.ref;
+  get('format').value = f.algorithm; get('path-kind').value = 'text'; get('ref').value = f.ref; get('mode').value = 'all';
   const events = new Element('window'), downloads = [], doc = { body: new Element('body'), createElement: tag => new Element(tag), getElementById: id => elements.get(id) };
   const view = mountHistory(doc, { href, fetchImpl: f.fetchImpl, cryptoImpl: crypto, events, download: data => downloads.push(data) });
   return { ...view, get, f, downloads, events, elements,
@@ -53,6 +53,8 @@ for (const algorithm of ['sha1', 'sha256']) {
   test(`${algorithm}: blame origin navigation verifies the attributed historical bytes`, async () => {
     const h = harness(fixture(algorithm)); await h.connect(); await h.blame();
     assert.match(h.get('content').textContent, /Complete-file blob identity checked/);
+    assert.match(h.get('content').textContent, /2 commits visited/);
+    assert.match(h.get('content').textContent, /unrelated ancestry was not scanned/);
     await one(h.get('content'), `Verify origin ${h.f.base.object_id.slice(0, 12)}:1`).fire('click');
     assert.match(h.get('status').textContent, /Exact attributed origin bytes checked/);
     assert.equal(h.f.calls.at(-1).form.get('offset'), '5'); assert.equal(h.f.calls.at(-1).form.get('limit'), '3');
@@ -69,6 +71,38 @@ test('history continuation retains the applied path, limit and snapshot after fo
   assert.equal(form.get('path_hex'), h.f.path); assert.equal(form.get('limit'), '1'); assert.equal(form.get('after'), '1');
   assert.equal(form.get('expected_head'), h.f.head); assert.equal(form.get('ref'), h.f.ref);
   assert.match(h.get('content').textContent, /Exact path history: file/);
+});
+test('first-parent history opens directly and retains its profile and cursor after form edits', async () => {
+  const h = harness(); h.get('mode').value = 'first-parent'; await h.connect();
+  assert.equal(h.f.calls[0].form.get('first_parent'), 'true');
+  assert.equal(h.f.calls[0].form.has('after'), false);
+  assert.match(h.get('content').textContent, /Recent first-parent history/);
+  assert.match(h.get('content').textContent, /first-parent root was reached/);
+  h.get('limit').value = '1'; await h.get('query').fire('submit');
+  assert.match(h.get('content').textContent, /Older ancestry remains unread/);
+  assert.ok(!h.get('content').textContent.includes('reachable commits'));
+  const next = one(h.get('paging'), 'Next first-parent page');
+  h.get('mode').value = 'all'; h.get('path').value = 'elsewhere'; h.get('limit').value = '100'; h.get('ref').value = 'refs/heads/other';
+  await next.fire('click');
+  const form = h.f.calls.at(-1).form;
+  assert.equal(form.get('first_parent'), 'true'); assert.equal(form.get('limit'), '1');
+  assert.equal(form.get('cursor'), `fgfp1/${h.f.head}/${hex(bytes(h.f.ref))}/${h.f.algorithm}/${h.f.tip.object_id}/1`);
+  assert.equal(form.has('after'), false); assert.equal(form.has('path_hex'), false);
+  assert.equal(form.get('ref'), h.f.ref); assert.equal(form.get('expected_head'), h.f.head);
+  assert.equal(buttons(h.get('paging'), 'Next first-parent page').length, 0);
+  assert.match(h.get('content').textContent, /first-parent root was reached/);
+  await one(h.get('paging'), 'Restart first-parent pages').fire('click');
+  assert.equal(h.f.calls.at(-1).form.has('cursor'), false); assert.equal(h.f.calls.at(-1).form.get('first_parent'), 'true');
+});
+test('first-parent path conflicts refuse before network; choosing all parents restores exact-path history', async () => {
+  const h = harness(); h.get('mode').value = 'first-parent'; await h.connect();
+  h.get('path').value = 'file'; const before = h.f.calls.length; await h.get('query').fire('submit');
+  assert.equal(h.f.calls.length, before); assert.match(h.get('status').textContent, /Clear the path filter/);
+  assert.equal(h.get('content').textContent, '');
+  h.get('mode').value = 'all'; await h.get('query').fire('submit');
+  assert.equal(h.f.calls.at(-1).form.get('path_hex'), h.f.path);
+  assert.equal(h.f.calls.at(-1).form.has('first_parent'), false);
+  assert.match(h.get('content').textContent, /Exact path history/);
 });
 test('narrow blame ranges do not claim complete-file verification', async () => {
   const h = harness(); await h.connect(); h.get('first').value = '1'; h.get('end').value = '2'; await h.blame();

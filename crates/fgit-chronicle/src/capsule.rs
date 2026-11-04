@@ -59,6 +59,17 @@ pub enum BackupProfile {
     /// Full closure plus the repair symbols needed to survive the declared
     /// failure-domain loss.
     FullClosureWithRepair,
+    /// Decision history plus the complete cumulative admitted Git-object
+    /// membership at the capsule's exact head. `object_closure_root` names the
+    /// canonical permitted-object set, including objects whose refs were
+    /// deleted; it is not merely the current reachable set or the latest RCR.
+    ///
+    /// Object payloads still require another source, as with
+    /// [`Self::DecisionHistoryOnly`]. This profile permits a verified native
+    /// admission reader to stop its closure-prefix replay, not a full restore.
+    /// Publishers must derive, stage and verify the complete set before the
+    /// exact-head activation. Legacy profiles make no such declaration.
+    DecisionHistoryWithAdmissionClosureV1,
 }
 
 impl BackupProfile {
@@ -69,6 +80,9 @@ impl BackupProfile {
             Self::DecisionHistoryOnly => "decision_history_only",
             Self::FullClosure => "full_closure",
             Self::FullClosureWithRepair => "full_closure_with_repair",
+            Self::DecisionHistoryWithAdmissionClosureV1 => {
+                "decision_history_with_admission_closure_v1"
+            }
         }
     }
 
@@ -79,6 +93,7 @@ impl BackupProfile {
             Self::DecisionHistoryOnly => 1,
             Self::FullClosure => 2,
             Self::FullClosureWithRepair => 3,
+            Self::DecisionHistoryWithAdmissionClosureV1 => 4,
         }
     }
 
@@ -92,6 +107,7 @@ impl BackupProfile {
             1 => Ok(Self::DecisionHistoryOnly),
             2 => Ok(Self::FullClosure),
             3 => Ok(Self::FullClosureWithRepair),
+            4 => Ok(Self::DecisionHistoryWithAdmissionClosureV1),
             _ => Err(ChronicleRefusal::BackupProfileUnknown { observed: value }),
         }
     }

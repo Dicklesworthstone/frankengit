@@ -27,7 +27,7 @@ export function referenceLabel(encoded) {
   catch { return '[Non-UTF-8 reference; use its exact hex bytes.]'; }
 }
 
-export function editorPolicy(administrators, rules, observedBranches = [], observedRefPolicy = null, checkRows) {
+export function editorPolicy(administrators, rules, observedBranches = [], observedRefPolicy = null, checkRows, pathRows) {
   const lines = (value, maximum, count) => {
     if (typeof value !== 'string' || value.length > maximum) throw new Error('Protection editor exceeds its input limit.');
     const rows = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -37,6 +37,16 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
   // An explicit selector draft replaces all observed checks. An omitted draft
   // retains the earlier reviewer-only helper contract for existing callers.
   const checksByBranch = new Map();
+  const pathsByBranch = new Map();
+  if (pathRows !== undefined) {
+    for (const line of lines(pathRows, 256 * 1024, 256)) {
+      const fields = line.split(/\s+/u);
+      if (fields.length !== 5 || !/^[1-9][0-9]?$/.test(fields[3])) throw new Error('Each path rule needs branch hex, exact or subtree, path hex, approval count, and comma-separated reviewer IDs.');
+      const selected = pathsByBranch.get(fields[0]) ?? [];
+      selected.push({ path_hex: fields[2], scope: fields[1], required_approvals: Number(fields[3]), required_reviewers: fields[4].split(',') });
+      pathsByBranch.set(fields[0], selected);
+    }
+  }
   if (checkRows !== undefined) {
     if (!Array.isArray(checkRows) || checkRows.length > 64 * 32) throw new Error('Too many required workflow check rows.');
     const fields = ['reference_hex', 'source_ref_hex', 'publisher', 'graph_root', 'job'];
@@ -61,6 +71,7 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
     if (typeof requireQueue !== 'boolean') throw new Error('Invalid observed merge queue requirement.');
     const checks = checkRows === undefined ? previous?.required_checks ?? [] : checksByBranch.get(fields[0]) ?? [];
     const candidateChecks = structuredClone(previous?.required_candidate_checks ?? []);
+    const pathReviews = pathRows === undefined ? structuredClone(previous?.path_reviews ?? []) : pathsByBranch.get(fields[0]) ?? [];
     const selected = fields[2];
     if (selected !== undefined && selected !== 'all' && !/^(0|[1-9][0-9]?)$/.test(selected)) throw new Error('Approval count must be a whole number or “all”.');
     const approvals = selected === 'all' ? reviewers.length : selected !== undefined ? Number(selected)
@@ -68,9 +79,10 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
     if (!Number.isSafeInteger(approvals) || approvals < (reviewers.length ? 1 : 0) || approvals > reviewers.length) {
       throw new Error('Approval count must be 1 through the reviewer count, or 0 for a check-only or queue-only branch.');
     }
-    if (!reviewers.length && !checks.length && !candidateChecks.length && !requireQueue) throw new Error('A protected branch needs reviewers, configured checks or a required merge queue.');
+    if (!reviewers.length && !checks.length && !candidateChecks.length && !pathReviews.length && !requireQueue) throw new Error('A protected branch needs reviewers, path rules, configured checks or a required merge queue.');
     return { reference_hex: fields[0], required_reviewers: reviewers, ...(checks.length ? { required_checks: checks } : {}),
       ...(candidateChecks.length ? { required_candidate_checks: candidateChecks } : {}),
+      ...(pathReviews.length ? { path_reviews: pathReviews } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}) };
   }), ...(observedRefPolicy ? { ref_policy: structuredClone(observedRefPolicy) } : {}) };
@@ -78,12 +90,13 @@ export function editorPolicy(administrators, rules, observedBranches = [], obser
   if ([...checksByBranch.keys()].some(target => !targets.has(target))) {
     throw new Error('A required workflow check targets a branch missing from the rule list. Remove or retarget its check row explicitly.');
   }
+  if ([...pathsByBranch.keys()].some(target => !targets.has(target))) throw new Error('A path review targets a branch missing from the rule list. Remove or retarget its path row explicitly.');
   return protectionPolicy(replacement);
 }
 export function mountProtection(doc, { client, events = doc.defaultView } = {}) {
   if (!client) throw new Error('A native protection client is required.');
   const ids = ['connect', 'token', 'actor', 'recovery-only', 'reload', 'disconnect', 'status', 'snapshot', 'policy',
-    'edit', 'administrators', 'rules', 'checks', 'add-check', 'remove-checks', 'clear', 'prepare', 'confirm', 'ownership-confirm', 'send', 'retry',
+    'edit', 'administrators', 'rules', 'paths', 'checks', 'add-check', 'remove-checks', 'clear', 'prepare', 'confirm', 'ownership-confirm', 'send', 'retry',
     'lookup', 'discard', 'export', 'restore', 'receipt', 'preview', 'terminal'];
   const ui = Object.fromEntries(ids.map(id => {
     const element = doc.getElementById(`protection-${id}`);
@@ -100,7 +113,7 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
   const say = message => { ui.status.textContent = visible(message); };
   function clear() { ui.snapshot.textContent = ''; ui.policy.replaceChildren(); }
   function clearChecks() { checkRows.length = 0; ui.checks.replaceChildren(); }
-  function clearEditor() { ui.administrators.value = ''; ui.rules.value = ''; ui.clear.checked = false; clearChecks(); }
+  function clearEditor() { ui.administrators.value = ''; ui.rules.value = ''; ui.paths.value = ''; ui.clear.checked = false; clearChecks(); }
   function editable() { return client.connected && !client.recoveryOnly && !client.pending && !busy && !client.busy && Boolean(client.observed?.policy); }
   function appendCheck(reference = '', check = {}) {
     const section = node('fieldset'), fields = {};
@@ -135,7 +148,7 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     const canEdit = editable();
     ui.reload.disabled = !ordinary || Boolean(pending) || working;
     for (const id of ['token', 'actor', 'recovery-only']) ui[id].disabled = working;
-    for (const id of ['administrators', 'rules', 'clear', 'prepare']) ui[id].disabled = !canEdit;
+    for (const id of ['administrators', 'rules', 'paths', 'clear', 'prepare']) ui[id].disabled = !canEdit;
     ui['add-check'].disabled = !canEdit || checkRows.length >= 64 * 32;
     ui['remove-checks'].disabled = !canEdit || !checkRows.length;
     for (const row of checkRows) {
@@ -188,6 +201,8 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
       section.append(node('h3', referenceLabel(branch.reference_hex)), node('p', `Exact reference bytes: ${branch.reference_hex}`),
         node('p', `${branch.required_approvals ?? branch.required_reviewers.length} of ${branch.required_reviewers.length} listed reviewers must approve the exact candidate. The PR opener and merge submitter cannot contribute votes. Other reviewers do not veto a satisfied quorum.`));
       for (const person of branch.required_reviewers) section.append(node('p', person));
+      for (const rule of branch.path_reviews ?? []) section.append(node('p',
+        `Path review: ${rule.scope} ${rule.path_hex}; ${rule.required_approvals} of ${rule.required_reviewers.join(', ')}. Required in addition to branch-wide approvals when the actual candidate changes this path.`));
       if (branch.require_merge_queue) section.append(node('p', 'Merge queue required. Only an authenticated canonical queue landing targeting this branch may update it; reviews and checks still apply.'));
       for (const check of branch.required_checks ?? []) section.append(node('p',
         `Required check: ${check.job}; publisher ${check.publisher}; workflow ${check.graph_root}; source ${referenceLabel(check.source_ref_hex)}. The latest result must succeed for the exact proposed commit.`));
@@ -199,6 +214,8 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     }
     ui.administrators.value = policy.administrators.join('\n');
     ui.rules.value = policy.branches.map(branch => `${branch.reference_hex} ${branch.required_reviewers.join(',') || '-'} ${branch.required_approvals ?? 'all'}${branch.require_merge_queue ? ' true' : ''}`).join('\n');
+    ui.paths.value = policy.branches.flatMap(branch => (branch.path_reviews ?? []).map(rule =>
+      `${branch.reference_hex} ${rule.scope} ${rule.path_hex} ${rule.required_approvals} ${rule.required_reviewers.join(',')}`)).join('\n');
     clearChecks();
     for (const branch of policy.branches) for (const check of branch.required_checks ?? []) appendCheck(branch.reference_hex, check);
     ui.clear.checked = false;
@@ -229,7 +246,7 @@ export function mountProtection(doc, { client, events = doc.defaultView } = {}) 
     }, 'Reading the complete native protection policy…');
   };
   const prepare = () => run(() => client.stage(editorPolicy(ui.administrators.value, ui.rules.value, client.observed?.policy?.branches ?? [],
-    ui.clear.checked ? null : client.observed?.policy?.ref_policy ?? null, selectedChecks()), ui.clear.checked), () => {
+    ui.clear.checked ? null : client.observed?.policy?.ref_policy ?? null, selectedChecks(), ui.paths.value), ui.clear.checked), () => {
     ui.terminal.textContent = ''; ui.receipt.value = ''; say('Replacement frozen, not submitted. Review the complete policy and confirm explicitly.');
   }, 'Preparing one exact policy replacement without publication…', true);
   function settle(result) {

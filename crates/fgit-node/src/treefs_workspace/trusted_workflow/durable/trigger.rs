@@ -89,6 +89,9 @@ struct Selected {
     head: RepositoryAuthorityHeadId,
     commit: GitOid,
     previous_commit: Option<GitOid>,
+    // Tag event identity retains the raw reference values independently of
+    // the verified commit whose files execute. Reannotations are new events.
+    tag_update: Option<(GitOid, Option<GitOid>)>,
     batch: RepositoryDecisionBatchId,
     event_head: RepositoryAuthorityHeadId,
     pull: Option<pull_request::PullSelection>,
@@ -113,7 +116,7 @@ fn stopped_poll() -> TrustedRefWorkflowPoll {
 }
 
 impl OneNode {
-    /// Observe the latest net change of one visible branch and dispatch its push
+    /// Observe the latest net change of one visible branch or tag and dispatch its push
     /// definitions once under an exclusive, permanent local custody namespace.
     ///
     /// This is an explicit trusted whole-repository operator API, NOT remote
@@ -182,8 +185,14 @@ impl OneNode {
             .validate()
             .map_err(TrustedWorkflowFailure::Workflow)?;
         validate_inputs(directory, [1; 16], parent, read_prefixes)?;
-        if !reference.as_bytes().starts_with(b"refs/heads/") {
-            return Err(invalid("ref watcher requires a branch"));
+        let tag = reference.as_bytes().starts_with(b"refs/tags/");
+        if !reference.as_bytes().starts_with(b"refs/heads/") && !tag {
+            return Err(invalid("ref watcher requires a branch or tag"));
+        }
+        if tag && (pull_number.is_some() || queue_number.is_some() || merge_config.is_some()) {
+            return Err(invalid(
+                "tag workflows cannot select PR or queue candidates",
+            ));
         }
         if !workspace_request_live(request) {
             return Ok(stopped_poll());
@@ -371,6 +380,8 @@ impl OneNode {
             "latest-canonical-pull-request-merge-v1"
         } else if selected.pull.is_some() {
             "latest-canonical-pull-request-head-v1"
+        } else if selected.tag_update.is_some() {
+            "latest-canonical-tag-update-v1"
         } else {
             "latest-canonical-ref-update-v1"
         };
@@ -402,6 +413,14 @@ impl OneNode {
                 event,
                 ",\"pull_request\":{}}}",
                 pull.to_json(merge_config.is_some())
+            )
+            .expect("writing to a String cannot fail");
+        } else if let Some((tip, previous)) = selected.tag_update {
+            let previous = previous.map_or_else(|| "null".to_owned(), |id| format!("\"{id}\""));
+            event.pop();
+            write!(
+                event,
+                ",\"tag_tip\":\"{tip}\",\"previous_tag_tip\":{previous}}}"
             )
             .expect("writing to a String cannot fail");
         } else {
@@ -631,7 +650,7 @@ impl OneNode {
         if state.snapshot().hidden_refs.hides(reference.as_bytes()) {
             return Ok(Selection::Absent);
         }
-        let Some(commit) = state.snapshot().refs.get(reference).copied() else {
+        let Some(tip) = state.snapshot().refs.get(reference).copied() else {
             return Ok(Selection::Absent);
         };
         let head = state.basis().id();
@@ -675,10 +694,40 @@ impl OneNode {
         let (event, value) = changes
             .next()
             .ok_or_else(|| invalid("current ref has no authenticated change event"))?;
-        if value != Some(commit) {
-            return Err(invalid("ref event does not match the current branch"));
+        if value != Some(tip) {
+            return Err(invalid("ref event does not match the current reference"));
         }
-        let previous_commit = changes.next().and_then(|(_, value)| value);
+        let previous_tip = changes.next().and_then(|(_, value)| value);
+        let (commit, previous_commit, tag_update) =
+            if reference.as_bytes().starts_with(b"refs/tags/") {
+                let tag = match self.workflow_tag_in(request, reference, Some(head)).await {
+                    Ok(tag) => tag,
+                    Err(NodeWorkspaceRefusal::SourceBrowse(error))
+                        if matches!(
+                            error.as_ref(),
+                            fgit_forge::source_browse::SourceBrowseError::SnapshotMoved
+                                | fgit_forge::source_browse::SourceBrowseError::CommitMoved
+                        ) =>
+                    {
+                        return Ok(Selection::ChangedBeforeReservation);
+                    }
+                    Err(NodeWorkspaceRefusal::Cancelled { .. }) => {
+                        return Ok(Selection::StoppedBeforeReservation);
+                    }
+                    Err(NodeWorkspaceRefusal::Authority(error))
+                        if cancellation::materialization(&error) =>
+                    {
+                        return Ok(Selection::StoppedBeforeReservation);
+                    }
+                    Err(error) => return Err(TrustedWorkflowFailure::Source(error)),
+                };
+                if tag.tip != tip {
+                    return Ok(Selection::ChangedBeforeReservation);
+                }
+                (tag.peeled, None, Some((tip, previous_tip)))
+            } else {
+                (tip, previous_tip, None)
+            };
         if !workspace_request_live(request) {
             return Ok(Selection::StoppedBeforeReservation);
         }
@@ -686,6 +735,7 @@ impl OneNode {
             head,
             commit,
             previous_commit,
+            tag_update,
             batch: event.batch_id,
             event_head: event.resulting_head_id,
             pull: None,

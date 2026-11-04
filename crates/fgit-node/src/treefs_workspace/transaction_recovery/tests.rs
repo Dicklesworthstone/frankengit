@@ -207,12 +207,58 @@ fn committed_and_refused_outcomes_recover_after_reopen_without_inputs_or_serving
             .unwrap();
         assert!(matches!(refused.1.outcome, DecisionOutcome::Refused { .. }));
         let before = head(&node);
+        let mut original_principals = Vec::new();
         for (key, expected) in [
             (b"open".as_slice(), committed),
             (b"stale-open".as_slice(), refused),
         ] {
             let result = recover(&node, key).unwrap();
             assert_eq!(result.terminal(), Some(expected.1));
+            let original = node
+                .runtime()
+                .block_on(node.recover_transaction_principal_in(&request, &session(key), &result))
+                .unwrap()
+                .unwrap();
+            assert_eq!(original.principal_id(), principal());
+            assert_eq!(
+                original.authentication(),
+                Some(fgit_admission::evidence::AdmissionAuthentication::OperatorAssertion)
+            );
+            for method in [
+                fgit_admission::evidence::AdmissionAuthentication::HttpToken,
+                fgit_admission::evidence::AdmissionAuthentication::SshDeployKey,
+            ] {
+                let changed_transport = LoopbackReceiveSession::Authenticated(
+                    crate::AuthenticatedReceiveSession::new(
+                        principal(),
+                        IdempotencyKey::new(key.to_vec()).unwrap(),
+                    )
+                    .with_authentication(method),
+                );
+                assert_eq!(
+                    node.runtime()
+                        .block_on(node.recover_transaction_principal_in(
+                            &request,
+                            &changed_transport,
+                            &result,
+                        ))
+                        .unwrap(),
+                    Some(original.clone())
+                );
+            }
+            let other_principal = LoopbackReceiveSession::authenticated(
+                PrincipalId::from_bytes([0xd4; 16]),
+                IdempotencyKey::new(key.to_vec()).unwrap(),
+            );
+            for wrong in [other_principal, session(b"different-original-key")] {
+                assert!(
+                    node.runtime()
+                        .block_on(node.recover_transaction_principal_in(&request, &wrong, &result,))
+                        .is_err()
+                );
+                assert_eq!(result.terminal(), Some(expected.1));
+            }
+            original_principals.push((key.to_vec(), original));
             let RequestRecovery::Recovered(request) = result else {
                 panic!("verified result");
             };
@@ -232,6 +278,21 @@ fn committed_and_refused_outcomes_recover_after_reopen_without_inputs_or_serving
             recover(&reopened, b"stale-open").unwrap().terminal(),
             Some(refused.1)
         );
+        for (key, original) in original_principals {
+            let report = recover(&reopened, &key).unwrap();
+            let request = reopened.request_context();
+            assert_eq!(
+                reopened
+                    .runtime()
+                    .block_on(reopened.recover_transaction_principal_in(
+                        &request,
+                        &session(&key),
+                        &report,
+                    ))
+                    .unwrap(),
+                Some(original)
+            );
+        }
         assert_eq!(head(&reopened), before);
         reopened.shutdown().unwrap();
     }

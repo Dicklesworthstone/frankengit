@@ -19,6 +19,17 @@ test('package source reads identify the project on every actual HTTP page', asyn
   }
 });
 
+for (const format of ['sha1', 'sha256']) test(`${format}: current commit parent order is retained without history reads`, async t => {
+  const parents = ['a', 'c'].map(value => value.repeat(format === 'sha1' ? 40 : 64));
+  const p = await peer(t, fixture(format, { parents })), acquired = await capture(p);
+  assert.equal((await inspect(p, acquired)).verified.commit, p.f.commitId);
+  assert.equal(p.requests[0].path, '/repo/api/v1/source/commit');
+  assert.equal(p.requests.some(call => call.path.includes('/log')), false);
+  p.requests.length = 0; p.f.parents.reverse();
+  await assert.rejects(capture(p), /commit bytes or summary/);
+  assert.equal(p.requests.length, 1);
+});
+
 function labelledContext(p) {
   updateContext(p, context => {
     for (const row of context.files) {
@@ -162,18 +173,25 @@ test('altered saved excerpt cannot become verified merely because its blob ID is
 });
 
 for (const [name, change] of Object.entries({
-  'commit body': value => { value.commits[0].body_hex += '00'; },
+  'commit body': value => { value.body_hex += '00'; },
+  'commit identity': value => { value.object_id = 'c'.repeat(40); },
+  'commit root': value => { value.root_tree = 'c'.repeat(40); },
+  'commit parents': value => { value.parents = ['c'.repeat(40)]; },
+  'commit source record': value => { value.source_rcr = 'changed-rcr'; },
+  'commit source head': value => { value.source_head = 'changed-head'; },
+  'commit snapshot': value => { value.snapshot_token = 'alg:1:bb'; },
+  'commit author claim': value => { value.author_identity_verified = true; },
   'tree entry': value => { value.entries[0].object_id = 'c'.repeat(40); },
   'blob body': value => { if (value.content_hex) value.content_hex = 'ff' + value.content_hex.slice(2); },
   'blob mode': value => { value.kind = 'symlink'; },
   'snapshot': value => { value.snapshot_token = 'alg:1:bb'; },
   'incarnation': value => { value.repository_incarnation = '4'.repeat(32); },
 })) test(`native ${name} tampering has no partial success or retry`, async t => {
-  const target = name.startsWith('commit') ? 'source_log' : name.startsWith('tree') ? 'source_tree' : 'source_blob';
+  const target = name.startsWith('commit') ? 'source_commit' : name.startsWith('tree') ? 'source_tree' : 'source_blob';
   let altered = false;
   const p = await peer(t, fixture(), value => { if (!altered && value.type === target && (name !== 'blob body' || value.content_hex)) { altered = true; change(value); } });
   await assert.rejects(capture(p)); assert.equal(altered, true);
-  assert.equal(p.requests.filter(call => call.path.endsWith('/log')).length, 1);
+  assert.equal(p.requests.filter(call => call.path.endsWith('/commit')).length, 1);
 });
 
 test('authentication revocation aborts without retry or content leakage', async t => {

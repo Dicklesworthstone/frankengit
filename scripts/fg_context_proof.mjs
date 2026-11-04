@@ -7,6 +7,7 @@ import { archiveSelection, archiveLimits } from './operator/source_archive.mjs';
 import { captureContextProof, inspectContextProof, CONTEXT_INPUT_LIMIT, CONTEXT_PROOF_LIMIT } from './operator/source_context_proof.mjs';
 import { parse } from './operator/source_archive_transport.mjs';
 import { absolute, directory, readPrivate, writeNew } from './operator/workflow_watch_io.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES, isCredentialToken } from './operator/credential_token.mjs';
 
 const USAGE = `node scripts/fg_context_proof.mjs capture --selection <private-json>
   --context <private-capture.json-or-native-context.json> --context-sha256 <retained-hash>
@@ -77,9 +78,12 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const output = absolute(f.get('--output')); await directory(dirname(output));
       const exists = await lstat(output).then(() => true, e => { if (e.code === 'ENOENT') return false; throw e; });
       if (exists) throw new Error('Proof output already exists; overwrite is forbidden.');
-      const raw = await read(f.get('--token-file'), 66); check();
-      if (!/^[0-9a-f]{64}(?:\r?\n)?$/.test(raw.toString('utf8'))) throw new Error('Invalid private source token.');
-      const token = raw.subarray(0, 64).toString('ascii'); raw.fill(0);
+      const raw = await read(f.get('--token-file'), MAX_CREDENTIAL_TOKEN_BYTES + 2); check();
+      let token;
+      try {
+        token = raw.toString('ascii').replace(/\r?\n$/, '');
+        if (raw.some(byte => byte > 127) || !isCredentialToken(token)) throw new Error('Invalid private source token.');
+      } finally { raw.fill(0); }
       const ca = f.has('--ca-file') ? await read(f.get('--ca-file'), 131072) : undefined; check();
       const remaining = Math.floor(limits.timeoutMs - (performance.now() - start));
       if (remaining < 1) throw new Error('Context proof operation deadline exceeded.');

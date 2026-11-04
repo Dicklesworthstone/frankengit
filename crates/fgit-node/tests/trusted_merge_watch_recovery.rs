@@ -492,6 +492,7 @@ fn stale_canonical_subject_or_ci_lease_cannot_execute_or_replace_a_candidate() {
                             administrators: vec![OWNER],
                             ref_policy: None,
                             branches: vec![ProtectedBranch {
+                                path_reviews: Vec::new(),
                                 name: target_ref(),
                                 reviewers: Vec::new(),
                                 required_approvals: 0,

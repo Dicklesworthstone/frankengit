@@ -314,6 +314,13 @@ pub enum EffectJournalRefusal {
         /// The malformed effect identity.
         effect_id: EffectId,
     },
+    /// A live request names itself, an absent parent, or a parent accepted later.
+    InvalidParentEffect {
+        /// Child effect whose parentage was refused before acceptance.
+        effect_id: EffectId,
+        /// Parent that must already have been accepted at or before the child.
+        parent_effect_id: EffectId,
+    },
     /// One journal mixed numeric run identities.
     MixedRun {
         /// Effect that crossed the journal's run boundary.
@@ -389,6 +396,13 @@ impl fmt::Display for EffectJournalRefusal {
                     "effect journal acceptance for {effect_id} is malformed"
                 )
             }
+            Self::InvalidParentEffect {
+                effect_id,
+                parent_effect_id,
+            } => write!(
+                formatter,
+                "effect {effect_id} requires a distinct, previously accepted parent {parent_effect_id} at or before its acceptance time"
+            ),
             Self::MixedRun {
                 effect_id,
                 expected,
@@ -453,6 +467,33 @@ struct EffectJournal {
 impl EffectJournal {
     fn contains(&self, effect_id: EffectId) -> bool {
         self.positions.contains_key(&effect_id)
+    }
+
+    // New live requests require an already accepted parent so every newly
+    // produced prefix remains causally complete. Historical replay keeps its
+    // existing semantics: complete-inventory reconciliation validates parentage.
+    fn validate_parent_effect(
+        &self,
+        effect_id: EffectId,
+        parent_effect_id: Option<EffectId>,
+        accepted_at: LogicalTime,
+    ) -> Result<(), EffectJournalRefusal> {
+        let Some(parent_effect_id) = parent_effect_id else {
+            return Ok(());
+        };
+        let parent = self
+            .positions
+            .get(&parent_effect_id)
+            .and_then(|position| self.records.get(*position));
+        if parent_effect_id == effect_id
+            || parent.is_none_or(|record| record.accepted_at > accepted_at)
+        {
+            return Err(EffectJournalRefusal::InvalidParentEffect {
+                effect_id,
+                parent_effect_id,
+            });
+        }
+        Ok(())
     }
 
     fn records(&self) -> &[EffectRecord] {
@@ -1017,6 +1058,11 @@ pub enum ExternalEffectOutcome {
 /// A typed outbox-reservation refusal.
 #[derive(Debug)]
 pub enum OutboxReservationRefused {
+    /// The grant belongs to another broker's journal and resource ledger.
+    BrokerMismatch {
+        /// The still-live grant, recoverable by its issuing broker.
+        grant: Box<EffectGrant>,
+    },
     /// A non-external effect cannot be silently repurposed as an outbox effect.
     WrongEffectClass {
         /// The still-live grant the caller must resolve.
@@ -1045,7 +1091,9 @@ impl OutboxReservationRefused {
     #[must_use]
     pub fn into_grant(self) -> Option<EffectGrant> {
         match self {
-            Self::WrongEffectClass { grant, .. } | Self::Journal { grant, .. } => Some(*grant),
+            Self::BrokerMismatch { grant }
+            | Self::WrongEffectClass { grant, .. }
+            | Self::Journal { grant, .. } => Some(*grant),
             Self::Resource { .. } => None,
         }
     }
@@ -1054,6 +1102,9 @@ impl OutboxReservationRefused {
 impl fmt::Display for OutboxReservationRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BrokerMismatch { .. } => {
+                formatter.write_str("outbox grant belongs to another broker")
+            }
             Self::WrongEffectClass { observed, .. } => write!(
                 formatter,
                 "only an external effect may reserve an outbox obligation; observed {observed}"
@@ -1378,6 +1429,11 @@ impl EffectBroker {
             return Err(BrokerRefusal::CapabilityQuotaExceeded { deficit });
         }
 
+        self.journal
+            .borrow()
+            .validate_parent_effect(request.effect_id, request.parent_effect_id, now)
+            .map_err(|source| BrokerRefusal::Journal { source })?;
+
         let budget = self
             .ledger
             .grant(request.cost)
@@ -1431,12 +1487,23 @@ impl EffectBroker {
         Ok(receipt)
     }
 
-    /// Converts an external-effect grant into the shared outbox obligation.
+    /// Whether a live reservation belongs to this broker's actual journal and
+    /// resource ledger. Public run, agent, and region IDs do not prove custody.
+    pub(crate) fn owns_outbox(&self, effect: &ReservedOutboxEffect) -> bool {
+        Rc::ptr_eq(&self.journal, &effect.journal)
+    }
+
+    /// Converts this broker's external-effect grant into the shared outbox obligation.
     pub fn reserve_outbox(
         &mut self,
         grant: EffectGrant,
         dispatch: OutboxDispatch,
     ) -> Result<ReservedOutboxEffect, OutboxReservationRefused> {
+        if !Rc::ptr_eq(&self.journal, &grant.journal) {
+            return Err(OutboxReservationRefused::BrokerMismatch {
+                grant: Box::new(grant),
+            });
+        }
         if grant.record.effect_class != EffectClass::ExternalEffect {
             return Err(OutboxReservationRefused::WrongEffectClass {
                 observed: grant.record.effect_class,

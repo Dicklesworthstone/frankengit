@@ -1,10 +1,13 @@
 # Native source publication through MCP
 
-`--allow-source-writes` enables six narrow, operator-sponsored source mutations:
+`--allow-source-writes` enables ten narrow, operator-sponsored source mutations:
 `frankengit_branch_create`, `frankengit_branch_update`,
 `frankengit_branch_delete`, `frankengit_branch_rename`,
-`frankengit_branch_transaction`, and
-`frankengit_source_publish`. None launches Git, a shell or a host-file reader.
+`frankengit_branch_transaction`, `frankengit_source_publish`,
+`frankengit_source_publish_rebase`,
+`frankengit_tag_create`, `frankengit_tag_annotate`, and `frankengit_tag_delete`.
+See [MCP tags](MCP_TAGS.md) for the tag lifecycle and exact outer-object deletion
+lease. None launches Git, a shell or a host-file reader.
 Every command uses the existing node quarantine/admission/recovery boundary.
 
 ```sh
@@ -24,7 +27,7 @@ broker. Do not forward the channel to an untrusted remote principal.
 
 The four lifecycle tools require `reference` and `idempotency_key`. `reference_hex` is the
 lossless alternative for non-UTF-8 ref names; exactly one encoding is required.
-Refs must be full `refs/heads/...` names, bounded to 4096 bytes. Native OIDs
+Refs must be full `refs/heads/...` names, bounded to 1024 bytes. Native OIDs
 are nonzero lowercase hex in the repository's SHA-1 or SHA-256 domain.
 
 | Tool | Additional fields and conditions |
@@ -87,6 +90,53 @@ bypass mandatory protection, force a non-fast-forward transition, accept a
 multi-parent merge through the source-only path, or create an initial root
 commit. Candidate construction, richer bundle intake, approvals and coupled
 merge admission retain their separate native interfaces and authority rules.
+
+## Reviewed linear-rebase publication
+
+`frankengit_source_publish_rebase` publishes a complete, independently inspected
+native linear-rebase bundle through the existing dedicated rebase owner. It
+requires the ordinary source-write grant and launch-bound principal/incarnation.
+Source read and outcome recovery remain independent grants. Sponsored-agent
+profiles exclude this operator adapter.
+
+| Argument | Required meaning |
+|---|---|
+| `reference` or `reference_hex` | Exactly one encoding of the SOURCE branch being replaced. |
+| `expected_source` | Exact old SOURCE tip; the branch lease. |
+| `onto` | Exact commit named by the bundle's sole prerequisite. |
+| `expected_candidate` | Exact independently inspected final candidate tip. |
+| `bundle_hex_chunks` | Complete bundle under the same three-chunk, 24 KiB envelope above. |
+| `idempotency_key` | Original durable key for this publication. |
+
+The old source tip and onto commit have distinct roles. A rebase onto another
+branch does not replace the old-source lease with that branch's tip. Native
+quarantine verifies the advertised source branch, hash domain, prerequisite,
+candidate, closure and a bounded single-parent chain of at most 256 rewritten
+commits reaching onto. A zero-commit series may move the source directly to onto,
+including with an empty pack; `expected_candidate == onto` is permitted.
+The original one-commit workspace publisher retains its own contract.
+
+Obtain and independently inspect the complete artifact using the
+[complete MCP rebase workflow](MCP_SOURCE_REBASE.md),
+[native rebase workflow](NATIVE_LINEAR_REBASE.md), or
+[rebase inspection API](SOURCE_REBASE_INSPECTION_HTTP.md). Preparation and an
+inspection report do not grant publication or bypass protection. The mutation
+uses ordinary atomic receive admission, current policy, visibility and quota.
+It does not set a force flag, manufacture review approval, or rewrite PR metadata.
+
+The result is the same canonical `source_publication` receipt described below,
+with `action:"publish_rebase"`, `publication_profile:"linear-rebase-v1"` and one
+submitted source-ref command. `submitted_onto` reports the caller's input.
+Neither the pack encoding nor onto is added to the native ref transaction's
+seal: a terminal retry recovers the historical old-source/new-candidate decision.
+It does not validate a new pack or establish replay equivalence. Accordingly,
+`bundle_validation_receipt` remains null and `replay_equivalence_verified` is
+false. Preserve the exact original publication inputs on retry.
+
+The adapter makes no preliminary current-head read. Original-key recovery
+therefore remains available after a successful rebase, later source movement,
+or reopening the node. An uncertain native failure does not establish non-commit;
+retain the original key and use the normal outcome-recovery workflow.
 
 ## Terminal facts and recovery
 

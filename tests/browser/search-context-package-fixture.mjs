@@ -37,7 +37,7 @@ export function packageFor(repo, paths) {
 export async function online(t, options = {}) {
   const f = await fixture(t, { definitions, ...options });
   const transport = new Transport({ href: `${f.selection.endpoint}/ui/search/`, pageSuffix: '/ui/search/', cryptoImpl: webcrypto, timeoutMs: options.timeoutMs ?? 30000 });
-  await transport.connect(token); t.after(() => transport.disconnect());
+  await transport.connect(f.token); t.after(() => transport.disconnect());
   return { ...f, transport, result: basis(f.repo, options.paths),
     request: (path, options) => transport.request(path, options), expected: expectedFor(f.repo, options.paths) };
 }

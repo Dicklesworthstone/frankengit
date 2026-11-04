@@ -203,9 +203,17 @@ fn malformed_spans_work_and_truncation_never_become_successful_output() {
 #[test]
 fn schema_retains_closed_literal_and_regex_alternatives_without_adding_a_tool() {
     let tools = super::super::tools();
-    // Regex is an operation of the literal tool; the third search tool is the
-    // separate symbol search, not a regex tool.
-    assert_eq!(tools.len(), 3);
+    // Regex remains an operation of the literal tool. Symbol and paginated
+    // indexed search each have their own explicitly named tool.
+    assert_eq!(
+        tools.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+        [
+            "frankengit_source_search",
+            "frankengit_source_search_batch",
+            "frankengit_source_symbols",
+            "frankengit_source_search_index",
+        ]
+    );
     assert!(tools.iter().all(|tool| !tool.name.contains("regex")));
     let schema = tools[0].schema.object().unwrap();
     assert_eq!(schema["additionalProperties"], Value::Bool(false));

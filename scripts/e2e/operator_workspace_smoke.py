@@ -19,6 +19,7 @@ from typing import Any
 from operator_issue_smoke import OperatorCampaign
 from operator_context_smoke import acquire_context_cases, inspect_context_cases, workspace_scan_case
 from operator_composition_smoke import run_composition_case
+from operator_native_bundle_smoke import run_native_bundle_case
 from patch_smoke import loose, oid, bundle_objects
 from scoped_events_smoke import HttpServer, PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 from source_browse_smoke import tree
@@ -57,6 +58,95 @@ def file_tree(fmt: str, files: dict[bytes, tuple[bytes, bytes]], emit) -> tuple[
         return identity
 
     return directory(b""), trees
+
+
+def offline_compilers_case(c, home, fmt, source, base, result_tree, candidate, commit_body, expected_objects, oracle):
+    """Consume the shipped offline CLIs' exact outputs in isolated native nodes."""
+    for label, script in (("patch", "fg_source_patch.mjs"), ("refactor", "fg_source_refactor.mjs")):
+        work = home / ("offline-" + label)
+        work.mkdir(mode=0o700)
+        rows = []
+        for path in (EDIT, REMOVE, MODE, CREATE):
+            before = after = None
+            if path in BEFORE:
+                original = work / ("before-" + path.hex())
+                original.write_bytes(BEFORE[path][1])
+                before = {"file": str(original), "blob": oid(fmt, "blob", BEFORE[path][1]), "mode": int(BEFORE[path][0], 8)}
+            if path in AFTER:
+                desired = work / ("after-" + path.hex())
+                desired.write_bytes(AFTER[path][1])
+                after = {"file": str(desired), "mode": int(AFTER[path][0], 8)}
+            rows.append({"path_hex": path.hex(), "before": before, "after": after})
+        if label == "refactor":
+            # Explicit original-coordinate text -> edited binary move, plus the
+            # other edit/mode effects, yields the SAME independently built tree.
+            rows[1]["destination_hex"] = CREATE.hex()
+            rows[1]["after"] = rows[3]["after"]
+            rows.pop()
+        plan = {"schema": "frankengit-source-refactoring-v1" if label == "refactor" else "frankengit-source-replacements-v1",
+                "object_format": fmt, "changes": rows}
+        plan_path, bad_plan, patch = work / "plan.json", work / "bad-plan.json", work / "change.patch"
+        plan_path.write_text(json.dumps(plan))
+        bad = json.loads(json.dumps(plan)); bad["changes"][0]["before"]["blob"] = "0" * (40 if fmt == "sha1" else 64)
+        bad_plan.write_text(json.dumps(bad))
+        inputs = {path: path.read_bytes() for path in work.iterdir()}
+        flag = "--plan-file" if label == "refactor" else "--changes-file"
+        compile_args = ["compile", flag, str(plan_path), "--output", str(patch), "--binary", "literal"]
+        if label == "refactor":
+            compile_args.extend(["--profile", "exact-tree-binary-v1"])
+        wrong = compile_args.copy(); wrong[wrong.index(flag) + 1] = str(bad_plan)
+        refused = c.node_command(ROOT / "scripts" / script, wrong, 2, error_reply=True)
+        require(refused["code"] == "source_replacement_preimage" and not patch.exists(), "wrong independent preimage published an offline patch")
+        compiled = c.node_command(ROOT / "scripts" / script, compile_args)
+        identity = patch.stat().st_ino, file_sha256(patch)
+        require(compiled["patch_sha256"] == identity[1] and compiled["patch_bytes"] == patch.stat().st_size
+                and compiled["source_membership_verified"] is False and compiled["publication_attempted"] is False,
+                "offline compiler changed exact bytes or claimed native authority")
+        if label == "refactor":
+            require(compiled["move_count"] == 1 and compiled["changed_paths"] == 4
+                    and compiled["native_patch_profile"] == "exact-tree-binary-v1", "explicit edited move/profile was lost")
+        refused = c.node_command(ROOT / "scripts" / script, compile_args, 2, error_reply=True)
+        require(refused["code"] == f"source_{label}_destination_exists" and (patch.stat().st_ino, file_sha256(patch)) == identity
+                and all(path.read_bytes() == body for path, body in inputs.items()), "compiler retry overwrote output or changed source/plan bytes")
+        repository, bundle = work / "repository", work / "candidate.bundle"
+        c.run("init", repository, TENANT, REPOSITORY, fmt)
+        c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "offline-" + label + "-import", source)
+        authority = c.run("at", repository, TENANT, REPOSITORY, "latest")
+        prepared = json.loads(c.run("patch", "prepare", repository, TENANT, REPOSITORY, REF, patch, bundle,
+            "--trusted-local", "--profile", "exact-tree-binary-v1", "--workspace-id", "44" * 16,
+            "--expected-base", base, "--expected-result-tree", result_tree, "--author", AUTHOR,
+            "--timestamp", "2", "--message", MESSAGE))
+        require(prepared["node_closed"] is True and prepared["published_to_repository"] is False
+                and prepared["patch_sha256"] == identity[1] and prepared["candidate_commit"] == candidate
+                and prepared["root_tree"] == result_tree and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
+                "native preparation changed source state or independently selected candidate")
+        packed = bundle_objects(bundle.read_bytes(), fmt, base, candidate)
+        effects = {oid(fmt, "blob", AFTER[p][1]) for p in (EDIT, MODE, CREATE)}
+        inventory = {key: value for key, value in expected_objects.items() if value[0] != "blob" or key in effects}
+        require(packed == inventory and packed[candidate] == ("commit", commit_body), "native compiler consumer changed exact candidate objects")
+        oracle("offline-" + label + "-bundle", "bundle", "verify", "../offline-" + label + "/candidate.bundle")
+        apply = ["patch", "apply", repository, TENANT, REPOSITORY, REF, bundle, "--trusted-local", "--principal", PRINCIPAL,
+                 "--key-stdin", "--expected-base", base, "--expected-commit", candidate]
+        key = ("offline-" + label + "-publication\n").encode()
+        terminal = json.loads(c.run(*apply, input_bytes=key))
+        require(terminal["node_closed"] is True and terminal["outcome"] == "committed"
+                and terminal["published_to_repository"] is True and terminal["candidate_commit"] == candidate,
+                "actual compiled patch failed native publication")
+        authority = c.run("at", repository, TENANT, REPOSITORY, "latest")
+        require(json.loads(c.run(*apply, input_bytes=key)) == terminal
+                and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority, "same-key compiler publication replay changed native authority")
+        for path, (mode, body) in AFTER.items():
+            page = json.loads(c.run("show", repository, TENANT, REPOSITORY, "--trusted-local", "--object-format", fmt,
+                "--ref", REF, "--path-hex", path.hex(), "--max-bytes", "4096"))
+            require(page["node_closed"] is True and page["source_commit"] == candidate and page["root_tree"] == result_tree
+                    and page["object_id"] == oid(fmt, "blob", body) and bytes.fromhex(page["bytes_hex"]) == body
+                    and page["kind"] == ("executable" if mode == b"100755" else "file") and page["has_more"] is False,
+                    "canonical compiler result lost source bytes, identity, mode or unselected sibling")
+        directory = json.loads(c.run("tree", repository, TENANT, REPOSITORY, "--trusted-local", "--object-format", fmt,
+            "--ref", REF, "--path", "dir"))
+        require(directory["node_closed"] is True and {bytes.fromhex(row["name_hex"]) for row in directory["entries"]}
+                == {b"edit", b"kept", b"tool"}, "compiled deletion/move left its original path")
+        c.facts[f"{fmt}_offline_{label}_compiler_native_publication"] = True
 
 
 def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
@@ -100,9 +190,9 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
 
     package_path, expect_path = home / "package.json", put("expected.json", independent)
 
-    def oracle(label, *arguments):
+    def oracle(label, *arguments, directory=source):
         command = [str(ROOT / "scripts/e2e/oracle/oracle.sh"), "capture", "git-2.54.0", str(oracle_run),
-                   str(source.relative_to(oracle_run / "work")), fmt + "-workspace-" + label, "--", *arguments]
+                   str(directory.relative_to(oracle_run / "work")), fmt + "-workspace-" + label, "--", *arguments]
         stem = home / ("oracle-" + label)
         with stem.with_suffix(".stdout").open("wb") as out, stem.with_suffix(".stderr").open("wb") as err:
             result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=30, check=False)
@@ -112,6 +202,8 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(result.returncode == 0, "pinned Git rejected the fixture or candidate bundle")
 
     oracle("fsck", "fsck", "--full", "--strict", "--no-reflogs")
+    run_native_bundle_case(c, home, fmt, source, base, base_tree, original, BEFORE, oracle)
+    offline_compilers_case(c, home, fmt, source, base, result_tree, candidate, commit_body, expected_objects, oracle)
     c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "operator-workspace-import", source)
     initial_index = json.loads(c.run("index", repository, TENANT, REPOSITORY, fmt, REF, "build", "genesis"))
@@ -263,6 +355,13 @@ object_id:f.object_id,kind:f.kind,body_hex:Buffer.from(f.bytes).toString('hex')}
     c.node_command(package_cli, ["inspect", *package_common, "--package", str(package_path),
                                  "--package-sha256", acquired["package_sha256"]])
     c.node_command(ROOT / "scripts/fg_verify_source_package.mjs", ["--package", str(package_path), "--expect", str(expect_path)])
+    wrong_selection = json.loads(json.dumps(independent))
+    wrong_selection["files"][0]["blob"] = "f" * len(base)
+    wrong_expect = put("wrong-verification-selection.json", wrong_selection)
+    refused = c.node_command(ROOT / "scripts/fg_verify_source_package.mjs",
+        ["--package", str(package_path), "--expect", str(wrong_expect)], 1, error_reply=True, text_reply=True)
+    require(refused == "Source package verification failed. No files were written and no network request was made.\n"
+            and file_sha256(package_path) == acquired["package_sha256"], "offline package verifier accepted wrong blob pins or rewrote source")
     require(c.run("at", repository, TENANT, REPOSITORY, "latest") == before and refs() == {REF: base},
             "source acquisition or proof verification published canonical state")
     c.facts[f"{fmt}_native_package_and_proof_custody"] = True
@@ -595,7 +694,9 @@ def main() -> None:
         "scripts/fg_source_package.mjs", "scripts/fg_verify_source_package.mjs", "scripts/fg_source_workspace.mjs",
         "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs",
         "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs",
-        "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs", "scripts/fg_source_patch.mjs",
+        "scripts/fg_source_refactor.mjs", "scripts/verify_git_bundle_native.mjs",
+        "scripts/import_git_bundle_native.mjs", "scripts/recover_git_bundle.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 
@@ -610,6 +711,15 @@ def main() -> None:
         for fmt in ("sha1", "sha256"):
             run_case(c, oracle_run, fmt)
             run_composition_case(c, oracle_run, fmt, file_tree, BEFORE, {EDIT: AFTER[EDIT], MODE: AFTER[MODE]}, AUTHOR)
+        commands = [json.loads(line) for line in c.journal.read_text().splitlines()]
+        summary["entrypoint_runs"] = []
+        for path in summary["entrypoints"]:
+            calls = [r for r in commands if r.get("kind") == "operator" and r["command"][1] == str(ROOT / path)]
+            successes = sum(r["exit"] == 0 for r in calls)
+            nonzero = sum(r["exit"] != 0 for r in calls)
+            require(successes > 0 and nonzero > 0, "listed source entrypoint lacks actual success/expected-nonzero calls: " + path)
+            summary["entrypoint_runs"].append({"path": path, "binary_sha256": summary["binary_sha256"],
+                "client_sha256": file_sha256(ROOT / path), "success_count": successes, "expected_nonzero_count": nonzero})
         summary["complete"] = True
     except BaseException as error:
         summary["failure"] = f"{type(error).__name__}: {error}"

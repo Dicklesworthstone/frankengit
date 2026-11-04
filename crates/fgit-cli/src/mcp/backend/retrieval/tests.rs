@@ -253,7 +253,9 @@ fn seeded(format: GitHashAlgorithm, indexes: bool) -> (Scratch, NodeTools) {
         agent_context: false,
         artifacts: false,
         artifact_root: None,
+        agent_token_file: None,
         max_messages: 16,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend)
@@ -627,4 +629,32 @@ fn agent_context_missing_index_refuses_without_rebuilding_or_moving_authority() 
         .unwrap();
     assert_eq!(before.receipt(), after.receipt());
     backend.close().unwrap();
+}
+
+#[test]
+fn explicit_index_source_maps_to_native_mode_without_widening_the_grammar() {
+    let mut request = base();
+    assert!(
+        fields(&request, false)
+            .unwrap()
+            .iter()
+            .all(|(name, _)| name != "index_source")
+    );
+    request.insert("index_source".into(), text("current-native-v1"));
+    for context in [false, true] {
+        assert!(
+            fields(&request, context)
+                .unwrap()
+                .contains(&("index_source".into(), "current-native-v1".into()))
+        );
+    }
+    for mode in ["", "exact", "strict", "revalidated", "current-native-v2"] {
+        request.insert("index_source".into(), text(mode));
+        assert_eq!(
+            fields(&request, false).unwrap_err().code,
+            "unsupported_index_source"
+        );
+    }
+    request.insert("index_source".into(), Value::Bool(true));
+    assert_eq!(fields(&request, false).unwrap_err().code, "expected_string");
 }

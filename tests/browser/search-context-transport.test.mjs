@@ -48,10 +48,10 @@ for (const algorithm of ['sha1', 'sha256']) for (const selection of ['raw-path-p
 
 test('existing search routes retain their closed read envelope', async t => {
   const { client, requests } = await peer(t, (_, response) => json(response, 200, { received: true }));
-  for (const path of ['search', 'search-batch', 'search-regex', 'search-index', 'search-symbols-index', 'search-initial', 'blob']) {
+  for (const path of ['search', 'search-batch', 'search-regex', 'search-index', 'search-symbols-index', 'search-initial', 'blob', 'commit', 'tree']) {
     assert.deepEqual((await client.request(`source/${path}`, { method: 'POST', body })).value, { received: true });
   }
-  assert.equal(requests.length, 7);
+  assert.equal(requests.length, 9);
 });
 
 test('context does not acquire another method, mutation, recovery, route or representation', async t => {
@@ -63,7 +63,7 @@ test('context does not acquire another method, mutation, recovery, route or repr
     await assert.rejects(client.request(ROUTE, { method: 'POST', body, ...change }));
   }
   for (const path of [`${ROUTE}?x=1`, `${ROUTE}/`, `${ROUTE}x`, 'source/%63ontext-initial',
-    '../source/context-initial', '/r.git/api/v1/source/context-initial', 'source/apply', 'outcomes', 'pulls/1/open',
+    '../source/context-initial', '/r.git/api/v1/source/context-initial', 'source/apply', 'source/log', 'outcomes', 'pulls/1/open',
     'https://example.invalid/r.git/api/v1/source/context-initial']) {
     await assert.rejects(client.request(path, { method: 'POST', body }));
   }

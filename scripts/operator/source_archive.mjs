@@ -247,23 +247,23 @@ async function captureSelectedSource(selected, token, options, wanted) {
     reused_blob_bytes: 0, deduplicated_files: 0, deduplicated_blob_bytes: 0 };
   const base = { ref: selection.ref, object_format: algorithm, expected_commit: selection.expected_commit };
   if (selection.expected_head !== null) base.expected_head = selection.expected_head;
-  const log = await reader.read('log', { ...base, after: '0', limit: '1' }, 256 * 1024);
-  scope(log, selection, selection.expected_head);
-  integer(log.total_commits, 1, 4096, 'ancestry count');
-  if (log.type !== 'source_log' || log.ordering !== 'child-before-parent-native-id-v1' || log.author_identity_verified !== false ||
-      log.page_complete !== true || log.after !== 0 || log.limit !== 1 || !Array.isArray(log.commits) || log.commits.length !== 1 ||
-      log.next_after !== (log.total_commits > 1 ? 1 : null)) fail('Invalid pinned commit page.');
-  const row = log.commits[0], commit = { object_id: oid(row.object_id, algorithm), body_hex: row.body_hex };
+  // The selected tip is sufficient for Git membership. Do not traverse its
+  // ancestry or require a history grant to export current source bytes.
+  const tip = await reader.read('commit', base, 256 * 1024);
+  scope(tip, selection, selection.expected_head);
+  if (tip.type !== 'source_commit' || tip.author_identity_verified !== false) fail('Invalid pinned source commit.');
+  opaque(tip.source_rcr);
+  const commit = { object_id: oid(tip.object_id, algorithm), body_hex: tip.body_hex };
   const original = commitTree(commit, algorithm);
-  if (commit.object_id !== selection.expected_commit || oid(row.tree, algorithm) !== original.tree || !Array.isArray(row.parents) ||
-      JSON.stringify(row.parents.map(value => oid(value, algorithm))) !== JSON.stringify(original.parents)) fail('Commit summary differs from original bytes.');
+  if (commit.object_id !== selection.expected_commit || oid(tip.root_tree, algorithm) !== original.tree || !Array.isArray(tip.parents) ||
+      JSON.stringify(tip.parents.map(value => oid(value, algorithm))) !== JSON.stringify(original.parents)) fail('Commit summary differs from original bytes.');
   const capture = { schema: wanted ? 'frankengit-source-path-capture-v1' : 'frankengit-source-capture-v1',
-    ...(wanted ? { paths_hex: [...wanted.selected] } : {}), selection, snapshot_token: log.snapshot_token,
-    source_head: log.source_head, source_rcr: null, commit, trees: [], files: [] };
-  const expected = { ...base, expected_head: log.snapshot_token }, queue = [{ path_hex: null, object_id: original.tree }], files = [];
+    ...(wanted ? { paths_hex: [...wanted.selected] } : {}), selection, snapshot_token: tip.snapshot_token,
+    source_head: tip.source_head, source_rcr: tip.source_rcr, commit, trees: [], files: [] };
+  const expected = { ...base, expected_head: tip.snapshot_token }, queue = [{ path_hex: null, object_id: original.tree }], files = [];
   let entryCount = 0, treeBytes = 0, blobBytes = 0;
   const checkSource = value => {
-    reader.check(); scope(value, selection, log.snapshot_token, log.source_head); opaque(value.source_rcr);
+    reader.check(); scope(value, selection, tip.snapshot_token, tip.source_head); opaque(value.source_rcr);
     if (oid(value.root_tree, algorithm) !== original.tree || (capture.source_rcr !== null && capture.source_rcr !== value.source_rcr)) fail('Source root or record changed.');
     capture.source_rcr ??= value.source_rcr;
   };

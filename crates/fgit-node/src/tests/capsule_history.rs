@@ -395,7 +395,10 @@ fn checkpoint_edges_consume_the_same_bounded_native_history_budget() {
     let request = node.request_context();
     let live = || false;
     let mut walked = 0;
-    let HistoryStep::Checkpoint { predecessor } = node
+    let HistoryStep::Checkpoint {
+        predecessor,
+        capsule,
+    } = node
         .runtime()
         .block_on(read_history_step_async(
             &node.authority,
@@ -410,6 +413,13 @@ fn checkpoint_edges_consume_the_same_bounded_native_history_budget() {
         panic!("the first edge is a real checkpoint");
     };
     assert_eq!(walked, 1);
+    assert_eq!(capsule.head_id, predecessor.id());
+    assert_eq!(capsule.head_generation, predecessor.generation());
+    assert_eq!(
+        capsule_identity(&CryptoBodyIdentity, &capsule).unwrap(),
+        second.pointer().capsule_id(),
+        "the reader retains the exact verified capsule rather than a separate lookup"
+    );
     assert!(matches!(
         node.runtime().block_on(read_history_step_async(
             &node.authority,

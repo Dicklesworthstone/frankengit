@@ -3,9 +3,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { validateOutcomeReply } from './transaction_outcome.mjs';
 
 export const LIMITS = Object.freeze({ command: 256 * 1024, response: 1024 * 1024,
-  intent: 2 * 1024 * 1024, administrators: 32, branches: 64, reviewers: 32, checks: 32, job: 1024, ref: 1024 });
+  intent: 2 * 1024 * 1024, administrators: 32, branches: 64, reviewers: 32, checks: 32, job: 1024, ref: 1024,
+  branchPathReviews: 32, policyPathReviews: 256, path: 4096, policyPathBytes: 64 * 1024 });
 const U64_MAX = 18446744073709551615n;
 const ID = /^[0-9a-f]{32}$/, HASH = /^[0-9a-f]{64}$/;
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -96,6 +98,32 @@ function requiredChecks(values, candidate = false) {
   if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('duplicate_required_check');
   return result;
 }
+function pathReviews(values, budget) {
+  if (!Array.isArray(values) || values.length > LIMITS.branchPathReviews ||
+      budget.rules + values.length > LIMITS.policyPathReviews) fail('invalid_path_review_count');
+  budget.rules += values.length;
+  const result = values.map(value => {
+    fields(value, ['path_hex', 'scope', 'required_reviewers', 'required_approvals']);
+    const hex = value.path_hex;
+    if (typeof hex !== 'string' || !hex.length || hex.length > LIMITS.path * 2 ||
+        hex.length % 2 || !/^[0-9a-f]+$/.test(hex)) fail('invalid_path_review_path');
+    budget.bytes += hex.length / 2;
+    if (budget.bytes > LIMITS.policyPathBytes) fail('path_review_byte_limit');
+    const path = Buffer.from(hex, 'hex');
+    if (path.includes(0) || path.toString('latin1').split('/').some(part => !part || part === '.' || part === '..')) fail('invalid_path_review_path');
+    if (!['exact', 'subtree'].includes(value.scope)) fail('invalid_path_review_scope');
+    const reviewers = people(value.required_reviewers, LIMITS.reviewers);
+    if (!Number.isSafeInteger(value.required_approvals) || value.required_approvals < 1 ||
+        value.required_approvals > reviewers.length) fail('invalid_path_review_approval_count');
+    return { path_hex: hex, scope: value.scope, required_reviewers: reviewers, required_approvals: value.required_approvals };
+  });
+  const order = (a, b) => a.path_hex === b.path_hex
+    ? a.scope < b.scope ? -1 : a.scope > b.scope ? 1 : 0
+    : a.path_hex < b.path_hex ? -1 : 1;
+  result.sort(order);
+  if (result.some((value, index) => index && order(result[index - 1], value) === 0)) fail('duplicate_path_review_selector');
+  return result;
+}
 function refPolicy(value) {
   fields(value, ['snapshot_id', 'profile', 'mode', 'frame_hex']);
   const id = opaque(value.snapshot_id);
@@ -109,17 +137,20 @@ function refPolicy(value) {
 export function policy(value) {
   fields(value, ['administrators', 'branches', ...(Object.hasOwn(value, 'ref_policy') ? ['ref_policy'] : [])]);
   if (!Array.isArray(value.branches) || value.branches.length > LIMITS.branches) fail('invalid_branch_count');
+  const pathBudget = { rules: 0, bytes: 0 };
   const branches = value.branches.map(row => {
     fields(row, ['reference_hex', 'required_reviewers', ...(Object.hasOwn(row, 'required_checks') ? ['required_checks'] : []),
       ...(Object.hasOwn(row, 'required_candidate_checks') ? ['required_candidate_checks'] : []),
+      ...(Object.hasOwn(row, 'path_reviews') ? ['path_reviews'] : []),
       ...(Object.hasOwn(row, 'required_approvals') ? ['required_approvals'] : []),
       ...(Object.hasOwn(row, 'require_merge_queue') ? ['require_merge_queue'] : [])]);
     const requireQueue = Object.hasOwn(row, 'require_merge_queue') ? row.require_merge_queue : false;
     if (typeof requireQueue !== 'boolean') fail('invalid_merge_queue_requirement');
     const checks = requiredChecks(Object.hasOwn(row, 'required_checks') ? row.required_checks : []);
     const candidateChecks = requiredChecks(Object.hasOwn(row, 'required_candidate_checks') ? row.required_candidate_checks : [], true);
+    const paths = pathReviews(Object.hasOwn(row, 'path_reviews') ? row.path_reviews : [], pathBudget);
     if (checks.length + candidateChecks.length > LIMITS.checks) fail('invalid_required_check_count');
-    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0 || candidateChecks.length > 0 || requireQueue);
+    const reviewers = people(row.required_reviewers, LIMITS.reviewers, checks.length > 0 || candidateChecks.length > 0 || requireQueue || paths.length > 0);
     const approvals = Object.hasOwn(row, 'required_approvals') ? row.required_approvals : reviewers.length;
     if (!Number.isSafeInteger(approvals) || Object.is(approvals, -0) || approvals < (reviewers.length ? 1 : 0) ||
         approvals > reviewers.length) fail('invalid_required_approval_count');
@@ -128,6 +159,7 @@ export function policy(value) {
     return { reference_hex: branchHex(row.reference_hex), required_reviewers: reviewers,
       ...(checks.length ? { required_checks: checks } : {}),
       ...(candidateChecks.length ? { required_candidate_checks: candidateChecks } : {}),
+      ...(paths.length ? { path_reviews: paths } : {}),
       ...(approvals !== reviewers.length ? { required_approvals: approvals } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}) };
   }).sort((a, b) => a.reference_hex < b.reference_hex ? -1 : a.reference_hex > b.reference_hex ? 1 : 0);
@@ -162,6 +194,9 @@ function command(source, replacement, clear) {
   }
   for (const row of replacement.branches) for (const check of row.required_candidate_checks ?? []) {
     form.append('required_candidate_check', `${row.reference_hex}:${check.publisher}:${check.graph_root}:${Buffer.from(check.job).toString('hex')}`);
+  }
+  for (const row of replacement.branches) for (const rule of row.path_reviews ?? []) {
+    form.append('required_path_review', `${row.reference_hex}:${rule.scope}:${rule.path_hex}:${rule.required_approvals}:${rule.required_reviewers.join(',')}`);
   }
   for (const row of replacement.branches) if (Object.hasOwn(row, 'required_approvals')) {
     form.append('required_approvals', `${row.reference_hex}:${row.required_approvals}`);
@@ -354,9 +389,15 @@ export function publicationReply(value, intent, status) {
     value.repository_commit_id, value.refusal_code, value.refusal_record_id, value.refusal_code_point);
 }
 export function outcomeReply(value, intent) {
+  const provenance = value && ['principal_provenance', 'provenance_error'].some(key => Object.hasOwn(value, key));
+  if (provenance) {
+    try { validateOutcomeReply(value, { tenant_id: intent.scope.tenant_id, repository_id: intent.scope.repository_id,
+      repository_incarnation: intent.scope.repository_incarnation, principal_id: intent.principal_id }); }
+    catch { fail('invalid_original_outcome'); }
+  }
   fields(value, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'principal_id',
     'selector', 'command_index', 'state', 'terminal', 'transaction', 'decision', 'read_only', 'request_reexecuted',
-    'absence_proves_non_commit', 'session_completeness_established']);
+    'absence_proves_non_commit', 'session_completeness_established', ...(provenance ? ['principal_provenance', 'provenance_error'] : [])]);
   binding(value, intent.scope, false);
   if (value.type !== 'transaction_outcome' || value.schema_version !== 1 || identity(value.principal_id) !== intent.principal_id ||
       value.selector !== 'transaction' || value.command_index !== null || value.read_only !== true || value.request_reexecuted !== false ||
@@ -404,6 +445,12 @@ export function extendsObservation(next, known) {
       (k.terminal && JSON.stringify(n) !== JSON.stringify(k))) fail('outcome_regressed_or_conflicted');
   const previousSeal = known.record.reply.transaction, nextSeal = next.record.reply.transaction;
   if (previousSeal && nextSeal && JSON.stringify(previousSeal) !== JSON.stringify(nextSeal)) fail('outcome_seal_changed');
+  if (next.record.kind === 'outcome' && known.record.kind === 'outcome') {
+    const old = known.record.reply;
+    try { validateOutcomeReply(next.record.reply, { tenant_id: old.tenant_id, repository_id: old.repository_id,
+      repository_incarnation: old.repository_incarnation, principal_id: old.principal_id }, old); }
+    catch { fail('outcome_regressed_or_conflicted'); }
+  }
 }
 export function publicationPreflight(value, token, expectedEndpoint, confirmation) {
   const intent = validateIntent(value);

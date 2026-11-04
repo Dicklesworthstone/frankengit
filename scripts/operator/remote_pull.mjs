@@ -5,7 +5,8 @@ import { request as httpsRequest } from 'node:https';
 import { performance } from 'node:perf_hooks';
 import { lookupOutcome, validateOutcomeReply, OutcomeError } from './transaction_outcome.mjs';
 import { PULL_LIMITS, PullError, pullFields, failPull, pullOutcomeScope, pullTokenFingerprint,
-  validatePullIntent, validatePullPublication, parsePullJson, isPullReview, validatePullBundle, pullEnvelope } from './pull_command.mjs';
+  validatePullIntent, validatePullPublication, parsePullJson, isPullReview, validatePullBundle, pullEnvelope,
+  requireAgentMetadataOperation } from './pull_command.mjs';
 export { preparePull, validatePullIntent, pullCanonical, parsePullJson, PullError } from './pull_command.mjs';
 
 function configuration(options, send) {
@@ -94,6 +95,7 @@ async function operate(input, token, options, send) {
   // Detach every caller-owned value before the first await. A concurrent form
   // edit cannot change the authenticated scope, bytes, deadline or trust roots.
   const intent = validatePullIntent(input), config = configuration(options, send);
+  if (send) requireAgentMetadataOperation(intent.action, token);
   const deadline = performance.now() + config.timeoutMs;
   const fingerprint = pullTokenFingerprint(token), scope = pullOutcomeScope(intent.scope);
   let publication = config.publication == null ? null : validatePullPublication(config.publication, intent,

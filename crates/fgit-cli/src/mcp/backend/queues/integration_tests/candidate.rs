@@ -17,6 +17,7 @@ fn protect(backend: &NodeTools, version: u64, epoch: u64, approvals: bool) {
             administrators: vec![actor()],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 required_candidate_checks: Vec::new(),
                 require_merge_queue: true,
                 name: reference("refs/heads/main"),
@@ -237,6 +238,8 @@ fn divergent_candidate_lands_atomically_and_replays_without_upload_or_current_in
         assert_eq!(invoke(&mut backend, LAND_CANDIDATE, absent.clone()), landed);
         backend.close().unwrap();
         let mut backend = NodeTools {
+            agent: None,
+            maintenance: None,
             node: fgit_node::OneNode::open_existing(fixture.config()).unwrap(),
             options: fixture.options.clone(),
         };

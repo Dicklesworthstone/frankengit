@@ -40,6 +40,7 @@ fn report() -> TrustedWorkflowRun {
         source_commit: GitOid::Sha1(GitOidSha1::from_bytes([4; 20])),
         source_tree: GitOid::Sha1(GitOidSha1::from_bytes([5; 20])),
         source_reference: b"refs/heads/main".to_vec(),
+        source_tag_tip: None,
         candidate: None,
         merge: None,
         merge_style: Default::default(),

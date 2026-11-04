@@ -1,6 +1,6 @@
 // Queue collaboration over the native client. Forms never grant authority;
 // only explicit sends publish, and uncertain requests retain their identity.
-import { QueueClient, RECEIPT_LIMIT } from './queues.mjs';
+import { QueueClient, CANDIDATE_RECEIPT_LIMIT } from './queues.mjs';
 import { decimal, integer, hex, unhex, utf8, oid } from './pulls-core.mjs';
 
 export function displayText(value) {
@@ -15,25 +15,30 @@ const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'conn
   'queue-change', 'queue-number', 'queue-version', 'target-kind', 'target-ref', 'queue-action', 'pr-fields', 'pull-number', 'load-pull',
   'pull-observation', 'pull-version', 'source-kind', 'source-ref', 'source-tip', 'target-tip', 'priority-field', 'priority',
   'dequeue-fields', 'dequeue-number', 'dequeue-reason', 'reorder-fields', 'queue-order', 'landing-fields', 'policy-epoch', 'prepare',
+  'candidate-fields', 'candidate-author', 'candidate-committer', 'candidate-timestamp', 'candidate-message-kind', 'candidate-message', 'candidate-profile',
+  'candidate-prepare', 'candidate-section', 'candidate-report', 'candidate-bundle-download', 'candidate-inspection-download', 'candidate-review-download',
   'pending-section', 'pending', 'receipt-download', 'confirm', 'send', 'recover', 'discard', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
 const DRAFTS = ['queue-number', 'queue-version', 'target-ref', 'pull-number', 'pull-version', 'source-ref', 'source-tip', 'target-tip',
-  'dequeue-number', 'dequeue-reason', 'queue-order', 'policy-epoch', 'show-number'];
+  'dequeue-number', 'dequeue-reason', 'queue-order', 'policy-epoch', 'show-number', 'candidate-author', 'candidate-committer', 'candidate-timestamp', 'candidate-message'];
+const isLanding = action => ['land', 'land-candidate'].includes(action);
 
 function downloader(doc) {
   const window = doc.defaultView, urls = new Set();
   window.addEventListener('pagehide', () => { for (const url of urls) window.URL.revokeObjectURL(url); urls.clear(); });
-  return (name, contents) => {
-    const url = window.URL.createObjectURL(new Blob([contents], { type: 'application/json' })); urls.add(url);
+  const download = (name, contents, type = 'application/json') => {
+    const url = window.URL.createObjectURL(new Blob([contents], { type })); urls.add(url);
     const link = doc.createElement('a'); link.href = url; link.download = name;
     doc.body.append(link); link.click(); link.remove();
     window.setTimeout(() => { window.URL.revokeObjectURL(url); urls.delete(url); }, 30_000);
   };
+  download.revoke = () => { for (const url of urls) window.URL.revokeObjectURL(url); urls.clear(); };
+  return download;
 }
 async function fileText(input) {
   const files = input.files, file = files?.[0]; input.value = '';
-  if (files?.length !== 1 || !file || file.size > RECEIPT_LIMIT) throw new Error('Choose one recovery receipt no larger than 256 KiB.');
+  if (files?.length !== 1 || !file || file.size > CANDIDATE_RECEIPT_LIMIT) throw new Error('Choose one recovery receipt no larger than 24 MiB.');
   const bytes = new Uint8Array(await file.arrayBuffer());
-  if (bytes.length > RECEIPT_LIMIT || bytes.length !== file.size) throw new Error('Recovery receipt size changed while reading.');
+  if (bytes.length > CANDIDATE_RECEIPT_LIMIT || bytes.length !== file.size) throw new Error('Recovery receipt size changed while reading.');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
@@ -45,6 +50,7 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
   const client = new QueueClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   nodes['queue-action'].value ||= 'enqueue'; nodes['target-kind'].value ||= 'text'; nodes['source-kind'].value ||= 'text';
   nodes['page-limit'].value ||= '20'; nodes.priority.value ||= '0';
+  nodes['candidate-message-kind'].value ||= 'text'; nodes['candidate-profile'].value ||= 'path-merge-v1';
   let generation = 0, operation = null, selected = null, page = null;
   const dynamic = new Set();
   const text = (tag, value = '') => { const node = doc.createElement(tag); node.textContent = displayText(value); return node; };
@@ -77,14 +83,18 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
     for (const id of ['refresh', 'page-limit', 'show-load', 'show-number', 'queue-action']) nodes[id].disabled = !ordinary || busy;
     nodes['cancel-read'].disabled = operation !== 'read';
     for (const node of dynamic) node.disabled = !ordinary || busy;
-    nodes['pr-fields'].hidden = !['enqueue', 'land'].includes(action);
+    nodes['pr-fields'].hidden = action !== 'enqueue' && !isLanding(action);
     nodes['pr-fields'].disabled = nodes['pr-fields'].hidden || !ordinary || busy;
     nodes['dequeue-fields'].hidden = action !== 'dequeue'; nodes['dequeue-fields'].disabled = action !== 'dequeue' || !ordinary || busy;
     nodes['reorder-fields'].hidden = action !== 'reorder'; nodes['reorder-fields'].disabled = action !== 'reorder' || !ordinary || busy;
-    nodes['landing-fields'].hidden = action !== 'land'; nodes['landing-fields'].disabled = action !== 'land' || !ordinary || busy;
+    nodes['landing-fields'].hidden = !isLanding(action); nodes['landing-fields'].disabled = !isLanding(action) || !ordinary || busy;
+    nodes['candidate-fields'].hidden = action !== 'land-candidate'; nodes['candidate-fields'].disabled = action !== 'land-candidate' || !ordinary || busy;
     nodes['priority-field'].hidden = action !== 'enqueue'; nodes.priority.disabled = action !== 'enqueue';
     nodes['load-pull'].disabled = !ordinary || busy;
-    nodes.prepare.disabled = !ordinary || busy || Boolean(pending) || !client.binding;
+    nodes['candidate-prepare'].disabled = !ordinary || busy || Boolean(pending) || action !== 'land-candidate' || !selected?.row;
+    nodes.prepare.disabled = !ordinary || busy || Boolean(pending) || !client.binding || (action === 'land-candidate' && !client.candidateReady);
+    nodes.prepare.textContent = action === 'land-candidate' ? 'Stage this inspected candidate landing — do not send' : 'Prepare exact request — do not send';
+    for (const id of ['candidate-bundle-download', 'candidate-inspection-download', 'candidate-review-download']) nodes[id].disabled = !ordinary || busy || !client.candidateReady;
     nodes['pending-section'].hidden = !pending;
     nodes.pending.textContent = pending ? [
       `Queue #${pending.number} · ${pending.action} · ${pending.state}`,
@@ -104,16 +114,21 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
   function clearViews() {
     selected = null; page = null; dynamic.clear();
     for (const id of ['queue-list', 'paging', 'selected', 'snapshot', 'pull-observation']) nodes[id].replaceChildren();
+    clearCandidate();
+  }
+  function clearCandidate() {
+    client.invalidateCandidate(); nodes['candidate-report'].replaceChildren(); nodes['candidate-section'].hidden = true;
   }
   function disconnect() {
     generation += 1; operation = null; client.disconnect(); clearViews();
+    download.revoke?.();
     for (const id of DRAFTS) nodes[id].value = '';
     nodes.token.value = ''; nodes['receipt-import-file'].value = ''; nodes.confirm.checked = false;
     status('Disconnected. Any unresolved prepared request is retained for recovery.'); controls();
   }
   async function run(kind, work) {
     if (operation !== null && !(kind === 'read' && operation === 'read')) { status('Finish the current operation first.'); return; }
-    if (kind === 'read') client.cancelReads();
+    if (kind === 'read') clearCandidate();
     const current = ++generation; operation = kind; controls();
     const guard = () => { if (current !== generation) throw new Error('Operation superseded.'); };
     try { await work(guard); }
@@ -122,7 +137,13 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
         if (!client.connected) { clearViews(); for (const id of DRAFTS) nodes[id].value = ''; }
         status(error.outcomeUnknown ? `Outcome remains unknown: ${error.message} The original request is retained. Look up its outcome or explicitly retry identical bytes.` : error.message);
       }
-    } finally { if (current === generation) { operation = null; controls(); } }
+    } finally {
+      if (current === generation) operation = null;
+      // A cancelled candidate may clear the client's busy latch only after its
+      // read/hash settles. Refresh from current state without clearing a newer
+      // operation or replacing its status with the obsolete result.
+      controls();
+    }
   }
   function drawBinding(result) {
     nodes.snapshot.textContent = displayText(`Repository ${result.binding.repository} · ${result.binding.format}\nIncarnation ${result.binding.incarnation}\nSnapshot ${result.head}`);
@@ -178,9 +199,12 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
         fillQueue(queue);
         nodes['queue-action'].value = 'land'; configureAction();
       });
+      if (index === 0) button(article, `Prepare merge candidate for PR #${pull}`, () => {
+        fillQueue(queue); nodes['queue-action'].value = 'land-candidate'; configureAction();
+      });
       nodes.selected.append(article);
     }
-    if (nodes['queue-action'].value === 'land') configureAction();
+    if (isLanding(nodes['queue-action'].value)) configureAction();
   }
   function show(queue, head = null) {
     return run('read', async guard => {
@@ -195,8 +219,9 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
     return selected;
   }
   function configureAction() {
+    clearCandidate();
     nodes['pull-observation'].replaceChildren();
-    if (nodes['queue-action'].value === 'land' && selected?.row) {
+    if (isLanding(nodes['queue-action'].value) && selected?.row) {
       const entry = selected.row.entries.find(entry => entry.pull_request === selected.row.order[0]);
       nodes['pull-number'].value = entry ? String(entry.pull_request) : '';
       nodes['pull-version'].value = ''; nodes['target-tip'].value = ''; nodes['policy-epoch'].value = '';
@@ -208,10 +233,10 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
   async function loadPull() {
     return run('read', async guard => {
       const action = nodes['queue-action'].value;
-      if (!['enqueue', 'land'].includes(action)) throw new Error('PR coordinates apply only to enqueue or landing.');
-      const selection = action === 'land' ? requireSelection() : selected && number('queue-number', 1) === selected.number && number('queue-version') === selected.version ? selected : null;
+      if (action !== 'enqueue' && !isLanding(action)) throw new Error('PR coordinates apply only to enqueue or landing.');
+      const selection = isLanding(action) ? requireSelection() : selected && number('queue-number', 1) === selected.number && number('queue-version') === selected.version ? selected : null;
       const pull = number('pull-number', 1);
-      if (action === 'land' && selection.row.order[0] !== pull) throw new Error('Only the selected queue head can be landed.');
+      if (isLanding(action) && selection.row.order[0] !== pull) throw new Error('Only the selected queue head can be landed.');
       const selectionInput = () => JSON.stringify(['queue-action', 'queue-number', 'queue-version', 'target-kind', 'target-ref', 'pull-number'].map(id => nodes[id].value));
       const originalInput = selectionInput();
       const result = await client.pull(pull, selection?.head ?? null); guard();
@@ -219,7 +244,7 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
       const row = result.reply.pull_request;
       if (!row || row.state !== 'open' || !row.data) throw new Error('An open PR with recorded coordinates is required.');
       if (selection?.row && row.data.target_ref_hex !== selection.row.target_ref_hex) throw new Error('The PR targets a different branch than this queue.');
-      if (action === 'land') {
+      if (isLanding(action)) {
         const entry = selection.row.entries.find(entry => entry.pull_request === pull);
         if (entry.source_ref_hex !== row.data.source_ref_hex || oid(entry.head_tip, result.binding.format) !== oid(row.data.source_tip, result.binding.format)) {
           throw new Error('The PR coordinates differ from the queued head. Reload and explicitly update queue membership.');
@@ -233,7 +258,7 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
   }
   function stageFields(action) {
     const fields = { expected_version: number('queue-version', action === 'enqueue' ? 0 : 1), ...reference('target') };
-    if (action === 'enqueue' || action === 'land') {
+    if (action === 'enqueue' || isLanding(action)) {
       Object.assign(fields, { pull_request: number('pull-number', 1), expected_pull_request_version: number('pull-version', 1),
         ...reference('source'), expected_source_tip: nodes['source-tip'].value, expected_target_tip: nodes['target-tip'].value });
       if (action === 'enqueue') fields.priority = integer(number('priority'), 'priority', 0, 0xffffffff);
@@ -254,12 +279,46 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
     } else throw new Error('Choose a supported queue action.');
     return fields;
   }
+  function nativeBytes(encoded) {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(unhex(encoded)); }
+    catch { return `Native bytes (hex): ${encoded}`; }
+  }
+  function drawCandidate(result) {
+    const target = nodes['candidate-report']; target.replaceChildren(); nodes['candidate-section'].hidden = false;
+    drawBinding(result);
+    if (!result.candidate) {
+      target.append(text('h3', result.metadata.state === 'conflicted' ? 'Conflicts stop candidate preparation' : 'Already up to date — no candidate'));
+      for (const conflict of result.metadata.conflicts) target.append(text('pre',
+        `${conflict.kind}: ${nativeBytes(conflict.path_hex)}\nPath bytes: ${conflict.path_hex}\n${JSON.stringify({ base: conflict.base, ours: conflict.ours, theirs: conflict.theirs }, null, 2)}`));
+      status('Preparation stopped without a candidate, transaction or publication. Resolve source changes explicitly, then reload the queue and PR coordinates.');
+      return;
+    }
+    const candidate = result.candidate, report = candidate.inspection;
+    target.append(text('h3', `Queue #${candidate.number} · PR #${candidate.pull_request} · inspected merge commit`),
+      text('pre', `Candidate ${candidate.fields.expected_commit}\nMerge base ${candidate.fields.merge_base}\nOrdered parents: ${report.parents.join(', ')}\nBundle ${candidate.bundle_bytes} bytes · SHA-256 ${candidate.sha256}\nPreparation snapshot ${result.head}\nInspection snapshot ${report.snapshot_token}`),
+      text('p', 'Every changed path from the complete native inspection appears below. The candidate remains read-only until you stage and explicitly send its landing.'),
+      text('pre', nativeBytes(report.candidate_commit_body_hex)));
+    if (!report.comparison.entries.length) target.append(text('p', 'The candidate tree has no changes against the selected target. Its merge commit and parents are still explicit.'));
+    for (const entry of report.comparison.entries) {
+      const article = text('article'), content = entry.content;
+      article.append(text('h3', `${entry.kind}: ${nativeBytes(entry.path_hex)}`),
+        text('pre', `Path bytes: ${entry.path_hex}\nBefore: ${JSON.stringify(entry.before)}\nAfter: ${JSON.stringify(entry.after)}`));
+      if (content.type === 'text') {
+        article.append(text('p', `${content.algorithm}: +${content.additions} / −${content.deletions}; ${content.hunks.length} complete hunks.`));
+        const hunks = content.hunks.map((hunk, index) => `Hunk ${index + 1}\nBefore lines ${hunk.old.line_start} +${hunk.old.line_count}; bytes ${hunk.old.byte_start}..${hunk.old.byte_end}\n${nativeBytes(hunk.before_hex)}\nAfter lines ${hunk.new.line_start} +${hunk.new.line_count}; bytes ${hunk.new.byte_start}..${hunk.new.byte_end}\n${nativeBytes(hunk.after_hex)}`);
+        article.append(text('pre', hunks.join('\n\n')));
+      } else if (content.type === 'binary') article.append(text('p', `Binary content: ${content.before_bytes} → ${content.after_bytes} bytes. Object bodies are excluded from the native report.`));
+      else article.append(text('p', `${content.type}: exact object identities and modes are shown; no text body was read.`));
+      target.append(article);
+    }
+    status('Queue-head candidate prepared and completely inspected. Save it for independent review if required, then stage the exact landing. No branch has moved.');
+  }
   function terminal(result, action) {
     if (!result.terminal) { status(`Outcome remains unknown (${result.state}). Keep the exact original request for recovery or an identical retry.`); return; }
     clearViews(); nodes['queue-version'].value = ''; nodes.confirm.checked = false;
     status(`Canonical ${result.outcome} · ${action} · transaction ${result.tx}${result.refusal ? ` · ${result.refusal}` : ''}. ` +
-      (result.outcome === 'committed' && action === 'land' ? 'The original queue-head landing committed its target update and PR merge together. '
-        : action === 'land' ? 'This landing was refused. ' : 'Queue management does not land a PR. ') +
+      (result.outcome === 'committed' && isLanding(action) ? 'The original queue-head landing committed its target update and PR merge together. '
+        : isLanding(action) ? 'This landing was refused. ' : 'Queue management does not land a PR. ') +
       'Reload to observe current state. Delivery acknowledgement is not implied.');
   }
   function on(id, event, handler) {
@@ -286,12 +345,41 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
     generation += 1; operation = null; client.cancelReads(); status('Read cancelled. Prepared request custody is unchanged.'); controls();
   });
   on('queue-action', 'change', configureAction);
+  for (const id of [...DRAFTS, 'target-kind', 'source-kind', 'candidate-message-kind', 'candidate-profile']) {
+    for (const event of ['input', 'change']) nodes[id].addEventListener(event, () => { clearCandidate(); controls(); });
+  }
   on('load-pull', 'click', loadPull);
+  on('candidate-prepare', 'click', () => run('read', async guard => {
+    if (nodes['queue-action'].value !== 'land-candidate') throw new Error('Choose queue-head merge candidate preparation explicitly.');
+    const fields = stageFields('land-candidate'), draft = () => JSON.stringify([...DRAFTS, 'queue-action', 'target-kind', 'source-kind', 'candidate-message-kind', 'candidate-profile'].map(id => nodes[id].value));
+    const original = draft(), metadata = { author: nodes['candidate-author'].value, committer: nodes['candidate-committer'].value,
+      timestamp: number('candidate-timestamp', 1), profile: nodes['candidate-profile'].value,
+      [nodes['candidate-message-kind'].value === 'hex' ? 'message_hex' : 'message']: nodes['candidate-message'].value };
+    status('Constructing the selected queue-head merge, then inspecting its complete native bundle…');
+    const result = await client.prepareCandidate(number('queue-number', 1), fields, metadata); guard();
+    if (draft() !== original) { clearCandidate(); throw new Error('Draft changed during preparation. Prepare and inspect the new coordinates explicitly.'); }
+    drawCandidate(result);
+  }));
   on('queue-change', 'submit', () => run('stage', async guard => {
     const action = nodes['queue-action'].value, fields = stageFields(action);
-    await client.stage(number('queue-number', 1), action, fields); guard(); nodes.confirm.checked = false;
-    status(action === 'land' ? 'Exact queue-head landing prepared. Save and review the receipt, then send explicitly. No branch has moved.'
+    if (action === 'land-candidate') await client.stageCandidate(number('queue-number', 1), fields);
+    else await client.stage(number('queue-number', 1), action, fields);
+    guard(); nodes.confirm.checked = false;
+    status(isLanding(action) ? 'Exact queue-head landing prepared. Save and review the receipt, then send explicitly. No branch has moved.'
       : 'Exact queue change prepared locally. Save and review the receipt, then send explicitly. Nothing sent.');
+  }));
+  on('candidate-bundle-download', 'click', () => run('export', async () => {
+    download('frankengit-queue-candidate.bundle', client.exportCandidateBundle(), 'application/x-git-bundle');
+    status('Exact inspected candidate bundle saved. Preserve its native landing form and original queue guards.');
+  }));
+  on('candidate-inspection-download', 'click', () => run('export', async () => {
+    const candidate = client.candidate; if (!candidate) throw new Error('Prepare and inspect a candidate first.');
+    download('frankengit-queue-candidate-inspection.json', JSON.stringify({ preparation: candidate.metadata, inspection: candidate.inspection }, null, 2));
+    status('Complete preparation, original native landing form, and inspection saved. Binary object bodies remain excluded from the report.');
+  }));
+  on('candidate-review-download', 'click', () => run('export', async () => {
+    download('frankengit-queue-review-candidate.json', client.exportReviewCandidate());
+    status('Exact candidate exported for independent native reinspection and review on the Pull requests page. This records no vote.');
   }));
   nodes.confirm.addEventListener('change', controls);
   on('send', 'click', () => run('send', async guard => {

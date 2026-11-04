@@ -333,6 +333,7 @@ pub(super) fn change_policy(node: &OneNode) {
             administrators: vec![OWNER],
             ref_policy: None,
             branches: vec![ProtectedBranch {
+                path_reviews: Vec::new(),
                 name: target_ref(),
                 reviewers: vec![PrincipalId::from_bytes([0x74; 16])],
                 required_approvals: 1,

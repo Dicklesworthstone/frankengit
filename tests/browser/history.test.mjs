@@ -20,6 +20,7 @@ for (const algorithm of ['sha1', 'sha256']) {
   });
   test(`${algorithm}: full blame verifies native blob and origin navigation reproduces exact bytes`, async () => {
     const f = fixture(algorithm), c = await opened(f), result = await c.blame(f.path);
+    assert.equal(result.traversal, 'line-frontier-v1');
     assert.equal(result.fullBlobVerified, true); assert.deepEqual(result.lines.map(line => line.origin_commit), [f.tip.object_id, f.base.object_id]);
     result.lines[1].origin_commit = f.tip.object_id; // Public data cannot rewrite the private verified attribution.
     const original = await c.origin(1);
@@ -93,10 +94,21 @@ test('malformed blame ranges, line origins, hashes, and work reports cannot beco
   const changes = [r => r.lines[0].byte_start++, r => r.lines[0].origin_byte_end++, r => r.lines[0].line++,
     r => r.lines[1].origin_commit = 'a'.repeat(40), r => r.origins = [], r => r.origins.reverse(), r => r.lines.pop(),
     r => r.content_hex += '00', r => r.blob = 'a'.repeat(40), r => r.first_line++, r => r.end_line--,
-    r => r.graph_commits = 0, r => r.comparisons = 129, r => r.max_diff_work = 1, r => r.range_complete = false,
+    r => r.graph_commits = 0, r => r.traversal = null, r => r.traversal = 'unbounded',
+    r => r.comparisons = 129, r => r.max_diff_work = 1, r => r.range_complete = false,
     r => r.scope = 'renames', r => r.line_origin = 1, r => r.path_hex = '61', r => r.origins[0].body_hex += '00',
     r => r.content_hex = hex(bytes('ON\n\ntwo')), r => r.algorithms = ['Myers', 'Myers']];
   for (const change of changes) { const f = fixture(), c = await opened(f); f.config.mutate = change; await assert.rejects(c.blame(f.path)); await assert.rejects(c.origin(0)); }
+});
+test('legacy and explicit full-DAG blame reports retain their distinct traversal contract', async () => {
+  for (const explicit of [false, true]) {
+    const f = fixture(), c = await opened(f);
+    f.config.mutate = reply => { if (explicit) reply.traversal = 'full-dag-v1'; else delete reply.traversal; };
+    const result = await c.blame(f.path);
+    assert.equal(result.traversal, 'full-dag-v1');
+    assert.equal(result.fullBlobVerified, true);
+    assert.deepEqual(result.lines.map(line => line.origin_commit), [f.tip.object_id, f.base.object_id]);
+  }
 });
 test('historical source cannot change ref-tip/ancestor, path, hash domain, range, or traversal semantics', async () => {
   const changes = [r => r.source_ref_tip = 'a'.repeat(40), r => r.at_commit = 'a'.repeat(40),

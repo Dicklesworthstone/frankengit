@@ -1,8 +1,10 @@
 //! Real node operations, not fixtures or a CLI subprocess. Grants and principal
 //! are fixed at launch; repository text never selects an admission identity.
+mod agent;
 mod agent_context;
 mod artifacts;
 mod candidate;
+mod check_evidence;
 mod checks;
 mod discussions;
 mod events;
@@ -27,6 +29,8 @@ mod review_writes;
 mod search;
 mod source;
 mod source_writes;
+mod tags;
+mod verified_blob;
 use super::Options;
 use super::json::{self, Object, Value, object, text};
 use super::protocol::{ReadTools, Tool, ToolError, fields};
@@ -36,8 +40,12 @@ use fgit_types::{
 };
 
 pub(super) struct NodeTools {
+    // Field order is the unwind backstop: stop/join children before dropping
+    // the parent runtime. Normal shutdown consumes their terminal results.
+    maintenance: Option<fgit_node::SourceIndexService>,
     node: OneNode,
     options: Options,
+    agent: Option<agent::Profile>,
 }
 impl NodeTools {
     pub(super) fn open(options: Options) -> Result<Self, String> {
@@ -54,6 +62,9 @@ impl NodeTools {
             fgit_schema::mcp::REGISTRY,
         )
         .map_err(|error| error.to_string())?;
+        // Read the bounded private secret before acquiring repository/runtime
+        // resources. The file is selected at launch, never by tool arguments.
+        let agent = agent::Profile::load(&options)?;
         let mut config =
             NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
                 .with_object_format(options.format)
@@ -103,12 +114,57 @@ impl NodeTools {
                 Err(_) => Err(format!("{error}; MCP node shutdown also failed")),
             };
         }
-        Ok(Self { node, options })
-    }
-    pub(super) fn close(self) -> Result<(), String> {
-        self.node.shutdown().map_err(|_| {
-            "MCP node shutdown failed; do not infer rollback of submitted mutations".into()
+        let maintenance = match options.index_maintenance.clone() {
+            Some(group) => match fgit_node::SourceIndexService::start(&node, group, None) {
+                Ok(Some(service)) => Some(service),
+                result => {
+                    let detail = match result {
+                        Err(error) => error.to_string(),
+                        _ => "maintenance stopped during startup".into(),
+                    };
+                    let error = format!("MCP index maintenance startup failed: {detail}");
+                    return match node.shutdown() {
+                        Ok(()) => Err(error),
+                        Err(_) => Err(format!("{error}; MCP node shutdown also failed")),
+                    };
+                }
+            },
+            None => None,
+        };
+        Ok(Self {
+            maintenance,
+            node,
+            options,
+            agent,
         })
+    }
+    pub(super) fn close(mut self) -> Result<(), String> {
+        // An EOF or failed response does not abandon an original candidate.
+        // Signal/drain/join all children before closing the parent database/runtime.
+        let maintenance = self
+            .maintenance
+            .take()
+            .map(|service| service.finish())
+            .transpose()
+            .map_err(|error| format!("MCP index maintenance drain failed: {error}"));
+        let shutdown = self.node.shutdown().map_err(|_| {
+            "MCP node shutdown failed; do not infer rollback of submitted mutations".to_owned()
+        });
+        match (maintenance, shutdown) {
+            (Ok(_), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+        }
+    }
+    fn maintenance_checkpoint(&self) -> Result<(), &'static str> {
+        if self
+            .maintenance
+            .as_ref()
+            .is_some_and(fgit_node::SourceIndexService::finished)
+        {
+            return Err("index_maintenance_stopped");
+        }
+        Ok(())
     }
     fn header(&self, head: RepositoryAuthorityHeadId) -> Object {
         let Value::Object(fields) = object([
@@ -125,6 +181,36 @@ impl NodeTools {
             unreachable!()
         };
         fields
+    }
+
+    fn command_context(&self) -> fgit_node::NodeRequestContext {
+        if let Some(request) = self
+            .agent
+            .as_ref()
+            .and_then(|profile| profile.request.as_ref())
+        {
+            return request.context(&self.node);
+        }
+        let context = fgit_cli::command_request_context(&self.node);
+        if self.options.agent_token_file.is_some() {
+            // An adapter reached outside its authenticated call cannot
+            // acquire the trusted-local command budget as a fallback.
+            context.cancel();
+        }
+        context
+    }
+
+    fn source_read_context(
+        &self,
+    ) -> Result<fgit_node::source_retrieval::authorization::SourceReadContext, ToolError> {
+        if self.options.agent_token_file.is_some() {
+            return agent::source_read_context(self);
+        }
+        Ok(
+            fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_mcp(
+                &self.node,
+            ),
+        )
     }
 }
 
@@ -153,15 +239,20 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.pulls {
         tools.extend(pulls::tools());
         tools.push(checks::tool());
+        if options.artifacts {
+            tools.push(check_evidence::tool());
+        }
         tools.push(pull_comments::read_tool());
         tools.push(pull_reviews::tool());
     }
     if options.source {
         tools.extend(source::tools());
+        tools.push(verified_blob::tool());
         tools.extend(search::tools());
         tools.push(candidate::tool());
         tools.push(refs::tool());
         tools.extend(retrieval::tools());
+        tools.push(tags::read_tool());
     }
     if options.writes.issues {
         tools.extend(issue_writes::tools());
@@ -177,6 +268,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     }
     if options.writes.source {
         tools.extend(source_writes::tools());
+        tools.extend(tags::write_tools());
     }
     if options.writes.reviews {
         tools.extend(review_writes::tools());
@@ -193,6 +285,9 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     tools.extend(review::tools(options.source, options.pulls));
     if options.source {
         tools.extend(history::tools());
+    }
+    if options.agent_token_file.is_some() {
+        tools.retain(|tool| agent::operation(options, tool.name).is_some());
     }
     tools
 }
@@ -216,6 +311,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         agent_context: true,
         artifacts: true,
         artifact_root: None,
+        agent_token_file: None,
         writes: super::WriteGrants {
             issues: true,
             discussions: true,
@@ -228,6 +324,7 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
         outcomes: true,
         principal: Some(fgit_types::PrincipalId::from_bytes([0x44; 16])),
         max_messages: 1,
+        index_maintenance: None,
     };
     let mut names: Vec<&'static str> = tools_for_options(&full_options)
         .into_iter()
@@ -238,10 +335,40 @@ pub(super) fn all_registered_tool_names() -> Vec<&'static str> {
 }
 
 impl ReadTools for NodeTools {
+    fn service_ready(&mut self) -> Result<(), &'static str> {
+        self.maintenance_checkpoint()?;
+        if let Some(service) = &mut self.maintenance {
+            service
+                .activate()
+                .map_err(|_| "index_maintenance_activation_failed")?;
+        }
+        Ok(())
+    }
+    fn service_checkpoint(&self) -> Result<(), &'static str> {
+        self.maintenance_checkpoint()
+    }
+    fn begin_message(&mut self) {
+        if let Some(profile) = &mut self.agent {
+            profile.response = None;
+        }
+    }
+    fn response_checkpoint(&self, output_bytes: u64) -> Result<(), &'static str> {
+        self.maintenance_checkpoint()?;
+        if let Some(profile) = &self.agent {
+            agent::response_checkpoint(profile, output_bytes)?;
+        }
+        Ok(())
+    }
+    fn finish_response(&mut self) {
+        self.begin_message();
+    }
     fn tools(&self) -> Vec<Tool> {
         tools_for_options(&self.options)
     }
     fn is_mutation(&self, name: &str) -> bool {
+        if self.options.agent_token_file.is_some() {
+            return agent::operation(&self.options, name).is_some_and(agent::is_write);
+        }
         (notifications::write_permitted(&self.options) && notifications::is_write(name))
             || (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.issues && milestones::is_write(name))
@@ -250,6 +377,7 @@ impl ReadTools for NodeTools {
             || (self.options.writes.pulls
                 && matches!(name, pull_comments::WRITE | pull_comments::APPEND))
             || (self.options.writes.source && source_writes::is_tool(name))
+            || (self.options.writes.source && tags::is_write(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
             || (self.options.writes.merges && merge_writes::is_tool(name))
             || queues::is_mutation(self.options.queues, name)
@@ -263,6 +391,17 @@ impl ReadTools for NodeTools {
                 == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        self.maintenance_checkpoint().map_err(ToolError::failed)?;
+        if self.options.agent_token_file.is_some() {
+            return agent::call(self, name, args);
+        }
+        self.call_granted(name, args)
+    }
+}
+
+impl NodeTools {
+    /// Dispatch only after the selected launch profile has checked its boundary.
+    fn call_granted(&self, name: &str, args: &Object) -> Result<Value, ToolError> {
         if notifications::read_permitted(&self.options) && notifications::is_read(name) {
             return notifications::read(self, name, args);
         }
@@ -296,6 +435,9 @@ impl ReadTools for NodeTools {
         if self.options.writes.source && source_writes::is_tool(name) {
             return source_writes::call(self, name, args);
         }
+        if self.options.writes.source && tags::is_write(name) {
+            return tags::write(self, name, args);
+        }
         if self.options.writes.reviews && name == review_writes::NAME {
             return review_writes::call(self, args);
         }
@@ -324,6 +466,9 @@ impl ReadTools for NodeTools {
         if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
             return pulls::call(self, name, args);
         }
+        if self.options.pulls && self.options.artifacts && name == check_evidence::NAME {
+            return check_evidence::call(self, args);
+        }
         if self.options.pulls && name == checks::NAME {
             return checks::call(self, args);
         }
@@ -338,14 +483,23 @@ impl ReadTools for NodeTools {
         {
             return source::call(self, name, args);
         }
+        if self.options.source && name == verified_blob::NAME {
+            return verified_blob::call(self, args);
+        }
         if self.options.source && name == candidate::NAME {
             return candidate::call(self, args);
         }
         if self.options.source && name == refs::NAME {
             return refs::call(self, args);
         }
+        if self.options.source && name == tags::INSPECT {
+            return tags::inspect(self, args);
+        }
         if self.options.source && matches!(name, retrieval::INITIAL | retrieval::CONTEXT) {
             return retrieval::call(self, name, args);
+        }
+        if self.options.source && name == search::INDEXED_NAME {
+            return search::call_indexed(self, args);
         }
         if self.options.source && name == search::NAME {
             return search::call(self, args);
@@ -552,7 +706,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 84);
+        assert_eq!(server_names.len(), 92);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));

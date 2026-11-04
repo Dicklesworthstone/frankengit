@@ -3,8 +3,9 @@
 //! a candidate filter: returned rows still come from verified original tables.
 use super::{
     BTreeMap, CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Digest, DomainTag, Encoder,
-    Error, MAX_INDEX_BYTES, MAX_PAYLOAD, Manifest, Payload, Query, SchemaFamily, SymbolMatchMode,
-    add, check, decode_body, decode_limits, encode_body, engine, payload, root, table,
+    Error, MAX_INDEX_BYTES, MAX_INDEX_DECLARATIONS, MAX_PAYLOAD, Manifest, Payload, Query,
+    SchemaFamily, SymbolMatchMode, add, check, decode_body, decode_limits, encode_body, engine,
+    payload, root, table,
 };
 
 /// Generation layout profile. Existing v1 tables and manifests keep their
@@ -131,7 +132,7 @@ impl NameDirectory {
                 add(
                     &mut postings,
                     1,
-                    engine::MAX_DECLARATIONS,
+                    MAX_INDEX_DECLARATIONS,
                     "directory postings",
                 )?;
                 previous = Some(key);
@@ -215,7 +216,7 @@ impl NameDirectory {
         }
         let bound = input.read_digest()?;
         let count = input.read_scalar::<u32>("names")? as usize;
-        if count > engine::MAX_DECLARATIONS || count > input.remaining() / 9 {
+        if count > MAX_INDEX_DECLARATIONS || count > input.remaining() / 9 {
             return Err(Error::Limit("directory names"));
         }
         let mut names = BTreeMap::new();
@@ -230,12 +231,7 @@ impl NameDirectory {
                 return Err(Error::Invalid("directory name order"));
             }
             let n = input.read_scalar::<u32>("postings")? as usize;
-            add(
-                &mut total,
-                n,
-                engine::MAX_DECLARATIONS,
-                "directory postings",
-            )?;
+            add(&mut total, n, MAX_INDEX_DECLARATIONS, "directory postings")?;
             if n > input.remaining() / 9 {
                 return Err(Error::Invalid("directory posting count"));
             }

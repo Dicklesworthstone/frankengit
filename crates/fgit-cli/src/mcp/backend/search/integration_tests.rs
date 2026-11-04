@@ -104,7 +104,9 @@ fn open(format: GitHashAlgorithm) -> (Scratch, NodeTools) {
         agent_context: false,
         artifacts: false,
         artifact_root: None,
+        agent_token_file: None,
         max_messages: 16,
+        index_maintenance: None,
     })
     .unwrap();
     (scratch, backend)

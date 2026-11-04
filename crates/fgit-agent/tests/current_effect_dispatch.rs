@@ -304,6 +304,247 @@ impl DownstreamChannel for Delivered {
 }
 
 #[test]
+fn cross_broker_dispatch_cannot_extend_the_original_run_lifetime() {
+    let fixture = fixture(590);
+    let original_run = IntentRun::new_authenticated(
+        fixture.run.run_id(),
+        fixture
+            .run
+            .authority_read_receipt()
+            .expect("authenticated run")
+            .clone(),
+        fixture.run.allowed_operation_classes(),
+        fixture.run.resource_budget(),
+        LogicalTime::new(25),
+    )
+    .expect("the shorter run opens");
+    assert_eq!(original_run.run_id(), fixture.run.run_id());
+    assert_ne!(
+        original_run
+            .commitment()
+            .expect("the original run identity"),
+        fixture
+            .run
+            .commitment()
+            .expect("the receiving run identity"),
+    );
+    assert!(!original_run.is_open_at(LogicalTime::new(31)));
+    assert!(fixture.run.is_open_at(LogicalTime::new(31)));
+    let chain = verified_chain();
+    let initial = read_current_authority_capability_revocations(
+        &fixture.store,
+        tenant(),
+        &fixture.head_key,
+        &original_run,
+        LogicalTime::new(20),
+        30,
+        32,
+        0,
+    )
+    .expect("the original run reads the current selected generation");
+    let fresh = current_revocations(&fixture, 30, 20, 0);
+    let request = request(90);
+    let dispatch = dispatch(0xa1);
+    let mut owner = CurrentAuthorityRevocationCheckedEffectBroker::open(
+        original_run,
+        RegionId::new(90),
+        AgentInstanceId::new(90),
+    )
+    .expect("the original broker opens");
+    let mut receiver = CurrentAuthorityRevocationCheckedEffectBroker::open(
+        fixture.run.clone(),
+        RegionId::new(90),
+        AgentInstanceId::new(90),
+    )
+    .expect("the longer-lived broker opens");
+    let grant = owner
+        .request_high_value(&chain, &initial, LogicalTime::new(21), &request)
+        .expect("the original run initially authorizes the request");
+    let reserved = owner
+        .reserve_authorized_outbox(grant, dispatch)
+        .expect("the original broker reserves its effect");
+    let original_authorization = reserved.initial_authorization();
+    let journal = owner.journal();
+    let records = owner.records();
+    let refusal = receiver
+        .dispatch_authorized_outbox(
+            reserved,
+            &chain,
+            &fresh,
+            LogicalTime::new(31),
+            1,
+            &egress(100),
+        )
+        .expect_err("another complete run cannot revive an expired reservation");
+    assert!(matches!(
+        &refusal,
+        CurrentAuthorityOutboxDispatchRefused::RunCommitmentChanged {
+            expected, observed, ..
+        } if *expected == owner.run_commitment() && *observed == receiver.run_commitment()
+    ));
+    assert_eq!(owner.journal(), journal);
+    assert_eq!(owner.records(), records);
+    assert!(receiver.records().is_empty());
+    assert!(owner.dispatch_authorizations().is_empty());
+    assert!(receiver.dispatch_authorizations().is_empty());
+    assert!(owner.generic_dispatch_authorizations().is_empty());
+    assert!(receiver.generic_dispatch_authorizations().is_empty());
+    let reserved = refusal
+        .into_reserved()
+        .expect("wrong-run dispatch preserves the live reservation");
+    assert_eq!(reserved.initial_authorization(), original_authorization);
+    assert_eq!(reserved.request(), request);
+    let _settled = reserved
+        .abort_unused(DispatchAbortReason::Cancelled)
+        .expect("expiry does not prevent cleanup in the original broker");
+
+    let grant = receiver
+        .request_high_value(&chain, &fresh, LogicalTime::new(31), &request)
+        .expect("the receiving run can authorize its own fresh request");
+    let reserved = receiver
+        .reserve_authorized_outbox(grant, dispatch)
+        .expect("the receiving broker reserves its own effect");
+    let committed = receiver
+        .dispatch_authorized_outbox(
+            reserved,
+            &chain,
+            &fresh,
+            LogicalTime::new(31),
+            1,
+            &egress(100),
+        )
+        .expect("the original refusal does not prevent a legitimate dispatch");
+    let commitment = fixture.run.commitment().expect("the complete run identity");
+    assert_eq!(
+        committed.generic().initial_authorization().run_commitment(),
+        commitment
+    );
+    assert_eq!(
+        committed
+            .generic()
+            .dispatch_authorization()
+            .run_commitment(),
+        commitment
+    );
+    assert!(matches!(
+        committed.reconcile(
+            &mut plan(&dispatch),
+            &mut Delivered,
+            PrincipalId::from_bytes([0x41; 16]),
+            |attempt| DownstreamAck {
+                receipt: opaque(0xa2),
+                attempt,
+            },
+            Vec::new(),
+        ),
+        Ok(CurrentAuthorityExternalEffectOutcome::Acknowledged(_))
+    ));
+    assert!(owner.close().is_quiescent());
+    assert!(receiver.close().is_quiescent());
+}
+
+#[test]
+fn cross_broker_same_run_grants_and_reservations_keep_their_owner() {
+    let fixture = fixture(591);
+    let chain = verified_chain();
+    let revocations = current_revocations(&fixture, 20, 30, 0);
+    let mut owner = CurrentAuthorityRevocationCheckedEffectBroker::open(
+        fixture.run.clone(),
+        RegionId::new(91),
+        AgentInstanceId::new(91),
+    )
+    .expect("the owner opens");
+    let mut receiver = CurrentAuthorityRevocationCheckedEffectBroker::open(
+        fixture.run,
+        RegionId::new(91),
+        AgentInstanceId::new(91),
+    )
+    .expect("a sibling with identical public identities opens");
+    assert_eq!(owner.run_commitment(), receiver.run_commitment());
+    let request = request(91);
+    let dispatch = dispatch(0xb1);
+    let grant = owner
+        .request_high_value(&chain, &revocations, LogicalTime::new(21), &request)
+        .expect("the owner accepts the request");
+    let authorization = grant.authorization();
+    let journal = owner.journal();
+    let records = owner.records();
+    let refusal = receiver
+        .reserve_authorized_outbox(grant, dispatch)
+        .expect_err("identical public identities do not transfer a live grant");
+    assert!(matches!(
+        refusal.source().source(),
+        fgit_agent::OutboxReservationRefused::BrokerMismatch { .. }
+    ));
+    assert_eq!(owner.journal(), journal);
+    assert_eq!(owner.records(), records);
+    assert!(receiver.records().is_empty());
+    let grant = refusal
+        .into_authorized_grant()
+        .expect("wrong-broker reservation retains the authorized grant");
+    assert_eq!(grant.authorization(), authorization);
+    let reserved = owner
+        .reserve_authorized_outbox(grant, dispatch)
+        .expect("the recovered grant still reserves in its owning broker");
+    let journal = owner.journal();
+    let records = owner.records();
+    let refusal = receiver
+        .dispatch_authorized_outbox(
+            reserved,
+            &chain,
+            &revocations,
+            LogicalTime::new(22),
+            1,
+            &egress(100),
+        )
+        .expect_err("identical public identities do not transfer a reservation");
+    assert!(matches!(
+        &refusal,
+        CurrentAuthorityOutboxDispatchRefused::Dispatch {
+            source: fgit_agent::AuthorizedOutboxDispatchRefused::BrokerMismatch { .. },
+            ..
+        }
+    ));
+    assert_eq!(owner.journal(), journal);
+    assert_eq!(owner.records(), records);
+    assert!(receiver.records().is_empty());
+    assert!(owner.dispatch_authorizations().is_empty());
+    assert!(receiver.dispatch_authorizations().is_empty());
+    assert!(owner.generic_dispatch_authorizations().is_empty());
+    assert!(receiver.generic_dispatch_authorizations().is_empty());
+    let reserved = refusal
+        .into_reserved()
+        .expect("wrong-broker dispatch preserves the live reservation");
+    assert_eq!(reserved.initial_authorization(), authorization);
+    assert_eq!(reserved.request(), request);
+    let committed = owner
+        .dispatch_authorized_outbox(
+            reserved,
+            &chain,
+            &revocations,
+            LogicalTime::new(22),
+            1,
+            &egress(100),
+        )
+        .expect("the recovered reservation still dispatches in its owning broker");
+    assert!(matches!(
+        committed.reconcile(
+            &mut plan(&dispatch),
+            &mut Delivered,
+            PrincipalId::from_bytes([0x41; 16]),
+            |attempt| DownstreamAck {
+                receipt: opaque(0xb2),
+                attempt,
+            },
+            Vec::new(),
+        ),
+        Ok(CurrentAuthorityExternalEffectOutcome::Acknowledged(_))
+    ));
+    assert!(owner.close().is_quiescent());
+    assert!(receiver.close().is_quiescent());
+}
+
+#[test]
 fn failed_durable_escalation_retains_both_authorization_layers_and_live_debt() {
     use fgit_agent::effect_journal::{
         EffectJournalEncoder, EffectJournalPersistenceRefusal, EffectJournalPosition,

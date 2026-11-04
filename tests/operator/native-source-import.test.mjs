@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, readdir, rename, symlink, link, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -317,6 +318,59 @@ test('cancellation drains a child that ignores TERM, preserving a committed unkn
   await assert.rejects(operation, error => error.code === 'native_import_cancelled' && error.details?.submission_attempted);
   await f.setMode({ import: 'commit' });
   assert.equal((await readNativeImportOutcome(f.config.recovery, f.recovery)).outcome, 'committed');
+});
+for (const action of ['import', 'retry']) test(`${action} retains failed containment observations with original recovery identity`, async t => {
+  const f = await fixture(t, { import: 'hang-before' });
+  if (action === 'retry') await failedImport(f);
+  await f.setMode({ import: 'hang-before' });
+  const pidFile = join(f.root, 'import-child.pid'), originalKill = process.kill.bind(process);
+  let observations = 0;
+  // Inject only the owned import child's liveness-probe failure. Signals, actual
+  // child execution, pipe closure and reaping still use the OS; no child escapes.
+  // The existing fake adapter does not establish Git or authority semantics.
+  const kill = t.mock.method(process, 'kill', (pid, signal) => {
+    if (signal === 0 && existsSync(pidFile) && pid === -Number(readFileSync(pidFile, 'utf8'))) {
+      observations++;
+      throw Object.assign(new Error('planted liveness observation failure'), { code: 'EPERM' });
+    }
+    return originalKill(pid, signal);
+  });
+  let failure;
+  try {
+    await assert.rejects(action === 'import'
+      ? importNativeSource(f.source, { ...f.config, timeoutMs: 1000 })
+      : retryNativeSourceImport(f.config.recovery, { ...f.recovery, timeoutMs: 1000 }), error => {
+      failure = error;
+      return error.code === 'native_import_containment_failed';
+    });
+  } finally { kill.mock.restore(); }
+  assert.ok(observations > 0, 'the selected native owner reached the planted probe');
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  assert.throws(() => originalKill(pid, 0), { code: 'ESRCH' }, 'actual direct child was reaped');
+  assert.deepEqual(failure.details.process_failure, {
+    reason: 'native_process_deadline', leader_exited: true, output_closed: true,
+    process_group: 'unknown', scope: 'posix-process-group',
+  });
+  const intentBytes = await readFile(join(f.config.recovery, 'intent.json'));
+  const intent = JSON.parse(intentBytes);
+  assert.equal(failure.details.recovery_directory, f.config.recovery);
+  assert.equal(failure.details.intent_sha256, sha(intentBytes));
+  assert.equal(failure.details.key_sha256, sha(intent.idempotency_key));
+  assert.equal(failure.details.outcome, 'unknown_pending');
+  assert.equal(failure.details.submission_attempted, true);
+  assert.equal(failure.details.absence_proves_non_commit, false);
+  assert.equal(failure.details.automatic_retry, false);
+  assert.equal(JSON.stringify(failure.details).includes(intent.idempotency_key), false);
+  assert.deepEqual(await readFile(join(f.config.recovery, 'source.bundle')), f.bytes);
+  const attempts = (await f.calls()).filter(args => args[1] === 'import').length;
+  assert.equal(attempts, action === 'import' ? 1 : 2, 'no automatic resubmission');
+  // The near-identical permitted twin: restore observation, then explicitly
+  // retry the same retained request rather than manufacturing another key.
+  await f.setMode({ import: 'commit' });
+  const resolved = await retryNativeSourceImport(f.config.recovery, f.recovery);
+  assert.equal(resolved.outcome, 'committed');
+  assert.equal(resolved.intent_sha256, sha(intentBytes));
+  assert.equal((await f.calls()).filter(args => args[1] === 'import').length, attempts + 1);
 });
 test('expired budget never acquires a fresh verification/admission allowance', async t => {
   const f = await fixture(t, { verify: 'hang' });

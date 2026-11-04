@@ -8,10 +8,13 @@ mod pulls;
 mod queues;
 
 mod activity;
+#[cfg(target_os = "linux")]
+mod artifacts;
 mod branches;
 mod export_verify;
 mod history;
 mod initial;
+mod milestones;
 mod rebase;
 mod replay;
 mod search;
@@ -80,7 +83,9 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str, Asse
             ISSUES_VIEW,
             AssetScope::Issues,
         )),
-        _ => None,
+        _ => {
+            milestones::asset(route, target).map(|(media, body)| (media, body, AssetScope::Issues))
+        }
     }
 }
 
@@ -129,6 +134,10 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    #[cfg(target_os = "linux")]
+    if artifacts::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
     if discussions::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }

@@ -53,8 +53,10 @@ tags or arbitrary bare names.
 Other pattern operators (`?`, `+`, character classes, escapes), triple stars,
 control/whitespace characters and expressions refuse with a source span. This
 is a named subset, not a full Actions glob implementation. Unknown event mapping
-keys/options, `paths`, `tags`, activity types and dispatch-input declarations
-also refuse; they are not silently discarded.
+keys/options, activity types and dispatch-input declarations also refuse; they
+are not silently discarded. The separate [path filter](NATIVE_WORKFLOW_PATH_FILTERS.md)
+and [tag filter](NATIVE_TAG_WORKFLOW_WATCH.md) profiles describe supported
+`paths` / `paths-ignore` and push `tags` / `tags-ignore` mappings.
 
 Scalar and block-list event declarations retain their historical behavior.
 Within a mixed mapping, an unfiltered event is explicitly written `push: ''` or

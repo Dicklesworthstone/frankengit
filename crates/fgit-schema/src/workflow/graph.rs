@@ -40,12 +40,16 @@ pub const DEADLINE_CANONICAL_VERSION: &str = "fgit-workflow/v4";
 pub const TRIGGER_CANONICAL_VERSION: &str = "fgit-workflow/v5";
 /// Complete changed-path selection bound to exact event coordinates.
 pub const PATH_CANONICAL_VERSION: &str = "fgit-workflow/v6";
+/// Explicit tag filters select the tag namespace without changing old graph bytes.
+pub const TAG_CANONICAL_VERSION: &str = "fgit-workflow/v7";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Trigger {
     /// Optional ordered branch filter.
     pub branch_filter: Option<super::triggers::BranchFilter>,
+    /// Optional ordered tag filter. Only push triggers admit this selection.
+    pub tag_filter: Option<super::triggers::TagFilter>,
     /// Optional complete changed-path selection.
     pub path_filter: Option<super::triggers::PathFilter>,
     /// Trigger name as written.
@@ -180,7 +184,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_path_filters() {
+        let version = if self.has_tag_filters() {
+            TAG_CANONICAL_VERSION
+        } else if self.has_path_filters() {
             PATH_CANONICAL_VERSION
         } else if self.has_branch_filters() {
             TRIGGER_CANONICAL_VERSION
@@ -201,6 +207,16 @@ impl WorkflowGraph {
                 for pattern in filter.patterns() {
                     lines.push(format!(
                         "trigger-branch\t{}\t{}\t{}",
+                        escape(&trigger.name),
+                        filter.field(),
+                        escape(pattern)
+                    ));
+                }
+            }
+            if let Some(filter) = &trigger.tag_filter {
+                for pattern in filter.patterns() {
+                    lines.push(format!(
+                        "trigger-tag\t{}\t{}\t{}",
                         escape(&trigger.name),
                         filter.field(),
                         escape(pattern)

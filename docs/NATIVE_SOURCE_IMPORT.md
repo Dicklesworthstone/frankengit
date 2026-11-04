@@ -93,6 +93,11 @@ second outcome database supplies publication authority.
 A timeout, signal, child failure, invalid report or lost stdout after submission
 is an **unknown outcome**, not rollback. Error receipts retain the recovery path
 and intent pin. A native canonical refusal is terminal, not a retry instruction.
+If the native process owner supplies structured failure facts, the error retains
+them under `details.process_failure` alongside that recovery context. These facts
+include containment observation scope and child/pipe state when available; they
+do not establish noncommit or permit automatic resubmission. Raw native output
+and the idempotency key are not added to this diagnostic field.
 Reports are bounded and reject duplicate JSON fields, contradictory exit/status
 pairs and mismatched namespace/transaction/count fields.
 
@@ -133,6 +138,24 @@ reports, cancellation, read-only lookup, explicit retry and refusal, not Git
 parsing, native CAS, power-loss durability or native recovery correctness.
 The actual `fg` test is separate and explicitly skipped without `FG_NATIVE_BIN`.
 No full-workspace, production-readiness, full-capsule or bead-closure claim follows.
+
+The existing `scripts/e2e/suites/operator/source_workspace.sh` campaign also
+invokes the actual import CLI on native-exported, independently framed Git
+source in both hash domains. It checks a wrong reference pin before custody or
+publication, canonical reads after import, original-key `status` and `retry`
+after the original input and retained snapshot disappear, a wrong intent pin,
+and a fresh existing-ref refusal. The original intent bytes and canonical
+source identities remain fixed. This is unsigned, caller-pinned source import;
+it does not certify signed approval, fault recovery, every entrypoint or
+independent verification. Standalone receipts bind the selected native image;
+they do not infer its source revision from a filename.
+
+An additional explicit test-only hook denies the owner's liveness observation
+after a real native import exits. The CLI must retain both the containment facts
+and the unknown outcome, and the actual child must be reaped. Independent Rust
+reads establish that this particular import committed; original-key `status`
+resolves it without resubmission. This injected observation failure is separate
+from a live escaped-process or hostile-execution containment claim.
 
 ## Signed source approval and explicit retry
 

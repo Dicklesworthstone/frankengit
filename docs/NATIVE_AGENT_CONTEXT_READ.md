@@ -45,7 +45,29 @@ receipt or source-read authorization. The native API now also has an explicit
 trusted-local [`fg agent context` adapter](AGENT_CONTEXT_COMMAND.md). That command
 authenticates the current head and opens one read-only invocation under the
 operator's source grant and asserted sponsor. It does not add an MCP or HTTP
-endpoint, remotely authenticated agent principal, or persistent run controller.
+endpoint itself. The shared HTTP and MCP adapters also use this native document
+reader, with independently authenticated ordinary or canonical sponsored
+credentials. None of these read entry points creates a persistent run controller.
+
+### Explicit current-source index reuse
+
+`retrieve_agent_context_revalidated_local_in` accepts the same `AgentContextRead`
+and logical clock, but consumes `RevalidatedInitialReport` through exact native
+hydration. Its distinct `RevalidatedAgentSourceContext` retains both the
+`RevalidatedInitialContext` and the existing Agent Protocol packet.
+`context_packet_for_revalidated_run` binds that packet to the current source's
+exact authenticated head, repository commit and forge position. Each index keeps
+its original source observation, generation and row labels; metadata movement
+does not cause those positions to be rewritten.
+
+`document::read_agent_context_revalidated_in` exposes the same behavior to the
+document hosts, using the unchanged `AgentContextRequest`. The explicit request
+selector `index_source=current-native-v1` and both current/original source
+observations enter the request and evidence commitments. The existing strict
+APIs retain their matching requirements and encoding. Current source code or
+visibility changes, old current-head pins, missing backing and stale generation
+floors still refuse. Original retrieval, lineage, hydration and response bounds
+remain active; no phase obtains a fresh lifetime or implicitly rebuilds indexes.
 
 ## Enforced behavior
 

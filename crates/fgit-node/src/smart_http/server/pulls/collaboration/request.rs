@@ -2,6 +2,7 @@
 //! version/tip refresh, caller-supplied reviewer identity or inferred hash domain.
 
 use super::super::super::issues::{Rendering, parse_decimal, parse_form, parse_snapshot};
+use super::super::subject::reference;
 use super::{ApiError, multipart};
 use fgit_admission::merge::native::NativeMergeMethod;
 use fgit_admission::merge::native::pull_request::reviews::gate::ReviewRequirements;
@@ -9,9 +10,7 @@ use fgit_forge::event::review::{
     CandidateBinding, CandidateReviewCommand, ReviewCommand, ReviewDecision, ReviewSubject,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
-use fgit_types::{
-    GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId, RefName, RepositoryAuthorityHeadId,
-};
+use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
@@ -159,7 +158,9 @@ impl<'a> Request<'a> {
                         | "pull_request_version"
                         | "policy_epoch"
                         | "source_ref"
+                        | "source_ref_hex"
                         | "target_ref"
+                        | "target_ref_hex"
                         | "source_tip"
                         | "target_tip"
                         | "merge_base"
@@ -190,10 +191,8 @@ impl<'a> Request<'a> {
             pull_request_version: version,
             policy_epoch: PolicyEpoch::try_new(parse_decimal(&take(&mut fields, "policy_epoch")?)?)
                 .map_err(|_| ApiError::bad("invalid_policy_epoch"))?,
-            source_ref: RefName::try_new(take(&mut fields, "source_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?,
-            target_ref: RefName::try_new(take(&mut fields, "target_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?,
+            source_ref: reference(&mut fields, "source_ref", "source_ref_hex")?,
+            target_ref: reference(&mut fields, "target_ref", "target_ref_hex")?,
             source_tip: oid(&take(&mut fields, "source_tip")?, format)?,
             target_tip: oid(&take(&mut fields, "target_tip")?, format)?,
         };
@@ -344,6 +343,138 @@ mod tests {
             number: PullRequestNumber::FIRST,
             operation,
             encoding: Encoding::Form,
+        }
+    }
+
+    fn hex_fields(format: GitHashAlgorithm, source: &[u8], target: &[u8]) -> String {
+        let encode =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let width = format.digest_len() * 2;
+        format!(
+            "object_format={}&pull_request_version=1&policy_epoch=1&source_ref_hex={}&target_ref_hex={}&source_tip={}&target_tip={}&merge_base={}&candidate_commit={}",
+            format.as_str(),
+            encode(source),
+            encode(target),
+            "a".repeat(width),
+            "b".repeat(width),
+            "c".repeat(width),
+            "d".repeat(width)
+        )
+    }
+
+    #[test]
+    fn raw_reference_subjects_survive_every_review_decision_and_merge_method() {
+        let actor = PrincipalId::from_bytes([3; 16]);
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            for (source, target) in [
+                (
+                    b"refs/heads/topic-\xff".as_slice(),
+                    b"refs/heads/main".as_slice(),
+                ),
+                (
+                    b"refs/heads/topic".as_slice(),
+                    b"refs/heads/main-\xfe".as_slice(),
+                ),
+                (
+                    b"refs/heads/topic-\xff".as_slice(),
+                    b"refs/heads/main-\xfe".as_slice(),
+                ),
+            ] {
+                let body = hex_fields(format, source, target);
+                for decision in [
+                    ReviewDecision::Approve,
+                    ReviewDecision::RequestChanges,
+                    ReviewDecision::Withdraw,
+                ] {
+                    let command = body.clone() + "&expected_version=1&reason=exact+raw+candidate";
+                    let Command::Review(parsed) = request(Operation::Review(decision))
+                        .command(command.as_bytes(), format, actor)
+                        .unwrap()
+                    else {
+                        panic!("review");
+                    };
+                    assert_eq!(parsed.review.subject.source_ref.as_bytes(), source);
+                    assert_eq!(parsed.review.subject.target_ref.as_bytes(), target);
+                    assert_eq!(parsed.review.decision, decision);
+                    assert_eq!(
+                        parsed.review.expected_version,
+                        ExpectedVersion::Exactly(AggregateVersion::FIRST)
+                    );
+                    assert_eq!(parsed.candidate.commit.algorithm(), format);
+                }
+                for (method, expected) in [
+                    ("merge-commit", NativeMergeMethod::MergeCommit),
+                    ("squash", NativeMergeMethod::Squash),
+                ] {
+                    let command = body.clone()
+                        + &format!("&method={method}&required_reviewer={}", "44".repeat(16));
+                    let Command::Merge {
+                        subject,
+                        candidate,
+                        method,
+                        required,
+                    } = request(Operation::Merge)
+                        .command(command.as_bytes(), format, actor)
+                        .unwrap()
+                    else {
+                        panic!("merge");
+                    };
+                    assert_eq!(subject.source_ref.as_bytes(), source);
+                    assert_eq!(subject.target_ref.as_bytes(), target);
+                    assert_eq!(candidate.commit.algorithm(), format);
+                    assert_eq!(method, expected);
+                    assert_eq!(required.reviewers(), &[PrincipalId::from_bytes([0x44; 16])]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raw_review_aliases_are_exclusive_without_changing_legacy_subjects() {
+        let actor = PrincipalId::from_bytes([3; 16]);
+        let format = GitHashAlgorithm::Sha1;
+        let request = request(Operation::Review(ReviewDecision::Approve));
+        let suffix = "&expected_version=0&reason=exact";
+        let Command::Review(text) = request
+            .command((fields() + suffix).as_bytes(), format, actor)
+            .unwrap()
+        else {
+            panic!("review");
+        };
+        let encoded = hex_fields(format, b"refs/heads/topic", b"refs/heads/main");
+        let Command::Review(raw) = request
+            .command((encoded.clone() + suffix).as_bytes(), format, actor)
+            .unwrap()
+        else {
+            panic!("review");
+        };
+        assert_eq!(raw, text);
+        let source_hex = "726566732f68656164732f746f706963";
+        let mixed = encoded.replace(
+            &format!("source_ref_hex={source_hex}"),
+            "source_ref=refs/heads/topic",
+        );
+        let Command::Review(mixed) = request
+            .command((mixed + suffix).as_bytes(), format, actor)
+            .unwrap()
+        else {
+            panic!("review");
+        };
+        assert_eq!(mixed, text);
+        for body in [
+            encoded.clone() + "&source_ref=refs/heads/topic",
+            encoded.clone() + "&target_ref=refs/heads/main",
+            encoded.replace(&format!("source_ref_hex={source_hex}"), "source_ref_hex=FF"),
+            encoded.replace(&format!("source_ref_hex={source_hex}"), "source_ref_hex=0"),
+            encoded.replace(&format!("&source_ref_hex={source_hex}"), ""),
+            hex_fields(format, b"refs/heads/main", b"refs/heads/main"),
+            hex_fields(format, b"refs/tags/topic", b"refs/heads/main"),
+        ] {
+            assert!(
+                request
+                    .command((body + suffix).as_bytes(), format, actor)
+                    .is_err()
+            );
         }
     }
     #[test]

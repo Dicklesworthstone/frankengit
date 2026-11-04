@@ -3,6 +3,8 @@
 //! candidate guidance. Run independently of the node's large unit-test binary.
 #[path = "candidate_thin_frontier/support.rs"]
 mod support;
+#[path = "candidate_thin_frontier/reused_blobs.rs"]
+mod reused_blobs;
 use fgit_forge::review::ReviewOptions;
 use fgit_node::{BundleInspectionRefusal, NodeConfig, OneNode};
 use fgit_pack::PackError;

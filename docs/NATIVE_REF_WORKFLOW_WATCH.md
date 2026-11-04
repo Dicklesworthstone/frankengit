@@ -1,6 +1,8 @@
 # Native latest-ref workflow triggering
 
 Branch-selected execution is documented in [native branch filters](NATIVE_WORKFLOW_BRANCH_FILTERS.md).
+Release-tag selection, verified peeling, and raw tag identity are documented in
+[native tag workflows](NATIVE_TAG_WORKFLOW_WATCH.md).
 
 For the current head of a canonical merge queue, use
 [`--merge-queue` candidate CI](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md). That mode
@@ -16,10 +18,11 @@ script with host-user privileges.
 
 ## Selection and identity
 
-One configured `refs/heads/*` branch is observed. Its latest committed net ref
+One configured `refs/heads/*` branch or `refs/tags/*` tag is observed. Its latest committed net ref
 change is selected from verified history, and the current authority head is
 rechecked after that scan. Dispatch requires the same observed head and commit.
-Import, merge and receive updates all qualify. Matching uses native `on: push`
+For tags, the commit is the verified peeled target and the raw tag tip is bound
+separately. Import, merge and receive updates all qualify. Matching uses native `on: push`
 definitions in the configured directory; a caller-supplied push story is not used.
 
 This is a latest-state profile: intermediate tips that came and went between
