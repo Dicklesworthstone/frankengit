@@ -4265,7 +4265,7 @@
     },
     "frankengit_source_symbols": {
       "title": "frankengit_source_symbols",
-      "description": "Find Rust declaration heads by exact or prefix ASCII name in one authenticated repository snapshot.",
+      "description": "Find Rust declaration heads by exact or prefix ASCII name with the existing source scan or explicit persisted indexed-exact/indexed-current modes. Indexed modes preserve original/current provenance and report query completeness separately from corpus coverage; ordinary source grant only, no build or scan fallback.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -4306,6 +4306,62 @@
               "description": "Optional snapshot token pin.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "source_mode": {
+              "type": "string",
+              "description": "Omitted or scan preserves direct search; indexed-exact requires original source authority, indexed-current independently revalidates the same visible native commit/tree. Indexed modes require the ordinary source grant.",
+              "x-classification": "selector_position",
+              "maxLength": 15,
+              "pattern": "^(scan|indexed-exact|indexed-current)$"
+            },
+            "expected_commit": {
+              "type": "string",
+              "description": "Optional current native commit pin in the repository hash domain.",
+              "x-classification": "selector_position",
+              "maxLength": 64
+            },
+            "max_matches": {
+              "type": "integer",
+              "description": "Bounded declaration result prefix, 1..100, default 20. A further observed match marks complete false; no continuation cursor.",
+              "x-classification": "selector_position"
+            },
+            "max_files": {
+              "type": "integer",
+              "description": "Maximum selected files or indexed declaration tables, 1..20000, default 2000.",
+              "x-classification": "selector_position"
+            },
+            "max_file_bytes": {
+              "type": "integer",
+              "description": "Maximum source bytes per selected file/table, 1..8388608, default 1048576.",
+              "x-classification": "selector_position"
+            },
+            "max_total_bytes": {
+              "type": "integer",
+              "description": "Maximum aggregate selected or referenced source bytes, 1..67108864, default 8388608.",
+              "x-classification": "selector_position"
+            },
+            "max_work": {
+              "type": "integer",
+              "description": "Shared native symbol query work ceiling, 1..67108864, default 67108864.",
+              "x-classification": "selector_position"
+            },
+            "max_payload_bytes": {
+              "type": "integer",
+              "description": "Indexed modes only: aggregate immutable manifest/directory/table bytes, 1..33554432, default 8388608. Independent of source-byte limits.",
+              "x-classification": "selector_position"
+            },
+            "minimum_index_token": {
+              "type": "string",
+              "description": "Indexed modes only: retained canonical generation token paired with minimum_index_number. Native ancestry floor, not exact selection or pagination.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "minimum_index_number": {
+              "type": "string",
+              "description": "Indexed modes only: positive decimal u64 ancestry-floor number, paired with minimum_index_token.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
             }
           },
           "required": ["reference", "name"],

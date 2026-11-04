@@ -1,6 +1,6 @@
-//! Rust declaration-head search over one verified snapshot: the same native
-//! reader as `fg search --symbols`. Not compiler name resolution; no index is
-//! read, built or refreshed, and no source is executed.
+//! Rust declaration-head search over a verified snapshot or an explicitly
+//! selected persisted index. Native owners retain source and index authority.
+mod indexed;
 use super::*;
 use fgit_forge::source_symbols::{
     MAX_SYMBOL_WORK, PROFILE, SymbolKind, SymbolMatch, SymbolMatchMode, SymbolQuery,
@@ -14,7 +14,7 @@ const MAX_NAME_BYTES: usize = 256;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Find Rust declaration heads (function, struct, enum, trait, type, module, union, macro) by exact or prefix ASCII name in .rs files of a visible ref, from one authority snapshot. Paths and spans are exact bytes. Not compiler name resolution: attributes and macro bodies are opaque and all cfg branches are searched. Malformed Rust refuses the read; a match ceiling returns an explicitly incomplete prefix.",
+        description: "Find Rust declaration heads by exact or prefix ASCII name in .rs files of a visible ref. Default scan reads one source snapshot. Explicit indexed-exact/indexed-current modes read existing persisted declaration tables; current mode independently revalidates the native commit/tree and preserves original index provenance. Index coverage and match completeness are separate. Indexed modes require an ordinary source grant; no build, refresh or scan fallback. Exact byte paths/spans; no compiler resolution, macro expansion or cfg evaluation. Match limits return an incomplete prefix without a cursor.",
         schema: input_schema(),
     }
 }
@@ -49,8 +49,19 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<(Selection, SymbolQu
             "max_file_bytes",
             "max_total_bytes",
             "max_work",
+            "source_mode",
         ],
     )?;
+    if !matches!(string(args, "source_mode")?, None | Some("scan")) {
+        return Err(ToolError::invalid("invalid_symbol_source_mode"));
+    }
+    parse_query(args, format)
+}
+
+fn parse_query(
+    args: &Object,
+    format: GitHashAlgorithm,
+) -> Result<(Selection, SymbolQuery), ToolError> {
     let selected = selection(args, format)?;
     let name = string(args, "name")?.ok_or(ToolError::invalid("name_required"))?;
     if name.len() > MAX_NAME_BYTES {
@@ -96,6 +107,11 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<(Selection, SymbolQu
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     if !backend.options.source {
         return Err(ToolError::invalid("tool_not_granted"));
+    }
+    match string(args, "source_mode")? {
+        None | Some("scan") => {}
+        Some("indexed-exact" | "indexed-current") => return indexed::call(backend, args),
+        Some(_) => return Err(ToolError::invalid("invalid_symbol_source_mode")),
     }
     let (selected, query) = parse(args, backend.options.format)?;
     let request = backend.command_context();
@@ -177,72 +193,7 @@ fn render(
         return Err(invalid_report());
     }
     let mut retained = 0usize;
-    let mut matches = Vec::with_capacity(report.matches.len());
-    for hit in &report.matches {
-        let found = &hit.location;
-        let start = found
-            .byte_offset
-            .checked_sub(found.excerpt_offset)
-            .ok_or_else(invalid_report)?;
-        let end = start
-            .checked_add(found.match_length)
-            .ok_or_else(invalid_report)?;
-        if !accepted(query, hit)
-            || found.match_length != hit.name.len()
-            || found.excerpt.get(start..end) != Some(hit.name.as_slice())
-            || found.path.is_empty()
-            || found.path.len() > 4096
-            || found.path.contains(&0)
-            || found
-                .path
-                .split(|b| *b == b'/')
-                .any(|part| part.is_empty() || part == b"." || part == b"..")
-            || !found.path.ends_with(b".rs")
-            || found.blob.is_zero()
-            || found.blob.algorithm() != format
-            || found.line == 0
-            || found.byte_column == 0
-            || found.byte_column - 1 > found.byte_offset
-            || (!scope.prefixes().is_empty()
-                && !scope.prefixes().iter().any(|prefix| {
-                    let prefix = prefix.as_bytes();
-                    found.path.as_slice() == prefix
-                        || found
-                            .path
-                            .strip_prefix(prefix)
-                            .is_some_and(|tail| tail.starts_with(b"/"))
-                }))
-        {
-            return Err(invalid_report());
-        }
-        retained = retained
-            .checked_add(found.path.len() + found.excerpt.len())
-            .filter(|n| *n <= MAX_RETAINED_BYTES)
-            .ok_or(ToolError::failed("resource_limit"))?;
-        matches.push(object([
-            ("name_hex", text(hex(&hit.name))),
-            (
-                "name",
-                std::str::from_utf8(&hit.name).map_or(Value::Null, text),
-            ),
-            ("kind", text(hit.kind.as_str())),
-            ("raw_identifier", Value::Bool(hit.raw_identifier)),
-            ("path_hex", text(hex(&found.path))),
-            ("blob", text(found.blob.to_string())),
-            ("byte_offset", text(found.byte_offset.to_string())),
-            ("line", text(found.line.to_string())),
-            ("byte_column", text(found.byte_column.to_string())),
-            ("match_length", text(found.match_length.to_string())),
-            ("excerpt_offset", text(found.excerpt_offset.to_string())),
-            ("excerpt_hex", text(hex(&found.excerpt))),
-            (
-                "excerpt_utf8",
-                std::str::from_utf8(&found.excerpt)
-                    .ok()
-                    .map_or(Value::Null, text),
-            ),
-        ]));
-    }
+    let matches = render_rows(format, query, &report.matches, &mut retained, &mut || true)?;
     let mut result = search_header(selected, scope, report.source_commit, report.source_tree);
     result.extend([
         ("type".into(), text("source_symbol_search")),
@@ -301,6 +252,89 @@ fn render(
         report.non_regular_entries,
     );
     Ok(result)
+}
+
+// Scan and persisted results cross the same byte/span validation boundary.
+// The indexed caller shares its request cancellation and retained-byte budget
+// with omission rendering; no new read budget is acquired after native work.
+fn render_rows(
+    format: GitHashAlgorithm,
+    query: &SymbolQuery,
+    hits: &[SymbolMatch],
+    retained: &mut usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<Vec<Value>, ToolError> {
+    let scope = query.source_scope();
+    let mut matches = Vec::with_capacity(hits.len());
+    for hit in hits {
+        if !live() {
+            return Err(ToolError::failed("read_cancelled"));
+        }
+        let found = &hit.location;
+        let start = found
+            .byte_offset
+            .checked_sub(found.excerpt_offset)
+            .ok_or_else(invalid_report)?;
+        let end = start
+            .checked_add(found.match_length)
+            .ok_or_else(invalid_report)?;
+        if !accepted(query, hit)
+            || found.match_length != hit.name.len()
+            || found.excerpt.get(start..end) != Some(hit.name.as_slice())
+            || found.path.is_empty()
+            || found.path.len() > 4096
+            || found.path.contains(&0)
+            || found
+                .path
+                .split(|b| *b == b'/')
+                .any(|part| part.is_empty() || part == b"." || part == b"..")
+            || !found.path.ends_with(b".rs")
+            || found.blob.is_zero()
+            || found.blob.algorithm() != format
+            || found.line == 0
+            || found.byte_column == 0
+            || found.byte_column - 1 > found.byte_offset
+            || (!scope.prefixes().is_empty()
+                && !scope.prefixes().iter().any(|prefix| {
+                    let prefix = prefix.as_bytes();
+                    found.path.as_slice() == prefix
+                        || found
+                            .path
+                            .strip_prefix(prefix)
+                            .is_some_and(|tail| tail.starts_with(b"/"))
+                }))
+        {
+            return Err(invalid_report());
+        }
+        *retained = retained
+            .checked_add(found.path.len() + found.excerpt.len())
+            .filter(|n| *n <= MAX_RETAINED_BYTES)
+            .ok_or(ToolError::failed("resource_limit"))?;
+        matches.push(object([
+            ("name_hex", text(hex(&hit.name))),
+            (
+                "name",
+                std::str::from_utf8(&hit.name).map_or(Value::Null, text),
+            ),
+            ("kind", text(hit.kind.as_str())),
+            ("raw_identifier", Value::Bool(hit.raw_identifier)),
+            ("path_hex", text(hex(&found.path))),
+            ("blob", text(found.blob.to_string())),
+            ("byte_offset", text(found.byte_offset.to_string())),
+            ("line", text(found.line.to_string())),
+            ("byte_column", text(found.byte_column.to_string())),
+            ("match_length", text(found.match_length.to_string())),
+            ("excerpt_offset", text(found.excerpt_offset.to_string())),
+            ("excerpt_hex", text(hex(&found.excerpt))),
+            (
+                "excerpt_utf8",
+                std::str::from_utf8(&found.excerpt)
+                    .ok()
+                    .map_or(Value::Null, text),
+            ),
+        ]));
+    }
+    Ok(matches)
 }
 
 fn input_schema() -> Value {
@@ -363,12 +397,16 @@ fn input_schema() -> Value {
             ("default", json::number(MAX_SYMBOL_WORK)),
         ]),
     );
+    indexed::schema(properties)
+}
+
+fn object_schema(properties: Object, required: &[&str]) -> Value {
     object([
         ("type", text("object")),
         ("properties", Value::Object(properties)),
         (
             "required",
-            Value::Array(vec![text("reference"), text("name")]),
+            Value::Array(required.iter().map(|name| text(*name)).collect()),
         ),
         ("additionalProperties", Value::Bool(false)),
     ])

@@ -2477,7 +2477,7 @@
       "kind": "tool",
       "owner_subsystem": "search",
       "support_profile": "active",
-      "description": "Find Rust declaration heads by exact or prefix ASCII name in one authenticated repository snapshot.",
+      "description": "Find Rust declaration heads by exact or prefix ASCII name with the existing source scan or explicit persisted indexed-exact/indexed-current modes. Indexed modes preserve original/current provenance and report query completeness separately from corpus coverage; ordinary source grant only, no build or scan fallback.",
       "read_mutation": "read_only",
       "capability": "read_canonical_object",
       "principal": "none",
@@ -2495,7 +2495,7 @@
       "disclosure": "untrusted_content_data",
       "receipt": "none",
       "cancellation": "immediate_quiescent",
-      "refusal_codes": ["name_required", "invalid_symbol_query", "invalid_match_mode", "invalid_symbol_kinds", "invalid_limit", "unsupported_rust_source", "snapshot_moved", "resource_limit"],
+      "refusal_codes": ["name_required", "invalid_symbol_query", "invalid_match_mode", "invalid_symbol_kinds", "invalid_limit", "invalid_symbol_source_mode", "incomplete_index_generation", "invalid_index_generation", "symbol_index_uninitialized", "symbol_index_stale", "symbol_index_generation_unavailable", "symbol_index_unavailable", "invalid_symbol_index_report", "read_cancelled", "tool_not_granted", "unsupported_rust_source", "snapshot_moved", "resource_limit"],
       "cli_command": "fg search --symbols",
       "rest_api_path": "/api/v1/source/search-symbols"
     },
