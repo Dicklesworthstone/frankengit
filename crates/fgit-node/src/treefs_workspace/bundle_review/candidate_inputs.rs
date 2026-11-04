@@ -255,6 +255,7 @@ impl OneNode {
             .min(sparse.max_entry_bytes.max(MAX_CANDIDATE_BYTES));
         let limits = MergeObjectLimits {
             max_object_bytes: maximum,
+            max_reused_blob_bytes: self.reused_merge_blob_limit(),
             ..Default::default()
         };
         let parents: Vec<_> = selections.iter().map(|(_, parent)| *parent).collect();

@@ -45,6 +45,8 @@ impl Drop for Scratch {
 
 pub struct History {
     pub parent: GitOid,
+    pub source: GitOid,
+    pub reused_blob: Option<GitOid>,
     pub sibling: GitOid,
     pub old_dir: GitOid,
     pub old_deep: GitOid,
@@ -66,7 +68,7 @@ fn tree(entries: &[(&str, u32, GitOid)]) -> Vec<u8> {
     }
     bytes
 }
-fn commit(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
+pub fn commit(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     let mut bytes = format!("tree {tree}\n");
     for parent in parents {
         writeln!(bytes, "parent {parent}").unwrap();
@@ -75,7 +77,27 @@ fn commit(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     bytes.into_bytes()
 }
 pub fn fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, History) {
-    let (mut node, _) = OneNode::init(root.config(format)).unwrap();
+    build_fixture(root, format, None)
+}
+
+pub fn fixture_with_reused_blob(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    blob_bytes: usize,
+) -> (OneNode, History) {
+    build_fixture(root, format, Some(blob_bytes))
+}
+
+fn build_fixture(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    reused_blob_bytes: Option<usize>,
+) -> (OneNode, History) {
+    let mut config = root.config(format);
+    if reused_blob_bytes.is_some() {
+        config = config.with_max_object_bytes(64 * 1024 * 1024);
+    }
+    let (mut node, _) = OneNode::init(config).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let mut originals = BTreeMap::new();
     let mut put = |kind, bytes: Vec<u8>| {
@@ -92,10 +114,18 @@ pub fn fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, History) {
     let old_dir = put(ObjectType::Tree, tree(&[("deep", 0o040000, old_deep)]));
     let untouched = put(ObjectType::Blob, b"untouched sibling\n".to_vec());
     let sibling = put(ObjectType::Tree, tree(&[("keep", 0o100644, untouched)]));
-    let root_tree = put(
-        ObjectType::Tree,
-        tree(&[("a", 0o040000, sibling), ("z", 0o040000, old_dir)]),
-    );
+    let reused_blob = reused_blob_bytes.map(|bytes| put(ObjectType::Blob, vec![b'k'; bytes]));
+    let root_body = |directory| {
+        let mut entries = vec![("a", 0o040000, sibling)];
+        if let Some(blob) = reused_blob {
+            // A direct edge in the changed root requires frontier metadata;
+            // an unchanged subtree would skip this blob's header entirely.
+            entries.push(("keep", 0o100644, blob));
+        }
+        entries.push(("z", 0o040000, directory));
+        tree(&entries)
+    };
+    let root_tree = put(ObjectType::Tree, root_body(old_dir));
     let ancestor = put(ObjectType::Commit, commit(root_tree, &[], "old history"));
     let parent = put(
         ObjectType::Commit,
@@ -111,19 +141,27 @@ pub fn fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, History) {
     );
     let zero = GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
     let ids: BTreeSet<_> = originals.keys().copied().collect();
+    let mut updates = vec![
+        SourceRefUpdate {
+            old: zero,
+            new: parent,
+            ref_name: b"refs/heads/main".to_vec(),
+        },
+        SourceRefUpdate {
+            old: zero,
+            new: private,
+            ref_name: b"refs/heads/private".to_vec(),
+        },
+    ];
+    if reused_blob.is_some() {
+        updates.push(SourceRefUpdate {
+            old: zero,
+            new: ancestor,
+            ref_name: b"refs/heads/topic".to_vec(),
+        });
+    }
     let imported = validate_source_import(
-        &[
-            SourceRefUpdate {
-                old: zero,
-                new: parent,
-                ref_name: b"refs/heads/main".to_vec(),
-            },
-            SourceRefUpdate {
-                old: zero,
-                new: private,
-                ref_name: b"refs/heads/private".to_vec(),
-            },
-        ],
+        &updates,
         &SourceImportReceipt {
             object_format: format,
             object_count: u32::try_from(ids.len()).unwrap(),
@@ -173,10 +211,7 @@ pub fn fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, History) {
     let changed = upload(ObjectType::Blob, b"changed\n".to_vec());
     let new_deep = upload(ObjectType::Tree, tree(&[("file", 0o100644, changed)]));
     let new_dir = upload(ObjectType::Tree, tree(&[("deep", 0o040000, new_deep)]));
-    let new_root = upload(
-        ObjectType::Tree,
-        tree(&[("a", 0o040000, sibling), ("z", 0o040000, new_dir)]),
-    );
+    let new_root = upload(ObjectType::Tree, root_body(new_dir));
     let candidate = upload(
         ObjectType::Commit,
         commit(new_root, &[parent], "actual thin candidate"),
@@ -185,6 +220,8 @@ pub fn fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, History) {
         node,
         History {
             parent,
+            source: ancestor,
+            reused_blob,
             sibling,
             old_dir,
             old_deep,
