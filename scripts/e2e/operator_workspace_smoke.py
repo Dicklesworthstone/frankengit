@@ -19,6 +19,7 @@ from typing import Any
 from operator_issue_smoke import OperatorCampaign
 from operator_context_smoke import acquire_context_cases, inspect_context_cases, workspace_scan_case
 from operator_composition_smoke import run_composition_case
+from operator_native_bundle_smoke import run_native_bundle_case
 from patch_smoke import loose, oid, bundle_objects
 from scoped_events_smoke import HttpServer, PRINCIPAL, REPOSITORY, TENANT, file_sha256, require
 from source_browse_smoke import tree
@@ -189,9 +190,9 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
 
     package_path, expect_path = home / "package.json", put("expected.json", independent)
 
-    def oracle(label, *arguments):
+    def oracle(label, *arguments, directory=source):
         command = [str(ROOT / "scripts/e2e/oracle/oracle.sh"), "capture", "git-2.54.0", str(oracle_run),
-                   str(source.relative_to(oracle_run / "work")), fmt + "-workspace-" + label, "--", *arguments]
+                   str(directory.relative_to(oracle_run / "work")), fmt + "-workspace-" + label, "--", *arguments]
         stem = home / ("oracle-" + label)
         with stem.with_suffix(".stdout").open("wb") as out, stem.with_suffix(".stderr").open("wb") as err:
             result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=30, check=False)
@@ -201,6 +202,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(result.returncode == 0, "pinned Git rejected the fixture or candidate bundle")
 
     oracle("fsck", "fsck", "--full", "--strict", "--no-reflogs")
+    run_native_bundle_case(c, home, fmt, source, base, base_tree, original, BEFORE, oracle)
     offline_compilers_case(c, home, fmt, source, base, result_tree, candidate, commit_body, expected_objects, oracle)
     c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "operator-workspace-import", source)
@@ -353,6 +355,13 @@ object_id:f.object_id,kind:f.kind,body_hex:Buffer.from(f.bytes).toString('hex')}
     c.node_command(package_cli, ["inspect", *package_common, "--package", str(package_path),
                                  "--package-sha256", acquired["package_sha256"]])
     c.node_command(ROOT / "scripts/fg_verify_source_package.mjs", ["--package", str(package_path), "--expect", str(expect_path)])
+    wrong_selection = json.loads(json.dumps(independent))
+    wrong_selection["files"][0]["blob"] = "f" * len(base)
+    wrong_expect = put("wrong-verification-selection.json", wrong_selection)
+    refused = c.node_command(ROOT / "scripts/fg_verify_source_package.mjs",
+        ["--package", str(package_path), "--expect", str(wrong_expect)], 1, error_reply=True, text_reply=True)
+    require(refused == "Source package verification failed. No files were written and no network request was made.\n"
+            and file_sha256(package_path) == acquired["package_sha256"], "offline package verifier accepted wrong blob pins or rewrote source")
     require(c.run("at", repository, TENANT, REPOSITORY, "latest") == before and refs() == {REF: base},
             "source acquisition or proof verification published canonical state")
     c.facts[f"{fmt}_native_package_and_proof_custody"] = True
@@ -686,7 +695,8 @@ def main() -> None:
         "scripts/fg_source_changes.mjs", "scripts/fg_source_edit.mjs", "scripts/fg_source_archive.mjs",
         "scripts/fg_context_session.mjs", "scripts/fg_context_proof.mjs", "scripts/fg_source_workspace_scan.mjs",
         "scripts/fg_source_assembly.mjs", "scripts/fg_source_replay.mjs", "scripts/fg_source_patch.mjs",
-        "scripts/fg_source_refactor.mjs"], "oracle_pin": "git-2.54.0",
+        "scripts/fg_source_refactor.mjs", "scripts/verify_git_bundle_native.mjs",
+        "scripts/import_git_bundle_native.mjs", "scripts/recover_git_bundle.mjs"], "oracle_pin": "git-2.54.0",
         "oracle_run": str(oracle_run), "artifacts": str(c.work),
         "non_claim": "Independent imported object corpus, actual native context/package acquisition and authoring/publication; not every operator, current-source native qualification, search completeness beyond this selected corpus, retained authority proofs, TLS or deployment."}
 
@@ -701,6 +711,15 @@ def main() -> None:
         for fmt in ("sha1", "sha256"):
             run_case(c, oracle_run, fmt)
             run_composition_case(c, oracle_run, fmt, file_tree, BEFORE, {EDIT: AFTER[EDIT], MODE: AFTER[MODE]}, AUTHOR)
+        commands = [json.loads(line) for line in c.journal.read_text().splitlines()]
+        summary["entrypoint_runs"] = []
+        for path in summary["entrypoints"]:
+            calls = [r for r in commands if r.get("kind") == "operator" and r["command"][1] == str(ROOT / path)]
+            successes = sum(r["exit"] == 0 for r in calls)
+            nonzero = sum(r["exit"] != 0 for r in calls)
+            require(successes > 0 and nonzero > 0, "listed source entrypoint lacks actual success/expected-nonzero calls: " + path)
+            summary["entrypoint_runs"].append({"path": path, "binary_sha256": summary["binary_sha256"],
+                "client_sha256": file_sha256(ROOT / path), "success_count": successes, "expected_nonzero_count": nonzero})
         summary["complete"] = True
     except BaseException as error:
         summary["failure"] = f"{type(error).__name__}: {error}"

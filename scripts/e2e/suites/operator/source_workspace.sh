@@ -6,14 +6,15 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init operator-source-workspace
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
-fge_context non_claim 'Fourteen source/context entrypoints with actual native acquisition, offline compiler consumption, composition/replay and independently imported objects; not every operator, broad search completeness, retained authority proofs, TLS or deployment.'
+fge_context non_claim 'Seventeen source/context entrypoints with actual native acquisition, bundle verification/import/recovery, offline compiler consumption and composition/replay; not every operator, broad search completeness, retained authority proofs, TLS or deployment.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
   fge_skip OPERATOR-WORKSPACE-001 'A prebuilt FG_BIN, pinned Node and Python 3 are required'
   exit 0
 fi
-fge_context binary_sha256 "$(fge_digest_file "$FG_BIN")"
+BINARY_DIGEST="$(fge_digest_file "$FG_BIN")"
+fge_context binary_sha256 "$BINARY_DIGEST"
 ORACLE="$E2E_ROOT/oracle/oracle.sh"
 fge_capture oracle-verify "$ORACLE" verify git-2.54.0 || true
 fge_assert_exit OPERATOR-WORKSPACE-002 0 "$FGE_LAST_EXIT" 'pinned sandboxed Git verifies'
@@ -54,6 +55,22 @@ for format in sha1 sha256; do
     fge_assert_eq "OPERATOR-WORKSPACE-$format-offline-$compiler" true "$(fact "${format}_offline_${compiler}_compiler_native_publication")" "offline $compiler CLI output reaches exact native publication"
   done
 done
+for format in sha1 sha256; do
+  for property in verification import_custody recovery containment_diagnostics; do
+    fge_assert_eq "OPERATOR-WORKSPACE-$format-native-bundle-$property" true "$(fact "${format}_native_bundle_cli_$property")" "actual native bundle CLI $property"
+  done
+done
+fge_capture entrypoint-receipts python3 - "$SUMMARY" "$BINARY_DIGEST" <<'PY' || true
+import json, re, sys
+with open(sys.argv[1], encoding='utf-8') as source:
+    summary = json.load(source)
+rows = summary['entrypoint_runs']
+assert summary['complete'] is True and len(rows) == len(summary['entrypoints']) == 17
+assert len({r['path'] for r in rows}) == 17 and {r['path'] for r in rows} == set(summary['entrypoints'])
+assert all(r['binary_sha256'] == sys.argv[2] and re.fullmatch('[0-9a-f]{64}', r['client_sha256'])
+           and r['success_count'] > 0 and r['expected_nonzero_count'] > 0 for r in rows)
+PY
+fge_assert_exit OPERATOR-WORKSPACE-ENTRYPOINT-001 0 "$FGE_LAST_EXIT" 'every listed source entrypoint has actual success/expected-nonzero calls and its selected native digest'
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" operator-workspace-summary; fi
 if [ -f "$ORACLE_RUN/work/campaign/commands.jsonl" ]; then
   fge_artifact "$ORACLE_RUN/work/campaign/commands.jsonl" native-operator-and-oracle-command-journal

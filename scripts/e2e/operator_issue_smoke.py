@@ -35,7 +35,9 @@ class OperatorCampaign(Campaign):
 
     def node_command(self, script: Path, args: list[str], expected: int = 0, *,
                      error_reply: bool = False, timeout: float = 40,
-                     json_lines: bool = False) -> dict[str, Any] | list[dict[str, Any]]:
+                     json_lines: bool = False, text_reply: bool = False) -> dict[str, Any] | list[dict[str, Any]] | str:
+        if json_lines and text_reply:
+            raise ValueError("NDJSON and text replies are mutually exclusive")
         if not 0 < timeout <= 40:
             raise ValueError("operator execution timeout must be positive and at most 40 seconds")
         self.client_serial += 1
@@ -90,6 +92,8 @@ class OperatorCampaign(Campaign):
             sys.stderr.write(stem.with_suffix(".stderr").read_text(errors="replace"))
             raise AssertionError(f"operator exit {exit_code}, expected {expected}; see {stem}")
         raw = stem.with_suffix(".stderr" if error_reply else ".stdout").read_bytes()
+        if text_reply:
+            return raw.decode("utf-8")
         if json_lines:
             records = [json.loads(line) for line in raw.splitlines()]
             require(bool(records) and all(isinstance(row, dict) for row in records),

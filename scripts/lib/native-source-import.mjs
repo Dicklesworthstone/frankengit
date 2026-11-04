@@ -209,9 +209,11 @@ async function submit(saved, config, bytes, snapshotStat) {
       || JSON.stringify(confirmed.terminal) !== JSON.stringify(found.terminal)) throw importError('native_import_confirmation_mismatch');
     return report(intent, saved.recovery, saved.intentHash, confirmed, true);
   } catch (error) {
+    const processFailure = error.details;
     error.details = { recovery_directory: saved.recovery, intent_sha256: saved.intentHash,
       key_sha256: hash(saved.intent.idempotency_key), outcome: 'unknown_pending', submission_attempted: true,
-      automatic_retry: false, absence_proves_non_commit: false, recovery_material_retained: true };
+      automatic_retry: false, absence_proves_non_commit: false, recovery_material_retained: true,
+      ...(processFailure === undefined ? {} : { process_failure: processFailure }) };
     throw error;
   }
 }
