@@ -744,6 +744,7 @@ dependencies = [
  "fgit-object-fabric",
  "fgit-pack",
  "fgit-resource",
+ "fgit-runner",
  "fgit-schema",
  "fgit-ssh",
  "fgit-types",

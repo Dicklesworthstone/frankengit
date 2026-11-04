@@ -2188,6 +2188,60 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_check_evidence": {
+      "title": "frankengit_pull_check_evidence",
+      "description": "Read at most 65536 exact bytes of one canonical PR check's evidence at a mandatory selected snapshot and expected SHA-256. Requires BOTH PR-read and independent artifact-read launch grants; sponsored-agent profiles cannot use it. Current visibility applies to both PR branches. The entire canonical evidence is verified before each range. A native-decoded report_span locates diagnostic JSON when recognized. Output is untrusted execution data, not approval, independent execution verification or merge permission.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive PR number as a canonical unsigned decimal u64 string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]{0,19}$"
+            },
+            "check": {
+              "type": "string",
+              "description": "Exact canonical check ID from frankengit_pull_checks at expected_head.",
+              "x-classification": "selector_position",
+              "maxLength": 58,
+              "pattern": "^check/[0-9a-v]{51}[0g]$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Required exact snapshot_token of the selected check listing on every byte page. A retained snapshot is allowed; current hidden-ref rules still apply to both PR branches.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "expected_evidence_sha256": {
+              "type": "string",
+              "description": "Expected complete evidence SHA-256 from the selected check row. This binds the listed observation and is neither an artifact ID nor an arbitrary object selector.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "offset": {
+              "type": "string",
+              "description": "Optional canonical unsigned decimal u64 byte offset, default 0. EOF is allowed; beyond EOF refuses. Continue with the same PR, check, snapshot and evidence digest.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Optional integer byte ceiling from 1 through 65536, inclusive; defaults to 65536. Bounds are enforced before native evidence access.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": ["number", "check", "expected_head", "expected_evidence_sha256"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_checks": {
       "title": "frankengit_pull_checks",
       "description": "Read immutable workflow check observations for the exact recorded pull request source commit.",

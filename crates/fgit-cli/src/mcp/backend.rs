@@ -4,6 +4,7 @@ mod agent;
 mod agent_context;
 mod artifacts;
 mod candidate;
+mod check_evidence;
 mod checks;
 mod discussions;
 mod events;
@@ -237,6 +238,9 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.pulls {
         tools.extend(pulls::tools());
         tools.push(checks::tool());
+        if options.artifacts {
+            tools.push(check_evidence::tool());
+        }
         tools.push(pull_comments::read_tool());
         tools.push(pull_reviews::tool());
     }
@@ -459,6 +463,9 @@ impl NodeTools {
         }
         if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
             return pulls::call(self, name, args);
+        }
+        if self.options.pulls && self.options.artifacts && name == check_evidence::NAME {
+            return check_evidence::call(self, args);
         }
         if self.options.pulls && name == checks::NAME {
             return checks::call(self, args);
@@ -691,7 +698,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 88);
+        assert_eq!(server_names.len(), 89);
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
