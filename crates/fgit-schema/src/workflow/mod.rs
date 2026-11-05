@@ -13,7 +13,7 @@
 //!
 //! A general YAML crate would need a `registries/dependency_policy.tsv` row and
 //! a constitutional exception. It would also be the wrong instrument: this
-//! module must refuse anchors, aliases, tags, flow style and multi-document
+//! module must refuse anchors, aliases, tags, multiline flow and multi-document
 //! input, and enforce pre-allocation limits on depth, node count and scalar
 //! length. A permissive parser would accept all of it and leave the refusal to
 //! a later pass, which is exactly the "silent partial success" §3.1 forbids.

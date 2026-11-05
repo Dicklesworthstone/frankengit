@@ -272,13 +272,13 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "yaml.flow-mapping",
-        status: ConstructStatus::Unsupported,
-        reason: "flow style admits nesting without indentation, which defeats the depth limit the scanner relies on",
+        status: ConstructStatus::Normalized,
+        reason: "single-line nested mappings with scalar keys lower like block mappings; explicit values, exact spans and shared node/depth/entry/scalar budgets are required; complex keys, implicit pairs and multiline flow refuse",
     },
     Construct {
         key: "yaml.flow-sequence",
-        status: ConstructStatus::Unsupported,
-        reason: "same as flow mappings: depth without indentation",
+        status: ConstructStatus::Normalized,
+        reason: "single-line nested sequences lower like block sequences; empty collections and one trailing comma are accepted, empty entries refuse, and nesting shares the block scanner's pre-allocation budgets",
     },
     Construct {
         key: "yaml.merge-key",

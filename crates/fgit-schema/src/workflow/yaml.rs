@@ -1,7 +1,8 @@
 //! A bounded scanner for the YAML subset the workflow profile accepts.
 //!
 //! This is not a YAML parser and does not try to be one. It accepts block
-//! mappings, block sequences and bounded scalar forms, and refuses every other
+//! mappings, block sequences, single-line flow collections and bounded scalar
+//! forms, and refuses every other
 //! construct **by its registry key**, so the refusal a user sees and the
 //! published compatibility table are the same fact.
 //!
@@ -17,6 +18,8 @@ use crate::workflow::WorkflowRefusal;
 use crate::workflow::registry;
 
 use core::fmt;
+
+mod flow;
 
 /// A byte range in the source, with the line and column of its start.
 ///
@@ -116,14 +119,14 @@ pub enum Node {
         /// Where it came from.
         span: Span,
     },
-    /// A block mapping, in source order.
+    /// A mapping, in source order, independent of block or flow presentation.
     Mapping {
         /// Key, value and the key's span.
         entries: Vec<(String, Self, Span)>,
         /// Where the mapping starts.
         span: Span,
     },
-    /// A block sequence, in source order.
+    /// A sequence, in source order, independent of block or flow presentation.
     Sequence {
         /// The items.
         items: Vec<Self>,
@@ -447,16 +450,24 @@ fn significant_lines(source: &str, _limits: &Limits) -> Result<Vec<Line>, Workfl
                 ),
             ));
         }
-        let uncommented = strip_comment(after_indent);
+        // New flow collections own their quote/comment lexical state. The
+        // legacy block scalar path retains its exact historical normalization.
+        let is_flow = flow::line_has_collection(after_indent);
+        let uncommented = if is_flow {
+            after_indent
+        } else {
+            strip_comment(after_indent)
+        };
         let trimmed = uncommented.trim_end();
-        let content =
-            if block_context(trimmed, indent).is_some_and(|context| !context.legacy_literal) {
-                // YAML separation is only space/tab. Unicode whitespace after a
-                // new block header is invalid content, not another spelling of it.
-                uncommented.trim_end_matches([' ', '\t'])
-            } else {
-                trimmed
-            };
+        let content = if is_flow
+            || block_context(trimmed, indent).is_some_and(|context| !context.legacy_literal)
+        {
+            // YAML separation is only space/tab. Unicode whitespace after a
+            // new block header is invalid content, not another spelling of it.
+            uncommented.trim_end_matches([' ', '\t'])
+        } else {
+            trimmed
+        };
         if content.is_empty() {
             continue;
         }
@@ -469,7 +480,11 @@ fn significant_lines(source: &str, _limits: &Limits) -> Result<Vec<Line>, Workfl
         if content == "---" || content == "..." || content.starts_with("--- ") {
             return Err(refuse("yaml.document-marker", span));
         }
-        block = block_context(content, indent);
+        block = if is_flow {
+            None
+        } else {
+            block_context(content, indent)
+        };
         lines.push(Line {
             indent,
             text: content.to_owned(),
@@ -489,13 +504,23 @@ fn scalar(text: &str, span: Span, limits: &Limits) -> Result<String, WorkflowRef
             span,
         });
     }
+    if !flow::starts(text) && flow::starts(text.trim_start()) {
+        return Err(WorkflowRefusal::Malformed {
+            expected: "only space or tab separation before a flow collection",
+            span,
+        });
+    }
     let first = text.as_bytes().first().copied();
     match first {
         Some(b'&') => return Err(refuse("yaml.anchor", span)),
         Some(b'*') => return Err(refuse("yaml.alias", span)),
         Some(b'!') => return Err(refuse("yaml.tag", span)),
-        Some(b'{') => return Err(refuse("yaml.flow-mapping", span)),
-        Some(b'[') => return Err(refuse("yaml.flow-sequence", span)),
+        Some(b'{' | b'[') => {
+            return Err(WorkflowRefusal::Malformed {
+                expected: "a scalar mapping key; collection keys are not supported",
+                span,
+            });
+        }
         Some(b'|' | b'>') => return Err(refuse("yaml.block-scalar", span)),
         _ => {}
     }
@@ -540,6 +565,8 @@ fn new_block_form(text: &str) -> bool {
 fn scalar_start(text: &str) -> &str {
     let legacy = text.trim_start();
     if new_block_form(legacy)
+        || flow::starts(legacy)
+        || flow::entry(legacy).is_some()
         || split_entry_parts(legacy).is_some_and(|(_, value)| new_block_form(value))
     {
         text.trim_start_matches([' ', '\t'])
@@ -630,32 +657,40 @@ struct Scanner<'a> {
     nodes: usize,
 }
 
+const fn charge_node(nodes: &mut usize, maximum: usize, span: Span) -> Result<(), WorkflowRefusal> {
+    *nodes += 1;
+    if *nodes > maximum {
+        return Err(WorkflowRefusal::LimitExceeded {
+            limit: "nodes",
+            allowed: maximum,
+            observed: *nodes,
+            span,
+        });
+    }
+    Ok(())
+}
+
+const fn check_nesting(depth: usize, maximum: usize, span: Span) -> Result<(), WorkflowRefusal> {
+    if depth > maximum {
+        return Err(WorkflowRefusal::LimitExceeded {
+            limit: "depth",
+            allowed: maximum,
+            observed: depth,
+            span,
+        });
+    }
+    Ok(())
+}
+
 impl Scanner<'_> {
     /// Charges one node against `max_nodes` before it is built.
     const fn charge(&mut self, span: Span) -> Result<(), WorkflowRefusal> {
-        self.nodes += 1;
-        if self.nodes > self.limits.max_nodes {
-            return Err(WorkflowRefusal::LimitExceeded {
-                limit: "nodes",
-                allowed: self.limits.max_nodes,
-                observed: self.nodes,
-                span,
-            });
-        }
-        Ok(())
+        charge_node(&mut self.nodes, self.limits.max_nodes, span)
     }
 
     /// Checks the depth budget before descending.
     const fn check_depth(&self, depth: usize, span: Span) -> Result<(), WorkflowRefusal> {
-        if depth > self.limits.max_depth {
-            return Err(WorkflowRefusal::LimitExceeded {
-                limit: "depth",
-                allowed: self.limits.max_depth,
-                observed: depth,
-                span,
-            });
-        }
-        Ok(())
+        check_nesting(depth, self.limits.max_depth, span)
     }
 
     /// Parses the block starting at `at`, whose lines are indented `indent`.
@@ -669,7 +704,10 @@ impl Scanner<'_> {
     ) -> Result<(Node, usize), WorkflowRefusal> {
         let first = &self.lines[at];
         self.check_depth(depth, first.span)?;
-        if first.text.starts_with("- ") || first.text == "-" {
+        if flow::starts(&first.text) {
+            let node = flow::parse(&first.text, first.span, depth, self.limits, &mut self.nodes)?;
+            Ok((node, at + 1))
+        } else if first.text.starts_with("- ") || first.text == "-" {
             self.sequence(at, indent, depth)
         } else {
             self.mapping(at, indent, depth)
@@ -692,7 +730,8 @@ impl Scanner<'_> {
         let mut entries: Vec<(String, Node, Span)> = Vec::new();
         while at < self.lines.len() && self.lines[at].indent == indent {
             let line = &self.lines[at];
-            let Some((raw_key, raw_value)) = split_entry(&line.text) else {
+            let flow_entry = flow::entry(&line.text);
+            let Some((raw_key, raw_value)) = flow_entry.or_else(|| split_entry(&line.text)) else {
                 return Err(WorkflowRefusal::Malformed {
                     expected: "a `key: value` entry",
                     span: line.span,
@@ -704,7 +743,7 @@ impl Scanner<'_> {
                 line.span.line,
                 line.span.column,
             );
-            let key_text = if new_block_form(raw_value) {
+            let key_text = if flow_entry.is_some() || new_block_form(raw_value) {
                 raw_key.trim_matches([' ', '\t'])
             } else {
                 raw_key.trim()
@@ -712,7 +751,11 @@ impl Scanner<'_> {
             if key_text == "<<" {
                 return Err(refuse("yaml.merge-key", key_span));
             }
-            let key = scalar(key_text, key_span, self.limits)?;
+            let key = if flow_entry.is_some() {
+                flow::key(key_text, key_span, self.limits)?
+            } else {
+                scalar(key_text, key_span, self.limits)?
+            };
             if entries.iter().any(|(existing, _, _)| existing == &key) {
                 return Err(WorkflowRefusal::DuplicateKey {
                     key: key.into(),
@@ -760,10 +803,20 @@ impl Scanner<'_> {
                 at = after;
                 continue;
             }
-            self.charge(value_span)?;
-            let value = Node::Scalar {
-                value: scalar(raw_value, value_span, self.limits)?,
-                span: value_span,
+            let value = if flow::starts(raw_value) {
+                flow::parse(
+                    raw_value,
+                    value_span,
+                    depth + 1,
+                    self.limits,
+                    &mut self.nodes,
+                )?
+            } else {
+                self.charge(value_span)?;
+                Node::Scalar {
+                    value: scalar(raw_value, value_span, self.limits)?,
+                    span: value_span,
+                }
             };
             entries.push((key, value, key_span));
             at += 1;
@@ -1056,7 +1109,19 @@ impl Scanner<'_> {
                 });
             }
 
-            if split_entry(rest).is_some() {
+            if flow::starts(rest) {
+                items.push(flow::parse(
+                    rest,
+                    rest_span,
+                    depth + 1,
+                    self.limits,
+                    &mut self.nodes,
+                )?);
+                at += 1;
+                continue;
+            }
+
+            if flow::entry(rest).is_some() || split_entry(rest).is_some() {
                 // `- key: value` starts a mapping whose indent is the column of
                 // the key. Its continuation lines are indented to match.
                 let inner_indent = indent + rest_offset;

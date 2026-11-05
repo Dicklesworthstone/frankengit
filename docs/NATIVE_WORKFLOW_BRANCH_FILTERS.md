@@ -59,9 +59,11 @@ and [tag filter](NATIVE_TAG_WORKFLOW_WATCH.md) profiles describe supported
 `paths` / `paths-ignore` and push `tags` / `tags-ignore` mappings.
 
 Scalar and block-list event declarations retain their historical behavior.
+The scanner also accepts [single-line flow collections](NATIVE_WORKFLOW_FLOW_COLLECTIONS.md),
+such as `on: {push: {branches: [main]}}`, with the same filter semantics.
 Within a mixed mapping, an unfiltered event is explicitly written `push: ''` or
-`workflow_dispatch: ''`. The existing scanner still refuses flow mappings and
-bare keys without an indented value. This slice does not reinterpret YAML nulls.
+`workflow_dispatch: ''`. Bare keys without an explicit or indented value still
+refuse. This profile does not reinterpret YAML nulls.
 
 ## Ownership, bounds and evidence
 

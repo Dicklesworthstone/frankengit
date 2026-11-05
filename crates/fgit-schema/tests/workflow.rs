@@ -201,14 +201,6 @@ fn yaml_constructs_outside_the_subset_are_refused_by_name() {
             "yaml.tag",
         ),
         (
-            "name: ci\non: {a: b}\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: x\n",
-            "yaml.flow-mapping",
-        ),
-        (
-            "name: ci\non: [push]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: x\n",
-            "yaml.flow-sequence",
-        ),
-        (
             "---\nname: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: x\n",
             "yaml.document-marker",
         ),
@@ -600,8 +592,6 @@ fn every_construct_the_lowerer_names_exists_in_the_registry() {
         "yaml.anchor",
         "yaml.block-scalar",
         "yaml.document-marker",
-        "yaml.flow-mapping",
-        "yaml.flow-sequence",
         "yaml.merge-key",
         "yaml.tab-indent",
         "yaml.tag",
