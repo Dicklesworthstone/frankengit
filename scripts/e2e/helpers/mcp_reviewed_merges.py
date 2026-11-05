@@ -225,14 +225,14 @@ for fmt in ['sha1', 'sha256']:
             # exactly, rather than equating different packed representations.
             minimal_bytes = bytes.fromhex(''.join(inspection['bundle_hex_chunks']))
             for name in ['candidate_arguments', 'publication_arguments']:
-                before, after = inspected[name], thicker[name]
-                assert before.keys() == after.keys() and 'bundle_hex_chunks' in before, name
-                for key in sorted(before):
+                minimal_arguments, thicker_arguments = inspected[name], thicker[name]
+                assert minimal_arguments.keys() == thicker_arguments.keys() and 'bundle_hex_chunks' in minimal_arguments, name
+                for key in sorted(minimal_arguments):
                     if key == 'bundle_hex_chunks':
-                        assert bytes.fromhex(''.join(before[key])) == minimal_bytes, name
-                        assert bytes.fromhex(''.join(after[key])) == thicker_bytes, name
+                        assert bytes.fromhex(''.join(minimal_arguments[key])) == minimal_bytes, name
+                        assert bytes.fromhex(''.join(thicker_arguments[key])) == thicker_bytes, name
                     else:
-                        assert before[key] == after[key], (name, key)
+                        assert minimal_arguments[key] == thicker_arguments[key], (name, key)
             assert int(thicker['pack_objects']) == int(inspected['pack_objects']) + 1
             assert int(thicker['bundle_bytes']) == len(thicker_bytes)
             assert thicker['bundle_sha256'] == hashlib.sha256(thicker_bytes).hexdigest()
