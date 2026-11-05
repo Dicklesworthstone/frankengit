@@ -26,6 +26,14 @@ cargo run --locked -p fgit-node --bin fg-repository-backup -- \
 ```
 
 The same operations are available as `fg backup export` and `fg backup restore`.
+An explicit `--donor-backup` with its independently retained SHA-256 can supply
+missing or corrupt historical Git objects while exporting the **current** source
+snapshot. The donor must pass complete native preflight and exact canonical-head
+ancestry checks in the same repository incarnation. Current refs, forge state,
+outcomes and retained checkpoint remain authoritative; live placements stay
+unchanged. See [donor-assisted current export](DONOR_BACKUP_EXPORT.md) for the
+required scratch custody, bounds and recovery command.
+
 `fg backup attest` adds a detached operator approval after complete native
 verification of an existing archive. It reads the private key only after the
 archive's authority, inventory, graph and operator declarations agree, retains

@@ -1,7 +1,7 @@
 //! Recovery preflight through the real metadata backend and canonical graph.
 //! Only bounded authority metadata is imported; Git payloads stay in the archive.
 use super::super::approval::ApprovalFlags;
-use super::super::archive::stream::{Seal, StreamHeader};
+use super::super::archive::stream::{RecordHeader, Seal, StreamHeader};
 use super::super::input::PinnedArchive;
 use super::super::profile::{Deadline, Profile, ProfileFlags};
 use super::{
@@ -303,6 +303,18 @@ impl<R: Read + Seek> VerifiedSourceArchive<R> {
 
     pub(in super::super) const fn graph(&self) -> GraphReport {
         self.graph
+    }
+
+    /// A composition may stream only from this already verified archive and
+    /// must keep its output private until this pass rechecks the original seal.
+    /// The original descriptor, header, payload commitments and exact EOF are
+    /// retained by PinnedArchive; no caller may replace the input or its pin.
+    pub(in super::super) fn scan_stream(
+        &mut self,
+        deadline: Deadline,
+        visit: impl FnMut(RecordHeader, &mut dyn Read) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.archive.scan_stream(deadline, visit)
     }
 
     /// Reverify the original bytes through exact EOF without renewing the

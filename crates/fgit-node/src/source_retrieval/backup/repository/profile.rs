@@ -53,6 +53,12 @@ pub(super) struct Deadline {
     timeout: Duration,
 }
 impl Deadline {
+    pub fn remaining(self) -> Result<Duration, String> {
+        self.timeout
+            .checked_sub(self.started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| "repository backup operation deadline exceeded".into())
+    }
     pub fn check(self) -> Result<(), String> {
         if self.started.elapsed() >= self.timeout {
             Err("repository backup operation deadline exceeded".into())
@@ -133,6 +139,31 @@ impl ProfileFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn later_phases_receive_only_the_original_deadlines_remaining_time() {
+        let deadline = Deadline {
+            started: Instant::now() - Duration::from_secs(2),
+            timeout: Duration::from_secs(5),
+        };
+        let remaining = deadline.remaining().unwrap();
+        assert!(remaining <= Duration::from_secs(3));
+        assert!(remaining > Duration::ZERO);
+        assert!(deadline.remaining().unwrap() <= remaining);
+        let expired = Deadline {
+            started: Instant::now() - Duration::from_secs(5),
+            timeout: Duration::from_secs(5),
+        };
+        assert!(expired.remaining().is_err());
+        assert!(expired.check().is_err());
+        assert!(
+            Deadline {
+                started: Instant::now(),
+                timeout: Duration::ZERO
+            }
+            .remaining()
+            .is_err()
+        );
+    }
     #[test]
     fn a_global_timeout_only_narrows_the_leaf_without_renewing_other_allowances() {
         let profile = Profile::default();

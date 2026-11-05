@@ -5,6 +5,7 @@ mod archive;
 mod attest;
 mod blob_io;
 mod checkpoint;
+mod donor;
 mod input;
 mod payload;
 mod profile;
@@ -19,13 +20,13 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use crate::{NodeConfig, OneNode};
+use crate::{NodeConfig, NodeRequestContext, OneNode};
 use fgit_authority::{HeadReadReceipt, StoreInstanceId};
 use fgit_authority_fsqlite::{ExportBundle, PortableStoreLimits, export_bundle};
 use fgit_crypto::GitObjectKind;
 use fgit_object_fabric::ObjectKind as FabricKind;
 use fgit_treefs::integrity::{GraphLimits, GraphReport, ObjectGraphAudit};
-use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
+use fgit_types::{GitHashAlgorithm, GitOid, HeadGeneration, RepositoryId, TenantId};
 
 use super::{emit, hex, publish_streamed, quote, regular, require_absent, with_store};
 use archive::stream::{Seal, StreamDecoder, StreamEncoder, StreamHeader, TransferLimits};
@@ -39,6 +40,9 @@ pub const USAGE: &str =
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>]
+         [--donor-backup <file> --donor-sha256 <64-lowercase-hex>
+          --donor-scratch <new-private-root> --donor-verification-instance <positive-integer>
+          [--donor-max-ancestry-hops <1..65536>]]
 
 Authority metadata plus every authority-selected Git object, including admitted
 history unreachable from current refs. Source head, complete local graph, native
@@ -64,7 +68,19 @@ Codec/runtime limits may refuse earlier. The deadline covers all passes, is
 cooperative, and cannot interrupt a blocking filesystem call.
 Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
 Export streams blobs in bounded chunks and independently verifies the staged file.
-Export never overwrites an existing file. Save its SHA-256 independently.";
+Export never overwrites an existing file. Save its SHA-256 independently.
+
+An explicit donor uses a separately retained archive SHA-256 plus complete native
+authority/inventory/graph verification. Its exact head must be an ancestor of
+the current capture in the same tenant/repository/incarnation/object format.
+Selected donor objects supply their original verified payload commitments;
+newer objects still come from the live source. The current authority, inventory
+and checkpoint are never replaced by the donor's older snapshot. Donor overlap
+is selected before local reads, so missing/corrupt old objects can be exported.
+No live object is repaired or rewritten. A new ordinary archive is the output.
+Donor, output and verification scratch must be physically separate from one
+another and the live source. Unix directory identity profile; stable trusted
+parents required. Ancestry defaults to 4096 hops. All passes share one deadline.";
 
 #[derive(Debug)]
 struct Options {
@@ -74,9 +90,10 @@ struct Options {
     repository: RepositoryId,
     format: GitHashAlgorithm,
     profile: Profile,
+    donor: Option<donor::Options>,
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(6..=16).contains(&args.len())
+    if !(6..=26).contains(&args.len())
         || args[0] != "export"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -88,6 +105,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut trusted = false;
     let mut format = None;
     let mut profile = ProfileFlags::default();
+    let mut donor = donor::Flags::default();
     let mut cursor = 5;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -108,6 +126,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or_else(|| format!("missing value for {flag}"))?;
                 cursor += 1;
                 profile.set(flag, value)?;
+            }
+            _ if donor::Flags::accepts(flag) => {
+                let value = args
+                    .get(cursor)
+                    .ok_or_else(|| format!("missing value for {flag}"))?;
+                cursor += 1;
+                donor.set(flag, value)?;
             }
             _ => {
                 return Err(format!(
@@ -132,6 +157,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         repository: RepositoryId::from_hex(&args[4]).map_err(|e| e.to_string())?,
         format: format.unwrap_or(GitHashAlgorithm::Sha1),
         profile: profile.finish(),
+        donor: donor.finish()?,
     })
 }
 fn limits(transfer: TransferLimits) -> GraphLimits {
@@ -170,7 +196,12 @@ fn with_node<T>(
         (Err(error), Err(cleanup)) => Err(format!("{error}; node shutdown also failed: {cleanup}")),
     }
 }
-fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<String, String> {
+fn export(
+    options: &Options,
+    file: &mut File,
+    deadline: Deadline,
+    donor: Option<&mut donor::Prepared>,
+) -> Result<String, String> {
     deadline.check()?;
     let metadata = std::fs::symlink_metadata(&options.root).map_err(|e| e.to_string())?;
     if !metadata.is_dir() {
@@ -200,7 +231,7 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
             )
             .with_runtime_budgets(options.profile.node_budgets()?),
         |node| {
-            let request = node.request_context();
+            let request = node.session_request_context_with_timeout(deadline.remaining()?);
             let selected = node
                 .runtime()
                 .block_on(node.materialize_admission_in(&request))
@@ -233,54 +264,40 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
                 options.profile.transfer,
                 &mut io_live,
             )?;
-            for &oid in objects {
-                io_live()?;
-                // Header reads select the bounded path only; they establish no
-                // payload authenticity. Both paths verify the actual body.
-                let header = node.git_object_header(oid).map_err(|e| e.to_string())?;
-                if header.kind == FabricKind::Blob {
-                    let mut body = blob_io::BlobReader::open(
+            let provenance = if let Some(donor) = donor {
+                Some(donor.write_selected(
+                    donor::SourceSnapshot {
                         node,
-                        oid,
-                        options.profile.transfer.max_blob_bytes,
-                        deadline,
+                        request: &request,
+                        captured: selected.authenticated().receipt(),
+                        objects,
+                    },
+                    &mut output,
+                    deadline,
+                    |oid, output| {
+                        encode_local_object(
+                            node,
+                            &request,
+                            oid,
+                            options.profile.transfer,
+                            deadline,
+                            output,
+                        )
+                    },
+                )?)
+            } else {
+                for &oid in objects {
+                    encode_local_object(
+                        node,
                         &request,
-                    )?;
-                    let length = body.length();
-                    let commitment = body.commitment();
-                    output.object_stream(
                         oid,
-                        GitObjectKind::Blob,
-                        length,
-                        &commitment,
-                        &mut body,
-                        &mut io_live,
-                    )?;
-                } else {
-                    if header.payload_length > MAX_OBJECT_BYTES as u64 {
-                        return Err("repository backup metadata object-byte limit".into());
-                    }
-                    let object = node
-                        .read_git_object(oid)
-                        .map_err(|error| format!("backup object {oid}: {error}"))?;
-                    io_live()?;
-                    let kind = match object.envelope().object_kind() {
-                        FabricKind::Commit => GitObjectKind::Commit,
-                        FabricKind::Tree => GitObjectKind::Tree,
-                        FabricKind::Tag => GitObjectKind::Tag,
-                        FabricKind::Blob | FabricKind::Internal => {
-                            return Err("selected backup object changed its Git kind".into());
-                        }
-                    };
-                    output.object(
-                        oid,
-                        kind,
-                        object.payload(),
-                        &object.envelope().payload_commitment(),
-                        &mut io_live,
+                        options.profile.transfer,
+                        deadline,
+                        &mut output,
                     )?;
                 }
-            }
+                None
+            };
             let written = output.finish(&mut io_live)?;
             file.seek(SeekFrom::Start(0))
                 .map_err(|e| format!("backup verification seek failed: {e}"))?;
@@ -331,13 +348,70 @@ fn export(options: &Options, file: &mut File, deadline: Deadline) -> Result<Stri
             if !matches_head(&authority, current.receipt()) {
                 return Err("repository head moved during backup; no backup published".into());
             }
-            Ok(receipt(&header, report, verified))
+            Ok(receipt(&header, report, verified, provenance.as_ref()))
         },
     )?;
     deadline.check()?;
     Ok(result)
 }
-fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
+fn encode_local_object<W: Write>(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    oid: GitOid,
+    transfer: TransferLimits,
+    deadline: Deadline,
+    output: &mut StreamEncoder<W>,
+) -> Result<(), String> {
+    let mut live = || deadline.in_request(request);
+    live()?;
+    // Header reads select the bounded path only; they establish no payload
+    // authenticity. Both paths still verify the actual body through exact EOF.
+    let header = node
+        .git_object_header(oid)
+        .map_err(|error| error.to_string())?;
+    if header.kind == FabricKind::Blob {
+        let mut body =
+            blob_io::BlobReader::open(node, oid, transfer.max_blob_bytes, deadline, request)?;
+        output.object_stream(
+            oid,
+            GitObjectKind::Blob,
+            body.length(),
+            &body.commitment(),
+            &mut body,
+            &mut live,
+        )
+    } else {
+        if header.payload_length > MAX_OBJECT_BYTES as u64 {
+            return Err("repository backup metadata object-byte limit".into());
+        }
+        let object = node
+            .read_git_object(oid)
+            .map_err(|error| format!("backup object {oid}: {error}"))?;
+        live()?;
+        let kind = match object.envelope().object_kind() {
+            FabricKind::Commit => GitObjectKind::Commit,
+            FabricKind::Tree => GitObjectKind::Tree,
+            FabricKind::Tag => GitObjectKind::Tag,
+            FabricKind::Blob | FabricKind::Internal => {
+                return Err("selected backup object changed its Git kind".into());
+            }
+        };
+        output.object(
+            oid,
+            kind,
+            object.payload(),
+            &object.envelope().payload_commitment(),
+            &mut live,
+        )
+    }
+}
+
+fn receipt(
+    archive: &StreamHeader,
+    graph: GraphReport,
+    seal: Seal,
+    donor: Option<&donor::Provenance>,
+) -> String {
     format!(
         concat!(
             "{{\"type\":\"repository_source_backup_export\",\"schema_version\":1,",
@@ -347,7 +421,7 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
             "\"complete\":true,\"scope\":\"authority_and_selected_git_objects\",",
             "\"object_graph_verified\":true,\"original_payload_commitments_verified\":true,",
             "\"source_head_revalidated\":true,\"node_closed\":true,\"signature_verified\":false,",
-            "\"external_artifacts_included\":false,\"physical_orphans_included\":false{}}}"
+            "\"external_artifacts_included\":false,\"physical_orphans_included\":false{}{}}}"
         ),
         quote(&hex(&seal.digest)),
         seal.bytes,
@@ -361,7 +435,8 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
         graph.payload_bytes,
         graph.local_edges,
         graph.external_gitlinks,
-        checkpoint::receipt(archive.checkpoint.as_ref())
+        checkpoint::receipt(archive.checkpoint.as_ref()),
+        donor.map_or_else(String::new, donor::Provenance::receipt_fields),
     )
 }
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
@@ -418,11 +493,31 @@ pub(super) fn run_with_timeout(
     let deadline = options.profile.start();
     deadline.check()?;
     require_absent(&options.destination)?;
-    let receipt = publish_streamed(
-        &options.destination,
-        |file| export(&options, file, deadline),
-        || deadline.check(),
-    )?;
+    let receipt = if let Some(donor) = &options.donor {
+        let (mut prepared, separation) = donor.prepare(
+            &options.root,
+            &options.destination,
+            (options.tenant, options.repository, options.format),
+            options.profile,
+            deadline,
+        )?;
+        publish_streamed(
+            &options.destination,
+            |file| {
+                separation.check(|| deadline.check())?;
+                let receipt = export(&options, file, deadline, Some(&mut prepared))?;
+                separation.check(|| deadline.check())?;
+                Ok(receipt)
+            },
+            || separation.check(|| deadline.check()),
+        )?
+    } else {
+        publish_streamed(
+            &options.destination,
+            |file| export(&options, file, deadline, None),
+            || deadline.check(),
+        )?
+    };
     emit(output, &receipt)
         .map_err(|error| format!("repository backup published; receipt output failed: {error}"))
 }
