@@ -31,6 +31,12 @@ Origin/`Sec-Fetch-Site` preflight runs before any attempt adaptation, so a
 cross-site POST receives the same refusal even when adaptation would otherwise
 challenge credentials, reject a retry header or select a fresh attempt.
 
+The reserved `fgagent_` Bearer namespace passes unchanged to canonical agent
+authentication, including malformed tokens and forbidden Git operations. The
+stock adapter neither consults the legacy credential table nor rewrites an
+attempt URL or retry key for these requests. Canonical metadata/source grants
+retain their existing handler and cannot become Git publication permission.
+
 Every redirected discovery and RPC authenticates independently. The identifier
 is public routing/idempotency data, not a bearer capability, an approval, a
 policy snapshot, or an authority receipt. Revoked credentials and disabled
