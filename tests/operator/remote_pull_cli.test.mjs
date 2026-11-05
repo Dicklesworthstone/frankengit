@@ -53,6 +53,13 @@ for (const action of PULL_ACTIONS) test(`${action}: prepare/inspect/send/recover
   const sent = await cli(t, sendArgs(f, p.intent)); assert.equal(sent.code, 0, sent.err);
   const record = await readPullRecord(f.record, p.intent); assert.equal(record.outcome.state, 'committed');
   assert.equal(record.outcome.decision.decision_sequence, '18446744073709551615');
+  if (action === 'append-comment') {
+    assert.deepEqual(p.intent.fields, { body: 'Discussion, not approval.\n🦀' });
+    assert.equal(record.publication.expected_version, null); assert.equal(record.publication.comment_version, null);
+    assert.equal(record.publication.refs_changed, false);
+    assert.equal(p.requests[1].url, `/repo.git/api/v1/pulls/${p.intent.number}/comments/append`);
+    assert.equal(p.requests[1].body, p.intent.body);
+  }
   assert.equal((await lstat(f.slot)).mode & 0o777, 0o700);
   assert.equal((await lstat(f.record)).mode & 0o777, 0o600);
   assert.equal((await lstat(f.record)).nlink, 1);
@@ -69,13 +76,13 @@ test('SHA-256 fast-forward retains exact tips and version in saved intent and re
   assert.equal(record.publication.source_tip, `sha256:${p.intent.fields.source_tip}`);
   assert.equal(record.publication.pull_request_version, p.intent.fields.pull_request_version);
 });
-test('a canonical refusal exits 1 and retains its exact evidence', async t => {
-  const p = await peer(t, { state: 'refused' }), f = await prepared(t, p);
+for (const action of ['open', 'append-comment']) test(`${action}: a canonical refusal exits 1 and retains its exact evidence`, async t => {
+  const p = await peer(t, { action, state: 'refused' }), f = await prepared(t, p);
   const result = await cli(t, sendArgs(f, p.intent)); assert.equal(result.code, 1, result.err);
   assert.equal((await readPullRecord(f.record, p.intent)).outcome.decision.code, 'PolicyDenied');
 });
-test('lost reply persists unknown status and later recovers without another mutation', async t => {
-  const p = await peer(t, { handle(r, res, s) { if (!r.url.endsWith('/outcomes')) { s.published = true; res.destroy(); return true; } } });
+for (const action of ['open', 'append-comment']) test(`${action}: lost reply persists unknown status and later recovers without another mutation`, async t => {
+  const p = await peer(t, { action, handle(r, res, s) { if (!r.url.endsWith('/outcomes')) { s.published = true; res.destroy(); return true; } } });
   const f = await prepared(t, p), original = await readFile(join(f.slot, 'intent.json'));
   const sent = await cli(t, sendArgs(f, p.intent)); assert.equal(sent.code, 3, sent.err);
   const uncertain = await readPullRecord(f.record, p.intent); assert.equal(uncertain.outcome, null); assert.equal(uncertain.dispatched, true);
@@ -83,9 +90,9 @@ test('lost reply persists unknown status and later recovers without another muta
   assert.equal(recovered.code, 0, recovered.err); assert.equal(p.requests.filter(r => !r.url.endsWith('/outcomes')).length, 1);
   assert.deepEqual(await readFile(join(f.slot, 'intent.json')), original);
 });
-for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during publication preserves identity for restart recovery`, async t => {
+for (const action of ['fast-forward', 'append-comment']) for (const signal of ['SIGTERM', 'SIGKILL']) test(`${action}: ${signal} during publication preserves identity for restart recovery`, async t => {
   let admitted; const reached = new Promise(resolve => admitted = resolve);
-  const p = await peer(t, { action: 'fast-forward', handle(r, res, s) {
+  const p = await peer(t, { action, handle(r, res, s) {
     if (!r.url.endsWith('/outcomes')) { s.published = true; admitted(); return true; }
   } });
   const f = await prepared(t, p), saved = await readFile(join(f.slot, 'intent.json'));
@@ -95,6 +102,13 @@ for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during publication 
   const recovered = await cli(t, recoveryArgs(f, join(f.root, 'restart.json'))); assert.equal(recovered.code, 0, recovered.err);
   assert.deepEqual(await readFile(join(f.slot, 'intent.json')), saved);
   assert.equal(p.requests.filter(r => !r.url.endsWith('/outcomes')).length, 1);
+});
+for (const version of ['0', null]) test(`append-comment preparation rejects expected_version ${String(version)} without creating a request`, async t => {
+  const p = await peer(t, { action: 'append-comment' }), value = input(p.endpoint, 'append-comment');
+  value.fields.expected_version = version;
+  const f = await files(t, value), result = await cli(t, prepArgs(f));
+  assert.equal(result.code, 2, result.err); assert.equal(p.requests.length, 0);
+  await assert.rejects(lstat(f.slot), { code: 'ENOENT' });
 });
 test('closed stdout after commit leaves a complete result record and exits nonzero', async t => {
   const p = await peer(t, { action: 'comment' }), f = await prepared(t, p);
@@ -163,8 +177,8 @@ test('retained receipt cross-request substitution and terminal regression are re
   assert.equal(sent.code, 3, sent.err); assert.equal(p.requests.length, 1);
   assert.equal(p.requests[0].url, '/repo.git/api/v1/outcomes');
 });
-test('publication awaiting confirmation is saved and only lookup is attempted next', async t => {
-  const p = await peer(t, { handle(r, res, s) { if (r.url.endsWith('/outcomes') && s.published) {
+for (const action of ['open', 'append-comment']) test(`${action}: publication awaiting confirmation is saved and only lookup is attempted next`, async t => {
+  const p = await peer(t, { action, handle(r, res, s) { if (r.url.endsWith('/outcomes') && s.published) {
     res.writeHead(503); res.end(); return true;
   } } }), f = await prepared(t, p);
   const sent = await cli(t, sendArgs(f, p.intent)); assert.equal(sent.code, 3, sent.err);

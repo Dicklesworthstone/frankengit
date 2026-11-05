@@ -5,9 +5,9 @@ import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
 import { isCredentialToken, isAgentCredentialToken } from './credential_token.mjs';
 
 export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024, bundle: 16 * 1024 * 1024 });
-export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'comment', 'fast-forward']);
-// Keep the original form-only list stable for existing consumers. Candidate
-// operations are a distinct profile with independently bound bundle bytes.
+export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'comment', 'append-comment', 'fast-forward']);
+// Form-only operations retain their saved-intent schema. Candidate operations
+// are a distinct profile with independently bound bundle bytes.
 export const PULL_REVIEW_ACTIONS = Object.freeze(['approve', 'request-changes', 'withdraw', 'merge']);
 export const isPullReview = action => PULL_REVIEW_ACTIONS.includes(action);
 const REVIEW_SCHEMA = 'frankengit-remote-pull-candidate-intent-v1';
@@ -49,7 +49,7 @@ export function pullTokenFingerprint(value) {
   return pullHash(value);
 }
 export function requireAgentMetadataOperation(action, token) {
-  if (isAgentCredentialToken(token) && !['open', 'update', 'close', 'reopen', 'comment'].includes(action)) {
+  if (isAgentCredentialToken(token) && !['open', 'update', 'close', 'reopen', 'comment', 'append-comment'].includes(action)) {
     failPull('agent_metadata_operation_unsupported');
   }
 }
@@ -116,14 +116,14 @@ export function pullCommand(number, action, input, format) {
   pullU64(number, 1n);
   if (isPullReview(action)) return candidateCommand(number, action, input, format);
   if (!PULL_ACTIONS.includes(action) || !['sha1', 'sha256'].includes(format)) failPull('unsupported_pull_command');
-  const ff = action === 'fast-forward', comment = action === 'comment';
-  const names = comment ? ['expected_version', 'body'] :
+  const ff = action === 'fast-forward', append = action === 'append-comment', comment = action === 'comment' || append;
+  const names = comment ? [...(append ? [] : ['expected_version']), 'body'] :
     [ff ? 'pull_request_version' : 'expected_version', 'source_ref', 'target_ref', 'source_tip', 'target_tip', ...(ff ? [] : ['title', 'body'])];
   pullFields(input, names);
   const versionName = ff ? 'pull_request_version' : 'expected_version';
-  const version = pullU64(input[versionName], ff ? 1n : 0n, U64 - 1n);
+  const version = append ? null : pullU64(input[versionName], ff ? 1n : 0n, U64 - 1n);
   if (!ff && !comment && (action === 'open') !== (version === '0')) failPull('invalid_pull_action_version');
-  const normalized = { [versionName]: version };
+  const normalized = append ? {} : { [versionName]: version };
   if (!comment) {
     for (const side of ['source', 'target']) normalized[`${side}_ref`] = branch(input[`${side}_ref`]);
     for (const side of ['source', 'target']) normalized[`${side}_tip`] = oid(input[`${side}_tip`], format);
@@ -181,7 +181,8 @@ export function validatePullIntent(value) {
   return result;
 }
 export function validatePullPublication(value, input, status) {
-  const intent = validatePullIntent(input), ff = intent.action === 'fast-forward', comment = intent.action === 'comment', review = isPullReview(intent.action);
+  const intent = validatePullIntent(input), ff = intent.action === 'fast-forward', append = intent.action === 'append-comment';
+  const comment = intent.action === 'comment' || append, review = isPullReview(intent.action);
   const names = ['type', 'schema_version', ...Object.keys(intent.scope), ...(review ? [] : ['number']), 'action', 'tx_id', 'outcome', 'decision_sequence',
     'repository_commit_id', 'refusal_record_id', 'refusal_code', 'refusal_code_point', 'delivery_acknowledged',
     ...(review ? ['subject', 'merge_base', 'candidate_commit', 'required_reviewers', 'review_expected_version', ...(intent.action === 'merge' ? ['method'] : [])]
@@ -196,12 +197,14 @@ export function validatePullPublication(value, input, status) {
       status !== (committed ? 200 : 409) || value.delivery_acknowledged !== null) failPull('pull_publication_mismatch');
   const version = ff ? 'pull_request_version' : 'expected_version';
   if (review) checkCandidatePublication(value, intent);
-  if (!review && value[version] !== f[version]) failPull('pull_publication_version');
+  if (!review && value[version] !== (append ? null : f[version])) failPull('pull_publication_version');
   if (ff) for (const side of ['source', 'target']) {
     if (value[`${side}_ref`] !== f[`${side}_ref`] || value[`${side}_ref_hex`] !== Buffer.from(f[`${side}_ref`]).toString('hex') ||
         oid(value[`${side}_tip`], intent.scope.object_format, true) !== f[`${side}_tip`]) failPull('pull_publication_coordinates');
   }
-  if (comment && (value.refs_changed !== false || value.comment_version !== (committed ? String(BigInt(f.expected_version) + 1n) : null))) failPull('pull_comment_receipt');
+  // Append receipts identify the terminal decision, not its assigned position.
+  // Neither a later discussion read nor a caller predecessor can supply it.
+  if (comment && (value.refs_changed !== false || value.comment_version !== (committed && !append ? String(BigInt(f.expected_version) + 1n) : null))) failPull('pull_comment_receipt');
   opaque(value.tx_id); pullU64(value.decision_sequence, 1n);
   if (committed) {
     opaque(value.repository_commit_id);

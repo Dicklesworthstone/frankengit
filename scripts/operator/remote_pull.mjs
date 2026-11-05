@@ -45,7 +45,7 @@ function postPull(intent, token, options, envelope) {
     const abort = () => finish(new PullError('pull_cancelled'));
     if (signal?.aborted) { abort(); return; }
     try {
-      const suffix = intent.action === 'comment' ? 'comments' :
+      const suffix = intent.action === 'comment' ? 'comments' : intent.action === 'append-comment' ? 'comments/append' :
         isPullReview(intent.action) && intent.action !== 'merge' ? `reviews/${intent.action}` : intent.action;
       const url = new URL(`${intent.endpoint}/api/v1/pulls/${intent.number}/${suffix}`);
       request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {

@@ -8,7 +8,8 @@ export const TOKEN = 'a'.repeat(64), ROTATED = 'b'.repeat(64);
 export const BASE_SCOPE = Object.freeze({ tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32),
   repository_incarnation: '3'.repeat(32), principal_id: '4'.repeat(32) });
 export function input(endpoint, action = 'open', algorithm = 'sha1') {
-  const fields = action === 'comment' ? { expected_version: '0', body: 'Discussion, not approval.\n🦀' }
+  const fields = ['comment', 'append-comment'].includes(action) ? {
+    ...(action === 'comment' ? { expected_version: '0' } : {}), body: 'Discussion, not approval.\n🦀' }
     : { [action === 'fast-forward' ? 'pull_request_version' : 'expected_version']: action === 'open' ? '0' : '9007199254740993',
       source_ref: 'refs/heads/topic', target_ref: 'refs/heads/main',
       source_tip: 'a'.repeat(algorithm === 'sha1' ? 40 : 64), target_tip: 'b'.repeat(algorithm === 'sha1' ? 40 : 64),
@@ -16,15 +17,16 @@ export function input(endpoint, action = 'open', algorithm = 'sha1') {
   return { endpoint, scope: { ...BASE_SCOPE, object_format: algorithm }, number: '18446744073709551615', action, fields };
 }
 export function publication(intent, state = 'committed') {
-  const ff = intent.action === 'fast-forward', comment = intent.action === 'comment', committed = state === 'committed';
+  const ff = intent.action === 'fast-forward', append = intent.action === 'append-comment';
+  const comment = intent.action === 'comment' || append, committed = state === 'committed';
   return { type: ff ? 'fast_forward_merge_publication' : comment ? 'pull_request_comment_publication' : 'pull_request_publication',
     schema_version: 1, ...intent.scope, number: intent.number, action: intent.action,
     ...(ff ? { pull_request_version: intent.fields.pull_request_version,
       ...Object.fromEntries(['source', 'target'].flatMap(side => [[`${side}_ref`, intent.fields[`${side}_ref`]],
         [`${side}_ref_hex`, Buffer.from(intent.fields[`${side}_ref`]).toString('hex')],
         [`${side}_tip`, `${intent.scope.object_format}:${intent.fields[`${side}_tip`]}`]])) }
-      : { expected_version: intent.fields.expected_version, ...(comment ? { refs_changed: false,
-        comment_version: committed ? String(BigInt(intent.fields.expected_version) + 1n) : null } : {}) }),
+      : { expected_version: append ? null : intent.fields.expected_version, ...(comment ? { refs_changed: false,
+        comment_version: committed && !append ? String(BigInt(intent.fields.expected_version) + 1n) : null } : {}) }),
     tx_id: 'native-transaction', outcome: state, decision_sequence: '18446744073709551615',
     repository_commit_id: committed ? 'native-rcr' : null, refusal_record_id: committed ? null : 'native-refusal',
     refusal_code: committed ? null : 'PolicyDenied', refusal_code_point: committed ? null : 17, delivery_acknowledged: null };

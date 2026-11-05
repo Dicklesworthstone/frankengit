@@ -10,7 +10,9 @@ The same client and CLI now also support exact-candidate approval, change
 requests, withdrawal and reviewed merge-commit/squash. Their separate bundle
 intent schema, confirmations and durable workflow are documented in
 [REMOTE_REVIEWED_MERGES.md](REMOTE_REVIEWED_MERGES.md). The six original form-only
-commands below retain their existing intent bytes, keys and requirements.
+commands retain their existing intent bytes, keys and requirements. The explicit
+`append-comment` action adds version-independent discussion through the same
+durable request and original-key recovery workflow.
 
 ## Supported commands
 
@@ -27,13 +29,14 @@ JavaScript's safe integer range.
 | `open` | `expected_version:"0"`, source/target refs and tips, title, body |
 | `update`, `close`, `reopen` | Nonzero `expected_version`, source/target refs and tips, title, body |
 | `comment` | `expected_version` of the separate discussion stream, body |
+| `append-comment` | Body only; `expected_version` is forbidden, including null |
 | `fast-forward` | `pull_request_version`, source/target refs and tips |
 
 The four lifecycle operations carry complete metadata because that is the
 native command contract; even close/reopen must not silently replace a newer
 PR's coordinates. Refs are explicit UTF-8 `refs/heads/...` names. Byte-only refs
 are not lossy-decoded or silently renamed. Input tips are full, raw lowercase
-native OIDs in the selected hash domain. These six original form-only commands
+native OIDs in the selected hash domain. These form-only commands
 accept no arbitrary route, force, review assertion, policy override, bundle, or
 alternative merge-method field. Candidate review/merge is a separate explicit
 action profile, never a fallback for a failed fast-forward.
@@ -41,6 +44,18 @@ Titles are bounded to 256 UTF-8 bytes; bodies to 64 KiB. Encoded forms are bound
 to 256 KiB (8 KiB for fast-forward); retained intents to 1 MiB, independently of
 the 32 KiB publication response limit. The larger intent bound accounts for both
 JSON escaping and the saved URL-encoded body.
+
+Use `append-comment` when adding a new discussion entry should survive another
+writer adding a comment first. It posts the exact saved body to
+`/api/v1/pulls/NUMBER/comments/append`, with no conversation predecessor. Native
+admission revalidates the current PR and permission and assigns the publication
+position, retaining the same sealed request across an authority-head race under
+[the normative append contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2022-native-pull-request-append-comment-intents).
+The existing `comment` action still requires an exact predecessor and can refuse
+a stale version. Neither action is automatically converted into the other, and
+their saved keys bind the distinct action. This operator supports plain
+discussion bodies; exact source-anchored comments remain available through the
+native API and browser, and an `anchor` field here is refused.
 
 ## Submission and recovery
 
@@ -56,8 +71,14 @@ squash, force-update, branch deletion, or another principal.
 A historical terminal suppresses publication. Otherwise a submission makes one
 mutation request and checks the matching native outcome afterward. The reply
 must bind scope, principal, action, number, predecessor, transaction and decision;
-fast-forward also binds both text/byte refs and native tips. A comment receipt
-must retain its separate next version and explicitly change no refs. Native
+fast-forward also binds both text/byte refs and native tips. A strict comment
+receipt must retain its separate next version and explicitly change no refs.
+An append receipt binds `action:"append-comment"`, `expected_version:null`,
+`comment_version:null` and `refs_changed:false`, together with the original
+transaction, decision sequence and RCR or refusal. The native PR receipt identifies
+this profile by its action and does not carry a `command_profile` field. The
+operator rejects a strict-comment receipt for an append request and never infers
+the assigned comment position from a later discussion read. Native
 refusal receipts and pre-decision HTTP errors are different outcomes.
 
 `recoverPull(intent, originalOrRotatedToken)` only looks up the original key.
@@ -94,20 +115,29 @@ native engine still decides whether any review or merge may be published.
 Run the focused client tests:
 
 ```sh
-node --test tests/operator/remote_pull.test.mjs
+node --test tests/operator/remote_pull.test.mjs tests/operator/remote_pull_cli.test.mjs
 ```
 
-Node 22.16.0 is the executed profile. Tests import complete normal production
+Use the Node version pinned in [`tests/node-version`](../tests/node-version).
+The original client checkpoint used Node 22.16.0. Tests import complete normal production
 modules and use real HTTP/TLS sockets with explicit native-schema peers. OpenSSL
 is used only by the test to generate ephemeral certificates. These tests are not
 a live Rust-node, native authorization/ancestry, full-workspace or deployment
 pass. The shared outcome module remains unchanged at blob `9d497c67e0b2f49895efd4259d7a28c5129f7541`.
+The append cases cover both Git hash domains, strict-command identity
+compatibility, rejected predecessor injection and substituted receipts, bounded
+literal bodies, dropped replies, credential rotation, retained-publication
+recovery, and actual CLI processes interrupted by SIGTERM/SIGKILL. Their HTTP
+peers exercise client protocol and persistence behavior; they do not establish
+native concurrent admission or authorization.
 
 ## Live native campaign
 
 `scripts/e2e/suites/operator/remote_pull.sh` is discovered by the existing E2E
 runner. With an explicit prebuilt `FG_BIN`, the pinned Node and the installed
-Git 2.54.0 sandbox, it exercises all ten actions in SHA-1 and SHA-256.
+Git 2.54.0 sandbox, it exercises the ten original lifecycle, strict discussion,
+candidate and publication actions in SHA-1 and SHA-256. That campaign does not
+yet include this operator's `append-comment` action.
 Canonical Rust reads check metadata, the independent discussion stream and the
 complete ref map. The campaign includes original-key recovery/replay, stale and
 current predecessors, denied/restored outcome grants, divergent fast-forward
@@ -144,8 +174,8 @@ operator entrypoint, general merge compatibility, TLS or deployment acceptance.
 ## Durable command-line workflow
 
 The CLI uses private files rather than token arguments, environment credentials,
-or access to the node's storage root. Node 22.16.0 and POSIX filesystem semantics
-are the exercised profile. Create an owner-private directory outside a Git
+or access to the node's storage root. Its filesystem profile requires POSIX
+semantics. Create an owner-private directory outside a Git
 worktree, provision a 64-character lowercase hexadecimal bearer token in a mode
 0600 file, and write an input JSON file in that directory. An optional final
 newline is accepted in the token file. Do not put a real token in shell history.
@@ -191,6 +221,14 @@ versions. `inspect` above inspects the saved local intent, not live state. It
 prints private command data; do not route its output into public logs. `prepare`
 prints only identifying receipt fields, not the token or PR body. All JSON output
 escapes control/bidirectional formatting characters; repository text stays data.
+
+For a version-independent discussion entry, retain the same endpoint, scope and
+PR number, set `action` to `"append-comment"`, and use only
+`"fields":{"body":"The exact comment to publish."}`. Prepare, inspect and send
+it using the same commands above. Do not include `expected_version`, even as
+null, and retain the original request directory if the response is lost. The
+confirmed result deliberately leaves `comment_version` null while preserving the
+native terminal decision.
 
 A fast-forward input uses `action:"fast-forward"` and only
 `pull_request_version`, `source_ref`, `target_ref`, `source_tip`, `target_tip`

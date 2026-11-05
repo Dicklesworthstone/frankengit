@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { submitPull, recoverPull, preparePull, validatePullIntent, parsePullJson } from '../../scripts/operator/remote_pull.mjs';
-import { PULL_ACTIONS, PULL_LIMITS, pullCommand, validatePullPublication, pullCanonical } from '../../scripts/operator/pull_command.mjs';
+import { PULL_ACTIONS, PULL_LIMITS, pullCommand, validatePullPublication, pullCanonical,
+  preparePullWithIdentity, pullTokenFingerprint } from '../../scripts/operator/pull_command.mjs';
 import { TOKEN, ROTATED, input, publication, outcome, wire, peer, respond, consent } from './remote_pull_fixture.mjs';
 
 for (const algorithm of ['sha1', 'sha256']) for (const action of PULL_ACTIONS) for (const state of ['committed', 'refused']) {
@@ -25,11 +26,16 @@ for (const algorithm of ['sha1', 'sha256']) for (const action of PULL_ACTIONS) f
     }
     assert.equal(before.url, '/repo.git/api/v1/outcomes'); assert.equal(after.url, before.url);
     assert.equal(before.body, ''); assert.equal(after.body, '');
-    assert.equal(post.url, `/repo.git/api/v1/pulls/${p.intent.number}/${action === 'comment' ? 'comments' : action}`);
+    assert.equal(post.url, `/repo.git/api/v1/pulls/${p.intent.number}/${action === 'comment' ? 'comments' : action === 'append-comment' ? 'comments/append' : action}`);
     assert.equal(post.body, p.intent.body);
     const f = new URLSearchParams(post.body);
     assert.equal(f.get('principal'), null); assert.equal(f.get('force'), null);
-    assert.equal(f.get('object_format'), action === 'comment' ? null : algorithm);
+    assert.equal(f.get('object_format'), ['comment', 'append-comment'].includes(action) ? null : algorithm);
+    if (action === 'append-comment') {
+      assert.deepEqual([...f.keys()], ['body']);
+      assert.equal(result.publication.expected_version, null); assert.equal(result.publication.comment_version, null);
+      assert.equal(result.publication.refs_changed, false);
+    }
     const retried = await submitPull(p.intent, TOKEN, consent(p.intent, { known: result.outcome }));
     assert.equal(retried.dispatched, false); assert.equal(p.requests.length, 4);
   });
@@ -49,6 +55,101 @@ test('comment stream zero is valid independently of PR version; upper bound incr
   const intent = preparePull(value, TOKEN), p = publication(intent);
   assert.equal(validatePullPublication(p, intent, 200).comment_version, '18446744073709551615');
   value.fields.expected_version = '18446744073709551615'; assert.throws(() => preparePull(value, TOKEN));
+});
+test('append-comment has distinct immutable identity and preserves historical strict comment bytes and key', () => {
+  const source = input('https://forge.test/repo.git', 'comment');
+  const identity = { nonce: '01'.repeat(16), credential_fingerprint: pullTokenFingerprint(TOKEN) };
+  const strict = preparePullWithIdentity(source, identity);
+  assert.equal(strict.body, 'expected_version=0&body=Discussion%2C+not+approval.%0A%F0%9F%A6%80');
+  assert.equal(strict.key, 'fgp1-01010101010101010101010101010101-cccc46f396b626d5403e78f47553031f381e05b89bb5ddd9594454855345d0b0');
+  const value = input(source.endpoint, 'append-comment'), append = preparePullWithIdentity(value, identity);
+  assert.equal(append.body, 'body=Discussion%2C+not+approval.%0A%F0%9F%A6%80');
+  assert.deepEqual(append.fields, { body: value.fields.body });
+  assert.notEqual(append.key, strict.key);
+  assert.deepEqual(preparePullWithIdentity(value, identity), append);
+  assert.deepEqual(validatePullIntent(JSON.parse(pullCanonical(append))), append);
+  for (const edit of [v => v.fields.body += ' changed', v => v.number = '1',
+    v => { v.action = 'comment'; v.fields = { expected_version: '0', body: v.fields.body }; }]) {
+    const changed = structuredClone(append); edit(changed);
+    assert.throws(() => validatePullIntent(changed));
+  }
+  const changed = structuredClone(value); changed.fields.body += ' changed';
+  assert.notEqual(preparePullWithIdentity(changed, identity).key, append.key);
+});
+for (const version of ['0', '1', null, undefined, 0]) test(`append-comment rejects predecessor injection ${String(version)}`, () => {
+  const value = input('https://forge.test/repo.git', 'append-comment'); value.fields.expected_version = version;
+  assert.throws(() => preparePull(value, TOKEN));
+});
+test('append-comment body is literal and bounded, with no implicit strict-comment conversion', () => {
+  const value = input('https://forge.test/repo.git', 'append-comment');
+  value.fields.body = '  literal%26+&=\r\n💡  ';
+  assert.deepEqual([...new URLSearchParams(preparePull(value, TOKEN).body)], [['body', value.fields.body]]);
+  for (const body of ['', ' \r\n ', '\ud800', 'a\0b', 'é'.repeat(32768) + 'x']) {
+    assert.throws(() => preparePull({ ...value, fields: { body } }, TOKEN));
+  }
+  const bounded = preparePull({ ...value, fields: { body: 'é'.repeat(32768) } }, TOKEN);
+  assert.equal(Buffer.byteLength(bounded.fields.body), 65536);
+  assert.ok(bounded.body.length < PULL_LIMITS.form);
+  assert.throws(() => preparePull({ ...value, action: 'comment' }, TOKEN));
+  for (const field of ['anchor', 'principal', 'command_profile']) {
+    assert.throws(() => preparePull({ ...value, fields: { ...value.fields, [field]: {} } }, TOKEN));
+  }
+});
+for (const state of ['committed', 'refused']) test(`append-comment ${state} receipt binds exact profile and never invents its position`, () => {
+  const append = preparePull(input('https://forge.test/repo.git', 'append-comment'), TOKEN);
+  const strict = preparePull(input(append.endpoint, 'comment'), TOKEN), status = state === 'committed' ? 200 : 409;
+  const valid = publication(append, state);
+  assert.deepEqual(validatePullPublication(valid, append, status), valid);
+  for (const edit of [p => p.action = 'comment', p => p.type = 'pull_request_publication',
+    p => p.expected_version = '0', p => { delete p.expected_version; }, p => p.comment_version = '1',
+    p => { delete p.comment_version; }, p => p.refs_changed = true,
+    p => p.command_profile = 'pull-request.append-comment.v1', p => p.anchor = {}]) {
+    const changed = structuredClone(valid); edit(changed);
+    assert.throws(() => validatePullPublication(changed, append, status));
+  }
+  assert.throws(() => validatePullPublication(publication(strict, state), append, status));
+  assert.throws(() => validatePullPublication(valid, strict, status));
+});
+for (const algorithm of ['sha1', 'sha256']) test(`${algorithm} append-comment lost response recovers only the original outcome`, async t => {
+  const p = await peer(t, { action: 'append-comment', algorithm, handle(r, res, s) {
+    if (!r.url.endsWith('/outcomes')) { s.published = true; res.destroy(); return true; }
+  } });
+  const saved = pullCanonical(p.intent);
+  await assert.rejects(submitPull(p.intent, TOKEN, consent(p.intent)), e => e.dispatched && e.outcomeUnknown && e.publication === null);
+  assert.equal(p.requests.length, 2);
+  const recovered = await recoverPull(p.intent, ROTATED);
+  assert.equal(recovered.outcome.state, 'committed'); assert.equal(recovered.publication, null);
+  assert.equal(recovered.dispatched, false); assert.equal(p.requests.length, 3);
+  const retried = await submitPull(p.intent, TOKEN, consent(p.intent, { known: recovered.outcome }));
+  assert.equal(retried.dispatched, false); assert.equal(p.requests.length, 4);
+  assert.equal(p.requests.filter(r => !r.url.endsWith('/outcomes')).length, 1);
+  assert.equal(p.requests[1].url, `/repo.git/api/v1/pulls/${p.intent.number}/comments/append`);
+  assert.equal(p.requests[1].body, p.intent.body);
+  assert.equal(p.requests[2].headers.authorization, `Bearer ${ROTATED}`);
+  assert.ok(p.requests.every(r => r.headers['idempotency-key'] === p.intent.key));
+  assert.equal(pullCanonical(p.intent), saved);
+});
+test('append-comment retains a valid publication when confirmation fails and suppresses resending', async t => {
+  const p = await peer(t, { action: 'append-comment', handle(r, res, s) {
+    if (r.url.endsWith('/outcomes') && s.published) { res.writeHead(503); res.end(); return true; }
+  } });
+  let retained;
+  await assert.rejects(submitPull(p.intent, TOKEN, consent(p.intent)), e => {
+    retained = e.publication;
+    return e.phase === 'confirmation' && retained?.outcome === 'committed' && retained.comment_version === null;
+  });
+  await assert.rejects(submitPull(p.intent, TOKEN, consent(p.intent, { publication: retained })), e =>
+    !e.dispatched && e.publication?.tx_id === retained.tx_id);
+  assert.equal(p.requests.filter(r => !r.url.endsWith('/outcomes')).length, 1);
+});
+test('append-comment accepts the existing agent metadata credential profile with exact token binding', async t => {
+  const p = await peer(t, { action: 'append-comment' }), token = `fgagent_${TOKEN}`;
+  p.intent = preparePull(input(p.endpoint, 'append-comment'), token);
+  await assert.rejects(submitPull(p.intent, TOKEN, consent(p.intent)));
+  assert.equal(p.requests.length, 0);
+  assert.equal((await submitPull(p.intent, token, consent(p.intent))).outcome.state, 'committed');
+  assert.ok(p.requests.every(r => r.headers.authorization === `Bearer ${token}`));
+  assert.throws(() => preparePull(input(p.endpoint, 'fast-forward'), token), /agent_metadata_operation_unsupported/);
 });
 for (const mutate of [
   v => v.fields.expected_version = 1, v => v.fields.expected_version = '01',
