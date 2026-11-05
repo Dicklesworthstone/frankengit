@@ -180,12 +180,15 @@ pub fn decode_entry_header(
                 context: "pack entry size",
             });
         }
-        let component =
-            u64::from(next & 0x7f)
-                .checked_shl(shift)
-                .ok_or(PackError::InvalidVarint {
-                    context: "pack entry size",
-                })?;
+        let payload = u64::from(next & 0x7f);
+        // checked_shl checks the shift count, not discarded high bits. The
+        // final seven-bit group may have only four representable bits left.
+        let component = payload
+            .checked_shl(shift)
+            .filter(|component| (*component >> shift) == payload)
+            .ok_or(PackError::InvalidVarint {
+                context: "pack entry size",
+            })?;
         value = value
             .checked_add(component)
             .ok_or(PackError::IntegerOverflow {
@@ -245,7 +248,7 @@ pub fn decode_ofs_delta_base(
         })?;
         distance = distance
             .checked_add(1)
-            .and_then(|value| value.checked_shl(7))
+            .and_then(|value| value.checked_mul(128))
             .and_then(|value| value.checked_add(u64::from(next & 0x7f)))
             .ok_or(PackError::InvalidOfsDelta)?;
         byte = next;

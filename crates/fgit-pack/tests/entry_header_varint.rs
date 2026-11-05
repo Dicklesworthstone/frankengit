@@ -16,14 +16,16 @@
 //! So nine continuation reads are admissible and the tenth is refused. That is
 //! an exact boundary, and both sides are pinned below.
 //!
-//! # The second `InvalidVarint` site is dominated, and is recorded not tested
+//! # Value overflow is separate from shift-count overflow
 //!
-//! `pack.rs:184` builds the same variant from
-//! `u64::from(next & 0x7f).checked_shl(shift)`. `checked_shl` returns `None`
-//! only when `shift >= 64` — which the guard three lines above has already
-//! refused. The second site is therefore **unreachable while the first stands**:
-//! it is belt-and-braces against the bound being removed, not a distinct
-//! condition. No honest test drives it, and it must not be counted as covered.
+//! A shift of 60 leaves four representable bits in the final payload group.
+//! The production decoder also checks that shifting does not discard high
+//! payload bits; `checked_shl` alone only validates the shift count.
+//! `pack_integer_overflow.rs` covers that value boundary through the direct,
+//! buffered, streaming and boundary-scanner entry points.
+//!
+//! The redundant zero-payload encoding below preserves the decoder's existing
+//! behavior. It is not a claim that upstream Git emits this encoding.
 //!
 //! Three `IntegerOverflow` arms in the same loop are unreachable for the same
 //! class of reason — `index.checked_add(1)` and `shift.checked_add(7)` would
@@ -74,8 +76,8 @@ fn a_varint_shifting_past_sixty_three_is_refused() {
 ///
 /// One byte shorter than the refusal above. The last shift consulted is 60,
 /// which is admissible; the guard is `>= 64`, and written `>= 57` — or any
-/// other conservative-looking bound — it would refuse a varint Git itself can
-/// emit, while the ten-byte probe still passed.
+/// other conservative-looking bound — it would refuse an existing zero-payload
+/// encoding without a value overflow, while the ten-byte probe still passed.
 ///
 /// Asserted on the decoded header rather than `is_ok`: a decoder that silently
 /// produced the wrong size would satisfy a weaker check.
