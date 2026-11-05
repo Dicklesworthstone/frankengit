@@ -22,7 +22,7 @@ import tempfile
 import urllib.parse
 
 from smart_http_smoke import (
-    Commands, REPOSITORY, SECRETS, TENANT, isolated_environment,
+    Commands, REPOSITORY, SECRETS, TENANT, USER_AGENT, isolated_environment,
     redact, require, seed, server,
 )
 
@@ -35,7 +35,7 @@ def exchange(base: str, target: str, token: str | None, *, body: bytes | None = 
     endpoint = urllib.parse.urlsplit(base)
     require(endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1",
             "campaign refuses non-loopback HTTP")
-    headers = {"Connection": "close"}
+    headers = {"Connection": "close", "User-Agent": USER_AGENT}
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
     if key is not None:

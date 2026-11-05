@@ -26,7 +26,7 @@ import time
 import urllib.parse
 
 from continuous_git_transports_smoke import LoggedCommands, digest, private_file, records
-from smart_http_smoke import PRINCIPAL, REPOSITORY, SECRETS, TENANT, isolated_environment, redact, require
+from smart_http_smoke import PRINCIPAL, REPOSITORY, SECRETS, TENANT, USER_AGENT, isolated_environment, redact, require
 
 MEDIA = "application/vnd.git-lfs+json"
 MAX_REPLY = 2 * 1024 * 1024
@@ -66,7 +66,7 @@ def exchange(url: str, method: str, token: str | None, data: bytes | None = None
     require(endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1"
             and not endpoint.username and not endpoint.password and not endpoint.fragment,
             "non-local, credential-bearing or fragmented action URL")
-    request_headers = {"Connection": "close", "Accept": MEDIA}
+    request_headers = {"Connection": "close", "Accept": MEDIA, "User-Agent": USER_AGENT}
     if data is not None:
         request_headers["Content-Type"] = media
     if token is not None:
