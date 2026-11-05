@@ -708,10 +708,22 @@ admission and transport remain separately owned.
 `fgit-node::OneNode::publish_agent_ref_transaction_trusted_local_in` connects
 the checked transaction and broker lifecycle to production quarantine and
 ordinary asynchronous receive admission. Its explicit local-host profile
-supports one atomic, non-force update of an existing branch to a single-parent
-commit. The original expected-old commit and ordinary idempotency key survive
-unchanged into the canonical seal. Other publication shapes require their own
-checked adapter.
+supports one atomic, non-force branch creation or exact update to a
+single-parent commit. The original expected-old value (including explicit
+absence) and ordinary idempotency key survive unchanged into the canonical
+seal. Other publication shapes require their own checked adapter.
+
+A checked `ExpectedRef::Absent` proposal can publish its reviewed changes on a
+new feature branch while preserving the existing source branch. Its receive
+command carries Git's format-width zero as the expected old value. The bundle
+still names exactly one nonzero prerequisite from the current canonical
+repository history; that prerequisite is the candidate's actual sole parent,
+whose identity is bound by the sealed candidate OID and independent body
+approval. The parent is never substituted for the absence precondition.
+Ordinary admission refuses an occupied destination, including an identical
+tip, and the exact prepared-head requirement also prevents a concurrent
+creation from being silently replanned. This profile does not create a root
+commit or import an unrelated parent from the uploaded pack.
 
 The host supplies `TrustedLocalAgentPublicationInput`: the prepared
 `AgentRefTransaction`, original `ExportPlan`, reviewed bundle, verified
@@ -738,7 +750,8 @@ quarantine retains private, synchronized object custody while the adapter
 checks the actual receive command and verifies:
 
 - the candidate's native identity and independently approved commit-body hash;
-- its sole parent equals the original expected-old commit;
+- its sole parent equals the original expected-old commit for an update, or
+  the single canonical prerequisite for branch creation;
 - its tree equals both the checked proposal's resulting tree and export root;
 - the actual parent's tree equals the checked workspace base tree;
 - every exported object's verified kind and bytes equal the checked export.
@@ -788,8 +801,10 @@ establish quiescence.
 
 The native tests in `crates/fgit-node/src/agent_publication/tests.rs` use the
 embedded authority and production initial/ref publication paths in both Git
-formats. They cover exact ordinary retry identity, cold journal/run recovery,
-canonical refusal settlement, candidate/export mismatch, separate approval
+formats. They cover branch creation and update with exact ordinary retry
+identity and cold journal/run recovery, occupied-branch refusal, substituted
+or noncanonical prerequisites, actual parent/base-tree mismatch, canonical
+refusal settlement, candidate/export mismatch, separate approval
 and capability gates, finite-deadline and cancellation refusal, missing
 revocation configuration, and a real competing publication changing the
 prepared basis. The ECC fixtures supply explicit host assertions; these tests

@@ -137,7 +137,7 @@ impl TrustedLocalAgentPublicationClock<'_> {
     }
 }
 
-/// All inert inputs for one exact existing-branch, single-parent update.
+/// All inert inputs for one exact branch creation or single-parent update.
 pub struct TrustedLocalAgentPublicationInput<'a, A: GitHashAlgorithm> {
     pub transaction: &'a AgentRefTransaction<A>,
     pub export: &'a ExportPlan<A>,
@@ -350,11 +350,14 @@ impl OneNode {
         if !semantic.atomic()
             || command.force
             || !command.name.as_bytes().starts_with(b"refs/heads/")
-            || !matches!(command.expected_old, ExpectedOld::Exactly(_))
+            || !matches!(
+                command.expected_old,
+                ExpectedOld::Absent | ExpectedOld::Exactly(_)
+            )
             || !matches!(command.proposed_new, ProposedNew::Update(_))
         {
             return Err(preflight(NativeAgentPublicationRefusal::Profile(
-                "profile requires an atomic, non-force update of an existing branch",
+                "profile requires an atomic, non-force branch creation or exact update",
             )));
         }
         if input.export.object_count() > MAX_AGENT_PUBLICATION_OBJECTS

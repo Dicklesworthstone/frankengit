@@ -81,6 +81,20 @@ fn budget() -> ResourceVector {
 }
 
 fn source(node: &OneNode) -> InitialCommitPlan {
+    source_on_branch(
+        node,
+        &reference(),
+        b"native-agent-source",
+        b"diff --git a/lib.rs b/lib.rs\nnew file mode 100644\n--- /dev/null\n+++ b/lib.rs\n@@ -0,0 +1 @@\n+fn original() {}\n",
+    )
+}
+
+fn source_on_branch(
+    node: &OneNode,
+    branch: &RefName,
+    key: &[u8],
+    patch: &[u8],
+) -> InitialCommitPlan {
     let metadata = MergeMetadata {
         author: "Agent Fixture <fixture@example.invalid>".into(),
         committer: "Agent Fixture <fixture@example.invalid>".into(),
@@ -88,21 +102,25 @@ fn source(node: &OneNode) -> InitialCommitPlan {
         message: b"initial checked-agent source\n".to_vec(),
     };
     let request = node.command_request_context(None);
-    let (_, plan, bundle) = node.runtime().block_on(node.prepare_trusted_initial_patch_in(
-        &request, &reference(),
-        b"diff --git a/lib.rs b/lib.rs\nnew file mode 100644\n--- /dev/null\n+++ b/lib.rs\n@@ -0,0 +1 @@\n+fn original() {}\n",
-        &metadata, Default::default(), None,
-    )).unwrap();
-    let session = LoopbackReceiveSession::authenticated(
-        OWNER,
-        IdempotencyKey::new(b"native-agent-source".to_vec()).unwrap(),
-    );
+    let (_, plan, bundle) = node
+        .runtime()
+        .block_on(node.prepare_trusted_initial_patch_in(
+            &request,
+            branch,
+            patch,
+            &metadata,
+            Default::default(),
+            None,
+        ))
+        .unwrap();
+    let session =
+        LoopbackReceiveSession::authenticated(OWNER, IdempotencyKey::new(key.to_vec()).unwrap());
     let admitted = node
         .runtime()
         .block_on(node.apply_initial_patch_bundle_durable_in(
             &request,
             &session,
-            &reference(),
+            branch,
             plan.commit,
             bundle.bytes(),
             Default::default(),
@@ -157,6 +175,40 @@ fn prepared<A: GitHashAlgorithm>(
     branch: &[u8],
     candidate_has_wrong_tree: bool,
 ) -> Prepared<A> {
+    let base_commit = A::parse_hex(&source.commit.to_string()).unwrap();
+    prepared_with_parent(
+        node,
+        source,
+        branch,
+        ExpectedRef::Exactly { oid: base_commit },
+        base_commit,
+        candidate_has_wrong_tree,
+    )
+}
+
+fn prepared_creation<A: GitHashAlgorithm>(
+    node: &OneNode,
+    source: &InitialCommitPlan,
+    branch: &[u8],
+) -> Prepared<A> {
+    prepared_with_parent(
+        node,
+        source,
+        branch,
+        ExpectedRef::Absent,
+        A::parse_hex(&source.commit.to_string()).unwrap(),
+        false,
+    )
+}
+
+fn prepared_with_parent<A: GitHashAlgorithm>(
+    node: &OneNode,
+    source: &InitialCommitPlan,
+    branch: &[u8],
+    expected: ExpectedRef<A>,
+    parent: GitOid<A>,
+    candidate_has_wrong_tree: bool,
+) -> Prepared<A> {
     let selected = node
         .runtime()
         .block_on(node.authenticate_authority_head())
@@ -165,7 +217,6 @@ fn prepared<A: GitHashAlgorithm>(
         AuthorityReadReceipt::from_authenticated_head(&selected, LogicalTime::new(10), [51; 32])
             .unwrap();
     let base_tree = A::parse_hex(&source.tree.to_string()).unwrap();
-    let base_commit = A::parse_hex(&source.commit.to_string()).unwrap();
     let limits = ParseLimits {
         tree_reference_bytes: A::DIGEST_LEN,
         ..Default::default()
@@ -236,7 +287,7 @@ fn prepared<A: GitHashAlgorithm>(
     };
     let body = format!(
         "tree {}\nparent {}\nauthor Fixture <fixture@example.invalid> 18 +0000\ncommitter Fixture <fixture@example.invalid> 18 +0000\n\nchecked native publication\n",
-        candidate_tree.erase(), base_commit.erase(),
+        candidate_tree.erase(), parent.erase(),
     ).into_bytes();
     let candidate = GitOid::<A>::of_object(GitObjectKind::Commit, &body);
     let proposal = ProposedTransaction::seal(
@@ -251,7 +302,7 @@ fn prepared<A: GitHashAlgorithm>(
         },
         vec![ProposedRefIntent {
             name: branch.to_vec(),
-            expected: ExpectedRef::Exactly { oid: base_commit },
+            expected,
             new: candidate,
         }],
     )
@@ -294,7 +345,7 @@ fn prepared<A: GitHashAlgorithm>(
     let mut bundle = format!(
         "# v3 git bundle\n@object-format={}\n-{} source\n{} ",
         A::OBJECT_FORMAT.as_str(),
-        base_commit.erase(),
+        parent.erase(),
         candidate.erase(),
     )
     .into_bytes();
@@ -409,10 +460,19 @@ fn input<'a, A: GitHashAlgorithm>(
     }
 }
 
-fn native_success_retry_and_restart<A: GitHashAlgorithm>() {
+fn native_success_retry_and_restart<A: GitHashAlgorithm>(create: bool) {
     let scratch = Scratch::new();
     let (node, source) = node(&scratch, A::OBJECT_FORMAT, true);
-    let change = prepared::<A>(&node, &source, reference().as_bytes(), false);
+    let branch = if create {
+        RefName::try_new(b"refs/heads/agent/checked-change").unwrap()
+    } else {
+        reference()
+    };
+    let change = if create {
+        prepared_creation::<A>(&node, &source, branch.as_bytes())
+    } else {
+        prepared::<A>(&node, &source, branch.as_bytes(), false)
+    };
     let approved = approval(&change, b"checked-agent-submit");
     let chain = chain(10_000, true);
     let directory = scratch.journal("journal");
@@ -473,7 +533,14 @@ fn native_success_retry_and_restart<A: GitHashAlgorithm>() {
     else {
         panic!("update");
     };
-    assert_eq!(selected.snapshot().refs[&reference()], candidate);
+    assert_eq!(selected.snapshot().refs[&branch], candidate);
+    if create {
+        assert_eq!(selected.snapshot().refs[&reference()], source.commit);
+        assert_eq!(
+            change.transaction.semantic_request().ref_commands()[0].expected_old,
+            ExpectedOld::Absent,
+        );
+    }
     assert_eq!(broker.dispatch_authorizations().len(), 1);
     assert_eq!(broker.generic_dispatch_authorizations().len(), 1);
 
@@ -547,15 +614,24 @@ fn native_success_retry_and_restart<A: GitHashAlgorithm>() {
 
 #[test]
 fn checked_publication_commits_and_recovers_original_tx_after_restart_in_both_formats() {
-    native_success_retry_and_restart::<Sha1>();
-    native_success_retry_and_restart::<Sha256>();
+    native_success_retry_and_restart::<Sha1>(false);
+    native_success_retry_and_restart::<Sha256>(false);
 }
 
 #[test]
-fn ordinary_canonical_refusal_settles_submission_without_claiming_ref_success() {
+fn checked_branch_creation_commits_and_recovers_original_tx_after_restart_in_both_formats() {
+    native_success_retry_and_restart::<Sha1>(true);
+    native_success_retry_and_restart::<Sha256>(true);
+}
+
+fn native_expected_ref_refusal(create: bool) {
     let scratch = Scratch::new();
     let (node, source) = node(&scratch, Format::Sha1, true);
-    let change = prepared::<Sha1>(&node, &source, b"refs/heads/absent", false);
+    let change = if create {
+        prepared_creation::<Sha1>(&node, &source, reference().as_bytes())
+    } else {
+        prepared::<Sha1>(&node, &source, b"refs/heads/absent", false)
+    };
     let approved = approval(&change, b"checked-agent-expected-old-refusal");
     let chain = chain(10_000, true);
     let mut broker = broker(&node, &change, &scratch.journal("journal"));
@@ -599,6 +675,153 @@ fn ordinary_canonical_refusal_settles_submission_without_claiming_ref_success() 
     );
     assert!(broker.close().is_quiescent());
     drop(clock);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn ordinary_canonical_refusal_settles_submission_without_claiming_ref_success() {
+    native_expected_ref_refusal(false);
+}
+
+#[test]
+fn checked_branch_creation_never_overwrites_an_existing_branch() {
+    native_expected_ref_refusal(true);
+}
+
+fn assert_parent_refusal<A: GitHashAlgorithm>(
+    node: &OneNode,
+    change: &Prepared<A>,
+    directory: &std::path::Path,
+    expected_reason: &str,
+) {
+    let approved = approval(change, b"invalid-creation-history");
+    let chain = chain(10_000, true);
+    let mut broker = broker(node, change, directory);
+    let clock = node
+        .trusted_local_agent_publication_clock(LogicalTime::new(20), Duration::from_secs(1))
+        .unwrap();
+    let error = node
+        .runtime()
+        .block_on(node.publish_agent_ref_transaction_trusted_local_in(
+            &node.request_context(),
+            &mut broker,
+            &clock,
+            input(change, &approved, &chain),
+        ))
+        .unwrap_err();
+    let NativeAgentPublicationError::Reserved {
+        reservation,
+        reason,
+    } = error
+    else {
+        panic!("invalid creation history must retain unstarted custody: {error:?}");
+    };
+    assert!(matches!(
+        reason,
+        NativeAgentPublicationRefusal::Workspace(_)
+    ));
+    assert!(format!("{reason}").contains(expected_reason), "{reason}");
+    assert!(broker.dispatch_authorizations().is_empty());
+    let _settled = reservation
+        .abort(NoCandidateReason::WitnessInvalid)
+        .unwrap();
+    assert!(broker.close().is_quiescent());
+}
+
+#[test]
+fn checked_branch_creation_binds_canonical_parent_and_actual_ecc_base_tree() {
+    let scratch = Scratch::new();
+    let (node, source) = node(&scratch, Format::Sha1, true);
+    let other_branch = RefName::try_new(b"refs/heads/other-history").unwrap();
+    let other = source_on_branch(
+        &node,
+        &other_branch,
+        b"other-canonical-source",
+        b"diff --git a/lib.rs b/lib.rs\nnew file mode 100644\n--- /dev/null\n+++ b/lib.rs\n@@ -0,0 +1 @@\n+fn different_history() {}\n",
+    );
+    assert_ne!(source.tree, other.tree);
+    let branch = b"refs/heads/agent/checked-change";
+    let selected_before = node
+        .runtime()
+        .block_on(node.authenticate_authority_head())
+        .unwrap()
+        .receipt()
+        .clone();
+
+    // A well-formed commit identity in the reviewed body is insufficient:
+    // its parent must belong to the current canonical repository closure.
+    let unknown = prepared_with_parent::<Sha1>(
+        &node,
+        &source,
+        branch,
+        ExpectedRef::Absent,
+        Sha1::parse_hex(&"91".repeat(20)).unwrap(),
+        false,
+    );
+    assert_parent_refusal(
+        &node,
+        &unknown,
+        &scratch.journal("unknown-parent"),
+        "prerequisite is outside the authority-selected history",
+    );
+
+    // Both named commits are canonical, but the untrusted bundle cannot swap
+    // the approved candidate's actual parent for another prerequisite.
+    let mut substituted = prepared_creation::<Sha1>(&node, &source, branch);
+    let original = format!("-{} source\n", source.commit);
+    let replacement = format!("-{} source\n", other.commit);
+    let offset = substituted
+        .bundle
+        .windows(original.len())
+        .position(|bytes| bytes == original.as_bytes())
+        .unwrap();
+    substituted.bundle[offset..offset + original.len()].copy_from_slice(replacement.as_bytes());
+    assert_parent_refusal(
+        &node,
+        &substituted,
+        &scratch.journal("substituted-prerequisite"),
+        "candidate must have exactly the expected base as its sole parent",
+    );
+
+    // Here the body and bundle genuinely agree on a canonical parent, but its
+    // tree is not the source tree whose edits and ECC were checked.
+    let wrong_base = prepared_with_parent::<Sha1>(
+        &node,
+        &source,
+        branch,
+        ExpectedRef::Absent,
+        Sha1::parse_hex(&other.commit.to_string()).unwrap(),
+        false,
+    );
+    assert_parent_refusal(
+        &node,
+        &wrong_base,
+        &scratch.journal("wrong-base-tree"),
+        "workspace base tree differs from the actual parent commit",
+    );
+
+    let selected = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .unwrap();
+    assert_eq!(
+        node.runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap()
+            .receipt(),
+        &selected_before,
+    );
+    assert_eq!(selected.snapshot().refs[&reference()], source.commit);
+    assert_eq!(selected.snapshot().refs[&other_branch], other.commit);
+    assert!(
+        !selected
+            .snapshot()
+            .refs
+            .contains_key(&RefName::try_new(branch).unwrap())
+    );
+    for object in wrong_base.export.objects() {
+        assert!(node.read_git_object(object.oid().erase()).is_err());
+    }
     node.shutdown().unwrap();
 }
 
@@ -716,11 +939,17 @@ fn independent_approval_scope_durability_deadline_and_cancellation_are_separate_
     );
     assert!(broker.records().is_empty());
 
-    let short = self::chain(21, true);
+    // Keep the capability comfortably live while the original request has an
+    // explicitly longer lifetime. This tests deadline binding, not whether
+    // earlier durable-journal operations happened to finish within one second.
+    let short = self::chain(1_000, true);
+    let overly_long_request = node.command_request_context(Some(
+        crate::GitDaemonSessionTimeout::try_new(Duration::from_secs(3_600)).unwrap(),
+    ));
     let error = node
         .runtime()
         .block_on(node.publish_agent_ref_transaction_trusted_local_in(
-            &node.request_context(),
+            &overly_long_request,
             &mut broker,
             &clock,
             input(&change, &approved, &short),

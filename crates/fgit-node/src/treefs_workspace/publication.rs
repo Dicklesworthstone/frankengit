@@ -29,7 +29,7 @@ use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
 };
 use fgit_object_fabric::ObjectKind;
-use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
+use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, PrincipalId, RefName};
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, ReceivePack, SignedPushProfile};
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
@@ -446,7 +446,9 @@ impl OneNode {
 
     // `expected_old` is the ref lease, not necessarily a pack prerequisite.
     // They coincide for workspace/merge input but differ for rebase: the
-    // source ref is leased while onto is the bundle's prerequisite.
+    // source ref is leased while onto is the bundle's prerequisite. Checked
+    // agent creation passes the wire's zero lease through the bounded helper;
+    // its independently verified history parent remains a real prerequisite.
     async fn quarantine_bound_envelope_in(
         &self,
         request: &NodeRequestContext,
@@ -604,11 +606,9 @@ impl OneNode {
                 "checked agent publication requires exactly one ref command",
             ));
         };
-        let (ExpectedOld::Exactly(base), ProposedNew::Update(candidate)) =
-            (&command.expected_old, &command.proposed_new)
-        else {
+        let ProposedNew::Update(candidate) = &command.proposed_new else {
             return Err(invalid(
-                "checked agent publication requires an existing branch update",
+                "checked agent publication requires a branch creation or update",
             ));
         };
         let expected = SemanticRequest::build(
@@ -626,7 +626,31 @@ impl OneNode {
             ));
         }
         let envelope = CandidateEnvelope::parse(input)?;
-        envelope.bind(self.object_format, &command.name, *base, *candidate)?;
+        let [prerequisite] = envelope.prerequisites.as_slice() else {
+            return Err(invalid(
+                "checked agent publication requires one history parent",
+            ));
+        };
+        // The candidate's sealed identity and separately approved body bind its
+        // sole parent. Creating a branch does not manufacture an old ref value:
+        // absence is encoded as the ordinary receive zero, while its nonzero
+        // history parent must still belong to the selected canonical closure.
+        let (base, expected_old) = match command.expected_old {
+            ExpectedOld::Exactly(base) => (base, base),
+            ExpectedOld::Absent => (
+                *prerequisite,
+                match self.object_format {
+                    GitHashAlgorithm::Sha1 => GitOid::Sha1(GitOidSha1::ZERO),
+                    GitHashAlgorithm::Sha256 => GitOid::Sha256(GitOidSha256::ZERO),
+                },
+            ),
+            ExpectedOld::Unspecified => {
+                return Err(invalid(
+                    "checked agent publication requires an exact ref expectation",
+                ));
+            }
+        };
+        envelope.bind(self.object_format, &command.name, base, *candidate)?;
         let object_limit = u32::try_from(export.object_count())
             .ok()
             .and_then(|count| count.checked_add(1))
@@ -642,7 +666,7 @@ impl OneNode {
             .quarantine_bound_envelope_with_bounds_in(
                 request,
                 &command.name,
-                *base,
+                expected_old,
                 &envelope,
                 &[],
                 Some(staging),
@@ -660,7 +684,7 @@ impl OneNode {
             || !received.push_options.is_empty()
             || received.certificate.is_some()
             || received.commands.len() != 1
-            || received.commands[0].old != *base
+            || received.commands[0].old != expected_old
             || received.commands[0].new != *candidate
             || received.commands[0].ref_name.as_slice() != command.name.as_bytes()
         {
@@ -702,7 +726,7 @@ impl OneNode {
                 "candidate body differs from independent host approval",
             ));
         }
-        check_candidate_commit(&candidate_body, *base, parse_limits.clone())?;
+        check_candidate_commit(&candidate_body, base, parse_limits.clone())?;
         let candidate_tree = checked_agent_commit_tree(
             &candidate_body,
             self.object_format,
@@ -717,7 +741,7 @@ impl OneNode {
                 "candidate commit does not name the checked export tree",
             ));
         }
-        let (kind, base_body) = read(base)?;
+        let (kind, base_body) = read(&base)?;
         if kind != ObjectType::Commit
             || checked_agent_commit_tree(
                 &base_body,
