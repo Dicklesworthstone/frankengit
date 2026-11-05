@@ -261,6 +261,25 @@ refusal reports the observed minimum, actual configured maximum and a remedy
 in a Git `ERR` packet. An interruption after admission starts retains unknown
 outcomes for any commands without authenticated terminal evidence.
 
+Within a receive projection, consecutive commands with the same permitted
+object closure reuse its verified canonical body and encoded frame. Reuse
+requires the same digest and full object membership, while each command still
+evaluates its own authentication, policy, ref effects and decision evidence.
+The current authority always receives the immutable closure put: an in-memory
+proof, even with a matching store instance ID, does not prove durable placement.
+This removes repeated closure cloning, hashing and encoding; the exact
+membership comparison remains proportional to the closure size.
+
+Decision evidence keeps the same six repository-scoped keys and canonical
+bodies, but small bodies now share one native immutable-write transaction.
+Each group is bounded to 1 MiB of keys and frames. Larger decisions split into
+bounded groups; an individually valid body larger than the group allowance
+uses the existing single-body path, preserving the authority's per-body limit.
+An interrupted write can leave an immutable prefix, and identical retries keep
+the original bytes. Conflicts, incomplete replies and cancellation refuse
+staging. These writes do not publish refs; publication still requires the
+ordinary seals and the sole authority-head CAS.
+
 The node's default authority profile permits 262,144 immutable bodies, with
 all key/body/count checks still enforced. This fits the staged-body bound for
 one fresh uncontended 16,384-command receive. Existing history and speculative

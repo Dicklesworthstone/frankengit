@@ -33,6 +33,9 @@ pub(super) fn materialization(error: &AdmissionMaterializationRefusal) -> bool {
     match error {
         AdmissionMaterializationRefusal::Cancelled => true,
         AdmissionMaterializationRefusal::Authority(error) => authority(error),
+        AdmissionMaterializationRefusal::ImmutableBatch(
+            fgit_authority::ImmutableBatchFailure::Interrupted { source, .. },
+        ) => authority(source),
         AdmissionMaterializationRefusal::DecisionHistory(error) => outcome(error),
         AdmissionMaterializationRefusal::Delivery(error) => admission(error),
         _ => false,
