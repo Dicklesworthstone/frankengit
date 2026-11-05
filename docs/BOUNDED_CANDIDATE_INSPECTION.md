@@ -113,6 +113,11 @@ directly into per-command files, preserving partial evidence on timeout or
 spawn failure. The scale suite first runs real-child capture selftests; those
 tests check the runner, while the subsequent native lifecycle checks the forge.
 Timeouts and nonzero exits remain failures and never trigger automatic retries.
+Exit status checks also apply under optimized Python. The MCP helper refuses
+optimized execution before starting work because its semantic assertions are
+required. If diagnostic delivery fails, an existing execution exception retains
+its captured streams and the secondary capture error; a successful child still
+fails when its diagnostics cannot be delivered.
 
 The ordinary helper's scenarios and 120-second subprocess deadline remain
 unchanged. The named scale suite has a 1,800-second outer deadline and runs the
