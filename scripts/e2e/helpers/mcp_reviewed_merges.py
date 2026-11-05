@@ -1,6 +1,8 @@
-import hashlib, json, pathlib, subprocess, sys, zlib
+import hashlib, json, pathlib, struct, subprocess, sys, zlib
 
 fg, fg_mcp, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+large_files = int(sys.argv[4]) if len(sys.argv) == 5 else 0
+assert len(sys.argv) in (4, 5) and large_files in (0, 100000)
 tenant, repository, opener, reviewer, merger = '1' * 32, '2' * 32, '3' * 32, '4' * 32, '5' * 32
 commands = tool_calls = sessions = 0
 cases = []
@@ -32,19 +34,44 @@ def native_object(source, fmt, kind, body):
     return oid
 
 
-def tree(source, fmt, files):
-    body = b''
-    for name, (mode, data) in sorted(files.items()):
+def tree(source, fmt, files, directories=()):
+    entries = []
+    for name, (mode, data) in files.items():
         blob = native_object(source, fmt, 'blob', data)
-        body += f'{mode:o} {name}'.encode() + b'\0' + bytes.fromhex(blob)
+        entries.append((name, mode, blob))
+    entries.extend((name, 0o40000, oid) for name, oid in directories)
+    entries.sort(key=lambda entry: entry[0] + ('/' if entry[1] == 0o40000 else ''))
+    body = b''.join(f'{mode:o} {name}'.encode() + b'\0' + bytes.fromhex(oid)
+                    for name, mode, oid in entries)
     return native_object(source, fmt, 'tree', body)
 
 
-def commit(source, fmt, files, parents, message):
-    root_tree = tree(source, fmt, files)
+def commit(source, fmt, files, parents, message, directories=()):
+    root_tree = tree(source, fmt, files, directories)
     body = f'tree {root_tree}\n' + ''.join(f'parent {p}\n' for p in parents)
     body += f'author Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\n{message}\n'
     return native_object(source, fmt, 'commit', body.encode())
+
+
+def with_selected_blob(arguments, fmt, data):
+    """Append one actual inherited blob, retaining the original packed entries."""
+    original = bytes.fromhex(''.join(arguments['bundle_hex_chunks']))
+    split = original.index(b'\n\n') + 2
+    pack = original[split:]
+    width = hashlib.new(fmt).digest_size
+    assert pack[:8] == b'PACK' + struct.pack('>I', 2)
+    assert hashlib.new(fmt, pack[:-width]).digest() == pack[-width:]
+    size = len(data)
+    header = bytearray()
+    byte, size = 0x30 | (size & 15), size >> 4
+    while size:
+        header.append(byte | 128)
+        byte, size = size & 127, size >> 7
+    header.append(byte)
+    count = struct.unpack('>I', pack[8:12])[0]
+    body = pack[:8] + struct.pack('>I', count + 1) + pack[12:-width] + header + zlib.compress(data)
+    result = original[:split] + body + hashlib.new(fmt, body).digest()
+    return dict(arguments, bundle_hex_chunks=[result[i:i+4096].hex() for i in range(0, len(result), 4096)]), result
 
 
 def content(response):
@@ -81,14 +108,26 @@ def terminal_refusal(response, expected_code):
     return value
 
 
+profiles = [('clean', 'merge-commit')] if large_files else [('clean', 'merge-commit'), ('clean', 'squash'), ('file', 'merge-commit'), ('file', 'squash'), ('ours', 'squash')]
 for fmt in ['sha1', 'sha256']:
-    for resolution, method in [('clean', 'merge-commit'), ('clean', 'squash'), ('file', 'merge-commit'), ('file', 'squash'), ('ours', 'squash')]:
+    for resolution, method in profiles:
         label = f'{fmt}-{resolution}-{method}'
         directory = root / label
         directory.mkdir()
         source, node = directory / 'source', directory / 'node'
+        directories, inherited = (), None
+        if large_files:
+            from import_metadata_fixture import build
+            inherited_tip, inherited_objects, inherited_pack = build(source, fmt, large_files)
+            kind, body = inherited_objects[inherited_tip]
+            assert kind == 'commit' and body.startswith(b'tree ')
+            inherited_tree = body.split(b'\n', 1)[0][5:].decode()
+            inherited_blobs = sum(kind == 'blob' for kind, _ in inherited_objects.values())
+            assert inherited_blobs == large_files and len(inherited_objects) > 100000
+            directories = (('wide', inherited_tree),)
+            inherited = dict(files=inherited_blobs, objects=len(inherited_objects), root_tree=inherited_tree, pack=inherited_pack)
         common = {'README': (0o100644, b'base\n'), 'sibling': (0o100644, b'unchanged\n')}
-        base = commit(source, fmt, common, [], 'base')
+        base = commit(source, fmt, common, [], 'base', directories)
         ours, theirs = dict(common), dict(common)
         if resolution == 'clean':
             ours['main-only'] = (0o100644, b'main\n')
@@ -100,10 +139,10 @@ for fmt in ['sha1', 'sha256']:
             expected = dict(ours)
             if resolution == 'file':
                 expected['README'] = (0o100755, b'resolved\0\xff\r\n')
-        target = commit(source, fmt, ours, [base], 'target')
-        tip = commit(source, fmt, theirs, [base], 'source')
-        expected_tree = tree(source, fmt, expected)
-        (source / 'refs/heads').mkdir(parents=True)
+        target = commit(source, fmt, ours, [base], 'target', directories)
+        tip = commit(source, fmt, theirs, [base], 'source', directories)
+        expected_tree = tree(source, fmt, expected, directories)
+        (source / 'refs/heads').mkdir(parents=True, exist_ok=True)
         (source / 'refs/heads/main').write_text(target + '\n')
         (source / 'refs/heads/topic').write_text(tip + '\n')
         (source / 'HEAD').write_text('ref: refs/heads/main\n')
@@ -174,6 +213,19 @@ for fmt in ['sha1', 'sha256']:
             assert inspected[key] == prepared[key], key
         if resolution == 'ours':
             assert inspected['review']['entry_count'] == '0', inspected
+        if large_files:
+            thicker_args, thicker_bytes = with_selected_blob(inspection, fmt, common['sibling'][1])
+            thicker = content(mcp('inspect-thicker-after-reopen', [(CANDIDATE, thicker_args)], read_grants)[0])
+            for key in ['method', 'parents', 'candidate_commit', 'candidate_commit_body_hex', 'root_tree', 'candidate_arguments', 'review', 'closure_objects', 'prerequisites']:
+                assert thicker[key] == inspected[key], key
+            assert int(thicker['pack_objects']) == int(inspected['pack_objects']) + 1
+            assert int(thicker['bundle_bytes']) == len(thicker_bytes)
+            assert thicker['bundle_sha256'] == hashlib.sha256(thicker_bytes).hexdigest()
+            assert thicker['root_tree'] == expected_tree
+            corrupt = thicker_bytes[:-1] + bytes([thicker_bytes[-1] ^ 1])
+            corrupt_args = dict(thicker_args, bundle_hex_chunks=[corrupt[i:i+4096].hex() for i in range(0, len(corrupt), 4096)])
+            refused(mcp('corrupt-thicker-bundle', [(CANDIDATE, corrupt_args)], read_grants)[0])
+            publish_args = dict(thicker['publication_arguments'], idempotency_key='exact-publication', required_reviewers=[reviewer])
         assert refs('after-inspection') == before
         denied = mcp('read-grants-cannot-write', [(REVIEW, review_args), (MERGE, publish_args)], read_grants)
         for row in denied:
@@ -209,10 +261,17 @@ for fmt in ['sha1', 'sha256']:
         blobs = mcp('read-merged-bytes', [('frankengit_source_blob', {'reference': 'refs/heads/main', 'path_hex': name.encode().hex()}) for name in expected], ['--allow-source'])
         for (name, (_, data)), row in zip(expected.items(), blobs):
             assert content(row)['bytes_hex'] == data.hex(), name
+        if large_files:
+            for index in [0, large_files - 1]:
+                path = f'wide/dir{index // 500:06d}/file{index:06d}'
+                row = mcp(f'read-inherited-{index}', [('frankengit_source_blob', {'reference': 'refs/heads/main', 'path_hex': path.encode().hex()})], ['--allow-source'])[0]
+                assert content(row)['bytes_hex'] == f'file {index:06d}\n'.encode().hex()
         cases.append({'format': fmt, 'resolution': resolution, 'method': method, 'candidate': candidate, 'exact_parents': expected_parents,
                       'independent_grants': True, 'unapproved_and_changed_method_refused': True, 'source_unchanged': True,
                       'unapproved_refusal_code': unapproved_refusal['refusal_code'], 'method_substitution_refusal_code': method_refusal['refusal_code'],
                       'source_free_terminal_retry': True, 'native_identity_and_content_verified': True})
+        if large_files:
+            cases[-1].update(inherited_repository=inherited, thicker_selected_blob_equivalent=True)
         print('PASS', label, flush=True)
 
 (root / 'results.json').write_text(json.dumps({'top_level_commands': commands, 'mcp_sessions': sessions, 'tool_calls': tool_calls, 'cases': cases, 'native_peers_are_fixtures': False}, indent=2) + '\n')

@@ -60,6 +60,58 @@ pub struct History {
     pub originals: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
     pub uploaded: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
 }
+
+/// Native review includes directory identities as well as the edited file.
+/// Check every record so retaining those directories cannot hide an extra
+/// file change, an incorrect identity, or missing text evidence.
+pub fn assert_deep_file_change(
+    comparison: &fgit_forge::review::SourceComparison,
+    history: &History,
+) {
+    use fgit_forge::review::{ChangeKind, EntryIdentity, ReviewContent};
+
+    let entries = &comparison.entries;
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.path.as_slice())
+            .collect::<Vec<_>>(),
+        [
+            b"z".as_slice(),
+            b"z/deep".as_slice(),
+            b"z/deep/file".as_slice()
+        ]
+    );
+    for (entry, mode, old, new) in [
+        (&entries[0], 0o040000, history.old_dir, history.new_dir),
+        (&entries[1], 0o040000, history.old_deep, history.new_deep),
+        (&entries[2], 0o100644, history.leaf, history.changed),
+    ] {
+        assert_eq!(entry.kind, ChangeKind::Modified);
+        assert_eq!(entry.before, Some(EntryIdentity { mode, oid: old }));
+        assert_eq!(entry.after, Some(EntryIdentity { mode, oid: new }));
+    }
+    assert_eq!(entries[0].content, ReviewContent::ObjectOnly);
+    assert_eq!(entries[1].content, ReviewContent::ObjectOnly);
+    let ReviewContent::Text {
+        additions,
+        deletions,
+        before_bytes,
+        after_bytes,
+        hunks,
+        ..
+    } = &entries[2].content
+    else {
+        panic!("the edited file requires actual text review evidence");
+    };
+    assert_eq!((*additions, *deletions), (1, 1));
+    assert_eq!(*before_bytes, history.originals[&history.leaf].1.len());
+    assert_eq!(*after_bytes, history.uploaded[&history.changed].1.len());
+    assert_eq!(hunks.len(), 1);
+    assert_eq!(hunks[0].before, history.originals[&history.leaf].1);
+    assert_eq!(hunks[0].after, history.uploaded[&history.changed].1);
+}
+
 fn tree(entries: &[(&str, u32, GitOid)]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (name, mode, id) in entries {

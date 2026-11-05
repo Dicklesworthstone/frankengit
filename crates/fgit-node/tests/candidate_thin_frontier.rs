@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
 //! Genuine durable-node, native-pack integration target for incremental thin
 //! candidate guidance. Run independently of the node's large unit-test binary.
-#[path = "candidate_thin_frontier/support.rs"]
-mod support;
 #[path = "candidate_thin_frontier/reused_blobs.rs"]
 mod reused_blobs;
+#[path = "candidate_thin_frontier/support.rs"]
+mod support;
 use fgit_forge::review::ReviewOptions;
 use fgit_node::{BundleInspectionRefusal, NodeConfig, OneNode};
 use fgit_pack::PackError;
 use fgit_types::{GitHashAlgorithm, RefName};
 use fgit_wire::visibility::RefVisibility;
-use support::{Entry, Scratch, bundle, corrupt_object, fixture};
+use support::{Entry, Scratch, assert_deep_file_change, bundle, corrupt_object, fixture};
 
 macro_rules! inspect {
     ($node:expr, $history:expr, $bytes:expr, $visibility:expr, $head:expr) => {
@@ -41,8 +41,7 @@ fn deep_thin_candidate_matches_thick_review_without_opening_an_unchanged_sibling
         let visibility = RefVisibility::new();
         let thick = bundle(&history, &history.thick_entries());
         let baseline = inspect!(&node, &history, &thick, &visibility, Some(before)).unwrap();
-        assert_eq!(baseline.review.comparison.entries.len(), 1);
-        assert_eq!(baseline.review.comparison.entries[0].path, b"z/deep/file");
+        assert_deep_file_change(&baseline.review.comparison, &history);
         assert_eq!(baseline.parents, [history.parent]);
         assert_eq!(
             baseline.candidate_commit_body,

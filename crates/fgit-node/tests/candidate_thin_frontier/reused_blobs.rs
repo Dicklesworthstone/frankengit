@@ -1,6 +1,8 @@
 //! The independently configured admitted-blob policy applies to every candidate
 //! consumer without widening body reads or staging unpublished source objects.
-use super::support::{Entry, History, Scratch, commit, fixture_with_reused_blob, pack};
+use super::support::{
+    Entry, History, Scratch, assert_deep_file_change, commit, fixture_with_reused_blob, pack,
+};
 use super::{BundleInspectionRefusal, GitHashAlgorithm, OneNode, RefName};
 use fgit_crypto::{GitHashAlgorithm as Hash, NativeObjectIdentity, git_object_id, sha256_digest};
 use fgit_forge::event::NativeMerge;
@@ -240,8 +242,7 @@ fn exercise_reused_blob_policy(format: GitHashAlgorithm, blob_bytes: usize) {
         ));
         if permitted {
             let review = review.unwrap();
-            assert_eq!(review.review.comparison.entries.len(), 1);
-            assert_eq!(review.review.comparison.entries[0].path, b"z/deep/file");
+            assert_deep_file_change(&review.review.comparison, &history);
         } else {
             assert!(matches!(
                 review,
@@ -299,8 +300,7 @@ fn exercise_reused_blob_policy(format: GitHashAlgorithm, blob_bytes: usize) {
             assert_eq!(rebase.commits[0].id, history.candidate);
             assert_eq!(rebase.comparisons.len(), 2);
             for comparison in rebase.comparisons {
-                assert_eq!(comparison.entries.len(), 1);
-                assert_eq!(comparison.entries[0].path, b"z/deep/file");
+                assert_deep_file_change(&comparison, &history);
             }
         } else {
             assert!(matches!(
