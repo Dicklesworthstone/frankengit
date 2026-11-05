@@ -1,6 +1,9 @@
 import hashlib, json, pathlib, struct, sys, zlib
 from recorded_command import run
 
+if not __debug__:
+    raise SystemExit('mcp_reviewed_merges_requires_assertions')
+
 fg, fg_mcp, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
 large_files = int(sys.argv[4]) if len(sys.argv) == 5 else 0
 assert len(sys.argv) in (4, 5) and large_files in (0, 100000)
