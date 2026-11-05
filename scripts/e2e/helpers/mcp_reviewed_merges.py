@@ -56,6 +56,7 @@ def commit(source, fmt, files, parents, message, directories=()):
 def with_selected_blob(arguments, fmt, data):
     """Append one actual inherited blob, retaining the original packed entries."""
     original = bytes.fromhex(''.join(arguments['bundle_hex_chunks']))
+    assert arguments['expected_bundle_sha256'] == hashlib.sha256(original).hexdigest()
     split = original.index(b'\n\n') + 2
     pack = original[split:]
     width = hashlib.new(fmt).digest_size
@@ -71,7 +72,8 @@ def with_selected_blob(arguments, fmt, data):
     count = struct.unpack('>I', pack[8:12])[0]
     body = pack[:8] + struct.pack('>I', count + 1) + pack[12:-width] + header + zlib.compress(data)
     result = original[:split] + body + hashlib.new(fmt, body).digest()
-    return dict(arguments, bundle_hex_chunks=[result[i:i+4096].hex() for i in range(0, len(result), 4096)]), result
+    return dict(arguments, expected_bundle_sha256=hashlib.sha256(result).hexdigest(),
+                bundle_hex_chunks=[result[i:i+4096].hex() for i in range(0, len(result), 4096)]), result
 
 
 def content(response):
@@ -223,8 +225,10 @@ for fmt in ['sha1', 'sha256']:
             assert thicker['bundle_sha256'] == hashlib.sha256(thicker_bytes).hexdigest()
             assert thicker['root_tree'] == expected_tree
             corrupt = thicker_bytes[:-1] + bytes([thicker_bytes[-1] ^ 1])
-            corrupt_args = dict(thicker_args, bundle_hex_chunks=[corrupt[i:i+4096].hex() for i in range(0, len(corrupt), 4096)])
-            refused(mcp('corrupt-thicker-bundle', [(CANDIDATE, corrupt_args)], read_grants)[0])
+            corrupt_args = dict(thicker_args, expected_bundle_sha256=hashlib.sha256(corrupt).hexdigest(),
+                                bundle_hex_chunks=[corrupt[i:i+4096].hex() for i in range(0, len(corrupt), 4096)])
+            corrupt_refusal = refused(mcp('corrupt-thicker-bundle', [(CANDIDATE, corrupt_args)], read_grants)[0])
+            assert 'pull_candidate_inspection_failed' in corrupt_refusal, corrupt_refusal
             publish_args = dict(thicker['publication_arguments'], idempotency_key='exact-publication', required_reviewers=[reviewer])
         assert refs('after-inspection') == before
         denied = mcp('read-grants-cannot-write', [(REVIEW, review_args), (MERGE, publish_args)], read_grants)
