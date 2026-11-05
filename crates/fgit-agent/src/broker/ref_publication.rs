@@ -51,6 +51,56 @@ impl EffectBroker {
         Rc::ptr_eq(&self.journal, &reservation.journal)
     }
 
+    /// Reconstruct only the already-paid request held by this exact live owner.
+    /// No grant, reservation, journal event or resource transition occurs here.
+    pub(crate) fn retained_ref_transaction_request(
+        &self,
+        pending: &PendingSubmission,
+    ) -> Result<EffectRequest, RefTransactionEffectRefusal> {
+        if !Rc::ptr_eq(&self.journal, &pending.journal) {
+            return Err(RefTransactionEffectRefusal::Binding);
+        }
+        let journal = self.journal.borrow();
+        journal
+            .ensure_writable()
+            .map_err(RefTransactionEffectRefusal::Journal)?;
+        if journal.sink.is_none() {
+            return Err(RefTransactionEffectRefusal::DurableJournalRequired);
+        }
+        let binding = pending.binding();
+        let effect_id = binding.effect_id();
+        let record = journal
+            .positions
+            .get(&effect_id)
+            .and_then(|position| journal.records.get(*position))
+            .ok_or(RefTransactionEffectRefusal::Binding)?;
+        let ledger = self.ledger.handle();
+        let obligation_id = pending.obligation.id();
+        if journal.ref_transactions.get(&effect_id) != Some(binding)
+            || record.effect_id != effect_id
+            || record.operation != OperationClass::PublishRefTransaction
+            || record.effect_class != EffectClass::CanonicalMutation
+            || record.run_commitment != binding.run_commitment()
+            || record.input_commitment != *binding.input_commitment()
+            || record.obligation_class != Some(ObligationClass::RefTransactionSubmission)
+            || record.obligation_state != ObligationState::DeferredExternally
+            || record.terminal_outcome.is_some()
+            || record.budget_consumed != record.budget_reserved
+            || pending.obligation.receipt().transaction != binding.tx_id()
+            || ledger.state_of(obligation_id) != Some(ObligationState::DeferredExternally)
+            || ledger.reserved_for(obligation_id) != Some(ResourceVector::ZERO)
+            || ledger.charged_to(obligation_id)
+                != Some(
+                    record
+                        .budget_consumed
+                        .mask(fgit_resource::GradeDisposition::Consumable),
+                )
+        {
+            return Err(RefTransactionEffectRefusal::Binding);
+        }
+        Ok(binding.request(record.budget_consumed))
+    }
+
     /// All refusal branches release an unstarted grant explicitly. No raw
     /// reservation escapes without its complete sealed-submission binding.
     pub(crate) fn reserve_ref_transaction(

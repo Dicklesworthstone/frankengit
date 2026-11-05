@@ -2,6 +2,8 @@
 //! The reference authority publishes decision fixtures; these tests do not stand
 //! in for the native node's object validation or ref-state admission tests.
 
+mod retained_resume;
+
 use super::*;
 
 use std::cell::RefCell;

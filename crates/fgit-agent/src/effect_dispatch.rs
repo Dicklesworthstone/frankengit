@@ -317,6 +317,13 @@ impl RevocationCheckedEffectBroker {
         self.inner.owns_ref_transaction(reservation)
     }
 
+    pub(crate) fn retained_ref_transaction_request(
+        &self,
+        pending: &crate::broker::ref_publication::PendingSubmission,
+    ) -> Result<EffectRequest, crate::ref_publication::RefTransactionEffectRefusal> {
+        self.inner.retained_ref_transaction_request(pending)
+    }
+
     /// Accepted effect records in acceptance order.
     #[must_use]
     pub fn records(&self) -> Vec<EffectRecord> {

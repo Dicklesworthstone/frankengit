@@ -7,16 +7,18 @@
 //! preparation, exact-head CAS and the canonical decision.
 
 use core::fmt;
+use std::rc::Rc;
 use std::time::Duration;
 
 use asupersync::types::Time;
 use fgit_admission::evidence::AdmissionAuthentication;
-use fgit_admission::{AdmissionLimits, AdmissionResult};
+use fgit_admission::{AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive};
 use fgit_agent::ref_publication::{
     ObservedRefTransaction, PendingRefTransactionSubmission, RefTransactionBinding,
     RefTransactionEffectRefusal, RefTransactionObservationRefusal,
     RefTransactionReconciliationRefused, RefTransactionResolution, RefTransactionStartRefused,
-    ReservedRefTransactionSubmission, observe_ref_transaction_async,
+    ReservedRefTransactionSubmission, SettledRefTransactionSubmission,
+    observe_ref_transaction_async,
 };
 use fgit_agent::{
     AgentRefTransaction, CurrentAuthorityCapabilityEffectAuthorization,
@@ -82,6 +84,7 @@ impl TrustedLocalAgentPublicationApproval {
 /// its original cancellation, parent ownership and quotas are never replaced.
 pub struct TrustedLocalAgentPublicationClock<'node> {
     runtime: &'node NodeRuntime,
+    owner: Rc<()>,
     logical_origin: LogicalTime,
     runtime_origin: Time,
     nanos_per_tick: u64,
@@ -146,6 +149,38 @@ pub struct TrustedLocalAgentPublicationInput<'a, A: GitHashAlgorithm> {
     pub chain: &'a VerifiedCapabilityChain,
 }
 
+/// Exact live custody retained when responsibility started but ordinary
+/// admission was never invoked. Only the native host can construct this owner.
+/// It cannot be cloned, reconstructed from a journal, or moved to a new clock.
+#[must_use = "resume this exact undispatched publication or retain its pending responsibility"]
+#[derive(Debug)]
+pub struct UndispatchedNativeAgentPublication {
+    pending: PendingRefTransactionSubmission,
+    validated: BasisBoundValidatedReceive,
+    staging: ReceiveStaging,
+    session: LoopbackReceiveSession,
+    clock_owner: Rc<()>,
+}
+
+impl UndispatchedNativeAgentPublication {
+    #[must_use]
+    pub fn binding(&self) -> &RefTransactionBinding {
+        self.pending.binding()
+    }
+
+    /// Discard native object custody and retain observation-only responsibility.
+    /// This does not cancel the canonical transaction or settle the obligation.
+    #[must_use]
+    pub fn into_pending(self) -> PendingRefTransactionSubmission {
+        self.pending
+    }
+}
+
+enum PreparedNativeAgentPublication {
+    Recovered(ObservedRefTransaction),
+    Ready(UndispatchedNativeAgentPublication),
+}
+
 /// Pre-start reason; no variant by itself proves an earlier submission failed.
 #[derive(Debug)]
 pub enum NativeAgentPublicationRefusal {
@@ -178,10 +213,15 @@ pub enum NativeAgentPublicationError {
         reason: NativeAgentPublicationRefusal,
     },
     Start(Box<RefTransactionStartRefused>),
+    /// Responsibility started successfully, but ordinary admission was never
+    /// invoked. Only this retained native owner can complete the first dispatch.
     Started {
-        pending: Box<PendingRefTransactionSubmission>,
+        publication: Box<UndispatchedNativeAgentPublication>,
         reason: NativeAgentPublicationRefusal,
     },
+    /// An authenticated terminal settled responsibility, but its journal mirror
+    /// still needs recovery. This cannot return a resumable publication owner.
+    Reconciliation(Box<RefTransactionReconciliationRefused>),
 }
 impl fmt::Display for NativeAgentPublicationError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -206,12 +246,16 @@ pub struct NativeAgentSubmission {
     pub responsibility: Result<RefTransactionResolution, RefTransactionReconciliationRefused>,
 }
 
-/// A terminal retry recovers only its original ordinary outcome. It does not
-/// revalidate retry transport bytes, refresh authority, or erase journal debt.
+/// Native publication or original-outcome recovery. Ordinary terminal retry is
+/// observation-only; a retained live owner can additionally acknowledge that
+/// terminal through `Reconciled`, without refreshing authority or dispatching.
 #[must_use]
 #[derive(Debug)]
 pub enum NativeAgentPublicationResult {
     Recovered(ObservedRefTransaction),
+    /// A retained, undispatched owner found and acknowledged its original
+    /// terminal decision before considering fresh authorization or dispatch.
+    Reconciled(Box<SettledRefTransactionSubmission>),
     Submitted(Box<NativeAgentSubmission>),
 }
 
@@ -229,6 +273,7 @@ impl OneNode {
             .ok_or(NativeAgentPublicationRefusal::Clock)?;
         Ok(TrustedLocalAgentPublicationClock {
             runtime: self.runtime(),
+            owner: Rc::new(()),
             logical_origin: logical_now,
             runtime_origin: self.runtime.now(),
             nanos_per_tick,
@@ -257,6 +302,30 @@ impl OneNode {
         clock: &TrustedLocalAgentPublicationClock<'_>,
         input: TrustedLocalAgentPublicationInput<'_, A>,
     ) -> Result<NativeAgentPublicationResult, NativeAgentPublicationError> {
+        match self
+            .prepare_agent_ref_transaction_trusted_local_in(request, broker, clock, input)
+            .await?
+        {
+            PreparedNativeAgentPublication::Recovered(observed) => {
+                Ok(NativeAgentPublicationResult::Recovered(observed))
+            }
+            PreparedNativeAgentPublication::Ready(publication) => {
+                self.dispatch_agent_ref_transaction_in(request, clock, publication)
+                    .await
+            }
+        }
+    }
+
+    // Separate owned preparation from the one admission invocation. A failed
+    // final gate returns the real validated/staged custody, never recreating it
+    // from caller-supplied retry bytes.
+    async fn prepare_agent_ref_transaction_trusted_local_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        broker: &mut CurrentAuthorityRevocationCheckedEffectBroker,
+        clock: &TrustedLocalAgentPublicationClock<'_>,
+        input: TrustedLocalAgentPublicationInput<'_, A>,
+    ) -> Result<PreparedNativeAgentPublication, NativeAgentPublicationError> {
         let preflight = NativeAgentPublicationError::Preflight;
         if !std::ptr::eq(clock.runtime, self.runtime()) || !request.is_live() {
             return Err(preflight(NativeAgentPublicationRefusal::CancelledOrExpired));
@@ -311,7 +380,7 @@ impl OneNode {
             )
             .await
             {
-                Ok(Some(observed)) => Ok(NativeAgentPublicationResult::Recovered(observed)),
+                Ok(Some(observed)) => Ok(PreparedNativeAgentPublication::Recovered(observed)),
                 Ok(None) => Err(preflight(
                     NativeAgentPublicationRefusal::ExistingSubmissionPending(binding),
                 )),
@@ -542,20 +611,57 @@ impl OneNode {
         let pending = broker
             .start_ref_transaction(reservation, input.chain, &revocations, now)
             .map_err(|e| NativeAgentPublicationError::Start(Box::new(e)))?;
-        if let Err(reason) = clock.require_request_before(
-            self,
-            request,
-            pending.start_authorization().authorization().valid_until(),
-        ) {
-            return Err(NativeAgentPublicationError::Started {
-                pending: Box::new(pending),
-                reason,
-            });
-        }
         let session = LoopbackReceiveSession::Authenticated(
             AuthenticatedReceiveSession::new(input.approval.principal, input.approval.key.clone())
                 .with_authentication(AdmissionAuthentication::OperatorAssertion),
         );
+        Ok(PreparedNativeAgentPublication::Ready(
+            UndispatchedNativeAgentPublication {
+                pending,
+                validated,
+                staging,
+                session,
+                clock_owner: Rc::clone(&clock.owner),
+            },
+        ))
+    }
+
+    async fn dispatch_agent_ref_transaction_in(
+        &self,
+        request: &NodeRequestContext,
+        clock: &TrustedLocalAgentPublicationClock<'_>,
+        publication: UndispatchedNativeAgentPublication,
+    ) -> Result<NativeAgentPublicationResult, NativeAgentPublicationError> {
+        if !Rc::ptr_eq(&clock.owner, &publication.clock_owner) {
+            return Err(NativeAgentPublicationError::Started {
+                publication: Box::new(publication),
+                reason: NativeAgentPublicationRefusal::Clock,
+            });
+        }
+        if let Err(reason) = clock.require_request_before(
+            self,
+            request,
+            publication
+                .pending
+                .start_authorization()
+                .authorization()
+                .valid_until(),
+        ) {
+            return Err(NativeAgentPublicationError::Started {
+                publication: Box::new(publication),
+                reason,
+            });
+        }
+        // Crossing this boundary consumes the only native resume owner. Any
+        // error from ordinary admission is ambiguous and remains observation-
+        // only, even if a particular error looks like an early refusal.
+        let UndispatchedNativeAgentPublication {
+            pending,
+            validated,
+            staging,
+            session,
+            clock_owner: _,
+        } = publication;
         let admission = self
             .admit_basis_bound_loopback_receive_publishing_in(
                 request,
@@ -574,6 +680,108 @@ impl OneNode {
                 responsibility,
             },
         )))
+    }
+
+    /// Resume one live publication whose successful start was followed by a
+    /// failed gate before any ordinary admission invocation.
+    ///
+    /// The opaque owner retains the original validated proof, synced objects,
+    /// principal, key and charged obligation. No replacement bundle, export or
+    /// request identity is accepted. A terminal outcome is reconciled first;
+    /// otherwise the same broker/chain must freshly authorize the original
+    /// effect at its exact prepared head. A new finite request deadline must
+    /// fit that authorization. The original live clock cannot be replaced.
+    ///
+    /// An invoked admission never returns this owner. Its ambiguous outcomes,
+    /// cold recovery, and journal-mirror start failures remain observation-only.
+    /// Dropping this in-flight future also discards native custody and leaves
+    /// journal debt; only a returned `Started` error preserves resumability.
+    pub async fn resume_undispatched_agent_ref_transaction_in(
+        &self,
+        request: &NodeRequestContext,
+        broker: &mut CurrentAuthorityRevocationCheckedEffectBroker,
+        clock: &TrustedLocalAgentPublicationClock<'_>,
+        publication: UndispatchedNativeAgentPublication,
+        chain: &VerifiedCapabilityChain,
+    ) -> Result<NativeAgentPublicationResult, NativeAgentPublicationError> {
+        let retain = |publication, reason| NativeAgentPublicationError::Started {
+            publication: Box::new(publication),
+            reason,
+        };
+        if !std::ptr::eq(clock.runtime, self.runtime())
+            || !Rc::ptr_eq(&clock.owner, &publication.clock_owner)
+        {
+            return Err(retain(publication, NativeAgentPublicationRefusal::Clock));
+        }
+        let UndispatchedNativeAgentPublication {
+            pending,
+            validated,
+            staging,
+            session,
+            clock_owner,
+        } = publication;
+        let (pending, observation_failure) = match pending
+            .reconcile_async(&self.authority, request.authority(), &self.head_key)
+            .await
+        {
+            Ok(RefTransactionResolution::Decided(settled)) => {
+                return Ok(NativeAgentPublicationResult::Reconciled(Box::new(settled)));
+            }
+            Ok(RefTransactionResolution::Pending(pending)) => (pending, None),
+            Err(RefTransactionReconciliationRefused::Pending { pending, reason }) => {
+                (*pending, Some(reason))
+            }
+            Err(error @ RefTransactionReconciliationRefused::JournalAfterSettlement { .. }) => {
+                return Err(NativeAgentPublicationError::Reconciliation(Box::new(error)));
+            }
+        };
+        let mut publication = UndispatchedNativeAgentPublication {
+            pending,
+            validated,
+            staging,
+            session,
+            clock_owner,
+        };
+        if let Some(reason) = observation_failure {
+            return Err(retain(
+                publication,
+                NativeAgentPublicationRefusal::Observation(Box::new(reason)),
+            ));
+        }
+        let now = match clock.now() {
+            Ok(now) => now,
+            Err(reason) => return Err(retain(publication, reason)),
+        };
+        let revocations = match self
+            .agent_publication_revocations_in(request, publication.pending.run(), now)
+            .await
+        {
+            Ok(revocations) => revocations,
+            Err(reason) => return Err(retain(publication, reason)),
+        };
+        if revocations.current_authority_head_id() != publication.validated.validation_basis() {
+            return Err(retain(
+                publication,
+                NativeAgentPublicationRefusal::Binding("prepared authority basis moved"),
+            ));
+        }
+        let now = match clock.now() {
+            Ok(now) => now,
+            Err(reason) => return Err(retain(publication, reason)),
+        };
+        if let Err(reason) = broker.reauthorize_retained_ref_transaction(
+            &mut publication.pending,
+            chain,
+            &revocations,
+            now,
+        ) {
+            return Err(retain(
+                publication,
+                NativeAgentPublicationRefusal::Effect(Box::new(reason)),
+            ));
+        }
+        self.dispatch_agent_ref_transaction_in(request, clock, publication)
+            .await
     }
 
     async fn agent_publication_revocations_in(

@@ -4,7 +4,9 @@
 //! capability authorizes a submission only after a fresh current-authority check.
 //! Committing this obligation records responsibility for submission, not a ref
 //! update. Only authenticated ordinary authority outcomes settle it. Recovery
-//! observes the original TxId; it never reissues an undecided mutation.
+//! observes the original TxId. A host retaining exclusive validated, unsubmitted
+//! custody can reauthorize its first dispatch without another reservation;
+//! this never permits replay of an admission attempt already invoked.
 
 use core::fmt;
 
@@ -242,7 +244,10 @@ impl core::error::Error for RefTransactionStartRefused {}
 /// Responsibility for an exact submission whose terminal outcome is not settled.
 ///
 /// This is never a successful ref update or permission to retry admission.
-/// Its only public consequential operation observes the original ordinary TxId.
+/// Its own consequential operation only observes the original ordinary TxId.
+/// A live broker can reauthorize the first dispatch for a host that still owns
+/// exclusive unsubmitted validation custody; this value alone proves no such
+/// custody and cannot authorize transport replay or reopening a journal.
 #[must_use = "retain and reconcile the pending canonical submission"]
 #[derive(Debug)]
 pub struct PendingRefTransactionSubmission {
@@ -253,6 +258,13 @@ pub struct PendingRefTransactionSubmission {
 }
 
 impl PendingRefTransactionSubmission {
+    /// Original complete run; observation and retained-custody checks use it
+    /// unchanged, including after the run's authority expires.
+    #[must_use]
+    pub const fn run(&self) -> &IntentRun {
+        &self.run
+    }
+
     #[must_use]
     pub const fn binding(&self) -> &RefTransactionBinding {
         self.raw.binding()
@@ -489,6 +501,74 @@ pub enum RefTransactionReconciliationRefused {
 }
 
 impl CurrentAuthorityRevocationCheckedEffectBroker {
+    /// Fresh authority for the first dispatch of exclusively retained custody.
+    ///
+    /// This is only the authorization half of live pre-dispatch resumption.
+    /// The native host must retain the original verified objects and validation
+    /// proof in an unforgeable, non-cloneable carrier that never survives an
+    /// ordinary admission invocation. No bundle may be read or staged again
+    /// under the already-consumed cost. An undecided authority observation alone
+    /// is never proof that dispatch did not happen.
+    ///
+    /// The original live broker, exact prepared head, chain, leaf, input and
+    /// charged cost are retained. No new grant, resource transition, journal
+    /// event or refreshed run is created. Both bounded authorization histories
+    /// advance only after every check succeeds. A refusal leaves `pending`
+    /// intact, including its previous authorization. Poisoned journal writers,
+    /// cold journal recovery and already-invoked admissions remain observation
+    /// only; this method cannot repair or replay them.
+    pub fn reauthorize_retained_ref_transaction(
+        &mut self,
+        pending: &mut PendingRefTransactionSubmission,
+        chain: &VerifiedCapabilityChain,
+        revocations: &CurrentAuthorityCapabilityRevocationReceipt,
+        now: LogicalTime,
+    ) -> Result<CurrentAuthorityCapabilityEffectAuthorization, RefTransactionEffectRefusal> {
+        if pending.binding().run_commitment() != self.run_commitment()
+            || pending.run.commitment().ok() != Some(self.run_commitment())
+        {
+            return Err(RefTransactionEffectRefusal::Binding);
+        }
+        let request = self.inner.retained_ref_transaction_request(&pending.raw)?;
+        if self.dispatch_authorizations.len()
+            >= crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS
+            || self.inner.dispatch_authorizations().len()
+                >= crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS
+        {
+            return Err(RefTransactionEffectRefusal::AuthorizationLimit);
+        }
+        let prepared_head = pending
+            .run
+            .authority_read_receipt()
+            .ok_or(RefTransactionEffectRefusal::Binding)?
+            .authority_head_id();
+        if revocations.current_authority_head_id() != prepared_head
+            || now < pending.started.authorization().authorized_at()
+        {
+            return Err(RefTransactionEffectRefusal::Binding);
+        }
+        let authorization = CurrentAuthorityCapabilityEffectAuthorization::authorize(
+            &self.run,
+            chain,
+            revocations,
+            now,
+            &request,
+        )
+        .map_err(|error| RefTransactionEffectRefusal::FreshAuthorization(Box::new(error)))?;
+        if pending.initial.authorization().verified_chain_id()
+            != authorization.authorization().verified_chain_id()
+            || pending.initial.authorization().capability_id()
+                != authorization.authorization().capability_id()
+        {
+            return Err(RefTransactionEffectRefusal::Binding);
+        }
+        self.inner
+            .record_ref_transaction_start(authorization.authorization());
+        self.dispatch_authorizations.push(authorization);
+        pending.started = authorization;
+        Ok(authorization)
+    }
+
     /// Reserve the new canonical-publication capability against this broker's
     /// complete run and durable journal. A preparation-only or external-integration
     /// capability cannot authorize it.

@@ -5,6 +5,8 @@
 
 #[path = "evidence_tests.rs"]
 mod evidence;
+#[path = "resumption_tests.rs"]
+mod resumption;
 
 use super::*;
 use std::collections::BTreeMap;

@@ -1018,6 +1018,13 @@ impl RevocationCheckedEffectBroker {
         self.broker.owns_ref_transaction(reservation)
     }
 
+    pub(crate) fn retained_ref_transaction_request(
+        &self,
+        pending: &crate::broker::ref_publication::PendingSubmission,
+    ) -> Result<EffectRequest, crate::ref_publication::RefTransactionEffectRefusal> {
+        self.broker.retained_ref_transaction_request(pending)
+    }
+
     /// Whether the reservation still belongs to the ledger served by this facade.
     pub(crate) fn owns_outbox(&self, effect: &ReservedOutboxEffect) -> bool {
         self.broker.owns_outbox(effect)

@@ -691,6 +691,17 @@ outcomes and failed observations preserve pending responsibility. There is no
 post-start abort or automatic resubmission path, and later expiry or revocation
 does not prevent observation and cleanup.
 
+`reauthorize_retained_ref_transaction` supplies the authorization half of an
+explicit live continuation before the first ordinary admission invocation. It
+checks the same actual broker journal and ledger, a writable acknowledged
+journal sink, the retained charged obligation, original full run, original
+chain and leaf, current revocations, and original authority head. It does not
+reserve another effect, reset a budget, rewrite journal events, or prove that
+admission has not already been invoked. A native host must separately retain
+private, non-cloneable evidence of that boundary and the exact validated object
+custody. Already-invoked admission and failed journal writers remain
+observation-only; an undecided lookup is never permission to dispatch again.
+
 Recovered bindings can be passed to `observe_ref_transaction_async` without
 reissuing admission. A journal failure after an authoritative observation has
 already settled the resource returns the terminal observation and settlement
@@ -789,6 +800,36 @@ errors retain pending responsibility. Both canonical commit and canonical
 refusal can settle submission, and callers must inspect the terminal outcome
 before reporting a successful ref update.
 
+There is one explicit live continuation for a cancellation or deadline failure
+after successful responsibility start but before the host invokes ordinary
+admission. That failure returns `UndispatchedNativeAgentPublication`, an
+opaque owner of the original validated receive, synchronized private staging,
+pending obligation, authenticated principal and original key. Its private
+identity also retains the original logical clock and live node; constructing a
+new clock with the same numbers cannot replace it. The owner cannot be cloned
+or reconstructed from a recovered journal.
+
+`resume_undispatched_agent_ref_transaction_in` consumes that owner with a fresh
+request context, the same broker and clock, and the capability chain. It takes
+no bundle, export, new approval or replacement key. An original canonical
+terminal is reconciled first and returned as `Reconciled`, without another
+authorization or dispatch. Otherwise the current revocations, exact prepared
+head, actual writable journal/ledger ownership, original chain, and finite new
+request deadline must all permit completion of the first dispatch. The
+original input charge remains consumed exactly once; the implementation does
+not parse, quarantine or reserve the effect again.
+
+Authorization and pre-dispatch refusals return the same owner. Dropping an
+in-flight continuation future instead discards native custody and leaves
+observation-only journal debt; arbitrary future cancellation is not resumable.
+Once ordinary admission has been invoked, every outcome is returned through
+`NativeAgentSubmission`; even an
+apparently early admission error cannot recover a resumable owner. A journal
+mirror failure during start also returns pending responsibility without this
+owner. Cold recovery and a moved authority basis therefore do not acquire a
+new retry right. `into_pending` deliberately discards the native object custody
+while preserving observation-only debt; it does not cancel or settle anything.
+
 An exact effect already retained by the broker can recover its original
 terminal outcome after expiry or loss of transport bytes without another
 dispatch. `reconcile_agent_ref_transaction_in` accepts a fresh finite
@@ -810,6 +851,13 @@ revocation configuration, and a real competing publication changing the
 prepared basis. The ECC fixtures supply explicit host assertions; these tests
 do not claim a hosted agent, a model executor, or general evidence-artifact
 authentication.
+
+`agent_publication/resumption_tests.rs` exercises deterministic cancellation
+between real preparation and the first admission call, retained private object
+custody, successful continuation without replacement inputs or another charge,
+clock/broker/capability/deadline substitutions, moved-head refusal, and original
+terminal settlement before fresh authorization. These tests cover the bounded
+live owner; they do not establish general crash replay or journal-writer repair.
 
 ---
 
