@@ -230,9 +230,21 @@ def verify_transfer_edges(url: str, tokens: dict[str, str], known: dict, payload
             "foreign repository route exposed LFS custody")
     batch(url, full, "download", [known], transfers=["tus"], expected=400)
     batch(url, full, "download", [known], hash_algo="sha1", expected=400)
-    oversized = {"oid": "01" * 32, "size": 64 * 1024 * 1024 + 1}
-    require(batch(url, writer, "upload", [oversized])["objects"][0].get("error", {}).get("code") == 413,
+    # The HTTP streaming profile permits 512 MiB; 64 MiB remains the separate
+    # buffered library-read ceiling. Check metadata admission without allocating
+    # a boundary-sized payload, then preserve a real above-limit refusal.
+    for size in (64 * 1024 * 1024 + 1, 512 * 1024 * 1024):
+        permitted = {"oid": "01" * 32, "size": size}
+        entry = batch(url, writer, "upload", [permitted])["objects"][0]
+        require("error" not in entry, f"permitted streaming object size {size} was refused")
+        action(url, entry, "upload")
+        action(url, entry, "verify")
+    oversized = {"oid": "01" * 32, "size": 512 * 1024 * 1024 + 1}
+    entries = batch(url, writer, "upload", [oversized, known])["objects"]
+    require(entries[0].get("error", {}).get("code") == 413 and "actions" not in entries[0],
             "oversized object did not receive a bounded per-item refusal")
+    require("error" not in entries[1] and "actions" not in entries[1],
+            "one oversized object prevented independent existing-object admission")
     status, raw = exchange(url + "/info/lfs/objects/batch", "POST", full,
                            json.dumps({"operation": "download", "objects": [known]}).encode(),
                            headers={"Host": "untrusted.example"})
