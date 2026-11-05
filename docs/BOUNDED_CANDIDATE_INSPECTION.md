@@ -108,6 +108,12 @@ bundle: the lane checks those bytes exactly and compares every other argument.
 A corrupted thicker bundle must refuse without changing refs.
 Publication uses the inspected thicker bundle's actual publication arguments.
 
+The helper saves each MCP request before spawning and captures stdout/stderr
+directly into per-command files, preserving partial evidence on timeout or
+spawn failure. The scale suite first runs real-child capture selftests; those
+tests check the runner, while the subsequent native lifecycle checks the forge.
+Timeouts and nonzero exits remain failures and never trigger automatic retries.
+
 The ordinary helper's scenarios and 120-second subprocess deadline remain
 unchanged. The named scale suite has a 1,800-second outer deadline and runs the
 clean merge-commit case for both hash domains; the existing lifecycle suite

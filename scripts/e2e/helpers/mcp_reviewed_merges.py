@@ -1,4 +1,5 @@
-import hashlib, json, pathlib, struct, subprocess, sys, zlib
+import hashlib, json, pathlib, struct, sys, zlib
+from recorded_command import run
 
 fg, fg_mcp, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
 large_files = int(sys.argv[4]) if len(sys.argv) == 5 else 0
@@ -12,17 +13,8 @@ CANDIDATE, REVIEW, MERGE = 'frankengit_source_candidate', 'frankengit_pull_revie
 def execute(label, argv, data=None):
     global commands
     commands += 1
-    result = subprocess.run(list(map(str, argv)), input=data, capture_output=True, timeout=120)
     prefix = root / f'{commands:03d}-{label}'
-    prefix.with_suffix('.out').write_bytes(result.stdout)
-    prefix.with_suffix('.err').write_bytes(result.stderr)
-    if data is not None:
-        prefix.with_suffix('.requests.ndjson').write_bytes(data)
-    if result.stderr:
-        sys.stderr.buffer.write(result.stderr)
-        sys.stderr.buffer.flush()
-    assert result.returncode == 0, (label, result.returncode, result.stdout, result.stderr)
-    return result.stdout
+    return run(prefix, argv, data, timeout=120)
 
 
 def native_object(source, fmt, kind, body):
