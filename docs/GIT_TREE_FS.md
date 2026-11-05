@@ -119,15 +119,24 @@ A write operation is reserve → stage → publish-visible → optionally sync-d
 retains its `BaseView`, capability, intent log, evaluated overlay, `SessionRecord`
 and `WorkspaceLease`. The bounded profile admits sixteen simultaneous sessions,
 each with at most 32 MiB of retained edit bodies and 16,384 export objects. It
-supports ordinary file writes, deletions, renames and executable-mode changes
-through the existing export engine. A base-resident rename or mode change must
-supply the source blob identity and mode; the node verifies both against the
-selected immutable tree. Files produced by earlier intents instead retain their
-current overlay content, including across session edit calls. A rename requires
-read/write access to both source and destination, and export requires complete
-disclosure of every rebuilt directory. Base blobs are referenced without copying
-their bytes. Self-renames, ancestor/descendant moves and edits of symlinks,
-directories or gitlinks remain outside this file profile. Each adopted edit
+supports ordinary file writes, executable-mode changes, symlink creation and
+replacement, and deletion or rename of either entry kind. File and symlink
+replacement may change an existing entry between those two kinds. A
+base-resident file rename or mode change must supply the source blob identity
+and mode; the node verifies both against the selected immutable tree. A base
+symlink rename uses `Rename` with no file `basis_entry`: the typed source and
+blob identity come from that same verified tree. A file basis on that base
+symlink source refuses. Entries produced by earlier intents instead retain their
+current overlay content, including across session edit calls. Symlink text is
+opaque blob data, never host traversal authority, and a `Refuse` symlink policy
+also prevents creation. Link-text bytes consume the same cumulative intent,
+overlay and export budgets as file bodies, including across session appends.
+A rename requires read/write access to both source and destination, and export
+requires complete disclosure of every rebuilt directory. File and symlink base
+blobs are referenced without reading or copying their bytes; the overlay root
+binds both the original object identity and source path. Self-renames,
+ancestor/descendant moves, directory edits and gitlink edits remain outside this
+entry-edit profile. A chmod cannot turn a symlink into an ordinary file. Each adopted edit
 advances staged and visible epochs.
 Durable remains zero: these mutable sessions are process-local, without a
 restartable session journal. Opaque handles cannot reopen a closed session or

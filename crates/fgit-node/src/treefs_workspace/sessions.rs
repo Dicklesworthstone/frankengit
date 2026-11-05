@@ -395,12 +395,15 @@ impl OneNode {
         }
         let mut bytes = 0usize;
         for intent in state.log().intents().iter().chain(append.intents()) {
-            if let TreeEditIntent::Write { content, .. } = intent {
-                bytes = bytes
-                    .checked_add(content.len())
-                    .filter(|n| *n <= limits.max_total_bytes)
-                    .ok_or(NodeWorkspaceRefusal::WorkspaceEditLimit)?;
-            }
+            let added = match intent {
+                TreeEditIntent::Write { content, .. } => content.len(),
+                TreeEditIntent::CreateSymlink { link_target, .. } => link_target.len(),
+                _ => 0,
+            };
+            bytes = bytes
+                .checked_add(added)
+                .filter(|n| *n <= limits.max_total_bytes)
+                .ok_or(NodeWorkspaceRefusal::WorkspaceEditLimit)?;
         }
         let mut log = state.log().clone();
         for intent in append.intents() {

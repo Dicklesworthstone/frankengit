@@ -22,9 +22,11 @@
 //! equivalent one. Nothing here consults a clock, a random source, or map
 //! iteration order.
 
+use crate::base::BaseEntry;
 use crate::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup};
 use crate::path::TreePath;
 use core::fmt::{self, Display, Formatter};
+use fgit_crypto::{GitHashAlgorithm, NativeObjectIdentity};
 use std::collections::BTreeMap;
 
 pub use crate::overlay::EntryClass as IntentEntryClass;
@@ -90,7 +92,8 @@ pub enum TreeEditIntent {
         /// Destination path.
         to: TreePath,
         /// What the base holds at `from`, when the source is base-resident.
-        /// `None` means the source was staged earlier in this same log.
+        /// `None` means the source was staged earlier in this same log, or is
+        /// a symlink resolved by [`IntentLog::evaluate_with_base_entries`].
         basis_entry: Option<BasisEntry>,
     },
     /// Change a file's mode without touching its content.
@@ -181,7 +184,7 @@ pub enum IntentError {
         /// The missing source.
         from: TreePath,
     },
-    /// A chmod targeted something that is not a file.
+    /// A file-only operation targeted something that is not a file.
     NotAFile {
         /// The offending path.
         path: TreePath,
@@ -207,6 +210,11 @@ pub enum IntentError {
         /// The path whose basis was not supplied.
         path: TreePath,
     },
+    /// A file basis does not match the supplied typed immutable base entry.
+    BasisEntryMismatch {
+        /// The path whose identity or kind disagreed.
+        path: TreePath,
+    },
 }
 
 impl Display for IntentError {
@@ -226,6 +234,12 @@ impl Display for IntentError {
                 write!(
                     formatter,
                     "no basis entry supplied for base-resident {path}"
+                )
+            }
+            Self::BasisEntryMismatch { path } => {
+                write!(
+                    formatter,
+                    "basis entry does not match selected base at {path}"
                 )
             }
         }
@@ -371,6 +385,43 @@ impl IntentLog {
     /// bytes, so this doubles as replay.
     #[must_use]
     pub fn evaluate(&self, base_exists: &dyn Fn(&TreePath) -> bool) -> (Overlay, IntentEvaluation) {
+        self.evaluate_sources(base_exists, &|_| None)
+    }
+
+    /// Evaluates using typed entries resolved from one immutable base.
+    ///
+    /// The resolver supplies metadata only; it must not follow symlinks or
+    /// fetch their target bytes. Base symlink renames carry the native blob
+    /// identity and source path into the overlay, while file renames and
+    /// chmod still require an exact caller-supplied file basis. The ordinary
+    /// [`Self::evaluate`] entry point retains its file-basis-only semantics.
+    #[must_use]
+    pub fn evaluate_with_base_entries<A: GitHashAlgorithm>(
+        &self,
+        base_entry: &dyn Fn(&TreePath) -> Option<BaseEntry<A>>,
+    ) -> (Overlay, IntentEvaluation) {
+        self.evaluate_sources(&|path| base_entry(path).is_some(), &|path| {
+            base_entry(path).map(|entry| match entry {
+                BaseEntry::File { oid, mode } => match FileMode::from_octal_bytes(&mode) {
+                    Some(mode) => BaseSource::File(BasisEntry {
+                        oid: oid.digest_bytes().to_vec(),
+                        mode,
+                    }),
+                    None => BaseSource::Unsupported,
+                },
+                BaseEntry::Symlink { oid } => BaseSource::Symlink(oid.digest_bytes().to_vec()),
+                BaseEntry::Directory { .. } | BaseEntry::Submodule { .. } => {
+                    BaseSource::Unsupported
+                }
+            })
+        })
+    }
+
+    fn evaluate_sources(
+        &self,
+        base_exists: &dyn Fn(&TreePath) -> bool,
+        base_source: &dyn Fn(&TreePath) -> Option<BaseSource>,
+    ) -> (Overlay, IntentEvaluation) {
         let mut overlay = Overlay::new();
         let mut evaluation = IntentEvaluation::default();
         // Which source index currently owns each path, so a superseded intent
@@ -383,6 +434,7 @@ impl IntentLog {
                 &mut owner,
                 &mut evaluation,
                 base_exists,
+                base_source,
                 index,
                 intent,
             );
@@ -403,6 +455,33 @@ impl IntentLog {
         let effects = overlay.entries().clone();
         (TreeNetEffect { effects }, evaluation)
     }
+}
+
+/// The body-free source kinds this evaluator can carry through a rename.
+enum BaseSource {
+    File(BasisEntry),
+    Symlink(Vec<u8>),
+    Unsupported,
+}
+
+fn file_basis<'a>(
+    source: Option<&BaseSource>,
+    basis: Option<&'a BasisEntry>,
+    path: &TreePath,
+) -> Result<&'a BasisEntry, IntentError> {
+    if matches!(
+        source,
+        Some(BaseSource::Symlink(_) | BaseSource::Unsupported)
+    ) {
+        return Err(IntentError::NotAFile { path: path.clone() });
+    }
+    let basis = basis.ok_or_else(|| IntentError::MissingBasisEntry { path: path.clone() })?;
+    if let Some(BaseSource::File(actual)) = source
+        && actual != basis
+    {
+        return Err(IntentError::BasisEntryMismatch { path: path.clone() });
+    }
+    Ok(basis)
 }
 
 /// Marks a previously surviving intent at `path` as superseded by `index`.
@@ -441,6 +520,7 @@ fn apply_one(
     owner: &mut BTreeMap<TreePath, usize>,
     evaluation: &mut IntentEvaluation,
     base_exists: &dyn Fn(&TreePath) -> bool,
+    base_source: &dyn Fn(&TreePath) -> Option<BaseSource>,
     index: usize,
     intent: &TreeEditIntent,
 ) -> NetEffect {
@@ -477,7 +557,12 @@ fn apply_one(
         TreeEditIntent::CreateSymlink { path, link_target } => {
             let id = overlay.intern(link_target.clone());
             supersede(owner, evaluation, path, index, false);
-            overlay.put(path.clone(), OverlayEntry::Symlink { target: id });
+            overlay.put(
+                path.clone(),
+                OverlayEntry::Symlink {
+                    target: ContentRef::Overlay(id),
+                },
+            );
             NetEffect::Survives { path: path.clone() }
         }
         TreeEditIntent::CreateDirectory { path } => {
@@ -534,21 +619,35 @@ fn apply_one(
                 // Base-resident: the caller supplies the basis, so the body
                 // stays in the base and the destination names it. Renaming a
                 // gigabyte file copies nothing.
-                OverlayLookup::Absent if base_exists(from) => match basis_entry {
-                    Some(basis) => OverlayEntry::File {
-                        content: ContentRef::Base {
-                            oid: basis.oid.clone(),
-                            from: from.clone(),
-                        },
-                        mode: basis.mode,
-                        class: EntryClass::Content,
-                    },
-                    None => {
-                        return NetEffect::Error(IntentError::MissingBasisEntry {
-                            path: from.clone(),
-                        });
+                OverlayLookup::Absent if base_exists(from) => {
+                    let source = base_source(from);
+                    if let Some(BaseSource::Symlink(oid)) = source {
+                        if basis_entry.is_some() {
+                            return NetEffect::Error(IntentError::BasisEntryMismatch {
+                                path: from.clone(),
+                            });
+                        }
+                        OverlayEntry::Symlink {
+                            target: ContentRef::Base {
+                                oid,
+                                from: from.clone(),
+                            },
+                        }
+                    } else {
+                        let basis = match file_basis(source.as_ref(), basis_entry.as_ref(), from) {
+                            Ok(basis) => basis,
+                            Err(error) => return NetEffect::Error(error),
+                        };
+                        OverlayEntry::File {
+                            content: ContentRef::Base {
+                                oid: basis.oid.clone(),
+                                from: from.clone(),
+                            },
+                            mode: basis.mode,
+                            class: EntryClass::Content,
+                        }
                     }
-                },
+                }
                 _ => {
                     return NetEffect::Error(IntentError::RenameSourceMissing {
                         from: from.clone(),
@@ -583,28 +682,26 @@ fn apply_one(
                 OverlayLookup::Present(_) => {
                     return NetEffect::Error(IntentError::NotAFile { path: path.clone() });
                 }
-                OverlayLookup::Absent if base_exists(path) => match basis_entry {
+                OverlayLookup::Absent if base_exists(path) => {
+                    let source = base_source(path);
+                    let basis = match file_basis(source.as_ref(), basis_entry.as_ref(), path) {
+                        Ok(basis) => basis,
+                        Err(error) => return NetEffect::Error(error),
+                    };
                     // Mode-only change against a base file: the body stays in
                     // the base and is named, not copied.
-                    Some(basis) => {
-                        if basis.mode == *after {
-                            return NetEffect::NoOp(NoOpReason::AlreadyIdentical);
-                        }
-                        OverlayEntry::File {
-                            content: ContentRef::Base {
-                                oid: basis.oid.clone(),
-                                from: path.clone(),
-                            },
-                            mode: *after,
-                            class: EntryClass::Content,
-                        }
+                    if basis.mode == *after {
+                        return NetEffect::NoOp(NoOpReason::AlreadyIdentical);
                     }
-                    None => {
-                        return NetEffect::Error(IntentError::MissingBasisEntry {
-                            path: path.clone(),
-                        });
+                    OverlayEntry::File {
+                        content: ContentRef::Base {
+                            oid: basis.oid.clone(),
+                            from: path.clone(),
+                        },
+                        mode: *after,
+                        class: EntryClass::Content,
                     }
-                },
+                }
                 _ => return NetEffect::Error(IntentError::NotAFile { path: path.clone() }),
             };
             supersede(owner, evaluation, path, index, false);

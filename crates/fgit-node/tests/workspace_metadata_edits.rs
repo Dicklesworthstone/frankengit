@@ -431,7 +431,6 @@ fn unsupported_entry_kinds_and_move_shapes_have_permitted_file_twins() {
             ("src/tool.sh", "src/tool.sh/child"),
             ("src/tool.sh", "src"),
             ("src/tool.sh", "dst"),
-            ("src/tool.sh", "link"),
             ("src", "new"),
             ("link", "dst/renamed.sh"),
             ("module", "dst/renamed.sh"),

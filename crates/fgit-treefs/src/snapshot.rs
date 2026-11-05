@@ -283,7 +283,21 @@ impl OverlayRoot {
                         hasher.update(input);
                     }
                 }
-                crate::overlay::OverlayEntry::Symlink { .. }
+                crate::overlay::OverlayEntry::Symlink {
+                    target: crate::overlay::ContentRef::Base { oid, from },
+                } => {
+                    // The staged-link encoding is unchanged. A carried link
+                    // has no content-store identity, so bind its immutable
+                    // object and lineage explicitly instead.
+                    hasher.update(&[1]);
+                    hasher.update(&(oid.len() as u64).to_be_bytes());
+                    hasher.update(oid);
+                    hasher.update(&(from.as_bytes().len() as u64).to_be_bytes());
+                    hasher.update(from.as_bytes());
+                }
+                crate::overlay::OverlayEntry::Symlink {
+                    target: crate::overlay::ContentRef::Overlay(_),
+                }
                 | crate::overlay::OverlayEntry::Directory
                 | crate::overlay::OverlayEntry::Whiteout => {}
             }

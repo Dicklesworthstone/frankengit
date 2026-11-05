@@ -306,7 +306,12 @@ fn apply_edits(
             // text byte for byte is the correct behaviour, not a vulnerability.
             "120000" => {
                 let target = overlay.intern(content.as_bytes().to_vec());
-                overlay.put(path, OverlayEntry::Symlink { target });
+                overlay.put(
+                    path,
+                    OverlayEntry::Symlink {
+                        target: ContentRef::Overlay(target),
+                    },
+                );
             }
             // A gitlink names a commit that is NOT in this repository's object
             // store, which is the whole point of the case: it is the one entry

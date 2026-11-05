@@ -169,8 +169,9 @@ pub enum OverlayEntry {
     },
     /// A symlink stored as link-text data, never as host traversal authority.
     Symlink {
-        /// Identity of the link text in the content store.
-        target: ContentId,
+        /// Where the link text lives. A rename preserves the immutable blob
+        /// identity without fetching, copying or following its target bytes.
+        target: ContentRef,
     },
     /// An explicitly created directory that may still be empty.
     Directory,
@@ -198,7 +199,7 @@ impl OverlayEntry {
     pub const fn content_id(&self) -> Option<ContentId> {
         match self {
             Self::File { content, .. } => content.overlay_id(),
-            Self::Symlink { target } => Some(*target),
+            Self::Symlink { target } => target.overlay_id(),
             Self::Conflict { marker, .. } => Some(*marker),
             Self::Directory | Self::Whiteout | Self::Submodule { .. } => None,
         }
@@ -211,6 +212,9 @@ impl OverlayEntry {
             Self::File {
                 content: ContentRef::Base { oid, from },
                 ..
+            }
+            | Self::Symlink {
+                target: ContentRef::Base { oid, from },
             } => Some((oid, from)),
             _ => None,
         }
