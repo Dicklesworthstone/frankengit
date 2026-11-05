@@ -42,7 +42,8 @@ where
     verify_successor(basis, batch, head, tail, latest_committed_rcr_id)?;
     verify_tail_binding(identity, batch, head)?;
     verify_roots(batch, head)?;
-    verify_refusal_only(basis, batch)
+    verify_refusal_only(basis, batch)?;
+    verify_policy_configuration_transition(basis, batch, head)
 }
 
 fn verify_batch_evidence_root(batch: &RepositoryDecisionBatchBody) -> Result<(), ChronicleRefusal> {
@@ -350,7 +351,7 @@ fn verify_refusal_only(
         return Ok(());
     }
     let previous = basis.body();
-    let unchanged: [(&'static str, bool); 4] = [
+    let unchanged: [(&'static str, bool); 5] = [
         (
             "resulting_ref_root",
             batch.resulting_ref_root == previous.ref_root,
@@ -367,11 +368,96 @@ fn verify_refusal_only(
             "resulting_outbox_root",
             batch.resulting_outbox_root == previous.outbox_root,
         ),
+        (
+            "resulting_policy_epoch",
+            batch.resulting_policy_epoch == previous.policy_epoch,
+        ),
     ];
     for (field, held) in unchanged {
         if !held {
             return Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState { field });
         }
+    }
+    Ok(())
+}
+
+/// Structural replay constraints, independent of the opaque publication proof.
+///
+/// An event digest alone does not identify a protection command or prove the
+/// contents of a configuration body. Admission and the proof-backed sealer own
+/// those checks. A stored pair can still demonstrate that configuration moved
+/// only with one committed immediate policy advance, preserving source and
+/// retention roots. Checkpoint activation has its separate successor verifier.
+fn verify_policy_configuration_transition(
+    basis: &PublicationBasis,
+    batch: &RepositoryDecisionBatchBody,
+    head: &RepositoryAuthorityHeadBody,
+) -> Result<(), ChronicleRefusal> {
+    let previous = basis.body();
+    for (field, unchanged) in [
+        (
+            "format_registry_epoch",
+            head.format_registry_epoch == previous.format_registry_epoch,
+        ),
+        (
+            "last_checkpoint_id",
+            head.last_checkpoint_id == previous.last_checkpoint_id,
+        ),
+    ] {
+        if !unchanged {
+            return Err(ChronicleRefusal::PermanentHeadFieldChanged { field });
+        }
+    }
+    let configuration_changed = head.configuration_root != previous.configuration_root;
+    let policy_changed = head.policy_epoch != previous.policy_epoch;
+    if configuration_changed && batch.committed_rcrs.is_empty() {
+        return Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState {
+            field: "configuration_root",
+        });
+    }
+    if !configuration_changed && !policy_changed {
+        return Ok(());
+    }
+    let expected_epoch =
+        previous
+            .policy_epoch
+            .next()
+            .map_err(|_| ChronicleRefusal::SequenceExhausted {
+                counter: "policy epoch",
+            })?;
+    for (field, matches) in [
+        (
+            "immediate policy epoch",
+            head.policy_epoch == expected_epoch,
+        ),
+        (
+            "one committed decision",
+            batch.decisions.len() == 1 && batch.committed_rcrs.len() == 1,
+        ),
+        ("ref root", head.ref_root == previous.ref_root),
+        (
+            "retention root",
+            head.retention_root == previous.retention_root,
+        ),
+        (
+            "compaction link",
+            batch.compaction_generation_link.is_none(),
+        ),
+    ] {
+        if !matches {
+            return Err(ChronicleRefusal::PolicyTransitionMismatch { field });
+        }
+    }
+    let record = &batch.committed_rcrs[0];
+    if record.policy_epoch != previous.policy_epoch {
+        return Err(ChronicleRefusal::PolicyTransitionMismatch {
+            field: "admission policy epoch",
+        });
+    }
+    if record.resulting_ref_root != previous.ref_root {
+        return Err(ChronicleRefusal::PolicyTransitionMismatch {
+            field: "committed ref root",
+        });
     }
     Ok(())
 }

@@ -42,6 +42,7 @@ mod metadata_read_tests;
 pub mod milestones;
 pub mod notifications;
 pub mod objects;
+mod policy_configuration;
 pub mod policy_preparation;
 pub mod prepare;
 pub mod progress;

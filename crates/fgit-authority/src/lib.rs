@@ -102,13 +102,18 @@ pub use crate::admission::{
 pub use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 pub use crate::capability_revocation::{
     CapabilityRevocationAuthorityFailure, CapabilityRevocationBodyRefusal,
-    CapabilityRevocationGenerationBody, CapabilityRevocationGenerationId,
-    CapabilityRevocationGenerationRead, CapabilityRevocationGenerationStage,
+    CapabilityRevocationEpochTransition, CapabilityRevocationGenerationBody,
+    CapabilityRevocationGenerationId, CapabilityRevocationGenerationRead,
+    CapabilityRevocationGenerationStage, CapabilityRevocationTransitionRefusal,
     MAX_CAPABILITY_REVOCATION_ENTRIES, capability_revocation_generation_id_from_root,
+    prepare_capability_revocation_epoch_transition,
+    prepare_capability_revocation_epoch_transition_async,
     read_capability_revocation_generation_by_id, read_capability_revocation_generation_by_id_async,
     read_head_selected_capability_revocation_generation,
     read_head_selected_capability_revocation_generation_async,
     stage_capability_revocation_generation, stage_capability_revocation_generation_async,
+    verify_capability_revocation_epoch_transition,
+    verify_capability_revocation_epoch_transition_async,
 };
 pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,

@@ -2608,6 +2608,8 @@ pub enum AdmissionError {
     HeadIdentity(fgit_codec::CodecRefusal),
     /// Chronicle refused a batch/head pair before it reached the CAS.
     Chronicle(fgit_chronicle::ChronicleRefusal),
+    /// A policy transition could not retain exact canonical revocation state.
+    RevocationTransition(Box<fgit_authority::CapabilityRevocationTransitionRefusal>),
     /// Publication or replay refused to answer.
     Outcome(Box<OutcomeFailure>),
     /// Asynchronous projection material was unavailable before a terminal
@@ -2697,6 +2699,12 @@ impl Display for AdmissionError {
             Self::Chronicle(refusal) => {
                 write!(formatter, "chronicle publication refused: {refusal}")
             }
+            Self::RevocationTransition(refusal) => {
+                write!(
+                    formatter,
+                    "policy revocation carry-forward refused: {refusal}"
+                )
+            }
             Self::Outcome(failure) => {
                 write!(formatter, "terminal outcome resolution failed: {failure}")
             }
@@ -2768,6 +2776,12 @@ impl From<fgit_authority::IdentityRefusal> for AdmissionError {
 impl From<fgit_chronicle::ChronicleRefusal> for AdmissionError {
     fn from(refusal: fgit_chronicle::ChronicleRefusal) -> Self {
         Self::Chronicle(refusal)
+    }
+}
+
+impl From<fgit_authority::CapabilityRevocationTransitionRefusal> for AdmissionError {
+    fn from(refusal: fgit_authority::CapabilityRevocationTransitionRefusal) -> Self {
+        Self::RevocationTransition(Box::new(refusal))
     }
 }
 

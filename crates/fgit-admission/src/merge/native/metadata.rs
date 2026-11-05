@@ -236,13 +236,43 @@ where
             .merge_publication_checkpoint(cx)
             .map_err(unavailable)?;
         let mut plan = PublicationPlan::open(basis.clone())?;
+        let event_root = prepared.materialization.record.forge_event_batch_root;
         plan.commit(prepared.materialization.record);
-        let publication = plan.seal(
-            &CryptoBodyIdentity,
-            prepared.materialization.roots,
-            &cumulative,
-            receipt.token(),
-        )?;
+        let publication = if matches!(
+            prepared.event.events.as_slice(),
+            [ForgeEvent {
+                payload: fgit_forge::ForgeEventPayload::ReviewProtectionChanged(_),
+                ..
+            }]
+        ) {
+            super::policy_configuration::seal_policy_configuration_async(
+                store,
+                cx,
+                context.tenant_id,
+                &authenticated,
+                plan,
+                prepared.materialization.roots,
+                event_root,
+                &cumulative,
+                receipt.token(),
+            )
+            .await
+            .map_err(|failure| match failure {
+                super::policy_configuration::PolicyConfigurationFailure::Revocation(failure) => {
+                    failure.into()
+                }
+                super::policy_configuration::PolicyConfigurationFailure::Chronicle(failure) => {
+                    AdmissionError::Chronicle(failure)
+                }
+            })?
+        } else {
+            plan.seal(
+                &CryptoBodyIdentity,
+                prepared.materialization.roots,
+                &cumulative,
+                receipt.token(),
+            )?
+        };
         projection
             .merge_publication_checkpoint(cx)
             .map_err(unavailable)?;

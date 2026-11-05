@@ -164,6 +164,21 @@ pub enum ChronicleRefusal {
         /// Which root disagrees.
         field: &'static str,
     },
+    /// A decision transition changed a fact owned by a separate authority path.
+    PermanentHeadFieldChanged {
+        /// Registry epoch or checkpoint pointer that changed.
+        field: &'static str,
+    },
+    /// A stored configuration/policy change lacks the required committed shape.
+    PolicyTransitionMismatch {
+        /// Structural policy-transition constraint that failed.
+        field: &'static str,
+    },
+    /// An opaque carry-forward proof does not match this proposed publication.
+    RevocationTransitionMismatch {
+        /// Exact predecessor, token, event, epoch, or unchanged-root binding.
+        field: &'static str,
+    },
     /// The head belongs to a different repository than the batch.
     RepositoryMismatch,
     /// A capsule pointer was asked to move to an older or equal position.
@@ -333,6 +348,18 @@ impl fmt::Display for ChronicleRefusal {
             }
             Self::ResultingRootMismatch { field } => {
                 write!(f, "batch and head disagree about {field}")
+            }
+            Self::PermanentHeadFieldChanged { field } => {
+                write!(
+                    f,
+                    "decision publication changed permanent head field {field}"
+                )
+            }
+            Self::PolicyTransitionMismatch { field } => {
+                write!(f, "policy/configuration transition disagrees about {field}")
+            }
+            Self::RevocationTransitionMismatch { field } => {
+                write!(f, "revocation carry-forward proof disagrees about {field}")
             }
             Self::RepositoryMismatch => {
                 f.write_str("the head and the batch govern different repositories")

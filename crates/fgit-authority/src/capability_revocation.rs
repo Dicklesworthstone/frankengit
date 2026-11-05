@@ -27,6 +27,18 @@
 
 use core::fmt;
 
+mod replay;
+mod transition;
+pub use replay::{
+    verify_capability_revocation_epoch_transition,
+    verify_capability_revocation_epoch_transition_async,
+};
+pub use transition::{
+    CapabilityRevocationEpochTransition, CapabilityRevocationTransitionRefusal,
+    prepare_capability_revocation_epoch_transition,
+    prepare_capability_revocation_epoch_transition_async,
+};
+
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder, body_id,
     decode_body, encode_body,

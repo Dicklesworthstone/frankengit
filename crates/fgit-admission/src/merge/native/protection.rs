@@ -1212,7 +1212,6 @@ where
                 .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
         || record.resulting_ref_root != predecessor.body().ref_root
         || successor.retention_root != predecessor.body().retention_root
-        || successor.configuration_root != predecessor.body().configuration_root
     {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
@@ -1233,6 +1232,14 @@ where
         predecessor.body().policy_epoch,
     )
     .map_err(unavailable)?;
+    fgit_authority::verify_capability_revocation_epoch_transition_async(
+        store,
+        cx,
+        predecessor.body(),
+        successor,
+        record.forge_event_batch_root,
+    )
+    .await?;
     let successor_id = fgit_codec::body_id(&fgit_codec::CryptoBodyIdentity, successor)
         .and_then(|id| RepositoryAuthorityHeadId::from_internal_object_id(id).map_err(Into::into))
         .map_err(|_| unavailable(RefusalCode::AuthorityReceiptInvalid))?;

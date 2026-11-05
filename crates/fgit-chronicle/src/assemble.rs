@@ -1,13 +1,16 @@
 //! The builder that cannot express an ill-formed publication.
 
-use fgit_authority::{AuthorityVersionToken, CumulativeOutcomes, TerminalOutcome};
+use fgit_authority::{
+    AuthorityVersionToken, CapabilityRevocationEpochTransition, CumulativeOutcomes, TerminalOutcome,
+};
 use fgit_codec::attest::BodyIdentity;
 use fgit_codec::schema::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
     RepositoryDecisionBatchBody,
 };
 use fgit_types::{
-    DecisionOutcome, DecisionSequence, RefusalCode, RefusalRecordId, RepositorySequence, TxId,
+    DecisionOutcome, DecisionSequence, Digest, RefusalCode, RefusalRecordId, RepositorySequence,
+    TxId,
 };
 
 use std::collections::BTreeSet;
@@ -137,6 +140,116 @@ impl PublicationPlan {
     where
         I: BodyIdentity + ?Sized,
     {
+        self.seal_with_configuration(
+            identity,
+            roots,
+            cumulative_outcomes,
+            expected_head_token,
+            None,
+        )
+    }
+
+    /// Seal one committed policy event while carrying its predecessor's exact
+    /// capability-revocation set into the immediate successor policy epoch.
+    ///
+    /// The opaque authority proof is the only way this builder may change the
+    /// configuration root. It must match the complete predecessor, CAS token,
+    /// epoch, and committed event root. It preserves permanent configuration
+    /// facts and neither permits a refusal nor bundles source/retention changes.
+    /// The proof's dependencies must be staged before publication.
+    pub fn seal_with_revocation_epoch_transition<I>(
+        self,
+        identity: &I,
+        roots: ResultingRoots,
+        cumulative_outcomes: &CumulativeOutcomes,
+        expected_head_token: AuthorityVersionToken,
+        transition: &CapabilityRevocationEpochTransition,
+    ) -> Result<VerifiedPublication, ChronicleRefusal>
+    where
+        I: BodyIdentity + ?Sized,
+    {
+        let previous = self.basis.body();
+        let bindings = [
+            (
+                "predecessor identity",
+                self.basis.id() == transition.predecessor_id(),
+            ),
+            (
+                "predecessor body",
+                previous == transition.predecessor_body(),
+            ),
+            (
+                "predecessor token",
+                expected_head_token == transition.expected_head_token(),
+            ),
+            (
+                "resulting policy epoch",
+                roots.policy_epoch == transition.successor_epoch(),
+            ),
+            ("ref root", roots.ref_root == previous.ref_root),
+            (
+                "retention root",
+                roots.retention_root == previous.retention_root,
+            ),
+            (
+                "compaction link",
+                roots.compaction_generation_link.is_none(),
+            ),
+        ];
+        for (field, matches) in bindings {
+            if !matches {
+                return Err(ChronicleRefusal::RevocationTransitionMismatch { field });
+            }
+        }
+        let [
+            PlannedDecision {
+                outcome: PlannedOutcome::Committed(record),
+                ..
+            },
+        ] = self.decisions.as_slice()
+        else {
+            return Err(ChronicleRefusal::RevocationTransitionMismatch {
+                field: "one committed policy decision",
+            });
+        };
+        for (field, matches) in [
+            (
+                "admission policy epoch",
+                record.policy_epoch == previous.policy_epoch,
+            ),
+            (
+                "policy event root",
+                record.forge_event_batch_root == transition.evidence_root(),
+            ),
+            (
+                "committed ref root",
+                record.resulting_ref_root == previous.ref_root,
+            ),
+        ] {
+            if !matches {
+                return Err(ChronicleRefusal::RevocationTransitionMismatch { field });
+            }
+        }
+        self.seal_with_configuration(
+            identity,
+            roots,
+            cumulative_outcomes,
+            expected_head_token,
+            Some(transition.configuration_root()),
+        )
+    }
+
+    fn seal_with_configuration<I>(
+        self,
+        identity: &I,
+        roots: ResultingRoots,
+        cumulative_outcomes: &CumulativeOutcomes,
+        expected_head_token: AuthorityVersionToken,
+        configuration_root: Option<Digest>,
+    ) -> Result<VerifiedPublication, ChronicleRefusal>
+    where
+        I: BodyIdentity + ?Sized,
+    {
         if let Some(refusal) = self.deferred {
             return Err(refusal);
         }
@@ -239,7 +352,7 @@ impl PublicationPlan {
             outcome_index_root,
             retention_root: roots.retention_root,
             outbox_root: roots.outbox_root,
-            configuration_root: previous.configuration_root,
+            configuration_root: configuration_root.unwrap_or(previous.configuration_root),
             policy_epoch: roots.policy_epoch,
             format_registry_epoch: previous.format_registry_epoch,
             last_checkpoint_id: previous.last_checkpoint_id,

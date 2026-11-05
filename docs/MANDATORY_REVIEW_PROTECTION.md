@@ -187,9 +187,16 @@ material change without including a mutable current-head value.
 The policy-authorizing RCR names the **old** policy epoch; the successor head
 names the incremented epoch. Native history loading permits this difference only
 for the exact checked singleton transition: one decision and RCR, one epoch
-increment, unchanged ref/retention/configuration roots, the authenticated event
-batch, the old administrator authorization, and the matching selected successor
-policy. Other epoch mismatches still refuse.
+increment, unchanged ref/retention roots, the authenticated event batch, the old
+administrator authorization, and the matching selected successor policy. A
+supported configuration without capability-revocation state keeps its exact
+configuration root. When a generation is selected, publication carries its entire
+revoked-ID set into the next epoch, links the predecessor generation, binds the
+committed policy event, and changes only the configuration's revocation root.
+History loading independently reidentifies both generations and configurations
+and checks that exact carry-forward, including permanent repository facts. An
+enabled generation left at the old epoch, unreadable bodies, or other epoch
+mismatches still refuse.
 
 Terminal recovery precedes new-publication quota/service checks. Retrying the
 same command recovers its original committed or refused decision, even after
