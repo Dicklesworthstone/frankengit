@@ -220,6 +220,63 @@ def probe_requests(fg: str, commands: Commands, root: Path, url: str, token: str
                     "a probe changed canonical state")
 
 
+def attempt_route_refusals(fg: str, commands: Commands, root: Path, url: str, token: str) -> None:
+    """Compare complete real refusals without making route existence observable."""
+    endpoint = urllib.parse.urlsplit(url)
+    require(endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1",
+            "attempt check left the selected loopback origin")
+    before = commands.run([fg, "at", str(root / "state"), TENANT, REPOSITORY, "latest"])
+    alias = "/.fgit-receive/" + "42" * 32
+    discovery = "/info/refs?service=git-receive-pack"
+    rpc = [("Content-Type", "application/x-git-receive-pack-request"),
+           ("Content-Length", "4"), ("Expect", "100-continue")]
+    cases = [
+        ("GET", discovery, [], b"", 401),
+        ("GET", alias + discovery, [], b"", 401),
+        ("GET", "/.fgit-receive/short" + discovery, [], b"", 401),
+        ("GET", "/.fgit-receive/" + "AB" * 32 + discovery, [], b"", 401),
+        ("GET", alias + "/unsupported", [], b"", 405),
+        ("GET", alias + "/git-receive-pack", [], b"", 405),
+        ("GET", alias + discovery, [("Idempotency-Key", "conflicting-key")], b"", 401),
+        ("GET", alias + discovery, [("Idempotency-Key", "one"),
+                                    ("Idempotency-Key", "two")], b"", 401),
+        ("GET", alias + discovery, [("Idempotency-Key", "")], b"", 401),
+        ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "one"),
+                                            ("Idempotency-Key", "two")], b"", 401),
+        ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "")], b"", 401),
+        ("POST", "/git-receive-pack", rpc + [("Origin", "https://attacker.invalid")], b"", 403),
+        ("POST", alias + "/git-receive-pack", rpc + [("Origin", "https://attacker.invalid")], b"", 403),
+        ("POST", "/git-receive-pack", rpc + [("Sec-Fetch-Site", "cross-site")], b"", 403),
+        ("POST", alias + "/git-receive-pack", rpc + [("Sec-Fetch-Site", "cross-site")], b"", 403),
+    ]
+    wrong = "b" * 64 if token != "b" * 64 else "c" * 64
+    for credential in (None, "Bearer " + wrong):
+        for method, suffix, extra, body, expected in cases:
+            snapshots = []
+            for route in (endpoint.path, "/missing.git"):
+                connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=30)
+                try:
+                    connection.putrequest(method, route + suffix)
+                    connection.putheader("User-Agent", USER_AGENT)
+                    if credential is not None:
+                        connection.putheader("Authorization", credential)
+                    for name, value in extra:
+                        connection.putheader(name, value)
+                    connection.endheaders(body)
+                    with connection.getresponse() as response:
+                        payload = response.read(65_537)
+                        require(len(payload) <= 65_536, "unbounded attempt refusal")
+                        require(response.status == expected,
+                                f"{method} {suffix}: expected {expected}, got {response.status}")
+                        snapshots.append((response.status, response.getheaders(), payload))
+                finally:
+                    connection.close()
+            require(snapshots[0] == snapshots[1],
+                    f"{method} {suffix}: unauthenticated response disclosed the repository route")
+    require(commands.run([fg, "at", str(root / "state"), TENANT, REPOSITORY, "latest"]) == before,
+            "an attempt refusal changed canonical state")
+
+
 def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> None:
     root.mkdir()
     commands = Commands(git, isolated_environment(root / "home"), timeout)
@@ -235,6 +292,7 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> None:
                 "unauthenticated discovery disclosed repository state")
         require(http_status(url + "/info/refs?service=git-upload-pack", {"X-Forwarded-User": "admin"}) == 401,
                 "forwarded identity bypassed authentication")
+        attempt_route_refusals(fg, commands, root, url, token)
         probe_requests(fg, commands, root, url, token)
         commands.remote_git(token, 2, "-C", str(source), "push", url, "HEAD:refs/heads/main", key="initial-push")
         clones = []

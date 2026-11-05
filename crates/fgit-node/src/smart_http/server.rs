@@ -1333,14 +1333,19 @@ fn serve_connection(
     let mut recovery_error = None;
     let served = (|| -> Result<(), Status> {
         let bytes = read_head(&mut reader, profile.http)?;
-        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
-            return Ok(());
-        };
+        // This shared policy precedes every adapter return, including an
+        // authentication/key refusal or a discovery redirect. Otherwise an
+        // adapter can reveal whether the configured repository route matched.
         let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
         if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
         }
+        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
+            return Ok(());
+        };
+        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        version = envelope.version;
         // Select the response contract before canonical bearer verification.
         // Rejected agent credentials must preserve native JSON errors and the
         // Bearer-only challenge, including outcome-recovery uncertainty.

@@ -55,19 +55,33 @@ fn adapt_with_nonce(
         return Ok(Some(bytes));
     };
     if let Some(scoped) = suffix.strip_prefix(MARKER) {
-        let (identifier, tail) = scoped.split_once('/').ok_or(Status::NotFound)?;
+        // Only recognized aliases belong to this adapter. Let the ordinary
+        // router authenticate and refuse all other targets, just as it does
+        // for a missing repository; an early alias error discloses this route.
+        let Some((identifier, tail)) = scoped.split_once('/') else {
+            return Ok(Some(bytes));
+        };
         if identifier.len() != NONCE_HEX_BYTES
             || !identifier
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(Status::NotFound);
+            return Ok(Some(bytes));
         }
         let tail = match tail {
             "info/refs?service=git-receive-pack" => DISCOVERY,
             "git-receive-pack" => RPC,
-            _ => return Err(Status::NotFound),
+            _ => return Ok(Some(bytes)),
         };
+        // Match ordinary endpoint/framing error ordering, then authenticate
+        // before key conflicts or synthesized-header limits can reveal that
+        // this repository owns the alias. Normalized requests still undergo
+        // the full route and service authorization below this adapter.
+        let request = parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        profile
+            .credentials
+            .authenticate(request.authorization())
+            .map_err(Status::from)?;
         let key = format!("{KEY_PREFIX}{identifier}");
         let normalized = rewrite(&bytes, route, tail, &key, profile.http)?;
         return Ok(Some(normalized));
@@ -80,10 +94,10 @@ fn adapt_with_nonce(
         // (frankengit-g8fo). Such an RPC is a fresh attempt, exactly as a
         // fresh discovery would be. An explicit key keeps its own identity.
         let request = parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        authorized_grant(&request, profile)?;
         if retry_key(&bytes[..request.consumed])?.is_some() {
             return Ok(Some(bytes));
         }
-        authorized_grant(&request, profile)?;
         let key = format!("{KEY_PREFIX}{}", identifier(nonce()));
         return rewrite(&bytes, route, RPC, &key, profile.http).map(Some);
     }

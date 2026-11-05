@@ -384,6 +384,18 @@ fn conflicting_duplicate_and_hop_by_hop_keys_are_refused() {
 #[test]
 fn alias_syntax_cannot_select_foreign_endpoints_or_ambiguous_nonces() {
     let profile = profile();
+    let refused_by_ordinary_router = |input: Vec<u8>| {
+        let (forwarded, response) = run(input.clone(), &profile, 1).unwrap();
+        assert!(response.is_empty());
+        assert_eq!(forwarded.as_deref(), Some(input.as_slice()));
+        let result = parse_head(&input, profile.http)
+            .map_err(Status::from)
+            .and_then(|request| {
+                let request = request.ok_or(Status::BadRequest)?;
+                authenticated_session(&request, &input[..request.consumed], &profile).map(|_| ())
+            });
+        assert!(result.is_err(), "an unrecognized alias must still refuse");
+    };
     for identifier in [
         String::new(),
         "a".repeat(63),
@@ -392,14 +404,7 @@ fn alias_syntax_cannot_select_foreign_endpoints_or_ambiguous_nonces() {
         "g".repeat(64),
         "%61".repeat(32),
     ] {
-        assert!(
-            run(
-                request("GET", &scoped(&identifier, DISCOVERY), "", b""),
-                &profile,
-                1
-            )
-            .is_err()
-        );
+        refused_by_ordinary_router(request("GET", &scoped(&identifier, DISCOVERY), "", b""));
     }
     for suffix in [
         "/info/refs?service=git-upload-pack",
@@ -409,14 +414,7 @@ fn alias_syntax_cannot_select_foreign_endpoints_or_ambiguous_nonces() {
         "/api/v1/outcomes",
         "/../info/refs?service=git-receive-pack",
     ] {
-        assert!(
-            run(
-                request("GET", &scoped(&"42".repeat(32), suffix), "", b""),
-                &profile,
-                1
-            )
-            .is_err()
-        );
+        refused_by_ordinary_router(request("GET", &scoped(&"42".repeat(32), suffix), "", b""));
     }
     assert!(
         run(
