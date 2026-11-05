@@ -4,8 +4,8 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 18,
-  "count_normalized": 12,
-  "count_unsupported": 18,
+  "count_normalized": 14,
+  "count_unsupported": 16,
   "count_ambiguous": 0,
   "constructs": [
     {
@@ -256,15 +256,15 @@
     },
     {
       "key": "yaml.flow-mapping",
-      "status": "unsupported",
-      "refuses": true,
-      "reason": "flow style admits nesting without indentation, which defeats the depth limit the scanner relies on"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "single-line nested mappings with scalar keys lower like block mappings; explicit values, exact spans and shared node/depth/entry/scalar budgets are required; complex keys, implicit pairs and multiline flow refuse"
     },
     {
       "key": "yaml.flow-sequence",
-      "status": "unsupported",
-      "refuses": true,
-      "reason": "same as flow mappings: depth without indentation"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "single-line nested sequences lower like block sequences; empty collections and one trailing comma are accepted, empty entries refuse, and nesting shares the block scanner's pre-allocation budgets"
     },
     {
       "key": "yaml.merge-key",
