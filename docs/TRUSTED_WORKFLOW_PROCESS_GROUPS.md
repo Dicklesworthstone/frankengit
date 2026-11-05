@@ -50,8 +50,14 @@ Forced cleanup inspects under its original three-second drain deadline. Every
 scan admits at most 16,384 directory entries and at most 4,096 bytes per stat
 record. These work bounds apply to normal completion too. Names in `/proc/<pid>/stat` are
 opaque: spaces, parentheses and newlines are not interpreted as field separators
-inside the command name. An unreadable, malformed, missing-leader, over-capacity
-or timed-out observation refuses rather than claiming complete cleanup. The
+inside the command name. If a nonleader's stat record cannot be read or parsed,
+the scanner asks the kernel for that PID's process group. It skips the failed
+record only when the kernel independently identifies another group or confirms
+that the PID vanished. A failed lookup or an actual member's failed record still
+refuses, and a pinned leader's failed record never uses this exception. This
+keeps unrelated host processes from invalidating an otherwise complete group
+observation without treating an unknown member as stopped. Missing-leader,
+over-capacity and timed-out observations also refuse. The
 normal host procfs must expose the group's members; a filtered or substituted
 process view is outside this trusted profile.
 
@@ -85,7 +91,11 @@ signal termination, output exhaustion, clean joined-child behavior, unrelated
 group isolation, pre-spawn cancellation and liveness-callback unwind. Existing
 workflow, condition, matrix and runner-library tests remain applicable. Private
 procfs fixtures test exact entry/record limits, caller deadline and cancellation,
-missing leaders and zombie distinctions. A deterministic clock advances beyond
+missing leaders and zombie distinctions. Failed-record fixtures pair unrelated
+or vanished PIDs with actual-member and unknown-membership refusals, including
+cancellation around the kernel lookup. A real-kernel regression retains two
+separately owned children while isolating one unrelated malformed record.
+A deterministic clock advances beyond
 the former observation windows during a scan and checks that no progress is
 discarded while the caller budget remains. Separate real-child tests verify that
 repeated WNOWAIT observations retain the leader, competing reaping invalidates

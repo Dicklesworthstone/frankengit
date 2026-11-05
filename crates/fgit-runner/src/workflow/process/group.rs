@@ -3,7 +3,7 @@
 //! after reaping that child: its numeric identity may then name somebody else.
 //! This is trusted-host cleanup, not a sandbox for processes that escape groups.
 use rustix::process::{
-    Pid, Signal, WaitId, WaitIdOptions, kill_process, kill_process_group, waitid,
+    Pid, Signal, WaitId, WaitIdOptions, getpgid, kill_process, kill_process_group, waitid,
 };
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -240,6 +240,15 @@ fn inspect(
     leader: u32,
     checkpoint: &dyn Fn() -> Result<(), ScanError>,
 ) -> Result<Snapshot, ScanError> {
+    inspect_with_group_lookup(root, leader, checkpoint, &kernel_group)
+}
+
+fn inspect_with_group_lookup(
+    root: &Path,
+    leader: u32,
+    checkpoint: &dyn Fn() -> Result<(), ScanError>,
+    group_of: &dyn Fn(u32) -> rustix::io::Result<Pid>,
+) -> Result<Snapshot, ScanError> {
     checkpoint()?;
     let mut snapshot = Snapshot::default();
     let mut saw_leader = false;
@@ -259,27 +268,29 @@ fn inspect(
         if pid == 0 {
             continue;
         }
-        let file = match File::open(entry.path().join("stat")) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let mut bytes = Vec::new();
-        if let Err(error) = file
-            .take((MAX_STAT_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-        {
-            // procfs can return ESRCH after a process vanishes during the read.
-            if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) {
-                continue;
-            }
-            return Err(error.into());
-        }
-        if bytes.len() > MAX_STAT_BYTES {
-            return Err(io::Error::other("process stat limit exceeded").into());
-        }
+        let observed = read_stat(&entry.path().join("stat"), pid);
         checkpoint()?;
-        let (group, state) = stat(&bytes, pid)?;
+        let (group, state) = match observed {
+            Ok(record) => record,
+            Err(error) => {
+                // Procfs includes unrelated host processes. A failed record
+                // does not invalidate this group's observation when the kernel
+                // independently proves that PID absent or in another group.
+                // Never waive a pinned leader's failure, a member's failure or
+                // an unknown membership. Keep the original diagnostic in those
+                // cases; this lookup cannot prove a member stopped or reap it.
+                if pid == leader {
+                    return Err(error.into());
+                }
+                let group = group_of(pid);
+                checkpoint()?;
+                match group {
+                    Ok(group) if group.as_raw_pid() as u32 != leader => continue,
+                    Err(rustix::io::Errno::SRCH) => continue,
+                    _ => return Err(error.into()),
+                }
+            }
+        };
         if pid == leader {
             saw_leader = true;
             if group != leader {
@@ -296,6 +307,28 @@ fn inspect(
     checkpoint()?;
     Ok(snapshot)
 }
+
+fn kernel_group(pid: u32) -> rustix::io::Result<Pid> {
+    // Zero means the caller to getpgid; negative IDs are not process entries.
+    // Reject either interpretation instead of truncating an untrusted name.
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(rustix::io::Errno::INVAL)?;
+    getpgid(Some(pid))
+}
+
+fn read_stat(path: &Path, pid: u32) -> io::Result<(u32, u8)> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take((MAX_STAT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STAT_BYTES {
+        return Err(io::Error::other("process stat limit exceeded"));
+    }
+    stat(&bytes, pid)
+}
+
 fn stat(bytes: &[u8], expected: u32) -> io::Result<(u32, u8)> {
     let bad = || io::Error::other("invalid process stat identity");
     let start = bytes.windows(2).position(|p| p == b" (").ok_or_else(bad)?;
