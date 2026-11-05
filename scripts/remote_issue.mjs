@@ -24,8 +24,10 @@ send/recover additionally accept:
 Input JSON: endpoint, scope {tenant_id, repository_id, repository_incarnation,
 principal_id}, number, expected_version, action, fields. Numbers/versions are
 canonical decimal strings, not JSON numbers. Actions: open/edit/comment/
-append-comment/close/reopen/assign/unassign/lock/unlock. Only append-comment requires
-expected_version: null, takes body only and sends no predecessor field.
+append-comment/close/reopen/assign/unassign/add-assignees/add-labels/lock/unlock/
+set-milestone/clear-milestone. append-comment, add-assignees and add-labels require
+expected_version: null and send no predecessor field. They take, respectively,
+body, 1..16 distinct assignee IDs, or 1..32 distinct labels in fields.
 Strict comment still requires an exact positive version. No mode fallback.
 Native issue-write and outcome-read grants are independent.
 The principal is an expected authenticated identity, never sent as a form field.

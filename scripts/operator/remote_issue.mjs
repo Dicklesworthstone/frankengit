@@ -10,7 +10,8 @@ import { isCredentialToken } from './credential_token.mjs';
 export const ISSUE_LIMITS = Object.freeze({ form: 256 * 1024, reply: 16 * 1024, intent: 512 * 1024,
   body: 64 * 1024, title: 256, labels: 32, assignees: 16 });
 const MAX_U64 = 18446744073709551615n;
-const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
+const ACTIONS = ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign', 'add-assignees', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
+const ADDITION_PROFILES = Object.freeze({ 'add-assignees': 'issue.add-assignees.v1', 'add-labels': 'issue.add-labels.v1' });
 const INTENT = 'frankengit-remote-issue-intent-v1';
 const ID = /^[0-9a-f]{32}$/, HASH = /^[0-9a-f]{64}$/;
 export class IssueError extends Error {
@@ -101,14 +102,17 @@ export function parseIssueJson(bytes, { wire = false, maximum = ISSUE_LIMITS.int
 }
 export function issueCommand(number, version, action, input) {
   issueU64(number, 1n);
-  const append = action === 'append-comment';
+  const append = action === 'append-comment', addition = Object.hasOwn(ADDITION_PROFILES, action);
+  const independent = append || addition;
   // Explicit local null means the native form carries NO predecessor field.
   // Never reinterpret a strict saved request by discarding its version.
   if (append) { if (version !== null) fail('append_issue_version_forbidden'); }
+  else if (addition) { if (version !== null) fail('addition_issue_version_forbidden'); }
   else issueU64(version, 0n, MAX_U64 - 1n);
-  if (!ACTIONS.includes(action) || (!append && (action === 'open') !== (version === '0'))) fail('invalid_issue_action_or_version');
+  if (!ACTIONS.includes(action) || (!independent && (action === 'open') !== (version === '0'))) fail('invalid_issue_action_or_version');
   const names = ['open', 'edit'].includes(action) ? ['title', 'body', 'labels']
-    : ['comment', 'append-comment'].includes(action) ? ['body'] : ['assign', 'unassign'].includes(action) ? ['assignees']
+    : ['comment', 'append-comment'].includes(action) ? ['body'] : ['assign', 'unassign', 'add-assignees'].includes(action) ? ['assignees']
+      : action === 'add-labels' ? ['labels']
       : action === 'set-milestone' ? ['milestone', 'expected_milestone_version'] : [];
   fields(input, names, action === 'open' ? ['title', 'body'] : action === 'edit' ? [] : names);
   const normalized = {};
@@ -122,8 +126,9 @@ export function issueCommand(number, version, action, input) {
     normalized.expected_milestone_version = issueU64(input.expected_milestone_version, 1n);
   }
   if ((action === 'edit' && !Object.keys(normalized).length) || (['comment', 'append-comment'].includes(action) && !normalized.body.trim()) ||
-      (['assign', 'unassign'].includes(action) && !normalized.assignees.length)) fail('empty_issue_change');
-  const form = new URLSearchParams(append ? {} : { expected_version: version });
+      (['assign', 'unassign', 'add-assignees'].includes(action) && !normalized.assignees.length) ||
+      (action === 'add-labels' && !normalized.labels.length)) fail('empty_issue_change');
+  const form = new URLSearchParams(independent ? {} : { expected_version: version });
   for (const name of ['title', 'body']) if (Object.hasOwn(normalized, name)) form.append(name, normalized[name]);
   if (normalized.labels) {
     for (const label of normalized.labels) form.append('label', label);
@@ -156,11 +161,14 @@ export function validateIssueIntent(value) {
   return normalized;
 }
 export function validateIssuePublication(value, intent, status) {
+  const profile = Object.hasOwn(ADDITION_PROFILES, intent.action) ? ADDITION_PROFILES[intent.action] : null;
   fields(value, ['type', 'schema_version', 'tenant_id', 'repository_id', 'principal_id', 'number', 'expected_version', 'action',
-    'tx_id', 'outcome', 'decision_sequence', 'repository_commit_id', 'refusal_record_id', 'refusal_code', 'delivery_acknowledged']);
+    'tx_id', 'outcome', 'decision_sequence', 'repository_commit_id', 'refusal_record_id', 'refusal_code', 'delivery_acknowledged',
+    ...(profile === null ? [] : ['command_profile'])]);
   if (value.type !== 'issue_publication' || value.schema_version !== 1 ||
       ['tenant_id', 'repository_id', 'principal_id'].some(key => value[key] !== intent.scope[key]) ||
       value.number !== intent.number || value.expected_version !== intent.expected_version || value.action !== intent.action ||
+      (profile !== null && (intent.expected_version !== null || value.command_profile !== profile)) ||
       !['committed', 'refused'].includes(value.outcome) || status !== (value.outcome === 'committed' ? 200 : 409) ||
       value.delivery_acknowledged !== null) fail('issue_publication_mismatch');
   opaque(value.tx_id); issueU64(value.decision_sequence, 1n);

@@ -54,6 +54,7 @@ async function fixture(t, options = {}) {
         state = options.refuse ? 'refused' : 'committed'; const pieces = request.url.split('/'), form = new URLSearchParams(body);
         reply = { type: 'issue_publication', schema_version: 1, tenant_id: scope.tenant_id, repository_id: scope.repository_id,
           principal_id: scope.principal_id, number: pieces.at(-2), expected_version: form.get('expected_version'), action: pieces.at(-1),
+          ...(['add-labels', 'add-assignees'].includes(pieces.at(-1)) ? { command_profile: `issue.${pieces.at(-1)}.v1` } : {}),
           tx_id: transaction.tx_id, outcome: state, decision_sequence: '18446744073709551615',
           repository_commit_id: state === 'committed' ? 'rcr:fixture' : null,
           refusal_record_id: state === 'refused' ? 'refusal:fixture' : null,
@@ -97,6 +98,54 @@ test('send confirms one publication and saves an atomic record; retained termina
   assert.equal(again.value.dispatched_this_call, false); assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
   assert.deepEqual(await readdir(f.slot), ['intent.json']);
 });
+for (const [action, fields, nativeField] of [
+  ['add-labels', { labels: ['z', 'é', 'a&=+%'] }, 'label'],
+  ['add-assignees', { assignees: ['66'.repeat(16), scope.principal_id] }, 'assignee'],
+]) {
+  test(`${action} CLI persists an exact addition and validates its saved result on restart`, async t => {
+    const f = await fixture(t, { input: { action, expected_version: null, fields } });
+    const prepared = await f.prepare(); assert.equal(prepared.code, 0, prepared.stdout);
+    assert.equal(prepared.value.expected_version, null); assert.equal(f.calls.length, 0);
+    const before = await readFile(join(f.slot, 'intent.json')), intent = await loadIssueIntent(f.slot);
+    const form = new URLSearchParams(intent.body);
+    assert.equal(form.has('expected_version'), false);
+    assert.deepEqual([...form.keys()], Array(Object.values(fields)[0].length).fill(nativeField));
+    const inspected = await invoke(['inspect', '--request-dir', f.slot]);
+    assert.equal(inspected.code, 0); assert.deepEqual(inspected.value.intent, intent);
+    const record = join(f.directory, 'outcome.json');
+    const sent = await invoke([...f.sendArgs(intent.key), '--record', record]);
+    assert.equal(sent.code, 0, sent.stdout); assert.equal(sent.value.publication.command_profile, `issue.${action}.v1`);
+    assert.equal(sent.value.publication.expected_version, null);
+    const recovered = await invoke([...f.recoverArgs, '--known', record]);
+    assert.equal(recovered.code, 0, recovered.stdout); assert.equal(recovered.value.dispatched_this_call, false);
+    const retry = await invoke([...f.sendArgs(intent.key), '--known', record]);
+    assert.equal(retry.code, 0, retry.stdout); assert.equal(retry.value.dispatched_this_call, false);
+    const writes = f.calls.filter(call => !call.path.endsWith('/outcomes'));
+    assert.equal(writes.length, 1); assert.equal(writes[0].body, intent.body);
+    assert.equal(writes[0].headers['idempotency-key'], intent.key);
+    assert.deepEqual(await readFile(join(f.slot, 'intent.json')), before);
+    const altered = JSON.parse(await readFile(record, 'utf8'));
+    altered.publication.command_profile = action === 'add-labels' ? 'issue.add-assignees.v1' : 'issue.add-labels.v1';
+    const wrong = join(f.directory, 'wrong-profile.json'); await writeFile(wrong, issueCanonical(altered), { mode: 0o600 });
+    const count = f.calls.length;
+    assert.equal((await invoke([...f.recoverArgs, '--known', wrong])).code, 2);
+    assert.equal(f.calls.length, count);
+  });
+  test(`${action} CLI recovers a lost publication reply in a fresh process without resending`, async t => {
+    const f = await fixture(t, { input: { action, expected_version: null, fields },
+      handle: ({ recovering, response }) => { if (recovering) return false; response.destroy(); return true; } });
+    const prepared = await f.prepare(); assert.equal(prepared.code, 0, prepared.stdout);
+    const before = await readFile(join(f.slot, 'intent.json'));
+    const sent = await invoke(f.sendArgs(prepared.value.key));
+    assert.equal(sent.code, 3); assert.equal(sent.value.outcome_unknown, true);
+    const recovered = await invoke(f.recoverArgs);
+    assert.equal(recovered.code, 0, recovered.stdout); assert.equal(recovered.value.key, prepared.value.key);
+    assert.equal(recovered.value.expected_version, null); assert.equal(recovered.value.dispatched_this_call, false);
+    assert.equal((await invoke(f.sendArgs(prepared.value.key))).value.dispatched_this_call, false);
+    assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+    assert.deepEqual(await readFile(join(f.slot, 'intent.json')), before);
+  });
+}
 test('native refusal exit is distinct from local rejection and unknown transport', async t => {
   const f = await fixture(t, { refuse: true }), p = await f.prepare(), result = await invoke(f.sendArgs(p.value.key));
   assert.equal(result.code, 1); assert.equal(result.value.outcome.state, 'refused');

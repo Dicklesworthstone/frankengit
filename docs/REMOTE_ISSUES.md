@@ -8,7 +8,8 @@ changes. The server must enable issues and outcomes and provision the caller
 with the independent issue-write and outcome-read grants.
 
 `scripts/operator/remote_issue.mjs` supports native `open`, `edit`, `comment`,
-`append-comment`, `close`, `reopen`, `lock`, `unlock`, `assign` and `unassign`. Issue numbers and expected versions
+`append-comment`, `close`, `reopen`, `lock`, `unlock`, `assign`, `unassign`,
+`add-assignees`, `add-labels`, `set-milestone` and `clear-milestone`. Issue numbers and expected versions
 are canonical decimal **strings**, including values beyond JavaScript's safe
 integer range. Text and list limits follow the native form contract; unknown
 fields, duplicate labels/assignees and invalid versions refuse before I/O.
@@ -32,6 +33,33 @@ while planning its position against the current canonical history. See
 This permits comments on unlocked open or closed issues; it grants no other edit or
 authority. Different request identities with identical text remain different
 comments. Keep the saved intent for recovery, including after a lost reply.
+
+Use `add-labels` or `add-assignees` to add metadata while other writers change
+the same issue. Both require explicit `expected_version: null`; the form omits
+the predecessor completely. Their `fields` objects contain exactly one nonempty
+array:
+
+| Action | Fields | Addition limit | Required publication profile |
+|---|---|---|---|
+| `add-labels` | `{ "labels": ["bug", "urgent"] }` | 1–32 distinct labels, at most 64 UTF-8 bytes each | `issue.add-labels.v1` |
+| `add-assignees` | `{ "assignees": ["44444444444444444444444444444444"] }` | 1–16 distinct principal IDs | `issue.add-assignees.v1` |
+
+The client sorts each addition by UTF-8 bytes before retaining its exact form
+and key. It rejects duplicates, empty sets, version fields and unrelated fields
+before I/O. The native server unions the supplied values with the current issue
+state and enforces the **resulting** 32-label or 16-assignee limit. A missing,
+swapped or unsupported `command_profile` in the publication receipt leaves the
+operation unresolved until original-key recovery; it cannot silently acquire
+replacement semantics. See the [label-addition contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2026-native-issue-label-addition-intents)
+and [assignee-addition contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2025-native-issue-assignee-addition-intents).
+
+Exact-version `edit` still replaces or clears labels, and `assign`/`unassign`
+retain their predecessor checks. Their saved forms, keys and receipt shapes
+remain unchanged. A retry of a terminal addition recovers that original outcome
+without adding again, including after a later writer removes one of its values.
+A terminal capacity refusal also remains refused after space becomes available.
+The client never refreshes a predecessor, changes the addition, or falls back to
+a strict operation when an addition route is unavailable.
 
 `lock` and `unlock` require the existing issue-write grant, a positive exact
 `expected_version` and an empty `fields` object. The lock is independent of
@@ -139,6 +167,9 @@ from the native issue API/browser for exact-version operations. A concurrent
 version change causes a native refusal, never a silently refreshed mutation.
 For contention-tolerant commenting instead, select `"action": "append-comment"`,
 `"expected_version": null` and a body-only `fields` object.
+For independent metadata additions, select `"action": "add-labels"` or
+`"action": "add-assignees"`, `"expected_version": null` and the corresponding
+nonempty array shown above. Sending and recovery use the same commands below.
 `edit` can replace selected title,
 body or labels; `comment` takes a body; `assign`/`unassign` take an `assignees`
 array of principal IDs; `close`/`reopen`/`lock`/`unlock` take an empty `fields` object.

@@ -26,6 +26,7 @@ export function outcome(state = 'key_not_observed', extra = {}) {
 function publication(intent, state = 'committed') {
   return { type: 'issue_publication', schema_version: 1, tenant_id: scope.tenant_id, repository_id: scope.repository_id,
     principal_id: scope.principal_id, number: intent.number, expected_version: intent.expected_version, action: intent.action,
+    ...(['add-labels', 'add-assignees'].includes(intent.action) ? { command_profile: `issue.${intent.action}.v1` } : {}),
     tx_id: tx.tx_id, outcome: state, decision_sequence: '9007199254740993',
     repository_commit_id: state === 'committed' ? 'rcr:fixture' : null,
     refusal_record_id: state === 'refused' ? 'refusal:fixture' : null, refusal_code: state === 'refused' ? 'ExpectedVersionMismatch' : null,
@@ -71,6 +72,8 @@ for (const [action, version, data, pairs] of [
   ['edit', '1', { labels: [] }, [['expected_version', '1'], ['clear_labels', 'true']]],
   ['comment', '2', { body: '  literal\r\n💡  ' }, [['expected_version', '2'], ['body', '  literal\r\n💡  ']]],
   ['append-comment', null, { body: '  literal%26+&=\r\n💡  ' }, [['body', '  literal%26+&=\r\n💡  ']]],
+  ['add-labels', null, { labels: ['é', 'a&=+%', 'z'] }, [['label', 'a&=+%'], ['label', 'z'], ['label', 'é']]],
+  ['add-assignees', null, { assignees: ['55'.repeat(16), scope.principal_id] }, [['assignee', scope.principal_id], ['assignee', '55'.repeat(16)]]],
   ['close', '3', {}, [['expected_version', '3']]], ['reopen', '4', {}, [['expected_version', '4']]],
   ['lock', '7', {}, [['expected_version', '7']]], ['unlock', '8', {}, [['expected_version', '8']]],
   ['assign', '5', { assignees: [scope.principal_id] }, [['expected_version', '5'], ['assignee', scope.principal_id]]],
@@ -341,4 +344,99 @@ test('append cancellation drains publication and retains its exact request', asy
   const before = issueCanonical(p.intent);
   await assert.rejects(p.send({ signal: controller.signal }), error => error.dispatched && error.code === 'issue_cancelled');
   assert.equal(issueCanonical(validateIssueIntent(p.intent)), before); assert.equal(p.calls.length, 2);
+});
+
+for (const [action, field, nativeField, entries, maximum, strictAction] of [
+  ['add-labels', 'labels', 'label', ['z', 'é', 'a&=+%'], ISSUE_LIMITS.labels, 'edit'],
+  ['add-assignees', 'assignees', 'assignee', ['66'.repeat(16), '55'.repeat(16)], ISSUE_LIMITS.assignees, 'assign'],
+]) {
+  const change = { action, expected_version: null, fields: { [field]: entries } };
+  test(`${action} requires an explicit nonempty bounded addition without any version`, () => {
+    const command = issueCommand('18446744073709551615', null, action, change.fields);
+    assert.equal(command.expected_version, null);
+    assert.deepEqual([...new URLSearchParams(command.body)].map(([name]) => name), entries.map(() => nativeField));
+    assert.deepEqual(command.fields[field], [...entries].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))));
+    const values = Array.from({ length: maximum }, (_, index) => field === 'labels' ? `label-${index}` : (index + 1).toString(16).padStart(32, '0'));
+    assert.equal(issueCommand('1', null, action, { [field]: values }).fields[field].length, maximum);
+    for (const invalid of [[], new Array(1), [...values, field === 'labels' ? 'overflow' : 'ff'.repeat(16)], [entries[0], entries[0]]]) {
+      assert.throws(() => issueCommand('1', null, action, { [field]: invalid }));
+    }
+    for (const version of ['0', '1', 'null', undefined, 1]) {
+      assert.throws(() => issueCommand('1', version, action, change.fields), /addition_issue_version_forbidden/);
+    }
+    for (const extra of [{ expected_version: '1' }, { principal: scope.principal_id }, { clear_labels: true }, { body: 'text' }]) {
+      assert.throws(() => issueCommand('1', null, action, { ...change.fields, ...extra }), /invalid_issue_fields/);
+    }
+    const { expected_version: _, ...omitted } = input(undefined, change);
+    assert.throws(() => prepareIssue(omitted, token));
+    assert.throws(() => issueCommand('1', null, strictAction, change.fields));
+    assert.equal(new URLSearchParams(issueCommand('1', '2', strictAction, change.fields).body).get('expected_version'), '2');
+  });
+  test(`${action} saved identity binds its exact delta and cannot be converted from a strict edit`, () => {
+    const intent = prepareIssue(input(undefined, change), token);
+    assert.deepEqual(validateIssueIntent(parseIssueJson(Buffer.from(issueCanonical(intent)))), intent);
+    const delta = clone(intent); delta.fields[field].pop();
+    assert.throws(() => validateIssueIntent(delta));
+    const strict = prepareIssue(input(undefined, { ...change, action: strictAction, expected_version: '2' }), token);
+    for (const [original, nextAction, version] of [[strict, action, null], [intent, strictAction, '2']]) {
+      const changed = { ...original, ...issueCommand(original.number, version, nextAction, original.fields) };
+      assert.throws(() => validateIssueIntent(changed), /issue_intent_changed/);
+    }
+  });
+  for (const [label, mutate] of [
+    ['missing profile', reply => { delete reply.command_profile; return reply; }],
+    ['swapped profile', reply => ({ ...reply, command_profile: action === 'add-labels' ? 'issue.add-assignees.v1' : 'issue.add-labels.v1' })],
+    ['unknown profile version', reply => ({ ...reply, command_profile: `issue.${action}.v2` })],
+    ['strict action', reply => ({ ...reply, action: strictAction })],
+    ['selected predecessor', reply => ({ ...reply, expected_version: '2' })],
+  ]) test(`${action} refuses a ${label} receipt and retains recovery responsibility`, async t => {
+    const p = await peer(t, { input: change, mutate });
+    await assert.rejects(p.send(), error => error.phase === 'publication' && error.dispatched && error.outcomeUnknown);
+    assert.equal(p.calls.length, 2);
+    assert.equal((await p.recover()).outcome.state, 'committed');
+    assert.equal(p.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  });
+  test(`${action} lost reply and historical refusal recover without repeating additions`, async t => {
+    for (const state of ['committed', 'refused']) {
+      const p = await peer(t, { input: change, state, drop: true }), before = issueCanonical(p.intent);
+      await assert.rejects(p.send(), error => error.dispatched && error.outcomeUnknown);
+      const result = await p.recover(rotated);
+      assert.equal(result.outcome.state, state); assert.equal(result.key, p.intent.key);
+      assert.equal(result.expected_version, null); assert.equal(result.dispatched_this_call, false);
+      assert.equal((await p.send()).dispatched_this_call, false);
+      assert.equal(p.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+      assert.equal(issueCanonical(p.intent), before);
+    }
+  });
+  test(`${action} unsupported route never substitutes a versioned operation`, async t => {
+    const p = await peer(t, { input: change, handle: ({ response, phase }) => {
+      if (phase !== 'publication') return false;
+      response.writeHead(404); response.end(); return true;
+    } });
+    await assert.rejects(p.send(), error => error.status === 404 && error.dispatched && error.outcomeUnknown);
+    assert.equal(p.calls.length, 2); assert.ok(p.calls[1].path.endsWith(`/${action}`));
+    assert.equal(new URLSearchParams(p.calls[1].body).has('expected_version'), false);
+  });
+}
+
+test('addition labels preserve the native UTF-8 byte limit and refuse empty, control and malformed values', () => {
+  const label = 'é'.repeat(32);
+  assert.deepEqual(issueCommand('1', null, 'add-labels', { labels: [label] }).fields.labels, [label]);
+  for (const value of [label + 'x', '', ' ', 'x\n', 'x\0', 'x\u0085', '\ud800']) {
+    assert.throws(() => issueCommand('1', null, 'add-labels', { labels: [value] }));
+  }
+  for (const value of ['', 'A'.repeat(32), '1'.repeat(31), '1'.repeat(33), null, 1]) {
+    assert.throws(() => issueCommand('1', null, 'add-assignees', { assignees: [value] }));
+  }
+});
+test('strict operations cannot acquire addition semantics from a response profile', async t => {
+  for (const [action, data, profile] of [
+    ['edit', { labels: ['bug'] }, 'issue.add-labels.v1'],
+    ['assign', { assignees: [scope.principal_id] }, 'issue.add-assignees.v1'],
+    ['append-comment', { body: 'message' }, 'issue.add-labels.v1'],
+  ]) {
+    const p = await peer(t, { input: { action, fields: data, expected_version: action === 'append-comment' ? null : '2' },
+      mutate: reply => ({ ...reply, command_profile: profile }) });
+    await assert.rejects(p.send(), error => error.code === 'invalid_issue_fields' && error.dispatched);
+  }
 });
