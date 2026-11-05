@@ -14,6 +14,8 @@ fge_context fg_digest "$(fge_digest_file "$FG_BIN")"
 fge_context fg_mcp_digest "$(fge_digest_file "$FG_MCP_BIN")"
 work="$(fge_tempdir mcp-reviewed-merge-scale)"
 fge_phase action
+fge_run_timeout 30 MCP-REVIEWED-SCALE-CAPTURE-001 python3 "$E2E_ROOT/selftests/test_recorded_command.py"
+fge_assert_exit MCP-REVIEWED-SCALE-CAPTURE-002 0 "$FGE_LAST_EXIT"
 fge_run_timeout 1800 MCP-REVIEWED-SCALE-001 python3 "$E2E_ROOT/helpers/mcp_reviewed_merges.py" "$FG_BIN" "$FG_MCP_BIN" "$work" 100000
 fge_assert_exit MCP-REVIEWED-SCALE-002 0 "$FGE_LAST_EXIT"
 fge_phase assert
