@@ -119,8 +119,16 @@ A write operation is reserve → stage → publish-visible → optionally sync-d
 retains its `BaseView`, capability, intent log, evaluated overlay, `SessionRecord`
 and `WorkspaceLease`. The bounded profile admits sixteen simultaneous sessions,
 each with at most 32 MiB of retained edit bodies and 16,384 export objects. It
-supports ordinary file writes/deletions through the existing export engine;
-other edits refuse. Each adopted edit advances staged and visible epochs.
+supports ordinary file writes, deletions, renames and executable-mode changes
+through the existing export engine. A base-resident rename or mode change must
+supply the source blob identity and mode; the node verifies both against the
+selected immutable tree. Files produced by earlier intents instead retain their
+current overlay content, including across session edit calls. A rename requires
+read/write access to both source and destination, and export requires complete
+disclosure of every rebuilt directory. Base blobs are referenced without copying
+their bytes. Self-renames, ancestor/descendant moves and edits of symlinks,
+directories or gitlinks remain outside this file profile. Each adopted edit
+advances staged and visible epochs.
 Durable remains zero: these mutable sessions are process-local, without a
 restartable session journal. Opaque handles cannot reopen a closed session or
 cross node instances, even when the caller reuses a `WorkspaceId`.

@@ -52,18 +52,19 @@ use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
     AsyncProjectionFailure, BasisBoundValidatedReceive, CanonicalAdmissionStore, CanonicalRefState,
-    CommitEvidence, CommitMaterialization, PermittedObjectClosure, RefusalMaterialization,
-    SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
-    ValidatedSourceImport, admit_basis_bound_validated_receive_async,
-    admit_validated_receive_async, admit_validated_source_import_async,
-    permitted_object_closure_root, prepare_canonical_commit, ref_state_root,
-    validate_source_import,
+    CommitEvidence, CommitMaterialization, PermittedObjectClosure, PreparedCanonicalClosure,
+    RefusalMaterialization, SourceImportOrigin, SourceImportReceipt, SourceRefUpdate,
+    ValidatedClosure, ValidatedReceive, ValidatedSourceImport,
+    admit_basis_bound_validated_receive_async, admit_validated_receive_async,
+    admit_validated_source_import_async, permitted_object_closure_root,
+    prepare_canonical_commit_reusing_closure, ref_state_root, validate_source_import,
 };
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 #[path = "smart_http/receive_session/bounded_intake.rs"]
 mod bounded_receive_intake;
 mod capsule_history;
 mod closure_selection;
+mod evidence_staging;
 pub mod outcome_checkpoint;
 mod outcome_collection;
 pub mod source_retrieval;
@@ -1338,6 +1339,8 @@ pub enum AdmissionMaterializationRefusal {
     Cancelled,
     /// The authority operation refused or became ambiguous.
     Authority(AuthorityFailure),
+    /// Independent immutable staging stopped, possibly after a completed prefix.
+    ImmutableBatch(fgit_authority::ImmutableBatchFailure),
     /// The authenticated receipt could not be decoded as its typed head.
     HeadBody(fgit_authority::HeadBodyRefusal),
     /// The authenticated receipt and requested publication basis did not name
@@ -1406,6 +1409,7 @@ impl Display for AdmissionMaterializationRefusal {
                 formatter.write_str("canonical admission materialization was cancelled")
             }
             Self::Authority(error) => Display::fmt(error, formatter),
+            Self::ImmutableBatch(error) => Display::fmt(error, formatter),
             Self::HeadBody(error) => Display::fmt(error, formatter),
             Self::ExactBasisMismatch => formatter.write_str(
                 "authenticated authority receipt disagrees with requested publication basis",
@@ -1462,6 +1466,7 @@ impl Error for AdmissionMaterializationRefusal {
         match self {
             Self::Delivery(error) => Some(error.as_ref()),
             Self::Authority(error) => Some(error),
+            Self::ImmutableBatch(error) => Some(error),
             Self::HeadBody(error) => Some(error),
             Self::DecisionHistory(error) => Some(error.as_ref()),
             Self::DecisionHistoryVerification(error) => Some(error),
@@ -1796,59 +1801,7 @@ impl DurableAdmissionMaterializer {
         Authority: AsyncAuthorityStore + ?Sized,
         IsCancelled: Fn() -> bool + Sync,
     {
-        let repository_id = bodies.principal_snapshot().repository_id();
-        stage_principal_snapshot_in(
-            authority,
-            cx,
-            repository_id,
-            bodies.principal_snapshot(),
-            is_cancelled,
-        )
-        .await?;
-        stage_policy_decision_in(
-            authority,
-            cx,
-            repository_id,
-            bodies.policy_decision(),
-            is_cancelled,
-        )
-        .await?;
-        stage_evidence_body_in(
-            authority,
-            cx,
-            repository_id,
-            ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
-            bodies.invariant_evidence(),
-            is_cancelled,
-        )
-        .await?;
-        stage_evidence_body_in(
-            authority,
-            cx,
-            repository_id,
-            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
-            bodies.forge_event_batch(),
-            is_cancelled,
-        )
-        .await?;
-        stage_evidence_body_in(
-            authority,
-            cx,
-            repository_id,
-            ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
-            bodies.outbox_effect_batch(),
-            is_cancelled,
-        )
-        .await?;
-        stage_evidence_body_in(
-            authority,
-            cx,
-            repository_id,
-            ADMISSION_RETENTION_DELTA_KEY_PREFIX,
-            bodies.retention_delta(),
-            is_cancelled,
-        )
-        .await
+        evidence_staging::stage_decision_in(authority, cx, bodies, is_cancelled).await
     }
 
     async fn stage_refusal_evidence_bodies_in<Authority, IsCancelled>(
@@ -2578,6 +2531,10 @@ pub struct DurableAsyncAdmissionProjection<'materializer> {
     authentication: Option<AdmissionAuthentication>,
     agent_deadline: Option<std::time::Instant>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
+    /// At most one exact closure's pure preparation and canonical bytes.
+    /// This never proves placement: each command still writes through its
+    /// selected authority, including on a hit and after any CAS replan.
+    prepared_closure: Mutex<Option<PreparedCanonicalClosure>>,
     /// A receive's staged objects, published before its first commit's
     /// frames (frankengit-tz5z).
     publication: Option<StagedPublication<'materializer>>,
@@ -2604,6 +2561,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             authentication: None,
             agent_deadline: None,
             prepared: Mutex::new(None),
+            prepared_closure: Mutex::new(None),
             publication: None,
         }
     }
@@ -2688,7 +2646,15 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         let evidence = provider
             .commit_evidence(basis, request, fold)
             .map_err(AsyncProjectionFailure::Unavailable)?;
-        let prepared = prepare_canonical_commit(
+        ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
+        // Move the optional proof out before any await. A poisoned cache or
+        // concurrent preparation only loses reuse, never admission checks.
+        let reusable = self
+            .prepared_closure
+            .lock()
+            .ok()
+            .and_then(|mut cached| cached.take());
+        let mut prepared = prepare_canonical_commit_reusing_closure(
             basis,
             request,
             fold,
@@ -2696,8 +2662,10 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             current,
             root_layout,
             evidence,
+            reusable,
         )
         .map_err(AsyncProjectionFailure::Refuse)?;
+        ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
         // The last refusal exit is behind us: this attempt stages a commit.
         // Its objects become durable names before any frame or head names
         // them; a replan finds them published (frankengit-tz5z). Publication
@@ -2727,22 +2695,31 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
                 RefusalCode::InternalInvariantBreach,
             ));
         }
-        let closure_root = self
-            .materializer
-            .stage_permitted_object_closure_in(
-                authority,
-                cx,
-                self.context.repository_id,
-                prepared.object_closure().clone(),
-            )
+        let closure_key = admission_immutable_key(
+            ADMISSION_CLOSURE_KEY_PREFIX,
+            self.context.repository_id,
+            prepared.object_closure_root(),
+        )
+        .map_err(|error| {
+            async_projection_unavailable(AdmissionMaterializationRefusal::Key(error))
+        })?;
+        let closure_frame = prepared.object_closure_frame().map_err(|error| {
+            async_projection_unavailable(AdmissionMaterializationRefusal::CanonicalFrame(error))
+        })?;
+        ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
+        // Never cache successful placement here. StoreInstanceId can repeat
+        // across independently configured databases, and this projection can
+        // receive another authority on a later call. The selected store owns
+        // its own committed-byte cache, cancellation and closed-store checks.
+        stage_immutable_frame(authority, cx, &closure_key, closure_frame)
             .await
             .map_err(async_projection_unavailable)?;
-        if closure_root != prepared.object_closure_root() {
-            return Err(AsyncProjectionFailure::Unavailable(
-                RefusalCode::InternalInvariantBreach,
-            ));
+        ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
+        let (materialization, closure) = prepared.into_materialization_and_closure();
+        if let Ok(mut cached) = self.prepared_closure.lock() {
+            *cached = Some(closure);
         }
-        Ok(prepared.into_materialization())
+        Ok(materialization)
     }
 }
 
@@ -2956,6 +2933,10 @@ fn async_projection_unavailable(
         }
         AdmissionMaterializationRefusal::Authority(error) => {
             return AdmissionError::Authority(error)
+                .into_projection_unavailable(RefusalCode::EvidenceMissing);
+        }
+        AdmissionMaterializationRefusal::ImmutableBatch(error) => {
+            return AdmissionError::from(fgit_authority::SealFailure::Batch(Box::new(error)))
                 .into_projection_unavailable(RefusalCode::EvidenceMissing);
         }
         AdmissionMaterializationRefusal::DecisionHistory(error) => {
@@ -3194,6 +3175,7 @@ where
     Ok(body)
 }
 
+#[cfg(test)]
 async fn stage_policy_decision_in<Authority, IsCancelled>(
     authority: &Authority,
     cx: &Authority::Context,
@@ -12075,10 +12057,12 @@ mod tests {
     mod canonical_genesis;
     mod capsule_history;
     mod closure_selection;
+    mod evidence_staging;
     mod fabric_read_budget;
     mod outcome_checkpoint;
     mod outcome_collection;
     mod policy_evidence;
+    mod prepared_closure;
     mod upload_work_budget;
 
     #[test]

@@ -1337,9 +1337,41 @@ pub struct CommitMaterialization {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedCanonicalCommit {
     next_ref_state: CanonicalRefState,
-    object_closure: PermittedObjectClosure,
+    object_closure: PreparedCanonicalClosure,
     materialization: CommitMaterialization,
 }
+
+/// A canonical object closure whose complete membership has been checked
+/// against its claimed root during commit preparation.
+///
+/// This is reusable computation, not a placement or authorization receipt.
+/// It has no public constructor: [`prepare_canonical_commit_reusing_closure`]
+/// verifies a new closure or compares every supplied member and the supplied
+/// root with this proof before reusing it. Storage must still stage its exact
+/// frame for every materialization. Keeping at most one proof per session
+/// avoids cloning, encoding and hashing the same potentially large closure
+/// for each independent ref command.
+#[derive(Clone, Debug)]
+pub struct PreparedCanonicalClosure {
+    closure: PermittedObjectClosure,
+    root: Digest,
+    frame: Option<Vec<u8>>,
+}
+
+impl PreparedCanonicalClosure {
+    fn matches(&self, closure: &ValidatedClosure) -> bool {
+        self.root == closure.object_closure_root && self.closure.objects == closure.objects
+    }
+}
+
+impl PartialEq for PreparedCanonicalClosure {
+    fn eq(&self, other: &Self) -> bool {
+        // Encoding a frame is optional derived work, not a semantic change.
+        self.root == other.root && self.closure == other.closure
+    }
+}
+
+impl Eq for PreparedCanonicalClosure {}
 
 impl PreparedCanonicalCommit {
     /// Immutable successor ref state whose root is named by the materialization.
@@ -1351,7 +1383,20 @@ impl PreparedCanonicalCommit {
     /// Immutable closure body whose root is bound by the RCR.
     #[must_use]
     pub const fn object_closure(&self) -> &PermittedObjectClosure {
-        &self.object_closure
+        &self.object_closure.closure
+    }
+
+    /// The exact immutable frame to stage for this closure.
+    ///
+    /// The frame is encoded at most once while its opaque preparation is
+    /// retained. Reusing these bytes never proves that a particular authority
+    /// store holds them; callers must still perform its immutable write.
+    pub fn object_closure_frame(&mut self) -> Result<&[u8], CodecRefusal> {
+        let frame = match self.object_closure.frame.take() {
+            Some(frame) => frame,
+            None => encode_body(&self.object_closure.closure)?,
+        };
+        Ok(self.object_closure.frame.insert(frame).as_slice())
     }
 
     /// Root the materialization binds to [`Self::next_ref_state`].
@@ -1370,6 +1415,18 @@ impl PreparedCanonicalCommit {
     #[must_use]
     pub fn into_materialization(self) -> CommitMaterialization {
         self.materialization
+    }
+
+    /// Returns the staged materialization and its reusable pure closure work.
+    ///
+    /// The preparation carries no durable-storage claim, even when the caller
+    /// obtained it after a successful write. A later use rechecks exact input
+    /// membership and must stage the frame through the selected authority.
+    #[must_use]
+    pub fn into_materialization_and_closure(
+        self,
+    ) -> (CommitMaterialization, PreparedCanonicalClosure) {
+        (self.materialization, self.object_closure)
     }
 }
 
@@ -2057,6 +2114,37 @@ pub fn prepare_canonical_commit(
     root_layout: RootLayoutVersion,
     evidence: CommitEvidence,
 ) -> Result<PreparedCanonicalCommit, RefusalCode> {
+    prepare_canonical_commit_reusing_closure(
+        basis,
+        request,
+        fold,
+        closure,
+        current,
+        root_layout,
+        evidence,
+        None,
+    )
+}
+
+/// Prepares a commit with optional, previously verified closure computation.
+///
+/// Every field of the supplied closure must match the opaque preparation.
+/// A root alone, matching object count, allocation address or earlier basis
+/// never permits reuse. A mismatch follows the ordinary validation path and
+/// preserves its refusal ordering. Ref effects, evidence, request identity and
+/// every resulting RCR field are still prepared independently for this command.
+/// The old preparation is consumed, so a hit transfers its body and optional
+/// encoded frame without copying either.
+pub fn prepare_canonical_commit_reusing_closure(
+    basis: &PublicationBasis,
+    request: &TransactionRequest,
+    fold: &TransactionFoldReport,
+    closure: &ValidatedClosure,
+    current: CanonicalRefState,
+    root_layout: RootLayoutVersion,
+    evidence: CommitEvidence,
+    reusable: Option<PreparedCanonicalClosure>,
+) -> Result<PreparedCanonicalCommit, RefusalCode> {
     let effects = fold
         .effects()
         .ok_or(RefusalCode::ConflictingSemanticEffects)?;
@@ -2066,11 +2154,22 @@ pub fn prepare_canonical_commit(
 
     let next_ref_state = current.apply(&effects.refs)?;
     let ref_root = ref_state_root(root_layout, &next_ref_state)?;
-    let object_closure = PermittedObjectClosure::new(closure.objects.clone());
-    let object_closure_root = permitted_object_closure_root(&object_closure)?;
-    if object_closure_root != closure.object_closure_root {
-        return Err(RefusalCode::ObjectClosureIncomplete);
-    }
+    let object_closure = match reusable.filter(|prepared| prepared.matches(closure)) {
+        Some(prepared) => prepared,
+        None => {
+            let objects = PermittedObjectClosure::new(closure.objects.clone());
+            let root = permitted_object_closure_root(&objects)?;
+            if root != closure.object_closure_root {
+                return Err(RefusalCode::ObjectClosureIncomplete);
+            }
+            PreparedCanonicalClosure {
+                closure: objects,
+                root,
+                frame: None,
+            }
+        }
+    };
+    let object_closure_root = object_closure.root;
 
     let ref_delta_root = canonical_ref_delta_root(&CanonicalRefDelta::from_effects(&effects.refs))?;
     let roots = ResultingRoots {
@@ -4728,6 +4827,7 @@ mod tests {
 
     mod absent_delete;
     mod option_work;
+    mod prepared_closure;
     mod receive_batch;
     mod source_import_bound;
 
