@@ -116,7 +116,9 @@ def seed(commands: Commands, root: Path, fmt: str) -> tuple[Path, str]:
 def server(fg: str, commands: Commands, root: Path, token_file: Path,
            *, receive: bool):
     label = "writable" if receive else "readonly"
-    stdout_path, stderr_path = root / f"{label}.out", root / f"{label}.err"
+    # Restarts of the same node must retain the earlier listener's receipts.
+    capture = Path(tempfile.mkdtemp(prefix=f"{label}-", dir=root))
+    stdout_path, stderr_path = capture / f"{label}.out", capture / f"{label}.err"
     args = [fg, "serve-http", str(root / "state"), TENANT, REPOSITORY, "127.0.0.1:0",
             "--trusted-local", "--token-file", str(token_file), "--principal", PRINCIPAL,
             "--idle-timeout-secs", "15", "--session-timeout-secs", "60",
