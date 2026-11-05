@@ -29,23 +29,34 @@
 //!
 //! # Bounds
 //!
-//! At most [`BODY_CACHE_BYTES`] bytes are retained. A body larger than
-//! [`BODY_CACHE_MAX_ENTRY`] is never cached. The least recently used bodies are
-//! evicted first. A poisoned lock disables the cache (every lookup misses)
-//! rather than panicking, because the cache is an acceleration and never a
-//! source of truth.
+//! Retained body bytes and both copies of every key share the
+//! [`BODY_CACHE_BYTES`] budget. An independent [`BODY_CACHE_MAX_ENTRIES`]
+//! ceiling bounds the number of map nodes and Arc allocations, including for
+//! empty bodies. Container capacity and allocator overhead are additional;
+//! this is not an exact process-RSS limit. The public retained-byte counter
+//! continues to count payload bytes only.
+//!
+//! A body larger than [`BODY_CACHE_MAX_ENTRY`], or an entry whose body and
+//! keys exceed the byte budget, is never cached. Eviction happens before
+//! allocation and preserves least-recently-used order. A zero byte or entry
+//! budget disables retention. Exhausting the recency clock discards the
+//! advisory cache instead of reusing a stamp. A poisoned lock disables the
+//! cache (every lookup misses) rather than panicking.
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-/// Retained bytes across all cached bodies.
+/// Retained payload bytes plus the bytes in both copies of every cached key.
 pub const BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Largest single body worth caching. A larger one would evict too much.
 pub const BODY_CACHE_MAX_ENTRY: usize = 4 * 1024 * 1024;
+/// Independent bound on map entries and Arc allocations, even for empty bodies.
+const BODY_CACHE_MAX_ENTRIES: usize = 65_536;
 
 #[derive(Debug)]
 pub struct BodyCache {
     budget: usize,
     max_entry: usize,
+    max_entries: usize,
     state: Mutex<State>,
 }
 
@@ -55,7 +66,10 @@ struct State {
     bodies: HashMap<Vec<u8>, (Arc<[u8]>, u64)>,
     /// Recency stamp -> key bytes, oldest first.
     recency: BTreeMap<u64, Vec<u8>>,
+    /// Payload bytes, preserving the public diagnostics counter's meaning.
     retained: usize,
+    /// Payload bytes plus the key bytes actually retained in both maps.
+    accounted_bytes: usize,
     clock: u64,
     hits: u64,
     misses: u64,
@@ -73,7 +87,7 @@ pub struct BodyCacheStats {
     pub put_hits: u64,
     /// Bodies currently retained.
     pub entries: usize,
-    /// Bytes currently retained.
+    /// Payload bytes currently retained, excluding keys and container overhead.
     pub retained: usize,
 }
 
@@ -83,9 +97,14 @@ impl BodyCache {
     }
 
     pub(crate) fn with_bounds(budget: usize, max_entry: usize) -> Self {
+        Self::with_limits(budget, max_entry, BODY_CACHE_MAX_ENTRIES)
+    }
+
+    fn with_limits(budget: usize, max_entry: usize, max_entries: usize) -> Self {
         Self {
             budget,
             max_entry: max_entry.min(budget),
+            max_entries,
             state: Mutex::new(State::default()),
         }
     }
@@ -96,8 +115,7 @@ impl BodyCache {
             return None;
         };
         let state = &mut *state;
-        state.clock = state.clock.wrapping_add(1);
-        let now = state.clock;
+        let now = state.next_stamp();
         let Some((body, stamp)) = state.bodies.get_mut(key) else {
             state.misses = state.misses.saturating_add(1);
             return None;
@@ -121,8 +139,7 @@ impl BodyCache {
             return None;
         };
         let state = &mut *state;
-        state.clock = state.clock.wrapping_add(1);
-        let now = state.clock;
+        let now = state.next_stamp();
         let (body, stamp) = state.bodies.get_mut(key)?;
         let matches = body.as_ref() == offered;
         let previous = std::mem::replace(stamp, now);
@@ -138,16 +155,20 @@ impl BodyCache {
     /// that could insert committed bytes between eviction and shutdown.
     pub(crate) fn clear(&self) {
         if let Ok(mut state) = self.state.lock() {
-            state.bodies.clear();
-            state.recency.clear();
-            state.retained = 0;
+            state.discard_entries();
         }
     }
 
     /// Record `body` as the bytes of `key`. The caller has either read them
     /// from the engine or had the engine accept them for this key.
     pub(crate) fn insert(&self, key: &[u8], body: &[u8]) {
-        if body.len() > self.max_entry {
+        if self.budget == 0 || self.max_entries == 0 || body.len() > self.max_entry {
+            return;
+        }
+        let Some(charge) = retention_charge(key.len(), body.len()) else {
+            return;
+        };
+        if charge > self.budget {
             return;
         }
         let Ok(mut state) = self.state.lock() else {
@@ -157,19 +178,25 @@ impl BodyCache {
         if state.bodies.contains_key(key) {
             return;
         }
-        state.clock = state.clock.wrapping_add(1);
-        let now = state.clock;
-        state.bodies.insert(key.to_vec(), (Arc::from(body), now));
-        state.recency.insert(now, key.to_vec());
-        state.retained = state.retained.saturating_add(body.len());
-        while state.retained > self.budget {
-            let Some((_, oldest)) = state.recency.pop_first() else {
+        let now = state.next_stamp();
+        // Preflight the complete entry before evicting anything, and make room
+        // before allocating either key copy or the body. Oversized candidates
+        // therefore leave useful entries intact.
+        while state.bodies.len() >= self.max_entries
+            || state.accounted_bytes > self.budget - charge
+        {
+            if !state.evict_oldest() {
+                // Recency is only an acceleration. If it ever disagrees with
+                // the body map, discard it rather than retaining unbounded data.
+                state.discard_entries();
                 break;
-            };
-            if let Some((evicted, _)) = state.bodies.remove(&oldest) {
-                state.retained = state.retained.saturating_sub(evicted.len());
             }
         }
+        state.bodies.insert(key.to_vec(), (Arc::from(body), now));
+        state.recency.insert(now, key.to_vec());
+        // The preflight above proves both additions fit inside the byte budget.
+        state.retained += body.len();
+        state.accounted_bytes += charge;
     }
 
     pub(crate) fn stats(&self) -> BodyCacheStats {
@@ -186,9 +213,67 @@ impl BodyCache {
     }
 }
 
+impl State {
+    fn discard_entries(&mut self) {
+        self.bodies.clear();
+        self.recency.clear();
+        self.retained = 0;
+        self.accounted_bytes = 0;
+    }
+
+    fn next_stamp(&mut self) -> u64 {
+        if let Some(next) = self.clock.checked_add(1) {
+            self.clock = next;
+        } else {
+            // Reusing a live stamp would orphan another body's eviction entry.
+            // A cold cache is always safe; its next caller reads the store.
+            self.discard_entries();
+            self.clock = 1;
+        }
+        self.clock
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some((_, key)) = self.recency.pop_first() else {
+            return false;
+        };
+        let Some((body, _)) = self.bodies.remove(&key) else {
+            return false;
+        };
+        // Every entry passed retention_charge before insertion. These are its
+        // same lengths, and each charge is included in the retained totals.
+        self.retained -= body.len();
+        self.accounted_bytes -= body.len() + 2 * key.len();
+        true
+    }
+}
+
+/// Charge both owned key arrays, with overflow refused before any allocation.
+fn retention_charge(key_bytes: usize, body_bytes: usize) -> Option<usize> {
+    key_bytes.checked_mul(2)?.checked_add(body_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_bounded(cache: &BodyCache) {
+        let state = cache.state.lock().unwrap();
+        let payload_bytes: usize = state.bodies.values().map(|(body, _)| body.len()).sum();
+        let body_keys: usize = state.bodies.keys().map(Vec::len).sum();
+        let recency_keys: usize = state.recency.values().map(Vec::len).sum();
+        assert_eq!(state.retained, payload_bytes);
+        assert_eq!(
+            state.accounted_bytes,
+            payload_bytes + body_keys + recency_keys
+        );
+        assert!(state.accounted_bytes <= cache.budget);
+        assert!(state.bodies.len() <= cache.max_entries);
+        assert_eq!(state.bodies.len(), state.recency.len());
+        for (key, (_, stamp)) in &state.bodies {
+            assert_eq!(state.recency.get(stamp), Some(key));
+        }
+    }
 
     #[test]
     fn a_second_read_is_a_hit_with_the_same_bytes() {
@@ -216,7 +301,7 @@ mod tests {
 
     #[test]
     fn the_least_recently_used_body_is_evicted_at_the_budget() {
-        let cache = BodyCache::with_bounds(10, 10);
+        let cache = BodyCache::with_bounds(12, 10);
         cache.insert(b"a", b"1234");
         cache.insert(b"b", b"5678");
         // Touch `a`, so `b` is now the oldest.
@@ -228,7 +313,8 @@ mod tests {
         );
         assert!(cache.get(b"a").is_some());
         assert!(cache.get(b"c").is_some());
-        assert!(cache.stats().retained <= 10);
+        assert_eq!(cache.stats().retained, 8);
+        assert_bounded(&cache);
     }
 
     #[test]
@@ -246,18 +332,18 @@ mod tests {
         for index in 0_u32..500 {
             let size = usize::try_from(index % 97).unwrap_or(0) + 1;
             cache.insert(&index.to_be_bytes(), &vec![7_u8; size]);
-            assert!(cache.stats().retained <= 1000);
+            assert_bounded(&cache);
         }
-        let stats = cache.stats();
+        let state = cache.state.lock().unwrap();
         assert!(
-            stats.entries > 0 && stats.retained > 900,
-            "the budget is used, not wasted: {stats:?}"
+            !state.bodies.is_empty() && state.accounted_bytes > 900,
+            "the body-and-key budget is used, not wasted: {state:?}"
         );
     }
 
     #[test]
     fn put_comparisons_preserve_bytes_and_refresh_bounded_retention() {
-        let cache = BodyCache::with_bounds(8, 4);
+        let cache = BodyCache::with_bounds(12, 4);
         assert_eq!(cache.matches(b"unknown", b"1234"), None);
         cache.insert(b"a", b"1234");
         cache.insert(b"b", b"5678");
@@ -274,5 +360,156 @@ mod tests {
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().retained, 0);
         assert_eq!(cache.stats().put_hits, before.put_hits);
+    }
+
+    #[test]
+    fn empty_bodies_charge_both_copies_of_their_keys() {
+        let cache = BodyCache::with_bounds(8, 8);
+        cache.insert(b"aa", b"");
+        cache.insert(b"bb", b"");
+        assert_eq!(cache.stats().entries, 2);
+        assert_eq!(cache.stats().retained, 0);
+        assert_bounded(&cache);
+        assert_eq!(cache.get(b"aa"), Some(Vec::new()));
+        cache.insert(b"cc", b"");
+        assert_eq!(cache.get(b"bb"), None, "the cold key must be evicted");
+        assert_eq!(cache.get(b"aa"), Some(Vec::new()));
+        assert_eq!(cache.get(b"cc"), Some(Vec::new()));
+        assert_eq!(cache.stats().entries, 2);
+        assert_bounded(&cache);
+    }
+
+    #[test]
+    fn maximum_authority_keys_consume_the_byte_budget_even_without_payloads() {
+        let key_bytes = fgit_authority::MAX_KEY_BYTES;
+        let cache = BodyCache::with_bounds(4 * key_bytes, 0);
+        let first = vec![1; key_bytes];
+        let second = vec![2; key_bytes];
+        let third = vec![3; key_bytes];
+        for key in [&first, &second, &third] {
+            cache.insert(key, b"");
+            assert_bounded(&cache);
+        }
+        assert_eq!(cache.stats().entries, 2);
+        assert_eq!(cache.stats().retained, 0);
+        assert_eq!(cache.get(&first), None);
+        assert_eq!(cache.get(&second), Some(Vec::new()));
+        assert_eq!(cache.get(&third), Some(Vec::new()));
+    }
+
+    #[test]
+    fn entry_limit_bounds_small_allocations_and_put_comparisons_refresh_lru() {
+        let cache = BodyCache::with_limits(1024, 8, 2);
+        cache.insert(b"a", b"");
+        cache.insert(b"b", b"");
+        assert_eq!(cache.matches(b"a", b""), Some(true));
+        assert_eq!(cache.matches(b"a", b"conflict"), Some(false));
+        cache.insert(b"c", b"");
+        assert_eq!(cache.get(b"b"), None);
+        assert_eq!(cache.get(b"a"), Some(Vec::new()));
+        assert_eq!(cache.get(b"c"), Some(Vec::new()));
+        assert_eq!(cache.stats().entries, 2);
+        assert_bounded(&cache);
+        // A repeated insertion neither overwrites the first bytes nor spends
+        // another entry or key-byte charge.
+        cache.insert(b"a", b"changed");
+        assert_eq!(cache.get(b"a"), Some(Vec::new()));
+        assert_bounded(&cache);
+    }
+
+    #[test]
+    fn zero_byte_or_entry_budget_disables_empty_and_nonempty_retention() {
+        for cache in [
+            BodyCache::with_limits(0, 8, 8),
+            BodyCache::with_limits(8, 8, 0),
+        ] {
+            for body in [b"".as_slice(), b"body".as_slice()] {
+                cache.insert(b"k", body);
+                assert_eq!(cache.get(b"k"), None);
+                assert_eq!(cache.matches(b"k", body), None);
+                assert_eq!(cache.stats().entries, 0);
+                assert_eq!(cache.stats().retained, 0);
+                assert_bounded(&cache);
+            }
+        }
+        // Zero maximum body bytes still permits an empty value when its two
+        // key copies and its entry have real capacity.
+        let cache = BodyCache::with_limits(2, 0, 1);
+        cache.insert(b"k", b"");
+        assert_eq!(cache.get(b"k"), Some(Vec::new()));
+        assert_bounded(&cache);
+    }
+
+    #[test]
+    fn an_unretainable_candidate_does_not_evict_useful_entries() {
+        let cache = BodyCache::with_bounds(8, 4);
+        cache.insert(b"a", b"1234");
+        cache.insert(b"oversized-key", b"");
+        cache.insert(b"b", b"12345");
+        assert_eq!(cache.stats().entries, 1);
+        assert_eq!(cache.get(b"a").as_deref(), Some(b"1234".as_slice()));
+        assert_eq!(cache.get(b"oversized-key"), None);
+        assert_eq!(cache.get(b"b"), None);
+        assert_bounded(&cache);
+        cache.insert(b"b", b"");
+        assert_eq!(cache.stats().entries, 2, "an exact-fit twin is retained");
+        assert_bounded(&cache);
+    }
+
+    #[test]
+    fn accounting_overflow_is_refused_without_wrapping() {
+        assert_eq!(retention_charge(usize::MAX, 0), None);
+        assert_eq!(retention_charge(usize::MAX / 2 + 1, 0), None);
+        assert_eq!(retention_charge(1, usize::MAX), None);
+        assert_eq!(retention_charge(usize::MAX / 2, 1), Some(usize::MAX));
+        assert_eq!(retention_charge(0, 0), Some(0));
+    }
+
+    #[test]
+    fn recency_exhaustion_discards_the_cache_before_reusing_a_stamp() {
+        for operation in 0..3 {
+            let cache = BodyCache::with_limits(64, 8, 2);
+            cache.insert(b"a", b"first");
+            cache.insert(b"b", b"second");
+            cache.state.lock().unwrap().clock = u64::MAX - 1;
+            assert_eq!(cache.matches(b"a", b"first"), Some(true));
+            assert_bounded(&cache);
+            match operation {
+                0 => assert_eq!(cache.get(b"a"), None),
+                1 => assert_eq!(cache.matches(b"a", b"first"), None),
+                _ => cache.insert(b"c", b"third"),
+            }
+            let state = cache.state.lock().unwrap();
+            assert_eq!(state.clock, 1);
+            let expected_entries = if operation == 2 { 1 } else { 0 };
+            assert_eq!(state.bodies.len(), expected_entries);
+            drop(state);
+            assert_bounded(&cache);
+            cache.insert(b"d", b"fourth");
+            assert_eq!(cache.get(b"d").as_deref(), Some(b"fourth".as_slice()));
+            assert_bounded(&cache);
+        }
+    }
+
+    #[test]
+    fn mixed_empty_and_small_body_churn_stays_within_both_budgets() {
+        let cache = BodyCache::with_limits(1024, 64, 7);
+        for index in 0_u32..500 {
+            let mut key = index.to_be_bytes().to_vec();
+            key.resize(4 + (index as usize % 253), 0);
+            let body = vec![7; index as usize % 65];
+            cache.insert(&key, &body);
+            assert_bounded(&cache);
+            let before = cache.stats();
+            cache.insert(&key, &body);
+            assert_eq!(cache.stats().entries, before.entries);
+            assert_eq!(cache.stats().retained, before.retained);
+            assert_bounded(&cache);
+        }
+        assert!(cache.stats().entries > 0);
+        cache.clear();
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().retained, 0);
+        assert_bounded(&cache);
     }
 }

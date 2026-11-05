@@ -346,3 +346,35 @@ fn closing_the_worker_invalidates_cached_read_and_put_answers() {
     );
     harness.close(reopened);
 }
+
+#[test]
+fn empty_bodies_keep_present_retry_and_reopen_semantics_at_maximum_key_length() {
+    let harness = Harness::new();
+    let scratch = Scratch::new("empty-body");
+    let store = harness.open(&scratch, 1);
+    let k = key(&[b'e'; fgit_authority::MAX_KEY_BYTES]);
+    let absent = key(&[b'a'; fgit_authority::MAX_KEY_BYTES]);
+    assert_eq!(harness.put(&store, &k, b""), PutOutcome::Created);
+    assert_eq!(harness.read(&store, &k), present(b""));
+    assert_eq!(counts(store.body_cache_stats()), (1, 0, 1));
+    assert_eq!(
+        store.body_cache_stats().retained,
+        0,
+        "the public counter still reports payload bytes"
+    );
+    assert_eq!(harness.put(&store, &k, b""), PutOutcome::IdenticalRetry);
+    assert_eq!(harness.put(&store, &k, b"changed"), PutOutcome::Conflict);
+    assert_eq!(harness.read(&store, &k), present(b""));
+    assert_eq!(harness.read(&store, &absent), ImmutableRead::Absent);
+    harness.close(store);
+
+    let reopened = harness.open(&scratch, 1);
+    assert_eq!(harness.read(&reopened, &k), present(b""));
+    assert_eq!(counts(reopened.body_cache_stats()), (0, 1, 1));
+    assert_eq!(harness.read(&reopened, &k), present(b""));
+    assert_eq!(counts(reopened.body_cache_stats()), (1, 1, 1));
+    assert_eq!(harness.put(&reopened, &k, b""), PutOutcome::IdenticalRetry);
+    assert_eq!(harness.put(&reopened, &k, b"changed"), PutOutcome::Conflict);
+    assert_eq!(harness.read(&reopened, &absent), ImmutableRead::Absent);
+    harness.close(reopened);
+}
