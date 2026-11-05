@@ -157,6 +157,13 @@ old deletion must recover its earlier acknowledgement without deleting the
 newly recreated branch. Every listener must drain. Failure artifacts are
 retained, and the shared harness records the suite's terminal result.
 
+Each listener invocation owns a distinct capture directory, so reopening a
+writable node preserves the earlier listener's stdout, stderr and drain receipt.
+The smart-HTTP driver accepts `--artifact-dir` for a new retained directory;
+both native HTTP suites preserve their FGE work directories on success and
+failure. When supplying a relocated Git client, its matching HTTP helpers must
+be accessible at the client's reported `git --exec-path` inside the sandbox.
+
 `scripts/e2e/suites/transport/smart_http_smoke.sh` pushes through a credential
 helper (401 challenge, then retry), beside a wrong-password twin that publishes
 nothing. `scripts/e2e/suites/git-lfs/basic_transfer.sh` takes the same path.
