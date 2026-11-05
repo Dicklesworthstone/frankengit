@@ -412,6 +412,13 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - brokered secrets/effects; no ambient sponsor token/cloud metadata;
 - idempotency/nonces according to protocol;
 - redaction and secret-taint tests;
+- stock HTTP attempt aliases preserve ordinary routing and authentication
+  error ordering: malformed aliases are not rejected based on the configured
+  repository prefix, and recognized aliases authenticate before retry-header
+  rewriting. Real TCP and native smoke twins compare existing/missing routes
+  with absent and wrong credentials, then retain valid push and replay paths
+  (`frankengit-g8fo.1`). These are response-disclosure controls, not a claim of
+  constant-time authentication or hosted multi-tenant isolation;
 - high-impact dual/independent approval policy and immutable overrides;
 - a request other than GET/HEAD whose browser-reported Origin or
   Sec-Fetch-Site names another origin is refused before any route runs; own

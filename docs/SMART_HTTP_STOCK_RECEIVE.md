@@ -20,6 +20,14 @@ normalizes the repository route, and supplies `fg-http-v1-{identifier}` as the
 bounded retry key. The redirect also reports this key in its `Idempotency-Key`
 response header. Other endpoints below an attempt URL are refused.
 
+Malformed nonces and unrecognized attempt suffixes pass unchanged to the
+ordinary router, so their status, authentication challenge and error body do
+not reveal whether the repository route is configured. Recognized aliases
+validate the ordinary endpoint policy and authenticate before retry-key
+conflicts or synthesized-header limits are evaluated. Unscoped receive RPCs
+also authenticate before interpreting retry headers. No alias error creates
+an attempt or publishes repository state (`frankengit-g8fo.1`).
+
 Every redirected discovery and RPC authenticates independently. The identifier
 is public routing/idempotency data, not a bearer capability, an approval, a
 policy snapshot, or an authority receipt. Revoked credentials and disabled
