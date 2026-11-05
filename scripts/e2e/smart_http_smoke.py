@@ -200,10 +200,20 @@ def probe_requests(fg: str, commands: Commands, root: Path, url: str, token: str
                     if width == 1:
                         time.sleep(0.02)
                 response = connection.getresponse()
-                require(response.status == 200 and response.read(1) == b""
-                        and response.getheader("Content-Length") == "0"
-                        and response.getheader("Content-Type") == f"application/x-git-{service}-pack-result",
-                        f"{service} v{version} probe width={width} was not an empty HTTP200 result")
+                body = response.read(1)
+                length = response.getheader("Content-Length")
+                transfer = response.getheader("Transfer-Encoding")
+                media = response.getheader("Content-Type")
+                # Receive probes use a fixed empty result. Upload replies use
+                # the existing HTTP/1.1 chunk encoder, including its terminating
+                # zero chunk. Never accept conflicting length/transfer framing.
+                framing = length == "0" and transfer is None
+                if service == "upload":
+                    framing |= length is None and transfer == "chunked"
+                require(response.status == 200 and body == b"" and framing
+                        and media == f"application/x-git-{service}-pack-result",
+                        f"{service} v{version} probe width={width}: status={response.status}, "
+                        f"body={body.hex()}, length={length!r}, transfer={transfer!r}, media={media!r}")
             finally:
                 connection.close()
             require(commands.run([fg, "at", str(root / "state"), TENANT, REPOSITORY, "latest"]) == before,
