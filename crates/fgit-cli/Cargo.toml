@@ -37,7 +37,9 @@ fgit-wire.workspace = true
 fgit-runner.workspace = true
 
 [dev-dependencies]
+fgit-git-object.workspace = true
 fgit-pack.workspace = true
+fgit-treefs.workspace = true
 
 [lints]
 workspace = true
