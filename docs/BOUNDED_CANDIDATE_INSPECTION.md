@@ -90,6 +90,31 @@ Fast-forward decisions therefore retain a nonzero count despite adding no
 native object. Pack counts, expanded bytes, and transport-only counts continue
 to describe the actual uploaded representation.
 
+## Native lifecycle acceptance
+
+With separately built native `FG_BIN` and `FG_MCP_BIN`, run
+`scripts/e2e/suites/mcp/reviewed_merge_scale.sh`. It extends the existing reviewed
+merge helper with a named 100,000-file profile for both SHA-1 and SHA-256.
+The fixture imports an actual native pack and index, then inherits the unchanged
+subtree through a divergent pull request. Separate MCP processes prepare and
+inspect the candidate, record an independent review, publish, reopen, retry the
+original request, and read canonical refs and inherited file bytes.
+
+Before publication, the lane compares the minimal bundle with a thicker bundle
+that resends one selected blob. Candidate identity, review, prerequisites and
+validated closure must match; transport counts and checksums must describe the
+actual bytes. Returned review/publication commands carry their respective input
+bundle: the lane checks those bytes exactly and compares every other argument.
+A corrupted thicker bundle must refuse without changing refs.
+Publication uses the inspected thicker bundle's actual publication arguments.
+
+The ordinary helper's scenarios and 120-second subprocess deadline remain
+unchanged. The named scale suite has a 1,800-second outer deadline and runs the
+clean merge-commit case for both hash domains; the existing lifecycle suite
+continues to cover squash and conflict resolution. These are executable local
+acceptance lanes, not a claim that they passed at an unspecified revision or
+that a release, remote authorization, or an unbounded repository is qualified.
+
 ## Applicability limits
 
 The benefit is avoiding unrelated historical trees and blob bodies, including

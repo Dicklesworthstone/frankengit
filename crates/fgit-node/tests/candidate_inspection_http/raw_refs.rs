@@ -30,7 +30,7 @@ fn raw_candidate(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, Candidat
     ];
     let result = node
         .runtime()
-        .block_on(node.admit_branch_updates_durable_in(
+        .block_on(node.admit_branch_transaction_durable_in(
             &node.request_context(),
             &session,
             &commands,
