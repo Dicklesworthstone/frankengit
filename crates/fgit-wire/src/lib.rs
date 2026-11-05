@@ -913,6 +913,30 @@ impl Capabilities {
     }
 }
 
+/// An explicit client format cannot change the repository's native domain.
+/// Omitted capabilities retain the enclosing adapter's existing profile.
+fn validate_upload_object_format(
+    capability: &Capability,
+    expected: GitObjectFormat,
+) -> Result<(), WireError> {
+    if capability.name != b"object-format" {
+        return Ok(());
+    }
+    let observed = match capability.value.as_deref() {
+        Some(b"sha1") => GitObjectFormat::Sha1,
+        Some(b"sha256") => GitObjectFormat::Sha256,
+        _ => {
+            return Err(WireError::MalformedRequestLine {
+                line: capability.encoded()?,
+            });
+        }
+    };
+    if observed != expected {
+        return Err(WireError::ObjectFormatMismatch { expected, observed });
+    }
+    Ok(())
+}
+
 fn line_without_lf(line: &[u8]) -> Result<&[u8], WireError> {
     let Some((&b'\n', text)) = line.split_last() else {
         return Err(WireError::MissingLineFeed);
@@ -2233,7 +2257,7 @@ impl LegacyUploadPack {
         }
         if let Some(raw) = capability_text {
             let requested = Capabilities::parse_v1(raw, &self.limits)?;
-            self.accept_request_capabilities(&requested)?;
+            self.accept_request_capabilities(&requested, repository.object_format())?;
             self.saw_want_capabilities = true;
         }
         push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
@@ -2361,13 +2385,27 @@ impl LegacyUploadPack {
         Ok(transition)
     }
 
-    fn accept_request_capabilities(&mut self, requested: &Capabilities) -> Result<(), WireError> {
+    fn accept_request_capabilities(
+        &mut self,
+        requested: &Capabilities,
+        object_format: GitObjectFormat,
+    ) -> Result<(), WireError> {
+        // Validate the complete suffix before installing any negotiated flag.
+        // A later incompatible format must not leave earlier options enabled.
         for capability in requested.entries() {
             if !self.server_capabilities.contains(&capability.name) {
                 return Err(WireError::UnknownCapability {
                     capability: capability.name.clone(),
                 });
             }
+            validate_upload_object_format(capability, object_format)?;
+            if capability.name == b"deepen-relative" && capability.value.is_some() {
+                return Err(WireError::MalformedRequestLine {
+                    line: capability.encoded()?,
+                });
+            }
+        }
+        for capability in requested.entries() {
             match capability.name.as_slice() {
                 b"multi_ack" => {
                     if self.ack_mode != AckMode::MultiAckDetailed {
@@ -2381,11 +2419,6 @@ impl LegacyUploadPack {
                 b"ofs-delta" => self.options = self.options.with(PackOptions::OFS_DELTA),
                 b"no-progress" => self.options = self.options.with(PackOptions::NO_PROGRESS),
                 b"deepen-relative" => {
-                    if capability.value.is_some() {
-                        return Err(WireError::MalformedRequestLine {
-                            line: capability.encoded()?,
-                        });
-                    }
                     self.options = self.options.with_deepen_relative(true);
                 }
                 b"no-done" => self.no_done = true,
@@ -2654,7 +2687,9 @@ impl V2UploadPack {
     ) -> Result<Transition, WireError> {
         match self.state {
             V2State::AwaitCommand => self.accept_command(packet),
-            V2State::AwaitCapabilities(command) => self.accept_capability(packet, command),
+            V2State::AwaitCapabilities(command) => {
+                self.accept_capability(packet, command, repository.object_format())
+            }
             V2State::AwaitArguments(command) => self.accept_argument(packet, command, repository),
             V2State::Complete => Err(WireError::IllegalTransition {
                 state: "completed v2 upload-pack request",
@@ -2715,6 +2750,7 @@ impl V2UploadPack {
         &mut self,
         packet: &Packet,
         command: V2Command,
+        object_format: GitObjectFormat,
     ) -> Result<Transition, WireError> {
         match packet {
             Packet::Data(line) => {
@@ -2725,6 +2761,7 @@ impl V2UploadPack {
                         capability: capability.name,
                     });
                 }
+                validate_upload_object_format(&capability, object_format)?;
                 self.request_capabilities.insert(capability, &self.limits)?;
                 Ok(Transition::empty())
             }
