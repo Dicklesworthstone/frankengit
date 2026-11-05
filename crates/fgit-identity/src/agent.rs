@@ -105,7 +105,6 @@ impl AuthenticatedAgentCredential {
 /// `grant` and `revocation` must come from the same authenticated current forge
 /// frontier. The caller may retain this result for one bounded in-flight request;
 /// every subsequent request authenticates again against its own current read.
-#[allow(clippy::too_many_arguments)] // Keep the three typed binding coordinates explicit.
 pub fn authenticate_agent_credential(
     id: AgentCredentialId,
     grant: &AgentCredentialGrant,
