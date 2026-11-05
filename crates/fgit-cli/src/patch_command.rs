@@ -12,7 +12,7 @@ use options::{Operation, Options, Profile, hex};
 use std::io::{Read, Write};
 
 const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <repository-id> <branch-ref> <patch-file> <new-bundle>
-  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1|exact-tree-binary-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
+  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1|exact-tree-binary-v1|exact-symlink-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>
   (--message <text> | --message-file <raw-file>) [--ref-hex]
   [--expected-result-tree <independently-chosen-native-tree-id>]
@@ -43,6 +43,12 @@ optional exact text edits and executable-mode changes. Both endpoints are checke
 against the original tree; occupied destinations, chains, cycles, copies and
 compressed edited renames refuse. Pure binary moves preserve their original bytes.
 All changes form one candidate or no bundle. Old profiles never admit rename.
+
+exact-symlink-v1 extends exact-tree-v1 with Git symlink mode 120000. Create,
+replace, edit, delete and original-coordinate rename operate on inert link-text
+blob bytes. No link target is traversed or materialized on the host. Regular-file
+changes and binary decoding keep their existing bounds; compressed edited renames,
+directories and gitlinks still refuse. Every older profile keeps refusing symlinks.
 
 Optional --expected-result-tree binds the complete intended root, including
 unchanged siblings and file modes. A mismatch refuses before publishing a bundle.
@@ -119,6 +125,17 @@ pub fn run(args: &[String]) -> Result<u8, String> {
                 let candidate = if *profile == Profile::ExactTreeBinary {
                     node.runtime()
                         .block_on(node.prepare_trusted_binary_refactor_in(
+                            &request,
+                            &options.reference,
+                            options.base,
+                            *workspace_id,
+                            &input,
+                            metadata,
+                            *limits,
+                        ))
+                } else if *profile == Profile::ExactSymlink {
+                    node.runtime()
+                        .block_on(node.prepare_trusted_symlink_patch_in(
                             &request,
                             &options.reference,
                             options.base,

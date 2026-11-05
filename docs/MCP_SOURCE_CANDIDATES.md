@@ -37,6 +37,17 @@ semantics and refusals apply, including regular-file creation/deletion/modes,
 explicit supported renames and binary patch records. No fuzzy application or
 unsupported fallback is introduced by MCP.
 
+`prepare_patch` may explicitly select `"profile": "exact-symlink-v1"` to
+create, edit, delete or rename Git symlink blobs using mode `120000`. An omitted
+profile, or explicit `"exact-tree-v1"`, retains the existing regular-file
+behavior. Link targets are inert bytes and are never traversed or materialized
+on the host. The same native parser, source/index verification, both-endpoint
+rename authorization, cumulative byte limits and complete candidate rules
+apply. The result reports the effective `profile` and exact `120000` path
+receipts. The option adds no new MCP grant, publication authority, host path
+input or sponsored-agent access; existing saved-bundle review and publication
+remain required.
+
 The complete result carries source RCR/base, candidate commit/tree, exact patch
 and bundle SHA-256, changed-path blob/mode receipts and `publication_arguments`.
 The latter uses the existing `frankengit_source_publish` field names and contains

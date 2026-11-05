@@ -241,6 +241,84 @@ fn prepare_over_mcp_is_reproducible_unstaged_and_refuses_without_side_effects() 
         backend.close().unwrap();
     }
 }
+
+#[test]
+fn explicit_symlink_profile_reaches_native_review_and_the_independently_granted_publisher() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut backend, base) = setup(format);
+        let before = head_bytes(&backend);
+        let mut args = input(base);
+        args.insert("patch".into(), text("diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+../../outside\n\\ No newline at end of file\n"));
+        assert_eq!(
+            backend.call(NAME, &args).unwrap_err().code,
+            "invalid_source_patch"
+        );
+        args.insert("profile".into(), text("exact-tree-v1"));
+        assert_eq!(
+            backend.call(NAME, &args).unwrap_err().code,
+            "invalid_source_patch"
+        );
+        args.insert("profile".into(), text("exact-symlink-v1"));
+        let mut server = server(&mut backend);
+        let response = invoke(&mut server, &mut backend, 2, NAME, args);
+        let prepared = content(&response);
+        assert_eq!(prepared["profile"].text(), Some("exact-symlink-v1"));
+        assert_eq!(prepared["published"], Value::Bool(false));
+        let Value::Array(paths) = &prepared["paths"] else {
+            panic!("complete path receipts")
+        };
+        assert_eq!(paths.len(), 1);
+        let path = paths[0].object().unwrap();
+        assert_eq!(path["path_hex"].text(), Some(hex(b"link").as_str()));
+        assert_eq!(path["new_mode"].text(), Some("120000"));
+        let inspection = backend.call(NAME, &inspection(prepared)).unwrap();
+        assert_eq!(head_bytes(&backend), before);
+        let mut publication = inspection.object().unwrap()["publication_arguments"]
+            .object()
+            .unwrap()
+            .clone();
+        publication.insert(
+            "idempotency_key".into(),
+            text("reviewed-symlink-publication"),
+        );
+        assert_eq!(
+            backend
+                .call("frankengit_source_publish", &publication)
+                .unwrap_err()
+                .code,
+            "tool_not_granted"
+        );
+        let mut options = backend.options.clone();
+        options.writes.source = true;
+        options.principal = Some(sponsor());
+        backend.close().unwrap();
+        let mut backend = NodeTools::open(options).unwrap();
+        let committed = backend
+            .call("frankengit_source_publish", &publication)
+            .unwrap();
+        assert_eq!(
+            committed.object().unwrap()["outcome"].text(),
+            Some("committed")
+        );
+        assert_eq!(
+            backend
+                .call("frankengit_source_publish", &publication)
+                .unwrap(),
+            committed
+        );
+        let link = blob(&mut backend, b"link");
+        assert_eq!(link.object().unwrap()["kind"].text(), Some("symlink"));
+        assert_eq!(
+            link.object().unwrap()["bytes_hex"].text(),
+            Some(hex(b"../../outside").as_str())
+        );
+        assert_eq!(
+            blob(&mut backend, b"sibling").object().unwrap()["bytes_hex"].text(),
+            Some(hex(b"untouched\n").as_str())
+        );
+        backend.close().unwrap();
+    }
+}
 #[test]
 fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotations() {
     let (_scratch, mut backend, base) = setup(GitHashAlgorithm::Sha1);

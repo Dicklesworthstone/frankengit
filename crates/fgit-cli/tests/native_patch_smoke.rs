@@ -20,5 +20,7 @@ fn exact_patch_preparation_publication_and_recovery_cross_real_process_boundarie
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("PATCH_CLI format=sha1 "));
     assert!(text.contains("PATCH_CLI format=sha256 "));
+    assert!(text.contains("PATCH_SYMLINK_CLI format=sha1 "));
+    assert!(text.contains("PATCH_SYMLINK_CLI format=sha256 "));
     print!("{text}");
 }
