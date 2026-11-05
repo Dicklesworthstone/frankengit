@@ -214,7 +214,7 @@ fn deferral_and_escalation_walk_the_committed_but_unacknowledged_window() {
 
 #[test]
 fn every_class_agrees_with_its_kind_about_external_observation() {
-    assert_eq!(ObligationClass::ALL.len(), 11, "there are eleven classes");
+    assert_eq!(ObligationClass::ALL.len(), 12, "there are twelve classes");
     assert_eq!(
         <ObjectAdmissionPermit as ObligationKind>::OBSERVATION,
         ObligationClass::ObjectAdmissionPermit.observation(),
@@ -230,8 +230,8 @@ fn every_class_agrees_with_its_kind_about_external_observation() {
         .filter(|class| class.observation() == ObservationMode::ExternallyObserved)
         .count();
     assert_eq!(
-        externally_observed, 4,
-        "outbox, secret lease, runner slot, and billing are the externally observed classes"
+        externally_observed, 5,
+        "outbox, secret lease, runner slot, billing, and canonical submission require observation"
     );
 }
 

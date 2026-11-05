@@ -290,6 +290,30 @@ impl RevocationCheckedEffectBroker {
         self.run.run_id()
     }
 
+    pub(crate) fn reserve_ref_transaction(
+        &mut self,
+        grant: RevocationAuthorizedEffectGrant,
+        binding: crate::ref_publication::RefTransactionBinding,
+    ) -> Result<crate::broker::ref_publication::ReservedSubmission, crate::ref_publication::RefTransactionEffectRefusal> {
+        self.inner.reserve_ref_transaction(grant, binding)
+    }
+
+    pub(crate) fn record_ref_transaction_start(
+        &mut self,
+        authorization: CapabilityEffectAuthorization,
+    ) {
+        // The outer current-authority facade preflights its aggregate limit
+        // before committing a submission, just as the outbox path does here.
+        self.dispatch_authorizations.push(authorization);
+    }
+
+    pub(crate) fn owns_ref_transaction(
+        &self,
+        reservation: &crate::broker::ref_publication::ReservedSubmission,
+    ) -> bool {
+        self.inner.owns_ref_transaction(reservation)
+    }
+
     /// Accepted effect records in acceptance order.
     #[must_use]
     pub fn records(&self) -> Vec<EffectRecord> {

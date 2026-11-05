@@ -31,7 +31,7 @@ pub enum ObservationMode {
     ExternallyObserved,
 }
 
-/// The eleven concrete obligation classes.
+/// The twelve concrete obligation classes.
 ///
 /// The list is closed and matches `docs/CALM_AND_OBLIGATIONS.md` section 7.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -58,11 +58,13 @@ pub enum ObligationClass {
     ContextBudgetPermit,
     /// One bounded charge against an external account.
     BillingReservation,
+    /// One exact ref transaction submitted to canonical authority by an agent.
+    RefTransactionSubmission,
 }
 
 impl ObligationClass {
     /// Every class, in specification order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::ObjectAdmissionPermit,
         Self::PreparedTxnSlot,
         Self::HeadCasAttempt,
@@ -74,6 +76,7 @@ impl ObligationClass {
         Self::RepairPermit,
         Self::ContextBudgetPermit,
         Self::BillingReservation,
+        Self::RefTransactionSubmission,
     ];
 
     /// Whether the class has an external observer.
@@ -83,7 +86,8 @@ impl ObligationClass {
             Self::OutboxEffectPermit
             | Self::SecretLease
             | Self::RunnerSlot
-            | Self::BillingReservation => ObservationMode::ExternallyObserved,
+            | Self::BillingReservation
+            | Self::RefTransactionSubmission => ObservationMode::ExternallyObserved,
             Self::ObjectAdmissionPermit
             | Self::PreparedTxnSlot
             | Self::HeadCasAttempt
@@ -109,6 +113,7 @@ impl ObligationClass {
             Self::RepairPermit => "repair_permit",
             Self::ContextBudgetPermit => "context_budget_permit",
             Self::BillingReservation => "billing_reservation",
+            Self::RefTransactionSubmission => "ref_transaction_submission",
         }
     }
 }
@@ -125,7 +130,7 @@ pub struct TrivialAck;
 
 /// One obligation class and the payloads its lifecycle carries.
 pub trait ObligationKind: Sized + 'static {
-    /// Which of the eleven classes this kind is.
+    /// Which of the twelve classes this kind is.
     const CLASS: ObligationClass;
     /// Whether an external recipient must be observed.
     const OBSERVATION: ObservationMode;

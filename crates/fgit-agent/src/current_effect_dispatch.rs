@@ -94,11 +94,11 @@ impl From<RevocationCheckedEffectRefusal> for CurrentAuthorityRevocationCheckedE
 /// ancestry evidence through the complete external-effect lifecycle.
 #[derive(Debug)]
 pub struct CurrentAuthorityRevocationCheckedEffectBroker {
-    run: IntentRun,
+    pub(crate) run: IntentRun,
     run_commitment: IntentRunCommitment,
-    inner: RevocationCheckedEffectBroker,
+    pub(crate) inner: RevocationCheckedEffectBroker,
     authorizations: Vec<CurrentAuthorityCapabilityEffectAuthorization>,
-    dispatch_authorizations: Vec<CurrentAuthorityCapabilityEffectAuthorization>,
+    pub(crate) dispatch_authorizations: Vec<CurrentAuthorityCapabilityEffectAuthorization>,
 }
 
 impl CurrentAuthorityRevocationCheckedEffectBroker {
@@ -399,6 +399,10 @@ pub struct CurrentAuthorityRevocationAuthorizedEffectGrant {
 }
 
 impl CurrentAuthorityRevocationAuthorizedEffectGrant {
+    pub(crate) fn into_grant(self) -> RevocationAuthorizedEffectGrant {
+        self.grant
+    }
+
     /// Ancestry-bound request-time authorization.
     #[must_use]
     pub const fn authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {

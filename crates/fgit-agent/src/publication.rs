@@ -209,6 +209,32 @@ impl AgentPublicationSubject {
         })
     }
 
+    /// Verify the actual object bodies supplied to a native publication
+    /// adapter against this independently retained evidence subject. The
+    /// object's native identity, deterministic order and byte envelope are
+    /// checked before the adapter may stage or publish them.
+    pub fn verify_export<A: GitHashAlgorithm>(
+        &self,
+        export: &ExportPlan<A>,
+    ) -> Result<(), AgentPublicationRefusal> {
+        if export.object_count() > MAX_PUBLICATION_OBJECTS {
+            return Err(AgentPublicationRefusal::Limit("export_objects"));
+        }
+        let mut bytes = 0;
+        for object in export.objects() {
+            bounded_add(
+                &mut bytes,
+                object.body().len(),
+                MAX_PUBLICATION_BYTES,
+                "export_bodies",
+            )?;
+        }
+        if export_commitment(export)? != self.export_commitment {
+            return Err(AgentPublicationRefusal::ExportBinding);
+        }
+        Ok(())
+    }
+
     /// Complete evidence-subject identity, retained independently with checks.
     #[must_use]
     pub const fn subject_id(&self) -> &[u8; 32] {

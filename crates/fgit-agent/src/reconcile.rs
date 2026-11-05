@@ -1011,7 +1011,9 @@ const fn effect_class_for(operation: OperationClass) -> EffectClass {
         OperationClass::ReadCanonicalObject => EffectClass::PureCanonicalRead,
         OperationClass::CreateCandidateObject => EffectClass::ImmutableCandidateCreation,
         OperationClass::PreparePublication => EffectClass::PreparedCanonicalMutation,
-        OperationClass::SubmitEvidence | OperationClass::MutateForgeEntity => {
+        OperationClass::SubmitEvidence
+            | OperationClass::MutateForgeEntity
+            | OperationClass::PublishRefTransaction => {
             EffectClass::CanonicalMutation
         }
         OperationClass::ExternalIntegration => EffectClass::ExternalEffect,
@@ -1240,6 +1242,7 @@ const fn operation_class_code(operation: OperationClass) -> u8 {
         OperationClass::MutateForgeEntity => 11,
         OperationClass::DelegateSubIntent => 12,
         OperationClass::ConsumeBudget => 13,
+        OperationClass::PublishRefTransaction => 14,
     }
 }
 
@@ -1269,6 +1272,7 @@ const fn obligation_class_code(class: ObligationClass) -> u8 {
         ObligationClass::RepairPermit => 9,
         ObligationClass::ContextBudgetPermit => 10,
         ObligationClass::BillingReservation => 11,
+        ObligationClass::RefTransactionSubmission => 12,
     }
 }
 

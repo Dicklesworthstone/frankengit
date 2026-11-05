@@ -42,10 +42,13 @@ pub enum OperationClass {
     DelegateSubIntent = 11,
     /// Consume compute, model, storage, or network budget.
     ConsumeBudget = 12,
+    /// Submit an evidence-bound ref transaction through ordinary admission.
+    /// Preparation alone never authorizes this consequential operation.
+    PublishRefTransaction = 13,
 }
 
 /// How many classes exist. A [`ClassSet`] mask uses this many bits.
-pub const CLASS_COUNT: usize = 13;
+pub const CLASS_COUNT: usize = 14;
 
 impl OperationClass {
     /// Every class, in discriminant order.
@@ -63,6 +66,7 @@ impl OperationClass {
         Self::MutateForgeEntity,
         Self::DelegateSubIntent,
         Self::ConsumeBudget,
+        Self::PublishRefTransaction,
     ];
 
     /// The bit this class occupies in a [`ClassSet`].
@@ -88,6 +92,7 @@ impl OperationClass {
             Self::MutateForgeEntity => "mutate_forge_entity",
             Self::DelegateSubIntent => "delegate_sub_intent",
             Self::ConsumeBudget => "consume_budget",
+            Self::PublishRefTransaction => "publish_ref_transaction",
         }
     }
 }
@@ -104,7 +109,7 @@ impl fmt::Display for OperationClass {
 ///
 /// Attenuation is defined by subset and intersection (§6.2), and both must be
 /// total and allocation-free so a verifier can walk a whole ancestry without
-/// failing partway for an unrelated reason. A `u16` mask over thirteen stable
+/// failing partway for an unrelated reason. A `u16` mask over fourteen stable
 /// discriminants makes `is_subset_of` a single instruction and makes the
 /// serialized form fixed-width, which matters because the authenticator
 /// commits to those bytes.
@@ -131,7 +136,7 @@ impl ClassSet {
         self.0
     }
 
-    /// Rebuilds a set from a mask, refusing bits outside the thirteen classes.
+    /// Rebuilds a set from a mask, refusing bits outside the fourteen classes.
     ///
     /// # Errors
     ///

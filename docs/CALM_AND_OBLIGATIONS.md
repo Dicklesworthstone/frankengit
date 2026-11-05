@@ -202,6 +202,25 @@ Owns token/byte/search/graph/model budget and authorization scope for one Contex
 
 Reserves a bounded charge before costly hosted effects. Commit binds actual usage; abort releases unused amount. Statistical estimates may size the reservation but cannot silently bill beyond it.
 
+
+### 7.12 `RefTransactionSubmission`
+
+Owns responsibility for one ordinary sealed ref transaction submitted by an
+agent. The reservation retains the exact `TxId` and complete-seal commitment
+and requires byte and object grades. It is separate from the authority service's
+`PreparedTxnSlot` and `HeadCasAttempt`; committing submission responsibility
+does not assert that a ref changed.
+
+A fresh `PublishRefTransaction` authorization and the original broker's actual
+ledger custody are required at start. Before start, cancellation or refusal can
+abort the reservation. After start, responsibility remains explicit pending
+debt until the exact canonical terminal outcome is authenticated. A canonical
+refusal acknowledges this obligation just as a canonical commit does; the
+outcome commitment preserves that distinction. Unknown outcomes cannot be
+converted into aborts or automatically resubmitted. The agent adapter retains
+the full binding in its durable journal and reobserves the original transaction
+during recovery.
+
 ## 8. Structured-concurrency regions
 
 Every long-lived operation has one ownership region:

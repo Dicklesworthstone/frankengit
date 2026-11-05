@@ -800,6 +800,7 @@ const fn operation_code(operation: OperationClass) -> u16 {
         OperationClass::SecretHandle => 11,
         OperationClass::DelegateSubIntent => 12,
         OperationClass::ConsumeBudget => 13,
+        OperationClass::PublishRefTransaction => 14,
     }
 }
 

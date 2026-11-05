@@ -510,7 +510,7 @@ where
         })
 }
 
-async fn authenticate_historical_async<S>(
+pub(crate) async fn authenticate_historical_async<S>(
     store: &S,
     cx: &S::Context,
     head_key: &HeadKey,
@@ -540,7 +540,7 @@ where
         })
 }
 
-fn validate_historical_receipt(
+pub(crate) fn validate_historical_receipt(
     expected: &AuthorityReadReceipt,
     authenticated: &AuthenticatedHead,
 ) -> Result<(), CurrentAuthorityCapabilityRevocationReadRefusal> {

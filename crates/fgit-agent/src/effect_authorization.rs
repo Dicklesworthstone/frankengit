@@ -1000,6 +1000,21 @@ impl RevocationCheckedEffectBroker {
             })
     }
 
+    pub(crate) fn reserve_ref_transaction(
+        &mut self,
+        grant: RevocationAuthorizedEffectGrant,
+        binding: crate::ref_publication::RefTransactionBinding,
+    ) -> Result<crate::broker::ref_publication::ReservedSubmission, crate::ref_publication::RefTransactionEffectRefusal> {
+        self.broker.reserve_ref_transaction(grant.grant, binding)
+    }
+
+    pub(crate) fn owns_ref_transaction(
+        &self,
+        reservation: &crate::broker::ref_publication::ReservedSubmission,
+    ) -> bool {
+        self.broker.owns_ref_transaction(reservation)
+    }
+
     /// Whether the reservation still belongs to the ledger served by this facade.
     pub(crate) fn owns_outbox(&self, effect: &ReservedOutboxEffect) -> bool {
         self.broker.owns_outbox(effect)
@@ -1085,6 +1100,7 @@ pub const fn requires_effect_time_revocation(operation: OperationClass) -> bool 
             | OperationClass::SecretHandle
             | OperationClass::ExternalIntegration
             | OperationClass::PreparePublication
+            | OperationClass::PublishRefTransaction
             | OperationClass::SubmitEvidence
             | OperationClass::MutateForgeEntity
             | OperationClass::DelegateSubIntent

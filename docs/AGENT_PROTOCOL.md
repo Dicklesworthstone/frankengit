@@ -250,7 +250,13 @@ Capability {
 - submit review/check/evidence;
 - mutate issue/comment/forge entity;
 - delegate sub-intent;
-- consume compute/model/storage/network budget.
+- consume compute/model/storage/network budget;
+- submit an ordinary ref transaction under `PublishRefTransaction`.
+
+`PublishRefTransaction` is the fourteenth class, appended at discriminant 13.
+The original thirteen discriminants remain unchanged. `PreparePublication`
+authorizes preparation only; it cannot authorize submission to repository
+authority. Both classes remain independently attenuable.
 
 A broad `repo_write` or inherited sponsor token is forbidden.
 
@@ -635,6 +641,67 @@ ordinary seal, including refusal counterparts and retry identity. It does not
 exercise native admission or a successful authority-head CAS. Effect-time
 capability/revocation checks, artifact authentication, native closure admission,
 and final head publication remain with their existing owners.
+
+
+### 12.2 Checked canonical submission responsibility
+
+`fgit-agent::CurrentAuthorityRevocationCheckedEffectBroker` provides a separate
+submission lifecycle after preparation. `reserve_ref_transaction` requires the
+`PublishRefTransaction` capability, a current-authority revocation receipt, an
+exact complete-run binding, and an acknowledged durable journal sink. A
+prepared transaction or publication evidence bundle alone grants no submission
+authority.
+
+`RefTransactionBinding` derives the ordinary seal from the prepared request,
+host-authenticated principal, tenant, and original idempotency key. It retains
+the full seal and publication-evidence binding, and can additionally bind the
+adapter's exact custody commitment. The complete input determines the broker
+effect identity; the ordinary `TxId` remains unchanged by agent provenance or
+custody metadata. An adapter using the optional custody pin must verify it
+against the actual objects and export it will submit.
+
+Before the resource reservation becomes a typed `RefTransactionSubmission`,
+the journal persists the exact binding. The additive `RefTransactionBound`
+event uses tag 4 and retains the seal, publication binding, and optional custody
+commitment. Existing event tags 1–3 retain their encodings. Recovery validates
+the complete run, framing, digest chain, event sequence, and replayed lifecycle;
+an independently retained acknowledged tail is required for a reconciliation
+report. An unanchored journal is inspection input, not settlement evidence.
+
+`start_ref_transaction` rechecks current authority immediately before
+committing submission responsibility. It preserves the accepted ancestry and
+leaf capability, full run commitment, and actual broker journal/ledger custody.
+Another broker cannot take the reservation by copying run, agent, or region
+IDs. A pre-start refusal returns the original reservation, which remains
+abortable after expiry or revocation. A journal failure after responsibility
+commits returns a pending obligation; the host must retain it and must not
+dispatch on that error.
+
+Committing this obligation means responsibility for submission has begun. It
+does not establish a successful ref update, and the broker itself does not
+write a seal, validate an object closure, or publish an authority head. Those
+operations remain with ordinary repository admission.
+
+`PendingRefTransactionSubmission::reconcile_async` only observes authority.
+It reauthenticates the run's historical head through the original store and
+head slot, requires the exact stored seal, and resolves the original `TxId`.
+Both an authenticated commit and an authenticated refusal acknowledge the
+obligation; the retained terminal outcome states which occurred. Unknown
+outcomes and failed observations preserve pending responsibility. There is no
+post-start abort or automatic resubmission path, and later expiry or revocation
+does not prevent observation and cleanup.
+
+Recovered bindings can be passed to `observe_ref_transaction_async` without
+reissuing admission. A journal failure after an authoritative observation has
+already settled the resource returns the terminal observation and settlement
+receipt together with the persistence error. A pending journal prefix cannot
+be treated as proof that the repository mutation failed.
+
+The broker lifecycle tests use the reference authority's ordinary seals and
+canonical decision publication, including refusal decisions, exact custody
+mismatches, revocation, anchored recovery, and journal write failures. These
+tests establish the submission-responsibility boundary; native object
+admission and transport remain separately owned.
 
 ---
 

@@ -9,7 +9,7 @@
 use core::{fmt, num::NonZeroU32};
 use std::collections::BTreeMap;
 
-use fgit_codec::{DecodeLimits, Decoder, Encoder};
+use fgit_codec::{DecodeLimits, Decoder, Encoder, TransactionSealBody, wire::{decode_body, encode_body}};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_resource::{
     DownstreamIdempotency, EscalationReason, IdempotencyKey, LifecycleEvent, ObligationClass,
@@ -336,6 +336,15 @@ impl RecoveredEffectJournal {
     pub fn records(&self) -> &[EffectRecord] {
         self.replay.records()
     }
+
+    /// Exact ordinary seals for responsibility inspection and outcome lookup.
+    /// These bindings do not authorize resubmission of an undecided transaction.
+    #[must_use]
+    pub fn ref_transactions(
+        &self,
+    ) -> &BTreeMap<EffectId, crate::ref_publication::RefTransactionBinding> {
+        self.replay.ref_transactions()
+    }
     /// Whether the independently retained exact final position matched.
     #[must_use]
     pub const fn is_anchored(&self) -> bool {
@@ -424,6 +433,25 @@ fn read_option_id(d: &mut Decoder<'_>) -> Result<Option<EffectId>> {
 
 fn encode_event(e: &mut Encoder, run: &IntentRun, event: &EffectJournalEvent) -> Result<()> {
     match event {
+        EffectJournalEvent::RefTransactionBound { effect_id, binding } => {
+            if binding.run_commitment() != run.commitment()
+                .map_err(|_| EffectJournalCodecRefusal::RunIdentity)?
+                || *effect_id != binding.effect_id()
+            {
+                return Err(EffectJournalCodecRefusal::RunMismatch);
+            }
+            e.write_raw_byte(4);
+            e.write_raw(&effect_id.value().to_be_bytes());
+            e.write_bytes(
+                "ref_transaction_seal",
+                &encode_body(binding.seal()).map_err(|_| EffectJournalCodecRefusal::Format)?,
+            ).map_err(|_| EffectJournalCodecRefusal::Format)?;
+            e.write_raw(binding.publication_binding());
+            e.write_raw_byte(u8::from(binding.custody_commitment().is_some()));
+            if let Some(commitment) = binding.custody_commitment() {
+                e.write_raw(&commitment);
+            }
+        }
         EffectJournalEvent::Accepted(record) => {
             if record.run_id != run.run_id()
                 || record.run_commitment
@@ -620,6 +648,29 @@ fn decode_event(
                 terminal_outcome: read_terminal(d)?,
             })
         }
+        4 => {
+            let bytes = d.read_bytes("ref_transaction_seal")
+                .map_err(|_| EffectJournalCodecRefusal::Format)?;
+            let seal: TransactionSealBody = decode_body(bytes, DecodeLimits::DEFAULT)
+                .map_err(|_| EffectJournalCodecRefusal::Format)?;
+            let mut binding = crate::ref_publication::RefTransactionBinding::from_parts(
+                run.commitment().map_err(|_| EffectJournalCodecRefusal::RunIdentity)?,
+                seal,
+                raw(d)?,
+            ).map_err(|_| EffectJournalCodecRefusal::Format)?;
+            match byte(d)? {
+                0 => {}
+                1 => {
+                    binding = binding.with_custody_commitment(raw(d)?)
+                        .map_err(|_| EffectJournalCodecRefusal::Format)?;
+                }
+                _ => return Err(EffectJournalCodecRefusal::Format),
+            }
+            if binding.effect_id() != effect_id {
+                return Err(EffectJournalCodecRefusal::Replay);
+            }
+            Ok(EffectJournalEvent::RefTransactionBound { effect_id, binding })
+        }
         _ => Err(EffectJournalCodecRefusal::Format),
     }
 }
@@ -658,6 +709,7 @@ const fn obligation_code(v: ObligationClass) -> u8 {
         ObligationClass::RepairPermit => 9,
         ObligationClass::ContextBudgetPermit => 10,
         ObligationClass::BillingReservation => 11,
+        ObligationClass::RefTransactionSubmission => 12,
     }
 }
 fn read_obligation(v: u8) -> Result<ObligationClass> {

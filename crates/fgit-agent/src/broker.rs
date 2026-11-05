@@ -16,6 +16,8 @@
 //! external path owns a real [`OutboxEffectPermit`] through reconciliation.
 //! It never converts an ambiguous downstream response into success.
 
+pub(crate) mod ref_publication;
+
 use core::fmt;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -116,7 +118,9 @@ impl EffectClass {
             OperationClass::ReadCanonicalObject => Self::PureCanonicalRead,
             OperationClass::CreateCandidateObject => Self::ImmutableCandidateCreation,
             OperationClass::PreparePublication => Self::PreparedCanonicalMutation,
-            OperationClass::SubmitEvidence | OperationClass::MutateForgeEntity => {
+            OperationClass::SubmitEvidence
+            | OperationClass::MutateForgeEntity
+            | OperationClass::PublishRefTransaction => {
                 Self::CanonicalMutation
             }
             OperationClass::ExternalIntegration => Self::ExternalEffect,
@@ -244,6 +248,11 @@ pub struct EffectRecord {
 /// One append-only event in the in-process effect journal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EffectJournalEvent {
+    /// Exact canonical submission identity, before its obligation is bound.
+    RefTransactionBound {
+        effect_id: EffectId,
+        binding: crate::ref_publication::RefTransactionBinding,
+    },
     /// A capability-authorized effect received its initial budget reservation.
     Accepted(Box<EffectRecord>),
     /// The grant became one of the shared typed obligations.
@@ -285,6 +294,7 @@ pub struct EffectJournalEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectJournalReplay {
     records: Vec<EffectRecord>,
+    ref_transactions: BTreeMap<EffectId, crate::ref_publication::RefTransactionBinding>,
 }
 
 impl EffectJournalReplay {
@@ -293,11 +303,21 @@ impl EffectJournalReplay {
     pub fn records(&self) -> &[EffectRecord] {
         &self.records
     }
+
+    /// Exact ordinary seals retained for canonical submission recovery.
+    #[must_use]
+    pub fn ref_transactions(
+        &self,
+    ) -> &BTreeMap<EffectId, crate::ref_publication::RefTransactionBinding> {
+        &self.ref_transactions
+    }
 }
 
 /// Why a journal cannot be appended or replayed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectJournalRefusal {
+    /// A canonical submission changed identity or lacked its durable binding.
+    RefTransactionBinding { effect_id: EffectId },
     /// A durable append failed or became ambiguous; new work is stopped.
     Persistence(EffectJournalPersistenceRefusal),
     /// A previous persistence failure requires restart/inspection before work.
@@ -378,6 +398,9 @@ pub enum EffectJournalRefusal {
 impl fmt::Display for EffectJournalRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RefTransactionBinding { effect_id } => {
+                write!(formatter, "canonical submission binding for {effect_id} is invalid")
+            }
             Self::Persistence(source) => {
                 write!(formatter, "effect journal persistence refused: {source:?}")
             }
@@ -459,6 +482,7 @@ struct EffectJournal {
     run_commitment: Option<IntentRunCommitment>,
     records: Vec<EffectRecord>,
     positions: BTreeMap<EffectId, usize>,
+    ref_transactions: BTreeMap<EffectId, crate::ref_publication::RefTransactionBinding>,
     entries: Vec<EffectJournalEntry>,
     sink: Option<Box<dyn EffectJournalSink>>,
     persistence_failed: bool,
@@ -595,13 +619,45 @@ impl EffectJournal {
             .ok_or(EffectJournalRefusal::UnknownEffect { effect_id })
     }
 
+    fn bind_ref_transaction(
+        &mut self,
+        effect_id: EffectId,
+        binding: crate::ref_publication::RefTransactionBinding,
+    ) -> Result<(), EffectJournalRefusal> {
+        self.ensure_writable()?;
+        if self.ref_transactions.contains_key(&effect_id) {
+            return Err(EffectJournalRefusal::RefTransactionBinding { effect_id });
+        }
+        let record = self.record_mut(effect_id)?;
+        if record.operation != OperationClass::PublishRefTransaction
+            || record.effect_class != EffectClass::CanonicalMutation
+            || record.obligation_state != ObligationState::Reserved
+            || record.obligation_class.is_some()
+            || record.run_commitment != binding.run_commitment()
+            || record.input_commitment != *binding.input_commitment()
+            || effect_id != binding.effect_id()
+            || record.source_authority_receipt.as_ref()
+                .is_none_or(|receipt| receipt.repository_id() != binding.seal().repository_id)
+        {
+            return Err(EffectJournalRefusal::RefTransactionBinding { effect_id });
+        }
+        self.ref_transactions.insert(effect_id, binding.clone());
+        self.append(EffectJournalEvent::RefTransactionBound { effect_id, binding })
+    }
+
     fn bind(
         &mut self,
         effect_id: EffectId,
         obligation_class: ObligationClass,
         external_idempotency_key: Option<IdempotencyKey>,
     ) -> Result<(), EffectJournalRefusal> {
+        let has_submission = self.ref_transactions.contains_key(&effect_id);
         let record = self.record_mut(effect_id)?;
+        if (obligation_class == ObligationClass::RefTransactionSubmission) != has_submission
+            || (has_submission && external_idempotency_key.is_some())
+        {
+            return Err(EffectJournalRefusal::RefTransactionBinding { effect_id });
+        }
         if record.obligation_class.is_some() {
             return Err(EffectJournalRefusal::ObligationAlreadyBound { effect_id });
         }
@@ -623,7 +679,15 @@ impl EffectJournal {
         reconciliation_evidence: Option<ReconciliationEvidence>,
         terminal_outcome: Option<EffectTerminalOutcome>,
     ) -> Result<(), EffectJournalRefusal> {
+        let has_submission = self.ref_transactions.contains_key(&effect_id);
         let record = self.record_mut(effect_id)?;
+        if record.operation == OperationClass::PublishRefTransaction
+            && event != LifecycleEvent::Abort
+            && (!has_submission
+                || record.obligation_class != Some(ObligationClass::RefTransactionSubmission))
+        {
+            return Err(EffectJournalRefusal::RefTransactionBinding { effect_id });
+        }
         let state = record
             .obligation_state
             .apply(event)
@@ -699,6 +763,9 @@ impl EffectJournal {
             }
             match &entry.event {
                 EffectJournalEvent::Accepted(record) => journal.accept((**record).clone())?,
+                EffectJournalEvent::RefTransactionBound { effect_id, binding } => {
+                    journal.bind_ref_transaction(*effect_id, binding.clone())?;
+                }
                 EffectJournalEvent::BoundObligation {
                     effect_id,
                     obligation_class,
@@ -723,6 +790,7 @@ impl EffectJournal {
         }
         Ok(EffectJournalReplay {
             records: journal.records,
+            ref_transactions: journal.ref_transactions,
         })
     }
 }

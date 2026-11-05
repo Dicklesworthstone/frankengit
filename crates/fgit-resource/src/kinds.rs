@@ -1,4 +1,4 @@
-//! The eleven concrete obligations of `docs/CALM_AND_OBLIGATIONS.md` section 7.
+//! The twelve concrete obligations of `docs/CALM_AND_OBLIGATIONS.md` section 7.
 //!
 //! Each class is a zero-sized marker implementing [`ObligationKind`] plus the
 //! payload types its four phases carry. Where the specification states a
@@ -1171,3 +1171,64 @@ impl ObligationKind for BillingReservation {
 }
 
 impl ExternallyObserved for BillingReservation {}
+
+
+// ---------------------------------------------------------------------------
+// 7.12 RefTransactionSubmission
+// ---------------------------------------------------------------------------
+
+/// Responsibility for one exact submission to canonical repository authority.
+///
+/// Its commit records that submission may start, never that a ref changed.
+/// The agent owner observes the authority service's terminal decision separately.
+/// The service retains ownership of its actual preparation slots and head CAS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefTransactionSubmission;
+
+/// The immutable identity retained before any submission may start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefTransactionRequest {
+    /// The ordinary sealed transaction identity.
+    pub transaction: TxId,
+    /// Commitment to the complete ordinary seal, not a second transaction ID.
+    pub seal_commitment: [u8; 32],
+}
+
+/// Responsibility committed before control reaches ordinary admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefTransactionSubmitted {
+    /// The one transaction whose terminal outcome must be observed.
+    pub transaction: TxId,
+}
+
+/// A definitely pre-submission cancellation or refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefTransactionAborted {
+    /// Why the reserved submission never began.
+    pub reason: NoCandidateReason,
+}
+
+/// Authority observation that settles submission responsibility.
+///
+/// A canonical refusal also settles this obligation. This receipt therefore
+/// does not assert that any ref was updated. The trusted authority adapter
+/// must authenticate the outcome before constructing this evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefTransactionObserved {
+    /// The exact transaction resolved by the authority service.
+    pub transaction: TxId,
+    /// Commitment to the full canonical terminal outcome, including refusal.
+    pub outcome_commitment: Digest,
+}
+
+impl ObligationKind for RefTransactionSubmission {
+    const CLASS: ObligationClass = ObligationClass::RefTransactionSubmission;
+    const OBSERVATION: ObservationMode = ObservationMode::ExternallyObserved;
+    const REQUIRED_GRADES: &'static [Grade] = &[Grade::Bytes, Grade::Objects];
+    type Reservation = RefTransactionRequest;
+    type CommitReceipt = RefTransactionSubmitted;
+    type AbortReceipt = RefTransactionAborted;
+    type AckEvidence = RefTransactionObserved;
+}
+
+impl ExternallyObserved for RefTransactionSubmission {}

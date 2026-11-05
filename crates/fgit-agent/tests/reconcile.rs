@@ -109,7 +109,9 @@ const fn effect_class(operation: OperationClass) -> EffectClass {
         OperationClass::ReadCanonicalObject => EffectClass::PureCanonicalRead,
         OperationClass::CreateCandidateObject => EffectClass::ImmutableCandidateCreation,
         OperationClass::PreparePublication => EffectClass::PreparedCanonicalMutation,
-        OperationClass::SubmitEvidence | OperationClass::MutateForgeEntity => {
+        OperationClass::SubmitEvidence
+        | OperationClass::MutateForgeEntity
+        | OperationClass::PublishRefTransaction => {
             EffectClass::CanonicalMutation
         }
         OperationClass::ExternalIntegration => EffectClass::ExternalEffect,

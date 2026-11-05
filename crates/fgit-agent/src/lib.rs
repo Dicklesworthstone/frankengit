@@ -102,6 +102,8 @@ pub mod outcome_learning;
 pub mod plan;
 pub mod protocol;
 pub mod publication;
+/// Durable, revocation-checked ordinary ref transaction submissions.
+pub mod ref_publication;
 pub mod pulse;
 pub mod reconcile;
 pub mod refresh;
