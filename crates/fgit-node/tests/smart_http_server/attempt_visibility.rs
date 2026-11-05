@@ -49,6 +49,30 @@ fn attempt_aliases_do_not_disclose_the_configured_route_before_authentication() 
                 "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nIdempotency-Key: \r\n",
                 401,
             ),
+            (
+                "POST",
+                "/git-receive-pack".into(),
+                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nOrigin: https://attacker.invalid\r\n",
+                403,
+            ),
+            (
+                "POST",
+                format!("{alias}/git-receive-pack"),
+                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nOrigin: https://attacker.invalid\r\n",
+                403,
+            ),
+            (
+                "POST",
+                "/git-receive-pack".into(),
+                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nSec-Fetch-Site: cross-site\r\n",
+                403,
+            ),
+            (
+                "POST",
+                format!("{alias}/git-receive-pack"),
+                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nSec-Fetch-Site: cross-site\r\n",
+                403,
+            ),
         ];
         let sessions = cases.len() * 4 + 5;
         let server = Server::start(initialized(config.clone()), sessions, true, 2);
@@ -117,7 +141,18 @@ fn attempt_aliases_do_not_disclose_the_configured_route_before_authentication() 
             &post_headers("receive-pack", body.len(), ""),
             &body,
         );
-        let first = response_body(&exchange(&server, &push, 1));
+        // A permitted browser origin may publish; the ordinary stock-client
+        // retry without browser headers must recover that same decision.
+        let mut browser_push = format!(
+            "POST {}{alias}/git-receive-pack HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\n{}\r\n",
+            server.route,
+            server.address,
+            server.address,
+            post_headers("receive-pack", body.len(), "")
+        )
+        .into_bytes();
+        browser_push.extend_from_slice(&body);
+        let first = response_body(&exchange(&server, &browser_push, 1));
         assert!(
             first
                 .windows(b"ok refs/heads/main".len())

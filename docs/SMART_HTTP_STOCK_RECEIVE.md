@@ -26,7 +26,10 @@ not reveal whether the repository route is configured. Recognized aliases
 validate the ordinary endpoint policy and authenticate before retry-key
 conflicts or synthesized-header limits are evaluated. Unscoped receive RPCs
 also authenticate before interpreting retry headers. No alias error creates
-an attempt or publishes repository state (`frankengit-g8fo.1`).
+an attempt or publishes repository state (`frankengit-g8fo.1`). The shared
+Origin/`Sec-Fetch-Site` preflight runs before any attempt adaptation, so a
+cross-site POST receives the same refusal even when adaptation would otherwise
+challenge credentials, reject a retry header or select a fresh attempt.
 
 Every redirected discovery and RPC authenticates independently. The identifier
 is public routing/idempotency data, not a bearer capability, an approval, a

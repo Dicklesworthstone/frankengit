@@ -244,6 +244,10 @@ def attempt_route_refusals(fg: str, commands: Commands, root: Path, url: str, to
         ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "one"),
                                             ("Idempotency-Key", "two")], b"", 401),
         ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "")], b"", 401),
+        ("POST", "/git-receive-pack", rpc + [("Origin", "https://attacker.invalid")], b"", 403),
+        ("POST", alias + "/git-receive-pack", rpc + [("Origin", "https://attacker.invalid")], b"", 403),
+        ("POST", "/git-receive-pack", rpc + [("Sec-Fetch-Site", "cross-site")], b"", 403),
+        ("POST", alias + "/git-receive-pack", rpc + [("Sec-Fetch-Site", "cross-site")], b"", 403),
     ]
     wrong = "b" * 64 if token != "b" * 64 else "c" * 64
     for credential in (None, "Bearer " + wrong):

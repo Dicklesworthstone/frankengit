@@ -415,7 +415,9 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - stock HTTP attempt aliases preserve ordinary routing and authentication
   error ordering: malformed aliases are not rejected based on the configured
   repository prefix, and recognized aliases authenticate before retry-header
-  rewriting. Real TCP and native smoke twins compare existing/missing routes
+  rewriting. Shared Origin/`Sec-Fetch-Site` refusal runs before any attempt
+  adapter can challenge credentials, rewrite headers or draw entropy. Real
+  TCP and native smoke twins compare existing/missing routes
   with absent and wrong credentials, then retain valid push and replay paths
   (`frankengit-g8fo.1`). These are response-disclosure controls, not a claim of
   constant-time authentication or hosted multi-tenant isolation;
