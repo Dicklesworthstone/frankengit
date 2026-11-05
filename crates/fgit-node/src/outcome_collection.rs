@@ -23,7 +23,7 @@ use crate::{
     FsqliteCx, NodeRequestContext, OneNode, PackContextCheckpoint, checkpoint_pack_context,
 };
 
-const MAX_OUTCOME_HEAD_RETRIES: usize = 16;
+pub(super) const MAX_OUTCOME_HEAD_RETRIES: usize = 16;
 
 impl OneNode {
     /// Resolve terminal history using the selected retained outcome checkpoint.
@@ -122,13 +122,16 @@ impl OneNode {
     }
 }
 
-pub async fn collect(
-    authority: &FsqliteAuthorityStore,
+pub async fn collect<Authority>(
+    authority: &Authority,
     cx: &FsqliteCx,
     head_key: &HeadKey,
     authenticated: &AuthenticatedHead,
     fabric: Option<&LocalFilesystemFabric>,
-) -> Result<CumulativeOutcomes, OutcomeFailure> {
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    Authority: AsyncAuthorityStore<Context = FsqliteCx> + ?Sized,
+{
     live(cx)?;
     let result = match fabric {
         Some(fabric) => {
@@ -185,7 +188,7 @@ pub(super) async fn collect_at_head(
     result
 }
 
-fn live(cx: &FsqliteCx) -> Result<(), OutcomeFailure> {
+pub(super) fn live(cx: &FsqliteCx) -> Result<(), OutcomeFailure> {
     match checkpoint_pack_context(cx) {
         PackContextCheckpoint::Live => Ok(()),
         PackContextCheckpoint::Stopped { .. } => {

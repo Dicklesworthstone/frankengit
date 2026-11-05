@@ -852,6 +852,17 @@ This recovery operation is read-only: an undecided result retains debt, and
 observing a terminal does not append an ACK to a recovered journal or by itself
 establish quiescence.
 
+These native observation paths, including retained live continuation, use the
+authority-selected retained outcome checkpoint. They verify its complete
+terminal set against the exact current head token and outcome root, while
+preserving original-run, full-seal and custody authentication. Covered decision
+batches need not remain replayable. Head movement triggers bounded recollection
+within the caller's original request; an absent current head refuses even if
+its historical issuance record survives. Without a selected checkpoint, replay
+still stops at a reachable terminal. Missing optional checkpoint evidence may
+fall back to history, but incomplete history cannot establish an undecided
+result. None of these observations renews execution authority.
+
 `settle_recovered_agent_ref_transaction_in` supplies the separate cold cleanup
 path. It reauthenticates the original saved run and independently pinned journal
 prefix, holds exclusive file custody through the ordinary original-TxId lookup,
@@ -889,6 +900,15 @@ custody, successful continuation without replacement inputs or another charge,
 clock/broker/capability/deadline substitutions, moved-head refusal, and original
 terminal settlement before fresh authorization. These tests cover the bounded
 live owner; they do not establish general crash replay or journal-writer repair.
+
+`agent_publication/checkpoint_tests.rs` uses real native admission and retained
+checkpoint publication in both Git formats. A read wrapper withholds an older
+decision batch to distinguish retained recovery from the original replay path.
+The cases cover live settlement, expired retry, reopened durable acknowledgement,
+corrupt checkpoint fallback, cancellation, missing current authority and
+terminal-only recovery with incomplete older history. Original run heads,
+issuance evidence and transaction seals remain retained throughout; these tests
+do not establish a general history-retention or garbage-collection policy.
 
 ---
 

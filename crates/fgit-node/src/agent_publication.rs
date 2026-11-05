@@ -18,7 +18,6 @@ use fgit_agent::ref_publication::{
     RefTransactionEffectRefusal, RefTransactionObservationRefusal,
     RefTransactionReconciliationRefused, RefTransactionResolution, RefTransactionStartRefused,
     ReservedRefTransactionSubmission, SettledRefTransactionSubmission,
-    observe_ref_transaction_async,
 };
 use fgit_agent::{
     AgentRefTransaction, CurrentAuthorityCapabilityEffectAuthorization,
@@ -39,6 +38,7 @@ use crate::{
     receive_staging::ReceiveStaging,
 };
 
+mod observation;
 mod recovery;
 pub use recovery::{NativeRecoveredRefTransactionRefusal, NativeRecoveredRefTransactionSettlement};
 
@@ -374,14 +374,9 @@ impl OneNode {
                     "effect identity collision",
                 )));
             }
-            return match observe_ref_transaction_async(
-                &self.authority,
-                request.authority(),
-                &self.head_key,
-                run,
-                &binding,
-            )
-            .await
+            return match self
+                .observe_agent_ref_transaction_checkpointed_in(request, run, &binding)
+                .await
             {
                 Ok(Some(observed)) => Ok(PreparedNativeAgentPublication::Recovered(observed)),
                 Ok(None) => Err(preflight(
@@ -674,8 +669,8 @@ impl OneNode {
                 Some(&staging),
             )
             .await;
-        let responsibility = pending
-            .reconcile_async(&self.authority, request.authority(), &self.head_key)
+        let responsibility = self
+            .reconcile_agent_ref_transaction_in(request, pending)
             .await;
         Ok(NativeAgentPublicationResult::Submitted(Box::new(
             NativeAgentSubmission {
@@ -723,8 +718,8 @@ impl OneNode {
             session,
             clock_owner,
         } = publication;
-        let (pending, observation_failure) = match pending
-            .reconcile_async(&self.authority, request.authority(), &self.head_key)
+        let (pending, observation_failure) = match self
+            .reconcile_agent_ref_transaction_in(request, pending)
             .await
         {
             Ok(RefTransactionResolution::Decided(settled)) => {
@@ -832,9 +827,21 @@ impl OneNode {
                 reason: RefTransactionObservationRefusal::Binding,
             });
         }
-        pending
-            .reconcile_async(&self.authority, request.authority(), &self.head_key)
+        match self
+            .observe_agent_ref_transaction_checkpointed_in(
+                request,
+                pending.run(),
+                pending.binding(),
+            )
             .await
+        {
+            Ok(Some(observed)) => pending.reconcile_observed(observed),
+            Ok(None) => Ok(RefTransactionResolution::Pending(pending)),
+            Err(reason) => Err(RefTransactionReconciliationRefused::Pending {
+                pending: Box::new(pending),
+                reason,
+            }),
+        }
     }
 
     /// Resolve the original TxId from an externally anchored recovered journal.
@@ -858,10 +865,8 @@ impl OneNode {
         {
             return Err(RefTransactionObservationRefusal::Binding);
         }
-        observe_ref_transaction_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
+        self.observe_agent_ref_transaction_checkpointed_in(
+            request,
             recovered.original_run(),
             binding,
         )

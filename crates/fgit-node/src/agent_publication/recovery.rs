@@ -10,7 +10,7 @@ use fgit_agent::{
     ref_publication::{
         ObservedRefTransaction, RefTransactionObservationRefusal,
         RefTransactionRecoveryPersistenceRefused, RefTransactionRecoveryRefusal,
-        observe_ref_transaction_async, prepare_recovered_ref_transaction_acknowledgement,
+        prepare_recovered_ref_transaction_acknowledgement,
     },
 };
 use fgit_types::TxId;
@@ -131,15 +131,10 @@ impl OneNode {
                 RefTransactionObservationRefusal::Binding,
             ));
         }
-        let observation = observe_ref_transaction_async(
-            &self.authority,
-            request.authority(),
-            &self.head_key,
-            &run,
-            binding,
-        )
-        .await
-        .map_err(NativeRecoveredRefTransactionRefusal::Observation)?;
+        let observation = self
+            .observe_agent_ref_transaction_checkpointed_in(request, &run, binding)
+            .await
+            .map_err(NativeRecoveredRefTransactionRefusal::Observation)?;
         let Some(observation) = observation else {
             return Ok(NativeRecoveredRefTransactionSettlement::Undecided {
                 effect_id: effect,

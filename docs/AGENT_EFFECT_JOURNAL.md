@@ -176,6 +176,17 @@ binding; callers cannot substitute another transaction. No issuing broker,
 capability proof, new resource reservation or admission request is created.
 Cleanup remains possible after expiry or revocation.
 
+The original-TxId lookup uses the native retained outcome checkpoint when the
+authenticated head selects one. Its complete terminal set is verified against
+the exact current head and outcome root before the original run and full seal
+can produce an acknowledgement. This permits cleanup without replaying older
+decision batches covered by that checkpoint; the original run's historical
+head body, issuance evidence and seal must still be retained. Head changes
+trigger bounded recollection within the same cleanup context. Missing or
+invalid optional checkpoint evidence falls back to authoritative history;
+incomplete history may recover a proven terminal but cannot establish absence.
+Cancellation leaves the original journal debt pending.
+
 The result is `NativeRecoveredRefTransactionSettlement`:
 
 - `Undecided` returns only the original effect and transaction identities. It
