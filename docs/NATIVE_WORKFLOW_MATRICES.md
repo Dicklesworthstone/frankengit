@@ -66,10 +66,13 @@ cancellation and unresolved containment retain their existing stop rules.
 
 ## Literal inputs, not executable interpolation
 
-Only a complete scalar `${{ matrix.name }}` in step `env` values or
+Only a complete scalar `${{ matrix.name }}` in job or step `env` values or step
 `working-directory` is substituted. Every selected row must define the requested
 name. The result is passed through the existing StepContext validator, retaining
 all environment limits, reserved-name rules and workspace-relative path checks.
+Job values are then inherited by their steps, with explicit step values taking
+precedence. Workflow-level environment defaults remain literal and cannot use
+a job's matrix. Invalid job values refuse even if a step would override them.
 There is no string interpolation in scripts, job conditions, runner labels, or
 other fields. A value such as `$(touch unexpected)` remains environment data,
 not inserted shell source. Scripts can deliberately evaluate their own inputs;
@@ -92,13 +95,16 @@ values are literal strings of at most 1,024 bytes. Matrix job names are at most
 The entire expanded workflow is limited to 128 jobs, 512 steps, 8,192 dependency
 edges and an 8 MiB conservative allocation-accounting envelope. Job/step/byte
 bounds are checked before source-node cloning. Dependency expansion is also
-charged before appending IDs. These are workload limits, not measured peak-RSS
+charged before appending IDs. Workflow/job environment inheritance charges new
+copies before allocation against this same byte allowance, including ordinary
+jobs in the graph; see [environment inheritance](NATIVE_WORKFLOW_STEP_CONTEXT.md).
+These are workload limits, not measured peak-RSS
 claims. Existing YAML byte/node/depth limits remain independent safeguards.
 
 ## Validation entry points
 
 ```sh
-cargo test -p fgit-schema --test workflow_matrix --test workflow --test workflow_context --test workflow_spans --locked
+cargo test -p fgit-schema --test workflow_matrix --test workflow --test workflow_context --test workflow_environment --test workflow_spans --locked
 cargo test -p fgit-runner --test workflow_matrix --lib --locked
 cargo check -p fgit-cli --all-targets --locked
 ```

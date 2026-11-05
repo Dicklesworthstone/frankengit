@@ -624,6 +624,147 @@ fn full_execution_replays_after_discarding_all_in_memory_handles_without_work() 
 }
 
 #[test]
+fn durable_execution_forwards_inherited_context_and_reopens_exactly_without_execution() {
+    // Real journal/attempt files and an explicitly recording executor. This
+    // checks the production durable forwarding path without launching processes.
+    struct ContextExecutor {
+        inner: Executor,
+        contexts: Vec<crate::workflow::StepContext>,
+    }
+    impl WorkflowExecutor for ContextExecutor {
+        fn begin_job(
+            &mut self,
+            index: usize,
+            job: &fgit_schema::workflow::Job,
+            live: &dyn Fn() -> bool,
+        ) -> Result<(), WorkerFailure> {
+            self.inner.begin_job(index, job, live)
+        }
+        fn execute_step(
+            &mut self,
+            _: usize,
+            _: &str,
+            _: StepLimits,
+            _: &dyn Fn() -> bool,
+        ) -> Result<StepObservation, WorkerFailure> {
+            panic!("inherited process context must not use the context-free adapter");
+        }
+        fn supports_step_context(&self) -> bool {
+            true
+        }
+        fn execute_step_with_context(
+            &mut self,
+            index: usize,
+            script: &str,
+            context: &crate::workflow::StepContext,
+            limits: StepLimits,
+            live: &dyn Fn() -> bool,
+        ) -> Result<StepObservation, WorkerFailure> {
+            self.contexts.push(context.clone());
+            self.inner.execute_step(index, script, limits, live)
+        }
+        fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
+            self.inner.finish_job(retain)
+        }
+    }
+    let source = "name: inherited durable\non: push\nenv:\n  VALUE: workflow\n  ROOT: common\njobs:\n  first:\n    runs-on: fgit-trusted-local\n    env:\n      VALUE: job\n      JOB: local\n    steps:\n      - run: echo first\n        env:\n          VALUE: step\n      - run: echo second\n  second:\n    runs-on: fgit-trusted-local\n    needs: first\n    steps:\n      - run: echo independent\n";
+    let graph = WorkflowPlan::compile(source).unwrap().graph_commitment();
+    let temp = Temp::new();
+    let mut c = coordinator();
+    let mut p = enqueue(&mut c, 1, source);
+    let binding = c.trusted_attempt_binding(&p, scope(), 200).unwrap();
+    let mut journal =
+        FileCheckJournal::create(&temp.journal(), scope(), CheckJournalLimits::default()).unwrap();
+    let mut owner = FileWorkflowAttempt::create(&temp.attempt(), binding).unwrap();
+    let mut executor = ContextExecutor {
+        inner: Executor::new(temp.attempt()),
+        contexts: Vec::new(),
+    };
+    let receipt = c
+        .execute_trusted_workflow_durable(
+            &mut p,
+            &mut executor,
+            &mut journal,
+            &mut owner,
+            200,
+            &|| true,
+        )
+        .unwrap();
+    assert_eq!(executor.inner.starts, 2);
+    assert_eq!(executor.inner.closes, 2);
+    assert_eq!(executor.contexts.len(), 3);
+    for (context, value) in executor.contexts.iter().zip(["step", "job", "workflow"]) {
+        assert_eq!(context.environment()["VALUE"], value);
+        assert_eq!(context.environment()["ROOT"], "common");
+    }
+    assert_eq!(executor.contexts[0].environment()["JOB"], "local");
+    assert_eq!(executor.contexts[1].environment()["JOB"], "local");
+    assert!(!executor.contexts[2].environment().contains_key("JOB"));
+    assert_eq!(p.receipt().unwrap().report().graph, graph);
+    assert_eq!(receipt.frame(), p.receipt().unwrap().frame());
+    c.verify_quiescence().unwrap();
+    let pin = owner.pin();
+    drop(owner);
+    drop(journal);
+    drop(p);
+    drop(c);
+
+    let mut c = coordinator();
+    let mut p = enqueue(&mut c, 1, source);
+    let mut owner =
+        FileWorkflowAttempt::open(&temp.attempt(), binding, Some(pin), &|| true).unwrap();
+    let mut journal = FileCheckJournal::open(
+        &temp.journal(),
+        scope(),
+        CheckJournalLimits::default(),
+        Some(receipt.journal_pin()),
+        &|| true,
+    )
+    .unwrap();
+    let mut no_work = Executor::new(temp.attempt());
+    let replayed = c
+        .execute_trusted_workflow_durable(
+            &mut p,
+            &mut no_work,
+            &mut journal,
+            &mut owner,
+            200,
+            &|| false,
+        )
+        .unwrap();
+    assert_eq!(replayed, receipt);
+    assert_eq!(no_work.starts, 0);
+    assert_eq!(no_work.closes, 0);
+    assert_eq!(owner.pin(), pin);
+    drop(owner);
+    drop(journal);
+
+    let changed = source.replace("VALUE: workflow", "VALUE: changed");
+    let equivalent = changed.replace(
+        "    needs: first\n",
+        "    needs: first\n    env:\n      VALUE: workflow\n",
+    );
+    assert_eq!(
+        WorkflowPlan::compile(&equivalent)
+            .unwrap()
+            .graph_commitment(),
+        graph
+    );
+    for changed_source in [changed, equivalent] {
+        let mut other = coordinator();
+        let other_plan = enqueue(&mut other, 1, &changed_source);
+        let other_binding = other
+            .trusted_attempt_binding(&other_plan, scope(), 200)
+            .unwrap();
+        assert_ne!(binding, other_binding);
+        assert_eq!(
+            FileWorkflowAttempt::open(&temp.attempt(), other_binding, Some(pin), &|| true).err(),
+            Some(WorkflowAttemptRefusal::IdentityMismatch)
+        );
+    }
+}
+
+#[test]
 fn unknown_started_attempt_blocks_rerun_and_fences_other_work_on_the_coordinator() {
     let temp = Temp::new();
     let mut c = coordinator();

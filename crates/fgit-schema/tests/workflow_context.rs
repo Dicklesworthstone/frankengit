@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use fgit_schema::workflow::{ContextRefusal, Limits, StepContext, WorkflowRefusal, compile};
+use fgit_schema::workflow::{ContextRefusal, Limits, StepContext, compile};
 
 fn workflow(step: &str) -> String {
     format!(
@@ -137,17 +137,7 @@ fn typed_context_limits_have_exact_permitted_twins() {
 }
 
 #[test]
-fn environments_are_not_promoted_to_workflow_or_job_inheritance() {
-    let top = format!("env:\n  VALUE: shared\n{}", workflow(""));
-    assert!(matches!(
-        compile(&top, &Limits::default()),
-        Err(WorkflowRefusal::ConstructUnsupported {
-            construct: "workflow.env",
-            ..
-        })
-    ));
-    let job = workflow("").replace("    steps:", "    env:\n      VALUE: shared\n    steps:");
-    assert!(compile(&job, &Limits::default()).is_err());
+fn literal_backslashes_and_tabs_have_distinct_single_record_commitments() {
     let literal = graph("        env:\n          VALUE: 'a\\tb'\n").canonical_bytes();
     let tab = graph("        env:\n          VALUE: \"a\\tb\"\n").canonical_bytes();
     assert_ne!(literal, tab);

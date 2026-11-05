@@ -1,4 +1,5 @@
-//! Explicit step-local process inputs. No inherited environment or secret lookup.
+//! Literal process inputs, with explicit workflow/job/step inheritance.
+//! No host environment, secret lookup or executable interpolation participates.
 use super::{Node, Span, WorkflowRefusal};
 use std::collections::BTreeMap;
 
@@ -6,6 +7,43 @@ pub const MAX_ENVIRONMENT_ENTRIES: usize = 64;
 pub const MAX_ENVIRONMENT_BYTES: usize = 64 * 1024;
 pub const MAX_ENVIRONMENT_VALUE_BYTES: usize = 8192;
 pub const MAX_WORKING_DIRECTORY_BYTES: usize = 1024;
+
+pub(super) type Environment = BTreeMap<String, String>;
+
+#[derive(Clone, Copy)]
+pub(super) enum EnvironmentScope {
+    Workflow,
+    Job,
+    Step,
+}
+impl EnvironmentScope {
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Workflow => "env",
+            Self::Job => "jobs.<id>.env",
+            Self::Step => "jobs.<id>.steps[].env",
+        }
+    }
+    const fn value_path(self) -> &'static str {
+        match self {
+            Self::Workflow => "env.<name>",
+            Self::Job => "jobs.<id>.env.<name>",
+            Self::Step => "jobs.<id>.steps[].env.<name>",
+        }
+    }
+    const fn entries_limit(self) -> &'static str {
+        match self {
+            Self::Step => "step environment entries",
+            Self::Workflow | Self::Job => "environment entries",
+        }
+    }
+    const fn bytes_limit(self) -> &'static str {
+        match self {
+            Self::Step => "step environment bytes",
+            Self::Workflow | Self::Job => "environment bytes",
+        }
+    }
+}
 
 /// Validated literal environment and workspace-relative directory. A context
 /// cannot be mutated after validation or accidentally evaluated as shell text.
@@ -145,12 +183,17 @@ fn normalize_directory(value: &str) -> Result<Option<String>, ContextRefusal> {
     Ok(Some(path.to_owned()))
 }
 
-pub(super) fn lower(node: &Node) -> Result<StepContext, WorkflowRefusal> {
-    let mut environment = Vec::new();
+/// Validate one source map before any child can override it. In particular,
+/// merging first must not hide reserved names, expressions or oversized values.
+pub(super) fn lower_environment(
+    node: &Node,
+    scope: EnvironmentScope,
+) -> Result<Environment, WorkflowRefusal> {
+    let mut environment = Environment::new();
     if let Some(env) = node.get("env") {
         let Node::Mapping { entries, .. } = env else {
             return Err(WorkflowRefusal::FieldShape {
-                path: "jobs.<id>.steps[].env",
+                path: scope.path(),
                 expected: "a mapping of literal values",
                 observed: env.shape(),
                 span: env.span(),
@@ -158,7 +201,7 @@ pub(super) fn lower(node: &Node) -> Result<StepContext, WorkflowRefusal> {
         };
         if entries.len() > MAX_ENVIRONMENT_ENTRIES {
             return Err(WorkflowRefusal::LimitExceeded {
-                limit: "step environment entries",
+                limit: scope.entries_limit(),
                 allowed: MAX_ENVIRONMENT_ENTRIES,
                 observed: entries.len(),
                 span: env.span(),
@@ -168,7 +211,7 @@ pub(super) fn lower(node: &Node) -> Result<StepContext, WorkflowRefusal> {
         for (name, value, span) in entries {
             let Node::Scalar { value: text, .. } = value else {
                 return Err(WorkflowRefusal::FieldShape {
-                    path: "jobs.<id>.steps[].env.<name>",
+                    path: scope.value_path(),
                     expected: "a literal scalar",
                     observed: value.shape(),
                     span: value.span(),
@@ -178,15 +221,85 @@ pub(super) fn lower(node: &Node) -> Result<StepContext, WorkflowRefusal> {
             bytes = bytes.saturating_add(name.len()).saturating_add(text.len());
             if bytes > MAX_ENVIRONMENT_BYTES {
                 return Err(WorkflowRefusal::LimitExceeded {
-                    limit: "step environment bytes",
+                    limit: scope.bytes_limit(),
                     allowed: MAX_ENVIRONMENT_BYTES,
                     observed: bytes,
                     span: *span,
                 });
             }
-            environment.push((name.clone(), text.clone()));
+            if environment.insert(name.clone(), text.clone()).is_some() {
+                return Err(invalid(ContextRefusal::DuplicateName, *span));
+            }
         }
     }
+    Ok(environment)
+}
+
+/// The same conservative entry allowance as the source-node expansion budget.
+/// This charges newly copied inherited strings and map entries before copying.
+pub(super) fn allocation_bytes(environment: &Environment) -> usize {
+    environment
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()).saturating_add(128))
+        .fold(0, usize::saturating_add)
+}
+
+pub(super) fn inherit_environment(
+    inherited: &Environment,
+    mut explicit: Environment,
+    expanded_bytes: &mut usize,
+    span: Span,
+) -> Result<Environment, WorkflowRefusal> {
+    let mut entries = explicit.len();
+    let mut bytes = explicit
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()))
+        .fold(0, usize::saturating_add);
+    let mut copied_bytes = 0usize;
+    for (name, value) in inherited {
+        if explicit.contains_key(name) {
+            continue;
+        }
+        entries = entries.saturating_add(1);
+        bytes = bytes.saturating_add(name.len()).saturating_add(value.len());
+        copied_bytes = copied_bytes
+            .saturating_add(name.len())
+            .saturating_add(value.len())
+            .saturating_add(128);
+    }
+    for (limit, allowed, observed) in [
+        (
+            "effective environment entries",
+            MAX_ENVIRONMENT_ENTRIES,
+            entries,
+        ),
+        ("effective environment bytes", MAX_ENVIRONMENT_BYTES, bytes),
+    ] {
+        if observed > allowed {
+            return Err(WorkflowRefusal::LimitExceeded {
+                limit,
+                allowed,
+                observed,
+                span,
+            });
+        }
+    }
+    super::matrix::charge_allocation(expanded_bytes, copied_bytes, span)?;
+    for (name, value) in inherited {
+        if !explicit.contains_key(name) {
+            explicit.insert(name.clone(), value.clone());
+        }
+    }
+    Ok(explicit)
+}
+
+pub(super) fn lower(
+    node: &Node,
+    inherited: &Environment,
+    expanded_bytes: &mut usize,
+) -> Result<StepContext, WorkflowRefusal> {
+    let explicit = lower_environment(node, EnvironmentScope::Step)?;
+    let environment = inherit_environment(inherited, explicit, expanded_bytes, node.span())?;
     let working_directory = if let Some(cwd) = node.get("working-directory") {
         let Node::Scalar { value, .. } = cwd else {
             return Err(WorkflowRefusal::FieldShape {
@@ -196,12 +309,14 @@ pub(super) fn lower(node: &Node) -> Result<StepContext, WorkflowRefusal> {
                 span: cwd.span(),
             });
         };
-        normalize_directory(value).map_err(|error| invalid(error, cwd.span()))?;
-        Some(value.clone())
+        normalize_directory(value).map_err(|error| invalid(error, cwd.span()))?
     } else {
         None
     };
-    StepContext::new(environment, working_directory).map_err(|error| invalid(error, node.span()))
+    Ok(StepContext {
+        environment,
+        working_directory,
+    })
 }
 const fn invalid(error: ContextRefusal, span: Span) -> WorkflowRefusal {
     WorkflowRefusal::Malformed {

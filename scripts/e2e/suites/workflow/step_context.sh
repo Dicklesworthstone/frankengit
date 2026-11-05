@@ -17,4 +17,4 @@ fge_run_timeout 600 WORKFLOW-CONTEXT-001 python3 "$E2E_ROOT/helpers/workflow_ste
 fge_assert_exit WORKFLOW-CONTEXT-002 0 "$FGE_LAST_EXIT"
 fge_phase assert
 fge_artifact "$WORK/results.json" native_step_context
-fge_note WORKFLOW-CONTEXT-003 'Both native hash domains exercised explicit literal inputs, directory selection, restored defaults, unsupported-input preflight and failed directory selection.'
+fge_note WORKFLOW-CONTEXT-003 'Both native hash domains exercised workflow/job/step environment precedence, matrix job inputs, literal values, directory selection, restored defaults, inherited-input preflight and exact durable recovery/publication.'

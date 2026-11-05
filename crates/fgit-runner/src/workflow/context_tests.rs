@@ -86,6 +86,33 @@ fn literal_environment_never_becomes_shell_code_or_leaks_into_later_steps() {
 }
 
 #[test]
+fn compiled_inherited_environment_reaches_real_processes_without_cross_step_or_job_leaks() {
+    let source = "name: inherited context\non: push\nenv:\n  VALUE: workflow\n  LITERAL: '$(touch injected) ; literal $HOME'\njobs:\n  first:\n    runs-on: fgit-trusted-local\n    env:\n      VALUE: job\n      JOB_ONLY: present\n    steps:\n      - run: printf '%s|%s|%s' \"$VALUE\" \"$JOB_ONLY\" \"$LITERAL\"\n        env:\n          VALUE: step\n          STEP_ONLY: present\n      - run: test -z \"${STEP_ONLY+x}\"; printf '%s|%s' \"$VALUE\" \"$JOB_ONLY\"\n  second:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: test -z \"${JOB_ONLY+x}\"; test -z \"${STEP_ONLY+x}\"; printf '%s|%s' \"$VALUE\" \"$LANG\"\n";
+    let plan = WorkflowPlan::compile(source).unwrap();
+    let expected: [&[u8]; 3] = [
+        b"step|present|$(touch injected) ; literal $HOME",
+        b"job|present",
+        b"workflow|C",
+    ];
+    let mut observations = Vec::new();
+    for job in &plan.graph().jobs {
+        let workspace = Temp::new();
+        for step in &job.steps {
+            let result = workspace
+                .execute(&step.run, &step.context, &|| true)
+                .unwrap();
+            assert_eq!(result.outcome, StepOutcome::Succeeded);
+            observations.push(result.stdout);
+            assert!(!workspace.0.join("injected").exists());
+        }
+    }
+    assert_eq!(
+        observations.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
 fn working_directory_is_step_local_and_each_component_must_be_a_real_directory() {
     let temp = Temp::new();
     fs::create_dir_all(temp.0.join("src/nested")).unwrap();
@@ -164,16 +191,24 @@ fn old_executors_refuse_the_complete_graph_before_starting_any_job() {
         fn observe_job(&mut self, _: &JobReport) {}
     }
     let source = "name: context\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: echo first\n      - run: echo second\n        env:\n          VALUE: explicit\n";
-    let plan = WorkflowPlan::compile(source).unwrap();
     let mut old = Old { calls: 0 };
-    assert!(matches!(
-        plan.execute(WorkflowLimits::default(), &mut old, &|| true),
-        Err(WorkflowError::UnsupportedStepContext)
-    ));
-    assert_eq!(old.calls, 0);
-    let plain =
-        WorkflowPlan::compile(&source.replace("        env:\n          VALUE: explicit\n", ""))
-            .unwrap();
+    let plain_source = source.replace("        env:\n          VALUE: explicit\n", "");
+    for contextual in [
+        source.to_owned(),
+        plain_source.replace("jobs:\n", "env:\n  VALUE: inherited\njobs:\n"),
+        plain_source.replace(
+            "    steps:\n",
+            "    env:\n      VALUE: inherited\n    steps:\n",
+        ),
+    ] {
+        let plan = WorkflowPlan::compile(&contextual).unwrap();
+        assert!(matches!(
+            plan.execute(WorkflowLimits::default(), &mut old, &|| true),
+            Err(WorkflowError::UnsupportedStepContext)
+        ));
+        assert_eq!(old.calls, 0);
+    }
+    let plain = WorkflowPlan::compile(&plain_source).unwrap();
     assert!(
         plain
             .execute(WorkflowLimits::default(), &mut old, &|| true)

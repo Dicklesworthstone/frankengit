@@ -285,8 +285,8 @@ fn workflow_constructs_outside_the_subset_are_refused_by_name() {
             "job.continue-on-error",
         ),
         (
-            "name: ci\non: push\nenv: x\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: x\n",
-            "workflow.env",
+            "name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    environment: deployment\n    steps:\n      - run: x\n",
+            "job.environment",
         ),
         (
             "name: ci\non: push\nconcurrency: g\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: x\n",
@@ -615,7 +615,6 @@ fn every_construct_the_lowerer_names_exists_in_the_registry() {
         "step.uses",
         "step.with",
         "workflow.concurrency",
-        "workflow.env",
         "workflow.secrets",
     ] {
         let entry = registry::lookup(key).unwrap_or_else(|| {

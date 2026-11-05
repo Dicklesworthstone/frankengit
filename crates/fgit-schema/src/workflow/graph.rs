@@ -407,7 +407,11 @@ fn check_keys(
 }
 
 /// Lowers one step.
-fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
+fn lower_step(
+    node: &Node,
+    environment: &context::Environment,
+    expanded_bytes: &mut usize,
+) -> Result<Step, WorkflowRefusal> {
     check_keys(
         node,
         "a step",
@@ -446,17 +450,23 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
         run,
         condition: condition(node.get("if"), "step.if", node.span())?,
         span: node.span(),
-        context: context::lower(node)?,
+        context: context::lower(node, environment, expanded_bytes)?,
         timeout_minutes: deadline::lower(node.get("timeout-minutes"), "step.timeout-minutes")?,
     })
 }
 
 /// Lowers one job.
-pub(super) fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> {
+pub(super) fn lower_job(
+    id: &str,
+    node: &Node,
+    span: Span,
+    workflow_environment: &context::Environment,
+    expanded_bytes: &mut usize,
+) -> Result<Job, WorkflowRefusal> {
     check_keys(
         node,
         "a job",
-        &["runs-on", "needs", "steps", "if", "timeout-minutes"],
+        &["runs-on", "needs", "steps", "if", "timeout-minutes", "env"],
         &[
             ("strategy", "job.strategy"),
             ("permissions", "job.permissions"),
@@ -500,9 +510,12 @@ pub(super) fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, Workfl
             span: steps_node.span(),
         });
     };
+    let explicit = context::lower_environment(node, context::EnvironmentScope::Job)?;
+    let environment =
+        context::inherit_environment(workflow_environment, explicit, expanded_bytes, node.span())?;
     let steps = items
         .iter()
-        .map(lower_step)
+        .map(|step| lower_step(step, &environment, expanded_bytes))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Job {
@@ -571,9 +584,8 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
     check_keys(
         document,
         "a workflow",
-        &["name", "on", "jobs"],
+        &["name", "on", "jobs", "env"],
         &[
-            ("env", "workflow.env"),
             ("concurrency", "workflow.concurrency"),
             ("permissions", "job.permissions"),
             ("secrets", "workflow.secrets"),
@@ -610,7 +622,8 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
             span: jobs_node.span(),
         });
     };
-    let jobs = matrix::lower_jobs(entries, span)?;
+    let environment = context::lower_environment(document, context::EnvironmentScope::Workflow)?;
+    let jobs = matrix::lower_jobs(entries, span, &environment)?;
 
     Ok(WorkflowGraph {
         name,

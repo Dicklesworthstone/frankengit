@@ -30,21 +30,35 @@ impl MatrixBinding {
 pub(super) fn lower_jobs(
     entries: &[(String, Node, Span)],
     span: Span,
+    workflow_environment: &super::context::Environment,
 ) -> Result<Vec<Job>, WorkflowRefusal> {
-    // Keep all original acceptance and canonical bytes for context-free inputs.
+    let mut bytes = super::context::allocation_bytes(workflow_environment);
+    // Keep the original canonical representation for context-free inputs.
     if !entries
         .iter()
         .any(|(_, node, _)| node.get("strategy").is_some())
     {
+        // Inheritance expands even when no job declares a matrix. Charge the
+        // source representation once, then every newly copied inherited entry
+        // as it is lowered into a job or step, before that copy is allocated.
+        for (id, node, key_span) in entries {
+            charge_allocation(
+                &mut bytes,
+                node_cost(node).saturating_add(id.len()).saturating_add(128),
+                *key_span,
+            )?;
+        }
         return entries
             .iter()
-            .map(|(id, node, span)| graph::lower_job(id, node, *span))
+            .map(|(id, node, span)| {
+                graph::lower_job(id, node, *span, workflow_environment, &mut bytes)
+            })
             .collect();
     }
     let mut sources = BTreeSet::new();
     let mut plans = Vec::new();
     let mut groups = BTreeMap::new();
-    let (mut job_count, mut step_count, mut bytes) = (0usize, 0usize, 0usize);
+    let (mut job_count, mut step_count) = (0usize, 0usize);
     for (id, node, key_span) in entries {
         if !sources.insert(id.as_str()) {
             return Err(WorkflowRefusal::DuplicateKey {
@@ -132,7 +146,13 @@ pub(super) fn lower_jobs(
                     entries.retain(|(key, _, _)| key != "strategy");
                 }
                 context::resolve(&mut selected, &values)?;
-                let mut job = graph::lower_job(&groups[id][index], &selected, *key_span)?;
+                let mut job = graph::lower_job(
+                    &groups[id][index],
+                    &selected,
+                    *key_span,
+                    workflow_environment,
+                    &mut bytes,
+                )?;
                 job.matrix = Some(MatrixBinding {
                     source_job: id.clone(),
                     values,
@@ -140,7 +160,13 @@ pub(super) fn lower_jobs(
                 jobs.push(job);
             }
         } else {
-            jobs.push(graph::lower_job(id, node, *key_span)?);
+            jobs.push(graph::lower_job(
+                id,
+                node,
+                *key_span,
+                workflow_environment,
+                &mut bytes,
+            )?);
         }
     }
     // Dependency names address declared job groups, never fabricated variants.
@@ -180,6 +206,21 @@ pub(super) fn lower_jobs(
 
 const fn invalid(expected: &'static str, span: Span) -> WorkflowRefusal {
     WorkflowRefusal::Malformed { expected, span }
+}
+pub(super) fn charge_allocation(
+    bytes: &mut usize,
+    added: usize,
+    span: Span,
+) -> Result<(), WorkflowRefusal> {
+    let observed = bytes.saturating_add(added);
+    limit(
+        "expanded workflow allocation bytes",
+        MAX_EXPANDED_BYTES,
+        observed,
+        span,
+    )?;
+    *bytes = observed;
+    Ok(())
 }
 const fn limit(
     name: &'static str,
