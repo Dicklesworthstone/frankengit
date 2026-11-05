@@ -50,6 +50,20 @@ fn adapt_with_nonce(
 ) -> Result<Option<Vec<u8>>, Status> {
     let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
     *version = envelope.version;
+    // The reserved bearer namespace belongs to canonical agent authentication,
+    // including malformed tokens and forbidden Git operations. Legacy token
+    // lookup here would replace that handler's refusal, and attempt rewriting
+    // would change the request commitment before its authority checks.
+    if envelope
+        .authorization()
+        .and_then(|value| value.split_once(' '))
+        .is_some_and(|(scheme, token)| {
+            scheme.eq_ignore_ascii_case("bearer")
+                && token.starts_with(crate::agent_credentials::TOKEN_PREFIX)
+        })
+    {
+        return Ok(Some(bytes));
+    }
     let route = std::str::from_utf8(&profile.route).map_err(|_| Status::Unavailable)?;
     let Some(suffix) = envelope.target.strip_prefix(route) else {
         return Ok(Some(bytes));

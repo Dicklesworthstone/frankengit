@@ -405,6 +405,7 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
     // becomes code publication, review approval, merge or administration.
     for (method, suffix, body) in [
         ("POST", "/git-receive-pack", "0000"),
+        ("GET", "/info/refs?service=git-receive-pack", ""),
         ("GET", "/info/refs?service=git-upload-pack", ""),
         ("GET", "/api/v1/source", ""),
         ("GET", "/api/v1/pulls/1/reviews", ""),
@@ -422,6 +423,30 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
             &request(&original, method, suffix, body, Some("closed-agent-effect")),
             403,
         );
+    }
+    // Attempt URLs cannot route a canonical bearer through the legacy
+    // credential table, synthesize a key, or replace the agent refusal with
+    // an alias/key conflict. The same real grant still serves metadata above.
+    let nonce = "42".repeat(32);
+    for repository in [route.as_str(), "/another-repository"] {
+        for (method, suffix, body) in [
+            ("GET", "/info/refs?service=git-receive-pack", ""),
+            ("POST", "/git-receive-pack", "0000"),
+        ] {
+            for key in [None, Some("conflicting-agent-attempt-key")] {
+                status(
+                    &exchange(
+                        &selected,
+                        &original,
+                        method,
+                        &format!("{repository}/.fgit-receive/{nonce}{suffix}"),
+                        body,
+                        key,
+                    ),
+                    403,
+                );
+            }
+        }
     }
     status(
         &exchange(

@@ -85,6 +85,45 @@ const RPC_HEADERS: &str =
     "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\n";
 
 #[test]
+fn canonical_agent_bearers_reach_the_canonical_handler_without_attempt_adaptation() {
+    let profile = profile();
+    for token in [
+        format!("fgagent_{}", "b".repeat(64)),
+        "fgagent_invalid".to_owned(),
+    ] {
+        for scheme in ["Bearer", "bEaReR"] {
+            for route in ["/repo.git", "/missing.git"] {
+                for scope in [String::new(), format!("{MARKER}{}", "42".repeat(32))] {
+                    for (method, suffix, headers, body) in [
+                        ("GET", DISCOVERY, "", b"".as_slice()),
+                        ("POST", RPC, RPC_HEADERS, b"0000".as_slice()),
+                    ] {
+                        for key in ["", "Idempotency-Key: conflicting-key\r\n"] {
+                            let input = format!(
+                                "{method} {route}{scope}{suffix} HTTP/1.1\r\nHost: local\r\nAuthorization: {scheme} {token}\r\n{headers}{key}\r\n",
+                            )
+                            .into_bytes();
+                            let input = [input, body.to_vec()].concat();
+                            let mut output = Vec::new();
+                            let forwarded = adapt_with_nonce(
+                                input.clone(),
+                                &profile,
+                                &mut HttpVersion::Http11,
+                                &mut output,
+                                || panic!("canonical bearers cannot create stock receive attempts"),
+                            )
+                            .unwrap();
+                            assert_eq!(forwarded, Some(input));
+                            assert!(output.is_empty());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn ordinary_push_discovery_redirects_without_a_custom_header() {
     let profile = profile();
     let input = request("GET", &format!("/repo.git{DISCOVERY}"), "", b"");
