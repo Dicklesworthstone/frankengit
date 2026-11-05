@@ -9,6 +9,9 @@
 //! symlinks, gitlinks and copies refuse in both profiles. `parse_with_binary`
 //! separately opts into framed binary hunks requiring an explicit native decoder.
 //! It does not opt into renames or introduce a compression/hash dependency.
+//! `parse_with_symlinks` explicitly extends the binary-and-renames profile with
+//! mode `120000`: link text remains opaque blob data and is never interpreted as
+//! a path. Every older profile keeps refusing symlink modes and source entries.
 //! `index` names are parsed and exposed as optional identity expectations;
 //! callers with an object store must check them against verified native IDs.
 
@@ -123,12 +126,48 @@ pub struct FilePatch<'a> {
     path: Vec<u8>,
     renamed_from: Option<Vec<u8>>,
     identical_content: bool,
+    allow_symlinks: bool,
     change: FileChange,
     old_mode: Option<u32>,
     new_mode: Option<u32>,
     index: Option<IndexExpectation>,
     hunks: Vec<Hunk<'a>>,
     binary: Option<BinaryHunks<'a>>,
+}
+
+/// Closed input grammars. A new mode cannot silently widen an older entrypoint.
+#[derive(Clone, Copy)]
+enum ParseProfile {
+    Exact,
+    Renames,
+    Binary,
+    BinaryAndRenames,
+    BinaryRenames,
+    Symlinks,
+}
+
+impl ParseProfile {
+    const fn allows_renames(self) -> bool {
+        matches!(
+            self,
+            Self::Renames | Self::BinaryAndRenames | Self::BinaryRenames | Self::Symlinks
+        )
+    }
+
+    const fn allows_binary(self) -> bool {
+        matches!(
+            self,
+            Self::Binary | Self::BinaryAndRenames | Self::BinaryRenames | Self::Symlinks
+        )
+    }
+
+    const fn allows_binary_renames(self) -> bool {
+        matches!(self, Self::BinaryRenames)
+    }
+
+    const fn allows_symlinks(self) -> bool {
+        matches!(self, Self::Symlinks)
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Hunk<'a> {
@@ -172,10 +211,11 @@ fn number(bytes: &[u8], at: usize) -> Result<usize, PatchError> {
             .ok_or_else(|| syntax(at, "range overflow"))
     })
 }
-const fn mode(bytes: &[u8], at: usize) -> Result<u32, PatchError> {
+const fn mode(bytes: &[u8], at: usize, profile: ParseProfile) -> Result<u32, PatchError> {
     match bytes {
         b"100644" => Ok(0o100644),
         b"100755" => Ok(0o100755),
+        b"120000" if profile.allows_symlinks() => Ok(0o120000),
         _ => Err(PatchError::Unsupported {
             line: at + 1,
             feature: "non-regular file mode",
@@ -349,10 +389,17 @@ fn file_path(
     };
     strip_path(&decoded, prefix, limit).map(Some)
 }
-fn index(bytes: &[u8], at: usize) -> Result<(IndexExpectation, Option<u32>), PatchError> {
+fn index(
+    bytes: &[u8],
+    at: usize,
+    profile: ParseProfile,
+) -> Result<(IndexExpectation, Option<u32>), PatchError> {
     let mut parts = bytes.split(|byte| *byte == b' ');
     let names = parts.next().unwrap_or_default();
-    let mode = parts.next().map(|part| mode(part, at)).transpose()?;
+    let mode = parts
+        .next()
+        .map(|part| mode(part, at, profile))
+        .transpose()?;
     if parts.next().is_some() {
         return Err(syntax(at, "trailing index metadata"));
     }
@@ -386,7 +433,7 @@ impl<'a> UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, false, false, false)
+        Self::parse_profile(input, limits, cancelled, ParseProfile::Exact)
     }
 
     /// Opt into explicit renames. Callers MUST read `source_path()` from the
@@ -400,7 +447,7 @@ impl<'a> UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, true, false, false)
+        Self::parse_profile(input, limits, cancelled, ParseProfile::Renames)
     }
 
     /// Opt into full-index compressed binary patches without enabling renames.
@@ -412,17 +459,35 @@ impl<'a> UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, false, true, false)
+        Self::parse_profile(input, limits, cancelled, ParseProfile::Binary)
+    }
+
+    /// Opt into inert Git symlink blobs alongside exact text changes, explicit
+    /// renames and non-renaming compressed binary changes. The original base
+    /// kind and each supplied index identity remain caller-verified inputs.
+    /// Link text is data: this parser performs no path resolution or I/O.
+    ///
+    /// Both rename endpoints retain the same authorization, original-coordinate
+    /// and absent-destination obligations as [`Self::parse_with_renames`].
+    /// Compressed edited renames, directories, gitlinks and copies still refuse.
+    /// No other parser entrypoint admits symlink metadata or symlink sources.
+    pub fn parse_with_symlinks(
+        input: &'a [u8],
+        limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, ParseProfile::Symlinks)
     }
 
     fn parse_profile(
         input: &'a [u8],
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
-        allow_renames: bool,
-        allow_binary: bool,
-        allow_binary_renames: bool,
+        profile: ParseProfile,
     ) -> Result<Self, PatchError> {
+        let allow_renames = profile.allows_renames();
+        let allow_binary = profile.allows_binary();
+        let allow_binary_renames = profile.allows_binary_renames();
         limits.validate()?;
         checkpoint(cancelled)?;
         if input.len() > limits.max_patch_bytes {
@@ -472,6 +537,7 @@ impl<'a> UnifiedPatch<'a> {
                 path,
                 renamed_from,
                 identical_content: similarity == Some(100),
+                allow_symlinks: profile.allows_symlinks(),
                 change: FileChange::Modify,
                 old_mode: None,
                 new_mode: None,
@@ -630,16 +696,16 @@ impl<'a> UnifiedPatch<'a> {
                     // including duplicates and agreement with both diff paths.
                 } else if let Some(value) = text.strip_prefix(b"new file mode ") {
                     set(&mut kind, FileChange::Create, pos)?;
-                    set(&mut file.new_mode, mode(value, pos)?, pos)?;
+                    set(&mut file.new_mode, mode(value, pos, profile)?, pos)?;
                 } else if let Some(value) = text.strip_prefix(b"deleted file mode ") {
                     set(&mut kind, FileChange::Delete, pos)?;
-                    set(&mut file.old_mode, mode(value, pos)?, pos)?;
+                    set(&mut file.old_mode, mode(value, pos, profile)?, pos)?;
                 } else if let Some(value) = text.strip_prefix(b"old mode ") {
-                    set(&mut file.old_mode, mode(value, pos)?, pos)?;
+                    set(&mut file.old_mode, mode(value, pos, profile)?, pos)?;
                 } else if let Some(value) = text.strip_prefix(b"new mode ") {
-                    set(&mut file.new_mode, mode(value, pos)?, pos)?;
+                    set(&mut file.new_mode, mode(value, pos, profile)?, pos)?;
                 } else if let Some(value) = text.strip_prefix(b"index ") {
-                    let (names, mode) = index(value, pos)?;
+                    let (names, mode) = index(value, pos, profile)?;
                     set(&mut file.index, names, pos)?;
                     index_mode = mode;
                 } else {
@@ -746,6 +812,14 @@ impl<'a> UnifiedPatch<'a> {
     }
 }
 impl FilePatch<'_> {
+    /// Whether this file was parsed with the explicit inert-symlink profile.
+    /// Consumers must still resolve and authorize its actual immutable source;
+    /// the flag never grants path traversal or broadens a capability.
+    #[must_use]
+    pub const fn allows_symlinks(&self) -> bool {
+        self.allow_symlinks
+    }
+
     /// Destination path (the deleted path for a deletion).
     #[must_use]
     pub fn path(&self) -> &[u8] {
@@ -828,9 +902,9 @@ impl FilePatch<'_> {
             return Err(PatchError::SourcePresence);
         }
         let (old_mode, body) = source.unwrap_or((0o100644, b""));
-        if !matches!(old_mode, 0o100644 | 0o100755)
-            || self.old_mode.is_some_and(|mode| mode != old_mode)
-        {
+        let source_mode_allowed = matches!(old_mode, 0o100644 | 0o100755)
+            || (self.allow_symlinks && old_mode == 0o120000);
+        if !source_mode_allowed || self.old_mode.is_some_and(|mode| mode != old_mode) {
             return Err(PatchError::SourceMode);
         }
         if body.len() > limits.max_file_bytes {
@@ -974,6 +1048,10 @@ fn append(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> Result<(), PatchE
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "patch/symlink_tests.rs"]
+mod symlink_tests;
 
 #[cfg(test)]
 #[path = "patch/octal_tests.rs"]
