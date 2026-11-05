@@ -47,6 +47,7 @@ def isolated_environment(root: Path) -> dict[str, str]:
            if not k.startswith("GIT_") and not k.upper().endswith("_PROXY")}
     env.update(HOME=str(root), XDG_CONFIG_HOME=str(root), GIT_CONFIG_NOSYSTEM="1",
                GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+               GIT_HTTP_USER_AGENT=USER_AGENT,
                GIT_AUTHOR_NAME="HTTP test", GIT_AUTHOR_EMAIL="http@example.test",
                GIT_COMMITTER_NAME="HTTP test", GIT_COMMITTER_EMAIL="http@example.test",
                GIT_AUTHOR_DATE="2000-01-01T00:00:00+0000",
