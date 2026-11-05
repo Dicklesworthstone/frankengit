@@ -120,9 +120,7 @@ impl EffectClass {
             OperationClass::PreparePublication => Self::PreparedCanonicalMutation,
             OperationClass::SubmitEvidence
             | OperationClass::MutateForgeEntity
-            | OperationClass::PublishRefTransaction => {
-                Self::CanonicalMutation
-            }
+            | OperationClass::PublishRefTransaction => Self::CanonicalMutation,
             OperationClass::ExternalIntegration => Self::ExternalEffect,
             OperationClass::ReadDerivedGeneration
             | OperationClass::TreeFsWorkspace
@@ -399,7 +397,10 @@ impl fmt::Display for EffectJournalRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RefTransactionBinding { effect_id } => {
-                write!(formatter, "canonical submission binding for {effect_id} is invalid")
+                write!(
+                    formatter,
+                    "canonical submission binding for {effect_id} is invalid"
+                )
             }
             Self::Persistence(source) => {
                 write!(formatter, "effect journal persistence refused: {source:?}")
@@ -636,7 +637,9 @@ impl EffectJournal {
             || record.run_commitment != binding.run_commitment()
             || record.input_commitment != *binding.input_commitment()
             || effect_id != binding.effect_id()
-            || record.source_authority_receipt.as_ref()
+            || record
+                .source_authority_receipt
+                .as_ref()
                 .is_none_or(|receipt| receipt.repository_id() != binding.seal().repository_id)
         {
             return Err(EffectJournalRefusal::RefTransactionBinding { effect_id });

@@ -9,7 +9,10 @@
 use core::{fmt, num::NonZeroU32};
 use std::collections::BTreeMap;
 
-use fgit_codec::{DecodeLimits, Decoder, Encoder, TransactionSealBody, wire::{decode_body, encode_body}};
+use fgit_codec::{
+    DecodeLimits, Decoder, Encoder, TransactionSealBody,
+    wire::{decode_body, encode_body},
+};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_resource::{
     DownstreamIdempotency, EscalationReason, IdempotencyKey, LifecycleEvent, ObligationClass,
@@ -434,8 +437,10 @@ fn read_option_id(d: &mut Decoder<'_>) -> Result<Option<EffectId>> {
 fn encode_event(e: &mut Encoder, run: &IntentRun, event: &EffectJournalEvent) -> Result<()> {
     match event {
         EffectJournalEvent::RefTransactionBound { effect_id, binding } => {
-            if binding.run_commitment() != run.commitment()
-                .map_err(|_| EffectJournalCodecRefusal::RunIdentity)?
+            if binding.run_commitment()
+                != run
+                    .commitment()
+                    .map_err(|_| EffectJournalCodecRefusal::RunIdentity)?
                 || *effect_id != binding.effect_id()
             {
                 return Err(EffectJournalCodecRefusal::RunMismatch);
@@ -445,7 +450,8 @@ fn encode_event(e: &mut Encoder, run: &IntentRun, event: &EffectJournalEvent) ->
             e.write_bytes(
                 "ref_transaction_seal",
                 &encode_body(binding.seal()).map_err(|_| EffectJournalCodecRefusal::Format)?,
-            ).map_err(|_| EffectJournalCodecRefusal::Format)?;
+            )
+            .map_err(|_| EffectJournalCodecRefusal::Format)?;
             e.write_raw(binding.publication_binding());
             e.write_raw_byte(u8::from(binding.custody_commitment().is_some()));
             if let Some(commitment) = binding.custody_commitment() {
@@ -649,19 +655,23 @@ fn decode_event(
             })
         }
         4 => {
-            let bytes = d.read_bytes("ref_transaction_seal")
+            let bytes = d
+                .read_bytes("ref_transaction_seal")
                 .map_err(|_| EffectJournalCodecRefusal::Format)?;
             let seal: TransactionSealBody = decode_body(bytes, DecodeLimits::DEFAULT)
                 .map_err(|_| EffectJournalCodecRefusal::Format)?;
             let mut binding = crate::ref_publication::RefTransactionBinding::from_parts(
-                run.commitment().map_err(|_| EffectJournalCodecRefusal::RunIdentity)?,
+                run.commitment()
+                    .map_err(|_| EffectJournalCodecRefusal::RunIdentity)?,
                 seal,
                 raw(d)?,
-            ).map_err(|_| EffectJournalCodecRefusal::Format)?;
+            )
+            .map_err(|_| EffectJournalCodecRefusal::Format)?;
             match byte(d)? {
                 0 => {}
                 1 => {
-                    binding = binding.with_custody_commitment(raw(d)?)
+                    binding = binding
+                        .with_custody_commitment(raw(d)?)
                         .map_err(|_| EffectJournalCodecRefusal::Format)?;
                 }
                 _ => return Err(EffectJournalCodecRefusal::Format),

@@ -456,6 +456,28 @@ impl OneNode {
         additional_visible_refs: &[RefName],
         staging: Option<&ReceiveStaging>,
     ) -> Result<(BasisBoundValidatedReceive, ParseLimits), NodeWorkspaceRefusal> {
+        self.quarantine_bound_envelope_with_bounds_in(
+            request,
+            reference,
+            expected_old,
+            envelope,
+            additional_visible_refs,
+            staging,
+            None,
+        )
+        .await
+    }
+
+    async fn quarantine_bound_envelope_with_bounds_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_old: GitOid,
+        envelope: &CandidateEnvelope<'_>,
+        additional_visible_refs: &[RefName],
+        staging: Option<&ReceiveStaging>,
+        pack_bounds: Option<(u32, usize)>,
+    ) -> Result<(BasisBoundValidatedReceive, ParseLimits), NodeWorkspaceRefusal> {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
@@ -497,6 +519,12 @@ impl OneNode {
         let mut limits = ReceiveLimits::default();
         limits.pack.max_input_bytes = MAX_BUNDLE_BYTES;
         limits.pack.max_total_expanded_bytes = MAX_BUNDLE_BYTES;
+        if let Some((objects, expanded_bytes)) = pack_bounds {
+            limits.pack.max_entries = limits.pack.max_entries.min(objects);
+            limits.pack.max_total_expanded_bytes =
+                limits.pack.max_total_expanded_bytes.min(expanded_bytes);
+            limits.pack.max_object_bytes = limits.pack.max_object_bytes.min(expanded_bytes);
+        }
         limits.pack.max_object_bytes = limits
             .pack
             .max_object_bytes
@@ -555,6 +583,183 @@ impl OneNode {
         }
         Ok((validated, parse_limits))
     }
+
+    /// Checked-agent intake retains exactly the same production quarantine and
+    /// private staging custody as ordinary workspace publication. In addition,
+    /// actual verified commit/export bodies must match the ECC-bound inputs.
+    pub(crate) async fn quarantine_agent_ref_transaction_in<A: fgit_crypto::GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        transaction: &fgit_agent::AgentRefTransaction<A>,
+        export: &fgit_treefs::ExportPlan<A>,
+        input: &[u8],
+        candidate_body_sha256: &[u8; 32],
+        staging: &ReceiveStaging,
+    ) -> Result<BasisBoundValidatedReceive, NodeWorkspaceRefusal> {
+        use fgit_crypto::NativeObjectIdentity;
+
+        let semantic = transaction.semantic_request();
+        let [command] = semantic.ref_commands() else {
+            return Err(invalid(
+                "checked agent publication requires exactly one ref command",
+            ));
+        };
+        let (ExpectedOld::Exactly(base), ProposedNew::Update(candidate)) =
+            (&command.expected_old, &command.proposed_new)
+        else {
+            return Err(invalid(
+                "checked agent publication requires an existing branch update",
+            ));
+        };
+        let expected = SemanticRequest::build(
+            RECEIVE_ADMISSION_SCHEMA,
+            self.object_format,
+            true,
+            vec![command.clone()],
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|_| invalid("invalid checked agent semantic request"))?;
+        if semantic != &expected || command.force {
+            return Err(invalid(
+                "checked agent request differs from ordinary atomic receive",
+            ));
+        }
+        let envelope = CandidateEnvelope::parse(input)?;
+        envelope.bind(self.object_format, &command.name, *base, *candidate)?;
+        let object_limit = u32::try_from(export.object_count())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| invalid("checked agent object budget overflow"))?;
+        let expanded_limit = export
+            .objects()
+            .try_fold(MAX_CANDIDATE_BYTES, |total, object| {
+                total
+                    .checked_add(object.body().len())
+                    .ok_or_else(|| invalid("checked agent byte budget overflow"))
+            })?;
+        let (validated, parse_limits) = self
+            .quarantine_bound_envelope_with_bounds_in(
+                request,
+                &command.name,
+                *base,
+                &envelope,
+                &[],
+                Some(staging),
+                Some((object_limit, expanded_limit)),
+            )
+            .await?;
+        if validated.validation_basis() != transaction.authority_read_receipt().authority_head_id()
+        {
+            return Err(invalid("checked agent publication authority basis moved"));
+        }
+        // The generated receive is atomic and has no options or extensions;
+        // compare its actual command as well as the prepared semantic request.
+        let received = validated.request();
+        if !received.has_capability(b"atomic")
+            || !received.push_options.is_empty()
+            || received.certificate.is_some()
+            || received.commands.len() != 1
+            || received.commands[0].old != *base
+            || received.commands[0].new != *candidate
+            || received.commands[0].ref_name.as_slice() != command.name.as_bytes()
+        {
+            return Err(invalid(
+                "checked agent receive changed its sealed semantics",
+            ));
+        }
+        let exhaustion = Cell::new(None);
+        let source = VerifiedFabricPackSource {
+            fabric: &self.fabric,
+            object_format: self.object_format,
+            maximum_object_bytes: parse_limits.max_object_bytes,
+            database_context: request.authority(),
+            database_exhaustion: &exhaustion,
+            session_is_live: None,
+        }
+        .with_staging(staging);
+        let read = |oid: &GitOid| {
+            if !workspace_request_live(request) {
+                return Err(NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: exhaustion.get(),
+                });
+            }
+            let object = source
+                .read_object(oid)
+                .map_err(|_| invalid("checked publication object bytes could not be verified"))?;
+            if !workspace_request_live(request) || exhaustion.get().is_some() {
+                return Err(NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: exhaustion.get(),
+                });
+            }
+            Ok(object)
+        };
+        let (kind, candidate_body) = read(candidate)?;
+        if kind != ObjectType::Commit
+            || fgit_crypto::sha256_digest(&candidate_body) != *candidate_body_sha256
+        {
+            return Err(invalid(
+                "candidate body differs from independent host approval",
+            ));
+        }
+        check_candidate_commit(&candidate_body, *base, parse_limits.clone())?;
+        let candidate_tree = checked_agent_commit_tree(
+            &candidate_body,
+            self.object_format,
+            parse_limits.clone(),
+            AcceptanceProfile::StrictCreate,
+        )?;
+        let receipt = transaction.proposal().receipt();
+        if candidate_tree != receipt.proposed_tree_oid.erase()
+            || candidate_tree != export.root_tree().erase()
+        {
+            return Err(invalid(
+                "candidate commit does not name the checked export tree",
+            ));
+        }
+        let (kind, base_body) = read(base)?;
+        if kind != ObjectType::Commit
+            || checked_agent_commit_tree(
+                &base_body,
+                self.object_format,
+                parse_limits,
+                AcceptanceProfile::GitCompatibleImport,
+            )? != receipt.base_tree_oid.erase()
+        {
+            return Err(invalid(
+                "workspace base tree differs from the actual parent commit",
+            ));
+        }
+        for object in export.objects() {
+            let (kind, body) = read(&object.oid().erase())?;
+            if kind != object.kind() || body != object.body() {
+                return Err(invalid(
+                    "verified object custody differs from the checked export",
+                ));
+            }
+        }
+        Ok(validated.requiring_exact_publication_basis())
+    }
+}
+
+fn checked_agent_commit_tree(
+    body: &[u8],
+    format: GitHashAlgorithm,
+    mut limits: ParseLimits,
+    profile: AcceptanceProfile,
+) -> Result<GitOid, NodeWorkspaceRefusal> {
+    limits.max_object_bytes = limits.max_object_bytes.min(MAX_CANDIDATE_BYTES);
+    let ParsedObject::Commit(commit) =
+        parse_object_body(ObjectType::Commit, body, profile, &limits)
+            .map_err(|_| invalid("invalid bounded publication commit"))?
+    else {
+        return Err(invalid("publication object must be a commit"));
+    };
+    commit
+        .tree_reference()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|text| GitOid::from_hex(format, text).ok())
+        .ok_or_else(|| invalid("publication commit has no valid tree"))
 }
 
 fn check_candidate_commit(

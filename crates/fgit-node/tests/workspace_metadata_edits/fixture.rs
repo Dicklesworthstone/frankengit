@@ -5,9 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_crypto::{
-    GitHashAlgorithm as HashAlgorithm, GitObjectKind, Sha1, Sha256, git_object_id,
-};
+use fgit_crypto::{GitHashAlgorithm as HashAlgorithm, GitObjectKind, Sha1, Sha256, git_object_id};
 use fgit_node::{NodeConfig, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_treefs::{
     BasisEntry, EntryClass, ExportLimits, FileMode, IntentLog, TreeCapability, TreeEditIntent,
@@ -103,7 +101,11 @@ fn tree(entries: &[(&str, &str, GitOid)]) -> Vec<u8> {
 
 fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, body: &[u8]) -> GitOid {
     let oid = git_object_id(format, kind, body);
-    let raw = [format!("{} {}\0", kind.label(), body.len()).as_bytes(), body].concat();
+    let raw = [
+        format!("{} {}\0", kind.label(), body.len()).as_bytes(),
+        body,
+    ]
+    .concat();
     let length = u16::try_from(raw.len()).expect("one stored DEFLATE block");
     let mut encoded = vec![0x78, 0x01, 0x01];
     encoded.extend(length.to_le_bytes());
@@ -149,7 +151,12 @@ impl Fixture {
         fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
         let body = b"immutable workspace source\n".repeat(1024);
         let file = loose(&source, format, GitObjectKind::Blob, &body);
-        let occupied = loose(&source, format, GitObjectKind::Blob, b"previous destination\n");
+        let occupied = loose(
+            &source,
+            format,
+            GitObjectKind::Blob,
+            b"previous destination\n",
+        );
         let keep = loose(&source, format, GitObjectKind::Blob, b"directory sibling\n");
         let untouched = loose(&source, format, GitObjectKind::Blob, b"root sibling\n");
         let link = loose(&source, format, GitObjectKind::Blob, b"src/tool.sh");
@@ -193,9 +200,13 @@ impl Fixture {
         );
         fs::write(source.join("refs/heads/main"), format!("{commit}\n")).unwrap();
         let (mut node, _) = OneNode::init(
-            NodeConfig::new(root.join("node"), TenantId::from_bytes([0xc1; 16]), REPOSITORY)
-                .with_object_format(format)
-                .with_worker_threads(2),
+            NodeConfig::new(
+                root.join("node"),
+                TenantId::from_bytes([0xc1; 16]),
+                REPOSITORY,
+            )
+            .with_object_format(format)
+            .with_worker_threads(2),
         )
         .unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -345,7 +356,12 @@ fn export_as<A: HashAlgorithm>(
         objects: result
             .plan
             .objects()
-            .map(|object| ((*object.oid()).erase(), (object.kind(), object.body().to_vec())))
+            .map(|object| {
+                (
+                    (*object.oid()).erase(),
+                    (object.kind(), object.body().to_vec()),
+                )
+            })
             .collect(),
         reused: result.plan.reused_base_objects(),
     })

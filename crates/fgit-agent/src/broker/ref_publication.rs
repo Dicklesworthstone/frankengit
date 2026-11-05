@@ -25,12 +25,21 @@ pub(crate) struct PendingSubmission {
 }
 
 pub(crate) enum StartFailure {
-    Before { reservation: ReservedSubmission, reason: RefTransactionEffectRefusal },
-    After { pending: PendingSubmission, reason: EffectJournalRefusal },
+    Before {
+        reservation: ReservedSubmission,
+        reason: RefTransactionEffectRefusal,
+    },
+    After {
+        pending: PendingSubmission,
+        reason: EffectJournalRefusal,
+    },
 }
 
 pub(crate) enum AcknowledgementFailure {
-    Before { pending: PendingSubmission, reason: EffectJournalRefusal },
+    Before {
+        pending: PendingSubmission,
+        reason: EffectJournalRefusal,
+    },
     After {
         settled: SettledObligation<RefTransactionSubmission>,
         reason: EffectJournalRefusal,
@@ -57,29 +66,40 @@ impl EffectBroker {
             || record.run_commitment != binding.run_commitment()
             || &record.input_commitment != binding.input_commitment()
         {
-            let _released = self.abort(grant).map_err(RefTransactionEffectRefusal::Journal)?;
+            let _released = self
+                .abort(grant)
+                .map_err(RefTransactionEffectRefusal::Journal)?;
             return Err(RefTransactionEffectRefusal::Binding);
         }
         let seal_bytes = match fgit_codec::wire::encode_body(binding.seal()) {
             Ok(bytes) => bytes,
             Err(error) => {
-                let _released = self.abort(grant).map_err(RefTransactionEffectRefusal::Journal)?;
+                let _released = self
+                    .abort(grant)
+                    .map_err(RefTransactionEffectRefusal::Journal)?;
                 return Err(RefTransactionEffectRefusal::Codec(error));
             }
         };
-        let binding_result = self.journal.borrow_mut().bind_ref_transaction(
-            record.effect_id, binding.clone(),
-        );
+        let binding_result = self
+            .journal
+            .borrow_mut()
+            .bind_ref_transaction(record.effect_id, binding.clone());
         if let Err(reason) = binding_result {
             let _cleanup = self.abort(grant);
             return Err(RefTransactionEffectRefusal::Journal(reason));
         }
         let (record, budget, journal) = grant.into_parts();
         let bound = journal.borrow_mut().bind(
-            record.effect_id, ObligationClass::RefTransactionSubmission, None,
+            record.effect_id,
+            ObligationClass::RefTransactionSubmission,
+            None,
         );
         if let Err(reason) = bound {
-            let _cleanup = self.abort(EffectGrant { record, budget, journal });
+            let _cleanup = self.abort(EffectGrant {
+                record,
+                budget,
+                journal,
+            });
             return Err(RefTransactionEffectRefusal::Journal(reason));
         }
         let obligation = match self.ledger.reserve(
@@ -102,7 +122,11 @@ impl EffectBroker {
                 return Err(RefTransactionEffectRefusal::Resource(Box::new(error)));
             }
         };
-        Ok(ReservedSubmission { binding, obligation, journal })
+        Ok(ReservedSubmission {
+            binding,
+            obligation,
+            journal,
+        })
     }
 }
 
@@ -115,7 +139,9 @@ impl ReservedSubmission {
         self,
         reason: NoCandidateReason,
     ) -> Result<SettledObligation<RefTransactionSubmission>, EffectJournalRefusal> {
-        let settled = self.obligation.abort_unused(RefTransactionAborted { reason });
+        let settled = self
+            .obligation
+            .abort_unused(RefTransactionAborted { reason });
         self.journal.borrow_mut().lifecycle(
             self.binding.effect_id(),
             LifecycleEvent::Abort,
@@ -127,10 +153,7 @@ impl ReservedSubmission {
         Ok(settled)
     }
 
-    pub(crate) fn start(
-        self,
-        actual: &ResourceVector,
-    ) -> Result<PendingSubmission, StartFailure> {
+    pub(crate) fn start(self, actual: &ResourceVector) -> Result<PendingSubmission, StartFailure> {
         let writable = self.journal.borrow().ensure_writable();
         if let Err(reason) = writable {
             return Err(StartFailure::Before {
@@ -138,9 +161,15 @@ impl ReservedSubmission {
                 reason: RefTransactionEffectRefusal::Journal(reason),
             });
         }
-        let Self { binding, obligation, journal } = self;
+        let Self {
+            binding,
+            obligation,
+            journal,
+        } = self;
         let committed = match obligation.commit(
-            RefTransactionSubmitted { transaction: binding.tx_id() },
+            RefTransactionSubmitted {
+                transaction: binding.tx_id(),
+            },
             actual,
         ) {
             Ok(committed) => committed,
@@ -148,7 +177,9 @@ impl ReservedSubmission {
                 let reason = RefTransactionEffectRefusal::Settlement(error.error());
                 return Err(StartFailure::Before {
                     reservation: Self {
-                        binding, obligation: error.into_obligation(), journal,
+                        binding,
+                        obligation: error.into_obligation(),
+                        journal,
                     },
                     reason,
                 });
@@ -171,7 +202,11 @@ impl ReservedSubmission {
             None,
             None,
         );
-        let pending = PendingSubmission { binding, obligation, journal };
+        let pending = PendingSubmission {
+            binding,
+            obligation,
+            journal,
+        };
         match committed_record.and(deferred_record) {
             Ok(()) => Ok(pending),
             Err(reason) => Err(StartFailure::After { pending, reason }),
@@ -199,7 +234,10 @@ impl PendingSubmission {
         }
         let writable = self.journal.borrow().ensure_writable();
         if let Err(reason) = writable {
-            return Err(AcknowledgementFailure::Before { pending: self, reason });
+            return Err(AcknowledgementFailure::Before {
+                pending: self,
+                reason,
+            });
         }
         let output: [u8; 32] = match observation.commitment().bytes().as_bytes().try_into() {
             Ok(output) => output,

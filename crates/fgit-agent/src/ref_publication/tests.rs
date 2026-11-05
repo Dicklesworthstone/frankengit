@@ -9,36 +9,35 @@ use std::future::{Future, ready};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::effect_journal::{
+    EffectJournalCodecRefusal, EffectJournalEncoder, EffectJournalPersistenceRefusal,
+    EffectJournalPosition, EffectJournalSink, RecoveredEffectJournal,
+};
 use crate::{
     AgentInstanceId, AttenuationRequest, AuthorityReadReceipt, Capability,
     CapabilityEffectAuthorizationRefusal, CapabilityId, ClassSet, EffectJournalEntry,
     EffectJournalEvent, EffectTerminalOutcome, RunId, RunReconciliationReadiness,
     read_current_authority_capability_revocations,
 };
-use crate::effect_journal::{
-    EffectJournalCodecRefusal, EffectJournalEncoder, EffectJournalPersistenceRefusal,
-    EffectJournalPosition, EffectJournalSink, RecoveredEffectJournal,
-};
 use fgit_authority::{
     AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore, AuthorityVersionToken,
-    CapabilityRevocationGenerationBody, CasOutcome, DuplicateAbsenceWitness, ExpectedOld,
-    HeadInit, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
-    ProposedNew, PublicationOutcome, PutOutcome, RefCommand, SealAttempt, SemanticRequest,
-    StoreInstanceId, authority_head_identity, body_key, canonical_body_id, decision_batch_identity,
-    initialize_repository, publish_decisions, seal_request,
-    stage_capability_revocation_generation,
+    CapabilityRevocationGenerationBody, CasOutcome, DuplicateAbsenceWitness, ExpectedOld, HeadInit,
+    HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, MemoryAuthorityStore, ProposedNew,
+    PublicationOutcome, PutOutcome, RefCommand, SealAttempt, SemanticRequest, StoreInstanceId,
+    authority_head_identity, body_key, canonical_body_id, decision_batch_identity,
+    initialize_repository, publish_decisions, seal_request, stage_capability_revocation_generation,
     stage_revocation_aware_repository_incarnation_configuration,
 };
 use fgit_codec::{
-    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision, RepositoryDecisionBatchBody,
-    RepositoryIncarnationConfigurationBodyV2_2,
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
+    RepositoryDecisionBatchBody, RepositoryIncarnationConfigurationBodyV2_2,
 };
 use fgit_crypto::IdentityDomain;
 use fgit_resource::{LifecycleEvent, ObligationClass, ObligationState, RegionId, algebra::Grade};
 use fgit_types::{
     DecisionOutcome, DecisionSequence, DigestBytes, GitHashAlgorithm as GitFormat, GitOid,
-    HeadGeneration, PolicyEpoch, PrincipalSnapshotId, RefName, RefusalCode, RefusalRecordId, RegistryEpoch,
-    RepositoryCommitId, RepositoryId, RepositoryIncarnationId, RepositorySequence,
+    HeadGeneration, PolicyEpoch, PrincipalSnapshotId, RefName, RefusalCode, RefusalRecordId,
+    RegistryEpoch, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, RepositorySequence,
     RootLayoutVersion, SchemaFamily, SchemaId,
 };
 
@@ -50,7 +49,10 @@ const PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0x44; 16]);
 
 fn digest(marker: u8) -> Digest {
     let empty = outcome_index_root(&[]).unwrap();
-    Digest::new(empty.algorithm(), DigestBytes::try_new(&[marker; 32]).unwrap())
+    Digest::new(
+        empty.algorithm(),
+        DigestBytes::try_new(&[marker; 32]).unwrap(),
+    )
 }
 
 fn resources(bytes: u64, objects: u64) -> ResourceVector {
@@ -70,7 +72,8 @@ fn stage_configuration(store: &MemoryAuthorityStore, revoked: &[CapabilityId]) -
         None,
         revoked.iter().map(|id| id.value().to_be_bytes()).collect(),
         digest(0x90),
-    ).unwrap();
+    )
+    .unwrap();
     let staged = stage_capability_revocation_generation(store, &generation).unwrap();
     stage_revocation_aware_repository_incarnation_configuration(
         store,
@@ -81,7 +84,8 @@ fn stage_configuration(store: &MemoryAuthorityStore, revoked: &[CapabilityId]) -
             policy_root: None,
             capability_revocation_root: Some(staged.generation_root()),
         },
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 struct Fixture {
@@ -124,7 +128,8 @@ impl Fixture {
             &authenticated,
             LogicalTime::new(10),
             [0x51; 32],
-        ).unwrap();
+        )
+        .unwrap();
         let run = IntentRun::new_authenticated(
             RunId::new(7),
             authority,
@@ -134,23 +139,41 @@ impl Fixture {
             ]),
             resources(16_384, 64),
             LogicalTime::new(100),
-        ).unwrap();
-        Self { store, head_key, genesis, run }
+        )
+        .unwrap();
+        Self {
+            store,
+            head_key,
+            genesis,
+            run,
+        }
     }
 
     fn current_head(&self) -> (HeadReadReceipt, RepositoryAuthorityHeadBody) {
         let HeadRead::Present(receipt) = self.store.read_head(&self.head_key).unwrap() else {
             panic!("fixture head remains present");
         };
-        let body = self.store.authenticate_head_receipt(&receipt).unwrap().body().unwrap();
+        let body = self
+            .store
+            .authenticate_head_receipt(&receipt)
+            .unwrap()
+            .body()
+            .unwrap();
         (receipt, body)
     }
 
     fn revocations(&self, now: u64) -> CurrentAuthorityCapabilityRevocationReceipt {
         read_current_authority_capability_revocations(
-            &self.store, TENANT, &self.head_key, &self.run,
-            LogicalTime::new(now), 1_000, 32, 32,
-        ).unwrap()
+            &self.store,
+            TENANT,
+            &self.head_key,
+            &self.run,
+            LogicalTime::new(now),
+            1_000,
+            32,
+            32,
+        )
+        .unwrap()
     }
 
     fn revoke(&self, ids: &[CapabilityId]) {
@@ -165,9 +188,9 @@ impl Fixture {
         let key = body_key(IdentityDomain::RepositoryAuthorityHead, &next).unwrap();
         self.store.put_if_absent(&key, &bytes).unwrap();
         assert!(matches!(
-            self.store.compare_exchange_head(
-                &self.head_key, receipt.token(), next.generation, &bytes,
-            ).unwrap(),
+            self.store
+                .compare_exchange_head(&self.head_key, receipt.token(), next.generation, &bytes,)
+                .unwrap(),
             CasOutcome::Committed(_)
         ));
     }
@@ -177,11 +200,14 @@ impl Fixture {
     /// corpus values. This tests stream observation, not native ref admission.
     fn decide(&self, tx_id: TxId, commit: bool) -> TerminalOutcome {
         let (receipt, previous) = self.current_head();
-        assert!(previous.latest_decision_sequence.is_none(), "one decision per fixture");
+        assert!(
+            previous.latest_decision_sequence.is_none(),
+            "one decision per fixture"
+        );
         let committed_record = commit.then(|| {
-            let seal = fgit_authority::read_seal(
-                &self.store, TENANT, REPOSITORY, tx_id,
-            ).unwrap().expect("a committed fixture has its ordinary seal");
+            let seal = fgit_authority::read_seal(&self.store, TENANT, REPOSITORY, tx_id)
+                .unwrap()
+                .expect("a committed fixture has its ordinary seal");
             RepositoryCommitRecord {
                 repository_id: REPOSITORY,
                 repository_sequence: RepositorySequence::FIRST,
@@ -206,19 +232,27 @@ impl Fixture {
             }
         });
         let rcr = committed_record.as_ref().map(|record| {
-            let id = RepositoryCommitId::from_internal_object_id(canonical_body_id(
-                IdentityDomain::RepositoryCommitRecord,
-                fgit_types::CANONICAL_CODEC_VERSION,
-                record,
-            ).unwrap()).unwrap();
-            self.store.put_if_absent(
-                &body_key(IdentityDomain::RepositoryCommitRecord, record).unwrap(),
-                &encode_body(record).unwrap(),
-            ).unwrap();
+            let id = RepositoryCommitId::from_internal_object_id(
+                canonical_body_id(
+                    IdentityDomain::RepositoryCommitRecord,
+                    fgit_types::CANONICAL_CODEC_VERSION,
+                    record,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            self.store
+                .put_if_absent(
+                    &body_key(IdentityDomain::RepositoryCommitRecord, record).unwrap(),
+                    &encode_body(record).unwrap(),
+                )
+                .unwrap();
             id
         });
         let outcome = if let Some(repository_commit_id) = rcr {
-            DecisionOutcome::Committed { repository_commit_id }
+            DecisionOutcome::Committed {
+                repository_commit_id,
+            }
         } else {
             DecisionOutcome::Refused {
                 code: RefusalCode::QuotaExceeded,
@@ -266,8 +300,14 @@ impl Fixture {
         };
         assert!(matches!(
             publish_decisions(
-                &self.store, &self.head_key, receipt.token(), &batch, &head, TENANT,
-            ).unwrap(),
+                &self.store,
+                &self.head_key,
+                receipt.token(),
+                &batch,
+                &head,
+                TENANT,
+            )
+            .unwrap(),
             PublicationOutcome::Published(_)
         ));
         terminal
@@ -294,14 +334,18 @@ fn seal_attempt(key: &[u8]) -> SealAttempt {
             }],
             Vec::new(),
             Vec::new(),
-        ).unwrap(),
+        )
+        .unwrap(),
     }
 }
 
 fn submission_binding(run: &IntentRun, attempt: &SealAttempt) -> RefTransactionBinding {
     RefTransactionBinding::from_parts(
-        run.commitment().unwrap(), attempt.derive().unwrap().1, [0x81; 32],
-    ).unwrap()
+        run.commitment().unwrap(),
+        attempt.derive().unwrap().1,
+        [0x81; 32],
+    )
+    .unwrap()
 }
 
 fn chain(operation: OperationClass) -> VerifiedCapabilityChain {
@@ -311,15 +355,18 @@ fn chain(operation: OperationClass) -> VerifiedCapabilityChain {
         resources(8_192, 32),
         LogicalTime::new(0),
         LogicalTime::new(100),
-    ).unwrap();
+    )
+    .unwrap();
     let sealed_root = root.seal(ISSUER_KEY, None).unwrap();
-    let leaf = root.attenuate(&AttenuationRequest {
-        id: CapabilityId::new(2),
-        operations: ClassSet::from_classes(&[operation]),
-        quota: resources(4_096, 16),
-        not_before: LogicalTime::new(5),
-        expires_at: LogicalTime::new(90),
-    }).unwrap();
+    let leaf = root
+        .attenuate(&AttenuationRequest {
+            id: CapabilityId::new(2),
+            operations: ClassSet::from_classes(&[operation]),
+            quota: resources(4_096, 16),
+            not_before: LogicalTime::new(5),
+            expires_at: LogicalTime::new(90),
+        })
+        .unwrap();
     let sealed_leaf = leaf.seal(ISSUER_KEY, Some(sealed_root.tag())).unwrap();
     VerifiedCapabilityChain::verify(&[sealed_root, sealed_leaf], ISSUER_KEY).unwrap()
 }
@@ -333,67 +380,104 @@ struct AsyncView<'a> {
 
 impl<'a> AsyncView<'a> {
     fn new(inner: &'a MemoryAuthorityStore) -> Self {
-        Self { inner, writes: AtomicUsize::new(0) }
+        Self {
+            inner,
+            writes: AtomicUsize::new(0),
+        }
     }
 
     fn assert_read_only(&self) {
-        assert_eq!(self.writes.load(Ordering::SeqCst), 0, "observation must not submit");
+        assert_eq!(
+            self.writes.load(Ordering::SeqCst),
+            0,
+            "observation must not submit"
+        );
     }
 }
 
 impl AsyncAuthorityStore for AsyncView<'_> {
     type Context = ();
 
-    fn instance_id(&self) -> StoreInstanceId { self.inner.instance_id() }
-    fn limits(&self) -> AuthorityLimits { self.inner.limits() }
+    fn instance_id(&self) -> StoreInstanceId {
+        self.inner.instance_id()
+    }
+    fn limits(&self) -> AuthorityLimits {
+        self.inner.limits()
+    }
 
     fn put_if_absent(
-        &self, _: &(), key: &ImmutableKey, body: &[u8],
+        &self,
+        _: &(),
+        key: &ImmutableKey,
+        body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
         self.writes.fetch_add(1, Ordering::SeqCst);
         ready(self.inner.put_if_absent(key, body))
     }
 
     fn read_immutable(
-        &self, _: &(), key: &ImmutableKey,
+        &self,
+        _: &(),
+        key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         ready(self.inner.read_immutable(key))
     }
 
     fn initialize_head(
-        &self, _: &(), key: &HeadKey, generation: HeadGeneration, body: &[u8],
+        &self,
+        _: &(),
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
     ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
         self.writes.fetch_add(1, Ordering::SeqCst);
         ready(self.inner.initialize_head(key, generation, body))
     }
 
     fn read_head(
-        &self, _: &(), key: &HeadKey,
+        &self,
+        _: &(),
+        key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         ready(self.inner.read_head(key))
     }
 
     fn compare_exchange_head(
-        &self, _: &(), key: &HeadKey, expected: AuthorityVersionToken,
-        generation: HeadGeneration, body: &[u8],
+        &self,
+        _: &(),
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        ready(self.inner.compare_exchange_head(key, expected, generation, body))
+        ready(
+            self.inner
+                .compare_exchange_head(key, expected, generation, body),
+        )
     }
 
     fn publish_head_with_outcomes(
-        &self, _: &(), key: &HeadKey, expected: AuthorityVersionToken,
-        generation: HeadGeneration, body: &[u8],
-        outcomes: &[(ImmutableKey, Vec<u8>)], witness: &DuplicateAbsenceWitness,
+        &self,
+        _: &(),
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        ready(self.inner.publish_head_with_outcomes(
-            key, expected, generation, body, outcomes, witness,
-        ))
+        ready(
+            self.inner
+                .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness),
+        )
     }
 
     fn authenticate_head_receipt(
-        &self, _: &(), receipt: &HeadReadReceipt,
+        &self,
+        _: &(),
+        receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         ready(self.inner.authenticate_head_receipt(receipt))
     }
@@ -409,17 +493,46 @@ fn poll_ready<F: Future>(future: F) -> F::Output {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum FailurePoint { Accepted, Binding, Bound, Commit, Defer, Acknowledge }
+enum FailurePoint {
+    Accepted,
+    Binding,
+    Bound,
+    Commit,
+    Defer,
+    Acknowledge,
+}
 
 impl FailurePoint {
     fn matches(self, event: &EffectJournalEvent) -> bool {
-        matches!((self, event),
+        matches!(
+            (self, event),
             (Self::Accepted, EffectJournalEvent::Accepted(_))
-            | (Self::Binding, EffectJournalEvent::RefTransactionBound { .. })
-            | (Self::Bound, EffectJournalEvent::BoundObligation { .. })
-            | (Self::Commit, EffectJournalEvent::Lifecycle { event: LifecycleEvent::Commit, .. })
-            | (Self::Defer, EffectJournalEvent::Lifecycle { event: LifecycleEvent::Defer, .. })
-            | (Self::Acknowledge, EffectJournalEvent::Lifecycle { event: LifecycleEvent::Acknowledge, .. })
+                | (
+                    Self::Binding,
+                    EffectJournalEvent::RefTransactionBound { .. }
+                )
+                | (Self::Bound, EffectJournalEvent::BoundObligation { .. })
+                | (
+                    Self::Commit,
+                    EffectJournalEvent::Lifecycle {
+                        event: LifecycleEvent::Commit,
+                        ..
+                    }
+                )
+                | (
+                    Self::Defer,
+                    EffectJournalEvent::Lifecycle {
+                        event: LifecycleEvent::Defer,
+                        ..
+                    }
+                )
+                | (
+                    Self::Acknowledge,
+                    EffectJournalEvent::Lifecycle {
+                        event: LifecycleEvent::Acknowledge,
+                        ..
+                    }
+                )
         )
     }
 }
@@ -442,17 +555,24 @@ impl EffectJournalSink for Sink {
     fn run_commitment(&self) -> IntentRunCommitment {
         self.0.0.borrow().encoder.run_commitment()
     }
-    fn position(&self) -> EffectJournalPosition { self.0.0.borrow().acknowledged }
+    fn position(&self) -> EffectJournalPosition {
+        self.0.0.borrow().acknowledged
+    }
 
     fn append(
-        &mut self, entry: &EffectJournalEntry,
+        &mut self,
+        entry: &EffectJournalEntry,
     ) -> Result<(), EffectJournalPersistenceRefusal> {
         let mut state = self.0.0.borrow_mut();
-        let failure = state.failure.filter(|(point, _)| point.matches(&entry.event));
+        let failure = state
+            .failure
+            .filter(|(point, _)| point.matches(&entry.event));
         if matches!(failure, Some((_, false))) {
             return Err(EffectJournalPersistenceRefusal::OutcomeUnknown);
         }
-        let frame = state.encoder.encode(entry)
+        let frame = state
+            .encoder
+            .encode(entry)
             .map_err(|_| EffectJournalPersistenceRefusal::Binding)?;
         state.bytes.extend(frame);
         if matches!(failure, Some((_, true))) {
@@ -478,33 +598,50 @@ fn broker(run: &IntentRun) -> (CurrentAuthorityRevocationCheckedEffectBroker, Ca
     let (encoder, bytes) = EffectJournalEncoder::new(run).unwrap();
     let acknowledged = encoder.position();
     let capture = Capture(Rc::new(RefCell::new(JournalState {
-        encoder, bytes, acknowledged, failure: None,
+        encoder,
+        bytes,
+        acknowledged,
+        failure: None,
     })));
     let broker = CurrentAuthorityRevocationCheckedEffectBroker::open_with_journal(
-        run.clone(), RegionId::new(7), AgentInstanceId::new(7),
+        run.clone(),
+        RegionId::new(7),
+        AgentInstanceId::new(7),
         Box::new(Sink(capture.clone())),
-    ).unwrap();
+    )
+    .unwrap();
     (broker, capture)
 }
 
 fn reserve(
-    fixture: &Fixture, owner: &mut CurrentAuthorityRevocationCheckedEffectBroker,
+    fixture: &Fixture,
+    owner: &mut CurrentAuthorityRevocationCheckedEffectBroker,
     binding: &RefTransactionBinding,
 ) -> ReservedRefTransactionSubmission {
-    owner.reserve_ref_transaction(
-        binding, &chain(OperationClass::PublishRefTransaction),
-        &fixture.revocations(20), LogicalTime::new(21), cost(),
-    ).unwrap()
+    owner
+        .reserve_ref_transaction(
+            binding,
+            &chain(OperationClass::PublishRefTransaction),
+            &fixture.revocations(20),
+            LogicalTime::new(21),
+            cost(),
+        )
+        .unwrap()
 }
 
 fn start(
-    fixture: &Fixture, owner: &mut CurrentAuthorityRevocationCheckedEffectBroker,
+    fixture: &Fixture,
+    owner: &mut CurrentAuthorityRevocationCheckedEffectBroker,
     reserved: ReservedRefTransactionSubmission,
 ) -> PendingRefTransactionSubmission {
-    owner.start_ref_transaction(
-        reserved, &chain(OperationClass::PublishRefTransaction),
-        &fixture.revocations(20), LogicalTime::new(22),
-    ).unwrap()
+    owner
+        .start_ref_transaction(
+            reserved,
+            &chain(OperationClass::PublishRefTransaction),
+            &fixture.revocations(20),
+            LogicalTime::new(22),
+        )
+        .unwrap()
 }
 
 fn before_start(refusal: RefTransactionStartRefused) -> ReservedRefTransactionSubmission {
@@ -527,30 +664,44 @@ fn committed_and_refused_decisions_settle_only_after_authenticated_observation()
         let started = pending.start_authorization();
         assert_eq!(owner.dispatch_authorizations().len(), 1);
         assert_eq!(owner.generic_dispatch_authorizations().len(), 1);
-        assert_eq!(owner.records()[0].obligation_state, ObligationState::DeferredExternally);
+        assert_eq!(
+            owner.records()[0].obligation_state,
+            ObligationState::DeferredExternally
+        );
         assert_eq!(owner.records()[0].budget_consumed, cost());
         assert_eq!(owner.records()[0].terminal_outcome, None);
 
         let original_head = fixture.store.read_head(&fixture.head_key).unwrap();
         let view = AsyncView::new(&fixture.store);
-        let RefTransactionResolution::Pending(pending) = poll_ready(
-            pending.reconcile_async(&view, &(), &fixture.head_key),
-        ).unwrap() else {
+        let RefTransactionResolution::Pending(pending) =
+            poll_ready(pending.reconcile_async(&view, &(), &fixture.head_key)).unwrap()
+        else {
             panic!("starting submission responsibility cannot invent a terminal");
         };
-        assert!(poll_ready(read_seal_async(
-            &view, &(), TENANT, REPOSITORY, binding.tx_id(),
-        )).unwrap().is_none());
-        assert_eq!(fixture.store.read_head(&fixture.head_key).unwrap(), original_head);
+        assert!(
+            poll_ready(read_seal_async(
+                &view,
+                &(),
+                TENANT,
+                REPOSITORY,
+                binding.tx_id(),
+            ))
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            fixture.store.read_head(&fixture.head_key).unwrap(),
+            original_head
+        );
         view.assert_read_only();
 
         let sealed = seal_request(&fixture.store, &attempt).unwrap();
         assert_eq!(sealed.tx_id(), binding.tx_id());
         let terminal = fixture.decide(binding.tx_id(), committed);
         let after = fixture.store.read_head(&fixture.head_key).unwrap();
-        let RefTransactionResolution::Decided(settled) = poll_ready(
-            pending.reconcile_async(&view, &(), &fixture.head_key),
-        ).unwrap() else {
+        let RefTransactionResolution::Decided(settled) =
+            poll_ready(pending.reconcile_async(&view, &(), &fixture.head_key)).unwrap()
+        else {
             panic!("the authenticated canonical terminal must settle responsibility");
         };
         assert_eq!(settled.observation().terminal(), &terminal);
@@ -558,7 +709,10 @@ fn committed_and_refused_decisions_settle_only_after_authenticated_observation()
         assert_eq!(settled.initial_authorization(), initial);
         assert_eq!(settled.start_authorization(), started);
         assert_eq!(settled.settled().state(), ObligationState::Acknowledged);
-        assert_eq!(owner.records()[0].terminal_outcome, Some(EffectTerminalOutcome::Acknowledged));
+        assert_eq!(
+            owner.records()[0].terminal_outcome,
+            Some(EffectTerminalOutcome::Acknowledged)
+        );
         assert_eq!(owner.records()[0].budget_consumed, cost());
         assert_eq!(owner.records()[0].output_commitments.len(), 1);
         assert_eq!(
@@ -571,8 +725,13 @@ fn committed_and_refused_decisions_settle_only_after_authenticated_observation()
         view.assert_read_only();
         let recovered = capture.decode(&fixture.run).unwrap();
         assert_eq!(recovered.records(), owner.records());
-        assert_eq!(recovered.ref_transactions().get(&binding.effect_id()), Some(&binding));
-        let report = recovered.reconciliation_report(&fixture.run, LogicalTime::new(40)).unwrap();
+        assert_eq!(
+            recovered.ref_transactions().get(&binding.effect_id()),
+            Some(&binding)
+        );
+        let report = recovered
+            .reconciliation_report(&fixture.run, LogicalTime::new(40))
+            .unwrap();
         assert_eq!(report.readiness(), RunReconciliationReadiness::Ready);
         assert!(!report.has_unsettled_effects());
         assert!(owner.close().is_quiescent());
@@ -590,22 +749,41 @@ fn observation_uses_the_full_seal_exact_transaction_store_slot_and_run() {
 
     let other = submission_binding(&fixture.run, &seal_attempt(b"another-idempotency-key"));
     assert_ne!(binding.tx_id(), other.tx_id());
-    assert!(poll_ready(observe_ref_transaction_async(
-        &view, &(), &fixture.head_key, &fixture.run, &other,
-    )).unwrap().is_none(), "another transaction's terminal is not this one's outcome");
+    assert!(
+        poll_ready(observe_ref_transaction_async(
+            &view,
+            &(),
+            &fixture.head_key,
+            &fixture.run,
+            &other,
+        ))
+        .unwrap()
+        .is_none(),
+        "another transaction's terminal is not this one's outcome"
+    );
 
     let mut changed_seal = binding.seal().clone();
     changed_seal.authenticated_principal_id = PrincipalId::from_bytes([0x45; 16]);
     let wrong_seal = RefTransactionBinding::from_parts(
-        fixture.run.commitment().unwrap(), changed_seal, *binding.publication_binding(),
-    ).unwrap();
+        fixture.run.commitment().unwrap(),
+        changed_seal,
+        *binding.publication_binding(),
+    )
+    .unwrap();
     assert_eq!(wrong_seal.tx_id(), binding.tx_id());
-    assert!(matches!(
-        poll_ready(observe_ref_transaction_async(
-            &view, &(), &fixture.head_key, &fixture.run, &wrong_seal,
-        )),
-        Err(RefTransactionObservationRefusal::Binding)
-    ), "a matching TxId is insufficient when the complete stored seal differs");
+    assert!(
+        matches!(
+            poll_ready(observe_ref_transaction_async(
+                &view,
+                &(),
+                &fixture.head_key,
+                &fixture.run,
+                &wrong_seal,
+            )),
+            Err(RefTransactionObservationRefusal::Binding)
+        ),
+        "a matching TxId is insufficient when the complete stored seal differs"
+    );
 
     let changed_run = IntentRun::new_authenticated(
         fixture.run.run_id(),
@@ -613,10 +791,15 @@ fn observation_uses_the_full_seal_exact_transaction_store_slot_and_run() {
         fixture.run.allowed_operation_classes(),
         fixture.run.resource_budget(),
         LogicalTime::new(101),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(matches!(
         poll_ready(observe_ref_transaction_async(
-            &view, &(), &fixture.head_key, &changed_run, &binding,
+            &view,
+            &(),
+            &fixture.head_key,
+            &changed_run,
+            &binding,
         )),
         Err(RefTransactionObservationRefusal::Binding)
     ));
@@ -625,7 +808,11 @@ fn observation_uses_the_full_seal_exact_transaction_store_slot_and_run() {
     initialize_repository(&fixture.store, &wrong_slot, &fixture.genesis).unwrap();
     assert!(matches!(
         poll_ready(observe_ref_transaction_async(
-            &view, &(), &wrong_slot, &fixture.run, &binding,
+            &view,
+            &(),
+            &wrong_slot,
+            &fixture.run,
+            &binding,
         )),
         Err(RefTransactionObservationRefusal::Historical(_))
     ));
@@ -633,13 +820,23 @@ fn observation_uses_the_full_seal_exact_transaction_store_slot_and_run() {
     let wrong_store = AsyncView::new(&unrelated.store);
     assert!(matches!(
         poll_ready(observe_ref_transaction_async(
-            &wrong_store, &(), &unrelated.head_key, &fixture.run, &binding,
+            &wrong_store,
+            &(),
+            &unrelated.head_key,
+            &fixture.run,
+            &binding,
         )),
         Err(RefTransactionObservationRefusal::Historical(_))
     ));
     let observed = poll_ready(observe_ref_transaction_async(
-        &view, &(), &fixture.head_key, &fixture.run, &binding,
-    )).unwrap().unwrap();
+        &view,
+        &(),
+        &fixture.head_key,
+        &fixture.run,
+        &binding,
+    ))
+    .unwrap()
+    .unwrap();
     assert_eq!(observed.terminal(), &terminal);
     view.assert_read_only();
     wrong_store.assert_read_only();
@@ -647,13 +844,19 @@ fn observation_uses_the_full_seal_exact_transaction_store_slot_and_run() {
     let unsealed = Fixture::new(712);
     let unsealed_binding = submission_binding(&unsealed.run, &seal_attempt(b"missing-seal"));
     unsealed.decide(unsealed_binding.tx_id(), false);
-    assert!(matches!(
-        poll_ready(observe_ref_transaction_async(
-            &AsyncView::new(&unsealed.store), &(), &unsealed.head_key,
-            &unsealed.run, &unsealed_binding,
-        )),
-        Err(RefTransactionObservationRefusal::Binding)
-    ), "even a canonical terminal cannot substitute for the exact ordinary seal");
+    assert!(
+        matches!(
+            poll_ready(observe_ref_transaction_async(
+                &AsyncView::new(&unsealed.store),
+                &(),
+                &unsealed.head_key,
+                &unsealed.run,
+                &unsealed_binding,
+            )),
+            Err(RefTransactionObservationRefusal::Binding)
+        ),
+        "even a canonical terminal cannot substitute for the exact ordinary seal"
+    );
 }
 
 #[test]
@@ -665,14 +868,19 @@ fn sibling_brokers_and_changed_complete_runs_cannot_take_submission_custody() {
     let reserved = reserve(&fixture, &mut owner, &binding);
     let before = owner.records();
     let history = owner.journal();
-    let refusal = sibling.start_ref_transaction(
-        reserved, &chain(OperationClass::PublishRefTransaction),
-        &fixture.revocations(20), LogicalTime::new(22),
-    ).unwrap_err();
+    let refusal = sibling
+        .start_ref_transaction(
+            reserved,
+            &chain(OperationClass::PublishRefTransaction),
+            &fixture.revocations(20),
+            LogicalTime::new(22),
+        )
+        .unwrap_err();
     assert!(matches!(
         &refusal,
         RefTransactionStartRefused::BeforeStart {
-            reason: RefTransactionEffectRefusal::Binding, ..
+            reason: RefTransactionEffectRefusal::Binding,
+            ..
         }
     ));
     assert_eq!(owner.records(), before);
@@ -686,18 +894,24 @@ fn sibling_brokers_and_changed_complete_runs_cannot_take_submission_custody() {
         fixture.run.allowed_operation_classes(),
         fixture.run.resource_budget(),
         LogicalTime::new(150),
-    ).unwrap();
+    )
+    .unwrap();
     let (mut other_run, _) = broker(&changed_run);
     assert_eq!(other_run.run_id(), owner.run_id());
     assert_ne!(other_run.run_commitment(), owner.run_commitment());
-    let refusal = other_run.start_ref_transaction(
-        reserved, &chain(OperationClass::PublishRefTransaction),
-        &fixture.revocations(20), LogicalTime::new(22),
-    ).unwrap_err();
+    let refusal = other_run
+        .start_ref_transaction(
+            reserved,
+            &chain(OperationClass::PublishRefTransaction),
+            &fixture.revocations(20),
+            LogicalTime::new(22),
+        )
+        .unwrap_err();
     assert!(matches!(
         &refusal,
         RefTransactionStartRefused::BeforeStart {
-            reason: RefTransactionEffectRefusal::Binding, ..
+            reason: RefTransactionEffectRefusal::Binding,
+            ..
         }
     ));
     assert!(other_run.records().is_empty());
@@ -707,8 +921,11 @@ fn sibling_brokers_and_changed_complete_runs_cannot_take_submission_custody() {
     fixture.decide(binding.tx_id(), true);
     assert!(matches!(
         poll_ready(pending.reconcile_async(
-            &AsyncView::new(&fixture.store), &(), &fixture.head_key,
-        )).unwrap(),
+            &AsyncView::new(&fixture.store),
+            &(),
+            &fixture.head_key,
+        ))
+        .unwrap(),
         RefTransactionResolution::Decided(_)
     ));
     assert!(owner.close().is_quiescent());
@@ -721,12 +938,18 @@ fn durable_custody_and_publication_capability_are_required_before_reserving() {
     let fixture = Fixture::new(730);
     let binding = submission_binding(&fixture.run, &seal_attempt(b"publication-capability"));
     let mut volatile = CurrentAuthorityRevocationCheckedEffectBroker::open(
-        fixture.run.clone(), RegionId::new(7), AgentInstanceId::new(7),
-    ).unwrap();
+        fixture.run.clone(),
+        RegionId::new(7),
+        AgentInstanceId::new(7),
+    )
+    .unwrap();
     assert!(matches!(
         volatile.reserve_ref_transaction(
-            &binding, &chain(OperationClass::PublishRefTransaction),
-            &fixture.revocations(20), LogicalTime::new(21), cost(),
+            &binding,
+            &chain(OperationClass::PublishRefTransaction),
+            &fixture.revocations(20),
+            LogicalTime::new(21),
+            cost(),
         ),
         Err(RefTransactionEffectRefusal::DurableJournalRequired)
     ));
@@ -736,8 +959,11 @@ fn durable_custody_and_publication_capability_are_required_before_reserving() {
     let (mut owner, _) = broker(&fixture.run);
     assert!(matches!(
         owner.reserve_ref_transaction(
-            &binding, &chain(OperationClass::PreparePublication),
-            &fixture.revocations(20), LogicalTime::new(21), cost(),
+            &binding,
+            &chain(OperationClass::PreparePublication),
+            &fixture.revocations(20),
+            LogicalTime::new(21),
+            cost(),
         ),
         Err(RefTransactionEffectRefusal::Authorization(_))
     ));
@@ -766,11 +992,19 @@ fn fresh_revocation_and_expiry_refusals_return_the_live_prestart_reservation() {
             1 => (fixture.revocations(20), 90),
             _ => (fixture.revocations(20), 100),
         };
-        let refusal = owner.start_ref_transaction(
-            reserved, &chain(OperationClass::PublishRefTransaction),
-            &revocations, LogicalTime::new(now),
-        ).unwrap_err();
-        let RefTransactionStartRefused::BeforeStart { reservation, reason } = refusal else {
+        let refusal = owner
+            .start_ref_transaction(
+                reserved,
+                &chain(OperationClass::PublishRefTransaction),
+                &revocations,
+                LogicalTime::new(now),
+            )
+            .unwrap_err();
+        let RefTransactionStartRefused::BeforeStart {
+            reservation,
+            reason,
+        } = refusal
+        else {
             panic!("revoked or expired authority cannot commit submission responsibility");
         };
         let RefTransactionEffectRefusal::FreshAuthorization(reason) = reason else {
@@ -788,12 +1022,21 @@ fn fresh_revocation_and_expiry_refusals_return_the_live_prestart_reservation() {
         assert_eq!(owner.journal(), history);
         assert!(owner.dispatch_authorizations().is_empty());
         assert!(owner.generic_dispatch_authorizations().is_empty());
-        assert_eq!(owner.records()[0].obligation_state, ObligationState::Reserved);
+        assert_eq!(
+            owner.records()[0].obligation_state,
+            ObligationState::Reserved
+        );
         let _settled = reservation.abort(NoCandidateReason::Cancelled).unwrap();
-        assert_eq!(owner.records()[0].obligation_state, ObligationState::Aborted);
+        assert_eq!(
+            owner.records()[0].obligation_state,
+            ObligationState::Aborted
+        );
         assert_eq!(owner.records()[0].budget_consumed, ResourceVector::ZERO);
-        let report = capture.decode(&fixture.run).unwrap()
-            .reconciliation_report(&fixture.run, LogicalTime::new(101)).unwrap();
+        let report = capture
+            .decode(&fixture.run)
+            .unwrap()
+            .reconciliation_report(&fixture.run, LogicalTime::new(101))
+            .unwrap();
         assert_eq!(report.readiness(), RunReconciliationReadiness::Ready);
         assert!(owner.close().is_quiescent());
     }
@@ -808,21 +1051,37 @@ fn observation_failure_retains_pending_debt_and_later_revocation_does_not_block_
     let reserved = reserve(&fixture, &mut owner, &binding);
     let pending = start(&fixture, &mut owner, reserved);
     let wrong = Fixture::new(751);
-    let refused = poll_ready(pending.reconcile_async(
-        &AsyncView::new(&wrong.store), &(), &wrong.head_key,
-    )).unwrap_err();
+    let refused =
+        poll_ready(pending.reconcile_async(&AsyncView::new(&wrong.store), &(), &wrong.head_key))
+            .unwrap_err();
     let RefTransactionReconciliationRefused::Pending { pending, reason } = refused else {
         panic!("a failed authority read cannot settle responsibility");
     };
-    assert!(matches!(reason, RefTransactionObservationRefusal::Historical(_)));
+    assert!(matches!(
+        reason,
+        RefTransactionObservationRefusal::Historical(_)
+    ));
     assert_eq!(pending.binding(), &binding);
-    assert_eq!(owner.records()[0].obligation_state, ObligationState::DeferredExternally);
-    let report = capture.decode(&fixture.run).unwrap()
-        .reconciliation_report(&fixture.run, LogicalTime::new(30)).unwrap();
-    assert_eq!(report.readiness(), RunReconciliationReadiness::EffectReconciliationRequired);
+    assert_eq!(
+        owner.records()[0].obligation_state,
+        ObligationState::DeferredExternally
+    );
+    let report = capture
+        .decode(&fixture.run)
+        .unwrap()
+        .reconciliation_report(&fixture.run, LogicalTime::new(30))
+        .unwrap();
+    assert_eq!(
+        report.readiness(),
+        RunReconciliationReadiness::EffectReconciliationRequired
+    );
     assert!(report.has_unsettled_effects());
     assert!(owner.journal().iter().all(|entry| !matches!(
-        entry.event, EffectJournalEvent::Lifecycle { event: LifecycleEvent::Abort, .. }
+        entry.event,
+        EffectJournalEvent::Lifecycle {
+            event: LifecycleEvent::Abort,
+            ..
+        }
     )));
 
     fixture.revoke(&[CapabilityId::new(1)]);
@@ -830,9 +1089,9 @@ fn observation_failure_retains_pending_debt_and_later_revocation_does_not_block_
     let terminal = fixture.decide(binding.tx_id(), false);
     assert!(!fixture.run.is_open_at(LogicalTime::new(101)));
     let view = AsyncView::new(&fixture.store);
-    let RefTransactionResolution::Decided(settled) = poll_ready(
-        (*pending).reconcile_async(&view, &(), &fixture.head_key),
-    ).unwrap() else {
+    let RefTransactionResolution::Decided(settled) =
+        poll_ready((*pending).reconcile_async(&view, &(), &fixture.head_key)).unwrap()
+    else {
         panic!("historical cleanup is permitted after authority expires or is revoked");
     };
     assert_eq!(settled.observation().terminal(), &terminal);
@@ -845,17 +1104,26 @@ fn new_binding_events_roundtrip_with_existing_journal_events_and_exact_tail_anch
     let fixture = Fixture::new(760);
     let (mut owner, capture) = broker(&fixture.run);
     let low_risk = Capability::issue(
-        CapabilityId::new(3), ClassSet::from_classes(&[OperationClass::ReadCanonicalObject]),
-        resources(256, 1), LogicalTime::new(0), LogicalTime::new(100),
-    ).unwrap();
-    let grant = owner.request_low_risk(
-        &low_risk, LogicalTime::new(20),
-        &EffectRequest {
-            effect_id: EffectId::new(99), parent_effect_id: None,
-            operation: OperationClass::ReadCanonicalObject,
-            cost: resources(16, 1), input_commitment: [0x91; 32],
-        },
-    ).unwrap();
+        CapabilityId::new(3),
+        ClassSet::from_classes(&[OperationClass::ReadCanonicalObject]),
+        resources(256, 1),
+        LogicalTime::new(0),
+        LogicalTime::new(100),
+    )
+    .unwrap();
+    let grant = owner
+        .request_low_risk(
+            &low_risk,
+            LogicalTime::new(20),
+            &EffectRequest {
+                effect_id: EffectId::new(99),
+                parent_effect_id: None,
+                operation: OperationClass::ReadCanonicalObject,
+                cost: resources(16, 1),
+                input_commitment: [0x91; 32],
+            },
+        )
+        .unwrap();
     let _released = owner.abort_low_risk(grant).unwrap();
     let legacy_tail = capture.0.borrow().acknowledged;
 
@@ -867,9 +1135,17 @@ fn new_binding_events_roundtrip_with_existing_journal_events_and_exact_tail_anch
     assert_eq!(recovered.records(), owner.records());
     assert_eq!(recovered.ref_transactions().len(), 1);
     assert_eq!(recovered.ref_transactions()[&binding.effect_id()], binding);
-    assert_eq!(recovered.records()[0].operation, OperationClass::ReadCanonicalObject);
-    assert_eq!(recovered.records()[1].obligation_class, Some(ObligationClass::RefTransactionSubmission));
-    let report = recovered.reconciliation_report(&fixture.run, LogicalTime::new(30)).unwrap();
+    assert_eq!(
+        recovered.records()[0].operation,
+        OperationClass::ReadCanonicalObject
+    );
+    assert_eq!(
+        recovered.records()[1].obligation_class,
+        Some(ObligationClass::RefTransactionSubmission)
+    );
+    let report = recovered
+        .reconciliation_report(&fixture.run, LogicalTime::new(30))
+        .unwrap();
     assert_eq!(report.counts().aborted(), 1);
     assert_eq!(report.counts().committed_or_deferred(), 1);
 
@@ -885,12 +1161,17 @@ fn new_binding_events_roundtrip_with_existing_journal_events_and_exact_tail_anch
     ));
     let mut changed = state.bytes.clone();
     *changed.last_mut().unwrap() ^= 1;
-    assert!(RecoveredEffectJournal::decode(
-        &fixture.run, &changed, Some(state.acknowledged),
-    ).is_err());
-    assert!(RecoveredEffectJournal::decode(
-        &fixture.run, &state.bytes[..state.bytes.len() - 1], Some(state.acknowledged),
-    ).is_err());
+    assert!(
+        RecoveredEffectJournal::decode(&fixture.run, &changed, Some(state.acknowledged),).is_err()
+    );
+    assert!(
+        RecoveredEffectJournal::decode(
+            &fixture.run,
+            &state.bytes[..state.bytes.len() - 1],
+            Some(state.acknowledged),
+        )
+        .is_err()
+    );
     drop(state);
 
     let attempt = seal_attempt(b"journal-roundtrip");
@@ -898,8 +1179,11 @@ fn new_binding_events_roundtrip_with_existing_journal_events_and_exact_tail_anch
     fixture.decide(binding.tx_id(), true);
     assert!(matches!(
         poll_ready(pending.reconcile_async(
-            &AsyncView::new(&fixture.store), &(), &fixture.head_key,
-        )).unwrap(),
+            &AsyncView::new(&fixture.store),
+            &(),
+            &fixture.head_key,
+        ))
+        .unwrap(),
         RefTransactionResolution::Decided(_)
     ));
     assert!(owner.close().is_quiescent());
@@ -908,20 +1192,38 @@ fn new_binding_events_roundtrip_with_existing_journal_events_and_exact_tail_anch
 #[test]
 fn failed_reservation_journals_release_unstarted_resources_and_poison_new_issuance() {
     for (index, point) in [
-        FailurePoint::Accepted, FailurePoint::Binding, FailurePoint::Bound,
-    ].into_iter().enumerate() {
+        FailurePoint::Accepted,
+        FailurePoint::Binding,
+        FailurePoint::Bound,
+    ]
+    .into_iter()
+    .enumerate()
+    {
         for after_write in [false, true] {
             let fixture = Fixture::new(770 + index as u64 * 2 + u64::from(after_write));
-            let binding = submission_binding(&fixture.run, &seal_attempt(b"reservation-journal-failure"));
+            let binding =
+                submission_binding(&fixture.run, &seal_attempt(b"reservation-journal-failure"));
             let (mut owner, capture) = broker(&fixture.run);
             capture.fail(point, after_write);
             let before = fixture.store.read_head(&fixture.head_key).unwrap();
-            assert!(owner.reserve_ref_transaction(
-                &binding, &chain(OperationClass::PublishRefTransaction),
-                &fixture.revocations(20), LogicalTime::new(21), cost(),
-            ).is_err());
+            assert!(
+                owner
+                    .reserve_ref_transaction(
+                        &binding,
+                        &chain(OperationClass::PublishRefTransaction),
+                        &fixture.revocations(20),
+                        LogicalTime::new(21),
+                        cost(),
+                    )
+                    .is_err()
+            );
             assert!(owner.durable_position().is_err());
-            assert!(owner.records().iter().all(|record| record.budget_consumed.is_zero()));
+            assert!(
+                owner
+                    .records()
+                    .iter()
+                    .all(|record| record.budget_consumed.is_zero())
+            );
             // An ambiguous first acceptance retains its nonterminal inspection
             // record, but its unexposed budget grant is released. Later bind
             // failures can explicitly abort the already-accepted record.
@@ -931,22 +1233,38 @@ fn failed_reservation_journals_release_unstarted_resources_and_poison_new_issuan
                     assert_eq!(record.terminal_outcome, None);
                 } else {
                     assert_eq!(record.obligation_state, ObligationState::Aborted);
-                    assert_eq!(record.terminal_outcome, Some(EffectTerminalOutcome::Aborted));
+                    assert_eq!(
+                        record.terminal_outcome,
+                        Some(EffectTerminalOutcome::Aborted)
+                    );
                 }
             }
-            assert!(owner.reserve_ref_transaction(
-                &binding, &chain(OperationClass::PublishRefTransaction),
-                &fixture.revocations(20), LogicalTime::new(21), cost(),
-            ).is_err());
+            assert!(
+                owner
+                    .reserve_ref_transaction(
+                        &binding,
+                        &chain(OperationClass::PublishRefTransaction),
+                        &fixture.revocations(20),
+                        LogicalTime::new(21),
+                        cost(),
+                    )
+                    .is_err()
+            );
             assert_eq!(fixture.store.read_head(&fixture.head_key).unwrap(), before);
-            assert!(owner.close().is_quiescent(), "no pre-start failure may leak a live grant");
+            assert!(
+                owner.close().is_quiescent(),
+                "no pre-start failure may leak a live grant"
+            );
         }
     }
 }
 
 #[test]
 fn journal_failures_after_start_retain_debt_and_never_dispatch_or_abort() {
-    for (index, point) in [FailurePoint::Commit, FailurePoint::Defer].into_iter().enumerate() {
+    for (index, point) in [FailurePoint::Commit, FailurePoint::Defer]
+        .into_iter()
+        .enumerate()
+    {
         for after_write in [false, true] {
             let fixture = Fixture::new(780 + index as u64 * 2 + u64::from(after_write));
             let binding = submission_binding(&fixture.run, &seal_attempt(b"start-journal-failure"));
@@ -954,31 +1272,54 @@ fn journal_failures_after_start_retain_debt_and_never_dispatch_or_abort() {
             let reserved = reserve(&fixture, &mut owner, &binding);
             capture.fail(point, after_write);
             let original_head = fixture.store.read_head(&fixture.head_key).unwrap();
-            let refused = owner.start_ref_transaction(
-                reserved, &chain(OperationClass::PublishRefTransaction),
-                &fixture.revocations(20), LogicalTime::new(22),
-            ).unwrap_err();
+            let refused = owner
+                .start_ref_transaction(
+                    reserved,
+                    &chain(OperationClass::PublishRefTransaction),
+                    &fixture.revocations(20),
+                    LogicalTime::new(22),
+                )
+                .unwrap_err();
             let RefTransactionStartRefused::AfterStart { pending, .. } = refused else {
                 panic!("a committed resource obligation must return pending responsibility");
             };
             assert_eq!(owner.dispatch_authorizations().len(), 1);
             assert_eq!(owner.generic_dispatch_authorizations().len(), 1);
-            assert_eq!(owner.records()[0].obligation_state, ObligationState::DeferredExternally);
+            assert_eq!(
+                owner.records()[0].obligation_state,
+                ObligationState::DeferredExternally
+            );
             assert_eq!(owner.records()[0].budget_consumed, cost());
             assert!(owner.durable_position().is_err());
             let view = AsyncView::new(&fixture.store);
-            let RefTransactionResolution::Pending(pending) = poll_ready(
-                (*pending).reconcile_async(&view, &(), &fixture.head_key),
-            ).unwrap() else {
+            let RefTransactionResolution::Pending(pending) =
+                poll_ready((*pending).reconcile_async(&view, &(), &fixture.head_key)).unwrap()
+            else {
                 panic!("journal failure cannot manufacture an authority outcome");
             };
-            assert!(poll_ready(read_seal_async(
-                &view, &(), TENANT, REPOSITORY, binding.tx_id(),
-            )).unwrap().is_none(), "the broker must not submit after its start mirror failed");
+            assert!(
+                poll_ready(read_seal_async(
+                    &view,
+                    &(),
+                    TENANT,
+                    REPOSITORY,
+                    binding.tx_id(),
+                ))
+                .unwrap()
+                .is_none(),
+                "the broker must not submit after its start mirror failed"
+            );
             view.assert_read_only();
-            assert_eq!(fixture.store.read_head(&fixture.head_key).unwrap(), original_head);
+            assert_eq!(
+                fixture.store.read_head(&fixture.head_key).unwrap(),
+                original_head
+            );
             assert!(owner.journal().iter().all(|entry| !matches!(
-                entry.event, EffectJournalEvent::Lifecycle { event: LifecycleEvent::Abort, .. }
+                entry.event,
+                EffectJournalEvent::Lifecycle {
+                    event: LifecycleEvent::Abort,
+                    ..
+                }
             )));
             if after_write {
                 assert!(matches!(
@@ -1007,16 +1348,19 @@ fn acknowledgement_mirror_failure_retains_the_authoritative_terminal_and_settlem
         let terminal = fixture.decide(binding.tx_id(), false);
         capture.fail(FailurePoint::Acknowledge, after_write);
         let view = AsyncView::new(&fixture.store);
-        let refusal = poll_ready(pending.reconcile_async(
-            &view, &(), &fixture.head_key,
-        )).unwrap_err();
-        let RefTransactionReconciliationRefused::JournalAfterSettlement { settled, .. } = refusal else {
+        let refusal =
+            poll_ready(pending.reconcile_async(&view, &(), &fixture.head_key)).unwrap_err();
+        let RefTransactionReconciliationRefused::JournalAfterSettlement { settled, .. } = refusal
+        else {
             panic!("post-settlement persistence failure must preserve terminal evidence");
         };
         assert_eq!(settled.observation().terminal(), &terminal);
         assert_eq!(settled.observation().binding(), &binding);
         assert_eq!(settled.settled().state(), ObligationState::Acknowledged);
-        assert_eq!(owner.records()[0].obligation_state, ObligationState::Acknowledged);
+        assert_eq!(
+            owner.records()[0].obligation_state,
+            ObligationState::Acknowledged
+        );
         assert!(owner.durable_position().is_err());
         view.assert_read_only();
         if after_write {
@@ -1026,18 +1370,32 @@ fn acknowledgement_mirror_failure_retains_the_authoritative_terminal_and_settlem
             ));
         } else {
             let recovered = capture.decode(&fixture.run).unwrap();
-            assert_eq!(recovered.records()[0].obligation_state, ObligationState::DeferredExternally);
             assert_eq!(
-                recovered.reconciliation_report(&fixture.run, LogicalTime::new(40)).unwrap().readiness(),
+                recovered.records()[0].obligation_state,
+                ObligationState::DeferredExternally
+            );
+            assert_eq!(
+                recovered
+                    .reconciliation_report(&fixture.run, LogicalTime::new(40))
+                    .unwrap()
+                    .readiness(),
                 RunReconciliationReadiness::EffectReconciliationRequired
             );
             let reread = poll_ready(observe_ref_transaction_async(
-                &view, &(), &fixture.head_key, &fixture.run,
+                &view,
+                &(),
+                &fixture.head_key,
+                &fixture.run,
                 &recovered.ref_transactions()[&binding.effect_id()],
-            )).unwrap().unwrap();
+            ))
+            .unwrap()
+            .unwrap();
             assert_eq!(reread.terminal(), &terminal);
         }
-        assert!(owner.close().is_quiescent(), "resource settlement survives its failed mirror");
+        assert!(
+            owner.close().is_quiescent(),
+            "resource settlement survives its failed mirror"
+        );
     }
 }
 
@@ -1048,8 +1406,14 @@ fn custody_pins_survive_recovery_and_cannot_acknowledge_another_bundle() {
     let fixture = Fixture::new(800);
     let attempt = seal_attempt(b"custody-pin");
     let unpinned = submission_binding(&fixture.run, &attempt);
-    let binding = unpinned.clone().with_custody_commitment([0xa1; 32]).unwrap();
-    let substituted = unpinned.clone().with_custody_commitment([0xa2; 32]).unwrap();
+    let binding = unpinned
+        .clone()
+        .with_custody_commitment([0xa1; 32])
+        .unwrap();
+    let substituted = unpinned
+        .clone()
+        .with_custody_commitment([0xa2; 32])
+        .unwrap();
     assert_eq!(unpinned.custody_commitment(), None);
     assert_eq!(binding.custody_commitment(), Some([0xa1; 32]));
     assert_eq!(binding.tx_id(), unpinned.tx_id());
@@ -1071,22 +1435,48 @@ fn custody_pins_survive_recovery_and_cannot_acknowledge_another_bundle() {
     let terminal = fixture.decide(binding.tx_id(), true);
     let view = AsyncView::new(&fixture.store);
     let wrong_observation = poll_ready(observe_ref_transaction_async(
-        &view, &(), &fixture.head_key, &fixture.run, &substituted,
-    )).unwrap().unwrap();
+        &view,
+        &(),
+        &fixture.head_key,
+        &fixture.run,
+        &substituted,
+    ))
+    .unwrap()
+    .unwrap();
     assert_eq!(wrong_observation.terminal(), &terminal);
     let before = owner.journal();
-    let PendingRefTransactionSubmission { run, initial, started, raw } = pending;
+    let PendingRefTransactionSubmission {
+        run,
+        initial,
+        started,
+        raw,
+    } = pending;
     let refused = raw.acknowledge(&wrong_observation);
-    let Err(AcknowledgementFailure::Before { pending: raw, reason }) = refused else {
+    let Err(AcknowledgementFailure::Before {
+        pending: raw,
+        reason,
+    }) = refused
+    else {
         panic!("a real terminal for the same TxId cannot settle another custody binding");
     };
-    assert!(matches!(reason, EffectJournalRefusal::RefTransactionBinding { .. }));
+    assert!(matches!(
+        reason,
+        EffectJournalRefusal::RefTransactionBinding { .. }
+    ));
     assert_eq!(owner.journal(), before);
-    assert_eq!(owner.records()[0].obligation_state, ObligationState::DeferredExternally);
-    let pending = PendingRefTransactionSubmission { run, initial, started, raw };
-    let RefTransactionResolution::Decided(settled) = poll_ready(
-        pending.reconcile_async(&view, &(), &fixture.head_key),
-    ).unwrap() else {
+    assert_eq!(
+        owner.records()[0].obligation_state,
+        ObligationState::DeferredExternally
+    );
+    let pending = PendingRefTransactionSubmission {
+        run,
+        initial,
+        started,
+        raw,
+    };
+    let RefTransactionResolution::Decided(settled) =
+        poll_ready(pending.reconcile_async(&view, &(), &fixture.head_key)).unwrap()
+    else {
         panic!("the original complete binding must still settle");
     };
     assert_eq!(settled.observation().binding(), &binding);

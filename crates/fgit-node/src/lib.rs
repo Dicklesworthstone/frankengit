@@ -19,6 +19,7 @@ extern crate self as fgit_node;
 mod admission_authentication;
 pub mod agent_credentials;
 pub mod agent_journal;
+pub mod agent_publication;
 
 /// Guarded, checkpointed lexical and symbol maintenance on an explicitly owned
 /// service lane. Standalone, HTTP and MCP services share this controller.
@@ -4671,6 +4672,11 @@ pub enum NodeRefusal {
     /// different branch would therefore be silently absorbed instead of
     /// refused, so the combination is refused until the record carries it.
     CreationKeyWithInitialBranch,
+    /// Keyed creation does not yet seal the agent-revocation bootstrap profile.
+    /// Refuse before opening storage rather than recovering another profile.
+    CreationKeyWithAgentRevocations,
+    /// Canonical initial capability-revocation staging failed.
+    AgentRevocationInitialization(Box<fgit_authority::CapabilityRevocationAuthorityFailure>),
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -4739,6 +4745,10 @@ impl Display for NodeRefusal {
                 "a creation idempotency key cannot be combined with an initial branch: \
                  the creation record does not seal the branch a retry would be checked against",
             ),
+            Self::CreationKeyWithAgentRevocations => formatter.write_str(
+                "a creation idempotency key cannot select agent revocations: the creation record does not seal that initialization profile",
+            ),
+            Self::AgentRevocationInitialization(error) => Display::fmt(error, formatter),
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
             ),
@@ -4791,6 +4801,7 @@ impl Error for NodeRefusal {
         match self {
             Self::Runtime(error) => Some(error.as_ref()),
             Self::Authority(error) => Some(error.as_ref()),
+            Self::AgentRevocationInitialization(error) => Some(error.as_ref()),
             Self::AdmissionMaterialization(error) => Some(error.as_ref()),
             Self::HeadKey(error) => Some(error.as_ref()),
             Self::AuthorityInitializationCleanup { initialization, .. } => Some(initialization),
@@ -4807,6 +4818,7 @@ impl Error for NodeRefusal {
             | Self::RepositoryIncarnationMismatch { .. }
             | Self::CreationWithResolutionInput
             | Self::CreationKeyWithInitialBranch
+            | Self::CreationKeyWithAgentRevocations
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -4827,6 +4839,12 @@ impl From<RuntimeRefusal> for NodeRefusal {
 impl From<fgit_authority::OutcomeFailure> for NodeRefusal {
     fn from(value: fgit_authority::OutcomeFailure) -> Self {
         Self::Authority(Box::new(value))
+    }
+}
+
+impl From<fgit_authority::CapabilityRevocationAuthorityFailure> for NodeRefusal {
+    fn from(value: fgit_authority::CapabilityRevocationAuthorityFailure) -> Self {
+        Self::AgentRevocationInitialization(Box::new(value))
     }
 }
 
@@ -8479,6 +8497,28 @@ impl OneNode {
     /// such as [`Self::read_authority_head`] remain async over the runtime-owned
     /// database context.
     pub fn init(config: NodeConfig) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        Self::init_profile(config, false)
+    }
+
+    /// Creates a repository with canonical empty capability-revocation state.
+    ///
+    /// This explicit profile selects configuration schema 2.2 in the genesis
+    /// head. It grants no capability, changes no existing repository, and
+    /// retains the ordinary initializer's exact retry and conflict semantics.
+    /// Keyed creation refuses until its seal also binds this profile.
+    pub fn init_with_agent_revocations(
+        config: NodeConfig,
+    ) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        Self::init_profile(config, true)
+    }
+
+    fn init_profile(
+        config: NodeConfig,
+        agent_revocations: bool,
+    ) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        if agent_revocations && config.creation_idempotency_key.is_some() {
+            return Err(NodeRefusal::CreationKeyWithAgentRevocations);
+        }
         if config.resolution_input.is_some() {
             return Err(NodeRefusal::CreationWithResolutionInput);
         }
@@ -8546,32 +8586,22 @@ impl OneNode {
             }
             node.repository_incarnation_id = stored;
         }
-        let configuration = RepositoryIncarnationConfigurationBodyV2_1 {
+        let configuration_root = match node.runtime.block_on(node.stage_genesis_configuration(
+            &initialization_cx,
             root_layout,
-            object_format: node.object_format,
-            repository_incarnation_id: node.repository_incarnation_id,
-            policy_root: None,
+            agent_revocations,
+        )) {
+            Ok(root) => root,
+            Err(initialization) => {
+                return match node.shutdown() {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
         };
-        let configuration_root =
-            match node
-                .runtime
-                .block_on(stage_latest_repository_incarnation_configuration_async(
-                    &node.authority,
-                    &initialization_cx,
-                    &configuration,
-                )) {
-                Ok(root) => root,
-                Err(staging) => {
-                    let initialization = NodeRefusal::from(staging);
-                    return match node.shutdown() {
-                        Ok(()) => Err(initialization),
-                        Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
-                            initialization: Box::new(initialization),
-                            cleanup: Box::new(cleanup),
-                        }),
-                    };
-                }
-            };
         // The ref-state frame itself is staged only after an existing head has
         // been compared, below.
         let ref_root = match fgit_admission::ref_state_root(root_layout, &genesis_refs) {
@@ -8720,6 +8750,64 @@ impl OneNode {
                 }
             }
         }
+    }
+
+    /// Staging is inert; only the ordinary genesis-head CAS activates this
+    /// configuration. Existing heads are still compared in full before init.
+    async fn stage_genesis_configuration(
+        &self,
+        cx: &FsqliteCx,
+        root_layout: RootLayoutVersion,
+        agent_revocations: bool,
+    ) -> Result<Digest, NodeRefusal> {
+        if !agent_revocations {
+            let configuration = RepositoryIncarnationConfigurationBodyV2_1 {
+                root_layout,
+                object_format: self.object_format,
+                repository_incarnation_id: self.repository_incarnation_id,
+                policy_root: None,
+            };
+            return stage_latest_repository_incarnation_configuration_async(
+                &self.authority,
+                cx,
+                &configuration,
+            )
+            .await
+            .map_err(NodeRefusal::from);
+        }
+
+        // This is an explicit empty bootstrap snapshot, never a replacement
+        // for missing revocation state or evidence of sponsor approval.
+        let generation = fgit_authority::CapabilityRevocationGenerationBody::try_new(
+            self.tenant_id,
+            self.repository_id,
+            self.repository_incarnation_id,
+            PolicyEpoch::FIRST,
+            None,
+            Vec::new(),
+            outcome_index_root(&[])?,
+        )
+        .map_err(fgit_authority::CapabilityRevocationAuthorityFailure::from)?;
+        let staged = fgit_authority::stage_capability_revocation_generation_async(
+            &self.authority,
+            cx,
+            &generation,
+        )
+        .await?;
+        let configuration = fgit_codec::RepositoryIncarnationConfigurationBodyV2_2 {
+            root_layout,
+            object_format: self.object_format,
+            repository_incarnation_id: self.repository_incarnation_id,
+            policy_root: None,
+            capability_revocation_root: Some(staged.generation_root()),
+        };
+        fgit_authority::stage_revocation_aware_repository_incarnation_configuration_async(
+            &self.authority,
+            cx,
+            &configuration,
+        )
+        .await
+        .map_err(NodeRefusal::from)
     }
 
     /// Opens an already initialized node without synthesizing a canonical head.
@@ -12054,6 +12142,7 @@ fn admission_cache_resources() -> ResourceVector {
 #[cfg(test)]
 mod tests {
     mod admission_projection;
+    mod agent_revocation_genesis;
     mod canonical_genesis;
     mod capsule_history;
     mod closure_selection;

@@ -216,7 +216,8 @@ fn edit_paths(intent: &TreeEditIntent) -> impl Iterator<Item = &TreePath> {
         TreeEditIntent::Rename { from, .. } => Some(from),
         _ => None,
     };
-    from.into_iter().chain(std::iter::once(intent.primary_path()))
+    from.into_iter()
+        .chain(std::iter::once(intent.primary_path()))
 }
 
 fn validate_basis_shape(basis: Option<&BasisEntry>) -> Result<(), NodeWorkspaceRefusal> {
@@ -285,7 +286,8 @@ fn verify_source_basis<'a, A: GitHashAlgorithm>(
     let (Some((oid, mode)), Some(basis)) = (original, basis) else {
         return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
     };
-    if basis.oid.as_slice() != oid.digest_bytes() || basis.mode.as_octal_bytes() != mode.as_slice() {
+    if basis.oid.as_slice() != oid.digest_bytes() || basis.mode.as_octal_bytes() != mode.as_slice()
+    {
         return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
     }
     Ok(basis)

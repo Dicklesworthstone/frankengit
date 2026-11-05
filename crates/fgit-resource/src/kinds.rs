@@ -1172,7 +1172,6 @@ impl ObligationKind for BillingReservation {
 
 impl ExternallyObserved for BillingReservation {}
 
-
 // ---------------------------------------------------------------------------
 // 7.12 RefTransactionSubmission
 // ---------------------------------------------------------------------------

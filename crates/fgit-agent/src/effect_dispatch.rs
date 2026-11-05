@@ -294,7 +294,10 @@ impl RevocationCheckedEffectBroker {
         &mut self,
         grant: RevocationAuthorizedEffectGrant,
         binding: crate::ref_publication::RefTransactionBinding,
-    ) -> Result<crate::broker::ref_publication::ReservedSubmission, crate::ref_publication::RefTransactionEffectRefusal> {
+    ) -> Result<
+        crate::broker::ref_publication::ReservedSubmission,
+        crate::ref_publication::RefTransactionEffectRefusal,
+    > {
         self.inner.reserve_ref_transaction(grant, binding)
     }
 

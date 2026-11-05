@@ -1012,10 +1012,8 @@ const fn effect_class_for(operation: OperationClass) -> EffectClass {
         OperationClass::CreateCandidateObject => EffectClass::ImmutableCandidateCreation,
         OperationClass::PreparePublication => EffectClass::PreparedCanonicalMutation,
         OperationClass::SubmitEvidence
-            | OperationClass::MutateForgeEntity
-            | OperationClass::PublishRefTransaction => {
-            EffectClass::CanonicalMutation
-        }
+        | OperationClass::MutateForgeEntity
+        | OperationClass::PublishRefTransaction => EffectClass::CanonicalMutation,
         OperationClass::ExternalIntegration => EffectClass::ExternalEffect,
         OperationClass::ReadDerivedGeneration
         | OperationClass::TreeFsWorkspace

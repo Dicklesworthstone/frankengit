@@ -703,6 +703,99 @@ mismatches, revocation, anchored recovery, and journal write failures. These
 tests establish the submission-responsibility boundary; native object
 admission and transport remain separately owned.
 
+### 12.3 Native trusted-local publication consumer
+
+`fgit-node::OneNode::publish_agent_ref_transaction_trusted_local_in` connects
+the checked transaction and broker lifecycle to production quarantine and
+ordinary asynchronous receive admission. Its explicit local-host profile
+supports one atomic, non-force update of an existing branch to a single-parent
+commit. The original expected-old commit and ordinary idempotency key survive
+unchanged into the canonical seal. Other publication shapes require their own
+checked adapter.
+
+The host supplies `TrustedLocalAgentPublicationInput`: the prepared
+`AgentRefTransaction`, original `ExportPlan`, reviewed bundle, verified
+capability ancestry, and a separate `TrustedLocalAgentPublicationApproval`.
+That approval independently names the real local operator principal, original
+key, complete publication-evidence binding, and SHA-256 of the reviewed commit
+body. Copying those commitments from agent input is not independent approval.
+The adapter keeps this boundary explicitly local; it does not convert existing
+HTTP/MCP `AgentRequest` credentials into source-publication grants. Ordinary
+installed ref authorization still evaluates the operator principal.
+
+The current authority configuration must select an actual canonical capability
+revocation generation through configuration schema v2.2.
+`OneNode::init_with_agent_revocations` explicitly opts a new repository into
+an empty canonical generation. Ordinary initialization retains its prior
+profile. This constructor does not upgrade an existing repository or supply an
+administrative revocation-update operation; an absent generation remains a
+hard refusal.
+
+Before new work, the consumer compares the checked reconciliation report with
+the actual broker's current records and requires the plan to include
+`PublishRefTransaction`. Reservation requires a durable broker. Production
+quarantine retains private, synchronized object custody while the adapter
+checks the actual receive command and verifies:
+
+- the candidate's native identity and independently approved commit-body hash;
+- its sole parent equals the original expected-old commit;
+- its tree equals both the checked proposal's resulting tree and export root;
+- the actual parent's tree equals the checked workspace base tree;
+- every exported object's verified kind and bytes equal the checked export.
+
+The checked export commitment is recomputed through
+`AgentPublicationSubject::verify_export`. A mandatory native custody pin
+combines that commitment with the approved candidate-body hash in the durable
+submission binding. Intake is bounded to 10,000 exported objects, 64 MiB of
+export bodies, a 2 MiB candidate commit, and a 128 MiB bundle. Quarantine is
+additionally limited to the export count plus one commit and the export byte
+count plus the bounded candidate. Its admitted input/expanded envelope and
+object count determine the broker's reserved cost; callers cannot replace
+those costs with their own assertion.
+
+The profile requires the run's exact prepared authority head to remain current.
+Current canonical revocations are read again after quarantine and before
+irreversible start. The consumer strengthens the real validation proof with
+`BasisBoundValidatedReceive::requiring_exact_publication_basis`; ordinary
+admission therefore refuses a changed initial or CAS-retry basis even when
+object-closure authority remains equivalent. Only the existing ordinary
+admission path owns the eventual prepared batch and head CAS.
+
+The trusted host explicitly maps its logical-time unit and origin to this live
+node with `TrustedLocalAgentPublicationClock`. The mapping cannot move to
+another runtime or survive a restart. The original request's native absolute
+deadline must already fit inside the actual start authorization's expiry,
+including capability and fresh-revocation limits. An overly long or unbounded
+request refuses; the adapter never substitutes an independent context that
+would lose the caller's cancellation or remaining quotas.
+
+`NativeAgentSubmission` preserves both the ordinary admission result and
+the responsibility-reconciliation result. An admission error is not proof of
+non-commit. Pre-start errors return an abortable reservation; post-start
+errors retain pending responsibility. Both canonical commit and canonical
+refusal can settle submission, and callers must inspect the terminal outcome
+before reporting a successful ref update.
+
+An exact effect already retained by the broker can recover its original
+terminal outcome after expiry or loss of transport bytes without another
+dispatch. `reconcile_agent_ref_transaction_in` accepts a fresh finite
+cleanup context for live debt. After a cold reopen,
+`observe_recovered_agent_ref_transaction_in` obtains the original TxId and
+seal from the authenticated original run and externally anchored journal.
+This recovery operation is read-only: an undecided result retains debt, and
+observing a terminal does not append an ACK to a recovered journal or by itself
+establish quiescence.
+
+The native tests in `crates/fgit-node/src/agent_publication/tests.rs` use the
+embedded authority and production initial/ref publication paths in both Git
+formats. They cover exact ordinary retry identity, cold journal/run recovery,
+canonical refusal settlement, candidate/export mismatch, separate approval
+and capability gates, finite-deadline and cancellation refusal, missing
+revocation configuration, and a real competing publication changing the
+prepared basis. The ECC fixtures supply explicit host assertions; these tests
+do not claim a hosted agent, a model executor, or general evidence-artifact
+authentication.
+
 ---
 
 ## 13. Delegation protocol

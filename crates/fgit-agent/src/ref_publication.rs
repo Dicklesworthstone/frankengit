@@ -229,7 +229,10 @@ impl fmt::Display for RefTransactionStartRefused {
         match self {
             Self::BeforeStart { reason, .. } => write!(formatter, "{reason}"),
             Self::AfterStart { reason, .. } => {
-                write!(formatter, "submission responsibility needs recovery: {reason}")
+                write!(
+                    formatter,
+                    "submission responsibility needs recovery: {reason}"
+                )
             }
         }
     }
@@ -280,25 +283,47 @@ impl PendingRefTransactionSubmission {
                 });
             }
         };
-        let Self { run, initial, started, raw } = self;
+        let Self {
+            run,
+            initial,
+            started,
+            raw,
+        } = self;
         match raw.acknowledge(&observation) {
             Ok(settled) => Ok(RefTransactionResolution::Decided(
-                SettledRefTransactionSubmission { initial, started, observation, settled },
+                SettledRefTransactionSubmission {
+                    initial,
+                    started,
+                    observation,
+                    settled,
+                },
             )),
             Err(crate::broker::ref_publication::AcknowledgementFailure::Before {
-                pending, reason,
+                pending,
+                reason,
             }) => Err(RefTransactionReconciliationRefused::Pending {
-                pending: Box::new(Self { run, initial, started, raw: pending }),
+                pending: Box::new(Self {
+                    run,
+                    initial,
+                    started,
+                    raw: pending,
+                }),
                 reason: RefTransactionObservationRefusal::Journal(reason),
             }),
             Err(crate::broker::ref_publication::AcknowledgementFailure::After {
-                settled, reason,
-            }) => Err(RefTransactionReconciliationRefused::JournalAfterSettlement {
-                settled: Box::new(SettledRefTransactionSubmission {
-                    initial, started, observation, settled,
-                }),
+                settled,
                 reason,
-            }),
+            }) => Err(
+                RefTransactionReconciliationRefused::JournalAfterSettlement {
+                    settled: Box::new(SettledRefTransactionSubmission {
+                        initial,
+                        started,
+                        observation,
+                        settled,
+                    }),
+                    reason,
+                },
+            ),
         }
     }
 }
@@ -341,7 +366,10 @@ pub enum RefTransactionObservationRefusal {
 
 impl fmt::Display for RefTransactionObservationRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "canonical submission observation refused: {self:?}")
+        write!(
+            formatter,
+            "canonical submission observation refused: {self:?}"
+        )
     }
 }
 impl core::error::Error for RefTransactionObservationRefusal {}
@@ -363,15 +391,18 @@ pub async fn observe_ref_transaction_async<S: AsyncAuthorityStore + ?Sized>(
         .authority_read_receipt()
         .filter(|authority| authority.repository_id() == binding.seal.repository_id)
         .ok_or(RefTransactionObservationRefusal::Binding)?;
-    let historical = crate::descendant_revocation::authenticate_historical_async(
-        store, cx, head_key, authority,
-    )
-    .await
-    .map_err(|error| RefTransactionObservationRefusal::Historical(Box::new(error)))?;
+    let historical =
+        crate::descendant_revocation::authenticate_historical_async(store, cx, head_key, authority)
+            .await
+            .map_err(|error| RefTransactionObservationRefusal::Historical(Box::new(error)))?;
     crate::descendant_revocation::validate_historical_receipt(authority, &historical)
         .map_err(|error| RefTransactionObservationRefusal::Historical(Box::new(error)))?;
     let stored = read_seal_async(
-        store, cx, binding.seal.tenant_id, binding.seal.repository_id, binding.tx_id(),
+        store,
+        cx,
+        binding.seal.tenant_id,
+        binding.seal.repository_id,
+        binding.tx_id(),
     )
     .await
     .map_err(|error| RefTransactionObservationRefusal::Seal(Box::new(error)))?;
@@ -379,7 +410,12 @@ pub async fn observe_ref_transaction_async<S: AsyncAuthorityStore + ?Sized>(
         return Err(RefTransactionObservationRefusal::Binding);
     }
     let outcome = resolve_outcome_async(
-        store, cx, head_key, binding.seal.tenant_id, binding.seal.repository_id, binding.tx_id(),
+        store,
+        cx,
+        head_key,
+        binding.seal.tenant_id,
+        binding.seal.repository_id,
+        binding.tx_id(),
     )
     .await
     .map_err(|error| RefTransactionObservationRefusal::Outcome(Box::new(error)))?;
@@ -391,7 +427,11 @@ pub async fn observe_ref_transaction_async<S: AsyncAuthorityStore + ?Sized>(
     }
     let commitment = outcome_index_root(&[(binding.tx_id(), terminal)])
         .map_err(|error| RefTransactionObservationRefusal::Outcome(Box::new(error)))?;
-    Ok(Some(ObservedRefTransaction { binding: binding.clone(), terminal, commitment }))
+    Ok(Some(ObservedRefTransaction {
+        binding: binding.clone(),
+        terminal,
+        commitment,
+    }))
 }
 
 /// Acknowledgement means a terminal decision was observed. Inspect `terminal`
@@ -475,8 +515,14 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
             .request_high_value(chain, revocations, now, &request)
             .map_err(|error| RefTransactionEffectRefusal::Authorization(Box::new(error)))?;
         let initial = grant.authorization();
-        let raw = self.inner.reserve_ref_transaction(grant.into_grant(), binding.clone())?;
-        Ok(ReservedRefTransactionSubmission { initial, request, raw })
+        let raw = self
+            .inner
+            .reserve_ref_transaction(grant.into_grant(), binding.clone())?;
+        Ok(ReservedRefTransactionSubmission {
+            initial,
+            request,
+            raw,
+        })
     }
 
     /// Fresh authorization at irreversible start, preserving actual journal and
@@ -489,7 +535,8 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
         now: LogicalTime,
     ) -> Result<PendingRefTransactionSubmission, RefTransactionStartRefused> {
         let refuse = |reservation, reason| RefTransactionStartRefused::BeforeStart {
-            reservation: Box::new(reservation), reason,
+            reservation: Box::new(reservation),
+            reason,
         };
         if reservation.binding().run_commitment() != self.run_commitment()
             || !self.inner.owns_ref_transaction(&reservation.raw)
@@ -499,10 +546,17 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
         if self.dispatch_authorizations.len()
             >= crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS
         {
-            return Err(refuse(reservation, RefTransactionEffectRefusal::AuthorizationLimit));
+            return Err(refuse(
+                reservation,
+                RefTransactionEffectRefusal::AuthorizationLimit,
+            ));
         }
         let started = match CurrentAuthorityCapabilityEffectAuthorization::authorize(
-            &self.run, chain, revocations, now, &reservation.request,
+            &self.run,
+            chain,
+            revocations,
+            now,
+            &reservation.request,
         ) {
             Ok(authorization) => authorization,
             Err(error) => {
@@ -519,24 +573,47 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
         {
             return Err(refuse(reservation, RefTransactionEffectRefusal::Binding));
         }
-        let ReservedRefTransactionSubmission { initial, request, raw } = reservation;
+        let ReservedRefTransactionSubmission {
+            initial,
+            request,
+            raw,
+        } = reservation;
         match raw.start(&request.cost) {
             Ok(raw) => {
-                self.inner.record_ref_transaction_start(started.authorization());
+                self.inner
+                    .record_ref_transaction_start(started.authorization());
                 self.dispatch_authorizations.push(started);
                 Ok(PendingRefTransactionSubmission {
-                    run: self.run.clone(), initial, started, raw,
+                    run: self.run.clone(),
+                    initial,
+                    started,
+                    raw,
                 })
             }
-            Err(StartFailure::Before { reservation: raw, reason }) => Err(refuse(
-                ReservedRefTransactionSubmission { initial, request, raw }, reason,
+            Err(StartFailure::Before {
+                reservation: raw,
+                reason,
+            }) => Err(refuse(
+                ReservedRefTransactionSubmission {
+                    initial,
+                    request,
+                    raw,
+                },
+                reason,
             )),
-            Err(StartFailure::After { pending: raw, reason }) => {
-                self.inner.record_ref_transaction_start(started.authorization());
+            Err(StartFailure::After {
+                pending: raw,
+                reason,
+            }) => {
+                self.inner
+                    .record_ref_transaction_start(started.authorization());
                 self.dispatch_authorizations.push(started);
                 Err(RefTransactionStartRefused::AfterStart {
                     pending: Box::new(PendingRefTransactionSubmission {
-                        run: self.run.clone(), initial, started, raw,
+                        run: self.run.clone(),
+                        initial,
+                        started,
+                        raw,
                     }),
                     reason,
                 })

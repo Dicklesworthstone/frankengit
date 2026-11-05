@@ -111,9 +111,7 @@ const fn effect_class(operation: OperationClass) -> EffectClass {
         OperationClass::PreparePublication => EffectClass::PreparedCanonicalMutation,
         OperationClass::SubmitEvidence
         | OperationClass::MutateForgeEntity
-        | OperationClass::PublishRefTransaction => {
-            EffectClass::CanonicalMutation
-        }
+        | OperationClass::PublishRefTransaction => EffectClass::CanonicalMutation,
         OperationClass::ExternalIntegration => EffectClass::ExternalEffect,
         OperationClass::ReadDerivedGeneration
         | OperationClass::TreeFsWorkspace
