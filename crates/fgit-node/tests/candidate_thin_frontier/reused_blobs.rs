@@ -44,7 +44,7 @@ fn candidate_bundle(
 }
 
 fn candidates(history: &History) -> [Candidate; 3] {
-    let make = |style| {
+    let make = |style: Option<MergeCommitStyle>| {
         let mut parents = vec![history.parent];
         if style == Some(MergeCommitStyle::TwoParent) {
             parents.push(history.source);
@@ -171,7 +171,8 @@ fn reopen(node: OneNode, root: &Scratch, format: GitHashAlgorithm, maximum: usiz
         .runtime()
         .block_on(node.authenticate_authority_head())
         .unwrap();
-    node.bring_into_service(head.receipt().generation()).unwrap();
+    node.bring_into_service(head.receipt().generation())
+        .unwrap();
     node
 }
 
