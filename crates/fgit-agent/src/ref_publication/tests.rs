@@ -2,6 +2,7 @@
 //! The reference authority publishes decision fixtures; these tests do not stand
 //! in for the native node's object validation or ref-state admission tests.
 
+mod cumulative;
 mod retained_resume;
 
 use super::*;
@@ -377,9 +378,15 @@ fn chain(operation: OperationClass) -> VerifiedCapabilityChain {
 
 /// Test-only adapter over the actual reference authority. Ready futures own
 /// their already-computed answers; no executor or production blocking adapter.
+type ImmutableReadHook<'a> = Box<dyn Fn(&ImmutableKey) + Send + Sync + 'a>;
+
 struct AsyncView<'a> {
     inner: &'a MemoryAuthorityStore,
     writes: AtomicUsize,
+    immutable_override: Option<(ImmutableKey, ImmutableRead)>,
+    overridden_reads: AtomicUsize,
+    after_read: Option<ImmutableReadHook<'a>>,
+    absent_head: bool,
 }
 
 impl<'a> AsyncView<'a> {
@@ -387,7 +394,16 @@ impl<'a> AsyncView<'a> {
         Self {
             inner,
             writes: AtomicUsize::new(0),
+            immutable_override: None,
+            overridden_reads: AtomicUsize::new(0),
+            after_read: None,
+            absent_head: false,
         }
+    }
+
+    fn with_immutable_override(mut self, key: ImmutableKey, value: ImmutableRead) -> Self {
+        self.immutable_override = Some((key, value));
+        self
     }
 
     fn assert_read_only(&self) {
@@ -424,7 +440,17 @@ impl AsyncAuthorityStore for AsyncView<'_> {
         _: &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
-        ready(self.inner.read_immutable(key))
+        let result = match &self.immutable_override {
+            Some((selected, value)) if selected == key => {
+                self.overridden_reads.fetch_add(1, Ordering::SeqCst);
+                Ok(value.clone())
+            }
+            _ => self.inner.read_immutable(key),
+        };
+        if let Some(after_read) = &self.after_read {
+            after_read(key);
+        }
+        ready(result)
     }
 
     fn initialize_head(
@@ -443,7 +469,11 @@ impl AsyncAuthorityStore for AsyncView<'_> {
         _: &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
-        ready(self.inner.read_head(key))
+        ready(if self.absent_head {
+            Ok(HeadRead::Absent)
+        } else {
+            self.inner.read_head(key)
+        })
     }
 
     fn compare_exchange_head(

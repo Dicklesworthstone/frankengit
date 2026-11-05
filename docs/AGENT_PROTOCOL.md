@@ -691,6 +691,18 @@ outcomes and failed observations preserve pending responsibility. There is no
 post-start abort or automatic resubmission path, and later expiry or revocation
 does not prevent observation and cleanup.
 
+`observe_ref_transaction_with_cumulative_async` performs the same original-run
+and complete-seal authentication using a retained `CumulativeOutcomes` witness.
+The authority layer rechecks its exact current head token, repository and
+outcome root before reconciling any accelerator hint. A changed or absent head
+returns `StaleOutcomeBasis`, distinct from an authenticated undecided result;
+callers must recollect within their original request. The original run's head
+body, issuance evidence and transaction seal remain required even when older
+decision batches are no longer available. `reconcile_observed` can settle live
+responsibility using this private authenticated observation, but first requires
+the exact original binding, complete run and custody commitment. A mismatch
+returns the unchanged pending submission.
+
 `reauthorize_retained_ref_transaction` supplies the authorization half of an
 explicit live continuation before the first ordinary admission invocation. It
 checks the same actual broker journal and ledger, a writable acknowledged

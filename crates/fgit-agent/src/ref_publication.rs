@@ -11,8 +11,9 @@
 use core::fmt;
 
 use fgit_authority::{
-    AsyncAuthorityStore, HeadKey, IdempotencyKey, OutcomeLookup, SealFailure, TerminalOutcome,
-    outcome_index_root, read_seal_async, resolve_outcome_async,
+    AsyncAuthorityStore, CumulativeOutcomes, HeadKey, IdempotencyKey, OutcomeLookup, SealFailure,
+    TerminalOutcome, outcome_index_root, read_seal_async, resolve_outcome_async,
+    resolve_outcome_with_cumulative_async,
 };
 use fgit_codec::{CodecRefusal, TransactionSealBody, wire::encode_body};
 use fgit_crypto::{GitHashAlgorithm, sha256_digest};
@@ -302,6 +303,29 @@ impl PendingRefTransactionSubmission {
                 });
             }
         };
+        self.reconcile_observed(observation)
+    }
+
+    /// Acknowledge an already authenticated terminal for this exact submission.
+    ///
+    /// This accepts only the private observation type produced by the authority
+    /// readers, including the retained-checkpoint reader. The complete binding
+    /// and original run must match before any journal or obligation changes.
+    /// A mismatch returns this same pending responsibility; observing another
+    /// transaction or another custody binding never authorizes its settlement.
+    /// No new capability or admission attempt is created, including after expiry.
+    pub fn reconcile_observed(
+        self,
+        observation: ObservedRefTransaction,
+    ) -> Result<RefTransactionResolution, RefTransactionReconciliationRefused> {
+        if observation.binding() != self.binding()
+            || self.run.commitment().ok() != Some(observation.binding().run_commitment())
+        {
+            return Err(RefTransactionReconciliationRefused::Pending {
+                pending: Box::new(self),
+                reason: RefTransactionObservationRefusal::Binding,
+            });
+        }
         let Self {
             run,
             initial,
@@ -377,6 +401,9 @@ impl ObservedRefTransaction {
 #[derive(Debug)]
 pub enum RefTransactionObservationRefusal {
     Binding,
+    /// The current head is absent or no longer selects the retained outcome
+    /// witness. Recollect within the original request; this proves no absence.
+    StaleOutcomeBasis,
     Historical(Box<CurrentAuthorityCapabilityRevocationReadRefusal>),
     Seal(Box<SealFailure>),
     Outcome(Box<fgit_authority::OutcomeFailure>),
@@ -403,6 +430,68 @@ pub async fn observe_ref_transaction_async<S: AsyncAuthorityStore + ?Sized>(
     run: &IntentRun,
     binding: &RefTransactionBinding,
 ) -> Result<Option<ObservedRefTransaction>, RefTransactionObservationRefusal> {
+    let seal_present =
+        authenticate_observation_binding_async(store, cx, head_key, run, binding).await?;
+    let outcome = resolve_outcome_async(
+        store,
+        cx,
+        head_key,
+        binding.seal.tenant_id,
+        binding.seal.repository_id,
+        binding.tx_id(),
+    )
+    .await
+    .map_err(|error| RefTransactionObservationRefusal::Outcome(Box::new(error)))?;
+    observation_from_outcome(binding, seal_present, outcome)
+}
+
+/// Observe the original terminal through a complete retained outcome witness.
+///
+/// Historical run and complete-seal authentication are identical to
+/// [`observe_ref_transaction_async`]. Authority rechecks the witness against a
+/// fresh authenticated head's exact token, repository and outcome root before
+/// reconciling the accelerator hint; no decision-history replay is needed here.
+///
+/// `Ok(None)` means the original transaction is undecided at that exact head.
+/// An absent or moved head instead returns
+/// [`RefTransactionObservationRefusal::StaleOutcomeBasis`], so a caller can
+/// recollect within its original bounded request without inventing absence.
+/// The witness grants neither publication nor renewed execution authority.
+pub async fn observe_ref_transaction_with_cumulative_async<S: AsyncAuthorityStore + ?Sized>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    run: &IntentRun,
+    binding: &RefTransactionBinding,
+    cumulative: &CumulativeOutcomes,
+) -> Result<Option<ObservedRefTransaction>, RefTransactionObservationRefusal> {
+    let seal_present =
+        authenticate_observation_binding_async(store, cx, head_key, run, binding).await?;
+    let outcome = resolve_outcome_with_cumulative_async(
+        store,
+        cx,
+        head_key,
+        cumulative.observed(),
+        binding.seal.tenant_id,
+        binding.seal.repository_id,
+        binding.tx_id(),
+        cumulative,
+    )
+    .await
+    .map_err(|error| RefTransactionObservationRefusal::Outcome(Box::new(error)))?
+    .ok_or(RefTransactionObservationRefusal::StaleOutcomeBasis)?;
+    observation_from_outcome(binding, seal_present, outcome)
+}
+
+/// Authenticate the complete original run and validate any existing seal.
+/// An absent seal remains legal only if authority also finds no terminal.
+async fn authenticate_observation_binding_async<S: AsyncAuthorityStore + ?Sized>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    run: &IntentRun,
+    binding: &RefTransactionBinding,
+) -> Result<bool, RefTransactionObservationRefusal> {
     if run.commitment().ok() != Some(binding.run_commitment()) {
         return Err(RefTransactionObservationRefusal::Binding);
     }
@@ -428,20 +517,18 @@ pub async fn observe_ref_transaction_async<S: AsyncAuthorityStore + ?Sized>(
     if stored.as_ref().is_some_and(|seal| seal != binding.seal()) {
         return Err(RefTransactionObservationRefusal::Binding);
     }
-    let outcome = resolve_outcome_async(
-        store,
-        cx,
-        head_key,
-        binding.seal.tenant_id,
-        binding.seal.repository_id,
-        binding.tx_id(),
-    )
-    .await
-    .map_err(|error| RefTransactionObservationRefusal::Outcome(Box::new(error)))?;
+    Ok(stored.is_some())
+}
+
+fn observation_from_outcome(
+    binding: &RefTransactionBinding,
+    seal_present: bool,
+    outcome: OutcomeLookup,
+) -> Result<Option<ObservedRefTransaction>, RefTransactionObservationRefusal> {
     let OutcomeLookup::Decided(terminal) = outcome else {
         return Ok(None);
     };
-    if stored.is_none() {
+    if !seal_present {
         return Err(RefTransactionObservationRefusal::Binding);
     }
     let commitment = outcome_index_root(&[(binding.tx_id(), terminal)])
