@@ -3,6 +3,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
 import { isCredentialToken, isAgentCredentialToken } from './credential_token.mjs';
+import { normalizePullCommentAnchor, pullCommentAnchorFields, PullAnchorError } from './pull_comment_anchor.mjs';
 
 export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024, bundle: 16 * 1024 * 1024 });
 export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'comment', 'append-comment', 'fast-forward']);
@@ -12,7 +13,8 @@ export const PULL_REVIEW_ACTIONS = Object.freeze(['approve', 'request-changes', 
 export const isPullReview = action => PULL_REVIEW_ACTIONS.includes(action);
 const REVIEW_SCHEMA = 'frankengit-remote-pull-candidate-intent-v1';
 const U64 = 18446744073709551615n, SCHEMA = 'frankengit-remote-pull-intent-v1';
-const COUNTERS = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence', 'policy_epoch', 'review_expected_version'];
+const COUNTERS = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence', 'policy_epoch', 'review_expected_version',
+  'byte_start', 'byte_end', 'line_start', 'line_count'];
 export class PullError extends Error {
   constructor(code, { phase = 'validation', dispatched = false, publication = null, status = null } = {}) {
     super(code); this.name = 'PullError'; this.code = code; this.phase = phase;
@@ -20,6 +22,10 @@ export class PullError extends Error {
   }
 }
 export const failPull = code => { throw new PullError(code); };
+function anchorResult(operation) {
+  try { return operation(); }
+  catch (error) { if (error instanceof PullAnchorError) failPull(error.code); throw error; }
+}
 export const pullHash = value => createHash('sha256').update(value).digest('hex');
 export const pullCanonical = value => `${JSON.stringify(value, null, 2).replace(
   /[\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/gu,
@@ -119,7 +125,7 @@ export function pullCommand(number, action, input, format) {
   const ff = action === 'fast-forward', append = action === 'append-comment', comment = action === 'comment' || append;
   const names = comment ? [...(append ? [] : ['expected_version']), 'body'] :
     [ff ? 'pull_request_version' : 'expected_version', 'source_ref', 'target_ref', 'source_tip', 'target_tip', ...(ff ? [] : ['title', 'body'])];
-  pullFields(input, names);
+  pullFields(input, [...names, ...(comment ? ['anchor'] : [])], names);
   const versionName = ff ? 'pull_request_version' : 'expected_version';
   const version = append ? null : pullU64(input[versionName], ff ? 1n : 0n, U64 - 1n);
   if (!ff && !comment && (action === 'open') !== (version === '0')) failPull('invalid_pull_action_version');
@@ -134,7 +140,15 @@ export function pullCommand(number, action, input, format) {
     normalized.body = text(input.body, 64 * 1024);
     if (comment && !normalized.body.trim()) failPull('empty_pull_comment');
   }
-  const body = new URLSearchParams(comment ? normalized : { object_format: format, ...normalized }).toString();
+  if (comment && Object.hasOwn(input, 'anchor')) {
+    normalized.anchor = anchorResult(() => normalizePullCommentAnchor(input.anchor, format));
+  }
+  // The full anchor belongs to the immutable local intent. Native forms carry
+  // its fifteen exact anchor_* coordinates; the fixed profile is not a field.
+  const { anchor, ...plain } = normalized;
+  const body = new URLSearchParams(comment ? { ...plain,
+    ...(anchor === undefined ? {} : anchorResult(() => pullCommentAnchorFields(anchor, format))) }
+    : { object_format: format, ...normalized }).toString();
   if (body.length > (ff ? 8192 : PULL_LIMITS.form)) failPull('pull_form_limit');
   return { number, action, fields: normalized, body };
 }
@@ -187,7 +201,8 @@ export function validatePullPublication(value, input, status) {
     'repository_commit_id', 'refusal_record_id', 'refusal_code', 'refusal_code_point', 'delivery_acknowledged',
     ...(review ? ['subject', 'merge_base', 'candidate_commit', 'required_reviewers', 'review_expected_version', ...(intent.action === 'merge' ? ['method'] : [])]
       : ff ? ['pull_request_version', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip']
-      : ['expected_version', ...(comment ? ['comment_version', 'refs_changed'] : [])])];
+      : ['expected_version', ...(comment ? ['comment_version', 'refs_changed',
+        ...(Object.hasOwn(intent.fields, 'anchor') ? ['anchor'] : [])] : [])])];
   pullFields(value, names);
   const committed = value.outcome === 'committed', f = intent.fields;
   if (value.type !== (review ? (intent.action === 'merge' ? 'reviewed_merge_publication' : 'candidate_review_publication')
@@ -205,6 +220,9 @@ export function validatePullPublication(value, input, status) {
   // Append receipts identify the terminal decision, not its assigned position.
   // Neither a later discussion read nor a caller predecessor can supply it.
   if (comment && (value.refs_changed !== false || value.comment_version !== (committed && !append ? String(BigInt(f.expected_version) + 1n) : null))) failPull('pull_comment_receipt');
+  if (comment && Object.hasOwn(f, 'anchor') &&
+      JSON.stringify(anchorResult(() => normalizePullCommentAnchor(value.anchor, intent.scope.object_format, { wire: true }))) !==
+      JSON.stringify(f.anchor)) failPull('pull_publication_anchor');
   opaque(value.tx_id); pullU64(value.decision_sequence, 1n);
   if (committed) {
     opaque(value.repository_commit_id);

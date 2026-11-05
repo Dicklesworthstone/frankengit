@@ -28,8 +28,8 @@ JavaScript's safe integer range.
 | --- | --- |
 | `open` | `expected_version:"0"`, source/target refs and tips, title, body |
 | `update`, `close`, `reopen` | Nonzero `expected_version`, source/target refs and tips, title, body |
-| `comment` | `expected_version` of the separate discussion stream, body |
-| `append-comment` | Body only; `expected_version` is forbidden, including null |
+| `comment` | `expected_version` of the separate discussion stream, body; optional complete source `anchor` |
+| `append-comment` | Body; optional complete source `anchor`; `expected_version` is forbidden, including null |
 | `fast-forward` | `pull_request_version`, source/target refs and tips |
 
 The four lifecycle operations carry complete metadata because that is the
@@ -54,8 +54,66 @@ position, retaining the same sealed request across an authority-head race under
 The existing `comment` action still requires an exact predecessor and can refuse
 a stale version. Neither action is automatically converted into the other, and
 their saved keys bind the distinct action. This operator supports plain
-discussion bodies; exact source-anchored comments remain available through the
-native API and browser, and an `anchor` field here is refused.
+discussion bodies and exact source-anchored comments through either action.
+
+## Exact source comments
+
+An optional `fields.anchor` binds a discussion entry to the PR's recorded source
+comparison. The selected PR metadata version is independent of the strict
+comment's discussion predecessor. An append comment can survive another comment
+arriving first, but it never refreshes the PR version, refs, tips, blob, path or
+source span. The complete original anchor participates in the saved request key.
+
+Use the fixed `frankengit.source-comment.myers-lines.v1` profile and all fifteen
+coordinates from the native PR comparison. Ref and path fields carry lowercase
+hex for the original raw bytes, including non-UTF-8 names; OIDs are full bare
+lowercase hex in the scope's hash domain. Every counter is a canonical decimal
+string, including `byte_start`, `byte_end`, `line_start` and `line_count`. The PR
+metadata version retains the full native u64 range. For example, an anchored
+append uses the usual endpoint, scope and number, with these command fields
+(replace every illustrative coordinate with the actual selected source):
+
+```json
+{
+  "action": "append-comment",
+  "fields": {
+    "body": "Please review these exact source lines.",
+    "anchor": {
+      "profile": "frankengit.source-comment.myers-lines.v1",
+      "pull_request_version": "2",
+      "source_ref_hex": "726566732f68656164732f746f706963",
+      "target_ref_hex": "726566732f68656164732f6d61696e",
+      "source_tip": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "target_tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "compared_base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "comparison": "direct",
+      "path_hex": "7372632f6c69622e7273",
+      "side": "after",
+      "blob": "cccccccccccccccccccccccccccccccccccccccc",
+      "mode": "100755",
+      "byte_start": "2",
+      "byte_end": "7",
+      "line_start": "1",
+      "line_count": "2"
+    }
+  }
+}
+```
+
+The client validates the closed shape and resource bounds before creating a
+request. Native admission still authenticates the PR, both original trees, the
+comparison and the exact whole-line range under
+[the normative source-anchor contract, §20.1.1](NORMATIVE_PROTOCOL_CONTRACTS.md).
+No rendered excerpt or caller assertion proves source membership, and symlinks
+remain inert source bytes. The HTTP form contains the fifteen `anchor_*` fields;
+the fixed profile is selected by the protocol and is not sent as `anchor_profile`.
+
+An anchored publication must echo the complete original anchor, with no
+read-time `anchor_status`. A missing, extra or changed anchor is refused. Plain
+comment requests and receipts omit the anchor entirely and retain their original
+bytes and keys. The CLI saves anchored intents and result records through the
+same private-file workflow; recovery reads only the original transaction even
+when the PR or source has changed afterward.
 
 ## Submission and recovery
 
@@ -115,7 +173,9 @@ native engine still decides whether any review or merge may be published.
 Run the focused client tests:
 
 ```sh
-node --test tests/operator/remote_pull.test.mjs tests/operator/remote_pull_cli.test.mjs
+node --test --test-concurrency=1 tests/operator/remote_pull.test.mjs tests/operator/remote_pull_cli.test.mjs \
+  tests/operator/pull_comment_anchor.test.mjs tests/operator/remote_pull_anchor.test.mjs \
+  tests/operator/remote_pull_anchor_cli.test.mjs
 ```
 
 Use the Node version pinned in [`tests/node-version`](../tests/node-version).
@@ -130,6 +190,10 @@ literal bodies, dropped replies, credential rotation, retained-publication
 recovery, and actual CLI processes interrupted by SIGTERM/SIGKILL. Their HTTP
 peers exercise client protocol and persistence behavior; they do not establish
 native concurrent admission or authorization.
+Source-anchor cases also cover raw non-UTF-8 coordinates, actual native numeric
+wire counters, full u64 PR versions, both comment modes, exact anchor echoes,
+changed request keys and retained receipts, and fresh-process recovery after a
+lost reply. Structural checks do not replace native source validation.
 
 ## Live native campaign
 

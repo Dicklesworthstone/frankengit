@@ -7,6 +7,19 @@ import { preparePull } from '../../scripts/operator/remote_pull.mjs';
 export const TOKEN = 'a'.repeat(64), ROTATED = 'b'.repeat(64);
 export const BASE_SCOPE = Object.freeze({ tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32),
   repository_incarnation: '3'.repeat(32), principal_id: '4'.repeat(32) });
+// An independent native-contract fixture, not the production anchor normalizer.
+export function commentAnchor(algorithm = 'sha1') {
+  const length = algorithm === 'sha1' ? 40 : 64;
+  return { profile: 'frankengit.source-comment.myers-lines.v1', pull_request_version: '18446744073709551615',
+    source_ref_hex: '726566732f68656164732f746f706963ff', target_ref_hex: '726566732f68656164732f6d61696e',
+    source_tip: 'a'.repeat(length), target_tip: 'b'.repeat(length), compared_base: 'b'.repeat(length),
+    comparison: 'direct', path_hex: '7372632fff2e7273', side: 'after', blob: 'c'.repeat(length), mode: '100755',
+    byte_start: '2', byte_end: '7', line_start: '1', line_count: '2' };
+}
+function nativeAnchor(anchor, algorithm) {
+  return { ...anchor, ...Object.fromEntries(['source_tip', 'target_tip', 'compared_base', 'blob']
+    .map(name => [name, `${algorithm}:${anchor[name]}`])) };
+}
 export function input(endpoint, action = 'open', algorithm = 'sha1') {
   const fields = ['comment', 'append-comment'].includes(action) ? {
     ...(action === 'comment' ? { expected_version: '0' } : {}), body: 'Discussion, not approval.\n🦀' }
@@ -29,7 +42,8 @@ export function publication(intent, state = 'committed') {
         comment_version: committed && !append ? String(BigInt(intent.fields.expected_version) + 1n) : null } : {}) }),
     tx_id: 'native-transaction', outcome: state, decision_sequence: '18446744073709551615',
     repository_commit_id: committed ? 'native-rcr' : null, refusal_record_id: committed ? null : 'native-refusal',
-    refusal_code: committed ? null : 'PolicyDenied', refusal_code_point: committed ? null : 17, delivery_acknowledged: null };
+    refusal_code: committed ? null : 'PolicyDenied', refusal_code_point: committed ? null : 17, delivery_acknowledged: null,
+    ...(Object.hasOwn(intent.fields, 'anchor') ? { anchor: nativeAnchor(intent.fields.anchor, intent.scope.object_format) } : {}) };
 }
 export function outcome(intent, state = 'key_not_observed') {
   const p = publication(intent, state), { object_format: _, ...scope } = intent.scope;
@@ -43,7 +57,8 @@ export function outcome(intent, state = 'key_not_observed') {
     read_only: true, request_reexecuted: false, absence_proves_non_commit: false, session_completeness_established: false };
 }
 export function wire(value) {
-  const counters = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence'];
+  const counters = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence',
+    'byte_start', 'byte_end', 'line_start', 'line_count'];
   return JSON.stringify(value, (key, data) => counters.includes(key) && typeof data === 'string' ? JSON.rawJSON(data) : data);
 }
 export function respond(response, value, status = 200, headers = {}) {
