@@ -186,7 +186,12 @@ impl<'a> super::UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, true, true, false)
+        Self::parse_profile(
+            input,
+            limits,
+            cancelled,
+            super::ParseProfile::BinaryAndRenames,
+        )
     }
 }
 
@@ -204,7 +209,7 @@ impl<'a> super::UnifiedPatch<'a> {
         limits: PatchLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, true, true, true)
+        Self::parse_profile(input, limits, cancelled, super::ParseProfile::BinaryRenames)
     }
 }
 #[cfg(test)]

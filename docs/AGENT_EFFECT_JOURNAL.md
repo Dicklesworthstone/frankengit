@@ -150,12 +150,73 @@ and cancellation. Obtaining a position from the same untrusted file is not an
 independent anchor.
 
 An interrupted append can leave a valid longer suffix or an incomplete frame.
-The API preserves this uncertainty instead of choosing a last-good prefix on
-the operator's behalf. This profile does not yet implement an authority-rooted
-run catalog, automatic tail-anchor publication, resumed issuance or automated
-settlement of recovered external effects. Capability-chain and dispatch
-authorization objects still require their own durable codecs; a retained
-capability identity is not a reconstructed authorization proof.
+The general recovery API preserves this uncertainty instead of choosing a
+last-good prefix on the operator's behalf. The narrow canonical-submission
+cleanup operation below can finish only its one independently proven ACK.
+This profile does not implement an authority-rooted run catalog, automatic
+tail-anchor publication, resumed issuance or general settlement of recovered
+external effects. Capability-chain and dispatch authorization objects still
+require their own durable codecs; a retained capability identity is not a
+reconstructed authorization proof.
+
+## Cleanup of recovered canonical ref submissions
+
+`OneNode::settle_recovered_agent_ref_transaction_in` closes the gap between
+observing a canonical outcome after restart and durably clearing that original
+submission's journal debt. Supply the original run ID, independently retained
+complete-run commitment and journal tail, the effect ID, and a fresh finite
+cleanup request context. Its logical observation time dates reconciliation;
+it does not refresh the original run's expiry or authority.
+
+The node reauthenticates the original immutable run checkpoint and obtains
+exclusive custody of the existing journal. It verifies the exact anchored
+prefix while retaining custody through the ordinary authority lookup. The
+original effect supplies the full seal, transaction ID and native custody
+binding; callers cannot substitute another transaction. No issuing broker,
+capability proof, new resource reservation or admission request is created.
+Cleanup remains possible after expiry or revocation.
+
+The result is `NativeRecoveredRefTransactionSettlement`:
+
+- `Undecided` returns only the original effect and transaction identities. It
+  leaves the journal unchanged and exposes no incomplete prefix as a complete
+  recovered inventory. It gives no permission to resubmit the transaction.
+- `Acknowledged` returns the authenticated ordinary observation and a
+  `RecoveredAgentJournal` containing the synchronized successor. Inspect the
+  ordinary terminal to distinguish a committed ref update from a canonical
+  refusal. Both outcomes clear submission responsibility. Retain the new
+  `recovered.journal().position()` independently for subsequent recovery.
+
+Only `Committed`, `DeferredExternally` or `Escalated` ref-submission obligations
+can gain the existing acknowledgement lifecycle event. An already acknowledged
+prefix must contain the exact same terminal commitment. The preparation checks
+the complete predecessor and successor inventories through the ordinary
+reconciliation engine. Original charged resources and every other effect remain
+unchanged; settling one submission does not establish whole-run quiescence.
+
+The host permits bytes after the supplied tail only when they are an exact
+prefix of that one deterministic ACK frame. An empty suffix is appended; a
+partial matching suffix is completed; a complete matching ACK is synchronized
+without appending a duplicate. Any different, extra or duplicate suffix refuses
+without truncation or overwrite. The original bytes are checked again after
+the authority await. This is not permission to salvage arbitrary journal tails.
+General `recover_agent_journal_in` continues to reject a longer suffix.
+
+Every successful cleanup, including a no-op, synchronizes the file and checks
+cancellation afterward. A write, sync or cancellation failure retains cleanup
+debt. `NativeRecoveredRefTransactionRefusal::Persistence` retains the terminal,
+exact proposed frame and both positions; retry with the original independent
+pins and a fresh context. A lost successful response can use the old tail again
+without duplicating the ACK. Once the new tail is retained, the same operation
+returns `already_acknowledged: true`; this flag describes the supplied prefix,
+not whether a previous uncertain write happened to finish its bytes.
+
+The core `prepare_recovered_ref_transaction_acknowledgement` and
+`RefTransactionAcknowledgementSink` provide this same cleanup contract to other
+durable hosts. A candidate exposes no successor inventory until its sink confirms
+the exact synchronized position. The native host uses append-only access to an
+existing regular file and retains the ordinary local locking, operator-owned
+directory and drained-sync requirements described above.
 
 ## Concrete validation surfaces
 
@@ -191,3 +252,26 @@ independent run and tail pins cross that process boundary separately. It also ch
 wrong pins, cancellation and unchanged repository authority during recovery.
 Execution of that integration test is a separate gate; its presence and successful
 type checking alone do not establish an executed persisted-node result.
+
+`crates/fgit-agent/src/ref_publication/tests/recovery.rs` compares recovered ACK
+bytes with the live broker path for both canonical outcomes, expiry and
+revocation, unchanged budgets and unrelated debt, exact bindings, legal lifecycle
+states, idempotence and persistence refusals. The reference authority supplies
+real seals and canonical decisions; the core sink models persistence faults.
+
+`crates/fgit-node/src/agent_journal/settlement_tests.rs` exercises the production
+file owner with real files, locks and synchronization. It covers exact partial
+and complete suffix retry, extra/different suffix refusal, cancellation before
+and after append, already-acknowledged cleanup and same-length interference.
+Its authority source is the reference engine. This component suite can be
+compiled against the same locked first-party libraries independently of the
+node runtime; such a run does not establish the native-node gate.
+
+`crates/fgit-node/src/agent_publication/cleanup_tests.rs` separately covers the
+native consumer. A child process prepares and admits through the production
+native paths, then exits before ACK while holding the real journal lock. The
+parent reopens the embedded authority and uses independently passed controller
+pins for cleanup in both Git formats. Cases cover commit/refusal, expired-run
+cleanup, partial ACK interruption, exact retry, cancellation, unchanged authority
+and budget, and undecided outcomes that expose no complete inventory. Execution
+of these native tests remains a separate revision-bound gate.

@@ -349,6 +349,25 @@ impl BasisBoundValidatedReceive {
     pub const fn validation_authority(&self) -> Option<ReceiveValidationAuthority> {
         self.validation_authority
     }
+
+    /// Requires the original validation to use its exact publication basis.
+    ///
+    /// Asynchronous admission can normally reuse a validator's authority
+    /// commitment when a successor head preserves the objects and policy that
+    /// validation used. Additional authorization bound to the exact head, such
+    /// as a current agent revocation check, must not inherit that optimization.
+    /// This consumes the proof and removes its optional reuse commitment; the
+    /// validated request, closure and original head identity remain unchanged.
+    ///
+    /// Terminal retries still recover the original decision before checking
+    /// freshness. Require an atomic receive when the whole session must share
+    /// one authorized head: this does not change non-atomic continuation after
+    /// an earlier command in that session commits.
+    #[must_use]
+    pub fn requiring_exact_publication_basis(mut self) -> Self {
+        self.validation_authority = None;
+        self
+    }
 }
 
 /// Validates closure and object availability for a quarantined pack.

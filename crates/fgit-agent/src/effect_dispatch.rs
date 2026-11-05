@@ -294,7 +294,10 @@ impl RevocationCheckedEffectBroker {
         &mut self,
         grant: RevocationAuthorizedEffectGrant,
         binding: crate::ref_publication::RefTransactionBinding,
-    ) -> Result<crate::broker::ref_publication::ReservedSubmission, crate::ref_publication::RefTransactionEffectRefusal> {
+    ) -> Result<
+        crate::broker::ref_publication::ReservedSubmission,
+        crate::ref_publication::RefTransactionEffectRefusal,
+    > {
         self.inner.reserve_ref_transaction(grant, binding)
     }
 
@@ -312,6 +315,13 @@ impl RevocationCheckedEffectBroker {
         reservation: &crate::broker::ref_publication::ReservedSubmission,
     ) -> bool {
         self.inner.owns_ref_transaction(reservation)
+    }
+
+    pub(crate) fn retained_ref_transaction_request(
+        &self,
+        pending: &crate::broker::ref_publication::PendingSubmission,
+    ) -> Result<EffectRequest, crate::ref_publication::RefTransactionEffectRefusal> {
+        self.inner.retained_ref_transaction_request(pending)
     }
 
     /// Accepted effect records in acceptance order.

@@ -132,6 +132,42 @@ def campaign(binary, fmt):
         assert not stale[7].exists()
         print(f"PATCH_CLI format={fmt} candidate={candidate} objects={len(packed)} committed=true replay_identical=true")
 
+        symlink_patch, symlink_bundle = root / "symlink.patch", root / "symlink.bundle"
+        target = b"../../outside"
+        symlink_patch.write_bytes(b"diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+" + target + b"\n\\ No newline at end of file\n")
+        symlink_prepare = prepare.copy()
+        symlink_prepare[6], symlink_prepare[7] = symlink_patch, symlink_bundle
+        symlink_prepare[symlink_prepare.index("--expected-base") + 1] = candidate
+        profile_at = symlink_prepare.index("--profile") + 1
+        for legacy in ("exact-v1", "exact-binary-v1", "exact-tree-v1", "exact-tree-binary-v1"):
+            denied = symlink_prepare.copy()
+            denied[profile_at], denied[7] = legacy, root / f"{legacy}-symlink-refused.bundle"
+            run(denied, code=2)
+            assert not denied[7].exists()
+        symlink_prepare[profile_at] = "exact-symlink-v1"
+        limited = symlink_prepare.copy()
+        limited[7] = root / "symlink-over-budget.bundle"
+        limited.extend(["--max-output-bytes", "4"])
+        run(limited, code=2)
+        assert not limited[7].exists(), "bounded refusal exposed a partial candidate"
+        linked = run(symlink_prepare, receipt=True)
+        assert linked["profile"] == "exact-symlink-v1" and linked["published_to_repository"] is False
+        link_blob = oid(fmt, "blob", target)
+        link_tree_body = tree([("edit.txt", "100755", new), ("keep.txt", "100644", keep), ("link", "120000", link_blob)])
+        link_tree = oid(fmt, "tree", link_tree_body)
+        assert linked["root_tree"] == link_tree
+        link_objects = bundle_objects(symlink_bundle.read_bytes(), fmt, candidate, linked["candidate_commit"])
+        assert link_objects[link_blob] == ("blob", target)
+        assert link_objects[link_tree] == ("tree", link_tree_body)
+        link_apply = apply.copy()
+        link_apply[6] = symlink_bundle
+        link_apply[link_apply.index("--expected-base") + 1] = candidate
+        link_apply[-1] = linked["candidate_commit"]
+        link_terminal = run(link_apply, stdin=b"reviewed-symlink-key\n", receipt=True)
+        assert link_terminal["outcome"] == "committed"
+        assert run(link_apply, stdin=b"reviewed-symlink-key\n", receipt=True) == link_terminal
+        print(f"PATCH_SYMLINK_CLI format={fmt} candidate={linked['candidate_commit']} mode=120000 inert_bytes=true old_profiles_refuse=true")
+
 
 def main():
     parser = argparse.ArgumentParser()

@@ -4,8 +4,8 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 18,
-  "count_normalized": 10,
-  "count_unsupported": 19,
+  "count_normalized": 12,
+  "count_unsupported": 18,
   "count_ambiguous": 0,
   "constructs": [
     {
@@ -19,6 +19,12 @@
       "status": "unsupported",
       "refuses": true,
       "reason": "turns a failed job into a passing one, which is gate self-weakening expressed as configuration"
+    },
+    {
+      "key": "job.env",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "validated literal job values override workflow defaults and lower into each effective step environment; whole-value matrix inputs are resolved before validation and inherited copies are bounded"
     },
     {
       "key": "job.environment",
@@ -84,7 +90,7 @@
       "key": "step.env",
       "status": "normalized",
       "refuses": false,
-      "reason": "literal step-local environment sorted by name and bound into a v2 graph; no inherited values, expressions, secret imports or reserved startup and identity variables"
+      "reason": "validated step values override job and workflow defaults; effective literals are sorted and graph-bound; whole-value matrix inputs are supported, but secret imports, general expressions and reserved variables refuse"
     },
     {
       "key": "step.if",
@@ -172,9 +178,9 @@
     },
     {
       "key": "workflow.env",
-      "status": "unsupported",
-      "refuses": true,
-      "reason": "workflow-level environment leaks into every step invisibly; the subset requires a step to state what it needs"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "validated literal workflow defaults lower into each effective step environment; job and step values override by name; no host inheritance, matrix expressions, secrets or reserved variables"
     },
     {
       "key": "workflow.jobs",

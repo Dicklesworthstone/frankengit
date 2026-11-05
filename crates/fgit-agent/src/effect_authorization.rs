@@ -1004,7 +1004,10 @@ impl RevocationCheckedEffectBroker {
         &mut self,
         grant: RevocationAuthorizedEffectGrant,
         binding: crate::ref_publication::RefTransactionBinding,
-    ) -> Result<crate::broker::ref_publication::ReservedSubmission, crate::ref_publication::RefTransactionEffectRefusal> {
+    ) -> Result<
+        crate::broker::ref_publication::ReservedSubmission,
+        crate::ref_publication::RefTransactionEffectRefusal,
+    > {
         self.broker.reserve_ref_transaction(grant.grant, binding)
     }
 
@@ -1013,6 +1016,13 @@ impl RevocationCheckedEffectBroker {
         reservation: &crate::broker::ref_publication::ReservedSubmission,
     ) -> bool {
         self.broker.owns_ref_transaction(reservation)
+    }
+
+    pub(crate) fn retained_ref_transaction_request(
+        &self,
+        pending: &crate::broker::ref_publication::PendingSubmission,
+    ) -> Result<EffectRequest, crate::ref_publication::RefTransactionEffectRefusal> {
+        self.broker.retained_ref_transaction_request(pending)
     }
 
     /// Whether the reservation still belongs to the ledger served by this facade.

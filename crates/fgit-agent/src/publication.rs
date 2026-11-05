@@ -513,22 +513,22 @@ fn check_change_bounds<A: GitHashAlgorithm>(
                 return Err(AgentPublicationRefusal::OverlayInvalid);
             }
         }
+        if let Some((oid, from)) = entry.base_carry() {
+            bounded_add(
+                &mut metadata,
+                oid.len(),
+                MAX_PUBLICATION_METADATA_BYTES,
+                "change_metadata",
+            )?;
+            bounded_add(
+                &mut metadata,
+                from.as_bytes().len(),
+                MAX_PUBLICATION_METADATA_BYTES,
+                "change_metadata",
+            )?;
+        }
         match entry {
             OverlayEntry::File { class, .. } => {
-                if let Some((oid, from)) = entry.base_carry() {
-                    bounded_add(
-                        &mut metadata,
-                        oid.len(),
-                        MAX_PUBLICATION_METADATA_BYTES,
-                        "change_metadata",
-                    )?;
-                    bounded_add(
-                        &mut metadata,
-                        from.as_bytes().len(),
-                        MAX_PUBLICATION_METADATA_BYTES,
-                        "change_metadata",
-                    )?;
-                }
                 if let EntryClass::Generated { producer } = class {
                     bounded_add(
                         &mut metadata,

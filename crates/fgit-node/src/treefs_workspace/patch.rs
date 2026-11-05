@@ -31,6 +31,30 @@ const FETCH_OBJECTS: u64 = 100_000;
 const EXPORT_BYTES: usize = 64 * 1024 * 1024;
 const EXPORT_OBJECTS: usize = 100_000;
 
+#[derive(Clone, Copy)]
+enum PatchProfile {
+    Regular,
+    BinaryRefactor,
+    Symlinks,
+}
+
+impl PatchProfile {
+    fn parse<'a>(
+        self,
+        input: &'a [u8],
+        limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<UnifiedPatch<'a>, PatchError> {
+        match self {
+            Self::Regular => UnifiedPatch::parse_with_binary_and_renames(input, limits, cancelled),
+            Self::BinaryRefactor => {
+                UnifiedPatch::parse_with_binary_renames(input, limits, cancelled)
+            }
+            Self::Symlinks => UnifiedPatch::parse_with_symlinks(input, limits, cancelled),
+        }
+    }
+}
+
 /// Verified before/after file identities. Paths are raw repository bytes.
 /// A rename contributes two entries: deletion at the source and creation at
 /// the destination. Receipts are sorted by raw path and cover every tree effect.
@@ -172,7 +196,7 @@ impl OneNode {
             now,
             metadata,
             limits,
-            false,
+            PatchProfile::Regular,
         )
         .await
     }
@@ -201,7 +225,37 @@ impl OneNode {
             now,
             metadata,
             limits,
-            true,
+            PatchProfile::BinaryRefactor,
+        )
+        .await
+    }
+
+    /// Explicit symlink-capable patch profile over the caller's existing
+    /// capability. Git mode 120000 names inert blob bytes, never a host path.
+    /// Existing patch entrypoints retain their regular-file-only semantics.
+    pub async fn prepare_workspace_symlink_patch_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        patch_bytes: &[u8],
+        now: u64,
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_workspace_patch_profile_in::<A>(
+            request,
+            reference,
+            expected_commit,
+            visibility,
+            capability,
+            patch_bytes,
+            now,
+            metadata,
+            limits,
+            PatchProfile::Symlinks,
         )
         .await
     }
@@ -217,16 +271,13 @@ impl OneNode {
         now: u64,
         metadata: &MergeMetadata,
         limits: PatchLimits,
-        binary_renames: bool,
+        profile: PatchProfile,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
         let cancelled = || !workspace_request_live(request);
-        let patch = if binary_renames {
-            UnifiedPatch::parse_with_binary_renames(patch_bytes, limits, &cancelled)
-        } else {
-            UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &cancelled)
-        }
-        .map_err(patch_error)?;
+        let patch = profile
+            .parse(patch_bytes, limits, &cancelled)
+            .map_err(patch_error)?;
         let paths = paths(&patch)?;
         authorize_patch(&patch, capability, now)?;
         self.with_workspace_base_in::<A, _>(
@@ -278,7 +329,7 @@ impl OneNode {
             patch_bytes,
             metadata,
             limits,
-            false,
+            PatchProfile::Regular,
         )
         .await
     }
@@ -303,7 +354,33 @@ impl OneNode {
             patch_bytes,
             metadata,
             limits,
-            true,
+            PatchProfile::BinaryRefactor,
+        )
+        .await
+    }
+
+    /// Trusted local-owner opt-in for inert symlink patch editing. Scope
+    /// discovery, budgets, exact base checks and candidate custody are shared
+    /// with the existing trusted patch adapter; no publication grant is added.
+    pub async fn prepare_trusted_symlink_patch_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        workspace_id: [u8; 16],
+        patch_bytes: &[u8],
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_trusted_patch_profile_in(
+            request,
+            reference,
+            expected_commit,
+            workspace_id,
+            patch_bytes,
+            metadata,
+            limits,
+            PatchProfile::Symlinks,
         )
         .await
     }
@@ -317,7 +394,7 @@ impl OneNode {
         patch_bytes: &[u8],
         metadata: &MergeMetadata,
         limits: PatchLimits,
-        binary_renames: bool,
+        profile: PatchProfile,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         match self.object_format {
             ObjectFormat::Sha1 => {
@@ -329,7 +406,7 @@ impl OneNode {
                     patch_bytes,
                     metadata,
                     limits,
-                    binary_renames,
+                    profile,
                 )
                 .await
             }
@@ -342,7 +419,7 @@ impl OneNode {
                     patch_bytes,
                     metadata,
                     limits,
-                    binary_renames,
+                    profile,
                 )
                 .await
             }
@@ -358,16 +435,13 @@ impl OneNode {
         patch_bytes: &[u8],
         metadata: &MergeMetadata,
         limits: PatchLimits,
-        binary_renames: bool,
+        profile: PatchProfile,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
         let cancelled = || !workspace_request_live(request);
-        let patch = if binary_renames {
-            UnifiedPatch::parse_with_binary_renames(patch_bytes, limits, &cancelled)
-        } else {
-            UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &cancelled)
-        }
-        .map_err(patch_error)?;
+        let patch = profile
+            .parse(patch_bytes, limits, &cancelled)
+            .map_err(patch_error)?;
         let paths = paths(&patch)?;
         let touched = touched_paths(&patch)?;
         let top = touched
@@ -512,6 +586,10 @@ fn prepare_at_base<A: GitHashAlgorithm>(
                 let id = native_id(source.inner.object_format, oid.digest_bytes())?;
                 Some((oid, id, mode))
             }
+            Ok(BaseEntry::Symlink { oid }) if file.allows_symlinks() => {
+                let id = native_id(source.inner.object_format, oid.digest_bytes())?;
+                Some((oid, id, 0o120000))
+            }
             Err(BaseError::NotFound { .. }) => None,
             Ok(_) => return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit),
             Err(error) => {
@@ -621,16 +699,23 @@ fn prepare_at_base<A: GitHashAlgorithm>(
                     .checked_add(file.content.len())
                     .filter(|bytes| *bytes <= limits.max_output_bytes)
                     .ok_or_else(|| patch_error(PatchError::Budget("aggregate result bytes")))?;
-                log.push(TreeEditIntent::Write {
-                    path: path.clone(),
-                    content: file.content,
-                    mode: if file.mode == 0o100755 {
-                        FileMode::Executable
-                    } else {
-                        FileMode::Regular
-                    },
-                    entry_class: EntryClass::Content,
-                });
+                if file.mode == 0o120000 {
+                    log.push(TreeEditIntent::CreateSymlink {
+                        path: path.clone(),
+                        link_target: file.content,
+                    });
+                } else {
+                    log.push(TreeEditIntent::Write {
+                        path: path.clone(),
+                        content: file.content,
+                        mode: if file.mode == 0o100755 {
+                            FileMode::Executable
+                        } else {
+                            FileMode::Regular
+                        },
+                        entry_class: EntryClass::Content,
+                    });
+                }
             }
             None => log.push(TreeEditIntent::Delete { path: path.clone() }),
         }

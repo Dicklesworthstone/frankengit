@@ -1435,3 +1435,6 @@ fn a_native_seal_does_not_enable_either_legacy_merge_publisher() {
         "legacy drivers must refuse before acquiring a seal"
     );
 }
+
+#[path = "async_admission_equivalence/exact_publication_basis.rs"]
+mod exact_publication_basis;

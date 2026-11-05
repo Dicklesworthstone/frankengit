@@ -15,6 +15,7 @@ pub(super) struct Input {
     pub base: GitOid,
     pub patch: Vec<u8>,
     pub metadata: MergeMetadata,
+    pub symlinks: bool,
 }
 
 pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
@@ -22,6 +23,7 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         args,
         &[
             "operation",
+            "profile",
             "reference",
             "reference_hex",
             "expected_base",
@@ -37,6 +39,11 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         return Err(ToolError::invalid("unsupported_candidate_operation"));
     }
     let reference = branch(args, "reference", "reference_hex")?;
+    let symlinks = match string(args, "profile")? {
+        None | Some("exact-tree-v1") => false,
+        Some("exact-symlink-v1") => true,
+        Some(_) => return Err(ToolError::invalid("unsupported_patch_profile")),
+    };
     let base = oid(args, "expected_base", format)?;
     let (patch, metadata) = payload(args)?;
     Ok(Input {
@@ -44,6 +51,7 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         base,
         patch,
         metadata,
+        symlinks,
     })
 }
 
@@ -87,6 +95,11 @@ pub(super) fn metadata(args: &Object) -> Result<MergeMetadata, ToolError> {
 
 pub(super) fn schema() -> Value {
     let mut properties = common_properties("prepare_patch");
+    properties.insert("profile".into(), object([
+        ("type", text("string")),
+        ("enum", Value::Array(vec![text("exact-tree-v1"), text("exact-symlink-v1")])),
+        ("description", text("Omit for existing regular-file behavior; exact-symlink-v1 explicitly permits inert Git symlink blobs without following targets.")),
+    ]));
     payload_properties(&mut properties);
     input_schema(
         properties,
@@ -120,19 +133,34 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     // admission identity, persistent workspace handle or caller-selected grant.
     let mut workspace = [0_u8; 16];
     workspace.copy_from_slice(&digest[..16]);
-    let candidate = backend
-        .node
-        .runtime()
-        .block_on(backend.node.prepare_trusted_patch_in(
-            &request,
-            &input.reference,
-            input.base,
-            workspace,
-            &input.patch,
-            &input.metadata,
-            Default::default(),
-        ))
-        .map_err(preparation_error)?;
+    let candidate = if input.symlinks {
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.prepare_trusted_symlink_patch_in(
+                &request,
+                &input.reference,
+                input.base,
+                workspace,
+                &input.patch,
+                &input.metadata,
+                Default::default(),
+            ))
+    } else {
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.prepare_trusted_patch_in(
+                &request,
+                &input.reference,
+                input.base,
+                workspace,
+                &input.patch,
+                &input.metadata,
+                Default::default(),
+            ))
+    }
+    .map_err(preparation_error)?;
     if candidate.object_format != backend.options.format
         || candidate.source_commit != input.base
         || candidate.patch_sha256 != digest
@@ -168,9 +196,9 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
                 .any(|p| p.is_empty() || p == b"." || p == b"..")
             || (path.old_blob.is_none() && path.new_blob.is_none())
             || path.new_blob.is_some() != path.new_mode.is_some()
-            || path
-                .new_mode
-                .is_some_and(|m| !matches!(m, 0o100644 | 0o100755))
+            || path.new_mode.is_some_and(|m| {
+                !matches!(m, 0o100644 | 0o100755) && !(input.symlinks && m == 0o120000)
+            })
             || [path.old_blob, path.new_blob]
                 .into_iter()
                 .flatten()
@@ -201,6 +229,14 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         ("type".into(), text("source_patch_candidate")),
         ("schema_version".into(), json::number(1)),
         ("operation".into(), text("prepare_patch")),
+        (
+            "profile".into(),
+            text(if input.symlinks {
+                "exact-symlink-v1"
+            } else {
+                "exact-tree-v1"
+            }),
+        ),
         // The native planner returns an RCR, not a selecting authority head.
         // A separate read cannot safely manufacture a snapshot token for it.
         ("snapshot_token".into(), Value::Null),

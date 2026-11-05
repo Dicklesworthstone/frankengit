@@ -43,20 +43,30 @@ def source_tree(source, fmt, files):
 literal = '$(touch injected) ; literal $HOME'
 good = '''name: context
 on: workflow_dispatch
+env:
+  WORKFLOW_ONLY: common
+  SHARED: workflow
+  LITERAL: '$(touch injected) ; literal $HOME'
 jobs:
   build:
     runs-on: fgit-trusted-local
+    env:
+      SHARED: job
+      JOB_ONLY: present
     steps:
-      - run: mkdir -p build/nested
+      - run: test "$SHARED" = job; test "$WORKFLOW_ONLY" = common; mkdir -p build/nested
       - name: explicit inputs
         env:
           BUILD_MODE: release
           EMPTY: ''
-          LITERAL: '$(touch injected) ; literal $HOME'
+          SHARED: step
         working-directory: ./build/nested
         run: |
           test "$BUILD_MODE" = release
           test "${EMPTY+x}" = x
+          test "$SHARED" = step
+          test "$JOB_ONLY" = present
+          test "$WORKFLOW_ONLY" = common
           test -f ../../src/input.txt
           printf '%s' "$LITERAL"
           printf '%s' "$BUILD_MODE" > result
@@ -64,6 +74,9 @@ jobs:
         run: |
           test -z "${BUILD_MODE+x}"
           test -z "${EMPTY+x}"
+          test "$SHARED" = job
+          test "$JOB_ONLY" = present
+          test "$WORKFLOW_ONLY" = common
           test -f build/nested/result
           test ! -e build/nested/injected
           test "$PATH" = /usr/bin:/bin
@@ -72,7 +85,23 @@ jobs:
   independent:
     runs-on: fgit-trusted-local
     steps:
-      - run: test -z "${BUILD_MODE+x}"; test ! -e build; printf 'fresh job'
+      - run: test -z "${BUILD_MODE+x}"; test -z "${JOB_ONLY+x}"; test "$SHARED" = workflow; test "$WORKFLOW_ONLY" = common; test ! -e build; printf 'fresh job'
+  variant:
+    runs-on: fgit-trusted-local
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - debug
+          - release
+    env:
+      MODE: '${{ matrix.mode }}'
+      SHARED: '${{ matrix.mode }}'
+    steps:
+      - env:
+          STEP_MODE: '${{ matrix.mode }}'
+        run: test "$MODE" = "$STEP_MODE"; test "$SHARED" = "$MODE"; test "$WORKFLOW_ONLY" = common; printf 'variant-%s' "$MODE"
+      - run: test -z "${STEP_MODE+x}"; test "$SHARED" = "$MODE"; test -z "${JOB_ONLY+x}"
 '''
 invalid = '''name: invalid
 on: workflow_dispatch
@@ -84,6 +113,30 @@ jobs:
       - run: printf SHOULD_NOT_RUN
         env:
           BASH_ENV: rejected
+'''
+invalid_workflow = '''name: invalid inherited workflow
+on: workflow_dispatch
+env:
+  VALUE: '${{ secrets.INVALID }}'
+jobs:
+  build:
+    runs-on: fgit-trusted-local
+    env:
+      VALUE: valid
+    steps:
+      - run: printf SHOULD_NOT_RUN
+'''
+invalid_job = '''name: invalid inherited job
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: fgit-trusted-local
+    env:
+      VALUE: '${{ secrets.INVALID }}'
+    steps:
+      - run: printf SHOULD_NOT_RUN
+        env:
+          VALUE: valid
 '''
 symlinked = '''name: symlinked
 on: workflow_dispatch
@@ -102,6 +155,8 @@ for fmt in ('sha1', 'sha256'):
     files = {
         '.github/workflows/good.yml': good.encode(),
         '.github/workflows/invalid.yml': invalid.encode(),
+        '.github/workflows/invalid-workflow.yml': invalid_workflow.encode(),
+        '.github/workflows/invalid-job.yml': invalid_job.encode(),
         '.github/workflows/symlinked.yml': symlinked.encode(),
         '.github/workflows/missing.yml': missing.encode(),
         'src/input.txt': b'exact source input\n',
@@ -129,10 +184,11 @@ for fmt in ('sha1', 'sha256'):
     report = envelope["run"]
     assert report['succeeded'] and report['workspaces_closed'] and not report['request_interrupted']
     jobs = report['execution']['jobs']
-    assert [job['id'] for job in jobs] == ['build', 'independent']
+    assert [job['id'] for job in jobs] == ['build', 'independent', 'variant__matrix_000', 'variant__matrix_001']
     assert all(job['outcome'] == 'succeeded' for job in jobs)
     output = b''.join(bytes.fromhex(step['stdout_hex']) for job in jobs for step in job['steps'])
     assert literal.encode() in output and b'root restored' in output and b'fresh job' in output
+    assert b'variant-debug' in output and b'variant-release' in output
     assert (directory / 'report.json').exists() and (directory / 'check-proposals.journal').exists()
     before = (directory / 'report.json').read_bytes()
     run(fmt + '-occupied-attempt', args, 2)
@@ -143,6 +199,9 @@ for fmt in ('sha1', 'sha256'):
     assert json.loads(recovery)
     invalid_raw, invalid_directory, _ = workflow('invalid', 2, 2)
     assert not invalid_directory.exists()
+    for number, name in [(5, 'invalid-workflow'), (6, 'invalid-job')]:
+        _, rejected_directory, _ = workflow(name, number, 2)
+        assert not rejected_directory.exists(), 'invalid inherited input must refuse before execution custody'
     for number, name in [(3, 'symlinked'), (4, 'missing')]:
         raw, failed_directory, _ = workflow(name, number, 1)
         envelope = json.loads(raw)
@@ -167,6 +226,6 @@ for fmt in ('sha1', 'sha256'):
     assert run(fmt + "-publish-retry", publish) == published_raw
     source.rename(root / (fmt + "-source-offline"))
     assert run(fmt + '-source-free-recovery', ['workflow', 'recover', directory, tenant, repository, '--journal-id', journal]) == recovery
-    results.append({'format': fmt, 'graph': report["execution"]["workflow_graph"], 'literal_inputs': True, 'separate_steps_and_jobs': True, 'refusal_twins': True, 'source_free_recovery': True})
+    results.append({'format': fmt, 'graph': report["execution"]["workflow_graph"], 'literal_inputs': True, 'workflow_job_step_precedence': True, 'matrix_job_inheritance': True, 'separate_steps_and_jobs': True, 'refusal_twins': True, 'source_free_recovery': True})
     print(json.dumps(results[-1]), flush=True)
 (root / 'results.json').write_text(json.dumps({'commands': counter, 'cases': results}, indent=2) + '\n')

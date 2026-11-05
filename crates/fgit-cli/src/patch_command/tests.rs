@@ -85,6 +85,37 @@ fn complete_explicit_commands_support_both_domains_and_byte_exact_keys() {
     assert!(read_key(&mut &vec![b'k'; 257][..]).is_err());
     assert!(read_key(&mut &b""[..]).is_err());
 }
+
+#[test]
+fn symlink_profile_is_explicit_and_reuses_the_same_input_and_output_limits() {
+    let patch = b"diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+../target\n\\ No newline at end of file\n";
+    for width in [40, 64] {
+        let mut args = prepare_args(width);
+        replace(&mut args, "--profile", "exact-symlink-v1");
+        let Operation::Prepare {
+            profile, limits, ..
+        } = options::parse(&args).unwrap().operation
+        else {
+            panic!("expected preparation");
+        };
+        assert_eq!(profile, Profile::ExactSymlink);
+        assert_eq!(profile.token(), "exact-symlink-v1");
+        profile.preflight(patch, limits).unwrap();
+        let mut smaller = limits;
+        smaller.max_patch_bytes = patch.len() - 1;
+        assert!(profile.preflight(patch, smaller).is_err());
+        for legacy in [
+            Profile::Exact,
+            Profile::ExactBinary,
+            Profile::ExactTree,
+            Profile::ExactTreeBinary,
+        ] {
+            assert!(legacy.preflight(patch, limits).is_err());
+        }
+        args.extend(["--profile".into(), "exact-symlink-v1".into()]);
+        assert!(options::parse(&args).is_err());
+    }
+}
 #[test]
 fn missing_duplicate_and_cross_operation_fields_refuse_before_io() {
     for args in [prepare_args(40), apply_args(40)] {

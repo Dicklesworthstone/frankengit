@@ -84,6 +84,48 @@ rejected; input order cannot introduce sequential rename/replacement semantics.
 
 ## Library and resource boundaries
 
+### Explicit inert symlink profile
+
+`fg patch prepare --profile exact-symlink-v1` extends the existing
+`exact-tree-v1` grammar with Git symlink mode `120000`. It creates, edits,
+deletes and renames link-text blobs, and allows explicit mode changes between
+ordinary files and symlinks. Link text remains exact blob data: neither absolute
+targets nor `..` components are resolved, opened, or materialized on the host.
+Missing-final-newline markers preserve ordinary Git symlink payloads exactly.
+Type changes use explicit `old mode` / `new mode` headers. Two delete/create
+sections naming the same path still refuse as duplicate targets; this profile
+does not reinterpret those sections in sequence. Initial-commit patch profiles
+are unchanged and do not admit symlinks.
+
+For example, this creates a link whose stored bytes are `../target`, with no
+final newline:
+
+```diff
+diff --git a/link b/link
+new file mode 120000
+--- /dev/null
++++ b/link
+@@ -0,0 +1 @@
++../target
+\ No newline at end of file
+```
+
+The new profile uses the same verified source/index identities, complete
+directory preservation, original-coordinate rename rules, shared binary
+decoder and cumulative limits as `exact-tree-v1`. Renames require both path
+grants and an absent destination; chains and cycles remain refused. Compressed
+edited renames, directories, gitlinks and copies remain outside this profile.
+Every older profile retains its symlink refusal, including a patch without a
+mode header that tries to edit an existing symlink.
+
+The capability-owned native entry point is
+`OneNode::prepare_workspace_symlink_patch_in`; the local-owner wrapper is
+`OneNode::prepare_trusted_symlink_patch_in`. Preparation and saved-bundle
+publication remain separate. `SymlinkPolicy::Refuse` also prevents this profile
+from creating or reading symlink entries.
+
+### Shared resource bounds
+
 - `fgit_diff::patch::UnifiedPatch` parses borrowed hunk data and applies files
   without storage access. It exposes optional index expectations, which an
   object-store consumer must verify. `fgit_forge::patch` reexports this module.

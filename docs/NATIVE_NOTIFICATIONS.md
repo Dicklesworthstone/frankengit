@@ -2,7 +2,8 @@
 
 FrankenGit provides repository issue and discussion inboxes for an explicit principal, with
 automatic participation, subscription, mute and read-prefix controls. The
-browser, authenticated HTTP API, local `fg inbox` commands and MCP adapters use
+browser, authenticated HTTP API, remote `forge_inbox.mjs` operator, local
+`fg inbox` commands and MCP adapters use
 the same canonical thread histories and principal-owned preference events.
 
 Preferences are durable forge metadata. The inbox is a disposable projection of
@@ -31,6 +32,7 @@ Select the namespace explicitly:
 | Surface | Discussion selection |
 | --- | --- |
 | CLI | Add `--kind discussion` to any `fg inbox` command |
+| Remote operator | Use `--kind discussion` and the exact discussion inbox URL with `node scripts/forge_inbox.mjs` |
 | MCP | Add `"kind":"discussion"` to any of the seven `frankengit_inbox_*` tools |
 | Browser | Open `/{repository}/ui/discussion-notifications/` |
 | HTTP list | `GET /api/v1/notifications/discussions` |
@@ -250,6 +252,23 @@ decimal strings; its page `limit` is a bounded JSON integer from 1 through 100.
 Do not round a version or continuation number through a lossy floating-point
 representation. The browser currently accepts only exactly representable
 JavaScript safe integers and refuses larger numeric IDs or versions.
+
+## Remote operator
+
+[`scripts/forge_inbox.mjs`](../scripts/forge_inbox.mjs) provides authenticated
+remote `list`, `show`, `subscribe`, `mute`, `automatic`, `read`, `unread`, `status`
+and exact-request `retry` commands. It uses the shipped notification clients,
+requires an explicit issue/discussion kind, pins multi-page reads to one source,
+and carries principal/incarnation guards across saved continuations. New
+preference requests require exact observed versions and a new private custody
+file synchronized before dispatch. Interrupted operations recover with the
+original credential-bound request and key; a later retry never silently changes
+the target, predecessor or read prefix.
+
+See [the remote inbox operator guide](REMOTE_INBOX_OPERATOR.md) for connection
+scopes, examples, snapshot continuation, file requirements, exit codes and
+restart recovery. The remote operator authenticates with a scoped bearer; its
+identity guards constrain that authenticated caller.
 
 ## Local CLI and MCP parity
 

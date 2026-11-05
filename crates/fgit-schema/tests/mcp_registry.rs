@@ -816,3 +816,42 @@ fn exact_queue_preparation_is_read_only_and_keeps_queue_guards_distinct() {
         }
     }
 }
+
+#[test]
+fn symlink_patch_profile_is_an_explicit_read_only_candidate_selector() {
+    let tool = find_tool("frankengit_source_candidate").unwrap();
+    assert_eq!(tool.read_mutation, ReadMutationClass::ReadOnly);
+    assert_eq!(
+        tool.capability,
+        CapabilityRequirement::READ_CANONICAL_OBJECT
+    );
+    assert_eq!(tool.principal, PrincipalRequirement::None);
+    assert_eq!(tool.idempotency, IdempotencyRequirement::NotApplicable);
+    let profile = tool
+        .input_fields
+        .iter()
+        .find(|field| field.name == "profile")
+        .unwrap();
+    assert!(!profile.required);
+    assert_eq!(
+        profile.classification,
+        FieldClassification::SelectorPosition
+    );
+    assert!(
+        profile
+            .description
+            .contains("omission keeps the original profile")
+    );
+    let pattern = profile.pattern.unwrap();
+    for existing in ["path-v1", "linear-v1", "exact-tree-v1", "exact-symlink-v1"] {
+        assert!(pattern.contains(existing));
+    }
+    let output = tool
+        .output_fields
+        .iter()
+        .find(|field| field.name == "profile")
+        .unwrap();
+    assert_eq!(output.classification, FieldClassification::SystemMetadata);
+    assert!(tool.refusal_codes.contains(&"unsupported_patch_profile"));
+    assert!(admit_call(tool.name, 1, "{}", &["read_canonical_object"], None).is_ok());
+}

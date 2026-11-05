@@ -361,7 +361,9 @@ impl ExportPlanner {
                     content: ContentRef::Overlay(_),
                     ..
                 }
-                | OverlayEntry::Symlink { .. } => {
+                | OverlayEntry::Symlink {
+                    target: ContentRef::Overlay(_),
+                } => {
                     let body = overlay
                         .body(entry)
                         .ok_or_else(|| ExportRefusal::MissingBody { path: path.clone() })?;
@@ -371,6 +373,9 @@ impl ExportPlanner {
                 OverlayEntry::File {
                     content: ContentRef::Base { .. },
                     ..
+                }
+                | OverlayEntry::Symlink {
+                    target: ContentRef::Base { .. },
                 } => reused += 1,
                 OverlayEntry::Directory
                 | OverlayEntry::Whiteout
@@ -533,16 +538,17 @@ impl ExportPlanner {
                         },
                     );
                 }
-                OverlayEntry::Symlink { .. } => {
-                    let body = overlay
-                        .body(entry)
-                        .ok_or_else(|| ExportRefusal::MissingBody { path: path.clone() })?;
-                    level.insert(
-                        name,
-                        Resolved::Symlink {
-                            oid: GitOid::<A>::of_object(GitObjectKind::Blob, body),
-                        },
-                    );
+                OverlayEntry::Symlink { target } => {
+                    let oid = match target {
+                        ContentRef::Overlay(_) => {
+                            let body = overlay
+                                .body(entry)
+                                .ok_or_else(|| ExportRefusal::MissingBody { path: path.clone() })?;
+                            GitOid::<A>::of_object(GitObjectKind::Blob, body)
+                        }
+                        ContentRef::Base { oid, .. } => oid_from_native::<A>(oid)?,
+                    };
+                    level.insert(name, Resolved::Symlink { oid });
                 }
                 OverlayEntry::Submodule { commit } => {
                     level.insert(

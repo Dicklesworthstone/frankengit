@@ -1,4 +1,4 @@
-//! Node-owned, pinned export of ordinary file edits. No publication authority.
+//! Node-owned, pinned export of file and inert symlink edits. No publication authority.
 
 use super::{NodeTreeSource, NodeWorkspaceRefusal};
 use crate::{NodeRequestContext, OneNode};
@@ -21,13 +21,13 @@ pub struct WorkspaceEditExport<A: GitHashAlgorithm> {
     pub source_commit: GitOid<A>,
     /// Candidate blobs/trees, including reused-subtree accounting.
     pub plan: ExportPlan<A>,
-    /// The actual requested file targets in canonical order.
+    /// The actual requested entry targets in canonical order.
     pub changed_paths: Vec<TreePath>,
 }
 
 impl OneNode {
-    /// Apply bounded file writes, deletions, renames and mode changes to one
-    /// exact current ref tip using the existing TreeFS export engine.
+    /// Apply bounded file writes, symlink replacements, deletions, renames and
+    /// file mode changes to one exact current ref tip using the TreeFS exporter.
     ///
     /// This interface consumes intents, not a caller-minted overlay or tree.
     /// The source is selected through authenticated authority and verified
@@ -36,11 +36,13 @@ impl OneNode {
     /// principal. A narrower capability refuses instead of accidentally
     /// deleting the siblings filtered out of a sparse directory listing.
     ///
-    /// A base-resident rename or chmod must carry the exact source blob and
-    /// mode in its basis entry. Both are verified against the selected tree.
-    /// Earlier edits supply their own overlay content in source order, without
-    /// rereading or copying base blobs. Renames affect both paths; self-renames
-    /// and ancestor/descendant moves are outside this ordinary-file profile.
+    /// A base-resident file rename or chmod must carry the exact source blob
+    /// and mode in its basis entry. A base symlink rename uses no file basis:
+    /// its identity and kind come directly from the selected immutable tree.
+    /// Earlier edits supply their own overlay content in source order. Neither
+    /// file nor symlink renames read or copy base blobs, and link text is never
+    /// followed. Renames affect both paths; self-renames, directory moves and
+    /// ancestor/descendant moves are outside this entry-edit profile.
     ///
     /// The returned plan is a preparation artifact. It never moves a ref;
     /// publication must separately recheck its exact source precondition.
@@ -135,8 +137,8 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
     for path in &paths {
         check_cancelled(cancelled)?;
         match base.resolve(source, capability, path, now) {
-            Ok(BaseEntry::File { oid, mode }) => {
-                existing.insert(path.clone(), (oid, mode));
+            Ok(entry @ (BaseEntry::File { .. } | BaseEntry::Symlink { .. })) => {
+                existing.insert(path.clone(), entry);
             }
             Err(BaseError::NotFound { .. }) => {}
             Ok(_) => return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit),
@@ -148,7 +150,7 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
         }
     }
     validate_source_bases(log, &existing, cancelled)?;
-    let (overlay, evaluation) = log.evaluate(&|path| existing.contains_key(path));
+    let (overlay, evaluation) = log.evaluate_with_base_entries(&|path| existing.get(path).cloned());
     if !evaluation.errors().is_empty() {
         return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
     }
@@ -185,6 +187,15 @@ pub(super) fn validate_log(
                     .filter(|total| *total <= limits.max_total_bytes)
                     .ok_or(NodeWorkspaceRefusal::WorkspaceEditLimit)?;
             }
+            TreeEditIntent::CreateSymlink { path, link_target } => {
+                capability.check_symlink(path).map_err(|error| {
+                    NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
+                })?;
+                bytes = bytes
+                    .checked_add(link_target.len())
+                    .filter(|total| *total <= limits.max_total_bytes)
+                    .ok_or(NodeWorkspaceRefusal::WorkspaceEditLimit)?;
+            }
             TreeEditIntent::Delete { .. } => {}
             TreeEditIntent::Rename {
                 from,
@@ -216,7 +227,8 @@ fn edit_paths(intent: &TreeEditIntent) -> impl Iterator<Item = &TreePath> {
         TreeEditIntent::Rename { from, .. } => Some(from),
         _ => None,
     };
-    from.into_iter().chain(std::iter::once(intent.primary_path()))
+    from.into_iter()
+        .chain(std::iter::once(intent.primary_path()))
 }
 
 fn validate_basis_shape(basis: Option<&BasisEntry>) -> Result<(), NodeWorkspaceRefusal> {
@@ -227,7 +239,7 @@ fn validate_basis_shape(basis: Option<&BasisEntry>) -> Result<(), NodeWorkspaceR
 }
 
 /// Only a source still resident in the immutable base may consume the caller's
-/// basis hint. Track earlier file-producing edits without duplicating bodies or
+/// basis hint. Track earlier entry-producing edits without duplicating bodies or
 /// evaluating every log prefix. The existing evaluator still owns statement
 /// errors, whiteouts, read-your-own-writes and the final overlay. Any invalid
 /// earlier statement refuses the whole evaluation before an export is built.
@@ -236,14 +248,14 @@ fn validate_basis_shape(basis: Option<&BasisEntry>) -> Result<(), NodeWorkspaceR
 /// path as staged, because a later operation will still consume a base hint.
 fn validate_source_bases<A: GitHashAlgorithm>(
     log: &IntentLog,
-    existing: &BTreeMap<TreePath, (GitOid<A>, Vec<u8>)>,
+    existing: &BTreeMap<TreePath, BaseEntry<A>>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), NodeWorkspaceRefusal> {
     let mut staged = BTreeSet::new();
     for intent in log.intents() {
         check_cancelled(cancelled)?;
         match intent {
-            TreeEditIntent::Write { path, .. } => {
+            TreeEditIntent::Write { path, .. } | TreeEditIntent::CreateSymlink { path, .. } => {
                 staged.insert(path.clone());
             }
             TreeEditIntent::Delete { path } => {
@@ -255,7 +267,14 @@ fn validate_source_bases<A: GitHashAlgorithm>(
                 basis_entry,
             } => {
                 if !staged.contains(from) {
-                    verify_source_basis(existing.get(from), basis_entry.as_ref())?;
+                    match (existing.get(from), basis_entry.as_ref()) {
+                        // The selected tree is the source of symlink identity.
+                        // A file-mode hint cannot relabel it as a regular file.
+                        (Some(BaseEntry::Symlink { .. }), None) => {}
+                        (original, basis) => {
+                            verify_source_basis(original, basis)?;
+                        }
+                    }
                 }
                 staged.remove(from);
                 staged.insert(to.clone());
@@ -279,13 +298,14 @@ fn validate_source_bases<A: GitHashAlgorithm>(
 }
 
 fn verify_source_basis<'a, A: GitHashAlgorithm>(
-    original: Option<&(GitOid<A>, Vec<u8>)>,
+    original: Option<&BaseEntry<A>>,
     basis: Option<&'a BasisEntry>,
 ) -> Result<&'a BasisEntry, NodeWorkspaceRefusal> {
-    let (Some((oid, mode)), Some(basis)) = (original, basis) else {
+    let (Some(BaseEntry::File { oid, mode }), Some(basis)) = (original, basis) else {
         return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
     };
-    if basis.oid.as_slice() != oid.digest_bytes() || basis.mode.as_octal_bytes() != mode.as_slice() {
+    if basis.oid.as_slice() != oid.digest_bytes() || basis.mode.as_octal_bytes() != mode.as_slice()
+    {
         return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
     }
     Ok(basis)

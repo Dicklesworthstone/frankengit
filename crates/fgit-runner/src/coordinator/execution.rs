@@ -437,5 +437,15 @@ mod step_context_tests {
                 Err(CoordinatorRefusal::UnsupportedExecution { .. })
             ));
         }
+        for inherited in [
+            source.replace("jobs:\n", "env:\n  VALUE: workflow\njobs:\n"),
+            source.replace("    steps:\n", "    env:\n      VALUE: job\n    steps:\n"),
+        ] {
+            let graph = fgit_schema::workflow::compile(&inherited, &Default::default()).unwrap();
+            assert!(matches!(
+                lower_command(&graph.jobs[0]),
+                Err(CoordinatorRefusal::UnsupportedExecution { .. })
+            ));
+        }
     }
 }

@@ -76,6 +76,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "turns a failed job into a passing one, which is gate self-weakening expressed as configuration",
     },
     Construct {
+        key: "job.env",
+        status: ConstructStatus::Normalized,
+        reason: "validated literal job values override workflow defaults and lower into each effective step environment; whole-value matrix inputs are resolved before validation and inherited copies are bounded",
+    },
+    Construct {
         key: "job.environment",
         status: ConstructStatus::Unsupported,
         reason: "names a deployment target with its own protection rules; the rules, not the name, are the authority",
@@ -128,7 +133,7 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "step.env",
         status: ConstructStatus::Normalized,
-        reason: "literal step-local environment sorted by name and bound into a v2 graph; no inherited values, expressions, secret imports or reserved startup and identity variables",
+        reason: "validated step values override job and workflow defaults; effective literals are sorted and graph-bound; whole-value matrix inputs are supported, but secret imports, general expressions and reserved variables refuse",
     },
     Construct {
         key: "step.if",
@@ -202,8 +207,8 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "workflow.env",
-        status: ConstructStatus::Unsupported,
-        reason: "workflow-level environment leaks into every step invisibly; the subset requires a step to state what it needs",
+        status: ConstructStatus::Normalized,
+        reason: "validated literal workflow defaults lower into each effective step environment; job and step values override by name; no host inheritance, matrix expressions, secrets or reserved variables",
     },
     Construct {
         key: "workflow.jobs",

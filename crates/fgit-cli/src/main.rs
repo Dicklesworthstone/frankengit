@@ -117,6 +117,15 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         .first()
         .is_some_and(|argument| argument == "agent")
     {
+        if arguments.get(1).is_some_and(|argument| argument == "recover") {
+            return match fgit_cli::agent_recover::run(&arguments[2..]) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("{}", fgit_cli::agent_recover::error_json(&error));
+                    ExitCode::from(2)
+                }
+            };
+        }
         if arguments.get(1).is_some_and(|argument| argument == "task") {
             return match fgit_cli::agent_tasks::run(&arguments[2..]) {
                 Ok(code) => ExitCode::from(code),
