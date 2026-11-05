@@ -91,6 +91,31 @@ When increasing `--max-in-flight`, budget for multiple decoded quarantines
 waiting on the writer, using their expanded-byte limits rather than compressed
 request sizes. No unbounded preparation workers are introduced.
 
+## Large-RPC probe bodies
+
+Before a request exceeds `http.postBuffer`, Git's remote-curl sends a separate
+RPC whose entire body is the flush packet `0000`. Both upload-pack and
+receive-pack answer this probe with HTTP 200 and an empty result. The adapter
+holds at most four candidate prefix bytes across decoded fragments. A mismatch
+or any following byte returns that prefix and input to the ordinary parser;
+the probe exception never admits an empty command list with additional data.
+
+HTTP framing must complete first. Upload-pack also verifies the entire gzip
+member, including its trailer, before releasing any reply. Cancellation,
+truncated framing, corrupt compression and resource limits still refuse.
+Receive probes create no quarantine handoff, terminal decision or session
+binding; consuming a probe through a probe-unaware handoff still refuses.
+Authentication, route and service permissions apply to every probe.
+
+The `frankengit-wh86.1` regressions extend the original `frankengit-wh86`
+scope: split transport reads, both native hash domains, upload protocols
+v0/v1/v2, invalid suffixes and gzip boundaries. The existing native receive
+test retains generation/recovery checks and the successful following request
+on the same attempt. The smart HTTP smoke sends real probe requests and checks
+unchanged canonical state before the ordinary push, beside its large-push and
+clone-back checks. Authored regressions do not establish a current passing lane;
+revision-bound execution and original wh86 acceptance remain separate.
+
 ## Verification
 
 Focused adapter, authorization and resource tests:

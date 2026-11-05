@@ -125,6 +125,98 @@ fn v2_caps() -> Capabilities {
 }
 
 #[test]
+fn upload_probe_still_requires_verified_gzip_and_a_complete_http_body() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let repository = Repository::new(format);
+        for version in [
+            ProtocolVersion::V0,
+            ProtocolVersion::V1,
+            ProtocolVersion::V2,
+        ] {
+            let member = stored(b"0000");
+            for chunked in [false, true] {
+                let head = http_head("/repo.git/git-upload-pack", "gzip", member.len(), chunked);
+                let request = parse_head(&head, HttpLimits::default()).unwrap().unwrap();
+                let body = if chunked {
+                    chunks(&member)
+                } else {
+                    member.clone()
+                };
+                for width in [1, 3, body.len()] {
+                    let mut rpc = UploadRpc::new(
+                        &request,
+                        version,
+                        if version == ProtocolVersion::V2 {
+                            v2_caps()
+                        } else {
+                            Capabilities::default()
+                        },
+                        &repository,
+                        WireLimits::default(),
+                        HttpLimits::default(),
+                    )
+                    .unwrap();
+                    for fragment in body.chunks(width) {
+                        assert_eq!(
+                            rpc.push(fragment, &mut || true).unwrap().consumed,
+                            fragment.len()
+                        );
+                    }
+                    let reply = rpc.finish(&mut || true).unwrap();
+                    assert!(reply.prefix().is_empty());
+                    assert!(reply.pack_request().is_none());
+                }
+                for cut in 0..body.len() {
+                    let mut rpc = UploadRpc::new(
+                        &request,
+                        version,
+                        if version == ProtocolVersion::V2 {
+                            v2_caps()
+                        } else {
+                            Capabilities::default()
+                        },
+                        &repository,
+                        WireLimits::default(),
+                        HttpLimits::default(),
+                    )
+                    .unwrap();
+                    let result = rpc
+                        .push(&body[..cut], &mut || true)
+                        .and_then(|_| rpc.finish(&mut || true));
+                    assert!(result.is_err(), "cut={cut} chunked={chunked}");
+                }
+            }
+            let mut corrupt = member.clone();
+            let checksum = corrupt.len() - 8;
+            corrupt[checksum] ^= 1;
+            let mut suffixed = member.clone();
+            suffixed.push(0);
+            for bytes in [corrupt, suffixed, stored(b"00000")] {
+                let head = http_head("/repo.git/git-upload-pack", "gzip", bytes.len(), false);
+                let request = parse_head(&head, HttpLimits::default()).unwrap().unwrap();
+                let mut rpc = UploadRpc::new(
+                    &request,
+                    version,
+                    if version == ProtocolVersion::V2 {
+                        v2_caps()
+                    } else {
+                        Capabilities::default()
+                    },
+                    &repository,
+                    WireLimits::default(),
+                    HttpLimits::default(),
+                )
+                .unwrap();
+                let result = rpc
+                    .push(&bytes, &mut || true)
+                    .and_then(|_| rpc.finish(&mut || true));
+                assert!(result.is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn gzip_v2_ls_refs_and_fetch_use_the_real_machines_for_both_hashes() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let repository = Repository::new(format);

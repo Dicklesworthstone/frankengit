@@ -128,6 +128,42 @@ enum UploadMachine {
     Failed,
 }
 
+/// Git's remote-curl probes either service with one flush packet before a
+/// large RPC. Hold only a matching prefix, independently of transport/inflate
+/// fragmentation. A mismatch or any suffix releases the original bytes to
+/// the ordinary parser; only a fully validated HTTP body can be a probe.
+struct ProbeBody {
+    matched: Option<usize>,
+}
+
+const PROBE_BODY: &[u8] = b"0000";
+
+impl ProbeBody {
+    const fn new() -> Self {
+        Self { matched: Some(0) }
+    }
+
+    fn push<'input>(&mut self, input: &'input [u8]) -> Option<(&'static [u8], &'input [u8])> {
+        let Some(matched) = self.matched else {
+            return Some((&[], input));
+        };
+        if PROBE_BODY[matched..].starts_with(input) {
+            self.matched = Some(matched + input.len());
+            return None;
+        }
+        self.matched = None;
+        Some((&PROBE_BODY[..matched], input))
+    }
+
+    const fn is_probe(&self) -> bool {
+        matches!(self.matched, Some(4))
+    }
+
+    fn take_prefix(&mut self) -> &'static [u8] {
+        &PROBE_BODY[..self.matched.take().unwrap_or(0)]
+    }
+}
+
 /// One HTTP upload-pack request over one immutable, pre-authorized view.
 /// No outer fetch-pack IPC envelope is parsed here: HTTP carries raw Git
 /// pkt-lines. The returned reply contains no pack until the caller builds it.
@@ -142,6 +178,7 @@ pub struct UploadRpc<'repo, R: UploadPackRepository> {
     output: Vec<u8>,
     pack_request: Option<PackRequest>,
     command_complete: bool,
+    probe: ProbeBody,
 }
 impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
     /// `selected_version` is the host's negotiated version. Capabilities must
@@ -190,6 +227,7 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
             output: Vec::new(),
             pack_request: None,
             command_complete: false,
+            probe: ProbeBody::new(),
         })
     }
 
@@ -269,6 +307,22 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
     }
 
     fn accept_payload<C: ReceiveCancellation>(
+        &mut self,
+        payload: &[u8],
+        cancellation: &mut C,
+    ) -> Result<(), RpcError> {
+        let Some((prefix, payload)) = self.probe.push(payload) else {
+            return Ok(());
+        };
+        for bytes in [prefix, payload] {
+            if !bytes.is_empty() {
+                self.accept_command_payload(bytes, cancellation)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_command_payload<C: ReceiveCancellation>(
         &mut self,
         payload: &[u8],
         cancellation: &mut C,
@@ -372,12 +426,21 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
         if let Some(gzip) = &mut self.gzip {
             gzip.finish(cancellation)?;
         }
+        let is_probe = self.probe.is_probe();
+        if !is_probe {
+            let prefix = self.probe.take_prefix();
+            if !prefix.is_empty() {
+                self.accept_command_payload(prefix, cancellation)?;
+            }
+        }
         self.decoder.finish()?;
-        match &self.machine {
-            UploadMachine::Legacy(machine) => machine.finish_stateless_http_round()?,
-            UploadMachine::V2(_) if self.command_complete => {}
-            UploadMachine::V2(_) => return Err(RpcError::IncompleteRequest),
-            UploadMachine::Failed => return Err(RpcError::FailedRequest),
+        if !is_probe {
+            match &self.machine {
+                UploadMachine::Legacy(machine) => machine.finish_stateless_http_round()?,
+                UploadMachine::V2(_) if self.command_complete => {}
+                UploadMachine::V2(_) => return Err(RpcError::IncompleteRequest),
+                UploadMachine::Failed => return Err(RpcError::FailedRequest),
+            }
         }
         checkpoint(cancellation)?;
         Ok(UploadReply {
@@ -423,15 +486,8 @@ pub struct ReceiveRpc {
     /// refused the fully received request (frankengit-87c7).
     request: Option<Box<ReceiveRequest>>,
     refused: bool,
-    /// Decoded body bytes fed to the receive machine so far.
-    fed: usize,
-    /// The body so far is exactly one flush packet, held back from the
-    /// machine: git's postBuffer probe (frankengit-wh86).
-    probe: bool,
+    probe: ProbeBody,
 }
-
-/// The whole body of git's `probe_rpc`: one flush packet.
-const PROBE_BODY: &[u8] = b"0000";
 
 impl ReceiveRpc {
     pub fn new(
@@ -456,8 +512,7 @@ impl ReceiveRpc {
             chunk_bytes,
             request: None,
             refused: false,
-            fed: 0,
-            probe: false,
+            probe: ProbeBody::new(),
         })
     }
 
@@ -478,7 +533,7 @@ impl ReceiveRpc {
     /// it without quarantine, admission or any binding (frankengit-wh86).
     #[must_use]
     pub const fn is_probe(&self) -> bool {
-        self.probe && self.body.is_complete()
+        self.machine.is_some() && self.probe.is_probe() && self.body.is_complete()
     }
 
     pub fn push<C: ReceiveCancellation>(
@@ -506,22 +561,19 @@ impl ReceiveRpc {
             consumed += step.consumed;
             for fragment in step.data.chunks(self.chunk_bytes) {
                 checkpoint(cancellation)?;
-                if self.fed == 0 && fragment == PROBE_BODY {
-                    self.probe = true;
-                    self.fed = PROBE_BODY.len();
+                let Some((prefix, fragment)) = self.probe.push(fragment) else {
                     continue;
-                }
-                if std::mem::take(&mut self.probe) {
-                    // Bytes after the flush: an ordinary request with no
-                    // commands, refused exactly as before.
-                    machine.push_bytes(PROBE_BODY)?;
-                }
-                self.fed = self.fed.saturating_add(fragment.len());
+                };
                 // The parsed request stays private until HTTP and pack
                 // validation, and is disclosed only to report a refusal.
-                for event in machine.push_bytes(fragment)?.events {
-                    if let ReceiveEvent::RequestReady(request) = event {
-                        self.request = Some(request);
+                for bytes in [prefix, fragment] {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    for event in machine.push_bytes(bytes)?.events {
+                        if let ReceiveEvent::RequestReady(request) = event {
+                            self.request = Some(request);
+                        }
                     }
                 }
             }
@@ -544,9 +596,10 @@ impl ReceiveRpc {
         let mut machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
         checkpoint(cancellation)?;
         self.body.finish()?;
-        if std::mem::take(&mut self.probe) {
+        let prefix = self.probe.take_prefix();
+        if !prefix.is_empty() {
             // A caller that does not answer probes refuses one as before.
-            machine.push_bytes(PROBE_BODY)?;
+            machine.push_bytes(prefix)?;
         }
         checkpoint(cancellation)?;
         let finished = machine.finish_with_handoff(handoff, cancellation);
@@ -568,9 +621,10 @@ impl ReceiveRpc {
         let mut machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
         checkpoint(cancellation)?;
         self.body.finish()?;
-        if std::mem::take(&mut self.probe) {
+        let prefix = self.probe.take_prefix();
+        if !prefix.is_empty() {
             // A caller that does not answer probes refuses one as before.
-            machine.push_bytes(PROBE_BODY)?;
+            machine.push_bytes(prefix)?;
         }
         checkpoint(cancellation)?;
         Ok(machine.into_quarantine(cancellation)?)

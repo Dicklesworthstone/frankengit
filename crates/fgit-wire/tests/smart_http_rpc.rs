@@ -176,6 +176,203 @@ impl ReceiveQuarantineHandoff for StructuralHandoff {
 }
 
 #[test]
+fn upload_probes_are_empty_only_after_the_complete_http_envelope() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let repo = Repository::new(format);
+        for version in [
+            ProtocolVersion::V0,
+            ProtocolVersion::V1,
+            ProtocolVersion::V2,
+        ] {
+            for is_chunked in [false, true] {
+                let header = head(Service::UploadPack, 4, is_chunked);
+                let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+                let encoded = if is_chunked {
+                    chunked(b"0000", 1)
+                } else {
+                    b"0000".to_vec()
+                };
+                for width in 1..=encoded.len() {
+                    let mut rpc = UploadRpc::new(
+                        &request,
+                        version,
+                        if version == ProtocolVersion::V2 {
+                            v2_caps()
+                        } else {
+                            caps(b"")
+                        },
+                        &repo,
+                        WireLimits::default(),
+                        HttpLimits::default(),
+                    )
+                    .unwrap();
+                    for fragment in encoded.chunks(width) {
+                        assert_eq!(
+                            rpc.push(fragment, &mut || true).unwrap().consumed,
+                            fragment.len()
+                        );
+                    }
+                    let reply = rpc.finish(&mut || true).unwrap();
+                    assert_eq!(reply.version(), version);
+                    assert!(reply.prefix().is_empty());
+                    assert!(reply.pack_request().is_none());
+                }
+                for cut in 0..encoded.len() {
+                    let mut rpc = UploadRpc::new(
+                        &request,
+                        version,
+                        if version == ProtocolVersion::V2 {
+                            v2_caps()
+                        } else {
+                            caps(b"")
+                        },
+                        &repo,
+                        WireLimits::default(),
+                        HttpLimits::default(),
+                    )
+                    .unwrap();
+                    rpc.push(&encoded[..cut], &mut || true).unwrap();
+                    assert!(
+                        rpc.finish(&mut || true).is_err(),
+                        "cut={cut} version={version:?}"
+                    );
+                }
+                let mut rpc = UploadRpc::new(
+                    &request,
+                    version,
+                    if version == ProtocolVersion::V2 {
+                        v2_caps()
+                    } else {
+                        caps(b"")
+                    },
+                    &repo,
+                    WireLimits::default(),
+                    HttpLimits::default(),
+                )
+                .unwrap();
+                rpc.push(&encoded, &mut || true).unwrap();
+                assert!(matches!(
+                    rpc.finish(&mut || false),
+                    Err(RpcError::Cancelled)
+                ));
+            }
+            for body in [
+                b"".as_slice(),
+                b"00000000",
+                b"00000",
+                b"00000009done\n",
+                b"00010000",
+                b"00020000",
+            ] {
+                let header = head(Service::UploadPack, body.len(), false);
+                let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+                for width in [1, 3, body.len().max(1)] {
+                    let mut rpc = UploadRpc::new(
+                        &request,
+                        version,
+                        if version == ProtocolVersion::V2 {
+                            v2_caps()
+                        } else {
+                            caps(b"")
+                        },
+                        &repo,
+                        WireLimits::default(),
+                        HttpLimits::default(),
+                    )
+                    .unwrap();
+                    let mut refused = false;
+                    for fragment in body.chunks(width) {
+                        if rpc.push(fragment, &mut || true).is_err() {
+                            refused = true;
+                            break;
+                        }
+                    }
+                    let result = rpc.finish(&mut || true);
+                    assert!(result.is_err(), "body={body:?} version={version:?}");
+                    if refused {
+                        assert!(matches!(result, Err(RpcError::FailedRequest)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn probe_recognition_obeys_the_same_body_budget_and_every_four_byte_partition() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let repo = Repository::new(format);
+        for service in [Service::UploadPack, Service::ReceivePack] {
+            let header = head(service, 4, false);
+            let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+            let tight = HttpLimits {
+                max_body_bytes: 3,
+                ..HttpLimits::default()
+            };
+            if service == Service::UploadPack {
+                assert!(
+                    UploadRpc::new(
+                        &request,
+                        ProtocolVersion::V0,
+                        caps(b""),
+                        &repo,
+                        WireLimits::default(),
+                        tight
+                    )
+                    .is_err()
+                );
+            } else {
+                assert!(
+                    ReceiveRpc::new(&request, ProtocolVersion::V0, context(format), tight).is_err()
+                );
+            }
+            for cuts in 0..8 {
+                let exact = HttpLimits {
+                    max_body_bytes: 4,
+                    ..HttpLimits::default()
+                };
+                let mut upload = (service == Service::UploadPack).then(|| {
+                    UploadRpc::new(
+                        &request,
+                        ProtocolVersion::V0,
+                        caps(b""),
+                        &repo,
+                        WireLimits::default(),
+                        exact,
+                    )
+                    .unwrap()
+                });
+                let mut receive = (service == Service::ReceivePack).then(|| {
+                    ReceiveRpc::new(&request, ProtocolVersion::V0, context(format), exact).unwrap()
+                });
+                let mut start = 0;
+                for end in 1..=4 {
+                    if end == 4 || cuts & (1 << (end - 1)) != 0 {
+                        let bytes = &b"0000"[start..end];
+                        if let Some(rpc) = &mut upload {
+                            rpc.push(bytes, &mut || true).unwrap();
+                        }
+                        if let Some(rpc) = &mut receive {
+                            rpc.push(bytes, &mut || true).unwrap();
+                            assert_eq!(rpc.is_probe(), end == 4);
+                        }
+                        start = end;
+                    }
+                }
+                if let Some(rpc) = upload {
+                    let reply = rpc.finish(&mut || true).unwrap();
+                    assert!(reply.prefix().is_empty() && reply.pack_request().is_none());
+                }
+                if let Some(rpc) = receive {
+                    assert!(rpc.is_probe());
+                    assert!(rpc.into_quarantine(&mut || true).is_err());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn native_upload_requests_survive_every_transport_fragment_and_both_hashes() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let repo = Repository::new(format);

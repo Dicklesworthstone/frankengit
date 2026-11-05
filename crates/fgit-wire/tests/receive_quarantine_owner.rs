@@ -297,6 +297,16 @@ fn consuming_handoff_preserves_its_refusal_or_success_after_late_cancellation() 
 }
 
 fn http_rpc(format: GitObjectFormat, bytes: &[u8], chunked: bool, complete: bool) -> ReceiveRpc {
+    http_rpc_fragmented(format, bytes, chunked, complete, 11)
+}
+
+fn http_rpc_fragmented(
+    format: GitObjectFormat,
+    bytes: &[u8],
+    chunked: bool,
+    complete: bool,
+    width: usize,
+) -> ReceiveRpc {
     let framing = if chunked {
         "Transfer-Encoding: chunked".to_owned()
     } else {
@@ -323,7 +333,7 @@ fn http_rpc(format: GitObjectFormat, bytes: &[u8], chunked: bool, complete: bool
     } else {
         bytes.to_vec()
     };
-    for fragment in input.chunks(11) {
+    for fragment in input.chunks(width) {
         let step = rpc.push(fragment, &mut || true).unwrap();
         assert_eq!(step.consumed, fragment.len());
     }
@@ -434,6 +444,75 @@ fn a_lone_flush_body_is_a_probe_and_anything_more_is_still_refused() {
         rpc.push(b"0000", &mut || true),
         Err(RpcError::Receive(ReceiveError::MissingCommands))
     ));
+}
+
+#[test]
+fn receive_probes_survive_fragmentation_but_never_escape_failed_or_consumed_requests() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        for chunked in [false, true] {
+            for width in 1..=20 {
+                let probe = http_rpc_fragmented(format, b"0000", chunked, true, width);
+                assert!(probe.is_probe(), "{format} chunked={chunked} width={width}");
+                let mut handoff = Observe::new(None);
+                let mut probe = probe;
+                assert!(matches!(
+                    probe.finish_with_handoff(&mut handoff, &mut || true),
+                    Err(RpcError::Receive(ReceiveError::MissingCommands))
+                ));
+                assert_eq!(handoff.calls, 0);
+                assert!(!probe.is_probe(), "a consumed RPC is not a live probe");
+                let probe = http_rpc_fragmented(format, b"0000", chunked, true, width);
+                assert!(matches!(
+                    probe.into_quarantine(&mut || true),
+                    Err(RpcError::Receive(ReceiveError::MissingCommands))
+                ));
+                assert!(!http_rpc_fragmented(format, b"0000", chunked, false, width).is_probe());
+            }
+        }
+        let mut probe = http_rpc_fragmented(format, b"0000", false, true, 1);
+        assert!(matches!(
+            probe.push(b"", &mut || false),
+            Err(RpcError::Cancelled)
+        ));
+        assert!(!probe.is_probe(), "a failed RPC is not a live probe");
+    }
+}
+
+#[test]
+fn receive_probe_suffixes_fail_for_every_ingress_fragment_width() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        for bytes in [b"00000".as_slice(), b"00000000", b"0000PACK", b"00010000"] {
+            let head = format!(
+                "POST /repo.git/git-receive-pack HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\n\r\n",
+                bytes.len()
+            );
+            let request = parse_head(head.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            for width in 1..=bytes.len() {
+                let mut rpc = ReceiveRpc::new(
+                    &request,
+                    ProtocolVersion::V0,
+                    context(format, ReceiveLimits::default()),
+                    HttpLimits::default(),
+                )
+                .unwrap();
+                let mut refused = false;
+                for fragment in bytes.chunks(width) {
+                    if rpc.push(fragment, &mut || true).is_err() {
+                        refused = true;
+                        break;
+                    }
+                }
+                assert!(refused, "{format} bytes={bytes:?} width={width}");
+                assert!(!rpc.is_probe());
+                assert!(matches!(
+                    rpc.into_quarantine(&mut || true),
+                    Err(RpcError::FailedRequest)
+                ));
+            }
+        }
+    }
 }
 
 #[derive(Default)]

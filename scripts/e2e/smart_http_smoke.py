@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -21,10 +22,12 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TENANT, REPOSITORY, PRINCIPAL = "c1" * 16, "c2" * 16, "c3" * 16
 SECRETS: list[str] = []
+USER_AGENT = "frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)"
 
 
 def require(condition: bool, message: str) -> None:
@@ -70,7 +73,8 @@ class Commands:
         # Credentials stay out of argv and all persistent Git configuration.
         env = self.env.copy()
         config = [("http.extraHeader", f"Authorization: Bearer {token}"),
-                  ("protocol.version", str(version)), ("http.proxy", "")]
+                  ("protocol.version", str(version)), ("http.proxy", ""),
+                  ("http.userAgent", USER_AGENT)]
         if key is not None:
             config.append(("http.extraHeader", f"Idempotency-Key: {key}"))
         env["GIT_CONFIG_COUNT"] = str(len(config))
@@ -88,7 +92,8 @@ class Commands:
         helper = ('!f() { if test "$1" = get; then printf "%s\\n" username=git; '
                   'printf "password=%s\\n" "$FG_SMOKE_HELPER_PASSWORD"; fi; }; f')
         config = [("credential.helper", ""), ("credential.helper", helper),
-                  ("protocol.version", str(version)), ("http.proxy", "")]
+                  ("protocol.version", str(version)), ("http.proxy", ""),
+                  ("http.userAgent", USER_AGENT)]
         env["GIT_CONFIG_COUNT"] = str(len(config))
         for index, (name, value) in enumerate(config):
             env[f"GIT_CONFIG_KEY_{index}"] = name
@@ -162,13 +167,47 @@ def server(fg: str, commands: Commands, root: Path, token_file: Path,
 def http_status(url: str, headers: dict[str, str]) -> int:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(urllib.request.Request(url, headers=headers), timeout=30) as response:
+        with opener.open(urllib.request.Request(url, headers={**headers, "User-Agent": USER_AGENT}), timeout=30) as response:
             return response.status
     except urllib.error.HTTPError as response:
         try:
             return response.code
         finally:
             response.close()
+
+
+def probe_requests(fg: str, commands: Commands, root: Path, url: str, token: str) -> None:
+    """Real flush-only RPCs decide nothing, including across split socket writes."""
+    before = commands.run([fg, "at", str(root / "state"), TENANT, REPOSITORY, "latest"])
+    endpoint = urllib.parse.urlsplit(url)
+    require(endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1",
+            "probe left the selected loopback origin")
+    for service, version in (("receive", 0), ("upload", 0), ("upload", 1), ("upload", 2)):
+        for width in (1, 4):
+            connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=30)
+            try:
+                connection.putrequest("POST", endpoint.path + f"/git-{service}-pack")
+                headers = {"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT,
+                           "Content-Type": f"application/x-git-{service}-pack-request",
+                           "Content-Length": "4", "Git-Protocol": f"version={version}"}
+                if service == "receive":
+                    headers["Idempotency-Key"] = "initial-push"
+                for name, value in headers.items():
+                    connection.putheader(name, value)
+                connection.endheaders()
+                for start in range(0, 4, width):
+                    connection.send(b"0000"[start:start + width])
+                    if width == 1:
+                        time.sleep(0.02)
+                response = connection.getresponse()
+                require(response.status == 200 and response.read(1) == b""
+                        and response.getheader("Content-Length") == "0"
+                        and response.getheader("Content-Type") == f"application/x-git-{service}-pack-result",
+                        f"{service} v{version} probe width={width} was not an empty HTTP200 result")
+            finally:
+                connection.close()
+            require(commands.run([fg, "at", str(root / "state"), TENANT, REPOSITORY, "latest"]) == before,
+                    "a probe changed canonical state")
 
 
 def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> None:
@@ -186,6 +225,7 @@ def exercise(fg: str, git: str, root: Path, fmt: str, timeout: int) -> None:
                 "unauthenticated discovery disclosed repository state")
         require(http_status(url + "/info/refs?service=git-upload-pack", {"X-Forwarded-User": "admin"}) == 401,
                 "forwarded identity bypassed authentication")
+        probe_requests(fg, commands, root, url, token)
         commands.remote_git(token, 2, "-C", str(source), "push", url, "HEAD:refs/heads/main", key="initial-push")
         clones = []
         for version in (0, 1, 2):
