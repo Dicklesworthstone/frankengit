@@ -218,8 +218,21 @@ for fmt in ['sha1', 'sha256']:
         if large_files:
             thicker_args, thicker_bytes = with_selected_blob(inspection, fmt, common['sibling'][1])
             thicker = content(mcp('inspect-thicker-after-reopen', [(CANDIDATE, thicker_args)], read_grants)[0])
-            for key in ['method', 'parents', 'candidate_commit', 'candidate_commit_body_hex', 'root_tree', 'candidate_arguments', 'review', 'closure_objects', 'prerequisites']:
+            for key in ['method', 'parents', 'candidate_commit', 'candidate_commit_body_hex', 'root_tree', 'review', 'closure_objects', 'prerequisites']:
                 assert thicker[key] == inspected[key], key
+            # Both commands carry their actual upload for independent native
+            # validation. Compare every semantic field and verify each carrier
+            # exactly, rather than equating different packed representations.
+            minimal_bytes = bytes.fromhex(''.join(inspection['bundle_hex_chunks']))
+            for name in ['candidate_arguments', 'publication_arguments']:
+                before, after = inspected[name], thicker[name]
+                assert before.keys() == after.keys() and 'bundle_hex_chunks' in before, name
+                for key in sorted(before):
+                    if key == 'bundle_hex_chunks':
+                        assert bytes.fromhex(''.join(before[key])) == minimal_bytes, name
+                        assert bytes.fromhex(''.join(after[key])) == thicker_bytes, name
+                    else:
+                        assert before[key] == after[key], (name, key)
             assert int(thicker['pack_objects']) == int(inspected['pack_objects']) + 1
             assert int(thicker['bundle_bytes']) == len(thicker_bytes)
             assert thicker['bundle_sha256'] == hashlib.sha256(thicker_bytes).hexdigest()

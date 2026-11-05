@@ -103,7 +103,9 @@ original request, and read canonical refs and inherited file bytes.
 Before publication, the lane compares the minimal bundle with a thicker bundle
 that resends one selected blob. Candidate identity, review, prerequisites and
 validated closure must match; transport counts and checksums must describe the
-actual bytes. A corrupted thicker bundle must refuse without changing refs.
+actual bytes. Returned review/publication commands carry their respective input
+bundle: the lane checks those bytes exactly and compares every other argument.
+A corrupted thicker bundle must refuse without changing refs.
 Publication uses the inspected thicker bundle's actual publication arguments.
 
 The ordinary helper's scenarios and 120-second subprocess deadline remain
