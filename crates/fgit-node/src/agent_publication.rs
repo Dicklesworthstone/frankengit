@@ -39,6 +39,9 @@ use crate::{
     receive_staging::ReceiveStaging,
 };
 
+mod recovery;
+pub use recovery::{NativeRecoveredRefTransactionRefusal, NativeRecoveredRefTransactionSettlement};
+
 /// Native profile limits, additionally narrowed by node quarantine policy.
 pub const MAX_AGENT_PUBLICATION_OBJECTS: usize = 10_000;
 pub const MAX_AGENT_PUBLICATION_EXPORT_BYTES: usize = 64 * 1024 * 1024;

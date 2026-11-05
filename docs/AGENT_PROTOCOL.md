@@ -840,6 +840,25 @@ This recovery operation is read-only: an undecided result retains debt, and
 observing a terminal does not append an ACK to a recovered journal or by itself
 establish quiescence.
 
+`settle_recovered_agent_ref_transaction_in` supplies the separate cold cleanup
+path. It reauthenticates the original saved run and independently pinned journal
+prefix, holds exclusive file custody through the ordinary original-TxId lookup,
+and appends only the existing ACK for an authenticated terminal. An interrupted
+partial or complete copy of that exact ACK can be completed or synchronized;
+any other suffix refuses without truncation. A candidate inventory is exposed
+only after file synchronization and the cancellation checkpoint succeed. An
+undecided result leaves bytes unchanged and returns no complete inventory.
+
+Both canonical commit and refusal can clear the original submission debt after
+expiry or revocation. The operation never creates an issuing broker, revives
+native object custody, reserves more resources or calls admission. Original
+spend and unrelated effects remain unchanged. The returned successor tail must
+be retained independently; an ambiguous persistence result keeps the exact
+terminal and ACK candidate for a retry using the original pins. See
+[`AGENT_EFFECT_JOURNAL.md`](AGENT_EFFECT_JOURNAL.md#cleanup-of-recovered-canonical-ref-submissions)
+for the host contract and the distinction between strict inspection and narrow
+ACK completion.
+
 The native tests in `crates/fgit-node/src/agent_publication/tests.rs` use the
 embedded authority and production initial/ref publication paths in both Git
 formats. They cover branch creation and update with exact ordinary retry

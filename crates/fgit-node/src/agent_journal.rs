@@ -6,7 +6,8 @@
 //! blocking lane; it starts no detached worker or alternate runtime. Cancellation
 //! is checked before I/O and after synchronization. An in-progress OS sync is
 //! drained before return, so this profile does not promise a hard syscall deadline.
-//! Recovery is inspection/reconciliation only and never creates an issuing broker.
+//! Recovery never creates an issuing broker. Canonical ref submissions have a
+//! cleanup-only ACK path; other recovery remains inspection/reconciliation.
 
 use std::path::Path;
 
@@ -26,6 +27,9 @@ mod effect_journal_tests;
 mod file;
 #[cfg(test)]
 mod run_checkpoint_tests;
+pub(super) mod settlement;
+#[cfg(test)]
+mod settlement_tests;
 pub use file::AgentJournalHostRefusal;
 
 /// Opens a new single-writer journal and the existing production checked
@@ -84,6 +88,10 @@ pub struct RecoveredAgentJournal {
 }
 
 impl RecoveredAgentJournal {
+    pub(crate) const fn from_settled(run: IntentRun, journal: RecoveredEffectJournal) -> Self {
+        Self { run, journal }
+    }
+
     /// The original machine-enforced run, including its original expiry.
     #[must_use]
     pub const fn original_run(&self) -> &IntentRun {
@@ -187,6 +195,28 @@ impl crate::OneNode {
         expected_run: &[u8; 32],
         expected_tail: EffectJournalPosition,
     ) -> Result<RecoveredAgentJournal, AgentJournalHostRefusal> {
+        let run = self
+            .restore_original_agent_run_in(request, directory, run_id, expected_run)
+            .await?;
+        let journal = file::recover(directory, &run, Some(expected_tail), &|| {
+            if request.is_live() {
+                Ok(())
+            } else {
+                Err(AgentJournalHostRefusal::Cancelled)
+            }
+        })?;
+        Ok(RecoveredAgentJournal { run, journal })
+    }
+
+    /// Restore immutable original authority, without selecting any journal
+    /// prefix. Cleanup takes separate exclusive custody before reading it.
+    pub(crate) async fn restore_original_agent_run_in(
+        &self,
+        request: &crate::NodeRequestContext,
+        directory: &Path,
+        run_id: RunId,
+        expected_run: &[u8; 32],
+    ) -> Result<IntentRun, AgentJournalHostRefusal> {
         let check = || {
             if request.is_live() {
                 Ok(())
@@ -206,7 +236,6 @@ impl crate::OneNode {
             .await
             .map_err(AgentJournalHostRefusal::RunCheckpoint)?;
         check()?;
-        let journal = file::recover(directory, &run, Some(expected_tail), &check)?;
-        Ok(RecoveredAgentJournal { run, journal })
+        Ok(run)
     }
 }

@@ -31,6 +31,13 @@ use crate::{
     broker::ref_publication::{PendingSubmission, ReservedSubmission, StartFailure},
 };
 
+mod recovery;
+pub use recovery::{
+    PreparedRefTransactionAcknowledgement, RecoveredRefTransactionAcknowledgement,
+    RefTransactionAcknowledgementSink, RefTransactionRecoveryPersistenceRefused,
+    RefTransactionRecoveryRefusal, prepare_recovered_ref_transaction_acknowledgement,
+};
+
 /// Exact ordinary seal and checked publication identity retained in the journal.
 ///
 /// This value grants no authority. Its constructor derives the seal from the

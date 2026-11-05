@@ -374,6 +374,48 @@ impl RecoveredEffectJournal {
         RunReconciliationReport::build(run, self.records().to_vec(), observed_at)
             .map_err(|_| EffectJournalCodecRefusal::Reconciliation)
     }
+
+    /// Pure candidate construction for the checked recovery facade. The
+    /// successor remains private to that facade until its cleanup sink has
+    /// acknowledged the exact resulting position. This does not open a writer
+    /// or reconstruct a broker, grant, or resource ledger.
+    pub(crate) fn prepare_append(
+        &self,
+        run: &IntentRun,
+        entry: EffectJournalEntry,
+    ) -> Result<(Vec<u8>, Self), EffectJournalCodecRefusal> {
+        if !self.anchored {
+            return Err(EffectJournalCodecRefusal::AnchorRequired);
+        }
+        if run
+            .commitment()
+            .map_err(|_| EffectJournalCodecRefusal::RunIdentity)?
+            != self.run_commitment
+        {
+            return Err(EffectJournalCodecRefusal::RunMismatch);
+        }
+        let mut encoder = EffectJournalEncoder {
+            run: run.clone(),
+            run_commitment: self.run_commitment,
+            position: self.position,
+            effects: self.records().len(),
+        };
+        let frame = encoder.encode(&entry)?;
+        let mut entries = self.entries.clone();
+        entries.push(entry);
+        let replay =
+            EffectBroker::replay(&entries).map_err(|_| EffectJournalCodecRefusal::Replay)?;
+        Ok((
+            frame,
+            Self {
+                run_commitment: self.run_commitment,
+                position: encoder.position(),
+                anchored: true,
+                entries,
+                replay,
+            },
+        ))
+    }
 }
 
 fn hash(parts: &[&[u8]]) -> [u8; 32] {

@@ -6,6 +6,8 @@ mod retained_resume;
 
 use super::*;
 
+mod recovery;
+
 use std::cell::RefCell;
 use std::future::{Future, ready};
 use std::rc::Rc;
