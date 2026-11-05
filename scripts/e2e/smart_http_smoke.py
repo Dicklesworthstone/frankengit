@@ -229,7 +229,7 @@ def attempt_route_refusals(fg: str, commands: Commands, root: Path, url: str, to
     alias = "/.fgit-receive/" + "42" * 32
     discovery = "/info/refs?service=git-receive-pack"
     rpc = [("Content-Type", "application/x-git-receive-pack-request"),
-           ("Content-Length", "4")]
+           ("Content-Length", "4"), ("Expect", "100-continue")]
     cases = [
         ("GET", discovery, [], b"", 401),
         ("GET", alias + discovery, [], b"", 401),
@@ -242,8 +242,8 @@ def attempt_route_refusals(fg: str, commands: Commands, root: Path, url: str, to
                                     ("Idempotency-Key", "two")], b"", 401),
         ("GET", alias + discovery, [("Idempotency-Key", "")], b"", 401),
         ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "one"),
-                                            ("Idempotency-Key", "two")], b"0000", 401),
-        ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "")], b"0000", 401),
+                                            ("Idempotency-Key", "two")], b"", 401),
+        ("POST", "/git-receive-pack", rpc + [("Idempotency-Key", "")], b"", 401),
     ]
     wrong = "b" * 64 if token != "b" * 64 else "c" * 64
     for credential in (None, "Bearer " + wrong):

@@ -40,13 +40,13 @@ fn attempt_aliases_do_not_disclose_the_configured_route_before_authentication() 
             (
                 "POST",
                 "/git-receive-pack".into(),
-                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nIdempotency-Key: one\r\nIdempotency-Key: two\r\n",
+                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nIdempotency-Key: one\r\nIdempotency-Key: two\r\n",
                 401,
             ),
             (
                 "POST",
                 "/git-receive-pack".into(),
-                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nIdempotency-Key: \r\n",
+                "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 4\r\nExpect: 100-continue\r\nIdempotency-Key: \r\n",
                 401,
             ),
         ];
@@ -58,9 +58,10 @@ fn attempt_aliases_do_not_disclose_the_configured_route_before_authentication() 
                 let responses: Vec<Vec<u8>> = [server.route.as_str(), "/missing.git"]
                     .into_iter()
                     .map(|route| {
-                        let body = if *method == "POST" { "0000" } else { "" };
+                        // A refused Expect request must answer before intake.
+                        // Do not race that answer by eagerly sending its body.
                         let input = format!(
-                            "{method} {route}{suffix} HTTP/1.1\r\nHost: loopback\r\n{credential}{headers}\r\n{body}"
+                            "{method} {route}{suffix} HTTP/1.1\r\nHost: loopback\r\n{credential}{headers}\r\n"
                         );
                         exchange(&server, input.as_bytes(), 1)
                     })
