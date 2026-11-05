@@ -373,6 +373,7 @@ def main() -> int:
     parser.add_argument("--git", default="git", help="stock Git oracle executable")
     parser.add_argument("--format", action="append", choices=("sha1", "sha256"), dest="formats")
     parser.add_argument("--timeout", type=int, default=180, help="per-command timeout in seconds (1..600)")
+    parser.add_argument("--artifact-dir", type=Path, help="new directory; retained on success or failure")
     options = parser.parse_args()
     require(1 <= options.timeout <= 600, "timeout must be in 1..600")
     fg = options.fg.resolve(strict=True)
@@ -381,13 +382,20 @@ def main() -> int:
     require(git is not None, "stock Git executable was not found")
     with fg.open("rb") as binary:
         digest = hashlib.file_digest(binary, "sha256").hexdigest()
-    with tempfile.TemporaryDirectory(prefix="fg-smart-http-smoke-") as temp:
-        root = Path(temp)
+    root = options.artifact_dir
+    if root is None:
+        root = Path(tempfile.mkdtemp(prefix="fg-smart-http-smoke-"))
+    else:
+        root.mkdir(parents=True, mode=0o700, exist_ok=False)
+    try:
         commands = Commands(git, isolated_environment(root / "home"), options.timeout)
         print(json.dumps({"type": "smart_http_smoke_started", "fg_binary_sha256": digest,
-                          "git_version": commands.local_git("--version")}), flush=True)
+                          "git_version": commands.local_git("--version"), "artifacts": str(root)}), flush=True)
         for fmt in dict.fromkeys(options.formats or ["sha1", "sha256"]):
             exercise(str(fg), git, root / fmt, fmt, options.timeout)
+    except BaseException:
+        print(f"smart HTTP smoke artifacts retained at {root}", file=sys.stderr)
+        raise
     return 0
 
 

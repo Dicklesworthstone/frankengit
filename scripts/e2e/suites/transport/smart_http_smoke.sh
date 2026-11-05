@@ -24,10 +24,12 @@ fge_phase setup
 FG_BIN="${FG_BIN:-}"
 fge_assert_cmd HTTP-SMOKE-001 'FG_BIN names a prebuilt fg binary' test -n "$FG_BIN"
 [ -x "$FG_BIN" ] || fge_die 'FG_BIN must name a prebuilt executable'
+WORK="$(fge_tempdir smart-http-smoke)"
+fge_preserve "$WORK" 'native HTTP fixtures, canonical state and listener receipts'
 
 fge_phase action
 fge_capture smoke python3 "$E2E_ROOT/smart_http_smoke.py" --fg "$FG_BIN" \
-  --git "${GIT_ORACLE_BIN:-git}" || true
+  --git "${GIT_ORACLE_BIN:-git}" --artifact-dir "$WORK/run" || true
 RC=$FGE_LAST_EXIT
 OUTPUT=$FGE_LAST_STDOUT
 
