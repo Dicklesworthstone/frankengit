@@ -92,6 +92,44 @@ test('actual profile verifies its selected source and completes a real one-test 
   f.complete();
 });
 
+test('a released runner group observation cannot authorize signals to a reused identity', { timeout: 15000 }, async t => {
+  const f = await fixture(t), loader = join(f.root, 'released-group.mjs');
+  // Actual metadata and test processes run normally. After the runner's real
+  // exit, model a new group occupying its released number. Record destructive
+  // attempts without delivering them to a potentially unrelated group.
+  await writeFile(loader, `import {ChildProcess} from 'node:child_process';
+    import {writeFileSync,appendFileSync} from 'node:fs';
+    if (process.argv[1]?.endsWith('/scripts/verify_js.mjs')) {
+      const emit = ChildProcess.prototype.emit, kill = process.kill.bind(process);
+      let released;
+      ChildProcess.prototype.emit = function(event, ...args) {
+        if (event === 'exit' && this.spawnargs.includes('--test')) {
+          released = this.pid; writeFileSync(${JSON.stringify(join(f.root, 'released'))}, String(released));
+        }
+        return Reflect.apply(emit, this, [event, ...args]);
+      };
+      process.kill = (pid, signal) => {
+        if (released && pid === -released) {
+          if (signal !== 0) appendFileSync(${JSON.stringify(join(f.root, 'signals'))}, JSON.stringify(signal) + '\\n');
+          return true;
+        }
+        return kill(pid, signal);
+      };
+    }
+  `);
+  const r = f.start({ NODE_OPTIONS: `--import=${loader}` }), result = await r.closed;
+  assert.equal(result.code, 1, r.stderr); assert.equal(result.signal, null);
+  assert.match(r.stdout, /# pass 1\b/, 'the actual selected corpus must execute');
+  assert.ok(Number(await readFile(join(f.root, 'released'), 'utf8')) > 1);
+  assert.match(r.stderr, /js_profile_containment_failed/);
+  assert.doesNotMatch(r.stderr, /owned process group is quiescent/);
+  let signals = '';
+  try { signals = await readFile(join(f.root, 'signals'), 'utf8'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  assert.equal(signals, '', 'a completed runner cannot retain signal authority over its group ID');
+  f.complete();
+});
+
 test('SIGTERM during stopped Git metadata drains its owned process before controller exit', { timeout: 15000 }, async t => {
   const f = await fixture(t);await f.blockIndex();const r = f.start(), pid = await metadataChild(r);
   process.kill(pid, 'SIGSTOP');r.child.kill('SIGTERM');const result = await r.closed;

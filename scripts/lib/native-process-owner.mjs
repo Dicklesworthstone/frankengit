@@ -49,6 +49,10 @@ export async function runNativeProcess(executable, args, {
       catch (cause) { return cause.code === 'ESRCH' ? 'absent' : 'unknown'; }
     }
     function sendSignal(name) {
+      // Node reaps the leader before emitting exit. Once released, its numeric
+      // PID/PGID can belong to another process; a group probe cannot restore
+      // signal authority. Unresolved descendants remain containment failure.
+      if (exited || child.exitCode !== null || child.signalCode !== null || !child.pid) return;
       try {
         if (group && child.pid) process.kill(-child.pid, name);
         else if (!exited && child.pid) child.kill(name);

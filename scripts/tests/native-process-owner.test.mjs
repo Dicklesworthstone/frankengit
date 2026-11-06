@@ -152,18 +152,53 @@ test('signal exit is not fabricated as ordinary success', {skip: !posix}, async 
   assert.equal(result.code, null); assert.equal(result.signal, 'SIGKILL');
 });
 for (const inherited of [true, false]) {
-  test(`leader exit cannot strand descendants with ${inherited ? 'inherited' : 'closed'} output`, {skip: !posix}, async () => withDirectory(async dir => {
+  test(`released leader with ${inherited ? 'inherited' : 'closed'} output never authorizes group signals`, {skip: !posix}, async t => withDirectory(async dir => {
     const marker = join(dir, 'pid'); let pid;
+    const originalKill = process.kill.bind(process), signals = [];
+    // Preserve the original orphan-producing input, but do not execute the
+    // broken owner's destructive calls against an already released group ID.
+    t.mock.method(process, 'kill', (target, signal) => {
+      if (target < 0 && signal !== 0) { signals.push({ target, signal }); return true; }
+      return originalKill(target, signal);
+    });
     const source = `const {spawn} = require('node:child_process');
       const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
         {stdio: ${inherited ? "['ignore','inherit','inherit']" : "'ignore'"}});
       require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(child.pid)); process.exit(0);`;
     const promise = execute(source);
     const observed = assert.rejects(promise, error => {
-      assert.ok(['native_process_descendants_remaining', 'native_process_containment_failed'].includes(error.code)); return true;
+      assert.equal(error.code, 'native_process_containment_failed');
+      assert.equal(error.details.reason, 'native_process_descendants_remaining');
+      assert.equal(error.details.leader_exited, true);
+      return true;
     });
-    try { pid = Number(await waitFile(marker)); await observed; assert.equal(await liveProcess(pid), false); }
+    try {
+      pid = Number(await waitFile(marker)); await observed;
+      assert.deepEqual(signals, [], 'a reaped leader cannot pin this numeric group identity');
+      assert.equal(await liveProcess(pid), true, 'uncertain containment must not claim orphan cleanup');
+    }
     finally { killOwned(pid); }
+  }));
+  test(`cancellation of an owned leader drains its child with ${inherited ? 'inherited' : 'closed'} output`, {skip: !posix}, async () => withDirectory(async dir => {
+    const marker = join(dir, 'pids'), controller = new AbortController(); let pids;
+    const source = `const {spawn} = require('node:child_process');
+      let stopping = false;
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
+        {stdio: ${inherited ? "['ignore','inherit','inherit']" : "'ignore'"}});
+      child.once('exit', () => { if (stopping) process.exit(0); });
+      process.on('SIGTERM', () => {
+        stopping = true;
+        if (child.exitCode !== null || child.signalCode !== null) process.exit(0);
+      });
+      require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify([process.pid, child.pid]));
+      setInterval(() => {}, 1000);`;
+    const promise = execute(source, {signal: controller.signal});
+    const observed = assert.rejects(promise, code('native_process_cancelled'));
+    try {
+      pids = JSON.parse(await waitFile(marker)); controller.abort(); await observed;
+      assert.equal(pids.length, 2);
+      for (const pid of pids) assert.equal(await liveProcess(pid), false, 'owned cancellation must stop both processes');
+    } finally { for (const pid of pids ?? []) killOwned(pid); }
   }));
 }
 test('escaped inherited output reports failed containment instead of hanging', {skip: !posix, timeout: 8000}, async () => withDirectory(async dir => {

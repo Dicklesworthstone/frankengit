@@ -18,6 +18,9 @@ const containment = cause => Object.assign(new Error('JS verification process-gr
   code: 'js_profile_containment_failed', cause,
 });
 const signalGroup = signal => {
+  // A reaped runner no longer pins this numeric group identity. Read-only
+  // presence checks may fail containment, but cannot authorize another signal.
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
   try { process.kill(-child.pid, signal); }
   catch (error) { if (error.code !== 'ESRCH') containmentFailure ??= containment(error); }
 };
