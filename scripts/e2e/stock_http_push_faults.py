@@ -61,18 +61,46 @@ class Relay:
             threading.Thread(target=self._serve, args=(client,), daemon=True).start()
 
     def _serve(self, client: socket.socket) -> None:
-        server = socket.create_connection(("127.0.0.1", self.upstream))
-        first = client.recv(65536)
-        receive_post = first.startswith(b"POST ") and b"git-receive-pack" in first.split(b"\r\n", 1)[0]
-        mode = self.mode if receive_post else "pass"
-        if receive_post and mode != "pass":
-            self.mode = "pass"
-            self.dropped += 1
-        if mode == "drop_before_request":
+        server = None
+        try:
+            client.settimeout(TIMEOUT)
+            first = bytearray()
+            line_end = -1
+            # recv boundaries do not delimit HTTP. Keep the existing 64 KiB
+            # intake bound and search only newly received bytes plus one byte
+            # of overlap, including when CR and LF arrive separately.
+            while line_end < 0:
+                if len(first) == 65536:
+                    return
+                data = client.recv(65536 - len(first))
+                if not data:
+                    return
+                previous = len(first)
+                first.extend(data)
+                line_end = first.find(b"\r\n", max(0, previous - 1))
+            parts = first[:line_end].split(b" ", 2)
+            receive_post = (len(parts) == 3 and parts[0] == b"POST"
+                            and parts[1].split(b"?", 1)[0].endswith(b"/git-receive-pack")
+                            and parts[2] in (b"HTTP/1.0", b"HTTP/1.1"))
+            mode = self.mode if receive_post else "pass"
+            if receive_post and mode != "pass":
+                self.mode = "pass"
+                self.dropped += 1
+            if mode == "drop_before_request":
+                return
+            server = socket.create_connection(("127.0.0.1", self.upstream), timeout=TIMEOUT)
+            server.sendall(first)
+            self._forward(client, server, mode)
+        except OSError:
+            # Disconnects are the mechanism under test; the native campaign
+            # independently checks which request, if any, actually committed.
+            pass
+        finally:
             client.close()
-            server.close()
-            return
-        server.sendall(first)
+            if server is not None:
+                server.close()
+
+    def _forward(self, client: socket.socket, server: socket.socket, mode: str) -> None:
         done = threading.Event()
 
         def pump(source: socket.socket, sink: socket.socket, drop_on_first: bool) -> None:
@@ -82,8 +110,8 @@ class Relay:
                     if not data:
                         break
                     if drop_on_first:
-                        # The server has started its answer: the request was
-                        # delivered in full. Cut both sides without relaying it.
+                        # Cut the answer; canonical readback below independently
+                        # establishes whether this request actually committed.
                         break
                     sink.sendall(data)
             except OSError:
@@ -99,8 +127,6 @@ class Relay:
         threading.Thread(target=pump, args=(client, server, False), daemon=True).start()
         pump(server, client, mode == "drop_after_request")
         done.wait(timeout=TIMEOUT)
-        client.close()
-        server.close()
 
 
 def run(args: list, env: dict[str, str]) -> subprocess.CompletedProcess:

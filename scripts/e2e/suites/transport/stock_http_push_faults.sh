@@ -18,6 +18,8 @@ fge_phase setup
 FG_BIN="${FG_BIN:-}"
 fge_assert_cmd PUSH-FAULT-001 'FG_BIN names a prebuilt fg binary' test -n "$FG_BIN"
 [ -x "$FG_BIN" ] || fge_die 'FG_BIN must name a prebuilt executable'
+fge_run_timeout 30 relay-preflight python3 "$E2E_ROOT/selftests/test_stock_http_push_faults.py" || true
+fge_assert_exit PUSH-FAULT-003 0 "$FGE_LAST_EXIT" 'real socket relay regression tests pass'
 
 fge_phase action
 WORK="$(fge_tempdir stock-http-push-faults)"
