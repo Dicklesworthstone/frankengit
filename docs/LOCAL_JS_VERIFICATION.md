@@ -133,12 +133,20 @@ The runner creates its own private temporary root under the canonical host temp
 directory and supplies it to fixture processes. On macOS, `/var` commonly aliases
 `/private/var`. Only fixture-owned paths are canonicalized; production custody
 checks still reject an explicitly aliased, replaced, public or unowned parent.
-The root is removed on success and retained on failure. Cancellation terminates
-the owned process group and escalates after five seconds. Descendants that
+The root is removed on success and retained on failure. Cancellation signals
+the owned process group and escalates after five seconds while its direct leader
+remains live and owned. Node reaps that leader before delivering its exit event;
+from then on, its numeric PID/group ID is no longer signal authority. A later
+presence probe cannot distinguish an old group from a reused identity. Both the
+shared native-process owner and this test controller therefore stop sending
+signals after leader exit, including delayed escalation and error cleanup.
+Descendants that
 deliberately detach from this group are outside this test-runner boundary; this
 is not hostile-code isolation. A successful leader that leaves descendants fails
-the profile. Cleanup kills those descendants and waits at most five seconds for
-group quiescence; failure to establish it remains a containment failure. The
+the profile. The controller waits at most five seconds for observed group
+quiescence; unresolved descendants remain an explicit containment failure with
+retained artifacts, requiring independent operator containment. It never claims
+to have reaped those descendants or signals an unowned group to force success. The
 campaign deadline is also checked against a monotonic clock at child closure.
 Initialization installs cancellation handling before acquiring subprocess or
 temporary-directory responsibility. Source metadata uses `/usr/bin/git` through
