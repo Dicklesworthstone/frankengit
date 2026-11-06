@@ -53,7 +53,13 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
 `init` creates or re-authenticates the empty canonical authority head.
 `import` verifies a bounded local object source composed of loose objects and
 checksum-bound idx-v2/pack-v2 pairs, then publishes its source refs through the
-sealed admission/RCR/head-CAS path. The pack-import focused integration target
+sealed admission/RCR/head-CAS path. Sources include bare repositories, ordinary
+checkouts, separate Git directories and linked worktrees. Bounded `gitdir:` and
+`commondir` resolution preserves the selected worktree's private refs and HEAD
+while reading shared refs and objects from the common repository; controls and
+refs are checked again before verified objects leave quarantine. See
+[local source import](docs/LOCAL_SOURCE_IMPORT_PROFILES.md) for source layouts,
+limits and destination HEAD behavior. The pack-import focused integration target
 is checked in and all 17 cases — the original 14 plus the resource-bound
 expansion — pass in a local run at `e296eb3f`; orchestrated batch
 verification remains the revision-bound gate. The verified-read defect that

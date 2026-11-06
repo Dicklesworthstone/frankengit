@@ -1159,3 +1159,4 @@ fn assert_source_refusal(
 
 #[path = "packed_import/incremental_midx.rs"]
 mod incremental_midx;
+mod worktrees;

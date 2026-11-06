@@ -17,6 +17,7 @@ use source_io::read_through_first_excess_byte;
 mod cancellation_tests;
 mod control;
 pub mod graph;
+mod layout;
 mod metadata;
 mod packed_sources;
 mod placement;
@@ -26,8 +27,7 @@ pub use refusal::LooseGitImportRefusal;
 use source_io::{
     BoundedInputClass, bounded_directory_entries, import_pack_limits, io_refusal,
     is_ignored_pack_accelerator, open_regular_bounded, pack_input_limit, pack_refusal,
-    parse_limits, path_metadata, read_direct_refs, read_head_target, read_local_object,
-    read_regular_bounded, reject_object_alternates, resolve_git_directory,
+    parse_limits, path_metadata, read_local_object, read_regular_bounded, reject_object_alternates,
 };
 mod profile;
 use packed_sources::PackedObjectSources;
@@ -143,10 +143,11 @@ impl OneNode {
     /// Validates and stages an ordinary local Git directory.
     ///
     /// This accepts a bare directory or a worktree directory containing a
-    /// `.git` directory. Direct refs may reach loose objects or objects in
-    /// checksum-bound idx-v2/pack-v2 pairs. Alternates, symbolic refs, and
-    /// `.git` indirection files are explicit typed refusals rather than paths
-    /// that can quietly select a different object source.
+    /// `.git` directory or bounded `gitdir:` file. Linked worktrees select
+    /// their own HEAD and private refs while sharing objects and ordinary refs
+    /// through `commondir`. Direct refs may reach loose objects or objects in
+    /// checksum-bound idx-v2/pack-v2 pairs. Alternates, symbolic refs, symlinks,
+    /// malformed indirection and a changed source layout are typed refusals.
     ///
     /// Success proves that every returned closure member was native-hash
     /// verified with a complete required-kind graph before the first placement.
@@ -236,10 +237,11 @@ impl OneNode {
             bytes: maximum_bytes,
             ..graph::Limits::default()
         };
-        let git_directory = resolve_git_directory(source, control)?;
-        reject_object_alternates(&git_directory, control)?;
+        let layout = layout::SourceLayout::resolve(source, control)?;
+        let git_directory = layout.common_directory();
+        reject_object_alternates(git_directory, control)?;
         let mut packed = PackedObjectSources::open_with_profile(
-            &git_directory,
+            git_directory,
             self.object_format,
             self.max_object_bytes,
             self.storage_root(),
@@ -249,8 +251,8 @@ impl OneNode {
         .with_received_pack_custody(std::sync::Arc::clone(
             &self.service_config.received_pack_cache,
         ));
-        let refs = read_direct_refs(&git_directory, self.object_format, max_refs, control)?;
-        let head_target = read_head_target(&git_directory, control)?;
+        let refs = layout.read_refs(self.object_format, max_refs, control)?;
+        let head_target = layout.read_head(control)?;
         let mut spool = spool::Spool::create(self.storage_root(), maximum_bytes, control)?;
         let validated = graph::validate_typed_with_custody(
             refs.iter().map(|(name, id)| {
@@ -264,7 +266,7 @@ impl OneNode {
             graph_limits,
             |identity| {
                 read_local_object(
-                    &git_directory,
+                    git_directory,
                     identity,
                     self.object_format,
                     self.max_object_bytes,
@@ -275,8 +277,11 @@ impl OneNode {
             |identity, object| spool.retain(identity, object, control),
             control,
         )?;
-        let refs = CanonicalRefState::new_with_head_target(refs, head_target)
-            .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?;
+        let refs = CanonicalRefState::new_with_head_target(refs, head_target).map_err(|_| {
+            LooseGitImportRefusal::HeadTargetNotBranch(Box::new(
+                layout.git_directory().to_path_buf(),
+            ))
+        })?;
         let mut closure = BTreeSet::new();
         for identity in validated.objects.keys() {
             control.checkpoint()?;
@@ -298,6 +303,10 @@ impl OneNode {
         // never reopened to construct a reusable representation.
         let mut captured = packed.finish_with_captures(&closure, control)?;
         let total_object_bytes = validated.total_bytes;
+        // Indirection is local input, never authority. Detect a changed
+        // gitfile/commondir or selected worktree refs before installing any
+        // objects; all subsequent bytes come from the verified private spool.
+        layout.revalidate(self.object_format, max_refs, &refs, control)?;
         // All required local edges and object bodies have now verified. The
         // standalone API places immutable names; durable import retains only
         // private synced batches until admission prepares its first commit.

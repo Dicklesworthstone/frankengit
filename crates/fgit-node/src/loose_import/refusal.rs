@@ -38,11 +38,22 @@ pub enum LooseGitImportRefusal {
     /// The source or one of its entries was a symlink, which this local import
     /// profile deliberately does not follow.
     SymbolicLink(Box<PathBuf>),
-    /// Neither a bare Git directory nor a worktree `.git` directory was found.
+    /// The selected Git administrative layout has no local objects directory.
     GitDirectoryMissing(Box<PathBuf>),
-    /// A worktree used a `.git` indirection file, unsupported by this bounded
-    /// first import profile.
-    GitDirectoryFileUnsupported(Box<PathBuf>),
+    /// A gitfile or commondir does not name one supported source layout.
+    DirectoryControlInvalid {
+        path: Box<PathBuf>,
+        reason: &'static str,
+    },
+    /// Directory indirection exceeded its independent pre-read byte budget.
+    DirectoryInputBytesExceeded {
+        path: Box<PathBuf>,
+        limit: u64,
+        observed: u64,
+    },
+    /// The gitfile, common directory or selected refs changed during source
+    /// verification. No object from this import has left quarantine.
+    SourceLayoutChanged(Box<PathBuf>),
     /// A required path had the wrong filesystem kind.
     PathKind {
         /// Expected kind.
@@ -229,9 +240,23 @@ impl Display for LooseGitImportRefusal {
                 "source {} is neither a bare Git directory nor a worktree with .git",
                 path.display()
             ),
-            Self::GitDirectoryFileUnsupported(path) => write!(
+            Self::DirectoryControlInvalid { path, reason } => write!(
                 formatter,
-                "loose import does not support .git indirection file {}",
+                "local Git directory control {} is invalid: {reason}",
+                path.display()
+            ),
+            Self::DirectoryInputBytesExceeded {
+                path,
+                limit,
+                observed,
+            } => write!(
+                formatter,
+                "local Git directory control {} is {observed} bytes, exceeding {limit}",
+                path.display()
+            ),
+            Self::SourceLayoutChanged(path) => write!(
+                formatter,
+                "local Git source layout or selected refs changed at {}; retry with a stable source",
                 path.display()
             ),
             Self::PathKind { expected, path } => {
@@ -406,7 +431,9 @@ impl Error for LooseGitImportRefusal {
             | Self::Interrupted { .. }
             | Self::SymbolicLink(_)
             | Self::GitDirectoryMissing(_)
-            | Self::GitDirectoryFileUnsupported(_)
+            | Self::DirectoryControlInvalid { .. }
+            | Self::DirectoryInputBytesExceeded { .. }
+            | Self::SourceLayoutChanged(_)
             | Self::PathKind { .. }
             | Self::PackPairMissing(_)
             | Self::PackDirectoryEntryUnsupported(_)

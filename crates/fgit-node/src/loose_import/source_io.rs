@@ -10,49 +10,6 @@ use super::{
     io,
 };
 
-pub(super) fn resolve_git_directory(
-    source: &Path,
-    control: &ImportControl<'_>,
-) -> Result<PathBuf, LooseGitImportRefusal> {
-    control.checkpoint()?;
-    require_directory(source, "Git source directory", control)?;
-    let dot_git = source.join(".git");
-    let git_directory = match control.run(|| fs::symlink_metadata(&dot_git))? {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(LooseGitImportRefusal::SymbolicLink(Box::new(dot_git)));
-            }
-            if metadata.is_dir() {
-                dot_git
-            } else {
-                return Err(LooseGitImportRefusal::GitDirectoryFileUnsupported(
-                    Box::new(dot_git),
-                ));
-            }
-        }
-        Err(source_error) if source_error.kind() == io::ErrorKind::NotFound => source.to_path_buf(),
-        Err(source_error) => return Err(io_refusal("inspect .git", dot_git, source_error)),
-    };
-    let objects = git_directory.join("objects");
-    match control.run(|| fs::symlink_metadata(&objects))? {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(LooseGitImportRefusal::SymbolicLink(Box::new(objects)))
-        }
-        Ok(metadata) if metadata.is_dir() => Ok(git_directory),
-        Ok(_) => Err(LooseGitImportRefusal::GitDirectoryMissing(Box::new(
-            git_directory,
-        ))),
-        Err(source_error) if source_error.kind() == io::ErrorKind::NotFound => Err(
-            LooseGitImportRefusal::GitDirectoryMissing(Box::new(git_directory)),
-        ),
-        Err(source_error) => Err(io_refusal(
-            "inspect Git objects directory",
-            objects,
-            source_error,
-        )),
-    }
-}
-
 pub(super) fn reject_object_alternates(
     git_directory: &Path,
     control: &ImportControl<'_>,
@@ -119,6 +76,7 @@ pub(super) fn is_ignored_pack_accelerator(path: &Path) -> bool {
 pub(super) enum BoundedInputClass {
     PackOrIndex,
     RefControl,
+    DirectoryControl,
     CompressedLooseObject,
 }
 
@@ -131,6 +89,11 @@ impl BoundedInputClass {
                 observed,
             },
             Self::RefControl => LooseGitImportRefusal::RefInputBytesExceeded {
+                path: Box::new(path.to_path_buf()),
+                limit,
+                observed,
+            },
+            Self::DirectoryControl => LooseGitImportRefusal::DirectoryInputBytesExceeded {
                 path: Box::new(path.to_path_buf()),
                 limit,
                 observed,
@@ -198,7 +161,22 @@ pub(super) fn open_regular_bounded(
     // envelope, so growth beyond the envelope causes a typed refusal rather
     // than an unbounded `fs::read` allocation.
     let file = control
-        .run(|| fs::File::open(path))?
+        .run(|| {
+            #[cfg(unix)]
+            if matches!(class, BoundedInputClass::DirectoryControl) {
+                use rustix::fs::{Mode, OFlags};
+                // A control file swapped after lstat cannot redirect the
+                // source or block opening a FIFO before the handle check.
+                return rustix::fs::open(
+                    path,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+                .map(fs::File::from)
+                .map_err(io::Error::from);
+            }
+            fs::File::open(path)
+        })?
         .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
     let opened_metadata = control
         .run(|| file.metadata())?
@@ -275,10 +253,11 @@ pub(super) fn read_direct_refs(
     git_directory: &Path,
     object_format: GitHashAlgorithm,
     max_refs: usize,
+    shared_only: bool,
     control: &ImportControl<'_>,
 ) -> Result<BTreeMap<RefName, GitOid>, LooseGitImportRefusal> {
     control.checkpoint()?;
-    let mut refs = read_packed_refs(git_directory, object_format, max_refs, control)?;
+    let mut refs = read_packed_refs(git_directory, object_format, max_refs, shared_only, control)?;
     let loose_root = git_directory.join("refs");
     let Some(metadata) = path_metadata(&loose_root, "inspect loose refs directory", control)?
     else {
@@ -300,6 +279,7 @@ pub(super) fn read_direct_refs(
         0,
         max_refs,
         &mut refs,
+        shared_only,
         control,
     )?;
     if refs.len() > max_refs {
@@ -309,6 +289,59 @@ pub(super) fn read_direct_refs(
         });
     }
     Ok(refs)
+}
+
+/// Git reserves these namespaces for the selected worktree. Its private
+/// packed-refs and any private refs/heads or refs/tags are not shared inputs.
+pub(super) const WORKTREE_REF_NAMESPACES: [&str; 3] = ["bisect", "rewritten", "worktree"];
+
+fn is_worktree_ref(name: &RefName) -> bool {
+    let bytes = name.as_bytes();
+    [
+        b"refs/bisect/".as_slice(),
+        b"refs/rewritten/",
+        b"refs/worktree/",
+    ]
+    .iter()
+    .any(|prefix| bytes.starts_with(prefix))
+}
+
+pub(super) fn read_worktree_refs(
+    git_directory: &Path,
+    object_format: GitHashAlgorithm,
+    max_refs: usize,
+    refs: &mut BTreeMap<RefName, GitOid>,
+    control: &ImportControl<'_>,
+) -> Result<(), LooseGitImportRefusal> {
+    let root = git_directory.join("refs");
+    let Some(_) = path_metadata(&root, "inspect worktree refs", control)? else {
+        return Ok(());
+    };
+    require_directory(&root, "worktree refs directory", control)?;
+    for namespace in WORKTREE_REF_NAMESPACES {
+        let directory = root.join(namespace);
+        let Some(metadata) = path_metadata(&directory, "inspect worktree ref namespace", control)?
+        else {
+            continue;
+        };
+        // The reserved namespace includes its trailing slash. A plain
+        // `refs/worktree` ref (or the other two names) is still shared.
+        if metadata.is_file() {
+            continue;
+        }
+        require_directory(&directory, "worktree ref namespace", control)?;
+        collect_loose_refs(
+            &root,
+            &directory,
+            object_format,
+            1,
+            max_refs,
+            refs,
+            false,
+            control,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn read_head_target(
@@ -365,6 +398,7 @@ pub(super) fn read_packed_refs(
     git_directory: &Path,
     object_format: GitHashAlgorithm,
     max_refs: usize,
+    shared_only: bool,
     control: &ImportControl<'_>,
 ) -> Result<BTreeMap<RefName, GitOid>, LooseGitImportRefusal> {
     control.checkpoint()?;
@@ -412,6 +446,9 @@ pub(super) fn read_packed_refs(
                 path: Box::new(packed.clone()),
                 source: Box::new(error),
             })?;
+        if shared_only && is_worktree_ref(&name) {
+            continue;
+        }
         let identity = GitOid::from_hex(object_format, identity).map_err(|error| {
             LooseGitImportRefusal::ObjectIdentity {
                 path: Box::new(packed.clone()),
@@ -443,6 +480,7 @@ pub(super) fn collect_loose_refs(
     depth: usize,
     max_refs: usize,
     refs: &mut BTreeMap<RefName, GitOid>,
+    shared_only: bool,
     control: &ImportControl<'_>,
 ) -> Result<(), LooseGitImportRefusal> {
     control.checkpoint()?;
@@ -457,6 +495,17 @@ pub(super) fn collect_loose_refs(
         let metadata = control
             .run(|| fs::symlink_metadata(&path))?
             .map_err(|error| io_refusal("inspect loose ref", path.clone(), error))?;
+        if shared_only
+            && depth == 0
+            && WORKTREE_REF_NAMESPACES
+                .iter()
+                .any(|namespace| entry.file_name() == OsStr::new(namespace))
+            && !metadata.is_file()
+        {
+            // The common repository is another worktree for these paths.
+            // Never traverse its private state or let it shadow this source.
+            continue;
+        }
         if metadata.file_type().is_symlink() {
             return Err(LooseGitImportRefusal::SymbolicLink(Box::new(path)));
         }
@@ -468,6 +517,7 @@ pub(super) fn collect_loose_refs(
                 depth + 1,
                 max_refs,
                 refs,
+                shared_only,
                 control,
             )?;
             continue;

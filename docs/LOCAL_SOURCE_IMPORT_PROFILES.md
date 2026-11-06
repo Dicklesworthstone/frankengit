@@ -1,10 +1,70 @@
-# Local source import size profiles
+# Local source import layouts and size profiles
 
 `fg import` uses bounded disk-backed quarantine for reachable native object
 bodies. The complete required-kind graph validates before the first fabric
 placement. Exact spool bytes are re-identified before immutable placement;
-mutable source paths are never reread after validation. Ref publication still
+source object paths are never reread after validation. Ref publication still
 uses the original sealed admission and authority-head compare-and-swap path.
+
+## Bare repositories, checkouts and linked worktrees
+
+The source argument accepts a bare Git directory, a checkout with a `.git`
+directory, or a checkout with a `gitdir: <path>` file. This includes Git's
+separate administrative directories and linked worktrees; the administrative
+directory itself is also an accepted source. The importer follows the
+[Git repository layout](https://git-scm.com/docs/gitrepository-layout) and
+[worktree ref rules](https://git-scm.com/docs/git-worktree):
+
+| Input | Read from |
+| --- | --- |
+| `HEAD` | The selected worktree's administrative directory |
+| Loose objects and native `.idx`/`.pack` pairs | The shared directory's `objects/` |
+| Ordinary loose refs and `packed-refs` | The shared directory |
+| `refs/bisect/`, `refs/rewritten/`, `refs/worktree/` | The selected worktree's administrative directory |
+
+A `gitdir:` path is relative to the directory containing the gitfile unless
+absolute. An optional `commondir` path is relative to the administrative
+directory unless absolute. Paths are literal, including spaces and native
+non-UTF-8 path bytes on Unix. No shell, environment variable, tilde, hook, or
+configuration expansion runs. The destination's configured object format
+continues to determine native identity verification. Shared repository config
+and worktree config are not executed or used to add object sources.
+
+For example, a worktree created by `git worktree add ../feature-checkout feature`
+can be imported directly:
+
+```sh
+fg import ./fgit-data \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222 \
+  33333333333333333333333333333333 \
+  import-feature-checkout ../feature-checkout --json
+```
+
+This imports the repository's shared direct refs and the selected worktree's
+private direct refs, not just the checked-out branch. Other worktrees' private
+refs do not become source refs. The same ref-count budget covers shared and
+private refs. The source `HEAD` must name a branch; detached HEAD and symbolic
+refs other than HEAD retain their existing refusals. Import changes destination
+refs only, so choose the destination's initial branch as described below.
+
+Each gitfile and commondir is limited to 16 KiB and one nonempty path; a path is
+limited to 256 components. LF, CRLF, or no terminal newline is accepted. NULs,
+embedded newlines, symlinks in source-selected directory paths, nonregular
+control files, self-reference, chained commondir files and object alternates
+refuse before object placement. Directory indirection does not weaken object,
+pack, ref, graph, or caller cancellation limits.
+
+Keep the source stable during import. After the reachable graph verifies and
+before placement, an indirect source's gitfile, commondir, HEAD and selected
+refs are read again. A changed layout or ref set refuses; retry after source
+activity stops. This detects ordinary concurrent source changes and does not
+provide filesystem snapshot isolation against a malicious local host. Once
+placement begins, object bytes come exclusively from verified quarantine.
+Equivalent source paths and control-file spellings used in separate completed
+attempts do not change transaction identity or the original idempotency result.
+
+## Reachable-object byte profiles
 
 The default reachable-body ceiling remains **512 MiB**. A trusted local operator
 may explicitly choose a ceiling from 1 to 16,384 MiB:
@@ -110,6 +170,7 @@ serves it: no HEAD line in protocol v0, and `unborn HEAD symref-target:` in v2.
 
 ```sh
 cargo test -p fgit-node --lib loose_import:: -- --test-threads=2
+cargo test -p fgit-node --test packed_import worktrees:: -- --test-threads=2
 cargo test -p fgit-cli --bin fg import_command:: -- --test-threads=2
 cargo test -p fgit-node --test large_loose_import -- --test-threads=1
 FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/import_profiles.sh
@@ -123,6 +184,12 @@ The binary suite pairs a 1 MiB refusal with a 4 MiB admission for the same 2 MiB
 source in SHA-1 and SHA-256, then checks larger-profile and default-profile replay
 and source-free outcome recovery. Test presence is not a completed batch gate;
 executed results remain revision-bound.
+
+The worktree cases cover SHA-1 and SHA-256 loose, mixed and delta-packed sources,
+the selected private ref namespaces and HEAD, exact stored native objects,
+unchanged retry identity, and cold reopen after source removal. Malformed,
+oversized, cyclic and symlinked directory controls, changed source controls and
+refs, cancellation, and outside object alternates have refusal cases.
 
 ## Packed-source regression campaign
 

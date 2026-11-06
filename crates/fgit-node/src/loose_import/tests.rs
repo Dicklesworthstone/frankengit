@@ -7,6 +7,8 @@ use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
 
 use super::{LooseGitImportRefusal, OneNode, read_through_first_excess_byte};
 
+mod worktrees;
+
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct ScratchDirectory(PathBuf);
@@ -327,17 +329,17 @@ fn loose_import_refuses_a_worktree_git_directory_symlink() {
 }
 
 #[test]
-fn loose_import_refuses_a_worktree_git_directory_file() {
+fn loose_import_refuses_a_malformed_worktree_git_directory_file() {
     let scratch = ScratchDirectory::new();
     let source = scratch.0.join("worktree");
     let dot_git = source.join(".git");
     fs::create_dir_all(&source).expect("worktree directory creates");
-    fs::write(&dot_git, "gitdir: /outside\n").expect("indirection fixture writes");
+    fs::write(&dot_git, "gitdir: \n").expect("indirection fixture writes");
     let node = node(scratch.0.join("node"));
 
     assert!(matches!(
         node.stage_loose_git_import(&source),
-        Err(LooseGitImportRefusal::GitDirectoryFileUnsupported(path)) if *path == dot_git
+        Err(LooseGitImportRefusal::DirectoryControlInvalid { path, .. }) if *path == dot_git
     ));
     node.shutdown().expect("node drains");
 }
