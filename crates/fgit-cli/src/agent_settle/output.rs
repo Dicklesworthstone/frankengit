@@ -236,8 +236,7 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use fgit_agent::EffectId;
-    use fgit_codec::CANONICAL_CODEC_VERSION;
-    use fgit_types::{DigestAlgorithmId, DigestBytes, TxId};
+    use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, TxId};
 
     fn transaction() -> TxId {
         TxId::from_digest(
