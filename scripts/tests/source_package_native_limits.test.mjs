@@ -17,7 +17,7 @@ const payload = Buffer.alloc(2 * QUANTUM + 17);
 for (let i = 0; i < payload.length; i++) payload[i] = i % 251;
 
 async function executable(t, value = payload) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'fg-executable-budget-'));
+  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'fg-executable-budget-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const path = join(root, 'fg');
   if (typeof value === 'number') {
