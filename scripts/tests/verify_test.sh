@@ -158,6 +158,33 @@ sys.stdout.buffer.write(data)
     def test_failed_stderr_retention_publishes_no_partial_replay(self):
         self.replay_copy_failure("stderr")
 
+    def test_failed_metadata_write_publishes_no_partial_replay(self):
+        shim = self.base / "controlled metadata write failure.bash"
+        shim.write_text('''printf() {
+  if [[ "${1-}" == "$TEST_METADATA_FORMAT" && ! -e "${TEST_LOG}.metadata-failed" ]]; then
+    : > "${TEST_LOG}.metadata-failed"
+    builtin printf 'partial-metadata'
+    return 74
+  fi
+  builtin printf "$@"
+}
+''')
+        # Fail the opening, an intermediate field, and the final write. The
+        # actual partial file must never become a published replay receipt.
+        for at, form in enumerate(['{', '"exit_code":%s,', '"captured_output_sha256":"%s"}\\n']):
+            for code in [0, 31]:
+                with self.subTest(write=at, lane_exit=code):
+                    marker = Path(str(self.log) + ".metadata-failed")
+                    marker.unlink(missing_ok=True)
+                    directory = self.base / f"failed metadata write {at} {code}"
+                    result, _ = self.invoke(expected=code, artifact=True,
+                        changes={"VERIFY_ARTIFACT_DIR":str(directory), "BASH_ENV":str(shim),
+                                 "TEST_METADATA_FORMAT":form, "TEST_NATIVE_EXIT":str(code)})
+                    self.assertTrue(marker.is_file())
+                    self.assertEqual(list(directory.iterdir()), [])
+                    self.assertIn("cannot write", result.stderr)
+                    self.assertTrue(result.stdout.endswith("caller tool executed\n"))
+
     def operator_fixture(self):
         # Dispatch-only doubles; the real shared runtime verifier owns the pin,
         # and no result from these tools is native/operator acceptance evidence.

@@ -53,9 +53,9 @@ When `CARGO_BUILD_JOBS` is set, native tool builds pass it explicitly as Cargo
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
 
-Replay artifacts retain both captured output streams. A failed stream copy
-publishes neither the replay JSON nor its partial output, warns on stderr,
-and preserves the original lane exit status.
+Replay artifacts retain both captured output streams. A failed stream copy or
+metadata write publishes neither the replay JSON nor its partial output, warns
+on stderr, and preserves the original lane exit status.
 
 The product `e2e` lane also discovers the operator module suite at
 [`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh).
