@@ -11,15 +11,32 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/forge_inbox.mjs"
 
 
-def connection(server, token):
-    return ["--kind", "issue", "--url", server.url + "/ui/notifications/",
+def connection(server, token, kind="issue"):
+    route = {"issue": "notifications", "discussion": "discussion-notifications"}[kind]
+    return ["--kind", kind, "--url", server.url + f"/ui/{route}/",
             "--tenant-id", TENANT, "--repository-id", REPOSITORY,
             "--token-file", str(token)]
 
 
-def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, issue):
+def http_thread(native, kind):
+    """Normalize only the documented CLI/HTTP representation differences."""
+    row = dict(native)
+    for field in ("number", kind + "_version", "preference_version", "read_through", "latest_other_version"):
+        if row[field] is not None:
+            row[field] = int(row[field])
+    row["mode"] = {"participating": "automatic", "subscribed": "subscribed", "muted": "muted"}[row["mode"]]
+    return row
+
+
+def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, source, *, kind="issue"):
+    enabled, disabled = {
+        "issue": ("issues-read,outcomes-read,notifications-write", "issues-read,outcomes-read"),
+        "discussion": ("outcomes-read,notifications-write,discussions-read", "outcomes-read,discussions-read"),
+    }[kind]
+    fact_prefix = fmt + ("_inbox" if kind == "issue" else "_discussion_inbox")
+
     def command(action, fields=(), expected=0, *, error_reply=False):
-        return c.node_command(SCRIPT, [action, *connection(server, token), *fields],
+        return c.node_command(SCRIPT, [action, *connection(server, token, kind), *fields],
                               expected, error_reply=error_reply)
 
     guards = ["--expected-principal", PRINCIPAL, "--expected-incarnation", incarnation]
@@ -27,7 +44,7 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
     def canonical(number="1", head=None):
         args = ["inbox", "show", root, TENANT, REPOSITORY, number, "--trusted-local",
                 "--principal", PRINCIPAL, "--object-format", fmt,
-                "--expected-incarnation", incarnation]
+                "--expected-incarnation", incarnation, "--kind", kind]
         if head is not None:
             args += ["--expected-head", head]
         page = json.loads(c.run(*args))
@@ -37,13 +54,11 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
         return page
 
     def compare(observed, native):
-        row = dict(native["threads"][0])
-        for field in ("number", "issue_version", "preference_version", "read_through", "latest_other_version"):
-            if row[field] is not None:
-                row[field] = int(row[field])
-        # Native CLI exposes the canonical enum; HTTP names its automatic mode.
-        row["mode"] = {"participating": "automatic", "subscribed": "subscribed", "muted": "muted"}[row["mode"]]
+        row = http_thread(native["threads"][0], kind)
         page = observed["pages"][0]
+        if kind == "discussion":
+            require(page["target_kind"] == native["target_kind"] == kind
+                    and "issue_version" not in row, "discussion inbox was relabeled as an issue")
         require(observed["complete"] is True and observed["read_only"] is True
                 and observed["mutation_submitted"] is False and page["found"] is True
                 and page["thread"] == row and observed["snapshot_token"] == native["snapshot_token"]
@@ -55,17 +70,17 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
                     "outbox_root": native["outbox_root"], "complete": True},
                 "inbox operator disagrees with independent canonical Rust read")
 
-    # Issue writes stay ungranted: the grant twins differ only in notifications-write.
-    grants("issues-read,outcomes-read,notifications-write")
-    version = issue()["issue"]["version"]
-    c.run("issue", "comment", root, TENANT, REPOSITORY, "1", "--trusted-local",
+    # Thread writes stay ungranted: the grant twins differ only in notifications-write.
+    grants(enabled)
+    version = source()[kind]["version"]
+    c.run(kind, "comment", root, TENANT, REPOSITORY, "1", "--trusted-local",
           "--object-format", fmt, "--principal", "44" * 16,
-          "--idempotency-key", "inbox-other-activity", "--expected-version", version,
+          "--idempotency-key", kind + "-inbox-other-activity", "--expected-version", version,
           "--body", "Activity by another authenticated fixture actor")
     native = canonical()
     require(native["threads"][0]["unread"] is True
             and int(native["threads"][0]["latest_other_version"]) == version + 1,
-            "foreign issue activity did not produce canonical unread state")
+            "foreign thread activity did not produce canonical unread state")
     prefix = version + 1
     compare(command("show", ["--number", "1"]), native)
     first = command("list", ["--limit", "1"], 4)
@@ -77,11 +92,11 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
     retained = canonical(head=continuation["expected_head"])
 
     # Newer activity must stay unread when only the earlier observed prefix is acknowledged.
-    c.run("issue", "comment", root, TENANT, REPOSITORY, "1", "--trusted-local",
+    c.run(kind, "comment", root, TENANT, REPOSITORY, "1", "--trusted-local",
           "--object-format", fmt, "--principal", "44" * 16,
-          "--idempotency-key", "inbox-newer-activity", "--expected-version", prefix,
+          "--idempotency-key", kind + "-inbox-newer-activity", "--expected-version", prefix,
           "--body", "Newer activity must remain unread")
-    original_issue = issue()
+    original_source = source()
     records = []
     for expected, action in enumerate(("subscribe", "mute", "automatic", "read", "unread")):
         path = directory / f"inbox-{action}.json"
@@ -99,9 +114,9 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
                 and row["read_through"] == (str(prefix) if action == "read" else None)
                 and row["unread"] is True, "inbox action changed mode, prefix or newer unread activity")
         compare(command("show", ["--number", "1"]), native)
-        observed_issue = issue()
-        require(observed_issue["issue"] == original_issue["issue"] and observed_issue["events"] == original_issue["events"],
-                "inbox preference changed canonical issue content/history")
+        observed_source = source()
+        require(observed_source[kind] == original_source[kind] and observed_source["events"] == original_source["events"],
+                "inbox preference changed canonical thread content/history")
         data = path.read_bytes()
         require(stat.S_IMODE(path.stat().st_mode) == 0o600 and path.stat().st_nlink == 1
                 and token.read_bytes() not in data, "inbox custody is not private and token-free")
@@ -114,7 +129,7 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
                     and result["result"] == {"terminal": True, **terminal}
                     and path.read_bytes() == data and canonical() == before,
                     "old inbox recovery reapplied a superseded preference or changed custody")
-    c.facts[f"{fmt}_inbox_actions_prefix_and_original_recovery"] = True
+    c.facts[f"{fact_prefix}_actions_prefix_and_original_recovery"] = True
 
     tail = command("list", ["--limit", "1", "--after", str(continuation["after"]),
                             "--expected-head", continuation["expected_head"], *guards])
@@ -123,7 +138,7 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
             "inbox continuation silently refreshed its snapshot or lost the next thread")
     compare(command("show", ["--number", "1", "--expected-head", continuation["expected_head"], *guards]), retained)
     require(canonical() == before, "retained inbox read changed current canonical preference")
-    c.facts[f"{fmt}_inbox_retained_reads_and_canonical_state"] = True
+    c.facts[f"{fact_prefix}_retained_reads_and_canonical_state"] = True
 
     for label, fields, code in (
         ("stale", ["--expected-version", "0", *guards], "inbox_operator_preference_moved"),
@@ -134,10 +149,10 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
         result = command("subscribe", ["--number", "1", "--record", str(path), *fields], 2, error_reply=True)
         require(result["code"] == code and result["state"] == "not_submitted"
                 and not path.exists() and canonical() == before, "inbox preflight refusal created custody or state")
-    c.facts[f"{fmt}_inbox_stale_and_identity_refusals"] = True
+    c.facts[f"{fact_prefix}_stale_and_identity_refusals"] = True
 
     path = directory / "inbox-denied.json"
-    grants("issues-read,outcomes-read")
+    grants(disabled)
     denied = command("subscribe", ["--number", "1", "--expected-version", "5", *guards,
                                    "--record", str(path)], 2, error_reply=True)
     require(denied["state"] == "submitted_unknown" and denied["http_status"] == 403
@@ -147,7 +162,7 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
     require(unknown["state"] == "unresolved" and unknown["mutation_submitted"] is False
             and unknown["absence_proves_non_commit"] is False and canonical() == before,
             "absent inbox outcome claimed non-commit or dispatched a preference")
-    grants("issues-read,outcomes-read,notifications-write")
+    grants(enabled)
     allowed = command("retry", ["--record", str(path)])
     final = canonical()
     require(allowed["mutation_submitted"] is True and allowed["result"]["outcome"] == "committed"
@@ -155,10 +170,10 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
             and final["threads"][0]["mode"] == "subscribed" and path.read_bytes() == data,
             "restored grant failed the exact retained inbox request")
     compare(command("show", ["--number", "1"]), final)
-    observed_issue = issue()
-    require(observed_issue["issue"] == original_issue["issue"] and observed_issue["events"] == original_issue["events"],
-            "inbox grant/recovery twins changed issue state")
-    c.facts[f"{fmt}_inbox_independent_grant_twins"] = True
+    observed_source = source()
+    require(observed_source[kind] == original_source[kind] and observed_source["events"] == original_source["events"],
+            "inbox grant/recovery twins changed thread state")
+    c.facts[f"{fact_prefix}_independent_grant_twins"] = True
 
     path = directory / "inbox-current-prefix.json"
     fields = ["--number", "1", "--expected-version", "6", *guards, "--record", str(path)]
@@ -187,18 +202,19 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
             and path.read_bytes() == data and canonical() == cleared,
             "old full-prefix recovery marked a later explicit unread preference as read")
     compare(command("show", ["--number", "1"]), cleared)
-    observed_issue = issue()
-    require(observed_issue["issue"] == original_issue["issue"] and observed_issue["events"] == original_issue["events"],
-            "read/unread preference toggles changed canonical issue content/history")
-    c.facts[f"{fmt}_inbox_prefix_bounds_and_read_toggle"] = True
+    observed_source = source()
+    require(observed_source[kind] == original_source[kind] and observed_source["events"] == original_source["events"],
+            "read/unread preference toggles changed canonical thread content/history")
+    c.facts[f"{fact_prefix}_prefix_bounds_and_read_toggle"] = True
 
 
-def missing_inbox_service(c, server, root, token, fmt):
+def missing_inbox_service(c, server, root, token, fmt, *, kind="issue"):
     before = c.run("at", root, TENANT, REPOSITORY, "latest")
-    denied = c.node_command(SCRIPT, ["list", *connection(server, token)], 2, error_reply=True)
+    denied = c.node_command(SCRIPT, ["list", *connection(server, token, kind)], 2, error_reply=True)
     require(denied["state"] == "read_incomplete" and denied["operation_completed"] is False
             and denied["http_status"] == 403 and denied["record"] is None
             and denied["absence_proves_non_commit"] is False
             and c.run("at", root, TENANT, REPOSITORY, "latest") == before,
             "missing native inbox route was accepted as a complete observation")
-    c.facts[f"{fmt}_inbox_missing_native_service_refusal"] = True
+    fact_prefix = fmt + ("_inbox" if kind == "issue" else "_discussion_inbox")
+    c.facts[f"{fact_prefix}_missing_native_service_refusal"] = True

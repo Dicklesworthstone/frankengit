@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from scoped_events_smoke import Campaign, HttpServer, PRINCIPAL, REPOSITORY, TENANT, require, file_sha256
 from operator_inbox_smoke import run_inbox_case, missing_inbox_service
+from operator_discussion_inbox_smoke import seed_discussions, run_discussion_inbox_case
 
 ROOT = Path(__file__).resolve().parents[2]
 TOKEN = "c" * 64
@@ -104,7 +105,8 @@ class OperatorCampaign(Campaign):
 
 
 @contextmanager
-def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt: str, *, allow_issues=True):
+def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt: str, *,
+                 allow_issues=True, allow_discussions=False):
     # Fetch rejects some ports even on loopback. Select only native-owned
     # listeners above the pinned runtime's highest blocked port (10080),
     # before any request. Every discarded listener must drain normally.
@@ -112,6 +114,8 @@ def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt:
         server = HttpServer(campaign, root, credentials, f"issue-{fmt}-{attempt}")
         if not allow_issues:
             server.command.remove("--allow-issues")
+        if allow_discussions:
+            server.command.append("--allow-discussions")
         server.command.append("--allow-outcomes")
         with server:
             port = urlsplit(server.url).port
@@ -330,7 +334,8 @@ def run_case(campaign: OperatorCampaign, fmt: str) -> None:
         require(page["found"] is True and page["node_closed"] is True, "native canonical issue read incomplete")
         return page
 
-    with issue_server(campaign, root, credentials, fmt) as server:
+    seeded_discussions = seed_discussions(campaign, root, fmt)
+    with issue_server(campaign, root, credentials, fmt, allow_discussions=True) as server:
         scope = {"tenant_id": TENANT, "repository_id": REPOSITORY,
                  "repository_incarnation": incarnation, "principal_id": PRINCIPAL}
 
@@ -431,8 +436,13 @@ def run_case(campaign: OperatorCampaign, fmt: str) -> None:
         campaign.facts[f"{fmt}_independent_outcome_grant"] = True
         forge_case(campaign, server, directory, root, fmt, token_path, grants, canonical)
         run_inbox_case(campaign, server, directory, root, fmt, token_path, incarnation, grants, canonical)
-    with issue_server(campaign, root, credentials, fmt + "-inbox-disabled", allow_issues=False) as server:
+        run_discussion_inbox_case(campaign, server, directory, root, fmt, token_path, incarnation, grants,
+                                 seeded_discussions)
+    with issue_server(campaign, root, credentials, fmt + "-inbox-disabled", allow_issues=False,
+                      allow_discussions=True) as server:
         missing_inbox_service(campaign, server, root, token_path, fmt)
+    with issue_server(campaign, root, credentials, fmt + "-discussion-inbox-disabled") as server:
+        missing_inbox_service(campaign, server, root, token_path, fmt, kind="discussion")
     campaign.facts[f"{fmt}_owned_service_drained"] = True
     print(f"OPERATOR_ISSUE {fmt}: three real CLI/HTTP/native paths, issue/inbox actions, recovery, retained reads and drain", flush=True)
 
@@ -454,7 +464,7 @@ def main() -> None:
     summary: dict[str, Any] = {"complete": False, "facts": campaign.facts,
         "binary_sha256": file_sha256(fg), "node_sha256": file_sha256(node), "artifacts": str(campaign.work),
         "entrypoints": ["scripts/remote_issue.mjs", "scripts/forge_issues.mjs", "scripts/forge_inbox.mjs"],
-        "non_claim": "Three real issue/inbox entrypoints; not discussion inboxes, every operator, same-source build qualification, browser UI, TLS or D10 acceptance."}
+        "non_claim": "Three real issue/inbox entrypoints, including issue/discussion namespaces; not every operator, same-source build qualification, browser UI, TLS or D10 acceptance."}
 
     def stop(_signum: int, _frame: Any) -> None:
         raise InterruptedError("operator campaign interrupted; draining owned children")

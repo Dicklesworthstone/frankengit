@@ -239,13 +239,17 @@ notification delivery.
 
 The discovered `scripts/e2e/suites/operator/remote_issue.sh` campaign also runs
 the shipped inbox CLI against `fg serve-http`, with separate `fg inbox` reads
-checking canonical preferences and source positions. Its issue-only cases cover
+checking canonical preferences and source positions. Both namespace cases cover
 the five preference actions, older read prefixes with newer unread activity,
 retained pagination, original-key recovery after later preferences, stale/owner
-refusals, independent notification-write grant restoration, and a disabled native
-issue service. The receipt binds each selected entrypoint's client and native
+refusals, independent notification-write grant restoration, and the selected
+native service being disabled while the other namespace stays enabled. Equal
+issue/discussion numbers retain separate canonical preferences. Issue read grants
+cannot disclose discussion inboxes, nor discussion read grants issue inboxes;
+each permitted disclosure twin adds only its missing read scope. The receipt
+binds each selected entrypoint's client and native
 binary digests and actual successful/expected-nonzero invocation counts.
 `./scripts/verify.sh operator` selects this campaign with its one native build and
 pinned Node runtime. A direct campaign run against a retained binary qualifies
-only that named producer, not the current source, discussion inboxes, crash
+only that named producer, not the current source, crash
 durability, independent verification or the complete operator matrix.
