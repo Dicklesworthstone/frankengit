@@ -2,11 +2,16 @@
 // Rust engine owns proof decoding and Git semantics; no fallback is permitted.
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdtemp, open, realpath, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
+import * as fsp from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executable, parseJson, readPrivate } from './workflow_watch_io.mjs';
 import { runNativeProcess } from '../lib/native-process-owner.mjs';
+
+// Test seam: keep filesystem calls on a mutable object so fault-injection tests
+// can replace them without depending on runtime builtin-export monkeypatching.
+export const nativeFs = { lstat: fsp.lstat, open: fsp.open };
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const same = (a, b) => ['dev', 'ino', 'size', 'mode', 'uid', 'mtimeMs', 'ctimeMs'].every(k => a[k] === b[k]);
@@ -19,9 +24,9 @@ export async function prepareNativePackageRead(fg, plan, maximumRequests, check)
   }
   if (plan.cost.blobRequests + plan.files.length > maximumRequests) throw new Error('Native proof request budget exceeded before reads.');
   check(); await executable(fg); check();
-  const identity = await lstat(fg);
+  const identity = await nativeFs.lstat(fg);
   if (identity.size > MAX_EXECUTABLE_BYTES) fail('native_source_proof_executable_limit');
-  const file = await open(fg, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const file = await nativeFs.open(fg, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await file.stat(); check();
     // Revalidate the opened object before allocating or reading its data: the
@@ -38,7 +43,7 @@ export async function prepareNativePackageRead(fg, plan, maximumRequests, check)
     }
     check();
     const extra = await file.read(buffer, 0, 1, at); check();
-    if (extra.bytesRead || !same(identity, await file.stat()) || !same(identity, await lstat(fg))) {
+    if (extra.bytesRead || !same(identity, await file.stat()) || !same(identity, await nativeFs.lstat(fg))) {
       fail('native_source_proof_executable_changed');
     }
     check();
@@ -50,12 +55,12 @@ export async function verifyNativePackageRead(native, plan, value, verified, tok
   if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('native_source_proof_invalid_token');
   const created = await mkdtemp(join(tmpdir(), 'fg-package-native-'));
   let scratch, identity;
-  try { scratch = await realpath(created); await chmod(scratch, 0o700); identity = await lstat(scratch); }
+  try { scratch = await realpath(created); await chmod(scratch, 0o700); identity = await nativeFs.lstat(scratch); }
   catch (error) { error.nativeScratch = created; throw error; }
   const allowed = new Set(['token']);
   const tokenFile = join(scratch, 'token'); let retain = false, problem, report;
   async function guard() {
-    const current = await lstat(scratch);
+    const current = await nativeFs.lstat(scratch);
     if (!current.isDirectory() || current.dev !== identity.dev || current.ino !== identity.ino ||
         current.uid !== process.getuid() || (current.mode & 0o777) !== 0o700) fail('native_source_proof_scratch_changed');
   }
@@ -64,7 +69,7 @@ export async function verifyNativePackageRead(native, plan, value, verified, tok
     const blobs = new Map(value.blobs.map(row => [row.oid, row.bytesHex]));
     for (let at = 0; at < plan.files.length; at++) {
       check(); await guard();
-      if (!same(native.identity, await lstat(native.fg))) fail('native_source_proof_executable_changed');
+      if (!same(native.identity, await nativeFs.lstat(native.fg))) fail('native_source_proof_executable_changed');
       const wanted = plan.files[at], member = verified.files[at], name = `blob-${at}`, output = join(scratch, name);
       allowed.add(name);
       const remaining = Math.floor(deadline - performance.now()); check();
@@ -90,7 +95,7 @@ export async function verifyNativePackageRead(native, plan, value, verified, tok
           actual.verified !== true || actual.output_state !== 'published' || actual.source_head !== plan.selected.expected_head ||
           actual.source_commit !== plan.independent.commit || actual.object_id !== wanted.blob || actual.kind !== member.kind ||
           actual.bytes !== wanted.sourceBytes || actual.output !== output || result.stderr.length !== 0) fail('native_source_proof_invalid_report');
-      const file = await open(output, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const file = await nativeFs.open(output, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const stat = await file.stat();
         if (!stat.isFile() || stat.uid !== process.getuid() || stat.nlink !== 1 || stat.size !== wanted.sourceBytes) fail('native_source_proof_output_changed');
@@ -100,7 +105,7 @@ export async function verifyNativePackageRead(native, plan, value, verified, tok
       if (body.toString('hex') !== blobs.get(wanted.blob)) fail('native_source_proof_content_mismatch');
     }
     check();
-    if (!same(native.identity, await lstat(native.fg))) fail('native_source_proof_executable_changed');
+    if (!same(native.identity, await nativeFs.lstat(native.fg))) fail('native_source_proof_executable_changed');
     report = { profile: 'native-pinned-head-capture-v1', verified_at_capture: true,
       head: plan.selected.expected_head, binary_sha256: native.digest, files: plan.files.length,
       proofs_retained_in_package: false, independent_build_attested: false };
@@ -114,7 +119,7 @@ export async function verifyNativePackageRead(native, plan, value, verified, tok
         // Unknown files or changed ownership are retained, never recursive GC.
         if (names.some(name => !allowed.has(name))) fail('native_source_proof_unknown_scratch');
         for (const name of names) {
-          await guard(); const path = join(scratch, name), stat = await lstat(path);
+          await guard(); const path = join(scratch, name), stat = await nativeFs.lstat(path);
           if (!stat.isFile() || stat.uid !== process.getuid() || stat.nlink !== 1) fail('native_source_proof_scratch_changed');
           await unlink(path);
         }

@@ -4,11 +4,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { prepareNativePackageRead } from '../operator/source_package_native.mjs';
+import { nativeFs, prepareNativePackageRead } from '../operator/source_package_native.mjs';
 
 const LIMIT = 256 * 1024 * 1024, QUANTUM = 65536;
 const plan = { selected: { expected_head: `alg:1:${'a'.repeat(64)}`, endpoint: 'http://127.0.0.1:1/repo' },
@@ -28,24 +27,19 @@ async function executable(t, value = payload) {
 }
 
 function observe(t, path, { afterStat, afterData } = {}) {
-  const original = { lstat: fs.lstat, readFile: fs.readFile, open: fs.open };
+  const original = { lstat: nativeFs.lstat, open: nativeFs.open };
   const handles = [], state = { bytes: 0, maximumBuffer: 0 };
   let dataObserved = false;
   async function data(bytes, capacity) {
     state.bytes += bytes; state.maximumBuffer = Math.max(state.maximumBuffer, capacity);
     if (bytes && !dataObserved) { dataObserved = true; await afterData?.(); }
   }
-  t.mock.method(fs, 'lstat', async (selected, ...args) => {
+  t.mock.method(nativeFs, 'lstat', async (selected, ...args) => {
     const stat = await original.lstat(selected, ...args);
     if (selected === path) await afterStat?.(stat);
     return stat;
   });
-  t.mock.method(fs, 'readFile', async (selected, ...args) => {
-    const bytes = await original.readFile(selected, ...args);
-    if (selected === path) await data(bytes.length, bytes.length);
-    return bytes;
-  });
-  t.mock.method(fs, 'open', async (selected, ...args) => {
+  t.mock.method(nativeFs, 'open', async (selected, ...args) => {
     const file = await original.open(selected, ...args);
     if (selected === path) {
       handles.push(file); const read = file.read.bind(file);
@@ -57,8 +51,7 @@ function observe(t, path, { afterStat, afterData } = {}) {
     }
     return file;
   });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  t.after(() => { t.mock.restoreAll(); });
   state.closed = async () => {
     for (const file of handles) await assert.rejects(file.stat(), { code: 'EBADF' });
   };
