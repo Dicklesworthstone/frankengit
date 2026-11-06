@@ -10,7 +10,7 @@ or publish a merge. `fg merge prepare` and `fg merge apply` remain separate.
 Rust compilation and native execution were not available in this editing
 environment; this guide is not a passing build or production-conformance report.
 
-## Open, update and close
+## Open, update, close and reopen
 
 For an existing imported node, with independently selected source/target tips:
 
@@ -26,8 +26,8 @@ fg pr open "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 7 \
   --body-file ./pr-body.md
 ```
 
-The action is `open`, `update` or `close`. All three supply complete desired
-metadata. Open requires expected version **0**; update and close require a
+The action is `open`, `update`, `close` or `reopen`. All four supply complete desired
+metadata. Open requires expected version **0**; update, close and reopen require a
 positive exact prior aggregate version. There is no automatic number allocation,
 latest-version substitution, implicit branch-tip refresh or metadata merge.
 
@@ -39,6 +39,15 @@ both supplied tips to match current authority. To close that updated PR, use
 Closing does not silently edit metadata and can preserve recorded tips after a
 branch moves or is deleted, subject to the node's retained-object checks.
 Closed or merged PRs cannot be resurrected through an update.
+
+Use `reopen` to resume a closed, unmerged PR at its exact current version. In
+the sequence above, supply expected version `3`, a new key and complete desired
+metadata. Source and target branch identities remain fixed; title/body and
+explicit tips may be refreshed, and both tips must match current authority.
+Reopen refuses missing branches, stale versions/tips, already-open PRs and
+merged PRs. It changes no branch and preserves the original opener. The same
+command is available as MCP `frankengit_pull_reopen` under the independent PR
+write grant, including canonical sponsored `pulls-write` credentials.
 
 Exactly one of `--body <text>` and `--body-file <path>` is required. An explicit
 `--body ''` means an empty body, not an omitted field. File bytes are read once,

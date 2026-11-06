@@ -13,6 +13,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 pub(super) const OPEN: &str = "frankengit_pull_open";
 pub(super) const UPDATE: &str = "frankengit_pull_update";
 pub(super) const CLOSE: &str = "frankengit_pull_close";
+pub(super) const REOPEN: &str = "frankengit_pull_reopen";
 const FIELDS: &[&str] = &[
     "number",
     "expected_version",
@@ -28,13 +29,14 @@ const FIELDS: &[&str] = &[
 ];
 
 pub(super) fn is_tool(name: &str) -> bool {
-    matches!(name, OPEN | UPDATE | CLOSE)
+    matches!(name, OPEN | UPDATE | CLOSE | REOPEN)
 }
 pub(super) fn tools() -> Vec<Tool> {
     [
         (OPEN, "Open a native PR at version zero from explicit source and target branches/tips. Canonical metadata mutation only; does not move refs, approve or merge code."),
         (UPDATE, "Replace complete PR metadata at an exact positive version and explicit branch tips. Cannot retarget branches or reopen a closed/merged PR. No latest-tip lookup."),
         (CLOSE, "Close a PR using its exact positive version and unchanged full recorded metadata. Remains possible after branch deletion. Retry the identical command and durable key."),
+        (REOPEN, "Reopen a closed, unmerged PR at its exact positive version with complete metadata and current source/target tips on the same branches. Does not restore branches, move refs, approve or merge code. Retry the identical command and durable key."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema() }).collect()
 }
 fn schema() -> Value {
@@ -150,6 +152,7 @@ pub(super) fn parse(
         OPEN => PullRequestAction::Open,
         UPDATE => PullRequestAction::Update,
         CLOSE => PullRequestAction::Close,
+        REOPEN => PullRequestAction::Reopen,
         _ => return Err(ToolError::invalid("tool_not_granted")),
     };
     Ok(PullRequestCommand {

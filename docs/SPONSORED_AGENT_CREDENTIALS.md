@@ -230,6 +230,17 @@ additional milestone, notification, check, review, event-feed, source, queue,
 artifact, agent-context or administration tools. An unknown or unsupported tool
 is refused before credential or repository lookup.
 
+`--allow-pull-writes` with a canonical `pulls-write` scope admits the exact
+metadata tools `frankengit_pull_open`, `frankengit_pull_update`,
+`frankengit_pull_close`, `frankengit_pull_reopen`, `frankengit_pull_comment` and
+`frankengit_pull_append_comment`. Reopening uses the existing native command:
+an exact positive closed-PR version, full metadata and current source/target
+tips on the original branches. It may refresh the explicit tips and title/body;
+it cannot restore branches, reopen a merged PR or grant a review/merge operation.
+Each retry reauthenticates the current credential, while a terminal retry after
+credential rotation preserves the original agent/sponsor evidence. PR reads and
+outcome queries retain their independent scopes.
+
 For current-source access, issue a credential with `--operations source-read`
 and select one or both independent source ceilings. Add `source-history-read`
 to the credential when historical analysis is required:

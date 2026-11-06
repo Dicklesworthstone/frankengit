@@ -1,4 +1,5 @@
 //! The real embedded authority owns every mutation, refusal and recovered key.
+mod reopen;
 use super::super::super::{
     WriteGrants,
     protocol::{ReadTools, Server},
@@ -349,7 +350,7 @@ fn pull_write_grants_do_not_imply_reads_issues_or_recovery_and_descriptors_are_m
     options.outcomes = false;
     let mut backend = NodeTools::open(options).unwrap();
     // The pull write tools plus the comment write and append tools (x2mv.4.39).
-    assert_eq!(backend.tools().len(), 5);
+    assert_eq!(backend.tools().len(), 6);
     for tool in backend.tools() {
         assert!(
             is_tool(tool.name)
@@ -403,5 +404,7 @@ fn pull_write_grants_do_not_imply_reads_issues_or_recovery_and_descriptors_are_m
     assert!(reader.call(OPEN, &fields).unwrap_err().invalid);
     // Direct adapter dispatch has the same denial as discovery/protocol dispatch.
     assert!(call(&reader, OPEN, &fields).unwrap_err().invalid);
+    assert!(reader.call(REOPEN, &fields).unwrap_err().invalid);
+    assert!(call(&reader, REOPEN, &fields).unwrap_err().invalid);
     reader.close().unwrap();
 }

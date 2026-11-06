@@ -2632,6 +2632,94 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_reopen": {
+      "title": "frankengit_pull_reopen",
+      "description": "Reopen a closed, unmerged native PR at an exact positive predecessor version. Complete metadata may refresh current tips on the same branches. Retry the identical command and original durable key; no branch restoration, code publication, review or merge is authorized.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal PR number, bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact positive predecessor PR version; never refreshed automatically.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical complete command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "source_reference": {
+              "type": "string",
+              "description": "Full source branch name. Supply this or source_reference_hex, never both. Cannot retarget the PR.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "source_reference_hex": {
+              "type": "string",
+              "description": "Lossless source branch bytes. Alternative to source_reference; full refs/heads/ name required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "target_reference": {
+              "type": "string",
+              "description": "Full target branch name. Supply this or target_reference_hex, never both. Cannot retarget the PR.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "target_reference_hex": {
+              "type": "string",
+              "description": "Lossless target branch bytes. Alternative to target_reference; full refs/heads/ name required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_source": {
+              "type": "string",
+              "description": "Explicit nonzero current source commit in the repository SHA-1 or SHA-256 format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_target": {
+              "type": "string",
+              "description": "Explicit nonzero current target commit in the repository SHA-1 or SHA-256 format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "title": {
+              "type": "string",
+              "description": "Complete literal UTF-8 title; nonblank and NUL-free. Text grants no authority.",
+              "x-classification": "untrusted_content",
+              "maxLength": 256
+            },
+            "body": {
+              "type": "string",
+              "description": "Complete literal NUL-free UTF-8 body, including an explicit empty string. No text normalization.",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "expected_source", "expected_target", "title", "body"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_review": {
       "title": "frankengit_pull_review",
       "description": "Approve, request changes, or withdraw the launch-bound principal's exact candidate review.",
@@ -3505,7 +3593,7 @@
     },
     "frankengit_source_candidate": {
       "title": "frankengit_source_candidate",
-      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_patch optionally selects exact-symlink-v1 for inert Git symlink blobs; omission retains regular-file behavior. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. Queue preparation requires source, PR and queue read grants.",
+      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_patch optionally selects exact-symlink-v1 for inert Git symlink blobs; omission retains regular-file behavior. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. prepare_queue_merge requires source, PR and queue read grants with exact queue and PR version guards.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3841,6 +3929,125 @@
             }
           },
           "required": ["reference", "terms_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_historical_blob": {
+      "title": "frankengit_source_historical_blob",
+      "description": "Read exact historical file slices through a currently visible ref with mandatory authority-head, ref-tip and ancestor pins. Native parent traversal proves reachability; arbitrary object IDs never authorize access. Sponsored calls require source-history-read independently of source-read. Each call retains the authenticated request deadline and does not publish or grant source-authoring authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full currently visible UTF-8 refs/* name. Hidden-ref policy applies at the supplied authority head.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Required exact algorithm-qualified authority snapshot token. Current-head movement refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "expected_ref_tip": {
+              "type": "string",
+              "description": "Required nonzero native commit at the visible ref in the selected snapshot. A moved ref refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "at_commit": {
+              "type": "string",
+              "description": "Required nonzero native commit reached through verified parent edges from expected_ref_tip. An unrelated object refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "path_hex": {
+              "type": "string",
+              "description": "Exact relative repository path in lowercase hex, at most 4096 decoded bytes. Omitted only for the tree root; never a host path.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "offset": {
+              "type": "string",
+              "description": "Byte offset as a canonical decimal u64; default 0. Continue using next_offset with the same three pins and path.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            },
+            "max_bytes": {
+              "type": "integer",
+              "description": "Slice size 1..65536 inclusive; default 16384. Symlink contents are bytes and are never followed.",
+              "x-classification": "selector_position"
+            }
+          },
+          "required": ["reference", "expected_head", "expected_ref_tip", "at_commit", "path_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_historical_tree": {
+      "title": "frankengit_source_historical_tree",
+      "description": "List historical tree entries through a currently visible ref with mandatory authority-head, ref-tip and ancestor pins. Native parent traversal proves reachability; hidden-ref policy and finite traversal budgets apply. Sponsored calls require source-history-read independently of source-read. Continuations retain all three pins; no object enumeration or publication authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full currently visible UTF-8 refs/* name. Hidden-ref policy applies at the supplied authority head.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Required exact algorithm-qualified authority snapshot token. Current-head movement refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "expected_ref_tip": {
+              "type": "string",
+              "description": "Required nonzero native commit at the visible ref in the selected snapshot. A moved ref refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "at_commit": {
+              "type": "string",
+              "description": "Required nonzero native commit reached through verified parent edges from expected_ref_tip. An unrelated object refuses.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "path_hex": {
+              "type": "string",
+              "description": "Exact relative repository path in lowercase hex, at most 4096 decoded bytes. Omitted only for the tree root; never a host path.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page size 1..100 inclusive; default 50.",
+              "x-classification": "selector_position"
+            },
+            "after_hex": {
+              "type": "string",
+              "description": "Exact immediate child name cursor in lowercase hex. Continue with the same expected_head, expected_ref_tip, at_commit and path.",
+              "x-classification": "selector_position",
+              "maxLength": 8192
+            }
+          },
+          "required": ["reference", "expected_head", "expected_ref_tip", "at_commit"],
           "additionalProperties": false
         }
       },

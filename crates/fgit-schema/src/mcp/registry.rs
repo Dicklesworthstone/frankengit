@@ -8,12 +8,14 @@ mod assignees;
 mod check_evidence;
 mod core;
 mod discussions;
+mod historical;
 mod indexed_search;
 mod labels;
 mod locking;
 mod milestones;
 mod notifications;
 mod pull_append;
+mod pull_reopen;
 mod queues;
 mod rebase;
 mod tags;
@@ -80,7 +82,7 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 49] = [
+const ADDITIONS: [McpToolEntry; 52] = [
     agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,
@@ -116,6 +118,7 @@ const ADDITIONS: [McpToolEntry; 49] = [
     milestones::SHOW,
     pull_append::ENTRY,
     check_evidence::READ,
+    pull_reopen::ENTRY,
     queues::DEQUEUE,
     queues::ENQUEUE,
     queues::LAND,
@@ -123,6 +126,8 @@ const ADDITIONS: [McpToolEntry; 49] = [
     queues::LIST,
     queues::REORDER,
     queues::SHOW,
+    historical::BLOB,
+    historical::TREE,
     rebase::PUBLISH,
     indexed_search::ENTRY,
     verified_blob::TOOL,

@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 96,
+  "total_tools": 99,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -636,6 +636,16 @@
       "rest_api_path": "POST /repos/{id}/pulls"
     },
     {
+      "tool": "frankengit_pull_reopen",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg pr reopen",
+      "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/reopen"
+    },
+    {
       "tool": "frankengit_pull_review",
       "version": 1,
       "owner_subsystem": "forge",
@@ -814,6 +824,26 @@
       "capability": "read_derived_generation",
       "cli_command": "fg search --context",
       "rest_api_path": "/api/v1/source/context-initial"
+    },
+    {
+      "tool": "frankengit_source_historical_blob",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg-mcp (frankengit_source_historical_blob)",
+      "rest_api_path": "/api/v1/source/historical-blob"
+    },
+    {
+      "tool": "frankengit_source_historical_tree",
+      "version": 1,
+      "owner_subsystem": "git-core",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg-mcp (frankengit_source_historical_tree)",
+      "rest_api_path": "/api/v1/source/historical-tree"
     },
     {
       "tool": "frankengit_source_initial",

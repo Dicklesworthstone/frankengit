@@ -712,7 +712,8 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 94);
+        assert_eq!(server_names.len(), 95);
+        assert!(server_names.contains(&pull_writes::REOPEN));
         assert!(server_names.contains(&source::HISTORICAL_TREE));
         assert!(server_names.contains(&source::HISTORICAL_BLOB));
         assert!(server_names.contains(&pull_comments::APPEND));

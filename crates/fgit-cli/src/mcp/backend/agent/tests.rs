@@ -8,6 +8,7 @@ use support::*;
 
 mod history;
 mod lifecycle;
+mod pull_reopen;
 mod source;
 mod support;
 
@@ -29,7 +30,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 49);
+    assert_eq!(tools.len(), 50);
     for tool in &tools {
         assert!(operation(&options, tool.name).is_some());
     }

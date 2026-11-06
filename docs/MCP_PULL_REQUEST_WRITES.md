@@ -1,7 +1,7 @@
 # Native pull-request mutations through MCP
 
 The operator may independently enable `--allow-pull-writes` on `fg-mcp`.
-This closes the PR submission/update/closure path over the existing durable
+This exposes PR submission, update, closure and reopening over the existing durable
 `OneNode::admit_pull_request_durable_in` boundary. There is no MCP-owned PR
 store, caller-selected principal, shell subprocess, or latest-tip lookup.
 
@@ -18,9 +18,16 @@ an exact repository incarnation. An operator explicitly sponsors the connected
 process as that principal; this is not remote IAM or an Intent Run broker.
 Do not expose the stdio channel to an untrusted remote principal.
 
+The separate sponsored-agent launch profile also permits these lifecycle tools
+when `--allow-pull-writes` intersects a current canonical `pulls-write` grant.
+The credential supplies the agent and sponsor; no caller principal is accepted.
+Reads and original-key recovery still require their independent scopes and
+launch ceilings. See [sponsored credentials](SPONSORED_AGENT_CREDENTIALS.md).
+
 ## Commands
 
-`frankengit_pull_open`, `frankengit_pull_update`, and `frankengit_pull_close`
+`frankengit_pull_open`, `frankengit_pull_update`, `frankengit_pull_close`, and
+`frankengit_pull_reopen`
 all accept a complete explicit command:
 
 ```json
@@ -37,7 +44,7 @@ all accept a complete explicit command:
 }
 ```
 
-Open requires version zero. Update and close require a positive exact prior
+Open requires version zero. Update, close and reopen require a positive exact prior
 version, not a floating latest version. Numbers and versions are canonical
 unsigned decimal strings. Native OIDs must be nonzero, lowercase, and match
 the repository's SHA-1 or SHA-256 domain.
@@ -48,7 +55,7 @@ encoding for each branch. Names are bounded to 4096 bytes and must be full
 `refs/heads/...` references. The schema expresses the alternatives with
 `oneOf`; dispatch independently enforces them.
 
-All operations require title and body, including close. An empty body is an
+All operations require title and body, including close and reopen. An empty body is an
 explicit replacement, not an omitted field. Titles retain the native 256-byte
 bound; MCP bodies are at most 16 KiB. Unknown/inapplicable fields, forced
 updates, repository selectors, caller principals, approval flags, and bundle
@@ -57,10 +64,19 @@ inputs are rejected before admission.
 ## Publication and recovery
 
 Native admission verifies the exact PR predecessor and the source/target tips
-for open/update. Updating cannot retarget branch identities or reopen a closed
+for open/update/reopen. Updating cannot retarget branch identities or reopen a closed
 or merged PR. Close requires unchanged full recorded data and remains possible
 after a source branch disappears. These are native forge rules, not assumptions
 made by a transport-local projection.
+
+Reopen requires a closed, unmerged PR and preserves its source and target branch
+identities. The complete command may replace title/body and explicitly refresh
+both tips to their current values. For an open at version `1` followed by close
+at version `2`, call `frankengit_pull_reopen` with `expected_version: "2"`, a new
+durable key and the complete desired metadata. Missing branches, stale tips,
+retargeting, already-open PRs and merged PRs refuse. Reopening never recreates a
+deleted branch. The original opener remains recorded, and the reopened PR can
+be updated or closed through the ordinary exact-version commands.
 
 Accepted PR metadata and its existing outbox obligation publish together through
 canonical admission. These commands change no Git ref and provide no review,
@@ -87,8 +103,12 @@ Parser/schema tests cover both native domains, lossless ref bytes, complete
 metadata, exact versions, injected authority fields and semantic-identity
 changes. Persisted-node integration tests exercise the MCP handshake, PR
 lifecycle, identical retries, stale refusals, unchanged-metadata closure after
-branch deletion, stopped-intake recovery, independent grants and mutation
-annotations. Existing issue-read/write tests retain their original grants.
+branch deletion, explicit tip/metadata refresh on reopening, missing-branch and
+retargeting refusals, stopped-intake recovery, independent grants and mutation
+annotations. Sponsored tests exercise write-only credentials, launch-ceiling
+denial, principal injection, revocation and rotated-credential retry while
+preserving the original actor evidence. Existing issue-read/write tests retain
+their original grants.
 
 Run `cargo test --locked -p fgit-cli --bin fg-mcp` on the pinned toolchain.
 Rust/Cargo are unavailable in the session introducing this implementation;
