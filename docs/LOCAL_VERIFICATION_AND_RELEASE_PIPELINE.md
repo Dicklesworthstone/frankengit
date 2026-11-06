@@ -2,7 +2,7 @@
 
 **Status:** normative operations profile  
 **Version:** 1.2
-**Last revised:** 2026-11-02
+**Last revised:** 2026-11-06
 
 FrankenGit uses Doodlestein Self-Releaser (`dsr`) directly. The GitHub Actions service must never be used, including hosted and self-hosted runners. Repository workflow definitions remain portable lane descriptions for local DSR/`act` execution. The canonical commands, schemas, and evidence generation live inside the repository.
 
@@ -53,6 +53,10 @@ When `CARGO_BUILD_JOBS` is set, native tool builds pass it explicitly as Cargo
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
 
+Replay artifacts retain both captured output streams. A failed stream copy or
+metadata write publishes neither the replay JSON nor its partial output, warns
+on stderr, and preserves the original lane exit status.
+
 The product `e2e` lane also discovers the operator module suite at
 [`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh).
 It reuses the [pinned JavaScript verifier](LOCAL_JS_VERIFICATION.md) for both
@@ -89,9 +93,11 @@ those production guards are retained. This profile selection applies only to
 The [native installer](../scripts/prepare_operator_native.py) leaves the Cargo/RCH
 delivery unchanged, checks stable source identity and matching SHA-256 bytes,
 and retains a canonical path under a private target subdirectory with mode
-`0500`. Its streaming copy bounds an executable to 2 GiB. This accommodates a
-worker's group-writable build output while retaining
-the operator's executable ownership checks. Incomplete copies stay non-executable;
+`0500`. Its streaming copy bounds an executable to 2 GiB. Both verification
+hash passes enforce the original byte length, with one extra byte used only to
+detect growth; a growing or truncated file refuses before executable promotion.
+This accommodates a worker's group-writable build output while retaining the
+operator's executable ownership checks. Incomplete copies stay non-executable;
 an installation failure prevents dispatch and retains its files for inspection.
 The build remains the trust boundary;
 installation does not authenticate an arbitrary executable. Retained snapshots

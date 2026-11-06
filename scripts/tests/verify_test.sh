@@ -4,6 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 "${PYTHON_BIN:-python3}" - "$ROOT" <<'PY'
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -97,16 +98,92 @@ test -x "$FG_BIN" && test -x "$FG_MCP_BIN"
         path.write_text("#!" + sys.executable + "\nimport json, os, sys\nfrom pathlib import Path\n" + body + "\n")
         path.chmod(0o700)
 
-    def invoke(self, lane="docs", expected=0, changes=None, unset=()):
+    def invoke(self, lane="docs", expected=0, changes=None, unset=(), artifact=False):
         env = {**self.env, **(changes or {})}
         for key in unset: env.pop(key, None)
-        result = subprocess.run(["bash", str(self.root / "scripts/verify.sh"), "--no-artifact", lane],
+        switches = [] if artifact else ["--no-artifact"]
+        result = subprocess.run(["bash", str(self.root / "scripts/verify.sh"), *switches, lane],
                                 cwd=self.base, env=env, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         records = [json.loads(row) for row in self.log.read_text().splitlines()] if self.log.exists() else []
         self.assertTrue(all(row["cwd"] == str(self.root) for row in records))
         self.assertFalse(any(row["args"][0] == "run" for row in records if row["kind"] == "cargo"))
         return result, records
+
+    def test_replay_retains_both_streams_with_matching_digests(self):
+        directory = self.base / "replay artifacts"
+        result, _ = self.invoke(changes={"VERIFY_ARTIFACT_DIR":str(directory)}, artifact=True)
+        receipts = list(directory.glob("*.json"))
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_bytes())
+        captured = (directory / receipt["captured_output_file"]).read_bytes()
+        self.assertEqual(hashlib.sha256(captured).hexdigest(), receipt["captured_output_sha256"])
+        self.assertTrue(captured.startswith(b"stdout\0"))
+        stdout, stderr = captured[len(b"stdout\0"):].split(b"\0stderr\0", 1)
+        self.assertEqual(stdout, result.stdout.encode())
+        self.assertTrue(stdout.endswith(b"caller tool executed\n"))
+        for name, stream in [("stdout", stdout), ("stderr", stderr)]:
+            self.assertEqual(hashlib.sha256(stream).hexdigest(), receipt[name + "_sha256"])
+        self.assertEqual(receipt["exit_code"], 0)
+
+    def replay_copy_failure(self, stream):
+        # A declared cat double writes a real partial file and returns failure
+        # once. Later replay succeeds, so it cannot mask the failed retention.
+        self.command("cat", '''
+path = Path(sys.argv[-1])
+marker = Path(os.environ["TEST_LOG"] + ".copy-failed")
+data = path.read_bytes()
+if path.name.startswith("frankengit-verify-" + os.environ["TEST_COPY_STREAM"] + ".") and not marker.exists():
+    marker.touch()
+    sys.stdout.buffer.write(data[:len(data) // 2])
+    sys.exit(74)
+sys.stdout.buffer.write(data)
+''')
+        for code in [0, 31]:
+            with self.subTest(stream=stream, lane_exit=code):
+                marker = Path(str(self.log) + ".copy-failed")
+                marker.unlink(missing_ok=True)
+                directory = self.base / f"failed {stream} copy {code}"
+                result, _ = self.invoke(expected=code, artifact=True,
+                    changes={"VERIFY_ARTIFACT_DIR":str(directory), "TEST_COPY_STREAM":stream,
+                             "TEST_NATIVE_EXIT":str(code)})
+                self.assertTrue(marker.is_file())
+                self.assertEqual(list(directory.iterdir()), [])
+                self.assertIn("cannot retain captured output", result.stderr)
+                self.assertTrue(result.stdout.endswith("caller tool executed\n"))
+
+    def test_failed_stdout_retention_publishes_no_partial_replay(self):
+        self.replay_copy_failure("stdout")
+
+    def test_failed_stderr_retention_publishes_no_partial_replay(self):
+        self.replay_copy_failure("stderr")
+
+    def test_failed_metadata_write_publishes_no_partial_replay(self):
+        shim = self.base / "controlled metadata write failure.bash"
+        shim.write_text('''printf() {
+  if [[ "${1-}" == "$TEST_METADATA_FORMAT" && ! -e "${TEST_LOG}.metadata-failed" ]]; then
+    : > "${TEST_LOG}.metadata-failed"
+    builtin printf 'partial-metadata'
+    return 74
+  fi
+  builtin printf "$@"
+}
+''')
+        # Fail the opening, an intermediate field, and the final write. The
+        # actual partial file must never become a published replay receipt.
+        for at, form in enumerate(['{', '"exit_code":%s,', '"captured_output_sha256":"%s"}\\n']):
+            for code in [0, 31]:
+                with self.subTest(write=at, lane_exit=code):
+                    marker = Path(str(self.log) + ".metadata-failed")
+                    marker.unlink(missing_ok=True)
+                    directory = self.base / f"failed metadata write {at} {code}"
+                    result, _ = self.invoke(expected=code, artifact=True,
+                        changes={"VERIFY_ARTIFACT_DIR":str(directory), "BASH_ENV":str(shim),
+                                 "TEST_METADATA_FORMAT":form, "TEST_NATIVE_EXIT":str(code)})
+                    self.assertTrue(marker.is_file())
+                    self.assertEqual(list(directory.iterdir()), [])
+                    self.assertIn("cannot write", result.stderr)
+                    self.assertTrue(result.stdout.endswith("caller tool executed\n"))
 
     def operator_fixture(self):
         # Dispatch-only doubles; the real shared runtime verifier owns the pin,

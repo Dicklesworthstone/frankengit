@@ -426,9 +426,11 @@ emit_captured_output() {
   local stdout_path="$1"
   local stderr_path="$2"
 
-  printf 'stdout\0'
-  cat -- "${stdout_path}"
-  printf '\0stderr\0'
+  # This function runs in a conditional, where errexit cannot catch a failed
+  # intermediate copy. Never replace that failure with a later successful write.
+  printf 'stdout\0' || return
+  cat -- "${stdout_path}" || return
+  printf '\0stderr\0' || return
   cat -- "${stderr_path}"
 }
 
@@ -519,26 +521,28 @@ write_replay_artifact() {
     return 0
   fi
 
+  # A conditional disables errexit throughout this group. Every field write
+  # must contribute to its status; a later write cannot hide a partial JSON.
   if ! {
-    printf '{'
-    printf '"schema":"%s",' "$(json_escape "${VERIFY_ARTIFACT_SCHEMA}")"
-    printf '"schema_version":%s,' "${VERIFY_ARTIFACT_SCHEMA_VERSION}"
-    printf '"created_at_utc":"%s",' "$(json_escape "${timestamp}")"
-    printf '"lane":"%s",' "$(json_escape "${lane_name}")"
-    printf '"command_argv":%s,' "${command_json}"
-    printf '"head":"%s",' "$(json_escape "${VERIFY_HEAD}")"
-    printf '"dirty":%s,' "${VERIFY_DIRTY}"
-    printf '"dirty_status":"%s",' "$(json_escape "${VERIFY_DIRTY_STATUS}")"
-    printf '"dirty_status_sha256":"%s",' "${VERIFY_DIRTY_STATUS_SHA256}"
-    printf '"dirty_diff_sha256":"%s",' "${VERIFY_DIRTY_DIFF_SHA256}"
-    printf '"rustc_version":"%s",' "$(json_escape "${VERIFY_RUSTC_VERSION}")"
-    printf '"cargo_version":"%s",' "$(json_escape "${VERIFY_CARGO_VERSION}")"
-    printf '"exit_code":%s,' "${lane_exit}"
-    printf '"wall_time_ms":%s,' "${wall_time_ms}"
-    printf '"stdout_sha256":"%s",' "${stdout_sha256}"
-    printf '"stderr_sha256":"%s",' "${stderr_sha256}"
-    printf '"captured_output_format":"stdout\\u0000<bytes>\\u0000stderr\\u0000<bytes>",'
-    printf '"captured_output_file":"%s",' "$(json_escape "${timestamp}-${lane_name}.output")"
+    printf '{' &&
+    printf '"schema":"%s",' "$(json_escape "${VERIFY_ARTIFACT_SCHEMA}")" &&
+    printf '"schema_version":%s,' "${VERIFY_ARTIFACT_SCHEMA_VERSION}" &&
+    printf '"created_at_utc":"%s",' "$(json_escape "${timestamp}")" &&
+    printf '"lane":"%s",' "$(json_escape "${lane_name}")" &&
+    printf '"command_argv":%s,' "${command_json}" &&
+    printf '"head":"%s",' "$(json_escape "${VERIFY_HEAD}")" &&
+    printf '"dirty":%s,' "${VERIFY_DIRTY}" &&
+    printf '"dirty_status":"%s",' "$(json_escape "${VERIFY_DIRTY_STATUS}")" &&
+    printf '"dirty_status_sha256":"%s",' "${VERIFY_DIRTY_STATUS_SHA256}" &&
+    printf '"dirty_diff_sha256":"%s",' "${VERIFY_DIRTY_DIFF_SHA256}" &&
+    printf '"rustc_version":"%s",' "$(json_escape "${VERIFY_RUSTC_VERSION}")" &&
+    printf '"cargo_version":"%s",' "$(json_escape "${VERIFY_CARGO_VERSION}")" &&
+    printf '"exit_code":%s,' "${lane_exit}" &&
+    printf '"wall_time_ms":%s,' "${wall_time_ms}" &&
+    printf '"stdout_sha256":"%s",' "${stdout_sha256}" &&
+    printf '"stderr_sha256":"%s",' "${stderr_sha256}" &&
+    printf '"captured_output_format":"stdout\\u0000<bytes>\\u0000stderr\\u0000<bytes>",' &&
+    printf '"captured_output_file":"%s",' "$(json_escape "${timestamp}-${lane_name}.output")" &&
     printf '"captured_output_sha256":"%s"}\n' "${captured_output_sha256}"
   } > "${temporary_artifact_path}"; then
     artifact_warning "cannot write ${artifact_path}"

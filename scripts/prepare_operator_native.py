@@ -22,10 +22,21 @@ def identity(value):
             value.st_ctime_ns, value.st_mode, value.st_uid)
 
 
-def stream_digest(stream):
+def stream_digest(stream, expected_bytes):
+    if not 0 <= expected_bytes <= MAX_EXECUTABLE_BYTES:
+        raise ValueError("invalid native verification length")
     digest = hashlib.sha256()
-    while chunk := stream.read(1024 * 1024):
+    remaining = expected_bytes
+    while remaining:
+        chunk = stream.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ValueError("native executable changed while verifying")
+        remaining -= len(chunk)
         digest.update(chunk)
+    # A changing file cannot extend this verification pass beyond its original
+    # size. One additional byte distinguishes exact EOF from late growth.
+    if stream.read(1):
+        raise ValueError("native executable changed while verifying")
     return digest.hexdigest()
 
 
@@ -62,12 +73,12 @@ def prepare(source, target):
             os.fsync(out.fileno())
             inp.seek(0)
             if (copied != before.st_size
-                    or not hmac.compare_digest(stream_digest(inp), digest.hexdigest())
+                    or not hmac.compare_digest(stream_digest(inp, before.st_size), digest.hexdigest())
                     or identity(os.fstat(inp.fileno())) != identity(before)
                     or identity(source.lstat()) != identity(before)):
                 raise ValueError("native executable changed while installing")
             with installed.open("rb") as check:
-                if not hmac.compare_digest(stream_digest(check), digest.hexdigest()):
+                if not hmac.compare_digest(stream_digest(check, before.st_size), digest.hexdigest()):
                     raise ValueError("installed native executable differs from its source")
             os.fchmod(out.fileno(), 0o500)
             os.fsync(out.fileno())
