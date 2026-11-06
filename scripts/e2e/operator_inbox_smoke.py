@@ -55,7 +55,8 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
                     "outbox_root": native["outbox_root"], "complete": True},
                 "inbox operator disagrees with independent canonical Rust read")
 
-    grants("issues-read,issues-write,outcomes-read,notifications-write")
+    # Issue writes stay ungranted: the grant twins differ only in notifications-write.
+    grants("issues-read,outcomes-read,notifications-write")
     version = issue()["issue"]["version"]
     c.run("issue", "comment", root, TENANT, REPOSITORY, "1", "--trusted-local",
           "--object-format", fmt, "--principal", "44" * 16,
@@ -146,7 +147,7 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
     require(unknown["state"] == "unresolved" and unknown["mutation_submitted"] is False
             and unknown["absence_proves_non_commit"] is False and canonical() == before,
             "absent inbox outcome claimed non-commit or dispatched a preference")
-    grants("issues-read,issues-write,outcomes-read,notifications-write")
+    grants("issues-read,outcomes-read,notifications-write")
     allowed = command("retry", ["--record", str(path)])
     final = canonical()
     require(allowed["mutation_submitted"] is True and allowed["result"]["outcome"] == "committed"
