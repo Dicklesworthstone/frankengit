@@ -76,9 +76,9 @@ build. Source must be clean before compilation; a changed revision or dirty
 checkout afterwards prevents campaign dispatch. After the campaigns finish, the
 launcher checks the revision and checkout again: changed or unreadable source
 cannot produce a successful lane result. An existing campaign failure keeps its
-original exit code and also reports any final source-inspection failure. These
-endpoint checks do not establish isolation from hostile concurrent writers or
-detect a temporary change that was restored before inspection. The selected
+original exit code even if the final source diagnostic cannot be written. These
+checks do not establish isolation from hostile concurrent writers or detect a
+temporary change that was restored before inspection. The selected
 source revision overrides a stale `FG_SIGNED_BUNDLE_SOURCE_CUT` for the signed
 campaign.
 Campaign receipts record `FGE_PROFILE=release`. The optimized, stripped artifact

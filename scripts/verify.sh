@@ -244,13 +244,13 @@ run_operator() {
     "$ROOT/scripts/e2e/run_all.sh" --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}" || suite_exit=$?
   if ! current_cut="$(git rev-parse --verify HEAD)" || \
       ! source_state="$(git status --porcelain=v1 --untracked-files=all)"; then
-    printf 'verify: cannot inspect source after operator campaigns\n' >&2
     source_failure=1
+    printf 'verify: cannot inspect source after operator campaigns\n' >&2 || true
   elif [[ "$current_cut" != "$source_cut" || -n "$source_state" ]]; then
-    printf 'verify: source changed during operator campaigns\n' >&2
     source_failure=1
+    printf 'verify: source changed during operator campaigns\n' >&2 || true
   fi
-  # Source inspection must not turn a campaign failure into another exit code.
+  # Diagnostic write failures cannot replace the refusal or campaign status.
   if [[ "$suite_exit" -ne 0 ]]; then return "$suite_exit"; fi
   return "$source_failure"
 }
