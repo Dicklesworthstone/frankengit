@@ -254,7 +254,7 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let command = Command::parse(&read_form(reader, framing, http)?, node.object_format)?;
-    execute_command(node, &command, maximum_response)
+    execute_command(node, session, &command, maximum_response)
 }
 
 /// Called only after the PR gateway has required both fetch and PR-read grants.
@@ -277,10 +277,11 @@ pub(in crate::smart_http::server) fn execute_pull(
         node.object_format,
         Some(number),
     )?;
-    execute_command(node, &command, maximum_response)
+    execute_command(node, session, &command, maximum_response)
 }
 fn execute_command(
     node: &OneNode,
+    session: &LoopbackReceiveSession,
     command: &Command,
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
@@ -288,8 +289,8 @@ fn execute_command(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     let report = drive_request_while(
         node,
         &context,

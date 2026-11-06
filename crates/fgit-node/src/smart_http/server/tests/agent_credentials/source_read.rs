@@ -2,6 +2,7 @@
 //! Canonical sponsored credentials cross the real HTTP/source/index boundary.
 
 mod commit;
+mod history;
 
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id};

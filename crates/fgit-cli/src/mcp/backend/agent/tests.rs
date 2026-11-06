@@ -6,6 +6,7 @@ use fgit_node::OneNode;
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId};
 use support::*;
 
+mod history;
 mod lifecycle;
 mod source;
 mod support;
@@ -28,7 +29,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 44);
+    assert_eq!(tools.len(), 49);
     for tool in &tools {
         assert!(operation(&options, tool.name).is_some());
     }
@@ -42,8 +43,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         "frankengit_pull_checks",
         "frankengit_pull_reviews",
         "frankengit_source_candidate",
-        "frankengit_source_log",
-        "frankengit_source_blame",
+        "frankengit_pull_diff",
         "frankengit_source_publish",
         "frankengit_branch_transaction",
         "frankengit_branch_create",

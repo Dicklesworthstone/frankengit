@@ -13,7 +13,7 @@ pub use fgit_forge::event::agent_credential::{
     ALL_OPERATIONS, AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
     AgentCredentialId, AgentCredentialSnapshot, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MAX_LIFETIME_SECONDS, NativeAgentCredentialEvent, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_READ, SponsorKind,
+    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
 };
 
 /// Fixed finite input bound before hashing untrusted bearer bytes.

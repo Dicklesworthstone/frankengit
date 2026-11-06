@@ -186,14 +186,24 @@ mod tests {
                 .unwrap();
             assert_eq!(operation(&envelope).unwrap(), SOURCE_READ, "{action}");
         }
+        for action in ["log", "blame", "historical-tree", "historical-blob", "diff"] {
+            let raw = format!(
+                "POST /repo/api/v1/source/{action} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                operation(&envelope).unwrap(),
+                fgit_identity::agent::SOURCE_HISTORY_READ,
+                "{action}"
+            );
+        }
         for action in [
             "prepare",
             "apply",
             "initial",
-            "diff",
             "history",
-            "historical-tree",
-            "historical-blob",
             "verified-blob",
             "branches/create",
             "branches/update",

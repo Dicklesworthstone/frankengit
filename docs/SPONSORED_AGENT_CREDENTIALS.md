@@ -2,7 +2,8 @@
 
 This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
-HTTP current-source browsing and context, issue, pull-request metadata and
+HTTP current-source browsing and context, separately granted source history and
+reference comparison, issue, pull-request metadata and
 conversation, standalone discussion, and single-transaction outcome endpoints,
 plus the explicit MCP source and metadata profile. Each request creates a real bounded
 `IntentRun`; the bearer alone is not an execution or publication capability.
@@ -86,24 +87,26 @@ observation schema. This grants no agent source-import capability.
 | `discussions-write` | Standalone discussion commands |
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
+| `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
-Source reads require an explicit `source-read` grant and the HTTP server's
+Current-source reads require an explicit `source-read` grant; history and
+comparison reads require `source-history-read`. Both require the HTTP server's
 source-read feature switch or the MCP launch ceilings described below.
 Metadata scopes, including all seven previously
 available flags, grant no source access. The HTTP adapter admits a closed set of
-current-source read routes; it does not interpret arbitrary GET requests or the
+current-source and history routes; it does not interpret arbitrary GET requests or the
 ordinary token's broader `read` scope as agent permission. Source selection and
 disclosure retain the existing canonical hidden-ref and visibility checks.
 
-Git upload-pack/receive-pack, commit history and historical source snapshots,
-verified-blob streaming, bundles, candidate preparation or inspection, diffs,
+Git upload-pack/receive-pack, verified-blob streaming, bundles,
+candidate preparation or inspection, PR-specific diffs,
 reviews, checks, merges, queue operations, milestones, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
 external effects are outside this profile. MCP offers the closed sponsored
 source and metadata tools described below and keeps its existing trusted-local
-profile. Its source ceiling does not include the operator profile's history,
-candidate or bundle tools.
+profile. Its source ceiling does not include the operator profile's candidate
+or bundle tools. History tools require their independent credential scope.
 
 A separate source-only credential can be issued with `--operations source-read`.
 Combine it with a metadata scope only when both capabilities are intended. Source
@@ -111,9 +114,48 @@ requests use the same per-request canonical authentication, revocation checks,
 finite IntentRun and input/output envelopes as the metadata routes. They do not
 publish repository state or create a durable autonomous execution run.
 
-### Source routes and authenticated context
+### Independently grant history and comparison
 
-The closed source route set consists of the following POST queries under the
+Use `--operations source-history-read` to grant read-only historical analysis.
+Use `--operations source-read,source-history-read` when an agent needs both the
+current-source tools and the history tools. Neither flag grants the other
+operation family, and existing credentials gain no new permission when a node
+is upgraded. A sponsor must issue a new credential to change an immutable grant.
+
+These are independent API permissions, not a secrecy boundary between current
+and older source bytes. Historical selection may name the current ref tip, and
+blame and comparison also disclose current-tip content. A history grant does
+not enable current-source search, indexes, retrieval or agent-context tools.
+
+The HTTP service requires its existing `--allow-source` switch and authenticates
+the new operation on each of these POST routes:
+
+| Route suffix under `/api/v1/source/` | Selection |
+| --- | --- |
+| `log` | Bounded commit-DAG, exact-path or first-parent history of a visible ref |
+| `blame` | Bounded line ancestry for a file selected through a visible ref |
+| `historical-tree`, `historical-blob` | A tree or file in a commit proven reachable from the selected visible ref |
+| `diff` | Direct or merge-base comparison of two currently visible references |
+
+Each route uses the existing form grammar, snapshot/commit pins, traversal and
+response limits. The grant does not authorize an arbitrary object ID or a hidden
+reference. Current canonical hidden-ref policy still applies to historical
+selection. Native author and committer fields are untrusted source metadata,
+not an authenticated human identity. The PR-specific diff route remains outside
+this scope; a reference comparison does not disclose PR metadata.
+
+In sponsored MCP mode, `--allow-source` exposes the corresponding closed set:
+`frankengit_source_log`, `frankengit_source_blame`,
+`frankengit_source_historical_tree`, `frankengit_source_historical_blob`, and
+`frankengit_source_compare`. Calls require `source-history-read` independently of
+the launch ceiling. History access does not enable search, agent context, source
+publication, candidate preparation, reviews, or Git transport. Native work and
+response disclosure share the originally authenticated request deadline;
+entering a history, blame or diff phase does not renew it.
+
+### Current-source routes and authenticated context
+
+The `source-read` route set consists of the following POST queries under the
 repository's `/api/v1/source/` route. All use the existing bounded form grammar.
 
 | Route suffix | Read surface |
@@ -136,9 +178,10 @@ because `verified-blob` remains outside this grant. No new MCP tool is introduce
 
 A source grant covers the repository's visible current source. Path selectors
 and query limits narrow an individual request; they are not a stored sparse-path
-capability. Read-only route classification alone does not grant access: history,
-bundle export and candidate preparation remain excluded even where their native
-HTTP operation does not publish a transaction. Read queries reject an
+capability. Read-only route classification alone does not grant access: history
+requires its separate scope, while bundle export and candidate preparation
+remain excluded even where their native HTTP operation does not publish a
+transaction. Read queries reject an
 `Idempotency-Key`; the transport's internal request key never seals a write.
 
 An agent-context response uses the
@@ -187,8 +230,9 @@ additional milestone, notification, check, review, event-feed, source, queue,
 artifact, agent-context or administration tools. An unknown or unsupported tool
 is refused before credential or repository lookup.
 
-For source access, issue a credential with `--operations source-read` and select
-one or both independent source ceilings:
+For current-source access, issue a credential with `--operations source-read`
+and select one or both independent source ceilings. Add `source-history-read`
+to the credential when historical analysis is required:
 
 ```sh
 fg mcp ./repository TENANT_ID REPOSITORY_ID \
@@ -196,13 +240,14 @@ fg mcp ./repository TENANT_ID REPOSITORY_ID \
   --allow-source --allow-agent-context
 ```
 
-| MCP launch ceiling | Exact sponsored tools |
-| --- | --- |
-| `--allow-source` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_search_index`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
-| `--allow-agent-context` | `frankengit_agent_context` |
+| MCP launch ceiling | Required canonical scope | Exact sponsored tools |
+| --- | --- | --- |
+| `--allow-source` | `source-read` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_search_index`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
+| `--allow-source` | `source-history-read` | `frankengit_source_log`, `frankengit_source_blame`, `frankengit_source_historical_tree`, `frankengit_source_historical_blob`, `frankengit_source_compare` |
+| `--allow-agent-context` | `source-read` | `frankengit_agent_context` |
 
-Both ceilings require canonical `source-read` on every call. Neither launch flag
-implies the other, and a metadata-only credential cannot use either. Source
+Each call requires its listed canonical scope. Neither launch flag implies the
+other, and a metadata-only credential cannot use either. Source
 search retains its existing bounded literal and regex operations. Structured
 Initial, source-context and agent-context retrieval require existing current
 indexes; reads do not create or rebuild them. Current visible-source filtering
@@ -311,7 +356,8 @@ new publication. This principal-kind rule is repository scoped.
 Each HTTP request derives an `IntentRun` from the authenticated authority receipt,
 credential, agent, sponsor, selected route operation, retry key and request-header
 commitment. It reserves the actual bounded HTTP input/output envelopes. Metadata
-requests permit one operation class. A `source-read` request permits exactly
+requests permit one operation class. A `source-history-read` request permits
+only `ReadCanonicalObject`. A `source-read` request permits exactly
 `ReadCanonicalObject` and `ReadDerivedGeneration` so the same bounded run can
 read native source and its authenticated search generations.
 It grants no write, process or publication class. Every request lasts at most
@@ -339,14 +385,18 @@ timeout proves non-commit.
 | Principal snapshot | Schema 1.2: full agent authentication witness |
 | Authentication policy evidence | Schema 1.5: full witness binding |
 
-The required operation mask remains a canonical `u16`. `source-read` adds bit 7
-(`0x0080`); the original seven flags retain bits 0 through 6 and their exact
-encodings. A stored `0x007f` grant still grants only the original metadata and
-outcome operations. Issuing source access requires a new grant, and revocation
-must retain the exact original operation mask. Bits 8 through 15 remain unknown
-and refuse decoding or authentication. Upgrade repository readers before issuing
-a source-read grant: an older reader fails closed on its unknown flag; it must
-not strip the flag or fall back to another credential profile.
+The required operation mask remains a canonical `u16`. `source-read` occupies
+bit 7 (`0x0080`) and `source-history-read` occupies bit 8 (`0x0100`); the original
+seven flags retain bits 0 through 6 and their exact encodings. A stored `0x007f`
+grant still grants only the original metadata and outcome operations. A stored
+`0x00ff` grant adds current-source access but grants no history operation. Issuing
+either source capability requires an explicit new grant, and revocation must
+retain the exact original operation mask. Bits 9 through 15 remain unknown and
+refuse decoding or authentication. Upgrade every repository reader before
+issuing a grant with a newly supported bit: an older reader fails closed on its
+unknown flag; it must not strip the flag or fall back to another credential
+profile. Existing grant bytes, event discriminants, request identities and
+revocation semantics are unchanged.
 
 The forge stream label is `agent/` plus 52 unpadded lowercase RFC 4648 base32
 characters. This preserves all 256 digest bits within the 64-byte slug bound;
@@ -362,7 +412,7 @@ is rejected. Existing authentication predicates see single-factor strength;
 this profile adds no human-kind, sponsor, membership, MFA or hardware policy
 predicate. Ordinary HTTP and SSH credentials never imply a human principal.
 
-This implements bounded current-source reads and metadata operations within
+This implements bounded current-source/history reads and metadata operations within
 `frankengit-root-doctrine-x2mv.4.34`, and provides source access needed by the
 agent-day integration in `frankengit-root-doctrine-x2mv.4.24`. Sponsored code
 publication, policy-visible sponsor selectors, human-review requirements for

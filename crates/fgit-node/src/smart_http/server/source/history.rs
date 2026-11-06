@@ -269,15 +269,15 @@ pub(super) fn execute(
     }
     let bytes = read_form(reader, framing, http)?;
     if request.blame {
-        return blame::execute(node, &bytes, maximum_response);
+        return blame::execute(node, session, &bytes, maximum_response);
     }
     let command = Command::parse(&bytes, node.object_format)?;
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(MAX_REPLY_BYTES);

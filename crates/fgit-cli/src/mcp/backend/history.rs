@@ -244,7 +244,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let query = parse(args, name == BLAME, backend.options.format)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let (head, fields) = if let Some(path) = &query.path {
         // An empty native range obtains the exact total without disclosing an
         // unbounded file or assuming that `first + limit` exists. The actual

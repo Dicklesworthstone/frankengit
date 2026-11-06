@@ -23,7 +23,12 @@ pub const OUTCOMES_READ: u16 = 1 << 6;
 /// The host must enforce its closed read-route profile and canonical visibility;
 /// this flag does not grant Git transport, history snapshots or candidate work.
 pub const SOURCE_READ: u16 = 1 << 7;
-pub const ALL_OPERATIONS: u16 = (1 << 8) - 1;
+/// Bounded history, blame, historical tree/blob and reference-diff reads.
+/// This is independently granted from current-source and metadata operations. Hosts must select
+/// only their closed read-only history routes and retain canonical visibility;
+/// it grants no arbitrary-object access, candidate work or review mutation.
+pub const SOURCE_HISTORY_READ: u16 = 1 << 8;
+pub const ALL_OPERATIONS: u16 = (1 << 9) - 1;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";

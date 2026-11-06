@@ -1,6 +1,7 @@
 //! Current-ref-authorized historical source selection. A candidate object ID
 //! never causes a direct read: only parent edges from the selected tip do.
-//! This is a bounded local-owner profile, not an agent capability expansion.
+//! Hosts require repository-wide operator read authority or the explicit
+//! sponsored history-read operation before calling this bounded native reader.
 
 #[cfg(test)]
 use super::{RepositoryAuthorityHeadId, SourceBrowseAction};
@@ -48,8 +49,9 @@ impl Selection {
 impl OneNode {
     /// Read an exact historical tree/file through one current visible ref.
     ///
-    /// The caller must have repository-wide local-owner read authority, as for
-    /// `browse_source_local_in`. `expected_ref_tip` is the CURRENT ref tip;
+    /// The host must establish repository-wide operator read authority or
+    /// authenticate the explicit sponsored history-read operation and retain
+    /// its original request deadline. `expected_ref_tip` is the CURRENT ref tip;
     /// `commit` is the selected historical commit. The query must bind its
     /// `expected_head` and set `expected_commit` to `commit`. No argument grants
     /// object authority. A commit admitted on a different branch is unavailable
@@ -57,7 +59,8 @@ impl OneNode {
     ///
     /// Canonical hidden refs are checked at the same selected authority head
     /// as the ancestry and tree. This does not implement historical policy,
-    /// retention changes, arbitrary OID reads, or agent capability widening.
+    /// retention changes or arbitrary OID reads. Query fields never grant
+    /// authority; the host's credential and route checks remain mandatory.
     /// Ancestry reads at most 4096 commits, 16384 parent edges and 16 MiB of
     /// commit bodies, with 64 KiB per commit. Its bytes also consume the normal
     /// source-read allowance. A budget/error/cancellation is never a short read.

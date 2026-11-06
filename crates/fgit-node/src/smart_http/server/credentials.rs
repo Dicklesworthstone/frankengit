@@ -81,6 +81,7 @@ enum Scope {
     DiscussionsRead,
     DiscussionsWrite,
     SourceRead,
+    SourceHistoryRead,
 }
 
 impl Scope {
@@ -145,7 +146,7 @@ impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-            PULLS_READ, PULLS_WRITE, SOURCE_READ,
+            PULLS_READ, PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -157,6 +158,7 @@ impl Grant {
             DISCUSSIONS_WRITE => Scope::DiscussionsWrite,
             OUTCOMES_READ => Scope::OutcomesRead,
             SOURCE_READ => Scope::SourceRead,
+            SOURCE_HISTORY_READ => Scope::SourceHistoryRead,
             _ => unreachable!("node authenticated a closed operation"),
         };
         scopes.insert(scope);
@@ -179,6 +181,12 @@ impl Grant {
     /// acquire upload-pack authority by passing this check.
     pub const fn permits_source_read(&self) -> bool {
         self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceRead)
+    }
+    /// Historical source and comparisons require their own sponsored grant.
+    /// Neither current-source access nor history access implies the other, and
+    /// neither grants a Git transport. Existing operator reads retain both.
+    pub const fn permits_source_history_read(&self) -> bool {
+        self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceHistoryRead)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -640,10 +648,12 @@ mod tests {
         let principal = PrincipalId::from_bytes([7; 16]);
         let mut value = grant(principal, "read").unwrap();
         assert!(value.permits_source_read());
+        assert!(value.permits_source_history_read());
         assert!(value.permits(Service::UploadPack));
 
         value.scopes = Scopes(Scope::SourceRead.mask());
         assert!(value.permits_source_read());
+        assert!(!value.permits_source_history_read());
         assert!(!value.permits(Service::UploadPack));
         assert!(!value.permits(Service::ReceivePack));
         for mutation in [false, true] {
@@ -662,7 +672,36 @@ mod tests {
 
         for scopes in ["receive", "issues-read", "pulls-read", "discussions-read"] {
             assert!(!grant(principal, scopes).unwrap().permits_source_read());
+            assert!(
+                !grant(principal, scopes)
+                    .unwrap()
+                    .permits_source_history_read()
+            );
         }
+    }
+
+    #[test]
+    fn source_history_permission_never_promotes_current_source_or_other_services() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let mut value = grant(principal, "read").unwrap();
+        value.scopes = Scopes(Scope::SourceHistoryRead.mask());
+        assert!(value.permits_source_history_read());
+        assert!(!value.permits_source_read());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_discussions(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_lfs(mutation));
+            assert!(!value.permits_queues(mutation));
+        }
+        assert!(!value.permits_outcomes());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        assert!(!value.permits_artifact_read());
     }
 
     #[test]

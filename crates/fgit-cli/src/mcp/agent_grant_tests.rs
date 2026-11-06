@@ -96,10 +96,16 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
         "frankengit_source_blob",
         "frankengit_source_search",
         "frankengit_source_search_batch",
+        "frankengit_source_search_index",
         "frankengit_source_symbols",
         "frankengit_ref_list",
         "frankengit_source_initial",
         "frankengit_source_context",
+        "frankengit_source_log",
+        "frankengit_source_blame",
+        "frankengit_source_historical_tree",
+        "frankengit_source_historical_blob",
+        "frankengit_source_compare",
     ]);
     for (flags, expected) in [
         (vec!["--allow-source"], source_tools.clone()),

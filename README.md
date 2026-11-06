@@ -333,13 +333,19 @@ repository-incarnation-bound credentials with an explicit agent and human or
 service sponsor. Native HTTP requests authenticate the current canonical grant
 and run under finite operation scopes, byte envelopes and expiry. An independent
 `source-read` grant enables current source browsing, search, reference/tag reads
-and authority-bound context with the actual agent and sponsor retained. Issue, PR
-metadata/conversation, discussion and individual outcome operations are supported;
+and authority-bound context with the actual agent and sponsor retained. The
+separate `source-history-read` grant enables bounded log, blame, historical
+tree/blob reads and comparisons of visible references through HTTP and MCP.
+Existing metadata and current-source credentials gain no history permission;
+history APIs can include current-tip content but do not grant search, indexes
+or agent context. Issue, PR metadata/conversation, discussion and individual
+outcome operations are supported;
 Git publication, reviews, merges and administration remain outside this profile.
 `fg mcp --agent-token-file ... --expected-incarnation ...` uses the same canonical
 credentials. Its independent `--allow-source` and `--allow-agent-context` ceilings
-expose current source retrieval and authenticated context while preserving the
-actual agent/sponsor and original request lifetime through response output.
+expose only their explicitly granted source/history operations and authenticated
+context while preserving the actual agent/sponsor and original request lifetime
+through response output.
 An explicitly configured MCP process can also own the existing lexical and
 symbol index-maintenance workers, allowing its indexed tools to catch up after
 code changes. Workers start after successful initialization output and drain

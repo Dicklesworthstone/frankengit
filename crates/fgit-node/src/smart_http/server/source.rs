@@ -128,31 +128,37 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.is_mutation(),
         }
     }
-    /// Closed source-understanding profile for sponsored credentials. Several
+    /// Closed source-understanding profiles for sponsored credentials. Several
     /// other nonmutating routes prepare candidate objects or disclose historical
     /// bundles; classifying every read as source access would widen this grant.
     /// The current-commit reader belongs to the same ref-selected source surface
     /// as tree/blob; it cannot traverse parents or select an arbitrary object.
     pub(super) fn agent_operation(&self) -> Option<u16> {
-        let allowed = match &self.0 {
+        use fgit_identity::agent::{SOURCE_HISTORY_READ, SOURCE_READ};
+        match &self.0 {
             RequestKind::Read(_)
             | RequestKind::Regex(_)
             | RequestKind::Indexed(_)
             | RequestKind::Symbols(_)
-            | RequestKind::Retrieval(_) => true,
-            RequestKind::Refs(request) => !request.is_mutation(),
-            RequestKind::Tags(request) => !request.is_mutation(),
+            | RequestKind::Retrieval(_) => Some(SOURCE_READ),
+            RequestKind::Refs(request) => (!request.is_mutation()).then_some(SOURCE_READ),
+            RequestKind::Tags(request) => (!request.is_mutation()).then_some(SOURCE_READ),
+            RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_) => {
+                Some(SOURCE_HISTORY_READ)
+            }
             RequestKind::Change(_)
             | RequestKind::Initial(_)
-            | RequestKind::History(_)
-            | RequestKind::Historical(_)
-            | RequestKind::Review(_)
             | RequestKind::Replay(_)
             | RequestKind::Rebase(_)
             | RequestKind::Bundle(_)
-            | RequestKind::VerifiedBlob(_) => false,
-        };
-        allowed.then_some(fgit_identity::agent::SOURCE_READ)
+            | RequestKind::VerifiedBlob(_) => None,
+        }
+    }
+    fn requires_history_read(&self) -> bool {
+        matches!(
+            &self.0,
+            RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_)
+        )
     }
     const fn route(&self) -> &str {
         match &self.0 {
@@ -254,6 +260,8 @@ pub(super) fn authenticate(
     }
     let permitted = if request.is_mutation() {
         profile.allow_receive() && grant.permits(Service::ReceivePack)
+    } else if request.requires_history_read() {
+        grant.permits_source_history_read()
     } else {
         grant.permits_source_read()
     };
@@ -278,7 +286,11 @@ pub(super) fn authenticate(
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
     let agent = match authenticated.authentication() {
         fgit_admission::evidence::AdmissionAuthentication::AgentCredential(authentication) => {
-            if request.agent_operation() != Some(fgit_identity::agent::SOURCE_READ) {
+            if !matches!(
+                request.agent_operation(),
+                Some(fgit_identity::agent::SOURCE_READ)
+                    | Some(fgit_identity::agent::SOURCE_HISTORY_READ)
+            ) {
                 return Err(ApiError::new(Status::Forbidden, "forbidden"));
             }
             // Both values originate in the same bounded credential request.
@@ -292,10 +304,13 @@ pub(super) fn authenticate(
         }
         _ => None,
     };
-    let read = (!request.is_mutation()).then_some(HttpReadGrant {
-        principal: grant.principal,
-        agent,
-    });
+    // Historical reads use only their authenticated session and its deadline.
+    // They cannot mint the current-source context used by retrieval adapters.
+    let read =
+        (!request.is_mutation() && !request.requires_history_read()).then_some(HttpReadGrant {
+            principal: grant.principal,
+            agent,
+        });
     Ok((session, read))
 }
 

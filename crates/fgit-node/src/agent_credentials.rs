@@ -1,7 +1,7 @@
 //! Canonical sponsored agent credentials and bounded request authentication.
 //!
 //! Issuance is an explicit trusted-local administration operation. Credential
-//! holders receive finite metadata and explicit source-read scopes, never source
+//! holders receive finite metadata and explicit source/history-read scopes, never source
 //! publication, review, merge, process execution, or administration authority.
 
 use crate::source_retrieval::authorization::SourceReadContext;

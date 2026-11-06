@@ -4,7 +4,7 @@ use fgit_authority::TerminalOutcome;
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_READ,
+    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
 };
 use fgit_types::{DecisionOutcome, TxId};
 
@@ -18,6 +18,7 @@ fn grant(value: &AgentCredentialGrant) -> String {
         (DISCUSSIONS_WRITE, "discussions-write"),
         (OUTCOMES_READ, "outcomes-read"),
         (SOURCE_READ, "source-read"),
+        (SOURCE_HISTORY_READ, "source-history-read"),
     ]
     .into_iter()
     .filter(|(bit, _)| value.permits(*bit))
@@ -119,4 +120,41 @@ pub(super) fn mutation(
         cleanup.is_none(),
         cleanup.map_or_else(|| "null".into(), quote)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgit_identity::agent::SponsorKind;
+    use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
+
+    #[test]
+    fn retained_grant_output_does_not_expand_old_scopes_or_hide_history_permission() {
+        let value = AgentCredentialGrant {
+            agent: PrincipalId::from_bytes([1; 16]),
+            sponsor: PrincipalId::from_bytes([2; 16]),
+            sponsor_kind: SponsorKind::Human,
+            tenant: TenantId::from_bytes([3; 16]),
+            repository: RepositoryId::from_bytes([4; 16]),
+            incarnation: RepositoryIncarnationId::from_bytes([5; 16]),
+            issued_at: 100,
+            expires_at: 200,
+            operations: SOURCE_HISTORY_READ,
+        };
+        assert!(grant(&value).contains("\"operations\":[\"source-history-read\"]"));
+        assert!(
+            grant(&AgentCredentialGrant {
+                operations: SOURCE_READ | SOURCE_HISTORY_READ,
+                ..value
+            })
+            .contains("\"operations\":[\"source-read\",\"source-history-read\"]")
+        );
+        assert!(
+            !grant(&AgentCredentialGrant {
+                operations: 0x00ff,
+                ..value
+            })
+            .contains("source-history-read")
+        );
+    }
 }

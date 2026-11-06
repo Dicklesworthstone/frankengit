@@ -60,14 +60,23 @@ fg mcp /absolute/path/to/existing-node TENANT_HEX REPOSITORY_HEX \
   --allow-source --allow-agent-context
 ```
 
-The credential must independently grant `source-read`. The source ceiling exposes
-only current tree/blob reads, literal/regex and batch search, persisted
-lexical/path pages, scanned or indexed symbols, ref listing, Initial retrieval
-and source context. The separate agent-context ceiling exposes
-only `frankengit_agent_context`. Neither flag grants the other. Source history,
-candidate preparation, verified-blob streaming, bundles, queues and workflow
-artifacts remain outside the sponsored profile even when an operator source
-launch supports them.
+The credential independently grants each operation family. With `source-read`,
+the `--allow-source` ceiling exposes current tree/blob reads, literal/regex and
+batch search, persisted lexical/path pages, scanned or indexed symbols, ref
+listing, Initial retrieval and source context. The separate `--allow-agent-context`
+ceiling exposes only `frankengit_agent_context`, which also requires `source-read`.
+Neither launch flag grants the other.
+
+With `source-history-read`, `--allow-source` exposes only
+`frankengit_source_log`, `frankengit_source_blame`,
+`frankengit_source_historical_tree`, `frankengit_source_historical_blob`, and
+`frankengit_source_compare`. The new credential bit is independent of
+`source-read`; an existing `0x00ff` grant gains no history operation. History
+queries can disclose current-tip content through historical selection, blame
+and diff, but do not enable current-source search, indexes or agent context.
+Candidate preparation, PR-specific diffs, verified-blob streaming, bundles,
+queues and workflow artifacts remain outside the sponsored profile even when
+an operator source launch supports them.
 
 Agent mode requires the exact incarnation and rejects `--trusted-local` and
 `--principal`. Every call verifies the current canonical grant and retains its
@@ -203,6 +212,25 @@ and optional expected head/commit. It returns `bytes_hex` without loss and a
 convenience `text_utf8` only when the exact slice is valid UTF-8. Byte ranges
 can split a Unicode character; concatenate exact bytes, not nullable text.
 Symlink payloads are data and never followed; gitlinks cannot be read as files.
+
+`frankengit_source_historical_tree` and `frankengit_source_historical_blob`
+require `reference`, `expected_head`, `expected_ref_tip` and `at_commit`.
+The current visible ref must still have `expected_ref_tip` at the pinned head,
+and verified parent traversal must reach `at_commit` before a tree or file is
+read. An unrelated admitted commit is unavailable. The selected historical
+commit may be the current tip. Native IDs are nonzero lowercase SHA-1 or SHA-256
+hex according to the repository's format; `expected_commit` is rejected.
+
+The historical tree tool retains optional `path_hex`, `after_hex` and `limit`
+(1..100, default 50). The historical blob tool requires `path_hex` and retains
+`offset` (decimal string, default zero) and `max_bytes` (1..65536, default 16384).
+Results contain the existing source fields plus `type: historical_source`,
+`selection: visible-ref-ancestor-v1`, `source_ref_tip` and `at_commit`, with
+`transaction_created: false` and `published: false`. Retain all three pins
+when continuing a directory or file range. Current hidden-ref policy, native
+ancestry limits and the original authenticated request lifetime apply; no
+phase refreshes the deadline. See [historical source browsing](HISTORICAL_SOURCE_BROWSING.md)
+for ancestry bounds and the corresponding HTTP forms.
 
 `frankengit_ref_list` (granted with source reads) pages the currently visible
 refs from one authenticated snapshot: `namespace` is `refs` (default: branches,

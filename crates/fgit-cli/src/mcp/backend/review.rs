@@ -56,7 +56,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let query = parse(args, name == PULL_DIFF, backend.options.format)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     // The native API selects PR metadata, refs, visibility, and objects from
     // ONE head. Do not precede it with an independently selected PR/ref read.
     let report = backend

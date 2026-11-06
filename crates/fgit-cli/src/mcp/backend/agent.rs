@@ -10,7 +10,7 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_READ,
+    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -49,7 +49,7 @@ impl Profile {
 
 /// One exhaustive list owns both discovery and dispatch. Do not derive this
 /// from broad operator groups: those also grant milestones, notifications,
-/// checks, reviews, history, candidates and events not covered by these grants.
+/// checks, reviews, candidates and events not covered by these grants.
 pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     match name {
         "frankengit_issue_list" | "frankengit_issue_show" if options.issues => Some(ISSUES_READ),
@@ -114,6 +114,15 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
             Some(SOURCE_READ)
         }
         "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
+        "frankengit_source_log"
+        | "frankengit_source_blame"
+        | "frankengit_source_historical_tree"
+        | "frankengit_source_historical_blob"
+        | "frankengit_source_compare"
+            if options.source =>
+        {
+            Some(SOURCE_HISTORY_READ)
+        }
         _ => None,
     }
 }

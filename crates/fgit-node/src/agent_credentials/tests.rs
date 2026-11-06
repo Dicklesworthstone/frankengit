@@ -9,7 +9,7 @@ use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
 use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialGrant, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-    PULLS_WRITE, SOURCE_READ, SponsorKind, agent_credential_id,
+    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind, agent_credential_id,
 };
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId,
@@ -649,6 +649,91 @@ fn adapter_api_keeps_the_original_key_and_only_shortens_request_authority() {
     assert!(!run.context(&node).is_live());
     assert!(run.check(0, 0).is_err());
     node.shutdown().unwrap();
+}
+
+#[test]
+fn history_requests_keep_independent_finite_authority_across_reopen_and_revocation() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = scratch.node(format);
+        let token = bearer('e');
+        let original = AgentCredentialGrant {
+            operations: SOURCE_HISTORY_READ,
+            ..grant(&node)
+        };
+        let command = issue_command(&token, original);
+        committed(credential(&node, &command, actor(1), "issue-history"));
+        let mut history = authentication(&node, &token, "read-history", SOURCE_HISTORY_READ);
+        for class in OperationClass::ALL {
+            assert_eq!(
+                history.run.allowed_operation_classes().contains(class),
+                class == OperationClass::ReadCanonicalObject,
+                "history requests must not acquire {class:?}"
+            );
+        }
+        assert!(history.mcp_source_read_context(&node).is_err());
+        history.check(4096, 8192).unwrap();
+        assert!(history.check(4097, 8192).is_err());
+        assert!(history.check(4096, 8193).is_err());
+        for operation in [SOURCE_READ, ISSUES_READ, ISSUES_WRITE, PULLS_WRITE] {
+            let denied = node.runtime().block_on(node.authenticate_agent_request_in(
+                &node.request_context(),
+                token.as_bytes(),
+                &key("wrong-history-operation"),
+                operation,
+                [1; 32],
+                4096,
+                8192,
+            ));
+            assert!(matches!(
+                denied,
+                Err(NodeReceiveTransportRefusal::Admission(error))
+                    if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::CapabilityScopeViolation))
+            ));
+        }
+        history.constrain_deadline(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!history.context(&node).is_live());
+        assert!(history.check(0, 0).is_err());
+        node.shutdown().unwrap();
+
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let stored = reopened
+            .runtime()
+            .block_on(reopened.read_agent_credential_in(&reopened.request_context(), command.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.grant, original);
+        assert!(!stored.revoked);
+        authentication(&reopened, &token, "reopened-history", SOURCE_HISTORY_READ)
+            .check(0, 0)
+            .unwrap();
+        committed(credential(
+            &reopened,
+            &AgentCredentialCommand {
+                id: command.id,
+                expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+                action: AgentCredentialAction::Revoke(original),
+            },
+            actor(1),
+            "revoke-history",
+        ));
+        assert!(matches!(
+            reopened
+                .runtime()
+                .block_on(reopened.authenticate_agent_request_in(
+                    &reopened.request_context(),
+                    token.as_bytes(),
+                    &key("revoked-history"),
+                    SOURCE_HISTORY_READ,
+                    [2; 32],
+                    4096,
+                    8192,
+                )),
+            Err(NodeReceiveTransportRefusal::Unauthenticated)
+        ));
+        reopened.shutdown().unwrap();
+    }
 }
 
 #[test]

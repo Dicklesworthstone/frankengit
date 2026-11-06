@@ -15,7 +15,9 @@ use super::{
     Output, Selection, checkpoint, commit, failure, identity, number, selection, take, valid_oid,
 };
 use crate::smart_http::drive_request_while;
-use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, OneNode};
+use crate::{
+    GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
+};
 
 #[derive(Debug)]
 struct Command {
@@ -104,6 +106,7 @@ impl Command {
 /// form. This helper never receives a write key or calls an admission method.
 pub(super) fn execute(
     node: &OneNode,
+    session: &LoopbackReceiveSession,
     bytes: &[u8],
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
@@ -112,8 +115,8 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || !deadline.expired() && context.is_live();
     let (head, result) = drive_request_while(
         node,
         &context,

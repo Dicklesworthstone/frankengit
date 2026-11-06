@@ -1,5 +1,8 @@
 //! Source-scoped tools read only authority-selected, currently visible refs.
 //! Repository paths are byte strings, never paths in the host filesystem.
+mod historical;
+pub(super) use historical::{BLOB as HISTORICAL_BLOB, TREE as HISTORICAL_TREE};
+
 use super::*;
 use fgit_forge::source_browse::{
     SourceBrowseAction, SourceBrowseContent, SourceBrowseError, SourceBrowseQuery,
@@ -9,7 +12,7 @@ use fgit_node::NodeWorkspaceRefusal;
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 
 pub(super) fn tools() -> Vec<Tool> {
-    vec![
+    let mut tools = vec![
         Tool {
             name: "frankengit_source_tree",
             description: "List immediate children of a visible repository ref and path. Paths and names use exact hex bytes. Snapshot-pinned, read-only; no host filesystem access.",
@@ -20,9 +23,14 @@ pub(super) fn tools() -> Vec<Tool> {
             description: "Read a bounded exact file byte range at a visible ref. Symlink contents are data, never followed. Continue with next_offset and snapshot_token; no checkout or arbitrary object lookup.",
             schema: input_schema(true),
         },
-    ]
+    ];
+    tools.extend(historical::tools());
+    tools
 }
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
+    if matches!(name, HISTORICAL_TREE | HISTORICAL_BLOB) {
+        return historical::call(backend, name, args);
+    }
     if !backend.options.source
         || !matches!(name, "frankengit_source_tree" | "frankengit_source_blob")
     {

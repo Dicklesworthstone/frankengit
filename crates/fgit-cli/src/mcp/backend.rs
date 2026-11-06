@@ -479,7 +479,13 @@ impl NodeTools {
             return pull_reviews::call(self, args);
         }
         if self.options.source
-            && matches!(name, "frankengit_source_tree" | "frankengit_source_blob")
+            && matches!(
+                name,
+                "frankengit_source_tree"
+                    | "frankengit_source_blob"
+                    | source::HISTORICAL_TREE
+                    | source::HISTORICAL_BLOB
+            )
         {
             return source::call(self, name, args);
         }
@@ -706,7 +712,9 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 92);
+        assert_eq!(server_names.len(), 94);
+        assert!(server_names.contains(&source::HISTORICAL_TREE));
+        assert!(server_names.contains(&source::HISTORICAL_BLOB));
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));

@@ -1,9 +1,50 @@
 use super::*;
-use fgit_identity::agent::{ISSUES_READ, ISSUES_WRITE, PULLS_WRITE, SOURCE_READ, SponsorKind};
+use fgit_identity::agent::{
+    ISSUES_READ, ISSUES_WRITE, PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
+};
 use std::path::PathBuf;
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).into()).collect()
+}
+
+#[test]
+fn history_scope_issuance_preserves_explicit_independent_permissions() {
+    for (scopes, expected) in [
+        ("source-history-read", SOURCE_HISTORY_READ),
+        (
+            "source-read,source-history-read",
+            SOURCE_READ | SOURCE_HISTORY_READ,
+        ),
+        (
+            "issues-read,source-history-read",
+            ISSUES_READ | SOURCE_HISTORY_READ,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!("repository issuance expected")
+        };
+        let Operation::Issue { grant, .. } = parsed.operation else {
+            panic!("issuance expected")
+        };
+        assert_eq!(grant.operations, expected);
+        assert_eq!(grant.permits(SOURCE_READ), expected & SOURCE_READ != 0);
+        assert_eq!(grant.permits(ISSUES_READ), expected & ISSUES_READ != 0);
+        assert!(!grant.permits(ISSUES_WRITE | PULLS_WRITE));
+    }
+    for scopes in [
+        "source-history-read,source-history-read",
+        "source-history-read,source-write",
+        "source-history-read,read",
+        "source-history-read,receive",
+        "source-history-read,",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err(), "{scopes}");
+    }
 }
 
 fn issue() -> Vec<String> {

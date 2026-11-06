@@ -2,16 +2,19 @@
 
 The source API can open the old contents named by ordinary commit-log or
 path-history results, without granting arbitrary object-ID lookup authority.
-This is the same bounded local-owner, repository-wide read profile as existing
-source browsing. It is not historical authorization, hosted IAM, or a new agent
-capability broker.
+Ordinary operator reads retain their repository-wide source-read profile.
+Sponsored HTTP and MCP callers require the independent `source-history-read`
+credential operation and the host's source feature switch. Existing metadata
+and `source-read` grants do not gain history operations. This is not historical
+authorization, hosted IAM, or a general agent capability broker.
 
 ## Requests
 
 Use `POST {repository-route}/api/v1/source/historical-tree` for a directory or
 `POST {repository-route}/api/v1/source/historical-blob` for a file/range.
-The source endpoints must be enabled and the credential must have the existing
-Git `read` scope. Neither endpoint is a mutation. `Idempotency-Key` is rejected
+The source endpoints must be enabled. An ordinary credential requires its
+existing Git `read` scope; a sponsored agent credential requires
+`source-history-read`. Neither endpoint is a mutation. `Idempotency-Key` is rejected
 by the shared source authentication boundary. GET, URL query parameters,
 Git-Protocol headers, unknown/duplicate fields and non-form media types refuse.
 Fixed-length and chunked bodies use the existing bounded form decoder.
@@ -45,6 +48,33 @@ reachable through its parent edges. In the node API, the inner
 `SourceBrowseQuery.expected_commit` is the historical target, not the ref tip.
 The new HTTP endpoints do not accept the ambiguous `expected_commit` field.
 Existing `source/tree` and `source/blob` semantics remain unchanged.
+
+## MCP historical reads
+
+With `--allow-source`, MCP exposes `frankengit_source_historical_tree` and
+`frankengit_source_historical_blob`. Sponsored mode additionally requires
+`source-history-read` for each call; the existing trusted-local operator
+profile remains available.
+
+Both tools require `reference`, `expected_head`, `expected_ref_tip` and
+`at_commit`. The latter two are nonzero lowercase native IDs in the repository's
+object format. The tree tool accepts optional `path_hex`, `after_hex` and `limit`
+(1..100, default 50). The blob tool requires `path_hex` and accepts `offset`
+(decimal string, default zero) and `max_bytes` (1..65536, default 16384).
+The ambiguous `expected_commit` field and unknown arguments are rejected.
+
+MCP returns its existing source fields directly in a `historical_source` result,
+with `selection: visible-ref-ancestor-v1`, `source_ref_tip`, `at_commit`,
+`transaction_created: false` and `published: false`. This differs from the
+nested HTTP `source` wrapper shown below. Retain the same head, tip and commit
+pins when following `next_after_hex` or `next_offset`. Both adapters use the
+same native ancestry validation and current hidden-ref policy. Native work and
+response output retain the originally authenticated deadline.
+
+A historical selection may name the current tip; blame and comparison also
+disclose current-tip content. The separate history grant controls these API
+operations, not a current-versus-old content secrecy boundary. It does not
+grant current-source search, indexes, retrieval or agent-context tools.
 
 ## Selection and response
 

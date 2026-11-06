@@ -497,6 +497,14 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+Historical source analysis uses a separate `SOURCE_HISTORY_READ` credential bit.
+The HTTP and MCP hosts admit only bounded log, blame, historical tree/blob and
+reference-comparison queries under it; old metadata and current-source masks do
+not acquire it. Historical commits must remain reachable from a currently
+visible selected ref, and both comparison refs pass current disclosure policy.
+The grant cannot enable arbitrary-object reads, candidate work, PR metadata or
+review mutations. History work and response output retain the same finite
+authenticated request lifetime, with fresh revocation checks on every new call.
 MCP index maintenance is a separate local-operator launch responsibility. It
 requires an exact incarnation, explicit ref/profile scope and private progress
 ownership; neither a source credential nor a tool call starts or configures it.

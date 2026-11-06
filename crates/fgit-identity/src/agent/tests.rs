@@ -52,6 +52,7 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         DISCUSSIONS_READ,
         OUTCOMES_READ,
         SOURCE_READ,
+        SOURCE_HISTORY_READ,
         1 << 15,
     ] {
         assert_eq!(
@@ -82,7 +83,7 @@ fn explicit_source_read_authentication_preserves_scope_lifetime_and_revocation()
         DISCUSSIONS_WRITE,
         OUTCOMES_READ,
         SOURCE_READ | ISSUES_READ,
-        1 << 8,
+        SOURCE_HISTORY_READ,
         SOURCE_READ | (1 << 15),
     ] {
         assert_eq!(
@@ -127,6 +128,61 @@ fn explicit_source_read_authentication_preserves_scope_lifetime_and_revocation()
         );
     }
     assert!(authenticate(&source, BEARER, 199, RevocationEvidence::Live).is_ok());
+}
+
+#[test]
+fn history_credential_cannot_be_used_for_current_source_or_metadata() {
+    let history = AgentCredentialGrant {
+        operations: SOURCE_HISTORY_READ,
+        ..grant()
+    };
+    let authenticated = authenticate(&history, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.authorize(SOURCE_HISTORY_READ), Ok(()));
+    assert_eq!(authenticated.principal(), history.agent);
+    assert_eq!(authenticated.sponsor(), history.sponsor);
+    for operation in (0..8).map(|bit| 1u16 << bit) {
+        assert_eq!(
+            authenticated.authorize(operation),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    let previous = AgentCredentialGrant {
+        operations: 0x00ff,
+        ..history
+    };
+    assert_eq!(
+        authenticate(&previous, BEARER, 100, RevocationEvidence::Live)
+            .unwrap()
+            .authorize(SOURCE_HISTORY_READ),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    for (now, revocation, expected) in [
+        (
+            99,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::NotYetValid,
+        ),
+        (
+            200,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::Expired,
+        ),
+        (
+            100,
+            RevocationEvidence::Revoked,
+            AgentCredentialRefusal::Revoked,
+        ),
+        (
+            100,
+            RevocationEvidence::NotChecked,
+            AgentCredentialRefusal::RevocationEvidenceRequired,
+        ),
+    ] {
+        assert_eq!(
+            authenticate(&history, BEARER, now, revocation),
+            Err(expected)
+        );
+    }
 }
 
 #[test]

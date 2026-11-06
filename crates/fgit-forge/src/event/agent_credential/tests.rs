@@ -283,7 +283,7 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
         assert!(explicit.validate().is_ok());
         assert!(explicit.permits(SOURCE_READ | metadata));
     }
-    for unknown in (8..16).map(|bit| 1u16 << bit) {
+    for unknown in (9..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_READ | unknown,
             ..grant()
@@ -297,8 +297,15 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
 }
 
 #[test]
-fn source_read_issue_and_revocation_round_trip_without_widening_legacy_grants() {
-    for operations in [0x007f, SOURCE_READ, SOURCE_READ | PULLS_READ] {
+fn source_grant_issue_and_revocation_round_trip_without_widening_legacy_grants() {
+    for operations in [
+        0x007f,
+        0x00ff,
+        SOURCE_READ,
+        SOURCE_READ | PULLS_READ,
+        SOURCE_HISTORY_READ,
+        SOURCE_HISTORY_READ | SOURCE_READ | PULLS_READ,
+    ] {
         let grant = AgentCredentialGrant {
             operations,
             ..grant()
@@ -317,7 +324,7 @@ fn source_read_issue_and_revocation_round_trip_without_widening_legacy_grants() 
         assert_eq!(payload.as_bytes().len(), 178);
         assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
         let mut unknown = payload.into_bytes();
-        unknown[176..178].copy_from_slice(&(operations | (1 << 8)).to_be_bytes());
+        unknown[176..178].copy_from_slice(&(operations | (1 << 9)).to_be_bytes());
         assert!(
             ForgeEvent::read_payload(&mut Decoder::new(&unknown, DecodeLimits::DEFAULT)).is_err()
         );
@@ -337,6 +344,10 @@ fn source_read_issue_and_revocation_round_trip_without_widening_legacy_grants() 
             original.grant.permits(SOURCE_READ),
             operations & SOURCE_READ != 0
         );
+        assert_eq!(
+            original.grant.permits(SOURCE_HISTORY_READ),
+            operations & SOURCE_HISTORY_READ != 0
+        );
         let mut substituted = revoked;
         let ForgeEventPayload::AgentCredentialChangedNative(change) = &mut substituted.payload
         else {
@@ -350,6 +361,45 @@ fn source_read_issue_and_revocation_round_trip_without_widening_legacy_grants() 
             apply_event(Some(&original), &substituted),
             Err(RefusalCode::EvidenceStale)
         );
+    }
+}
+
+#[test]
+fn history_access_is_independent_of_every_preexisting_operation() {
+    // A previously issued all-scopes credential must not acquire history access
+    // when readers upgrade. Freeze the actual old bits, not ALL_OPERATIONS.
+    let old = AgentCredentialGrant {
+        operations: 0x00ff,
+        ..grant()
+    };
+    let history = AgentCredentialGrant {
+        operations: SOURCE_HISTORY_READ,
+        ..grant()
+    };
+    assert!(old.validate().is_ok());
+    assert!(!old.permits(SOURCE_HISTORY_READ));
+    assert!(history.validate().is_ok());
+    assert!(history.permits(SOURCE_HISTORY_READ));
+    assert!(!history.permits(0));
+    for other in (0..8).map(|bit| 1u16 << bit) {
+        assert!(old.permits(other));
+        assert!(!history.permits(other));
+        assert!(!history.permits(SOURCE_HISTORY_READ | other));
+        let combined = AgentCredentialGrant {
+            operations: SOURCE_HISTORY_READ | other,
+            ..history
+        };
+        assert!(combined.validate().is_ok());
+        assert!(combined.permits(SOURCE_HISTORY_READ | other));
+    }
+    for unknown in (9..16).map(|bit| 1u16 << bit) {
+        let invalid = AgentCredentialGrant {
+            operations: SOURCE_HISTORY_READ | unknown,
+            ..history
+        };
+        assert!(invalid.validate().is_err());
+        assert!(!invalid.permits(SOURCE_HISTORY_READ));
+        assert!(!history.permits(unknown));
     }
 }
 
