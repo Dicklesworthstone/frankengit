@@ -165,6 +165,54 @@ fn cold_native_commit_and_refusal_clear_only_original_debt_and_retry_exact_ack()
                 )
                 .unwrap();
             let now = LogicalTime::new(10_001);
+            let wrong_principal = PrincipalId::from_bytes([0x84; 16]);
+            let unchanged = fs::read(&path).unwrap();
+            assert!(matches!(
+                node.runtime().block_on(
+                    node.settle_recovered_agent_ref_transaction_for_principal_in(
+                        &request,
+                        &directory,
+                        run_id,
+                        &run_pin,
+                        old_tail,
+                        effect,
+                        wrong_principal,
+                        now,
+                    )
+                ),
+                Err(NativeRecoveredRefTransactionRefusal::Observation(
+                    RefTransactionObservationRefusal::Binding
+                ))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), unchanged);
+            let locked = fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            locked.try_lock().unwrap();
+            assert!(
+                matches!(
+                    node.runtime().block_on(
+                        node.settle_recovered_agent_ref_transaction_for_principal_in(
+                            &request,
+                            &directory,
+                            run_id,
+                            &run_pin,
+                            old_tail,
+                            effect,
+                            wrong_principal,
+                            now,
+                        )
+                    ),
+                    Err(NativeRecoveredRefTransactionRefusal::Journal(
+                        crate::agent_journal::AgentJournalHostRefusal::Busy
+                    ))
+                ),
+                "principal validation requires exclusive journal custody"
+            );
+            drop(locked);
+            assert_eq!(fs::read(&path).unwrap(), unchanged);
             assert!(!original.original_run().is_open_at(now));
             let before = original.reconciliation_report(now).unwrap();
             assert!(before.has_unsettled_effects());
@@ -218,11 +266,35 @@ fn cold_native_commit_and_refusal_clear_only_original_debt_and_retry_exact_ack()
             for (tail, already_acknowledged) in
                 [(old_tail, false), (old_tail, false), (expected_tail, true)]
             {
+                // The original caller check applies before completion of a
+                // partial ACK, synchronization of a complete suffix, and the
+                // no-op path anchored at the acknowledged successor.
+                let unchanged = fs::read(&path).unwrap();
+                assert!(matches!(
+                    node.runtime().block_on(
+                        node.settle_recovered_agent_ref_transaction_for_principal_in(
+                            &request,
+                            &directory,
+                            run_id,
+                            &run_pin,
+                            tail,
+                            effect,
+                            wrong_principal,
+                            now,
+                        )
+                    ),
+                    Err(NativeRecoveredRefTransactionRefusal::Observation(
+                        RefTransactionObservationRefusal::Binding
+                    ))
+                ));
+                assert_eq!(fs::read(&path).unwrap(), unchanged);
                 let result = node
                     .runtime()
-                    .block_on(node.settle_recovered_agent_ref_transaction_in(
-                        &request, &directory, run_id, &run_pin, tail, effect, now,
-                    ))
+                    .block_on(
+                        node.settle_recovered_agent_ref_transaction_for_principal_in(
+                            &request, &directory, run_id, &run_pin, tail, effect, OWNER, now,
+                        ),
+                    )
                     .unwrap();
                 let NativeRecoveredRefTransactionSettlement::Acknowledged {
                     observation: settled,
@@ -286,17 +358,38 @@ fn undecided_cold_submission_does_not_append_or_expose_an_incomplete_inventory()
         .runtime()
         .block_on(node.authenticate_authority_head())
         .unwrap();
+    assert!(matches!(
+        node.runtime().block_on(
+            node.settle_recovered_agent_ref_transaction_for_principal_in(
+                &request,
+                &directory,
+                run_id,
+                &run_pin,
+                tail,
+                effect,
+                PrincipalId::from_bytes([0x84; 16]),
+                LogicalTime::new(10_001),
+            )
+        ),
+        Err(NativeRecoveredRefTransactionRefusal::Observation(
+            RefTransactionObservationRefusal::Binding
+        ))
+    ));
+    assert_eq!(fs::read(&path).unwrap(), before);
     let result = node
         .runtime()
-        .block_on(node.settle_recovered_agent_ref_transaction_in(
-            &request,
-            &directory,
-            run_id,
-            &run_pin,
-            tail,
-            effect,
-            LogicalTime::new(10_001),
-        ))
+        .block_on(
+            node.settle_recovered_agent_ref_transaction_for_principal_in(
+                &request,
+                &directory,
+                run_id,
+                &run_pin,
+                tail,
+                effect,
+                OWNER,
+                LogicalTime::new(10_001),
+            ),
+        )
         .unwrap();
     assert!(
         matches!(result, NativeRecoveredRefTransactionSettlement::Undecided { effect_id, .. } if effect_id == effect)

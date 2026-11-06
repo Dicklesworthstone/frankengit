@@ -13,7 +13,7 @@ use fgit_agent::{
         prepare_recovered_ref_transaction_acknowledgement,
     },
 };
-use fgit_types::TxId;
+use fgit_types::{PrincipalId, TxId};
 
 use crate::{
     NodeRequestContext, OneNode,
@@ -78,7 +78,10 @@ impl OneNode {
     /// Reauthenticate the immutable original run, observe its original canonical
     /// submission and durably acknowledge only that terminal under exclusive
     /// journal custody. Works after the run expires or capability is revoked;
-    /// no broker, new grant, budget reservation or admission is created.
+    /// no broker, new grant, budget reservation or admission is created. This
+    /// entry point retains the trusted host's existing responsibility for
+    /// authorizing cleanup; caller-facing hosts should use
+    /// [`Self::settle_recovered_agent_ref_transaction_for_principal_in`].
     ///
     /// The complete-run commitment and old tail must be retained independently
     /// of the files. A prior attempt may have left a partial or complete copy of
@@ -95,6 +98,64 @@ impl OneNode {
         expected_run: &[u8; 32],
         expected_tail: EffectJournalPosition,
         effect: EffectId,
+        observed_at: LogicalTime,
+    ) -> Result<NativeRecoveredRefTransactionSettlement, NativeRecoveredRefTransactionRefusal> {
+        self.settle_recovered_agent_ref_transaction_with_principal_in(
+            request,
+            directory,
+            run_id,
+            expected_run,
+            expected_tail,
+            effect,
+            None,
+            observed_at,
+        )
+        .await
+    }
+
+    /// Settle an original submission only for its authenticated principal.
+    ///
+    /// Hosts exposing cleanup to a caller must supply that caller's authenticated
+    /// identity, or an explicitly acknowledged trusted-local identity. The
+    /// identity is checked against the original effect's sealed submission while
+    /// exclusive journal custody is held, before observing its terminal or
+    /// completing or synchronizing any ACK suffix. A mismatch leaves the journal
+    /// unchanged, including partial and already-complete ACKs. This check does
+    /// not require renewed capability authority and does not prevent cleanup
+    /// after the original run expires or its capability is revoked.
+    pub async fn settle_recovered_agent_ref_transaction_for_principal_in(
+        &self,
+        request: &NodeRequestContext,
+        directory: &Path,
+        run_id: RunId,
+        expected_run: &[u8; 32],
+        expected_tail: EffectJournalPosition,
+        effect: EffectId,
+        expected_principal: PrincipalId,
+        observed_at: LogicalTime,
+    ) -> Result<NativeRecoveredRefTransactionSettlement, NativeRecoveredRefTransactionRefusal> {
+        self.settle_recovered_agent_ref_transaction_with_principal_in(
+            request,
+            directory,
+            run_id,
+            expected_run,
+            expected_tail,
+            effect,
+            Some(expected_principal),
+            observed_at,
+        )
+        .await
+    }
+
+    async fn settle_recovered_agent_ref_transaction_with_principal_in(
+        &self,
+        request: &NodeRequestContext,
+        directory: &Path,
+        run_id: RunId,
+        expected_run: &[u8; 32],
+        expected_tail: EffectJournalPosition,
+        effect: EffectId,
+        expected_principal: Option<PrincipalId>,
         observed_at: LogicalTime,
     ) -> Result<NativeRecoveredRefTransactionSettlement, NativeRecoveredRefTransactionRefusal> {
         let run = self
@@ -126,6 +187,8 @@ impl OneNode {
         if binding.seal().tenant_id != self.tenant_id
             || binding.seal().repository_id != self.repository_id
             || binding.custody_commitment().is_none()
+            || expected_principal
+                .is_some_and(|principal| binding.seal().authenticated_principal_id != principal)
         {
             return Err(NativeRecoveredRefTransactionRefusal::Observation(
                 RefTransactionObservationRefusal::Binding,
