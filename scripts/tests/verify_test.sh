@@ -37,6 +37,9 @@ class NativeVerificationTools(unittest.TestCase):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, destination)
+        self.original_source = self.base / "original verify.sh"
+        shutil.copy2(ROOT / "scripts/verify.sh", self.original_source)
+        self.env["TEST_ORIGINAL_SOURCE"] = str(self.original_source)
         self.command("rustc", 'print("host: " + os.environ.get("TEST_HOST", "' + HOST + '"))')
         self.command("cargo", '''
 record = {"kind": "cargo", "args": sys.argv[1:], "cwd": os.getcwd(),
@@ -123,9 +126,12 @@ count = sum(r["kind"] == "git" and r["args"] == args for r in rows)
 with open(os.environ["TEST_LOG"], "a") as out:
     out.write(json.dumps({"kind":"git", "args":args, "cwd":os.getcwd()}) + "\\n")
 if args == ["rev-parse", "--verify", "HEAD"]:
-    print(("b" if count and os.environ.get("TEST_SOURCE_MOVED") else "a") * 40)
+    moved = Path(os.environ["TEST_LOG"]).with_suffix(".moved").exists()
+    print(("b" if moved or count and os.environ.get("TEST_SOURCE_MOVED") else "a") * 40)
 elif args == ["status", "--porcelain=v1", "--untracked-files=all"]:
-    if os.environ.get("TEST_DIRTY_SOURCE") or (count and os.environ.get("TEST_SOURCE_DIRTY_AFTER")):
+    if Path(os.environ["TEST_LOG"]).with_suffix(".unreadable").exists(): sys.exit(88)
+    changed = Path("scripts/verify.sh").read_bytes() != Path(os.environ["TEST_ORIGINAL_SOURCE"]).read_bytes()
+    if changed or os.environ.get("TEST_DIRTY_SOURCE") or (count and os.environ.get("TEST_SOURCE_DIRTY_AFTER")):
         print(" M tracked source")
 else: sys.exit(92)
 ''')
@@ -148,6 +154,12 @@ row = {"kind":"suite", "args":sys.argv[1:], "cwd":os.getcwd(),
        "profile":os.environ.get("FGE_PROFILE"),
        "source_cut":os.environ.get("FG_SIGNED_BUNDLE_SOURCE_CUT")}
 with open(os.environ["TEST_LOG"], "a") as out: out.write(json.dumps(row) + "\\n")
+if os.environ.get("TEST_SOURCE_DIRTY_IN_SUITE"):
+    with Path("scripts/verify.sh").open("a") as out: out.write("\\n# controlled campaign source mutation\\n")
+if os.environ.get("TEST_SOURCE_MOVED_IN_SUITE"):
+    Path(os.environ["TEST_LOG"]).with_suffix(".moved").touch()
+if os.environ.get("TEST_SOURCE_UNREADABLE_IN_SUITE"):
+    Path(os.environ["TEST_LOG"]).with_suffix(".unreadable").touch()
 sys.exit(int(os.environ.get("TEST_SUITE_EXIT", "0")))
 OPERATOR_DISPATCH
 ''')
@@ -257,6 +269,31 @@ OPERATOR_DISPATCH
         self.operator_fixture()
         _, rows = self.invoke("operator", 1, {"TEST_SOURCE_DIRTY_AFTER":"1"})
         self.assertFalse(any(r["kind"] == "suite" for r in rows))
+
+    def test_operator_source_dirtied_during_campaigns_cannot_pass(self):
+        self.operator_fixture()
+        result, rows = self.invoke("operator", 1, {"TEST_SOURCE_DIRTY_IN_SUITE":"1"})
+        self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
+        self.assertNotEqual((self.root / "scripts/verify.sh").read_bytes(), self.original_source.read_bytes())
+        self.assertIn("source changed during operator campaigns", result.stderr)
+
+    def test_operator_revision_moved_during_campaigns_cannot_pass(self):
+        self.operator_fixture()
+        result, rows = self.invoke("operator", 1, {"TEST_SOURCE_MOVED_IN_SUITE":"1"})
+        self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
+        self.assertIn("source changed during operator campaigns", result.stderr)
+
+    def test_operator_unreadable_source_after_campaigns_cannot_pass(self):
+        self.operator_fixture()
+        result, rows = self.invoke("operator", 1, {"TEST_SOURCE_UNREADABLE_IN_SUITE":"1"})
+        self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
+        self.assertIn("cannot inspect source after operator campaigns", result.stderr)
+
+    def test_operator_source_change_preserves_the_campaign_failure(self):
+        self.operator_fixture()
+        result, rows = self.invoke("operator", 31, {"TEST_SOURCE_DIRTY_IN_SUITE":"1", "TEST_SUITE_EXIT":"31"})
+        self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
+        self.assertIn("source changed during operator campaigns", result.stderr)
 
     def test_docs_builds_native_but_reads_caller_even_with_remote_manifest_environment(self):
         _, rows = self.invoke()
