@@ -93,9 +93,11 @@ those production guards are retained. This profile selection applies only to
 The [native installer](../scripts/prepare_operator_native.py) leaves the Cargo/RCH
 delivery unchanged, checks stable source identity and matching SHA-256 bytes,
 and retains a canonical path under a private target subdirectory with mode
-`0500`. Its streaming copy bounds an executable to 2 GiB. This accommodates a
-worker's group-writable build output while retaining
-the operator's executable ownership checks. Incomplete copies stay non-executable;
+`0500`. Its streaming copy bounds an executable to 2 GiB. Both verification
+hash passes enforce the original byte length, with one extra byte used only to
+detect growth; a growing or truncated file refuses before executable promotion.
+This accommodates a worker's group-writable build output while retaining the
+operator's executable ownership checks. Incomplete copies stay non-executable;
 an installation failure prevents dispatch and retains its files for inspection.
 The build remains the trust boundary;
 installation does not authenticate an arbitrary executable. Retained snapshots

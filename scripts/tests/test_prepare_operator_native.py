@@ -89,6 +89,15 @@ class NativeInstallation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.prepare()
 
+    def test_exact_limit_verification_crosses_a_chunk_boundary(self):
+        payload = b"\xa5" * (1024 * 1024 + 1)
+        self.source.write_bytes(payload)
+        with patch.object(native, "MAX_EXECUTABLE_BYTES", len(payload)):
+            installed, _ = self.prepare()
+        self.assertEqual(installed.read_bytes(), payload)
+        self.assertEqual(self.source.read_bytes(), payload)
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o500)
+
     def test_changed_real_source_during_flush_never_publishes_an_executable(self):
         sync = os.fsync
         changed = False
@@ -106,6 +115,47 @@ class NativeInstallation(unittest.TestCase):
         installed = list(self.target.glob(".operator-native-*/fg"))
         self.assertEqual(len(installed), 1)
         self.assertEqual(installed[0].stat().st_mode & 0o777, 0o600)
+
+    def check_growing_hash_pass(self, selected_pass):
+        original_digest = native.stream_digest
+        calls = 0
+        consumed = []
+
+        def digest_after_growth(stream, *args):
+            nonlocal calls
+            calls += 1
+            if calls != selected_pass:
+                return original_digest(stream, *args)
+            # Append actual bytes after the copy/initial stat, immediately
+            # before the selected source or installed-file verification pass.
+            with Path(stream.name).open("ab") as writer:
+                writer.write(b"late growth" * 16384)
+
+            class CountReads:
+                def read(self, size=-1):
+                    chunk = stream.read(size)
+                    consumed.append(len(chunk))
+                    return chunk
+
+                def __getattr__(self, name):
+                    return getattr(stream, name)
+
+            return original_digest(CountReads(), *args)
+
+        with patch.object(native, "stream_digest", digest_after_growth), self.assertRaises(ValueError):
+            self.prepare()
+        self.assertTrue(consumed, "the selected verification pass must run")
+        self.assertLessEqual(sum(consumed), len(self.bytes) + 1,
+                             "verification must stop at the original size plus an oversize probe")
+        installed = list(self.target.glob(".operator-native-*/fg"))
+        self.assertEqual(len(installed), 1)
+        self.assertEqual(installed[0].stat().st_mode & 0o777, 0o600)
+
+    def test_source_verification_stops_at_original_length_after_growth(self):
+        self.check_growing_hash_pass(1)
+
+    def test_installed_verification_stops_at_original_length_after_growth(self):
+        self.check_growing_hash_pass(2)
 
     def test_copy_sync_failure_keeps_partial_output_non_executable(self):
         with patch.object(native.os, "fsync", side_effect=OSError("injected disk failure")):
