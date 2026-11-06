@@ -142,6 +142,7 @@ data = sys.stdin.buffer.read()
 counter = Path(os.environ["TEST_LOG"] + ".hash-count")
 count = int(counter.read_text()) + 1 if counter.exists() else 1
 counter.write_text(str(count))
+Path(os.environ["TEST_LOG"] + ".hash-tool").write_text(Path(sys.argv[0]).name)
 failed = count == int(os.environ["TEST_HASH_AT"])
 # Declared fault: emit a partial-input digest, then report failure.
 print(hashlib.sha256(data[:len(data) // 2] if failed else data).hexdigest() + "  -")
@@ -158,6 +159,21 @@ sys.exit(74 if failed else 0)
 }
 ''')
         for tool in ["sha256sum", "shasum"]:
+            counter = Path(str(self.log) + ".hash-count")
+            counter.unlink(missing_ok=True)
+            directory = self.base / f"successful {tool} replay"
+            self.invoke(artifact=True,
+                changes={"VERIFY_ARTIFACT_DIR":str(directory), "BASH_ENV":str(shim),
+                         "TEST_HASH_TOOL":tool, "TEST_HASH_AT":"0"})
+            self.assertEqual(Path(str(self.log) + ".hash-tool").read_text(), tool)
+            receipt = json.loads(next(directory.glob("*.json")).read_bytes())
+            captured = (directory / receipt["captured_output_file"]).read_bytes()
+            self.assertTrue(captured.startswith(b"stdout\0"))
+            self.assertEqual(hashlib.sha256(captured).hexdigest(), receipt["captured_output_sha256"])
+            stdout, stderr = captured[len(b"stdout\0"):].split(b"\0stderr\0", 1)
+            for name, stream in [("stdout", stdout), ("stderr", stderr)]:
+                self.assertEqual(hashlib.sha256(stream).hexdigest(), receipt[name + "_sha256"])
+            self.assertEqual(receipt["exit_code"], 0)
             for at in [3, 4, 5]:  # Captured stdout, stderr, and framed output.
                 for code in [0, 31]:
                     with self.subTest(tool=tool, hash_at=at, lane_exit=code):
@@ -169,6 +185,7 @@ sys.exit(74 if failed else 0)
                                      "TEST_HASH_TOOL":tool, "TEST_HASH_AT":str(at),
                                      "TEST_NATIVE_EXIT":str(code)})
                         self.assertGreaterEqual(int(counter.read_text()), at)
+                        self.assertEqual(Path(str(self.log) + ".hash-tool").read_text(), tool)
                         self.assertEqual(list(directory.glob("*")), [])
                         self.assertIn("cannot hash", result.stderr)
                         self.assertTrue(result.stdout.endswith("caller tool executed\n"))
