@@ -426,9 +426,11 @@ emit_captured_output() {
   local stdout_path="$1"
   local stderr_path="$2"
 
-  printf 'stdout\0'
-  cat -- "${stdout_path}"
-  printf '\0stderr\0'
+  # This function runs in a conditional, where errexit cannot catch a failed
+  # intermediate copy. Never replace that failure with a later successful write.
+  printf 'stdout\0' || return
+  cat -- "${stdout_path}" || return
+  printf '\0stderr\0' || return
   cat -- "${stderr_path}"
 }
 

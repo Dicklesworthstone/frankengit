@@ -2,7 +2,7 @@
 
 **Status:** normative operations profile  
 **Version:** 1.2
-**Last revised:** 2026-11-02
+**Last revised:** 2026-11-06
 
 FrankenGit uses Doodlestein Self-Releaser (`dsr`) directly. The GitHub Actions service must never be used, including hosted and self-hosted runners. Repository workflow definitions remain portable lane descriptions for local DSR/`act` execution. The canonical commands, schemas, and evidence generation live inside the repository.
 
@@ -52,6 +52,10 @@ When `CARGO_BUILD_JOBS` is set, native tool builds pass it explicitly as Cargo
 - `operator`: the currently implemented live operator campaigns and operator/script module suites, using one native `fg` build and the shared pinned Node identity. This is not the complete every-entrypoint qualification required by `x2mv.4.59`.
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
+
+Replay artifacts retain both captured output streams. A failed stream copy
+publishes neither the replay JSON nor its partial output, warns on stderr,
+and preserves the original lane exit status.
 
 The product `e2e` lane also discovers the operator module suite at
 [`scripts/e2e/suites/operator/contract_tests.sh`](../scripts/e2e/suites/operator/contract_tests.sh).
