@@ -179,7 +179,14 @@ execution. Use ordinary package capture for sponsored source reads; there is no
 silent downgrade of a requested authority-proof mode.
 
 Use an owner-controlled executable without symlink aliases or group/other write
-permissions. In this mode, `selection.json` must include an independently retained
+permissions. Executable preflight keeps the existing 256 MiB ceiling and hashes
+through one no-follow, nonblocking descriptor with at most 64 KiB buffered.
+The opened file is checked against the selected metadata before data reads;
+hashing checks the original deadline/cancellation between chunks and rechecks
+descriptor/path identity and growth before returning its SHA-256. A changed
+executable refuses capture. This does not attest its build or atomically pin the
+later process execution against a hostile host owner.
+In this mode, `selection.json` must include an independently retained
 `expected_head`; a head copied from the response being checked is not a trust
 anchor. The endpoint must be numeric-loopback HTTP, matching the current native
 `fg verify-read` client profile. HTTPS, DNS names and implicit head discovery are
