@@ -283,7 +283,7 @@ impl VerifiedApproval {
         self.deadline.check()?;
         validate_archive_budget(maximum_archive_bytes)?;
         if self.statement.archive_bytes > maximum_archive_bytes {
-            return Err("backup approval decimal exceeds its permitted range".into());
+            return Err("backup approval archive byte count exceeds its permitted range".into());
         }
         if self.statement.generation < self.policy.minimum_generation {
             return Err(
