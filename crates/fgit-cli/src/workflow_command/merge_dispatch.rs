@@ -14,6 +14,8 @@ const USAGE: &str = "usage: fg workflow dispatch-merge-candidate <storage-root> 
   [--artifact-root <absolute-private-directory>]
   [--artifact-logs] [--artifact <workflow:job:output> ...]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-retained-input <workflow:consumer:manifest-sha256:artifact-sha256:output:destination> ...]
+  [--artifact-retained-input-hex <workflow-hex:consumer:manifest-sha256:artifact-sha256:output-hex:destination-hex> ...]
   [artifact hex selectors and byte ceilings from fg workflow run --help]
 
 Execute ALL selected direct .yml/.yaml children from one verified unpublished

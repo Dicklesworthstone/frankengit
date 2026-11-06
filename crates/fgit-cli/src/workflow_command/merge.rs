@@ -21,6 +21,8 @@ const USAGE: &str =
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-retained-input <workflow:consumer:manifest-sha256:artifact-sha256:output:destination> ...]
+  [--artifact-retained-input-hex <workflow-hex:consumer:manifest-sha256:artifact-sha256:output-hex:destination-hex> ...]
   [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
   [--max-artifact-input-total-mib <1..512>]
 

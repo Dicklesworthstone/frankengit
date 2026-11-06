@@ -90,6 +90,7 @@ pub use treefs_workspace::{
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
     TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
+    TrustedWorkflowRetainedArtifactInput, TrustedWorkflowRetainedArtifactProvenance,
     TrustedWorkflowRun, TrustedWorkflowStepLog,
 };
 pub use treefs_workspace::{

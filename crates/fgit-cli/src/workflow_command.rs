@@ -31,6 +31,8 @@ const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <reposito
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-retained-input <workflow:consumer:manifest-sha256:artifact-sha256:output:destination> ...]
+  [--artifact-retained-input-hex <workflow-hex:consumer:manifest-sha256:artifact-sha256:output-hex:destination-hex> ...]
   [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
   [--max-artifact-input-total-mib <1..512>]
 
@@ -198,6 +200,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut inputs = BTreeSet::new();
     let mut artifact_selections = Vec::new();
     let mut artifact_inputs = Vec::new();
+    let mut retained_artifact_inputs = Vec::new();
     let mut cursor = 5;
     while cursor < args.len() {
         let flag = args[cursor].as_str();
@@ -227,6 +230,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 | "--max-artifact-total-mib"
                 | "--artifact-input"
                 | "--artifact-input-hex"
+                | "--artifact-retained-input"
+                | "--artifact-retained-input-hex"
                 | "--max-artifact-input-total-mib"
         ) && !(candidate_mode && matches!(flag, "--bundle" | "--candidate-commit"))
         {
@@ -254,12 +259,23 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             artifact_selections.push(artifacts::selection(value, flag == "--artifact-hex")?);
         } else if matches!(flag, "--artifact-input" | "--artifact-input-hex") {
-            if artifact_inputs.len() >= 64 {
+            if artifact_inputs.len() + retained_artifact_inputs.len() >= 64 {
                 return Err("at most 64 artifact input selections are permitted".into());
             }
             artifact_inputs.push(artifacts::input_selection(
                 value,
                 flag == "--artifact-input-hex",
+            )?);
+        } else if matches!(
+            flag,
+            "--artifact-retained-input" | "--artifact-retained-input-hex"
+        ) {
+            if artifact_inputs.len() + retained_artifact_inputs.len() >= 64 {
+                return Err("at most 64 combined artifact input selections are permitted".into());
+            }
+            retained_artifact_inputs.push(artifacts::retained_input_selection(
+                value,
+                flag == "--artifact-retained-input-hex",
             )?);
         } else if flags.insert(flag, value.as_str()).is_some() {
             return Err(format!("duplicate {flag}"));
@@ -346,7 +362,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
             RepositoryIncarnationId::from_hex(text).map_err(|_| "invalid incarnation ID".to_owned())
         })
         .transpose()?;
-    let artifacts = artifacts::options_with_inputs(&flags, artifact_selections, artifact_inputs)?;
+    let artifacts = artifacts::options_with_retained_inputs(
+        &flags,
+        artifact_selections,
+        artifact_inputs,
+        retained_artifact_inputs,
+    )?;
     let candidate = if candidate_mode {
         let base = commit.ok_or("--expected-commit is mandatory for run-candidate")?;
         let candidate = native_oid(value("--candidate-commit")?, format)?;

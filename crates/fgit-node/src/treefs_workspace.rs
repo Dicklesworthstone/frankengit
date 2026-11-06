@@ -61,6 +61,7 @@ pub use trusted_workflow::artifacts::{
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowJobArtifactInputs,
     TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
+    TrustedWorkflowRetainedArtifactInput, TrustedWorkflowRetainedArtifactProvenance,
     TrustedWorkflowStepLog,
 };
 #[cfg(target_os = "linux")]

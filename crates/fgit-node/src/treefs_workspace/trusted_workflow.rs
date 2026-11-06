@@ -357,7 +357,7 @@ impl TrustedWorkflowRun {
         if self
             .artifact_contract
             .as_ref()
-            .is_some_and(|config| !config.inputs().is_empty())
+            .is_some_and(|config| config.has_inputs())
         {
             write!(
                 artifacts,
@@ -456,9 +456,8 @@ impl OneNode {
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
         if artifacts.is_some_and(|config| {
             config
-                .selections()
-                .iter()
-                .any(|selection| selection.workflow_path() != workflow_path)
+                .selected_workflows()
+                .any(|path| path != workflow_path)
         }) {
             return Err(TrustedWorkflowFailure::InvalidInput(
                 "single-run artifact selections must name the selected workflow",
@@ -752,7 +751,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     let host_plan = inputs
         .host_plan(capability)
         .map_err(TrustedWorkflowFailure::Host)?;
-    if artifact_session.is_some_and(|session| !session.config.inputs().is_empty())
+    if artifact_session.is_some_and(|session| session.config.has_inputs())
         && inputs
             .entries()
             .iter()

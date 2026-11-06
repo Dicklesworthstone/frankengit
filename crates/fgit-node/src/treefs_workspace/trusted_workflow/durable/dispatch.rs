@@ -498,9 +498,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
             config.validate_workflow(entry.path().as_bytes(), &plan)?;
             if !selected
                 && config
-                    .selections()
-                    .iter()
-                    .any(|s| s.workflow_path() == entry.path().as_bytes())
+                    .selected_workflows()
+                    .any(|path| path == entry.path().as_bytes())
             {
                 return Err(invalid(
                     "artifact workflow is not selected by this dispatch event",
@@ -534,11 +533,9 @@ fn dispatch_at<A: GitHashAlgorithm>(
         });
     }
     if artifacts.is_some_and(|config| {
-        config.selections().iter().any(|s| {
-            !definitions
-                .iter()
-                .any(|d| d.selected && d.path == s.workflow_path())
-        })
+        config
+            .selected_workflows()
+            .any(|path| !definitions.iter().any(|d| d.selected && d.path == path))
     }) {
         return Err(invalid(
             "artifact selection names an absent dispatch workflow",
@@ -562,7 +559,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
         inputs
             .host_plan(capability)
             .map_err(TrustedWorkflowFailure::Host)?;
-        if artifacts.is_some_and(|config| !config.inputs().is_empty())
+        if artifacts.is_some_and(|config| config.has_inputs())
             && inputs.entries().iter().any(|entry| {
                 entry.path().components().next() == Some(b".fgit-artifacts".as_slice())
             })

@@ -50,6 +50,19 @@ pub(super) fn identity(
         part(&mut hash, input.output_path());
         part(&mut hash, input.destination());
     }
+    // Preserve the original identity exactly unless the new contract is present.
+    if !artifacts.retained_inputs().is_empty() {
+        part(&mut hash, b"frankengit/retained-artifact-inputs/v1");
+        number(&mut hash, artifacts.retained_inputs().len());
+        for input in artifacts.retained_inputs() {
+            part(&mut hash, input.workflow_path());
+            part(&mut hash, input.consumer_job_id().as_bytes());
+            part(&mut hash, input.producer_manifest_id().bytes().as_bytes());
+            part(&mut hash, input.artifact_id().bytes().as_bytes());
+            part(&mut hash, input.output_path());
+            part(&mut hash, input.destination());
+        }
+    }
     hash.finish()
 }
 
@@ -158,6 +171,66 @@ mod tests {
             artifact("/private/artifacts", false, None),
             artifact("/private/artifacts", false, Some(("changed", 256))),
             artifact("/private/artifacts", false, Some(("input", 255))),
+        ] {
+            assert_ne!(expected, identity(b"ci", &prefixes, limits, Some(&changed)));
+        }
+    }
+
+    #[test]
+    fn retained_input_identity_binds_original_objects_consumer_paths_and_shared_limits() {
+        use crate::TrustedWorkflowRetainedArtifactInput;
+        use fgit_crypto::DigestAlgorithm;
+        use fgit_types::{Digest, DigestBytes};
+        let digest = |byte| {
+            Digest::new(
+                DigestAlgorithm::Sha256.id(),
+                DigestBytes::try_new(&[byte; 32]).unwrap(),
+            )
+        };
+        let config = |workflow: &[u8],
+                      job: &str,
+                      manifest,
+                      artifact,
+                      output: &[u8],
+                      destination: &[u8],
+                      bytes| {
+            TrustedWorkflowArtifactConfig::new_with_retained_inputs(
+                "/private/artifacts".into(),
+                Vec::new(),
+                128,
+                256,
+                false,
+                vec![
+                    TrustedWorkflowRetainedArtifactInput::new(
+                        workflow,
+                        job,
+                        digest(manifest),
+                        digest(artifact),
+                        output,
+                        destination,
+                    )
+                    .unwrap(),
+                ],
+                bytes,
+            )
+            .unwrap()
+        };
+        let original = config(b"ci/build.yml", "test", 1, 2, b"out", b"prior", 128);
+        let prefixes = vec![b"ci".to_vec()];
+        let limits = WorkflowLimits::default();
+        let expected = identity(b"ci", &prefixes, limits, Some(&original));
+        assert_eq!(
+            expected,
+            identity(b"ci", &prefixes, limits, Some(&original.clone()))
+        );
+        for changed in [
+            config(b"ci/other.yml", "test", 1, 2, b"out", b"prior", 128),
+            config(b"ci/build.yml", "other", 1, 2, b"out", b"prior", 128),
+            config(b"ci/build.yml", "test", 3, 2, b"out", b"prior", 128),
+            config(b"ci/build.yml", "test", 1, 3, b"out", b"prior", 128),
+            config(b"ci/build.yml", "test", 1, 2, b"other", b"prior", 128),
+            config(b"ci/build.yml", "test", 1, 2, b"out", b"other", 128),
+            config(b"ci/build.yml", "test", 1, 2, b"out", b"prior", 127),
         ] {
             assert_ne!(expected, identity(b"ci", &prefixes, limits, Some(&changed)));
         }

@@ -14,7 +14,7 @@ use fgit_runner::Commitment;
 use fgit_runner::sparse_workspace::JobInput;
 use fgit_runner::workflow::{JobOutcome, JobReport};
 
-const ARTIFACT_INPUT_NAMESPACE: &[u8] = b".fgit-artifacts";
+pub(super) const ARTIFACT_INPUT_NAMESPACE: &[u8] = b".fgit-artifacts";
 
 pub const DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -134,6 +134,7 @@ impl TrustedWorkflowArtifactConfig {
         }
         self.inputs = inputs;
         self.input_total_bytes = maximum_total_delivery_bytes;
+        self.validate_delivery_contract()?;
         Ok(self)
     }
 
@@ -188,7 +189,7 @@ impl TrustedWorkflowArtifactConfig {
         Ok(())
     }
 }
-fn paths_overlap(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn paths_overlap(a: &[u8], b: &[u8]) -> bool {
     a == b
         || a.strip_prefix(b).is_some_and(|rest| rest.starts_with(b"/"))
         || b.strip_prefix(a).is_some_and(|rest| rest.starts_with(b"/"))
@@ -202,16 +203,24 @@ pub struct TrustedWorkflowArtifactInputReceipt {
     pub output: TrustedWorkflowArtifactOutput,
     /// Full relative workspace path, including the reserved namespace.
     pub destination: Vec<u8>,
+    /// Present only for a separately selected immutable previous producer.
+    /// Its custody never asserts that the producer completed successfully.
+    pub retained_producer: Option<super::TrustedWorkflowRetainedArtifactProvenance>,
 }
 impl TrustedWorkflowArtifactInputReceipt {
     fn to_json(&self) -> String {
-        format!(
+        let mut json = format!(
             "{{\"producer_job_id_hex\":\"{}\",\"producer_manifest_id_sha256\":\"{}\",\"output\":{},\"destination_path_hex\":\"{}\"}}",
             hex(self.producer_job_id.as_bytes()),
             digest_hex(self.producer_manifest_id),
             self.output.to_json(),
             hex(&self.destination),
-        )
+        );
+        if let Some(producer) = &self.retained_producer {
+            json.pop();
+            json.push_str(&format!(",\"retained_producer\":{}}}", producer.to_json()));
+        }
+        json
     }
 }
 
@@ -268,7 +277,16 @@ impl Collector<'_> {
             .iter()
             .filter(|input| input.workflow_path() == self.workflow && input.consumer == job.id)
             .collect::<Vec<_>>();
-        if selected.is_empty() {
+        let retained = self
+            .session
+            .config
+            .retained_inputs
+            .iter()
+            .filter(|input| {
+                input.workflow_path() == self.workflow && input.consumer_job_id() == job.id
+            })
+            .collect::<Vec<_>>();
+        if selected.is_empty() && retained.is_empty() {
             return Ok((plan, None));
         }
         let refused =
@@ -389,6 +407,7 @@ impl Collector<'_> {
                     producer_manifest_id: producer.manifest_id,
                     output: output.clone(),
                     destination,
+                    retained_producer: None,
                 };
                 let binding = format!(
                     "{}:{}:{}",
@@ -408,6 +427,65 @@ impl Collector<'_> {
                 )
                 .map_err(|e| e.to_string())?;
                 supplements.push(supplement);
+                receipts.push(receipt);
+            }
+            for input in retained {
+                if !live() {
+                    return Err("request stopped during retained input preparation".to_owned());
+                }
+                let receipt = self.retained_input(input, live)?;
+                let output = &receipt.output;
+                if output.payload_bytes
+                    > self
+                        .session
+                        .config
+                        .maximum_bytes
+                        .min(SOURCE_LIMITS.max_entry_bytes)
+                {
+                    return Err("retained output exceeds the selected file envelope".into());
+                }
+                workspace_remaining = workspace_remaining
+                    .checked_sub(output.payload_bytes)
+                    .ok_or("retained inputs exceed the consumer workspace envelope")?;
+                self.session.charge_input(output.payload_bytes)?;
+                let (actual, body) = self
+                    .session
+                    .store
+                    .read_payload(&output.artifact_id, &op)
+                    .map_err(|e| format!("verify retained payload: {e}"))?;
+                let provenance = receipt
+                    .retained_producer
+                    .as_ref()
+                    .expect("verified retained provenance");
+                let expected = super::retained::payload_identity(
+                    output.payload_sha256,
+                    output.payload_bytes,
+                    super::retained::source_identity(&provenance.source_rcr)?,
+                );
+                if actual != expected || *actual.artifact_id() != input.artifact_id() {
+                    return Err(
+                        "retained payload metadata differs from the selected manifest".into(),
+                    );
+                }
+                let binding = format!(
+                    "{}:{}:{}",
+                    hex(contract.digest().bytes().as_bytes()),
+                    hex(job.id.as_bytes()),
+                    receipt.to_json()
+                );
+                supplements.push(
+                    JobInput::new(
+                        input.destination(),
+                        body,
+                        if output.executable {
+                            FileMode::Executable
+                        } else {
+                            FileMode::Regular
+                        },
+                        Commitment::of_bytes(binding.as_bytes()),
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
                 receipts.push(receipt);
             }
             let plan = plan

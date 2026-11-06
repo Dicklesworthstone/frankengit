@@ -244,9 +244,8 @@ impl OneNode {
     ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
         if artifacts.is_some_and(|config| {
             config
-                .selections()
-                .iter()
-                .any(|selection| selection.workflow_path() != workflow_path)
+                .selected_workflows()
+                .any(|path| path != workflow_path)
         }) {
             return Err(TrustedWorkflowFailure::InvalidInput(
                 "single-run artifact selections must name the selected workflow",

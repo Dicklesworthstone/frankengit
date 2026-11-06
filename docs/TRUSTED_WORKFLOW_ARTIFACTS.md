@@ -16,6 +16,8 @@ verified immutable bytes and bound producing-attempt provenance. It does not
 create a BuildInputCapsule, authorize a cache hit, skip execution, or independently
 attest that a job succeeded. Explicit artifact-input selectors can deliver verified
 copies to successful producers' direct dependent jobs in the same attempt.
+Separate retained-input selectors can deliver an exactly pinned earlier output
+to a later workflow. Every consumer still executes its own scripts and checks.
 
 ## Select the producing workflow, expanded job and file
 
@@ -210,7 +212,7 @@ any attempt or dispatch batch is reserved. The same flags work with dispatch
 and both candidate modes; candidate manifests retain their exact unpublished
 input provenance.
 
-Delivery requires the producer's completed successful job observation and the
+`--artifact-input` delivery requires the producer's completed successful job observation and the
 output custody receipt from this attempt. Retained files from another run,
 failed-producer diagnostic outputs, or a guessed artifact ID cannot satisfy it.
 Before each consumer opens, the node reconstructs and verifies the producer's
@@ -258,6 +260,85 @@ workspaces verify supplemental bytes, modes and file identities on reopening.
 Supplemental-input plans cannot import workspace edits as canonical Git source;
 delivery adds no source-authoring capability. Calls without input selectors keep
 their existing capture-only marker, report and manifest bytes.
+
+## Use a retained output in a later workflow
+
+A later test or packaging workflow can consume a selected output after the
+producing workspace and run directory have been removed, including after the
+node reopens. Select the original `manifest_id_sha256` from the producer's
+`artifacts` entry and the exact output's `artifact_id_sha256`. Both identities
+are mandatory. The output path must name that same entry in the original
+manifest; it is not a filesystem path beneath the old run directory.
+
+For an original `dist/program` output, a reviewed `ci/package.yml` workflow can
+read `.fgit-artifacts/bin/program` using:
+
+```sh
+fg workflow run "$NODE" "$TENANT_ID" "$REPOSITORY_ID" refs/heads/main \
+  --trusted-local --workflow ci/package.yml --input ci --input packaging \
+  --run-parent "$RUN_PARENT" --run-id "$NEW_RUN_ID" \
+  --artifact-root "$ARTIFACT_ROOT" \
+  --artifact-retained-input "ci/package.yml:package:$PRODUCER_MANIFEST_ID:$OUTPUT_ARTIFACT_ID:dist/program:bin/program"
+```
+
+Each repeated `--artifact-retained-input` contains
+`workflow:consumer:manifest-sha256:artifact-sha256:output:destination`.
+The consumer is an exact expanded job ID in the newly selected workflow.
+Both IDs must contain exactly 64 lowercase hexadecimal digits. For raw-byte or
+colon-containing paths, `--artifact-retained-input-hex` accepts
+`workflow-hex:consumer:manifest-sha256:artifact-sha256:output-hex:destination-hex`;
+job IDs and SHA-256 identities remain literal. New output capture and log capture
+are optional: a workflow may request retained inputs alone. The same selectors
+work with directory dispatch, candidate runs, merge-candidate dispatch and watch
+executions through their shared artifact configuration.
+
+The existing artifact root must contain the original immutable objects in this
+node's exact tenant, repository, incarnation and `trusted-workflow-local-owner`
+scope. Before opening the consumer workspace, the node verifies the complete
+stored manifest, its scope and identity metadata, the original capture selection,
+the selected output path and identity, and the payload's full length and digest.
+The original source RCR, native object format and executable mode must agree with
+the immutable provenance. A copied foreign-scope container, substituted output,
+changed payload, malformed manifest or missing object refuses the consumer
+before its first script. No fallback reads an old workspace or searches for a
+similarly named output.
+
+This is explicit input custody selected by the trusted local operator. A retained
+manifest records `job_success_asserted: false`; the operator may deliberately
+select a diagnostic output from a failed producer. Delivery therefore does not
+require or imply that the original job succeeded. A same-attempt dependency
+selected with `--artifact-input` retains its separate successful-producer and
+direct-`needs` requirements. Both kinds can appear in one configuration. Every
+consumer executes normally, and canonical check publication uses its ordinary
+completed execution evidence. No BuildInputCapsule cache hit or skipped check is
+created.
+
+The two kinds share the existing 64-input count, 64 KiB aggregate path allowance,
+destination collision rules, per-file and workspace bounds, and
+`--max-artifact-input-total-mib` allowance. Every delivered copy is charged, even
+when multiple consumers select the same immutable payload. All children in one
+dispatch share this allowance. Each verified provenance read is bounded to
+1 MiB; it does not increase the payload or workspace limits. All selected
+workflows and consumer jobs are validated before reserving an attempt or batch.
+No selected source entry may occupy `.fgit-artifacts/`.
+
+The immutable attempt and dispatch contract add `retained_input_delivery`,
+including both original IDs, output and destination paths, consumer, and shared
+delivery budget. Existing contracts without retained selectors keep their
+original bytes. The synced `job-NNN-artifact-inputs.json` and the report's
+`artifact_inputs` entries retain the original manifest and payload identities.
+A prior-run entry also includes `retained_producer`: original run ID, attempt
+digest, workflow path, complete source RCR and executed commit, with
+`producer_success_asserted: false`. Any new captured output embeds this input
+receipt in its own provenance. This preserves the build-to-test-to-package
+lineage without presenting the producer as a newly executed job.
+
+Each consumer receives a separate verified copy with the recorded executable
+mode. Editing one copy cannot change the stored payload or a later consumer's
+copy. Cancellation before preparation prevents execution; input staging is
+cleaned on both success and refusal. An occupied run ID refuses both an identical
+retry and a changed retained-input contract, preserving the original marker and
+report for inspection.
 
 
 ## What is retained

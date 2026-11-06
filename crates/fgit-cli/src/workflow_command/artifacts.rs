@@ -19,6 +19,57 @@ pub(crate) struct InputSelection {
     destination: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct RetainedInputSelection {
+    workflow: Vec<u8>,
+    consumer: String,
+    manifest: [u8; 32],
+    artifact: [u8; 32],
+    output: Vec<u8>,
+    destination: Vec<u8>,
+}
+
+pub(crate) fn retained_input_selection(
+    value: &str,
+    encoded: bool,
+) -> Result<RetainedInputSelection, String> {
+    let fields = value.splitn(6, ':').collect::<Vec<_>>();
+    if fields.len() != 6 {
+        return Err("retained artifact input must be workflow:consumer:manifest-sha256:artifact-sha256:output:destination".into());
+    }
+    let output = selection(
+        &format!("{}:{}:{}", fields[0], fields[1], fields[4]),
+        encoded,
+    )?;
+    let target = selection(
+        &format!("{}:{}:{}", fields[0], fields[1], fields[5]),
+        encoded,
+    )?;
+    if target.output.len() > 4000 {
+        return Err("retained artifact input destination exceeds its namespace path limit".into());
+    }
+    let digest = |value: &str| -> Result<[u8; 32], String> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("retained artifact IDs must be 64 lowercase hexadecimal digits".into());
+        }
+        unhex(value, 32)?
+            .try_into()
+            .map_err(|_| "retained artifact digest width".into())
+    };
+    Ok(RetainedInputSelection {
+        workflow: output.workflow,
+        consumer: output.job,
+        manifest: digest(fields[2])?,
+        artifact: digest(fields[3])?,
+        output: output.output,
+        destination: target.output,
+    })
+}
+
 pub(crate) fn input_selection(value: &str, encoded: bool) -> Result<InputSelection, String> {
     let fields = value.splitn(5, ':').collect::<Vec<_>>();
     if fields.len() != 5 {
@@ -52,6 +103,7 @@ pub(crate) struct Options {
     maximum_bytes: usize,
     total_bytes: usize,
     inputs: Vec<InputSelection>,
+    retained_inputs: Vec<RetainedInputSelection>,
     input_total_bytes: usize,
 }
 
@@ -93,27 +145,45 @@ pub(crate) fn selection(value: &str, encoded: bool) -> Result<Selection, String>
     })
 }
 
+#[cfg(test)]
 pub(crate) fn options_with_inputs(
+    flags: &BTreeMap<&str, &str>,
+    selections: Vec<Selection>,
+    inputs: Vec<InputSelection>,
+) -> Result<Option<Options>, String> {
+    options_with_retained_inputs(flags, selections, inputs, Vec::new())
+}
+
+pub(crate) fn options_with_retained_inputs(
     flags: &BTreeMap<&str, &str>,
     mut selections: Vec<Selection>,
     mut inputs: Vec<InputSelection>,
+    mut retained_inputs: Vec<RetainedInputSelection>,
 ) -> Result<Option<Options>, String> {
     let root = flags.get("--artifact-root");
     let capture_logs = flags.contains_key("--artifact-logs");
     let has_limit = flags.contains_key("--max-artifact-mib")
         || flags.contains_key("--max-artifact-total-mib")
         || flags.contains_key("--max-artifact-input-total-mib");
-    if root.is_none() && selections.is_empty() && inputs.is_empty() && !has_limit && !capture_logs {
+    if root.is_none()
+        && selections.is_empty()
+        && inputs.is_empty()
+        && retained_inputs.is_empty()
+        && !has_limit
+        && !capture_logs
+    {
         return Ok(None);
     }
-    let root = PathBuf::from(*root.ok_or("--artifact-root is required for output or log capture")?);
+    let root = PathBuf::from(
+        *root.ok_or("--artifact-root is required for artifact capture or input delivery")?,
+    );
     if !root.is_absolute() || root.as_os_str().len() > 4096 {
         return Err("artifact root must be an absolute bounded private directory".into());
     }
-    if (selections.is_empty() && !capture_logs) || selections.len() > 64 {
-        return Err(
-            "artifact capture requires --artifact-logs or 1..64 explicit selections".into(),
-        );
+    if (selections.is_empty() && !capture_logs && retained_inputs.is_empty())
+        || selections.len() > 64
+    {
+        return Err("artifact contract requires logs, output selections or retained inputs".into());
     }
     if selections
         .iter()
@@ -127,8 +197,10 @@ pub(crate) fn options_with_inputs(
     if selections.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err("artifact selections must be distinct".into());
     }
-    if inputs.len() > 64
-        || (inputs.is_empty() && flags.contains_key("--max-artifact-input-total-mib"))
+    if inputs.len() + retained_inputs.len() > 64
+        || (inputs.is_empty()
+            && retained_inputs.is_empty()
+            && flags.contains_key("--max-artifact-input-total-mib"))
     {
         return Err("artifact input limits require 1..64 explicit input selections".into());
     }
@@ -140,11 +212,16 @@ pub(crate) fn options_with_inputs(
             .iter()
             .map(|s| s.workflow.len() + s.output.len() + s.destination.len())
             .sum::<usize>()
+        + retained_inputs
+            .iter()
+            .map(|s| s.workflow.len() + s.output.len() + s.destination.len())
+            .sum::<usize>()
         > 64 * 1024
     {
         return Err("combined artifact input/output paths exceed 64 KiB".into());
     }
     inputs.sort();
+    retained_inputs.sort();
     for (index, input) in inputs.iter().enumerate() {
         if !selections.iter().any(|output| {
             output.workflow == input.workflow
@@ -166,6 +243,29 @@ pub(crate) fn options_with_inputs(
                         .strip_prefix(previous.destination.as_slice())
                         .is_some_and(|r| r.starts_with(b"/")))
         }) {
+            return Err("artifact input destinations overlap within a consumer".into());
+        }
+    }
+    for (index, input) in retained_inputs.iter().enumerate() {
+        let overlaps = |workflow: &[u8], consumer: &str, destination: &[u8]| {
+            workflow == input.workflow
+                && consumer == input.consumer
+                && (destination == input.destination
+                    || destination
+                        .strip_prefix(input.destination.as_slice())
+                        .is_some_and(|r| r.starts_with(b"/"))
+                    || input
+                        .destination
+                        .strip_prefix(destination)
+                        .is_some_and(|r| r.starts_with(b"/")))
+        };
+        if retained_inputs[..index]
+            .iter()
+            .any(|old| overlaps(&old.workflow, &old.consumer, &old.destination))
+            || inputs
+                .iter()
+                .any(|old| overlaps(&old.workflow, &old.consumer, &old.destination))
+        {
             return Err("artifact input destinations overlap within a consumer".into());
         }
     }
@@ -195,6 +295,7 @@ pub(crate) fn options_with_inputs(
         maximum_bytes: mib("--max-artifact-mib", 16, 64)?,
         total_bytes: mib("--max-artifact-total-mib", 64, 512)?,
         inputs,
+        retained_inputs,
         input_total_bytes: mib("--max-artifact-input-total-mib", 64, 512)?,
     }))
 }
@@ -218,7 +319,38 @@ impl Options {
                     .map_err(str::to_owned)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let config = if self.capture_logs {
+        let config = if !self.retained_inputs.is_empty() {
+            let digest = |bytes: &[u8]| {
+                fgit_types::Digest::new(
+                    fgit_crypto::DigestAlgorithm::Sha256.id(),
+                    fgit_types::DigestBytes::try_new(bytes).expect("fixed SHA-256 bytes"),
+                )
+            };
+            let retained = self
+                .retained_inputs
+                .iter()
+                .map(|input| {
+                    fgit_node::TrustedWorkflowRetainedArtifactInput::new(
+                        &input.workflow,
+                        &input.consumer,
+                        digest(&input.manifest),
+                        digest(&input.artifact),
+                        &input.output,
+                        &input.destination,
+                    )
+                    .map_err(str::to_owned)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            fgit_node::TrustedWorkflowArtifactConfig::new_with_retained_inputs(
+                self.root.clone(),
+                selections,
+                self.maximum_bytes,
+                self.total_bytes,
+                self.capture_logs,
+                retained,
+                self.input_total_bytes,
+            )
+        } else if self.capture_logs {
             fgit_node::TrustedWorkflowArtifactConfig::new_with_logs(
                 self.root.clone(),
                 selections,
@@ -260,6 +392,116 @@ impl Options {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_inputs_pin_two_identities_preserve_raw_paths_and_need_no_capture() {
+        let selector = format!(
+            "63692fff2e796d6c:test:{}:{}:6f75742ffe:62696e2fff",
+            "ab".repeat(32),
+            "cd".repeat(32)
+        );
+        let selected = retained_input_selection(&selector, true).unwrap();
+        assert_eq!(selected.workflow, b"ci/\xff.yml");
+        assert_eq!(selected.output, b"out/\xfe");
+        assert_eq!(selected.destination, b"bin/\xff");
+        assert_eq!(selected.manifest, [0xab; 32]);
+        assert_eq!(selected.artifact, [0xcd; 32]);
+        let flags = BTreeMap::from([
+            ("--artifact-root", "/not-opened-artifacts"),
+            ("--max-artifact-input-total-mib", "1"),
+        ]);
+        let options =
+            options_with_retained_inputs(&flags, Vec::new(), Vec::new(), vec![selected.clone()])
+                .unwrap()
+                .unwrap();
+        assert!(options.selections.is_empty() && !options.capture_logs);
+        assert_eq!(options.input_total_bytes, 1024 * 1024);
+        #[cfg(target_os = "linux")]
+        {
+            let config = options.node_config().unwrap();
+            assert_eq!(config.retained_inputs().len(), 1);
+            assert_eq!(
+                config.retained_inputs()[0]
+                    .producer_manifest_id()
+                    .bytes()
+                    .as_bytes(),
+                &[0xab; 32]
+            );
+            assert_eq!(
+                config.retained_inputs()[0].artifact_id().bytes().as_bytes(),
+                &[0xcd; 32]
+            );
+            assert_eq!(config.retained_inputs()[0].destination(), b"bin/\xff");
+        }
+        assert!(
+            options_with_retained_inputs(&BTreeMap::new(), Vec::new(), Vec::new(), vec![selected])
+                .is_err()
+        );
+        for bad in [
+            selector.replace(&"ab".repeat(32), &"AB".repeat(32)),
+            selector.replace(&"ab".repeat(32), &"ab".repeat(31)),
+            selector.replace("62696e2fff", "2e2e2f657363617065"),
+            "ci/a.yml:test:123:456:out".to_owned(),
+        ] {
+            assert!(retained_input_selection(&bad, true).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn retained_and_same_attempt_input_options_share_counts_paths_and_delivery_limits() {
+        let flags = BTreeMap::from([("--artifact-root", "/not-opened-artifacts")]);
+        let output = selection("ci/a.yml:build:out", false).unwrap();
+        let fresh = input_selection("ci/a.yml:test:build:out:tool", false).unwrap();
+        let retained = |destination: &str| {
+            retained_input_selection(
+                &format!(
+                    "ci/a.yml:test:{}:{}:old:{destination}",
+                    "ab".repeat(32),
+                    "cd".repeat(32)
+                ),
+                false,
+            )
+            .unwrap()
+        };
+        for destination in ["tool", "tool/child"] {
+            assert!(
+                options_with_retained_inputs(
+                    &flags,
+                    vec![output.clone()],
+                    vec![fresh.clone()],
+                    vec![retained(destination)]
+                )
+                .is_err()
+            );
+        }
+        let both = options_with_retained_inputs(
+            &flags,
+            vec![output.clone()],
+            vec![fresh.clone()],
+            vec![retained("prior")],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(both.inputs.len(), 1);
+        assert_eq!(both.retained_inputs.len(), 1);
+        #[cfg(target_os = "linux")]
+        {
+            let node = both.node_config().unwrap();
+            assert_eq!(node.inputs().len(), 1);
+            assert_eq!(node.retained_inputs().len(), 1);
+        }
+        let many = (0..64).map(|i| retained(&format!("prior-{i}"))).collect();
+        assert!(options_with_retained_inputs(&flags, vec![output], vec![fresh], many).is_err());
+        assert!(
+            options_with_retained_inputs(
+                &flags,
+                Vec::new(),
+                Vec::new(),
+                vec![retained("prior"), retained("prior")]
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn byte_paths_and_expanded_job_ids_are_exact_without_globs() {

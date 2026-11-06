@@ -5,6 +5,8 @@ use super::*;
 mod input_delivery;
 #[path = "logs.rs"]
 mod logs;
+#[path = "artifact_retained_inputs.rs"]
+mod retained_input_delivery;
 use fgit_node::{
     TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig as Config,
     TrustedWorkflowArtifactSelection as Selection, TrustedWorkflowRun,

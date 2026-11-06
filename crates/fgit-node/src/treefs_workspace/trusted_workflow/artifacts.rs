@@ -25,11 +25,15 @@ use std::fmt::Write as _;
 use std::time::Duration;
 mod inputs;
 mod logs;
+mod retained;
 pub use inputs::{
     DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowJobArtifactInputs,
 };
 pub use logs::{TrustedWorkflowJobLogs, TrustedWorkflowLogStream, TrustedWorkflowStepLog};
+pub use retained::{
+    TrustedWorkflowRetainedArtifactInput, TrustedWorkflowRetainedArtifactProvenance,
+};
 
 /// Filesystem namespace selected with fg artifact inspect/export --trust-domain.
 pub const TRUSTED_WORKFLOW_ARTIFACT_TRUST: &str = "trusted-workflow-local-owner";
@@ -98,6 +102,7 @@ pub struct TrustedWorkflowArtifactConfig {
     total_bytes: usize,
     capture_logs: bool,
     inputs: Vec<TrustedWorkflowArtifactInput>,
+    retained_inputs: Vec<TrustedWorkflowRetainedArtifactInput>,
     input_total_bytes: usize,
 }
 impl TrustedWorkflowArtifactConfig {
@@ -107,7 +112,7 @@ impl TrustedWorkflowArtifactConfig {
         maximum_bytes: usize,
         total_bytes: usize,
     ) -> Result<Self, &'static str> {
-        Self::build(root, selections, maximum_bytes, total_bytes, false)
+        Self::build(root, selections, maximum_bytes, total_bytes, false, false)
     }
 
     /// Retain bounded stdout/stderr observations as well as selected outputs.
@@ -119,7 +124,7 @@ impl TrustedWorkflowArtifactConfig {
         maximum_bytes: usize,
         total_bytes: usize,
     ) -> Result<Self, &'static str> {
-        Self::build(root, selections, maximum_bytes, total_bytes, true)
+        Self::build(root, selections, maximum_bytes, total_bytes, true, false)
     }
 
     fn build(
@@ -128,11 +133,12 @@ impl TrustedWorkflowArtifactConfig {
         maximum_bytes: usize,
         total_bytes: usize,
         capture_logs: bool,
+        retained_inputs: bool,
     ) -> Result<Self, &'static str> {
         if !root.is_absolute() || root.as_os_str().as_bytes().len() > 4096 {
             return Err("artifact root must be an absolute bounded private directory");
         }
-        if (selections.is_empty() && !capture_logs)
+        if (selections.is_empty() && !capture_logs && !retained_inputs)
             || selections.len() > MAX_SELECTIONS
             || maximum_bytes == 0
             || maximum_bytes > MAX_ARTIFACT_BYTES
@@ -159,6 +165,7 @@ impl TrustedWorkflowArtifactConfig {
             total_bytes,
             capture_logs,
             inputs: Vec::new(),
+            retained_inputs: Vec::new(),
             input_total_bytes: DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES,
         })
     }
@@ -201,6 +208,15 @@ impl TrustedWorkflowArtifactConfig {
             write!(json, ",\"input_delivery\":{}}}", self.inputs_json())
                 .expect("writing to a String cannot fail");
         }
+        if !self.retained_inputs.is_empty() {
+            json.pop();
+            write!(
+                json,
+                ",\"retained_input_delivery\":{}}}",
+                self.retained_inputs_json()
+            )
+            .expect("writing to a String cannot fail");
+        }
         if self.capture_logs {
             json.pop();
             json.push_str(
@@ -226,7 +242,24 @@ impl TrustedWorkflowArtifactConfig {
             ));
         }
         self.validate_inputs(path, plan)?;
+        self.validate_retained_inputs(path, plan)?;
         Ok(())
+    }
+
+    pub(super) fn has_inputs(&self) -> bool {
+        !self.inputs.is_empty() || !self.retained_inputs.is_empty()
+    }
+
+    pub(super) fn selected_workflows(&self) -> impl Iterator<Item = &[u8]> {
+        self.selections
+            .iter()
+            .map(|selection| selection.workflow_path())
+            .chain(self.inputs.iter().map(|input| input.workflow_path()))
+            .chain(
+                self.retained_inputs
+                    .iter()
+                    .map(|input| input.workflow_path()),
+            )
     }
 }
 
@@ -271,7 +304,7 @@ impl<'a> Session<'a> {
         source_bytes: usize,
         source_entries: usize,
     ) {
-        if self.config.inputs.is_empty() {
+        if !self.config.has_inputs() {
             return;
         }
         self.input_materialization_remaining.set(
@@ -372,6 +405,7 @@ pub(super) struct Collector<'a> {
     workflow_graph: String,
     workflow: Vec<u8>,
     source_rcr: Option<Digest>,
+    object_format: fgit_types::GitHashAlgorithm,
     pub(super) jobs: Vec<TrustedWorkflowJobArtifacts>,
     pub(super) logs: Vec<TrustedWorkflowJobLogs>,
     pub(super) inputs: Vec<TrustedWorkflowJobArtifactInputs>,
@@ -394,6 +428,7 @@ impl<'a> Collector<'a> {
             workflow_graph: hex(report.execution.graph.digest().bytes().as_bytes()),
             workflow: report.workflow_path.clone(),
             source_rcr,
+            object_format: report.source_commit.algorithm(),
             jobs: Vec::new(),
             logs: Vec::new(),
             inputs: Vec::new(),

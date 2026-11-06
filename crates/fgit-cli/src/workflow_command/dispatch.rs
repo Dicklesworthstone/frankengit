@@ -15,6 +15,8 @@ const USAGE: &str = "usage: fg workflow dispatch <storage-root> <tenant-id> <rep
   [--artifact-hex <workflow-path-hex:job:output-path-hex> ...]
   [--max-artifact-mib <1..64>] [--max-artifact-total-mib <1..512>]
   [--artifact-input <workflow:consumer:producer:output:destination> ...]
+  [--artifact-retained-input <workflow:consumer:manifest-sha256:artifact-sha256:output:destination> ...]
+  [--artifact-retained-input-hex <workflow-hex:consumer:manifest-sha256:artifact-sha256:output-hex:destination-hex> ...]
   [--artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
   [--max-artifact-input-total-mib <1..512>]
 
@@ -215,6 +217,41 @@ pub(super) fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn retained_input_only_dispatch_parses_through_shared_cli_and_keeps_both_pins() {
+        let mut input = args();
+        input.extend([
+            "--artifact-root".into(),
+            "/not-opened-artifacts".into(),
+            "--artifact-retained-input".into(),
+            format!(
+                ".github/workflows/package.yml:package:{}:{}:dist/program:bin/program",
+                "ab".repeat(32),
+                "cd".repeat(32)
+            ),
+            "--max-artifact-input-total-mib".into(),
+            "2".into(),
+        ]);
+        let (parsed, event) = options(&input).unwrap();
+        assert_eq!(event, "push");
+        let config = parsed.artifacts.unwrap().node_config().unwrap();
+        assert!(config.selections().is_empty());
+        assert!(!config.capture_logs());
+        assert_eq!(config.input_total_bytes(), 2 * 1024 * 1024);
+        assert_eq!(
+            config.retained_inputs()[0]
+                .producer_manifest_id()
+                .bytes()
+                .as_bytes(),
+            &[0xab; 32]
+        );
+        assert_eq!(
+            config.retained_inputs()[0].artifact_id().bytes().as_bytes(),
+            &[0xcd; 32]
+        );
+    }
 
     fn args() -> Vec<String> {
         [
