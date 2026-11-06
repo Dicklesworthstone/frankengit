@@ -5,7 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_crypto::{GitHashAlgorithm as HashAlgorithm, GitObjectKind, Sha1, Sha256, git_object_id};
+use fgit_crypto::{
+    GitHashAlgorithm as HashAlgorithm, GitObjectKind, NativeObjectIdentity, Sha1, Sha256, git_object_id,
+};
 use fgit_node::{NodeConfig, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_treefs::{
     BasisEntry, EntryClass, ExportLimits, FileMode, IntentLog, TreeCapability, TreeEditIntent,
