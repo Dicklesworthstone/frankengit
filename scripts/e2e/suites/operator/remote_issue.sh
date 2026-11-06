@@ -52,6 +52,7 @@ for format in sha1 sha256; do
   fge_assert_eq "OPERATOR-ISSUE-$format-014" true "$(fact "${format}_inbox_stale_and_identity_refusals")" 'stale preference and changed owner refuse before custody or native mutation'
   fge_assert_eq "OPERATOR-ISSUE-$format-015" true "$(fact "${format}_inbox_independent_grant_twins")" 'notification-write denial preserves original custody; restored grant admits its exact retry'
   fge_assert_eq "OPERATOR-ISSUE-$format-016" true "$(fact "${format}_inbox_missing_native_service_refusal")" 'disabled native inbox service cannot produce a complete operator observation'
+  fge_assert_eq "OPERATOR-ISSUE-$format-017" true "$(fact "${format}_inbox_prefix_bounds_and_read_toggle")" 'future read prefix refuses; exact observed prefix clears unread and old recovery preserves a later explicit unread'
 done
 fge_capture entrypoint-receipts python3 - "$SUMMARY" "$FG_BIN" "$E2E_ROOT/../.." <<'PY' || true
 import hashlib, json, sys

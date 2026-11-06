@@ -159,6 +159,38 @@ def run_inbox_case(c, server, directory, root, fmt, token, incarnation, grants, 
             "inbox grant/recovery twins changed issue state")
     c.facts[f"{fmt}_inbox_independent_grant_twins"] = True
 
+    path = directory / "inbox-current-prefix.json"
+    fields = ["--number", "1", "--expected-version", "6", *guards, "--record", str(path)]
+    future = command("read", [*fields, "--read-through", str(prefix + 2)], 2, error_reply=True)
+    require(future["code"] == "inbox_operator_read_prefix_unobserved"
+            and future["state"] == "not_submitted" and not path.exists() and canonical() == final,
+            "unobserved inbox prefix created custody or changed canonical state")
+    read = command("read", [*fields, "--read-through", str(prefix + 1)])
+    data = path.read_bytes()
+    observed = canonical()
+    row = observed["threads"][0]
+    require(read["result"]["outcome"] == "committed" and row["preference_version"] == "7"
+            and row["mode"] == "subscribed" and row["read_through"] == str(prefix + 1)
+            and row["unread"] is False, "complete observed prefix did not clear native unread state")
+    compare(command("show", ["--number", "1"]), observed)
+    unread = command("unread", ["--number", "1", "--expected-version", "7", *guards,
+                               "--record", str(directory / "inbox-clear-prefix.json")])
+    cleared = canonical()
+    row = cleared["threads"][0]
+    require(unread["result"]["outcome"] == "committed" and row["preference_version"] == "8"
+            and row["mode"] == "subscribed" and row["read_through"] is None and row["unread"] is True,
+            "explicit unread failed to clear the native prefix while preserving subscription")
+    recovered = command("retry", ["--record", str(path)])
+    require(recovered["mutation_submitted"] is False
+            and recovered["result"] == {"terminal": True, **read["result"]}
+            and path.read_bytes() == data and canonical() == cleared,
+            "old full-prefix recovery marked a later explicit unread preference as read")
+    compare(command("show", ["--number", "1"]), cleared)
+    observed_issue = issue()
+    require(observed_issue["issue"] == original_issue["issue"] and observed_issue["events"] == original_issue["events"],
+            "read/unread preference toggles changed canonical issue content/history")
+    c.facts[f"{fmt}_inbox_prefix_bounds_and_read_toggle"] = True
+
 
 def missing_inbox_service(c, server, root, token, fmt):
     before = c.run("at", root, TENANT, REPOSITORY, "latest")
