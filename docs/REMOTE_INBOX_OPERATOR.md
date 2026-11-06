@@ -203,8 +203,12 @@ containment against a hostile process with the same user identity.
 300-second maximum. Cancellation aborts outstanding HTTP work; it does not roll
 back a server transaction. Synchronous work and blocking host filesystem calls
 cannot be preempted. A fully parsed terminal observation wins over later
-cancellation. If output fails after completion, the CLI reports failure and
-preserves the original request record for recovery.
+cancellation of the operation. Asynchronous stdout delivery remains subject to
+the invocation deadline and SIGINT/SIGTERM; a blocked consumer cannot retain the
+CLI indefinitely. If output fails after completion, the CLI exits 2 with
+`operation_completed:true` and preserves the original request record for recovery.
+Final diagnostics have a separate drain capped at 250 ms; blocked stderr is
+abandoned too. This finalization window permits no additional remote work.
 
 The existing JavaScript client accepts exact safe-integer coordinates only.
 The operator refuses numbers outside that range instead of rounding native
