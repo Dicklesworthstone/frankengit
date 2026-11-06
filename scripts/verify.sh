@@ -332,8 +332,8 @@ json_escape() {
       $'\t') escaped+='\t' ;;
       *)
         if [[ "${character}" =~ [[:cntrl:]] ]]; then
-          printf -v ordinal '%d' "'${character}"
-          printf -v character '\\u%04x' "${ordinal}"
+          printf -v ordinal '%d' "'${character}" || return
+          printf -v character '\\u%04x' "${ordinal}" || return
         fi
         escaped+="${character}"
         ;;
@@ -342,13 +342,22 @@ json_escape() {
   printf '%s' "${escaped}"
 }
 
+json_string_field() {
+  local escaped=""
+  # A successful outer printf must not hide failure of its encoding helper.
+  escaped="$(json_escape "$2")" || return
+  printf '"%s":"%s",' "$1" "${escaped}"
+}
+
 json_array() {
   local item=""
+  local escaped=""
   local separator=""
   local result='['
 
   for item in "$@"; do
-    result+="${separator}\"$(json_escape "${item}")\""
+    escaped="$(json_escape "${item}")" || return
+    result+="${separator}\"${escaped}\""
     separator=','
   done
   result+=']'
@@ -356,20 +365,20 @@ json_array() {
 }
 
 sha256_stdin() {
+  local output=""
   local digest=""
   local remainder=""
 
   if command -v sha256sum >/dev/null 2>&1; then
-    if ! read -r digest remainder < <(sha256sum); then
-      return 1
-    fi
+    output="$(sha256sum)" || return
   elif command -v shasum >/dev/null 2>&1; then
-    if ! read -r digest remainder < <(shasum -a 256); then
-      return 1
-    fi
+    output="$(shasum -a 256)" || return
   else
     return 1
   fi
+  # Reading a process substitution observes read's status, not the checksum
+  # process's status. Wait for a successful producer before accepting its text.
+  read -r digest remainder <<< "${output}" || return
   [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s\n' "${digest}"
 }
@@ -525,24 +534,24 @@ write_replay_artifact() {
   # must contribute to its status; a later write cannot hide a partial JSON.
   if ! {
     printf '{' &&
-    printf '"schema":"%s",' "$(json_escape "${VERIFY_ARTIFACT_SCHEMA}")" &&
+    json_string_field schema "${VERIFY_ARTIFACT_SCHEMA}" &&
     printf '"schema_version":%s,' "${VERIFY_ARTIFACT_SCHEMA_VERSION}" &&
-    printf '"created_at_utc":"%s",' "$(json_escape "${timestamp}")" &&
-    printf '"lane":"%s",' "$(json_escape "${lane_name}")" &&
+    json_string_field created_at_utc "${timestamp}" &&
+    json_string_field lane "${lane_name}" &&
     printf '"command_argv":%s,' "${command_json}" &&
-    printf '"head":"%s",' "$(json_escape "${VERIFY_HEAD}")" &&
+    json_string_field head "${VERIFY_HEAD}" &&
     printf '"dirty":%s,' "${VERIFY_DIRTY}" &&
-    printf '"dirty_status":"%s",' "$(json_escape "${VERIFY_DIRTY_STATUS}")" &&
+    json_string_field dirty_status "${VERIFY_DIRTY_STATUS}" &&
     printf '"dirty_status_sha256":"%s",' "${VERIFY_DIRTY_STATUS_SHA256}" &&
     printf '"dirty_diff_sha256":"%s",' "${VERIFY_DIRTY_DIFF_SHA256}" &&
-    printf '"rustc_version":"%s",' "$(json_escape "${VERIFY_RUSTC_VERSION}")" &&
-    printf '"cargo_version":"%s",' "$(json_escape "${VERIFY_CARGO_VERSION}")" &&
+    json_string_field rustc_version "${VERIFY_RUSTC_VERSION}" &&
+    json_string_field cargo_version "${VERIFY_CARGO_VERSION}" &&
     printf '"exit_code":%s,' "${lane_exit}" &&
     printf '"wall_time_ms":%s,' "${wall_time_ms}" &&
     printf '"stdout_sha256":"%s",' "${stdout_sha256}" &&
     printf '"stderr_sha256":"%s",' "${stderr_sha256}" &&
     printf '"captured_output_format":"stdout\\u0000<bytes>\\u0000stderr\\u0000<bytes>",' &&
-    printf '"captured_output_file":"%s",' "$(json_escape "${timestamp}-${lane_name}.output")" &&
+    json_string_field captured_output_file "${timestamp}-${lane_name}.output" &&
     printf '"captured_output_sha256":"%s"}\n' "${captured_output_sha256}"
   } > "${temporary_artifact_path}"; then
     artifact_warning "cannot write ${artifact_path}"
@@ -585,7 +594,17 @@ if [[ "${artifact_enabled}" == false ]]; then
 fi
 
 capture_source_state
-command_json="$(json_array "${command_argv[@]}")"
+if ! command_json="$(json_array "${command_argv[@]}")"; then
+  artifact_warning 'cannot encode command arguments; running lane without an artifact'
+  set +e
+  (
+    set -e
+    run_lane "${lane}"
+  )
+  lane_exit=$?
+  set -e
+  exit "${lane_exit}"
+fi
 started_ns="$(now_epoch_ns)"
 if ! stdout_path="$(mktemp "${TMPDIR:-/tmp}/frankengit-verify-stdout.XXXXXXXX")"; then
   artifact_warning 'cannot allocate stdout capture; running lane without an artifact'

@@ -126,6 +126,81 @@ test -x "$FG_BIN" && test -x "$FG_MCP_BIN"
             self.assertEqual(hashlib.sha256(stream).hexdigest(), receipt[name + "_sha256"])
         self.assertEqual(receipt["exit_code"], 0)
 
+    def test_replay_preserves_quoted_unicode_command_arguments(self):
+        original = self.root
+        self.root = self.base / 'caller "quoted" \\ unicode-λ checkout'
+        original.rename(self.root)
+        directory = self.base / "quoted command replay"
+        self.invoke(changes={"VERIFY_ARTIFACT_DIR":str(directory)}, artifact=True)
+        receipt = json.loads(next(directory.glob("*.json")).read_bytes())
+        self.assertEqual(receipt["command_argv"], [str(self.root / "scripts/verify.sh"), "docs"])
+
+    def test_failed_checksum_process_publishes_no_replay(self):
+        body = '''
+import hashlib
+data = sys.stdin.buffer.read()
+counter = Path(os.environ["TEST_LOG"] + ".hash-count")
+count = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(count))
+failed = count == int(os.environ["TEST_HASH_AT"])
+# Declared fault: emit a partial-input digest, then report failure.
+print(hashlib.sha256(data[:len(data) // 2] if failed else data).hexdigest() + "  -")
+sys.exit(74 if failed else 0)
+'''
+        self.command("sha256sum", body)
+        self.command("shasum", body)
+        shim = self.base / "controlled checksum selection.bash"
+        shim.write_text('''command() {
+  if [[ "$TEST_HASH_TOOL" == shasum && "${1-}" == -v && "${2-}" == sha256sum ]]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+''')
+        for tool in ["sha256sum", "shasum"]:
+            for at in [3, 4, 5]:  # Captured stdout, stderr, and framed output.
+                for code in [0, 31]:
+                    with self.subTest(tool=tool, hash_at=at, lane_exit=code):
+                        counter = Path(str(self.log) + ".hash-count")
+                        counter.unlink(missing_ok=True)
+                        directory = self.base / f"failed {tool} hash {at} {code}"
+                        result, _ = self.invoke(expected=code, artifact=True,
+                            changes={"VERIFY_ARTIFACT_DIR":str(directory), "BASH_ENV":str(shim),
+                                     "TEST_HASH_TOOL":tool, "TEST_HASH_AT":str(at),
+                                     "TEST_NATIVE_EXIT":str(code)})
+                        self.assertGreaterEqual(int(counter.read_text()), at)
+                        self.assertEqual(list(directory.glob("*")), [])
+                        self.assertIn("cannot hash", result.stderr)
+                        self.assertTrue(result.stdout.endswith("caller tool executed\n"))
+
+    def test_failed_json_escaping_publishes_no_replay_and_keeps_lane_exit(self):
+        shim = self.base / "controlled JSON escape failure.bash"
+        shim.write_text('''printf() {
+  if [[ "${FUNCNAME[1]-}" == json_escape && "${1-}" == '%s' && ! -e "${TEST_LOG}.escape-failed" ]]; then
+    case "$TEST_ESCAPE_CONTEXT:${FUNCNAME[*]}" in
+      argv:*json_array*|metadata:*write_replay_artifact*)
+        : > "${TEST_LOG}.escape-failed"
+        builtin printf '%s' 'partial-escape"'
+        return 74 ;;
+    esac
+  fi
+  builtin printf "$@"
+}
+''')
+        for context in ["argv", "metadata"]:
+            for code in [0, 31]:
+                with self.subTest(context=context, lane_exit=code):
+                    marker = Path(str(self.log) + ".escape-failed")
+                    marker.unlink(missing_ok=True)
+                    directory = self.base / f"failed JSON escape {context} {code}"
+                    result, _ = self.invoke(expected=code, artifact=True,
+                        changes={"VERIFY_ARTIFACT_DIR":str(directory), "BASH_ENV":str(shim),
+                                 "TEST_ESCAPE_CONTEXT":context, "TEST_NATIVE_EXIT":str(code)})
+                    self.assertTrue(marker.is_file())
+                    self.assertEqual(list(directory.glob("*")), [])
+                    self.assertIn("replay artifact unavailable", result.stderr)
+                    self.assertTrue(result.stdout.endswith("caller tool executed\n"))
+
     def replay_copy_failure(self, stream):
         # A declared cat double writes a real partial file and returns failure
         # once. Later replay succeeds, so it cannot mask the failed retention.
