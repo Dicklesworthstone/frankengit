@@ -125,7 +125,7 @@ export function runNative(fg, args, { signal, timeoutMs = 660_000, maximum = 40 
       }
     };
     const force = detail => {
-      if (forced) return;
+      if (settled || forced) return;
       forced = true; reason = detail; kill('SIGTERM');
       killTimer = setTimeout(() => kill('SIGKILL'), 250);
       closeTimer = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); finish(null, 'containment_unknown'); }, 1500);
@@ -134,6 +134,10 @@ export function runNative(fg, args, { signal, timeoutMs = 660_000, maximum = 40 
     const timer = setTimeout(() => force('native_deadline_exceeded'), timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
+    // Pipe errors must enter the same bounded finalizer as a watchdog failure,
+    // not terminate the JS owner while its native execution remains alive.
+    child.stdout.on('error', () => force('native_output_failed'));
+    child.stderr.on('error', () => force('native_diagnostic_failed'));
     child.stdout.on('data', bytes => {
       size += bytes.length;
       if (size > maximum) force('native_output_limit');

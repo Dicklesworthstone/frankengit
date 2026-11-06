@@ -1,7 +1,8 @@
 // Real child processes test native operator lifetime, never forge authority.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runNative } from '../../scripts/operator/workflow_watch_io.mjs';
@@ -52,3 +53,56 @@ test('normal completion and pre-spawn cancellation preserve exact output and own
   const stopped = new AbortController(); stopped.abort(new Error('pre-stopped'));
   assert.throws(() => runNative(file, [], { signal: stopped.signal }), /pre-stopped/);
 });
+
+for (const stream of ['stdout', 'stderr']) for (const drain of [false, true]) {
+  test(`${stream} reader failure finalizes its real child in ${drain ? 'dispatch drain' : 'read'} mode`,
+    { skip: process.platform !== 'linux', timeout: 8000 }, async t => {
+      const directory = await mkdtemp(join(tmpdir(), 'fg-workflow-pipe-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const marker = join(directory, 'child.pid');
+      const module = new URL('../../scripts/operator/workflow_watch_io.mjs', import.meta.url).href;
+      // Isolate the operator too: the broken implementation throws an unhandled
+      // stream error. Inject EIO on an actual child pipe, not a fabricated result.
+      const source = `import { ChildProcess } from 'node:child_process';
+        import { runNative } from ${JSON.stringify(module)};
+        const original = ChildProcess.prototype.spawn;
+        ChildProcess.prototype.spawn = function(options) {
+          const result = Reflect.apply(original, this, [options]);
+          this[${JSON.stringify(stream)}].once('data', () =>
+            this[${JSON.stringify(stream)}].destroy(Object.assign(new Error('injected pipe EIO'), { code: 'EIO' })));
+          return result;
+        };
+        const child = ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+          process.stdout.write('stdout-ready'); process.stderr.write('stderr-ready');
+          setTimeout(() => process.exit(0), 10000);`)};
+        const result = await runNative(process.execPath, ['-e', child], { timeoutMs: 3000, drain: ${drain} });
+        process.stdout.write(JSON.stringify({ ...result, stdout: result.stdout.toString(), stderr: result.stderr.toString() }));`;
+      let pid;
+      try {
+        const parent = spawnSync(process.execPath, ['--input-type=module', '-e', source],
+          { timeout: 6000, maxBuffer: 65536, encoding: 'utf8' });
+        pid = Number(await readFile(marker, 'utf8'));
+        assert.ok(Number.isSafeInteger(pid) && pid > 1);
+        assert.equal(parent.error, undefined);
+        assert.equal(parent.signal, null);
+        assert.equal(parent.status, 0, parent.stderr);
+        const result = JSON.parse(parent.stdout);
+        assert.equal(result.forced, true, 'unreadable output cannot establish a successful receipt');
+        assert.equal(result.reason, stream === 'stdout' ? 'native_output_failed' : 'native_diagnostic_failed');
+        assert.equal(result.spawn_error, null);
+        assert.equal(result[stream], `${stream}-ready`);
+        assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'native leader must be reaped before return');
+      } finally {
+        // A failing preimage may strand its child. Kill only this fixture's
+        // still-live process, whose argv retains the exact private marker path.
+        if (pid) {
+          let command;
+          try { command = await readFile(`/proc/${pid}/cmdline`); }
+          catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error; }
+          if (command?.includes(Buffer.from(marker))) {
+            try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+          }
+        }
+      }
+    });
+}
