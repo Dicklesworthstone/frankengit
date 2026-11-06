@@ -236,3 +236,16 @@ storage durability profile has been qualified. See
 [native notifications](NATIVE_NOTIFICATIONS.md) for the server protocol and
 remaining notification functionality, including PR inboxes and external
 notification delivery.
+
+The discovered `scripts/e2e/suites/operator/remote_issue.sh` campaign also runs
+the shipped inbox CLI against `fg serve-http`, with separate `fg inbox` reads
+checking canonical preferences and source positions. Its issue-only cases cover
+the five preference actions, older read prefixes with newer unread activity,
+retained pagination, original-key recovery after later preferences, stale/owner
+refusals, independent notification-write grant restoration, and a disabled native
+issue service. The receipt binds each selected entrypoint's client and native
+binary digests and actual successful/expected-nonzero invocation counts.
+`./scripts/verify.sh operator` selects this campaign with its one native build and
+pinned Node runtime. A direct campaign run against a retained binary qualifies
+only that named producer, not the current source, discussion inboxes, crash
+durability, independent verification or the complete operator matrix.
