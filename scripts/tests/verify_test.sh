@@ -295,6 +295,23 @@ OPERATOR_DISPATCH
         self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
         self.assertIn("source changed during operator campaigns", result.stderr)
 
+    def test_operator_diagnostic_failure_cannot_replace_campaign_failure(self):
+        self.operator_fixture()
+        shim = self.base / "controlled printf failure.bash"
+        shim.write_text('''printf() {
+  case "${1-}" in
+    'verify: source changed during operator campaigns'*)
+      : > "${TEST_LOG}.printf-failed"
+      return 1 ;;
+  esac
+  builtin printf "$@"
+}
+''')
+        _, rows = self.invoke("operator", 31, {"TEST_SOURCE_DIRTY_IN_SUITE":"1",
+                             "TEST_SUITE_EXIT":"31", "BASH_ENV":str(shim)})
+        self.assertEqual(len([r for r in rows if r["kind"] == "suite"]), 1)
+        self.assertTrue(Path(str(self.log) + ".printf-failed").is_file())
+
     def test_docs_builds_native_but_reads_caller_even_with_remote_manifest_environment(self):
         _, rows = self.invoke()
         build = next(r for r in rows if r["kind"] == "cargo" and r["args"][0] == "build")
