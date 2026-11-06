@@ -286,7 +286,7 @@ pub fn fixture_with_acknowledgement<A: GitHashAlgorithm>(mode: Mode, acknowledge
             class: EntryClass::Content,
         },
     );
-    let export = ExportPlanner::new(ExportLimits::default(), limits)
+    let export: ExportPlan<A> = ExportPlanner::new(ExportLimits::default(), limits)
         .plan(&base, &bodies, &mut capability, &overlay, 0, &|| false)
         .unwrap();
     let snapshot = WorkspaceSnapshotBody::new(
