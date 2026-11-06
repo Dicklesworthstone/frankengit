@@ -239,8 +239,20 @@ run_operator() {
   fg_binary="$("${PYTHON_BIN:-python3}" "$ROOT/scripts/prepare_operator_native.py" \
     "$fg_binary" "$VERIFY_TARGET_DIRECTORY")" || return
   echo_step "Running ${#suites[@]} current operator suites; the full entrypoint matrix remains separate"
+  local suite_exit=0 source_failure=0
   FGE_PROFILE=release FGE_NODE="$node" FG_BIN="$fg_binary" FG_SIGNED_BUNDLE_SOURCE_CUT="$source_cut" \
-    "$ROOT/scripts/e2e/run_all.sh" --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
+    "$ROOT/scripts/e2e/run_all.sh" --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}" || suite_exit=$?
+  if ! current_cut="$(git rev-parse --verify HEAD)" || \
+      ! source_state="$(git status --porcelain=v1 --untracked-files=all)"; then
+    printf 'verify: cannot inspect source after operator campaigns\n' >&2
+    source_failure=1
+  elif [[ "$current_cut" != "$source_cut" || -n "$source_state" ]]; then
+    printf 'verify: source changed during operator campaigns\n' >&2
+    source_failure=1
+  fi
+  # Source inspection must not turn a campaign failure into another exit code.
+  if [[ "$suite_exit" -ne 0 ]]; then return "$suite_exit"; fi
+  return "$source_failure"
 }
 
 run_full() {

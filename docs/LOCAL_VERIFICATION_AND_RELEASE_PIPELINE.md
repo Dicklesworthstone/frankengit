@@ -73,8 +73,14 @@ functions above, installs an identical private executable snapshot, then supplie
 it and the same Node to
 [`run_all.sh`](../scripts/e2e/run_all.sh). A supplied `FG_BIN` cannot bypass the
 build. Source must be clean before compilation; a changed revision or dirty
-checkout afterwards prevents campaign dispatch. The selected source revision
-overrides a stale `FG_SIGNED_BUNDLE_SOURCE_CUT` for the signed campaign.
+checkout afterwards prevents campaign dispatch. After the campaigns finish, the
+launcher checks the revision and checkout again: changed or unreadable source
+cannot produce a successful lane result. An existing campaign failure keeps its
+original exit code and also reports any final source-inspection failure. These
+endpoint checks do not establish isolation from hostile concurrent writers or
+detect a temporary change that was restored before inspection. The selected
+source revision overrides a stale `FG_SIGNED_BUNDLE_SOURCE_CUT` for the signed
+campaign.
 Campaign receipts record `FGE_PROFILE=release`. The optimized, stripped artifact
 serves the operators' existing executable-size and execution-time budgets;
 those production guards are retained. This profile selection applies only to
