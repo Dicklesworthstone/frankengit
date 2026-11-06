@@ -2,7 +2,7 @@
 // Rust engine owns proof decoding and Git semantics; no fallback is permitted.
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdtemp, open, readFile, realpath, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, open, realpath, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executable, parseJson, readPrivate } from './workflow_watch_io.mjs';
@@ -10,6 +10,7 @@ import { runNativeProcess } from '../lib/native-process-owner.mjs';
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const same = (a, b) => ['dev', 'ino', 'size', 'mode', 'uid', 'mtimeMs', 'ctimeMs'].every(k => a[k] === b[k]);
+const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024;
 export async function prepareNativePackageRead(fg, plan, maximumRequests, check) {
   if (plan.selected.expected_head === null) throw new Error('Native capture requires an independently retained head.');
   const endpoint = new URL(plan.selected.endpoint);
@@ -19,10 +20,30 @@ export async function prepareNativePackageRead(fg, plan, maximumRequests, check)
   if (plan.cost.blobRequests + plan.files.length > maximumRequests) throw new Error('Native proof request budget exceeded before reads.');
   check(); await executable(fg); check();
   const identity = await lstat(fg);
-  if (identity.size > 256 * 1024 * 1024) fail('native_source_proof_executable_limit');
-  const bytes = await readFile(fg); check();
-  if (bytes.length !== identity.size || !same(identity, await lstat(fg))) fail('native_source_proof_executable_changed');
-  return { fg, identity, digest: createHash('sha256').update(bytes).digest('hex') };
+  if (identity.size > MAX_EXECUTABLE_BYTES) fail('native_source_proof_executable_limit');
+  const file = await open(fg, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = await file.stat(); check();
+    // Revalidate the opened object before allocating or reading its data: the
+    // pathname may have grown or been replaced after the selected metadata.
+    if (opened.size > MAX_EXECUTABLE_BYTES) fail('native_source_proof_executable_limit');
+    if (!opened.isFile() || !same(identity, opened)) fail('native_source_proof_executable_changed');
+    const buffer = Buffer.alloc(65536), hash = createHash('sha256'); let at = 0;
+    while (at < identity.size) {
+      check();
+      const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, identity.size - at), at);
+      check();
+      if (!bytesRead) fail('native_source_proof_executable_changed');
+      hash.update(buffer.subarray(0, bytesRead)); at += bytesRead;
+    }
+    check();
+    const extra = await file.read(buffer, 0, 1, at); check();
+    if (extra.bytesRead || !same(identity, await file.stat()) || !same(identity, await lstat(fg))) {
+      fail('native_source_proof_executable_changed');
+    }
+    check();
+    return { fg, identity, digest: hash.digest('hex') };
+  } finally { await file.close(); }
 }
 export async function verifyNativePackageRead(native, plan, value, verified, token, deadline, signal, check) {
   check();
