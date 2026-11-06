@@ -37,6 +37,7 @@ fgit-wire.workspace = true
 fgit-runner.workspace = true
 
 [dev-dependencies]
+fgit-authority-fsqlite.workspace = true
 fgit-git-object.workspace = true
 fgit-pack.workspace = true
 fgit-treefs.workspace = true

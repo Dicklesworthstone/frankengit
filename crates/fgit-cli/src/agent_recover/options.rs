@@ -7,7 +7,7 @@ use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub(super) struct Options {
+pub(crate) struct Options {
     pub storage: PathBuf,
     pub tenant: TenantId,
     pub repository: RepositoryId,
@@ -22,12 +22,16 @@ pub(super) struct Options {
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
+    parse_with_usage(args, USAGE)
+}
+
+pub(crate) fn parse_with_usage(args: &[String], usage: &str) -> Result<Options, String> {
     if args.len() < 4
         || args.len() > 23
         || args.iter().any(|arg| arg.len() > 4096)
         || args.iter().map(String::len).sum::<usize>() > 32 * 1024
     {
-        return Err(USAGE.into());
+        return Err(usage.into());
     }
     if args[0].is_empty() {
         return Err("storage root must be nonempty".into());
@@ -62,7 +66,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 | "--object-format"
                 | "--max-output-bytes"
         ) {
-            return Err(format!("unknown agent recovery option {flag}"));
+            return Err(format!("unknown agent journal option {flag}"));
         }
         let value = args
             .get(at)
@@ -74,7 +78,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     }
     if !trusted {
         return Err(
-            "--trusted-local is required to authorize original journal and repository reads".into(),
+            "--trusted-local is required to authorize the selected journal operation".into(),
         );
     }
     let required = |name| {

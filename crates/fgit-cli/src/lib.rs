@@ -5,6 +5,7 @@
 pub mod agent_context;
 pub mod agent_credential_token;
 pub mod agent_recover;
+pub mod agent_settle;
 pub mod agent_tasks;
 
 mod at;

@@ -229,6 +229,76 @@ the exact synchronized position. The native host uses append-only access to an
 existing regular file and retains the ordinary local locking, operator-owned
 directory and drained-sync requirements described above.
 
+### CLI publication settlement
+
+`fg agent settle` is the explicit trusted-local host for this cleanup operation.
+`fg agent recover` retains its read-only inspection contract. Supply the same
+independent original-run and journal pins, the original principal, and a cleanup
+observation in the original host's logical-time domain:
+
+```bash
+fg agent settle ./node TENANT_ID REPOSITORY_ID /absolute/journal-directory \
+  --trusted-local --principal ORIGINAL_PRINCIPAL_ID \
+  --run-id ORIGINAL_RUN_ID --effect-id ORIGINAL_EFFECT_ID \
+  --expected-run ORIGINAL_RUN_COMMITMENT \
+  --expected-tail-entries ORIGINAL_ENTRIES \
+  --expected-tail-bytes ORIGINAL_BYTES \
+  --expected-tail-digest ORIGINAL_TAIL_DIGEST \
+  --observed-at CLEANUP_LOGICAL_TIME \
+  --object-format sha256
+```
+
+All IDs/digests use their documented lowercase hexadecimal widths. Counts and
+logical time use canonical unsigned decimal. The default object format is
+SHA-1; select SHA-256 explicitly for that repository. `--observed-at` is not an
+implicit Unix timestamp and grants no new lifetime or authority. A finite
+30-second request owns cancellation and shutdown; a leading global
+`--timeout-secs` can shorten it. The existing 16 MiB/32,768-event journal bounds
+remain. `--max-output-bytes` defaults to 65,536 and accepts 8,192..1,048,576;
+smaller ceilings refuse before opening the journal. Output is one complete JSON
+document with its final newline included in the selected bound.
+
+The CLI calls
+`OneNode::settle_recovered_agent_ref_transaction_for_principal_in`. That additive
+node entry point compares the supplied principal to the original seal while
+holding the journal lock, before terminal lookup or ACK synchronization. A
+different principal cannot acknowledge even a matching partial or complete ACK
+suffix. It must not first use the strict read-only recovery API: that reader
+correctly rejects the very suffix which cleanup may safely complete. The
+existing trusted-host node method keeps its original signature and contract.
+
+The version-1 `agent_settlement` receipt uses profile
+`native-agent-publication-settlement-v1`. Its `publication.canonical_status`
+separates the original Git decision from journal acknowledgement. The `journal`
+object carries `input_tail`, `current_tail`, `acknowledgement_confirmed`,
+`input_already_acknowledged`, and `inventory_complete`. Retain a confirmed
+`current_tail` independently for the next inspection. If the transaction is
+undecided, `current_tail` and `input_already_acknowledged` are null and
+`inventory_complete` is false: the private prefix cannot prove a complete
+inventory when an unknown suffix remains.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Original transaction committed and its ACK is confirmed durable. |
+| 3 | Original transaction was canonically refused and its ACK is confirmed durable. |
+| 4 | Original transaction is undecided; the journal was not changed. |
+| 2 | Invalid input, refusal, persistence uncertainty, or incomplete cleanup/output. |
+
+Both committed and refused terminals clear this submission's responsibility.
+The receipt reports its original charged resources and whether the recovered
+journal still contains unsettled effects. It always keeps
+`run_quiescence_established=false`: an acknowledged publication does not prove
+that unrelated processes, external effects or the whole run have stopped.
+
+A lost stdout receipt, failed flush or cleanup failure does not undo an ACK.
+The error retains known transaction/durability facts where available. Retry the
+same cleanup with the original independent pins and a fresh finite context;
+never resubmit the transaction to recover an ACK. Repeating with the old tail
+may return `input_already_acknowledged=false` even when a previous attempt wrote
+all bytes; repeating with the confirmed successor tail returns true. Other
+suffixes still refuse unchanged. No issuing broker, replacement bundle, new
+capability, task claim or source-write grant is accepted by this command.
+
 ## Concrete validation surfaces
 
 `crates/fgit-node/src/agent_journal/effect_journal_tests.rs` exercises the owning
@@ -286,3 +356,12 @@ pins for cleanup in both Git formats. Cases cover commit/refusal, expired-run
 cleanup, partial ACK interruption, exact retry, cancellation, unchanged authority
 and budget, and undecided outcomes that expose no complete inventory. Execution
 of these native tests remains a separate revision-bound gate.
+
+`crates/fgit-cli/tests/agent_settle_cli.rs` invokes fresh `fg` processes over real
+persisted node/journal state. Its synthetic test approval/ECC inputs are not
+claims of a real verifier or model run; the broker reservation, original
+admission, original-outcome lookup and ACK persistence use production owners.
+The cases pair committed/refused cleanup in both Git formats with undecided,
+wrong-pin/principal, interrupted ACK, exact retry, retained-tail inspection and
+failed-output behavior. The existing `agent_recover_cli` integration target
+continues to check the unchanged read-only contract.

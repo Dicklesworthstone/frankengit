@@ -2,7 +2,7 @@
 //! Original run/tail expectations are supplied independently by the operator;
 //! journal bytes never select their own anti-rollback anchor or principal.
 
-mod options;
+pub(crate) mod options;
 mod output;
 
 use fgit_agent::ref_publication::ObservedRefTransaction;

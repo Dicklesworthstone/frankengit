@@ -1041,6 +1041,17 @@ ownership from both the database and flushed export. Native ownership does not
 activate an agent claim or authorize publication. See
 [the Beads command and adapter](docs/AGENT_CONTROL_PLANE_BEADS_ADAPTER.md).
 
+`fg agent recover` inspects one original native publication after restart.
+`fg agent settle` now durably acknowledges that publication's authenticated
+committed or refused outcome in its existing responsibility journal. The
+explicit trusted-local command checks the original principal under exclusive
+journal custody, requires independently retained run/tail anchors, and can
+finish a matching interrupted ACK without duplicating it. It returns the new
+tail for independent retention; an undecided transaction leaves the journal
+unchanged. This closes one publication's cleanup debt, without resubmitting a
+transaction, renewing a capability or establishing whole-run quiescence. See
+[agent publication settlement](docs/AGENT_EFFECT_JOURNAL.md#cli-publication-settlement).
+
 ---
 
 ## Deployment profiles

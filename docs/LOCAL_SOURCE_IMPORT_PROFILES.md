@@ -148,5 +148,5 @@ The incremental-MIDX integration cases compare exact imported refs, closure and
 stored object bytes with and without a corrupt accelerator directory in SHA-1
 and SHA-256. They also exercise cancellation, the exact native-byte limit,
 unchanged retry identity after removing the accelerator, invalid directory/file
-kinds, symlinks and FIFOs on Unix, and pack/index damage with the accelerator
+kinds, symlinks on Unix, FIFOs on Linux, and pack/index damage with the accelerator
 present. Refused attempts leave canonical authority unchanged.

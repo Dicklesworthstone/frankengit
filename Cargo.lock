@@ -736,6 +736,7 @@ dependencies = [
  "fgit-admission",
  "fgit-agent",
  "fgit-authority",
+ "fgit-authority-fsqlite",
  "fgit-codec",
  "fgit-crypto",
  "fgit-forge",

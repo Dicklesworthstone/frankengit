@@ -6,7 +6,8 @@ mod evidence;
 
 use fgit_agent::effect_journal::EffectJournalPosition;
 use fgit_agent::*;
-use fgit_authority::IdempotencyKey;
+use fgit_authority::{AsyncAuthorityStore, IdempotencyKey, StoreInstanceId};
+use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_crypto::{
     GitHashAlgorithm, GitObjectKind, GitOid, NativeObjectIdentity, sha1_digest, sha256_digest,
 };
@@ -228,6 +229,12 @@ impl<A: GitHashAlgorithm> ObjectSource<A> for Bodies {
 }
 
 pub fn fixture<A: GitHashAlgorithm>(mode: Mode) -> Fixture {
+    fixture_with_acknowledgement::<A>(mode, true)
+}
+
+/// The non-acknowledging variant leaves an actual started submission for cold
+/// cleanup, instead of deleting a previously durable acknowledgement.
+pub fn fixture_with_acknowledgement<A: GitHashAlgorithm>(mode: Mode, acknowledge: bool) -> Fixture {
     let scratch = Scratch::new();
     let (mut node, _) =
         OneNode::init_with_agent_revocations(config(&scratch, A::OBJECT_FORMAT)).unwrap();
@@ -410,52 +417,68 @@ pub fn fixture<A: GitHashAlgorithm>(mode: Mode) -> Fixture {
         ))
         .unwrap(),
     ));
-    let result = node
-        .runtime()
-        .block_on(node.publish_agent_ref_transaction_trusted_local_in(
-            &request,
-            &mut broker,
-            &clock,
-            TrustedLocalAgentPublicationInput {
-                transaction: &transaction,
-                export: &export,
-                bundle: &bundle,
-                approval: &approved,
-                chain: &chain,
-            },
-        ));
-    let (binding, decision) = if matches!(mode, Mode::Reserved) {
-        let NativeAgentPublicationError::Reserved {
-            reservation,
-            reason,
-        } = result.unwrap_err()
-        else {
-            panic!("real pre-start reservation");
-        };
-        assert!(matches!(
-            reason,
-            NativeAgentPublicationRefusal::AuthorizationDeadlineUnbound
-        ));
-        let binding = reservation.binding().clone();
-        drop(reservation); // Simulate lost local ownership; never synthesize a journal transition.
-        (binding, None)
+    let (binding, decision) = if acknowledge {
+        let result = node
+            .runtime()
+            .block_on(node.publish_agent_ref_transaction_trusted_local_in(
+                &request,
+                &mut broker,
+                &clock,
+                TrustedLocalAgentPublicationInput {
+                    transaction: &transaction,
+                    export: &export,
+                    bundle: &bundle,
+                    approval: &approved,
+                    chain: &chain,
+                },
+            ));
+        if matches!(mode, Mode::Reserved) {
+            let NativeAgentPublicationError::Reserved {
+                reservation,
+                reason,
+            } = result.unwrap_err()
+            else {
+                panic!("real pre-start reservation");
+            };
+            assert!(matches!(
+                reason,
+                NativeAgentPublicationRefusal::AuthorizationDeadlineUnbound
+            ));
+            let binding = reservation.binding().clone();
+            drop(reservation); // Simulate lost local ownership; never synthesize a journal transition.
+            (binding, None)
+        } else {
+            let NativeAgentPublicationResult::Submitted(result) = result.unwrap() else {
+                panic!("native initial submission");
+            };
+            let admission = result.admission.unwrap();
+            let fgit_agent::ref_publication::RefTransactionResolution::Decided(settled) =
+                result.responsibility.unwrap()
+            else {
+                panic!("real canonical terminal");
+            };
+            assert_eq!(
+                settled.observation().terminal(),
+                &admission.commands[0].terminal
+            );
+            (
+                settled.observation().binding().clone(),
+                Some(admission.commands[0].terminal),
+            )
+        }
     } else {
-        let NativeAgentPublicationResult::Submitted(result) = result.unwrap() else {
-            panic!("native initial submission");
-        };
-        let admission = result.admission.unwrap();
-        let fgit_agent::ref_publication::RefTransactionResolution::Decided(settled) =
-            result.responsibility.unwrap()
-        else {
-            panic!("real canonical terminal");
-        };
-        assert_eq!(
-            settled.observation().terminal(),
-            &admission.commands[0].terminal
-        );
-        (
-            settled.observation().binding().clone(),
-            Some(admission.commands[0].terminal),
+        pending_submission(
+            &node,
+            &scratch,
+            &transaction,
+            &body,
+            &bundle,
+            &chain,
+            &mut broker,
+            branch,
+            source.commit,
+            candidate.erase(),
+            mode,
         )
     };
     let run = transaction.run_id();
@@ -463,7 +486,7 @@ pub fn fixture<A: GitHashAlgorithm>(mode: Mode) -> Fixture {
     let tail = broker.durable_position().unwrap().unwrap();
     assert_eq!(
         broker.close().is_quiescent(),
-        !matches!(mode, Mode::Reserved)
+        !matches!(mode, Mode::Reserved) && acknowledge
     );
     drop(clock);
     node.shutdown().unwrap();
@@ -480,6 +503,119 @@ pub fn fixture<A: GitHashAlgorithm>(mode: Mode) -> Fixture {
         bundle,
         decision,
     }
+}
+
+/// Exercise public broker reserve/start and the ordinary native transaction,
+/// deliberately leaving their acknowledgement join to the recovery command.
+/// The journal and original run are created by the production host. A separate
+/// short-lived reader observes revocations from that same persistent authority;
+/// there is no reference authority, synthetic lifecycle event, or truncation of
+/// a journal that already acknowledged a terminal outcome.
+fn pending_submission<A: GitHashAlgorithm>(
+    node: &OneNode,
+    scratch: &Scratch,
+    transaction: &AgentRefTransaction<A>,
+    commit_body: &[u8],
+    bundle: &[u8],
+    chain: &VerifiedCapabilityChain,
+    broker: &mut CurrentAuthorityRevocationCheckedEffectBroker,
+    branch: &[u8],
+    source: fgit_types::GitOid,
+    candidate: fgit_types::GitOid,
+    mode: Mode,
+) -> (
+    fgit_agent::ref_publication::RefTransactionBinding,
+    Option<fgit_authority::TerminalOutcome>,
+) {
+    use fgit_agent::ref_publication::RefTransactionBinding;
+
+    let cx = <FsqliteAuthorityStore as AsyncAuthorityStore>::Context::new();
+    cx.set_native_cx(node.runtime().request_cx_with_budget(Default::default()));
+    let mut authority = node
+        .runtime()
+        .block_on(FsqliteAuthorityStore::open(
+            &cx,
+            scratch.0.join("node/authority.fsqlite").to_str().unwrap(),
+            StoreInstanceId::from_raw(0x8371),
+            Default::default(),
+        ))
+        .unwrap();
+    let revocations = node
+        .runtime()
+        .block_on(read_current_authority_capability_revocations_async(
+            &authority,
+            &cx,
+            TenantId::from_bytes([0x81; 16]),
+            node.authority_head_key(),
+            transaction.run(),
+            LogicalTime::new(20),
+            100,
+            MAX_CAPABILITY_REVOCATIONS,
+            1024,
+        ))
+        .unwrap();
+    node.runtime().block_on(authority.close(&cx)).unwrap();
+    let mut custody = b"frankengit.native.agent-publication-custody/v1\0".to_vec();
+    custody.extend_from_slice(
+        transaction
+            .publication_evidence()
+            .subject()
+            .export_commitment(),
+    );
+    custody.extend_from_slice(&sha256_digest(commit_body));
+    let binding = RefTransactionBinding::derive(
+        transaction,
+        TenantId::from_bytes([0x81; 16]),
+        OWNER,
+        IdempotencyKey::new(KEY.to_vec()).unwrap(),
+    )
+    .unwrap()
+    .with_custody_commitment(sha256_digest(&custody))
+    .unwrap();
+    let reservation = broker
+        .reserve_ref_transaction(
+            &binding,
+            chain,
+            &revocations,
+            LogicalTime::new(20),
+            ResourceVector::single(Grade::Bytes, bundle.len() as u64).with(Grade::Objects, 3),
+        )
+        .unwrap();
+    let pending = broker
+        .start_ref_transaction(reservation, chain, &revocations, LogicalTime::new(21))
+        .unwrap();
+    let tail = broker.durable_position().unwrap().unwrap();
+    let decision = if matches!(mode, Mode::Reserved) {
+        None
+    } else {
+        let result = node
+            .runtime()
+            .block_on(node.apply_workspace_bundle_durable_in(
+                &node.command_request_context(None),
+                OWNER,
+                KEY,
+                &RefName::try_new(branch).unwrap(),
+                source,
+                candidate,
+                bundle,
+            ))
+            .unwrap();
+        assert_eq!(result.session.tx_ids, [binding.tx_id()]);
+        let terminal = result.commands[0].terminal;
+        assert_eq!(
+            matches!(terminal.outcome, DecisionOutcome::Committed { .. }),
+            matches!(mode, Mode::Committed)
+        );
+        Some(terminal)
+    };
+    assert_eq!(broker.durable_position().unwrap().unwrap(), tail);
+    assert_eq!(broker.records().len(), 1);
+    assert_eq!(
+        broker.records()[0].obligation_state,
+        fgit_resource::ObligationState::DeferredExternally
+    );
+    drop(pending);
+    (binding, decision)
 }
 
 pub fn hex(bytes: &[u8]) -> String {

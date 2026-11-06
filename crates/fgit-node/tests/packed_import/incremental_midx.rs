@@ -234,21 +234,24 @@ fn incremental_midx_symlinks_and_fifos_refuse_without_publication() {
             },
         );
     }
-    assert_source_refusal(
-        |repository| {
-            rustix::fs::mkfifoat(
-                rustix::fs::CWD,
-                repository.root.join("objects/pack/multi-pack-index.d"),
-                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-            )
-            .unwrap();
-        },
-        |refusal| {
-            matches!(refusal, LooseGitImportRefusal::PathKind {
-            expected: "regular pack-directory file", path,
-        } if path.file_name() == Some(OsStr::new("multi-pack-index.d")))
-        },
-    );
+    #[cfg(target_os = "linux")]
+    {
+        assert_source_refusal(
+            |repository| {
+                rustix::fs::mkfifoat(
+                    rustix::fs::CWD,
+                    repository.root.join("objects/pack/multi-pack-index.d"),
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                )
+                .unwrap();
+            },
+            |refusal| {
+                matches!(refusal, LooseGitImportRefusal::PathKind {
+                expected: "regular pack-directory file", path,
+            } if path.file_name() == Some(OsStr::new("multi-pack-index.d")))
+            },
+        );
+    }
 }
 
 #[test]
