@@ -44,6 +44,17 @@ result, whatever the pack size. Each verified pack retains offsets and native
 types, never a map of resident bodies. A pack installs nothing unless all of
 it verifies.
 
+Git's [incremental multi-pack-index layout](https://git-scm.com/docs/multi-pack-index)
+adds an `objects/pack/multi-pack-index.d/` directory alongside the ordinary
+`.idx`/`.pack` pairs. Import accepts this exact name only as a real directory,
+and skips its contents without traversing, reading or trusting them. A stale,
+corrupt or incomplete MIDX chain therefore does not prevent import when the
+ordinary pairs contain a valid reachable graph. Ordinary index/pack validation,
+including checksum, CRC, native-identity and resource-bound checks, is unchanged;
+MIDX files cannot replace a missing index or pack. Other directories, symlinks (including
+one named `multi-pack-index.d`), and unsupported file types retain their typed
+refusals. The existing flat `multi-pack-index` file remains disposable too.
+
 Cumulative inflated and retained native bytes are bounded by the selected
 import profile. One reconstruction-work witness spans every pack, so opening
 another pack never renews its delta-work allowance. That allowance follows the
@@ -116,6 +127,7 @@ executed results remain revision-bound.
 ## Packed-source regression campaign
 
 ```sh
+cargo test -p fgit-node --test packed_import incremental_midx:: -- --test-threads=2
 FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/packed_import_profiles.sh
 FG_BIN=/path/to/fg FG_PACKED_LARGE=1 bash scripts/e2e/suites/admission/packed_import_profiles.sh
 ```
@@ -131,3 +143,10 @@ using the identical sources. This script's presence is not evidence
 that it has run. The module tests independently exercise disk-custody reuse after
 source deletion, complete-pack charging, per-pack bounds, a corrupt later pack,
 and preservation of operation-wide reconstruction work.
+
+The incremental-MIDX integration cases compare exact imported refs, closure and
+stored object bytes with and without a corrupt accelerator directory in SHA-1
+and SHA-256. They also exercise cancellation, the exact native-byte limit,
+unchanged retry identity after removing the accelerator, invalid directory/file
+kinds, symlinks and FIFOs on Unix, and pack/index damage with the accelerator
+present. Refused attempts leave canonical authority unchanged.

@@ -95,11 +95,18 @@ struct IndexRecord {
 }
 
 fn serving_node(root: PathBuf) -> OneNode {
-    let mut node = OneNode::init(NodeConfig::new(
-        root,
-        TenantId::from_bytes([0xa1; 16]),
-        RepositoryId::from_bytes([0xb2; 16]),
-    ))
+    serving_node_with_format(root, GitHashAlgorithm::Sha1)
+}
+
+fn serving_node_with_format(root: PathBuf, format: GitHashAlgorithm) -> OneNode {
+    let mut node = OneNode::init(
+        NodeConfig::new(
+            root,
+            TenantId::from_bytes([0xa1; 16]),
+            RepositoryId::from_bytes([0xb2; 16]),
+        )
+        .with_object_format(format),
+    )
     .expect("node initializes")
     .0;
     node.bring_into_service(HeadGeneration::FIRST)
@@ -108,22 +115,37 @@ fn serving_node(root: PathBuf) -> OneNode {
 }
 
 fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepository {
+    write_packed_repository_with_format(root, storage, GitHashAlgorithm::Sha1)
+}
+
+fn write_packed_repository_with_format(
+    root: &Path,
+    storage: BlobStorage,
+    format: GitHashAlgorithm,
+) -> PackedRepository {
     fs::create_dir_all(root.join("objects/pack")).expect("pack directory creates");
     fs::create_dir_all(root.join("refs/heads")).expect("branch directory creates");
     fs::write(root.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD writes");
+    if format == GitHashAlgorithm::Sha256 {
+        fs::write(
+            root.join("config"),
+            "[core]\nrepositoryformatversion=1\nbare=true\n[extensions]\nobjectformat=sha256\n",
+        )
+        .expect("SHA-256 repository config writes");
+    }
 
     let base_blob_body = b"packed base blob\n".to_vec();
     let blob_body = b"packed reconstructed blob\n".to_vec();
-    let base_blob = object_id(GitObjectKind::Blob, &base_blob_body);
-    let blob = object_id(GitObjectKind::Blob, &blob_body);
+    let base_blob = fgit_crypto::git_object_id(format, GitObjectKind::Blob, &base_blob_body);
+    let blob = fgit_crypto::git_object_id(format, GitObjectKind::Blob, &blob_body);
     let mut tree_body = b"100644 file.txt\0".to_vec();
     tree_body.extend_from_slice(blob.as_bytes());
-    let tree = object_id(GitObjectKind::Tree, &tree_body);
+    let tree = fgit_crypto::git_object_id(format, GitObjectKind::Tree, &tree_body);
     let commit_body = format!(
         "tree {tree}\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000\n\npacked import\n"
     )
     .into_bytes();
-    let commit = object_id(GitObjectKind::Commit, &commit_body);
+    let commit = fgit_crypto::git_object_id(format, GitObjectKind::Commit, &commit_body);
 
     let mut entries = Vec::new();
     match storage {
@@ -132,7 +154,9 @@ fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepositor
             oid: blob,
             body: blob_body.clone(),
         }),
-        BlobStorage::Loose => write_loose_object(root, GitObjectKind::Blob, &blob_body),
+        BlobStorage::Loose => {
+            write_loose_object_with_format(root, GitObjectKind::Blob, &blob_body, format);
+        }
         BlobStorage::OfsDelta => {
             entries.push(FixtureEntry::Base {
                 type_code: 3,
@@ -181,8 +205,9 @@ fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepositor
         body: commit_body.clone(),
     });
 
-    let (pack, records) = encode_pack(&entries);
-    let index = encode_index(&records, &pack[pack.len() - 20..]);
+    let (pack, records) = encode_pack_with_format(&entries, format);
+    let index =
+        encode_index_with_format(&records, &pack[pack.len() - format.digest_len()..], format);
     let pack_path = root.join("objects/pack/pack-fixture.pack");
     let index_path = root.join("objects/pack/pack-fixture.idx");
     fs::write(&pack_path, pack).expect("pack writes");
@@ -203,7 +228,16 @@ fn write_packed_repository(root: &Path, storage: BlobStorage) -> PackedRepositor
 }
 
 fn write_loose_object(root: &Path, kind: GitObjectKind, body: &[u8]) {
-    let oid = object_id(kind, body);
+    write_loose_object_with_format(root, kind, body, GitHashAlgorithm::Sha1);
+}
+
+fn write_loose_object_with_format(
+    root: &Path,
+    kind: GitObjectKind,
+    body: &[u8],
+    format: GitHashAlgorithm,
+) {
+    let oid = fgit_crypto::git_object_id(format, kind, body);
     let identity = oid.to_string();
     let (directory, file) = identity.split_at(2);
     let path = root.join("objects").join(directory).join(file);
@@ -219,6 +253,13 @@ fn object_id(kind: GitObjectKind, body: &[u8]) -> GitOid {
 }
 
 fn encode_pack(entries: &[FixtureEntry]) -> (Vec<u8>, Vec<IndexRecord>) {
+    encode_pack_with_format(entries, GitHashAlgorithm::Sha1)
+}
+
+fn encode_pack_with_format(
+    entries: &[FixtureEntry],
+    format: GitHashAlgorithm,
+) -> (Vec<u8>, Vec<IndexRecord>) {
     let mut pack = b"PACK".to_vec();
     pack.extend_from_slice(&2_u32.to_be_bytes());
     pack.extend_from_slice(
@@ -266,12 +307,20 @@ fn encode_pack(entries: &[FixtureEntry]) -> (Vec<u8>, Vec<IndexRecord>) {
         });
         pack.extend_from_slice(&raw);
     }
-    let checksum = fgit_crypto::sha1_digest(&pack);
+    let checksum = fixture_digest(format, &pack);
     pack.extend_from_slice(&checksum);
     (pack, records)
 }
 
 fn encode_index(records: &[IndexRecord], pack_checksum: &[u8]) -> Vec<u8> {
+    encode_index_with_format(records, pack_checksum, GitHashAlgorithm::Sha1)
+}
+
+fn encode_index_with_format(
+    records: &[IndexRecord],
+    pack_checksum: &[u8],
+    format: GitHashAlgorithm,
+) -> Vec<u8> {
     let mut records = records.to_vec();
     records.sort_by(|left, right| left.oid.as_bytes().cmp(right.oid.as_bytes()));
     let mut index = vec![0xff, b't', b'O', b'c'];
@@ -301,9 +350,16 @@ fn encode_index(records: &[IndexRecord], pack_checksum: &[u8]) -> Vec<u8> {
         );
     }
     index.extend_from_slice(pack_checksum);
-    let checksum = fgit_crypto::sha1_digest(&index);
+    let checksum = fixture_digest(format, &index);
     index.extend_from_slice(&checksum);
     index
+}
+
+fn fixture_digest(format: GitHashAlgorithm, bytes: &[u8]) -> Vec<u8> {
+    match format {
+        GitHashAlgorithm::Sha1 => fgit_crypto::sha1_digest(bytes).to_vec(),
+        GitHashAlgorithm::Sha256 => fgit_crypto::sha256_digest(bytes).to_vec(),
+    }
 }
 
 fn entry_header(type_code: u8, size: usize) -> Vec<u8> {
@@ -1100,3 +1156,6 @@ fn assert_source_refusal(
     );
     node.shutdown().expect("node drains");
 }
+
+#[path = "packed_import/incremental_midx.rs"]
+mod incremental_midx;

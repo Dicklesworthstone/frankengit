@@ -103,13 +103,19 @@ impl PackedObjectSources {
             if metadata.file_type().is_symlink() {
                 return Err(LooseGitImportRefusal::SymbolicLink(Box::new(path)));
             }
+            let file_name = path.file_name().unwrap_or_else(|| OsStr::new(""));
+            if metadata.is_dir() && file_name == OsStr::new("multi-pack-index.d") {
+                // Git's incremental MIDX chain is a disposable lookup
+                // accelerator. Never descend into it or trust its contents:
+                // the ordinary .idx/.pack pairs remain the verified sources.
+                continue;
+            }
             if !metadata.is_file() {
                 return Err(LooseGitImportRefusal::PathKind {
                     expected: "regular pack-directory file",
                     path: Box::new(path),
                 });
             }
-            let file_name = path.file_name().unwrap_or_else(|| OsStr::new(""));
             if file_name == OsStr::new("multi-pack-index") || is_ignored_pack_accelerator(&path) {
                 continue;
             }
