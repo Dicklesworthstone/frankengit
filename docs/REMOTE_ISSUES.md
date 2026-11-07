@@ -241,6 +241,11 @@ The `remote_issue_output_failure` diagnostic names its error code and whether
 command work completed before output failed. When available, `native_result`
 preserves the validated terminal observation; output cancellation never rolls
 back publication or changes the original request, key or saved result record.
+If command work already failed, stderr instead preserves its original
+`remote_issue_error`, including the error code, phase, dispatch flag and any
+publication receipt. An added `output_failure` names the separate output
+problem. A publication receipt without completed incarnation-bound confirmation
+still leaves `outcome_unknown:true`; recovery uses the original request.
 Neither a nonzero exit nor an absent key is evidence that nothing happened.
 
 Run `bash scripts/verify_remote_issues.sh` for the complete client/CLI lane.
@@ -249,3 +254,12 @@ CLI cases execute real child processes and private filesystem publication,
 including exact-key restart recovery after dropped responses, SIGTERM, SIGKILL,
 closed stdout, conflicting result publication, scope/history pins and refused
 unsafe input files. Native replies remain explicit protocol peers, not `fg`.
+
+The separate `scripts/e2e/suites/operator/remote_issue.sh` campaign uses actual
+native listeners. For both Git hash domains and committed/refused transactions,
+it pairs complete confirmation with a two-session listener that publishes then
+retires before confirmation. Drained output and a real full, unread OS pipe
+must preserve the same error/receipt semantics. Separate `fg outcome` and issue
+reads bind the original key, transaction, decision and canonical effects. This
+bounded host-pipe campaign does not establish power-loss safety, browser/TLS
+behavior, every operator entrypoint or same-revision native build qualification.

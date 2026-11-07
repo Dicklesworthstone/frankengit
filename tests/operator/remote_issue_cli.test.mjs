@@ -439,3 +439,71 @@ test('repeated cancellation remains owned until blocked diagnostics finish drain
   await run.controlClosed; assert.equal(run.control(), 'B'); assert.equal(f.calls.length, 0);
   assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
 });
+
+for (const state of ['committed', 'refused'])
+for (const interruption of ['none', 'deadline', 'SIGTERM']) test(`confirmation ${state}/${interruption} preserves publication evidence and original custody`, async t => {
+  let child, publication, interrupt = true;
+  const terminalExit = state === 'committed' ? 0 : 1;
+  const f = await fixture(t, { refuse: state === 'refused', handle: ({ recovering, reply }) => {
+    if (!recovering) publication = reply;
+    if (recovering && reply.state === state && interrupt && interruption !== 'none') {
+      if (interruption === 'SIGTERM') child.kill('SIGTERM');
+      return true; // The native-schema peer withholds confirmation, not publication.
+    }
+    return false;
+  } });
+  const prepared = await f.prepare(); assert.equal(prepared.code, 0);
+  const before = await readFile(join(f.slot, 'intent.json'));
+  const run = spawnCli([...f.sendArgs(prepared.value.key), '--timeout-ms', '1500']); child = run.child;
+  const result = await run.done;
+  assert.equal(result.signal, null);
+  if (interruption === 'none') {
+    assert.equal(result.code, terminalExit); assert.equal(result.stderr, '');
+    assert.deepEqual(result.value.publication, publication);
+    assert.equal(result.value.outcome.state, state);
+  } else {
+    assert.equal(result.code, 3); assert.equal(result.stdout, '');
+    const error = JSON.parse(result.stderr);
+    assert.equal(error.type, 'remote_issue_error'); assert.equal(error.phase, 'confirmation');
+    assert.equal(error.dispatched_this_call, true); assert.deepEqual(error.publication, publication);
+    assert.equal(error.outcome_unknown, true); assert.equal(error.absence_proves_non_commit, false);
+    assert.equal(error.original_request_deleted, false); assert.equal(error.operation_completed, true);
+    assert.equal(error.output_failure, 'operator_output_cancelled_or_deadline');
+    assert.equal(error.native_result, null); assert.match(error.code, /^outcome_(cancelled|timeout)$/);
+    assert(!result.stderr.includes(token)); assert(!result.stderr.includes('inert</script>'));
+  }
+  assert.equal(f.calls.length, 3); assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+  interrupt = false;
+  const recovered = await invoke(f.recoverArgs);
+  assert.equal(recovered.code, terminalExit); assert.equal(recovered.value.key, prepared.value.key);
+  assert.equal(recovered.value.outcome.state, state);
+  assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});
+
+test('record-publication race and blocked stdout retain the original error and known terminal', async t => {
+  let record;
+  const f = await fixture(t, { handle: ({ recovering }) => {
+    if (!recovering) writeFileSync(record, 'competing record', { mode: 0o600 });
+    return false;
+  } });
+  record = join(f.directory, 'raced.json');
+  const prepared = await f.prepare(); assert.equal(prepared.code, 0);
+  const before = await readFile(join(f.slot, 'intent.json'));
+  const run = blockedOutput(t, [...f.sendArgs(prepared.value.key), '--record', record, '--timeout-ms', '1500'], { fillOut: true });
+  assert.deepEqual(await boundedOutput(run.exited), { code: 3, signal: null });
+  await run.errorsClosed; await run.controlClosed; assert.equal(run.control(), 'B');
+  const error = JSON.parse(run.errors());
+  assert.equal(error.type, 'remote_issue_error'); assert.equal(error.code, 'issue_output_already_exists');
+  assert.equal(error.phase, 'files'); assert.equal(error.dispatched_this_call, true);
+  assert.equal(error.output_failure, 'operator_output_cancelled_or_deadline'); assert.equal(error.operation_completed, true);
+  assert.equal(error.outcome_unknown, false); assert.equal(error.absence_proves_non_commit, false);
+  assert.equal(error.native_result.outcome.state, 'committed'); assert.equal(error.native_result.key, prepared.value.key);
+  assert.deepEqual(error.publication, error.native_result.publication);
+  assert.equal(await readFile(record, 'utf8'), 'competing record');
+  const recovered = await invoke(f.recoverArgs); assert.equal(recovered.code, 0);
+  assert.equal(recovered.value.key, prepared.value.key); assert.equal(recovered.value.outcome.state, 'committed');
+  assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, 1);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});

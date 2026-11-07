@@ -140,7 +140,14 @@ async function entry() {
     },
     failureExitCode: 3,
     failure: (error, completed) => {
-      const native = result?.value?.type === 'remote_issue_result' ? result.value : result?.value?.native_result ?? null;
+      // Cancellation can finish command work with an error that still owns
+      // dispatch/publication evidence. Preserve that error when stdout fails;
+      // do not replace its code/phase or dump a prepared/inspected request here.
+      if (result?.value?.type === 'remote_issue_error') {
+        return issueCanonical({ ...result.value, operation_completed: completed,
+          result_output_may_be_incomplete: true, output_failure: error.code ?? 'issue_output_failed' });
+      }
+      const native = result?.value?.type === 'remote_issue_result' ? result.value : null;
       return issueCanonical({ type: 'remote_issue_output_failure', code: error.code ?? 'issue_output_failed',
         operation_completed: completed, outcome_unknown: native ? !native.outcome.terminal : true,
         native_result: native, absence_proves_non_commit: false });

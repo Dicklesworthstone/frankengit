@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 from scoped_events_smoke import Campaign, HttpServer, PRINCIPAL, REPOSITORY, TENANT, require, file_sha256
 from operator_inbox_smoke import run_inbox_case, missing_inbox_service
 from operator_discussion_inbox_smoke import seed_discussions, run_discussion_inbox_case
+from operator_output_smoke import output_sink, run_output_cases
 
 ROOT = Path(__file__).resolve().parents[2]
 TOKEN = "c" * 64
@@ -37,19 +38,23 @@ class OperatorCampaign(Campaign):
 
     def node_command(self, script: Path, args: list[str], expected: int = 0, *,
                      error_reply: bool = False, timeout: float = 40,
-                     json_lines: bool = False, text_reply: bool = False) -> dict[str, Any] | list[dict[str, Any]] | str:
+                     json_lines: bool = False, text_reply: bool = False,
+                     block_stdout: bool = False) -> dict[str, Any] | list[dict[str, Any]] | str:
         if json_lines and text_reply:
             raise ValueError("NDJSON and text replies are mutually exclusive")
         if not 0 < timeout <= 40:
             raise ValueError("operator execution timeout must be positive and at most 40 seconds")
+        if block_stdout and (not error_reply or expected == 0):
+            raise ValueError("blocked output must explicitly expect a failed command and stderr reply")
         self.client_serial += 1
         stem = self.work / f"operator-{self.client_serial:03d}"
         command = [str(self.node), str(script), *args]
         started = time.monotonic()
-        with stem.with_suffix(".stdout").open("wb") as out, stem.with_suffix(".stderr").open("wb") as err:
+        with stem.with_suffix(".stdout").open("wb") as out, stem.with_suffix(".stderr").open("wb") as err, \
+                output_sink(out, block_stdout) as (sink, prefilled):
             owner = None
             try:
-                owner = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                owner = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=sink, stderr=err,
                                          start_new_session=os.name == "posix")
                 exit_code = owner.wait(timeout=timeout)
             except BaseException as interruption:
@@ -89,7 +94,9 @@ class OperatorCampaign(Campaign):
                     # native work or whether a repository mutation committed.
                     raise RuntimeError(f"operator_owner_containment_failed: {shutdown}; see {stem}") from interruption
                 raise
-        self.record(kind="operator", command=command, exit=exit_code, artifacts=str(stem))
+        self.record(kind="operator", command=command, exit=exit_code, artifacts=str(stem),
+                    stdout_mode="prefilled_unread_pipe" if block_stdout else "file",
+                    stdout_prefilled_bytes=prefilled)
         if exit_code != expected:
             sys.stderr.write(stem.with_suffix(".stderr").read_text(errors="replace"))
             raise AssertionError(f"operator exit {exit_code}, expected {expected}; see {stem}")
@@ -106,7 +113,7 @@ class OperatorCampaign(Campaign):
 
 @contextmanager
 def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt: str, *,
-                 allow_issues=True, allow_discussions=False):
+                 allow_issues=True, allow_discussions=False, max_sessions: int | None = None):
     # Fetch rejects some ports even on loopback. Select only native-owned
     # listeners above the pinned runtime's highest blocked port (10080),
     # before any request. Every discarded listener must drain normally.
@@ -117,6 +124,13 @@ def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt:
         if allow_discussions:
             server.command.append("--allow-discussions")
         server.command.append("--allow-outcomes")
+        if max_sessions is not None:
+            if max_sessions not in (2, 3):
+                raise ValueError("output case must select its exact two/three-session budget")
+            server.command.remove("--continuous")
+            stop = server.command.index("--stop-file")
+            del server.command[stop:stop + 2]
+            server.command += ["--max-sessions", str(max_sessions), "--idle-timeout-secs", "10"]
         with server:
             port = urlsplit(server.url).port
             require(port is not None, "native listener omitted its port")
@@ -443,6 +457,9 @@ def run_case(campaign: OperatorCampaign, fmt: str) -> None:
         missing_inbox_service(campaign, server, root, token_path, fmt)
     with issue_server(campaign, root, credentials, fmt + "-discussion-inbox-disabled") as server:
         missing_inbox_service(campaign, server, root, token_path, fmt, kind="discussion")
+    grants("issues-read,issues-write,outcomes-read")
+    run_output_cases(campaign, issue_server, canonical, directory, root, credentials, fmt,
+                     token_path, incarnation, script)
     campaign.facts[f"{fmt}_owned_service_drained"] = True
     print(f"OPERATOR_ISSUE {fmt}: three real CLI/HTTP/native paths, issue/inbox actions, recovery, retained reads and drain", flush=True)
 
