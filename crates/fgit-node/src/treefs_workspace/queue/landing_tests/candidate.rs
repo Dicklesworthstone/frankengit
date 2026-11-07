@@ -14,6 +14,7 @@ use fgit_forge::preparation::{
 use std::fs;
 
 mod queue_required;
+mod readiness;
 
 fn metadata() -> MergeMetadata {
     MergeMetadata {

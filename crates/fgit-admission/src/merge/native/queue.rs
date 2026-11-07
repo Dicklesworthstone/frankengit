@@ -31,6 +31,8 @@ mod candidate;
 pub use candidate::{
     QueueCandidateLandingCommand, admit_candidate_landing_async, candidate_landing_proposal,
 };
+mod readiness;
+pub use readiness::{CandidateLandingReadiness, inspect_candidate_landing_async};
 mod execution;
 pub(in crate::merge) use execution::{Landing, validate_publication_shape};
 

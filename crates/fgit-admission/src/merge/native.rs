@@ -11,10 +11,10 @@ use fgit_chronicle::{PublicationBasis, PublicationPlan};
 use fgit_codec::CryptoBodyIdentity;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, NativeMerge};
-use fgit_types::{AsciiSlug, GitOid, RefName, RefusalCode};
+use fgit_types::{AsciiSlug, GitOid, RefName, RefusalCode, TxId};
 
 use super::{
-    NativeMergeBasis, SealedMerge,
+    NativeMergeBasis, PreparedNativeMerge, SealedMerge,
     prepare::prepare_event,
     staging::{stage_prepared, validate_prepared},
 };
@@ -595,7 +595,6 @@ where
         .transpose()?;
     let admission = fgit_authority::seal_request_async(store, cx, attempt).await?;
     let tx_id = admission.tx_id();
-    let merge = intent.merge()?;
     for _ in 0..limits.max_cas_replans {
         projection.merge_checkpoint(cx).map_err(unavailable)?;
         let (basis, receipt, authenticated) =
@@ -643,154 +642,20 @@ where
             None => continue,
         }
 
-        let preparation: Result<_, PreparationFailure> = async {
-            protection::require_non_agent_publication_at(
-                store,
-                cx,
-                &basis,
-                Some(context.principal_id),
-                projection.admission_authentication(),
-                &|| projection.merge_checkpoint(cx).is_err(),
-            )
-            .await?;
-            if let Some(expected) = intent.workspace_snapshot_digest() {
-                let observed = projection.workspace_snapshot_digest()?;
-                if observed != expected {
-                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
-                }
-            }
-            let snapshot = projection
-                .snapshot_async(store, cx, &basis, &authenticated)
-                .await?;
-            if snapshot.hidden_refs.hides(merge.source_ref.as_bytes())
-                || snapshot.hidden_refs.hides(merge.target_ref.as_bytes())
-            {
-                return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
-            }
-            if landing.is_none()
-                && (snapshot.refs.get(&merge.source_ref) != Some(&merge.source_tip)
-                    || snapshot.refs.get(&merge.target_ref) != Some(&merge.target_tip_before))
-            {
-                return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
-            }
-            // Preserve source -> target -> workspace refusal precedence, and
-            // never override the historical terminal resolved above the loop.
-            if sealed.is_some_and(|package| {
-                package.workspace_epoch_now != package.attempt.workspace_epoch
-            }) {
-                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
-            }
-            let resolved = projection
-                .resolve_merge_basis_async(store, cx, &basis, &authenticated)
-                .await?;
-            if resolved.refs.refs() != &snapshot.refs
-                || resolved.refs.head_target() != snapshot.head_target.as_ref()
-            {
-                return Err(
-                    ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
-                );
-            }
-            let positions = load_forge_positions(store, cx, &basis).await?;
-            if positions != resolved.forge {
-                return Err(
-                    ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
-                );
-            }
-            let validated_landing = match (landing, &landing_events) {
-                (Some(command), Some(events)) => Some(
-                    queue::validate_landing_at(
-                        store, cx, context, &basis, &snapshot, &resolved, command, events, intent,
-                        attempt, projection,
-                    )
-                    .await?,
-                ),
-                (None, None) => None,
-                _ => return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into()),
-            };
-            if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
-                return Err(ProjectionFailure::Refuse(code).into());
-            }
-            let closure = if let Some(landing) = &validated_landing {
-                projection
-                    .validate_queued_merge_async(store, cx, &basis, &authenticated, intent, landing)
-                    .await?
-            } else {
-                match intent.method() {
-                    NativeMergeMethod::MergeCommit => {
-                        projection
-                            .validate_merge_async(store, cx, &basis, &authenticated, intent)
-                            .await?
-                    }
-                    NativeMergeMethod::FastForwardOnly => {
-                        projection
-                            .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
-                            .await?
-                    }
-                    NativeMergeMethod::Squash => {
-                        projection
-                            .validate_squash_async(store, cx, &basis, &authenticated, intent)
-                            .await?
-                    }
-                }
-            };
-            // A self-consistent caller-supplied set is not native-object
-            // evidence. Require the exact independently verified closure and
-            // retain explicit containment of every package-declared object.
-            if sealed.is_some_and(|package| {
-                package.closure != &closure
-                    || package
-                        .package
-                        .objects
-                        .iter()
-                        .any(|object| !closure.objects.contains(object))
-            }) {
-                return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
-            }
-            let mut prepared = match (landing, &landing_events) {
-                (Some(command), Some(events)) => {
-                    command.prepare(context, events, &closure, tx_id, attempt, &basis, &resolved)
-                }
-                (None, None) => prepare_event(
-                    context,
-                    &intent.event,
-                    &closure,
-                    tx_id,
-                    attempt,
-                    &basis,
-                    &resolved,
-                ),
-                _ => Err(RefusalCode::EvidenceInvalid),
-            }
-            .map_err(ProjectionFailure::Refuse)?;
-            protection::attach_prepared_policy_selected_at(
-                store,
-                cx,
-                context,
-                &basis,
-                &resolved,
-                &mut prepared,
-                crate::evidence::RefPolicyPublication::NativeMerge,
-                projection.admission_authentication(),
-                validated_landing.as_ref(),
-                &|| projection.merge_checkpoint(cx).is_err(),
-            )
-            .await?;
-            if let Some(package) = sealed {
-                let record = &prepared.materialization.record;
-                let expected = CommitEvidence {
-                    principal_snapshot_id: record.principal_snapshot_id,
-                    forge_event_batch_root: record.forge_event_batch_root,
-                    policy_decision_root: record.policy_decision_root,
-                    invariant_evidence_root: record.invariant_evidence_root,
-                    outbox_effect_root: record.outbox_effect_root,
-                    retention_delta_root: record.retention_delta_root,
-                };
-                if package.evidence != expected {
-                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
-                }
-            }
-            Ok(prepared)
-        }
+        let preparation = prepare_merge_attempt_at(
+            store,
+            cx,
+            context,
+            intent,
+            attempt,
+            sealed,
+            tx_id,
+            &basis,
+            &authenticated,
+            projection,
+            landing,
+            landing_events.as_ref(),
+        )
         .await;
 
         let prepared = match preparation {
@@ -871,6 +736,179 @@ where
     Err(AdmissionError::CasReplanLimitExceeded {
         limit: limits.max_cas_replans,
     })
+}
+
+/// Prepare the entire protected native merge at one authenticated predecessor.
+/// Inspection and publication share this exact fold; this function neither
+/// seals a request nor stages bodies, publishes objects or moves authority.
+async fn prepare_merge_attempt_at<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    intent: &NativeMergeIntent,
+    attempt: &SealAttempt,
+    sealed: Option<&SealedMerge<'_>>,
+    tx_id: TxId,
+    basis: &PublicationBasis,
+    authenticated: &AuthenticatedHead,
+    projection: &P,
+    landing: Option<queue::Landing<'_>>,
+    landing_events: Option<&ForgeEventBatch>,
+) -> Result<PreparedNativeMerge, PreparationFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    projection
+        .merge_checkpoint(cx)
+        .map_err(ProjectionFailure::Unavailable)?;
+    let merge = intent.merge()?;
+    protection::require_non_agent_publication_at(
+        store,
+        cx,
+        basis,
+        Some(context.principal_id),
+        projection.admission_authentication(),
+        &|| projection.merge_checkpoint(cx).is_err(),
+    )
+    .await?;
+    if let Some(expected) = intent.workspace_snapshot_digest() {
+        let observed = projection.workspace_snapshot_digest()?;
+        if observed != expected {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+        }
+    }
+    let snapshot = projection
+        .snapshot_async(store, cx, basis, authenticated)
+        .await?;
+    if snapshot.hidden_refs.hides(merge.source_ref.as_bytes())
+        || snapshot.hidden_refs.hides(merge.target_ref.as_bytes())
+    {
+        return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
+    }
+    if landing.is_none()
+        && (snapshot.refs.get(&merge.source_ref) != Some(&merge.source_tip)
+            || snapshot.refs.get(&merge.target_ref) != Some(&merge.target_tip_before))
+    {
+        return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
+    }
+    // Preserve source -> target -> workspace refusal precedence. Publication
+    // resolves historical terminal outcomes before entering this preparation.
+    if sealed.is_some_and(|package| {
+        package.workspace_epoch_now != package.attempt.workspace_epoch
+    }) {
+        return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+    }
+    let resolved = projection
+        .resolve_merge_basis_async(store, cx, basis, authenticated)
+        .await?;
+    if resolved.refs.refs() != &snapshot.refs
+        || resolved.refs.head_target() != snapshot.head_target.as_ref()
+    {
+        return Err(
+            ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
+        );
+    }
+    let positions = load_forge_positions(store, cx, basis).await?;
+    if positions != resolved.forge {
+        return Err(
+            ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
+        );
+    }
+    let validated_landing = match (landing, landing_events) {
+        (Some(command), Some(events)) => Some(
+            queue::validate_landing_at(
+                store, cx, context, basis, &snapshot, &resolved, command, events, intent,
+                attempt, projection,
+            )
+            .await?,
+        ),
+        (None, None) => None,
+        _ => return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into()),
+    };
+    if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
+        return Err(ProjectionFailure::Refuse(code).into());
+    }
+    let closure = if let Some(landing) = &validated_landing {
+        projection
+            .validate_queued_merge_async(store, cx, basis, authenticated, intent, landing)
+            .await?
+    } else {
+        match intent.method() {
+            NativeMergeMethod::MergeCommit => {
+                projection
+                    .validate_merge_async(store, cx, basis, authenticated, intent)
+                    .await?
+            }
+            NativeMergeMethod::FastForwardOnly => {
+                projection
+                    .validate_fast_forward_async(store, cx, basis, authenticated, intent)
+                    .await?
+            }
+            NativeMergeMethod::Squash => {
+                projection
+                    .validate_squash_async(store, cx, basis, authenticated, intent)
+                    .await?
+            }
+        }
+    };
+    // A self-consistent caller-supplied set is not native-object
+    // evidence. Require the exact independently verified closure and
+    // retain explicit containment of every package-declared object.
+    if sealed.is_some_and(|package| {
+        package.closure != &closure
+            || package
+                .package
+                .objects
+                .iter()
+                .any(|object| !closure.objects.contains(object))
+    }) {
+        return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
+    }
+    let mut prepared = match (landing, landing_events) {
+        (Some(command), Some(events)) => {
+            command.prepare(context, events, &closure, tx_id, attempt, basis, &resolved)
+        }
+        (None, None) => prepare_event(
+            context,
+            &intent.event,
+            &closure,
+            tx_id,
+            attempt,
+            basis,
+            &resolved,
+        ),
+        _ => Err(RefusalCode::EvidenceInvalid),
+    }
+    .map_err(ProjectionFailure::Refuse)?;
+    protection::attach_prepared_policy_selected_at(
+        store,
+        cx,
+        context,
+        basis,
+        &resolved,
+        &mut prepared,
+        crate::evidence::RefPolicyPublication::NativeMerge,
+        projection.admission_authentication(),
+        validated_landing.as_ref(),
+        &|| projection.merge_checkpoint(cx).is_err(),
+    )
+    .await?;
+    if let Some(package) = sealed {
+        let record = &prepared.materialization.record;
+        let expected = CommitEvidence {
+            principal_snapshot_id: record.principal_snapshot_id,
+            forge_event_batch_root: record.forge_event_batch_root,
+            policy_decision_root: record.policy_decision_root,
+            invariant_evidence_root: record.invariant_evidence_root,
+            outbox_effect_root: record.outbox_effect_root,
+            retention_delta_root: record.retention_delta_root,
+        };
+        if package.evidence != expected {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+        }
+    }
+    Ok(prepared)
 }
 
 enum PreparationFailure {

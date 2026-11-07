@@ -4,7 +4,8 @@
 
 use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_admission::merge::native::queue::{
-    QueueCandidateLandingCommand, admit_candidate_landing_async, candidate_landing_proposal,
+    CandidateLandingReadiness, QueueCandidateLandingCommand, admit_candidate_landing_async,
+    candidate_landing_proposal, inspect_candidate_landing_async,
 };
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
@@ -20,6 +21,63 @@ use crate::{
 };
 
 impl OneNode {
+    /// Observe whether this exact stored candidate can pass ordinary protected
+    /// queue landing preparation at the current authenticated authority head.
+    /// The same native admission fold checks identity, visibility, queue/PR/ref
+    /// guards, objects, independent reviews and exact workflow checks.
+    ///
+    /// This read-only path does not quarantine objects, consume a mutation
+    /// quota, seal the key or publish a refusal. In particular, a missing review
+    /// or check can become ready under the same unsubmitted landing key. The
+    /// candidate must already be stored, as after the watcher's CI publication.
+    /// Readiness is neither a service-availability guarantee nor a publication
+    /// permission: actual landing revalidates everything and decides once.
+    /// Recover an already submitted transaction through its original outcome.
+    pub async fn inspect_queue_head_candidate_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &QueueCandidateLandingCommand,
+    ) -> Result<CandidateLandingReadiness, NodeWorkspaceRefusal> {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: authenticated.principal_id(),
+            idempotency_key: authenticated.client_idempotency_key().clone(),
+            object_format: self.object_format,
+        };
+        let map_admission =
+            |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
+        let projection = NodeNativeMergeProjection {
+            node: self,
+            inner: self
+                .durable_admission_projection(&context)
+                .map_err(map_admission)?
+                .with_authentication(authenticated.authentication()),
+            object_limits: MergeObjectLimits {
+                max_reused_blob_bytes: self.reused_merge_blob_limit(),
+                ..MergeObjectLimits::default()
+            },
+            staging: None,
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
+        };
+        Box::pin(inspect_candidate_landing_async(
+            &self.authority,
+            request.authority(),
+            &context,
+            command,
+            &projection,
+        ))
+        .await
+        .map_err(map_admission)
+    }
+
     /// Land the exact first queued PR using an explicitly supplied two-parent
     /// candidate bundle. The native validator independently verifies ordered
     /// parents, common ancestry, closure and the current review/check policy.
