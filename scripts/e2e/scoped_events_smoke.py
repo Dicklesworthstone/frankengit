@@ -16,6 +16,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -166,20 +167,55 @@ class HttpServer:
     def close(self) -> None:
         if self.process is None:
             return
-        process, self.process = self.process, None
+        process = self.process
         started = time.monotonic()
-        self.stop.touch(exist_ok=False)
         forced = False
         try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            forced = True
-            process.terminate()
+            self.stop.touch(exist_ok=False)
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+                forced = True
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        except BaseException as error:
+            # A failed stop-file write or cancellation still owns this child.
+            # Keep its Popen capability and finish the bounded reap before
+            # propagating the original failure. Repeated cancellation must not
+            # interrupt this final drain or silently turn it into success.
+            handlers = {}
+            try:
+                if threading.current_thread() is threading.main_thread():
+                    for number in (signal.SIGTERM, signal.SIGINT):
+                        handlers[number] = signal.signal(number, signal.SIG_IGN)
+                try:
+                    if process.poll() is None:
+                        forced = True
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                except BaseException as cleanup:
+                    self.campaign.record(kind="service_stop", pid=process.pid, exit=process.poll(),
+                                         forced=forced, close_error=type(error).__name__,
+                                         cleanup_error=type(cleanup).__name__,
+                                         duration_ms=round((time.monotonic() - started) * 1000))
+                    raise RuntimeError("HTTP child containment failed during interrupted close") from cleanup
+                self.process = None
+                self.campaign.record(kind="service_stop", pid=process.pid, exit=process.returncode,
+                                     forced=forced, close_error=type(error).__name__,
+                                     duration_ms=round((time.monotonic() - started) * 1000))
+            finally:
+                for number, handler in handlers.items():
+                    signal.signal(number, handler)
+            raise
+        self.process = None
         self.campaign.record(kind="service_stop", pid=process.pid, exit=process.returncode, forced=forced,
                              duration_ms=round((time.monotonic() - started) * 1000))
         # Always retain and show actual service diagnostics; do not suppress an
