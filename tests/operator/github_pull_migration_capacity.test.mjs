@@ -6,6 +6,38 @@ import { encode,digest } from '../../scripts/lib/forge-pull-archive-store.mjs';
 import { wholeMigrationFixture,childPath,readJson } from './github-pull-migration-fixture.mjs';
 import { prepareGithubPullMigration,executeGithubPullMigration } from '../../scripts/lib/github-pull-migration.mjs';
 
+test('encoded capacity preflight rejects the global budget before custody and accepts its exact boundary',async t=>{
+  const f=await wholeMigrationFixture(t,{select:{number_start:'18446744073709551613'},source:{alter:s=>{
+    if(s.kind==='pull')s.value.body='Escaped "quotes", \\ and Unicode 雪\n';
+  }}}),original=await readFile(join(f.workdir,'manifest.json')),workdir=join(f.root,'exact-global');
+  const before=await readFile(join(childPath(f,0),'requests/step-000001/intent.json'));
+  await assert.rejects(prepareGithubPullMigration({...f.input,workdir,maxRequestBytes:f.prepared.request_bytes-1}),e=>{
+    assert.match(e.code,/plan_capacity/);assert.equal(e.migration_progress.directory_created,false);return true;
+  });
+  await assert.rejects(stat(workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
+  assert((await readFile(join(f.workdir,'manifest.json'))).equals(original));
+  assert((await readFile(join(childPath(f,0),'requests/step-000001/intent.json'))).equals(before));
+  const accepted=await prepareGithubPullMigration({...f.input,workdir,maxRequestBytes:f.prepared.request_bytes});
+  assert.equal(accepted.request_bytes,f.prepared.request_bytes);assert.equal(accepted.steps,f.prepared.steps);
+  assert.equal((await executeGithubPullMigration({...f.run,workdir,confirm:accepted.plan_sha256})).complete,true);
+  assert.equal(f.peer.mutations.length,accepted.steps);
+});
+
+test('encoded capacity preflight checks a later child before creating any earlier batch',async t=>{
+  const f=await wholeMigrationFixture(t,{source:{alter:s=>{if(s.kind==='pull'&&s.n===23)s.value.body='later child '.repeat(100);}}});
+  const manifest=await readJson(join(f.workdir,'manifest.json')),limit=Math.max(...manifest.batches.map(b=>b.request_bytes));
+  assert.equal(manifest.batches.at(-1).request_bytes,limit);
+  const workdir=join(f.root,'exact-child'),selection={...f.input.selection,max_request_bytes:limit-1};
+  await assert.rejects(prepareGithubPullMigration({...f.input,workdir,selection}),e=>{
+    assert.match(e.code,/import_request_limit/);assert.equal(e.migration_progress.directory_created,false);return true;
+  });
+  await assert.rejects(stat(workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
+  const accepted=await prepareGithubPullMigration({...f.input,workdir,selection:{...selection,max_request_bytes:limit}});
+  assert.equal(accepted.request_bytes,f.prepared.request_bytes);assert.equal(accepted.preparation_complete,true);
+  assert.equal((await executeGithubPullMigration({...f.run,workdir,confirm:accepted.plan_sha256})).complete,true);
+  assert.equal(f.peer.mutations.length,accepted.steps);
+});
+
 test('101 PRs in five original batches execute under one shared default 100-operation allowance',async t=>{
   const f=await wholeMigrationFixture(t,{pulls:Array.from({length:101},(_,i)=>i+1),batchSize:25,
     source:{discussions:0,reviews:0,inlines:0}});
@@ -17,11 +49,12 @@ test('101 PRs in five original batches execute under one shared default 100-oper
   assert.equal(f.peer.mutations.length,202);assert.equal(new Set(f.peer.mutations.map(m=>m.key)).size,202);
   assert.deepEqual(f.peer.mutations.filter(m=>m.action==='open').map(m=>m.number),Array.from({length:101},(_,i)=>String(100+i)));
 });
-test('aggregate intent size refuses even when body preflight fits, leaving no executable outer root',async t=>{
+test('aggregate intent size refuses even when bodies fit, leaving no output or executable outer root',async t=>{
   const f=await wholeMigrationFixture(t),limit=f.prepared.request_bytes-1,second=join(f.root,'too-small');
   await assert.rejects(prepareGithubPullMigration({...f.input,workdir:second,maxRequestBytes:limit}),/plan_capacity/);
   await assert.rejects(stat(join(second,'manifest.json')),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
-  await assert.rejects(prepareGithubPullMigration({...f.input,workdir:second,maxRequestBytes:limit}),/workdir_exists/);
+  await assert.rejects(stat(second),{code:'ENOENT'});
+  await assert.rejects(prepareGithubPullMigration({...f.input,workdir:second,maxRequestBytes:limit}),/plan_capacity/);
 });
 test('pre-aborted execution cannot reserve an attempt or submit',async t=>{
   const f=await wholeMigrationFixture(t),stop=new AbortController();stop.abort();

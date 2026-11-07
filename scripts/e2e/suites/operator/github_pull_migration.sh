@@ -47,7 +47,7 @@ with Path(sys.argv[2]).open('rb') as stream:
 digest = hasher.hexdigest()
 require(summary['complete'] is True and summary['binary_sha256'] == digest)
 require(summary['oracle_pin'] == 'git-2.54.0')
-require(len(summary['selected_facts']) == len(set(summary['selected_facts'])) == 36)
+require(len(summary['selected_facts']) == len(set(summary['selected_facts'])) == 38)
 require(set(summary['facts']) == set(summary['selected_facts']) and all(v is True for v in summary['facts'].values()))
 native_entrypoints = {'scripts/bootstrap_native_branches.mjs', 'scripts/migrate_github_pulls.mjs', 'scripts/migrate_github_pull_collection.mjs'}
 source_entrypoints = {'scripts/discover_github_pulls.mjs', 'scripts/collect_github_pulls.mjs'}
@@ -68,12 +68,15 @@ for operation, expected in [('prepare-begin', {0, 2}), ('prepare-resume', {0, 2,
     calls = [row for row in operators if Path(row['command'][1]).name == 'migrate_github_pulls.mjs'
              and row['command'][2] == operation]
     require(expected <= {row['exit'] for row in calls})
+capacity = [row for row in operators if Path(row['command'][1]).name == 'migrate_github_pull_collection.mjs'
+            and row['command'][2] == 'prepare' and '--max-request-bytes' in row['command']]
+require({0, 2} <= {row['exit'] for row in capacity})
 starts = [row for row in commands if row.get('kind') == 'service_start']
 drains = [row for row in commands if row.get('kind') == 'service_stop']
 require(1 <= len(starts) <= 16 and len(starts) == len(drains))
 require({row['pid'] for row in starts} == {row['pid'] for row in drains})
 require(all(row['exit'] == 0 and row['forced'] is False for row in drains))
-print('36 selected facts, bounded preparation phases, five entrypoint/digest rows and native owner drains verified')
+print('38 selected facts, encoded capacity, bounded preparation phases, five entrypoint/digest rows and native owner drains verified')
 PY
 fge_assert_exit GITHUB-PULL-MIGRATION-005 0 "$FGE_LAST_EXIT" 'exact facts, entrypoint success/refusal, native reads and owner drains read back'
 cp "$ORACLE_RUN/work/campaign/commands.jsonl" "$WORK/native-github-pull-commands.jsonl"

@@ -6,7 +6,9 @@ observations passed through production collection validation. Separate Rust
 reads check PR metadata, every attributed observation, absent imported approvals
 and exact branch effects. The campaign includes whole-plan source custody,
 independent branch credentials, paused/resumed operation budgets, grant refusals,
-original-key retry, occupied destinations and stopped-service completion. This
+original-key retry, occupied destinations and stopped-service completion. An
+encoded-byte budget refusal leaves no output; exact-limit preparation at the
+same path then feeds the ordinary native sender/readback. This
 bounded coverage does not claim live GitHub, maximum populations, power-loss,
 independent batch verification or the complete `.4.59` entrypoint matrix.
 
@@ -110,8 +112,15 @@ const prepared = await prepareGithubPullMigration({
 Both source pins are required. A collection plan pins membership and limits;
 its separately retained completion pin also commits the captured content.
 Preparation verifies the complete collection, compiles every capture and checks
-the whole destination-number window before creating a single request key. It
-never refreshes source data, repartitions batches, skips unsupported PRs or
+the whole destination-number window and full serialized intent capacity before
+creating a single request key or output directory. Capacity includes endpoint,
+scope, fields, encoded form, nonce, fingerprint and key overhead for both each
+child and the whole migration. Measurement uses the existing request codec with
+fixed-width scratch identity fields; these encodings are never saved or sent.
+Actual prepared totals must match that measurement before the outer root is
+published. A budget refusal leaves the output path available for a later explicit
+preparation with sufficient capacity. Preparation never refreshes source data,
+repartitions batches, skips unsupported PRs or
 contacts the destination. Every destination counter uses exact u64 arithmetic.
 The starting number applies to the whole inventory: each batch begins at that
 number plus its original zero-based first-member index.

@@ -32,6 +32,7 @@ SOURCE_FACTS = ["source_cli_discovery", "source_pin_refusals", "source_bounded_c
 PREPARATION_FACTS = ["preparation_cli_bounded_prefix", "preparation_cli_original_custody",
                      "preparation_cli_offline_completion", "preparation_cli_completed_recovery"]
 FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained",
+         "collection_encoded_capacity_preflight", "collection_exact_capacity_handoff",
          *SOURCE_FACTS, *PREPARATION_FACTS] + [
     f"{profile}_{fact}" for profile in ("single", "collection", "prepared") for fact in PROFILE_FACTS]
 
@@ -246,6 +247,27 @@ def run_case(c, oracle_run):
                 c.facts["preparation_cli_original_custody"] = True
             else:
                 prepared = c.node_command(script, preparation(workdir, selection_file))
+                if name == "collection":
+                    # Measure the already validated real intents, not a form-body
+                    # estimate. The insufficient attempt must leave this new
+                    # path reusable by an exact-boundary permitted preparation.
+                    original_workdir, originals = workdir, request_hashes(workdir)
+                    exact_bytes = sum(path.stat().st_size for path in workdir.glob("batches/*/requests/*/intent.json"))
+                    require(exact_bytes == prepared["request_bytes"], "prepared byte count differs from retained intents")
+                    workdir = directory / "capacity-job"
+                    command = preparation(workdir, selection_file)
+                    refused = c.node_command(script, [*command, "--max-request-bytes", str(exact_bytes - 1)], 2, error_reply=True)
+                    require(refused["code"] == "github_pull_migration_plan_capacity"
+                            and refused["migration_progress"]["directory_created"] is False
+                            and not workdir.exists() and request_hashes(original_workdir) == originals
+                            and read("list") == before and refs() == original_refs,
+                            "encoded capacity refusal created custody or changed native state")
+                    c.facts["collection_encoded_capacity_preflight"] = True
+                    prepared = c.node_command(script, [*command, "--max-request-bytes", str(exact_bytes)])
+                    require(prepared["preparation_complete"] and prepared["request_bytes"] == exact_bytes
+                            and request_hashes(original_workdir) == originals,
+                            "exact-capacity preparation did not preserve the reference job")
+                    c.facts["collection_exact_capacity_handoff"] = True
             common = ["--workdir", str(workdir), "--confirm", prepared["plan_sha256"]]
             require(prepared["network_accessed"] is False and read("list") == before,
                     "offline planning contacted or changed native authority")

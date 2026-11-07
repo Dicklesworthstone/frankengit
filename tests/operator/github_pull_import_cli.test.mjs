@@ -183,3 +183,21 @@ test('restartable CLI cancellation before begin creates no custody and a later p
  await assert.rejects(readdir(f.workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
  assert.equal(value(await run(t,beginArgs)).preparation_complete,false);
 });
+
+test('one-shot CLI encoded capacity preflight creates no custody and the exact byte limit remains usable',async t=>{
+ const f=await migrationFixture(t),workdir=join(f.root,'exact-capacity'),selection=join(f.root,'capacity-selection.json');
+ const original=await readFile(join(f.workdir,'requests/step-000001/intent.json'));
+ const selected={...f.input.selection,max_request_bytes:f.prepared.request_bytes-1};
+ await writeFile(selection,JSON.stringify(selected),{mode:0o600});
+ const command=['prepare','--workdir',workdir,'--capture',f.captureFile,'--capture-confirm',f.captured.sha256,
+  '--selection',selection,'--token-file',f.tokenFile];
+ const refused=await run(t,command);assert.equal(refused.code,2);
+ const report=JSON.parse(refused.stderr);assert.equal(report.code,'github_pull_import_request_limit');
+ assert.equal(report.import_progress.directory_created,false);assert.equal(report.mutation_submitted,false);
+ await assert.rejects(readdir(workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
+ assert((await readFile(join(f.workdir,'requests/step-000001/intent.json'))).equals(original));
+ selected.max_request_bytes=f.prepared.request_bytes;await writeFile(selection,JSON.stringify(selected));
+ const accepted=value(await run(t,command));assert.equal(accepted.request_bytes,f.prepared.request_bytes);
+ const done=value(await run(t,['run','--workdir',workdir,'--confirm',accepted.plan_sha256,'--token-file',f.tokenFile]));
+ assert.equal(done.complete,true);assert.equal(f.peer.mutations.length,accepted.steps);
+});

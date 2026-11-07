@@ -1,6 +1,6 @@
 // Foreign aliases remain provenance. Only native open/comment/close commands are
 // compiled; never synthesize native snapshots, actors, approvals or merge events.
-import { pullFields,pullScope,pullU64,pullCommand,pullHash } from '../operator/pull_command.mjs';
+import { pullFields,pullScope,pullU64,pullCommand,pullHash,preparePullWithIdentity,pullCanonical } from '../operator/pull_command.mjs';
 import { outcomeEndpoint } from '../operator/transaction_outcome.mjs';
 import { githubPullCaptureBytes,parseGithubPullCapture,encodeGithubPulls,pullSourceNumber,githubPullFail as fail } from './github-pull-source.mjs';
 
@@ -27,6 +27,20 @@ function parts(value){
     while(end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;
     result.push(bytes.subarray(at,end).toString('utf8'));at=end;}
   return {parts:result,sha256:pullHash(bytes)};
+}
+// Capacity only: no identity is selected or persisted. Nonces, fingerprints and
+// derived keys are fixed-width ASCII hex, so these scratch encodings have the
+// exact byte length of real intents, including duplicated fields/form escaping.
+export function githubPullImportRequestBytes(compiled,check=()=>{}){
+  let bytes=0;
+  for(const {number,action,fields} of compiled.steps){
+    check();
+    const intent=preparePullWithIdentity({endpoint:compiled.selection.endpoint,scope:compiled.selection.scope,
+      number,action,fields},{nonce:'0'.repeat(32),credential_fingerprint:'0'.repeat(64)});
+    bytes+=Buffer.byteLength(pullCanonical(intent));
+    if(bytes>compiled.selection.max_request_bytes)fail('import_request_limit');
+  }
+  return bytes;
 }
 export function compileGithubPullImport(rawCapture,rawSelection){
   // Detach and fully validate source before any caller can mutate its nested data.
