@@ -197,10 +197,10 @@ mod tests {
                     .count(),
                 1
             );
-            assert_eq!(find_tool(addition.name), Some(&addition));
+            assert_eq!(find_tool(addition.name), Some(addition));
             assert_eq!(
                 find_tool_version(addition.name, addition.version),
-                Some(&addition)
+                Some(addition)
             );
             assert!(find_tool_version(addition.name, 0).is_none());
             assert!(find_tool_version(addition.name, addition.version + 1).is_none());

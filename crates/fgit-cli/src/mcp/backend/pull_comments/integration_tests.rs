@@ -19,6 +19,8 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ACTOR: PrincipalId = PrincipalId::from_bytes([0xc3; 16]);
 
+mod notifications;
+
 struct Fixture {
     root: PathBuf,
     options: Options,

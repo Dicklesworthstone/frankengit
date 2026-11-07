@@ -264,6 +264,9 @@ pub(super) fn authenticate(
             fgit_forge::event::notification::NotificationTargetKind::Discussion => {
                 profile.config.http_discussions_enabled()
             }
+            fgit_forge::event::notification::NotificationTargetKind::PullRequest => {
+                profile.allow_pulls()
+            }
         };
         (
             enabled,

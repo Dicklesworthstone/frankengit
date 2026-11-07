@@ -1,7 +1,7 @@
 use super::*;
 use fgit_authority::{HeadKey, IdempotencyKey};
 use fgit_forge::event::notification::NotificationMode;
-use fgit_forge::{AggregateId, DiscussionNumber, IssueNumber};
+use fgit_forge::{AggregateId, DiscussionNumber, IssueNumber, PullRequestNumber};
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 
 fn context() -> AdmissionContext {
@@ -197,5 +197,44 @@ fn discussion_seals_bind_kind_number_owner_predecessor_and_action() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn pull_request_activity_seal_never_aliases_an_issue_discussion_or_other_recipient() {
+    let context = context();
+    let mut pull = command(
+        NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(8).unwrap())),
+        3,
+    );
+    pull.target = NotificationTarget::PullRequest(PullRequestNumber::FIRST);
+    let (event, attempt) = proposal(&context, &pull).unwrap();
+    assert_eq!(verify_event_seal(&context, &event, &attempt), Ok(()));
+    for changed in 0..6 {
+        let mut command = pull.clone();
+        let mut owner = context.clone();
+        match changed {
+            0 => command.target = NotificationTarget::Issue(IssueNumber::FIRST),
+            1 => command.target = NotificationTarget::Discussion(DiscussionNumber::FIRST),
+            2 => {
+                command.target =
+                    NotificationTarget::PullRequest(PullRequestNumber::try_new(2).unwrap())
+            }
+            3 => owner.principal_id = PrincipalId::from_bytes([7; 16]),
+            4 => {
+                command.expected_version =
+                    ExpectedVersion::Exactly(AggregateVersion::try_new(4).unwrap())
+            }
+            _ => {
+                command.action =
+                    NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(9).unwrap()))
+            }
+        }
+        let (other, seal) = proposal(&owner, &command).unwrap();
+        assert_ne!(seal.derive().unwrap().0, attempt.derive().unwrap().0);
+        assert_eq!(
+            verify_event_seal(&context, &other, &attempt),
+            Err(RefusalCode::EvidenceInvalid)
+        );
     }
 }

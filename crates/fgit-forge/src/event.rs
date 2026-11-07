@@ -276,6 +276,15 @@ fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
             out.write_opaque_id(principal.as_bytes());
             out.write_scalar(discussion.get());
         }
+        AggregateId::PullRequestNotificationPreference {
+            principal,
+            pull_request,
+        } => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_NOTIFICATION_PREFERENCE);
+            out.write_opaque_id(principal.as_bytes());
+            out.write_scalar(pull_request.get());
+        }
         AggregateId::Discussion(number) => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_DISCUSSION);
@@ -341,6 +350,17 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_NOTIFICATION_PREFERENCE => {
+            Ok(AggregateId::PullRequestNotificationPreference {
+                principal: fgit_types::PrincipalId::from_bytes(
+                    input.read_opaque_id("aggregate.notification_principal")?,
+                ),
+                pull_request: counter(
+                    "aggregate.notification_pull_request",
+                    input.read_scalar::<u64>("aggregate.notification_pull_request")?,
+                )?,
+            })
+        }
         crate::aggregate::AGGREGATE_KIND_AGENT_CREDENTIAL => {
             let mut bytes = [0_u8; 32];
             bytes.copy_from_slice(input.take("aggregate.agent_credential", 32)?);

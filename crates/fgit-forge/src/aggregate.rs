@@ -187,6 +187,13 @@ pub enum AggregateId {
         principal: fgit_types::PrincipalId,
         discussion: DiscussionNumber,
     },
+    /// Self-owned delivery mode and observed activity prefix for one PR.
+    /// Its read prefix counts canonical lifecycle, conversation and review
+    /// events; it is not any of those independent aggregate versions.
+    PullRequestNotificationPreference {
+        principal: fgit_types::PrincipalId,
+        pull_request: PullRequestNumber,
+    },
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -212,6 +219,8 @@ pub(crate) const AGGREGATE_KIND_DISCUSSION: u32 = 11;
 pub(crate) const AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE: u32 = 12;
 /// Required sponsored credential aggregate; established code points are unchanged.
 pub(crate) const AGGREGATE_KIND_AGENT_CREDENTIAL: u32 = 13;
+/// PR activity preferences; all established aggregate encodings are unchanged.
+pub(crate) const AGGREGATE_KIND_PULL_REQUEST_NOTIFICATION_PREFERENCE: u32 = 14;
 impl From<DiscussionNumber> for AggregateId {
     fn from(number: DiscussionNumber) -> Self {
         Self::Discussion(number)
@@ -277,6 +286,10 @@ impl fmt::Display for AggregateId {
                 principal,
                 discussion,
             } => write!(formatter, "dnotify/{principal}/{discussion}"),
+            Self::PullRequestNotificationPreference {
+                principal,
+                pull_request,
+            } => write!(formatter, "pnotify/{principal}/{pull_request}"),
         }
     }
 }

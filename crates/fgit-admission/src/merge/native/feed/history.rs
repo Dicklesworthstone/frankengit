@@ -116,6 +116,7 @@ where
                 sequence,
                 tx_id: record.tx_id,
                 policy_epoch: record.policy_epoch,
+                principal_snapshot_id: record.principal_snapshot_id,
                 event_root: record.forge_event_batch_root,
             });
             cursor_record_seen |=

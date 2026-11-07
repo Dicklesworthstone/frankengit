@@ -207,3 +207,94 @@ fn discussion_preferences_have_distinct_identity_and_preserve_the_issue_wire_pro
     assert_eq!(target.kind().name(), "discussion");
     assert_eq!(target.number(), u64::MAX);
 }
+
+#[test]
+fn pull_request_activity_preferences_preserve_older_bytes_and_private_owner_identity() {
+    let owner = PrincipalId::from_bytes([3; 16]);
+    let target = NotificationTarget::PullRequest(PullRequestNumber::FIRST);
+    for action in [
+        NotificationAction::SetMode(NotificationMode::Participating),
+        NotificationAction::SetMode(NotificationMode::Subscribed),
+        NotificationAction::SetMode(NotificationMode::Muted),
+        NotificationAction::SetReadThrough(None),
+        NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(9).unwrap())),
+    ] {
+        let pull = NotificationCommand {
+            target,
+            expected_version: ExpectedVersion::NewStream,
+            action,
+        }
+        .proposed_event(owner)
+        .unwrap();
+        assert_eq!(
+            pull.payload.kind(),
+            23,
+            "existing private preference payload"
+        );
+        let issue = event(action, 0);
+        let mut expected = fgit_codec::canonical_body_bytes(&issue).unwrap();
+        expected[8..12].copy_from_slice(&14u32.to_be_bytes());
+        assert_eq!(fgit_codec::canonical_body_bytes(&pull).unwrap(), expected);
+        let bytes = encode_body(&pull).unwrap();
+        assert_eq!(
+            decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap(),
+            pull
+        );
+        for length in 0..bytes.len() {
+            assert!(decode_body::<ForgeEvent>(&bytes[..length], DecodeLimits::DEFAULT).is_err());
+        }
+        let mut next = pull.clone();
+        next.version = AggregateVersion::FIRST.next().unwrap();
+        for other in [
+            NotificationTarget::Issue(IssueNumber::FIRST),
+            NotificationTarget::Discussion(DiscussionNumber::FIRST),
+            NotificationTarget::PullRequest(PullRequestNumber::try_new(2).unwrap()),
+        ] {
+            let other_event = NotificationCommand {
+                target: other,
+                expected_version: ExpectedVersion::NewStream,
+                action,
+            }
+            .proposed_event(owner)
+            .unwrap();
+            assert_ne!(encode_body(&other_event).unwrap(), bytes);
+            assert_eq!(
+                apply_event(Some(&apply_event(None, &other_event).unwrap()), &next),
+                Err(RefusalCode::EvidenceStale)
+            );
+        }
+        let state = apply_event(None, &pull).unwrap();
+        assert_eq!(state.target, target);
+        assert_eq!(state.principal, owner);
+        let mut forged = pull.clone();
+        forged.aggregate = target.preference_aggregate(PrincipalId::from_bytes([9; 16]));
+        assert!(encode_body(&forged).is_err());
+        assert_eq!(
+            apply_event(None, &forged),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+        assert_eq!(
+            crate::event::admission::classify_event(
+                &pull,
+                crate::event::admission::ForgeCommandProfile::ExactVersion
+            )
+            .replan,
+            fgit_calm::ForgeReplanPolicy::PreservePreconditions,
+        );
+    }
+    let target = NotificationTarget::PullRequest(PullRequestNumber::try_new(u64::MAX).unwrap());
+    let aggregate = target.preference_aggregate(owner);
+    assert_eq!(
+        aggregate.to_string(),
+        format!("pnotify/{owner}/{}", u64::MAX)
+    );
+    assert!(
+        fgit_types::AsciiSlug::try_new("notification", aggregate.to_string().as_bytes()).is_ok()
+    );
+    assert_eq!(
+        NotificationTarget::from_preference_aggregate(aggregate),
+        Some((owner, target))
+    );
+    assert_eq!(target.kind().name(), "pull_request");
+    assert_eq!(target.number(), u64::MAX);
+}

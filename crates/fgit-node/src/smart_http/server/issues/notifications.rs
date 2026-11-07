@@ -11,7 +11,9 @@ use fgit_forge::event::notification::{
     NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
     NotificationTargetKind,
 };
-use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
+use fgit_forge::{
+    AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber, PullRequestNumber,
+};
 use fgit_types::{PrincipalId, RepositoryIncarnationId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
@@ -46,7 +48,14 @@ pub(super) fn parse<'a>(head: &Envelope<'a>) -> Result<Option<Request<'a>>, ApiE
     {
         return Err(ApiError::not_found());
     }
-    let (kind, suffix) = if suffix == "/discussions" {
+    let (kind, suffix) = if suffix == "/pulls" {
+        (NotificationTargetKind::PullRequest, "")
+    } else if let Some(suffix) = suffix.strip_prefix("/pulls/") {
+        (
+            NotificationTargetKind::PullRequest,
+            &path[path.len() - suffix.len() - 1..],
+        )
+    } else if suffix == "/discussions" {
         (NotificationTargetKind::Discussion, "")
     } else if let Some(suffix) = suffix.strip_prefix("/discussions/") {
         // Keep the leading slash expected by the closed number/action parser.
@@ -130,6 +139,9 @@ fn target(kind: NotificationTargetKind, value: &str) -> Result<NotificationTarge
         }
         NotificationTargetKind::Discussion => {
             DiscussionNumber::try_new(number).map(NotificationTarget::Discussion)
+        }
+        NotificationTargetKind::PullRequest => {
+            PullRequestNumber::try_new(number).map(NotificationTarget::PullRequest)
         }
     }
     .ok_or_else(|| ApiError::bad("invalid_notification_target"))
@@ -272,12 +284,14 @@ fn thread(row: &NotificationThreadView) -> String {
         quote(match row.target.kind() {
             NotificationTargetKind::Issue => "issue_version",
             NotificationTargetKind::Discussion => "discussion_version",
+            NotificationTargetKind::PullRequest => "activity_version",
         }),
         row.thread_version.get(),
         quote(&row.title),
         quote(match row.state {
             NotificationThreadState::Open => "open",
             NotificationThreadState::Closed => "closed",
+            NotificationThreadState::Merged => "merged",
         }),
         optional(row.preference_version.map(AggregateVersion::get)),
         quote(match row.mode {
@@ -338,10 +352,10 @@ pub(super) fn list(
                 "{{\"type\":{},{},{},{}\"after\":{},\"limit\":{},",
                 "\"unread_only\":{},\"include_muted\":{},\"next_after\":{},\"threads\":["
             ),
-            quote(if result.kind == NotificationTargetKind::Issue {
-                "notification_page"
-            } else {
-                "discussion_notification_page"
+            quote(match result.kind {
+                NotificationTargetKind::Issue => "notification_page",
+                NotificationTargetKind::Discussion => "discussion_notification_page",
+                NotificationTargetKind::PullRequest => "pull_request_notification_page",
             }),
             header(node, page, result.binding.authority_head)?,
             source(result),
@@ -382,10 +396,10 @@ pub(super) fn show(
         &mut out,
         &format!(
             "{{\"type\":{},{},{},{}\"found\":{},\"thread\":{}}}",
-            quote(if result.kind == NotificationTargetKind::Issue {
-                "notification_thread"
-            } else {
-                "discussion_notification_thread"
+            quote(match result.kind {
+                NotificationTargetKind::Issue => "notification_thread",
+                NotificationTargetKind::Discussion => "discussion_notification_thread",
+                NotificationTargetKind::PullRequest => "pull_request_notification_thread",
             }),
             header(node, page, result.binding.authority_head)?,
             source(result),
@@ -401,11 +415,65 @@ pub(super) const fn kind_field(kind: NotificationTargetKind) -> &'static str {
     match kind {
         NotificationTargetKind::Issue => "",
         NotificationTargetKind::Discussion => "\"target_kind\":\"discussion\",",
+        NotificationTargetKind::PullRequest => "\"target_kind\":\"pull_request\",",
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgit_wire::smart_http::{HttpLimits, head};
+
+    #[test]
+    fn pull_inbox_routes_preserve_the_target_kind_and_reject_cross_namespace_suffixes() {
+        for (method, path, expected_mutation) in [
+            ("GET", "/repo.git/api/v1/notifications/pulls", false),
+            ("GET", "/repo.git/api/v1/notifications/pulls/7", false),
+            ("POST", "/repo.git/api/v1/notifications/pulls/7/read", true),
+        ] {
+            let body_headers = if expected_mutation {
+                "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n"
+            } else {
+                "Content-Length: 0\r\n"
+            };
+            let raw = format!("{method} {path} HTTP/1.1\r\nHost: local\r\n{body_headers}\r\n");
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            let parsed = parse(&envelope).unwrap().unwrap();
+            assert_eq!(parsed.repository_route, "/repo.git");
+            assert_eq!(parsed.is_mutation(), expected_mutation);
+            match parsed.operation {
+                Operation::NotificationList { kind, .. } => {
+                    assert_eq!(kind, NotificationTargetKind::PullRequest);
+                }
+                Operation::NotificationShow { target, .. }
+                | Operation::NotificationMutate { target, .. } => {
+                    assert_eq!(
+                        target,
+                        NotificationTarget::PullRequest(PullRequestNumber::try_new(7).unwrap())
+                    );
+                }
+                _ => panic!("PR notification path must stay in its own namespace"),
+            }
+        }
+        for suffix in [
+            "pulls/0",
+            "pulls/-1",
+            "pulls/7/subscribe",
+            "pulls/7/../8",
+            "pulls-extra",
+            "pulls/discussions/7",
+        ] {
+            let raw = format!(
+                "GET /repo.git/api/v1/notifications/{suffix} HTTP/1.1\r\nHost: local\r\n\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(parse(&envelope).is_err(), "{suffix}");
+        }
+    }
+
     #[test]
     fn forms_cannot_select_a_recipient_or_invent_a_read_prefix() {
         for body in [

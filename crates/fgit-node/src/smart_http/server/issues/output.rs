@@ -229,6 +229,9 @@ pub(super) fn mutation(
                 fgit_forge::event::notification::NotificationTargetKind::Discussion => {
                     "discussion_notification_publication"
                 }
+                fgit_forge::event::notification::NotificationTargetKind::PullRequest => {
+                    "pull_request_notification_publication"
+                }
             }
         } else if matches!(command, Command::Milestone(_)) {
             "milestone_publication"

@@ -36,15 +36,23 @@ fn commands_keep_exact_versions_and_never_accept_another_recipient() {
         );
         assert_eq!(command.expected_version, ExpectedVersion::NewStream);
         assert_eq!(command.action, action);
-        let mut discussion = args();
-        discussion.insert("kind".into(), text("discussion"));
-        let command = parse_command(name, &discussion).unwrap();
-        assert_eq!(
-            command.target,
-            NotificationTarget::Discussion(DiscussionNumber::try_new(7).unwrap())
-        );
-        assert_eq!(command.expected_version, ExpectedVersion::NewStream);
-        assert_eq!(command.action, action);
+        for (kind, target) in [
+            (
+                "discussion",
+                NotificationTarget::Discussion(DiscussionNumber::try_new(7).unwrap()),
+            ),
+            (
+                "pull_request",
+                NotificationTarget::PullRequest(PullRequestNumber::try_new(7).unwrap()),
+            ),
+        ] {
+            let mut selected = args();
+            selected.insert("kind".into(), text(kind));
+            let command = parse_command(name, &selected).unwrap();
+            assert_eq!(command.target, target);
+            assert_eq!(command.expected_version, ExpectedVersion::NewStream);
+            assert_eq!(command.action, action);
+        }
         for field in [
             "principal",
             "principal_id",
@@ -124,6 +132,26 @@ fn explicit_positive_read_prefix_and_strict_filter_booleans_cannot_be_coerced() 
             .map(|field| field.name)
             .collect();
         assert_eq!(served, declared);
+        let kind = properties["kind"].object().unwrap();
+        assert_eq!(
+            kind["enum"],
+            Value::Array(vec![
+                text("issue"),
+                text("discussion"),
+                text("pull_request")
+            ])
+        );
+        assert_eq!(kind["maxLength"], json::number(12));
+        let declared_kind = contract
+            .input_fields
+            .iter()
+            .find(|field| field.name == "kind")
+            .unwrap();
+        assert_eq!(declared_kind.max_bytes, Some(12));
+        assert_eq!(
+            declared_kind.pattern,
+            Some("^(issue|discussion|pull_request)$")
+        );
         for forbidden in ["principal", "principal_id", "recipient", "actor"] {
             assert!(!properties.contains_key(forbidden));
         }
@@ -189,30 +217,31 @@ fn personal_grants_require_selected_domain_disclosure_and_launch_identity() {
         }
         assert!(!read_permitted(&inconsistent) && !write_permitted(&inconsistent));
     }
-    for (grant, allowed, denied) in [
-        (
-            "--allow-issues",
-            NotificationTargetKind::Issue,
-            NotificationTargetKind::Discussion,
-        ),
-        (
-            "--allow-discussions",
-            NotificationTargetKind::Discussion,
-            NotificationTargetKind::Issue,
-        ),
+    let kinds = [
+        NotificationTargetKind::Issue,
+        NotificationTargetKind::Discussion,
+        NotificationTargetKind::PullRequest,
+    ];
+    for (grant, allowed) in [
+        ("--allow-issues", NotificationTargetKind::Issue),
+        ("--allow-discussions", NotificationTargetKind::Discussion),
+        ("--allow-pulls", NotificationTargetKind::PullRequest),
     ] {
         let ordinary = crate::mcp::parse_options(&launch(&[grant])).unwrap();
         assert!(!read_permitted(&ordinary));
         let personal = crate::mcp::parse_options(&bound(launch(&[grant]))).unwrap();
-        assert!(read_kind_permitted(&personal, allowed));
-        assert!(!read_kind_permitted(&personal, denied));
+        for kind in kinds {
+            assert_eq!(read_kind_permitted(&personal, kind), kind == allowed);
+        }
         assert!(!write_permitted(&personal));
         let writer =
             crate::mcp::parse_options(&bound(launch(&[grant, "--allow-notification-writes"])))
                 .unwrap();
         assert!(write_permitted(&writer));
-        assert!(read_kind_permitted(&writer, allowed));
-        assert!(!read_kind_permitted(&writer, denied));
+        for kind in kinds {
+            assert_eq!(read_kind_permitted(&writer, kind), kind == allowed);
+        }
+        assert!(!writer.writes.issues && !writer.writes.discussions && !writer.writes.pulls);
         assert!(
             crate::mcp::parse_options(&launch(&[grant, "--allow-notification-writes"])).is_err()
         );
@@ -229,6 +258,8 @@ fn thread_kind_is_explicitly_bounded_and_never_coerced() {
         text(""),
         text("Discussion"),
         text("pull"),
+        text("PullRequest"),
+        text("pull-request"),
         Value::Null,
         json::number(1),
         Value::Bool(true),
@@ -238,23 +269,25 @@ fn thread_kind_is_explicitly_bounded_and_never_coerced() {
         assert!(kind(&bad).is_err());
         assert!(parse_command("frankengit_inbox_subscribe", &bad).is_err());
     }
-    let mut discussion = args();
-    discussion.insert("kind".into(), text("discussion"));
-    discussion.insert("number".into(), text("9007199254740993"));
-    assert_eq!(
-        parse_command("frankengit_inbox_subscribe", &discussion)
-            .unwrap()
-            .target
-            .number(),
-        9_007_199_254_740_993
-    );
-    discussion.insert("read_through".into(), text("2"));
-    assert_eq!(
-        parse_command("frankengit_inbox_read", &discussion)
-            .unwrap()
-            .action,
-        NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(2).unwrap()))
-    );
-    discussion.insert("number".into(), text("0"));
-    assert!(parse_command("frankengit_inbox_read", &discussion).is_err());
+    for kind in ["discussion", "pull_request"] {
+        let mut selected = args();
+        selected.insert("kind".into(), text(kind));
+        selected.insert("number".into(), text("9007199254740993"));
+        assert_eq!(
+            parse_command("frankengit_inbox_subscribe", &selected)
+                .unwrap()
+                .target
+                .number(),
+            9_007_199_254_740_993
+        );
+        selected.insert("read_through".into(), text("2"));
+        assert_eq!(
+            parse_command("frankengit_inbox_read", &selected)
+                .unwrap()
+                .action,
+            NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(2).unwrap()))
+        );
+        selected.insert("number".into(), text("0"));
+        assert!(parse_command("frankengit_inbox_read", &selected).is_err());
+    }
 }

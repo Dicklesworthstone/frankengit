@@ -8,12 +8,17 @@ use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositio
 use fgit_forge::event::notification::{
     NotificationPreferenceSnapshot, NotificationTarget, NotificationTargetKind,
 };
-use fgit_forge::{AggregateId, AggregateVersion, DiscussionNumber, ForgeEvent, IssueNumber};
+use fgit_forge::{
+    AggregateId, AggregateVersion, DiscussionNumber, ForgeEvent, IssueNumber, PullRequestNumber,
+};
 use fgit_types::{Digest, PrincipalId, RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod pull_request;
 mod subject;
-pub use subject::NotificationSubjectSnapshot;
+pub use subject::{
+    NotificationSubjectSnapshot, PullRequestNotificationSnapshot, PullRequestNotificationState,
+};
 
 const MAX_THREADS: usize = 16_384;
 const MAX_EVENTS: usize = 65_536;
@@ -90,17 +95,21 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     let roots = delivery::read_roots_in(store, cx, basis, cancelled).await?;
-    let threads = replay(
-        store,
-        cx,
-        basis.body().repository_id,
-        &roots.forge,
-        &roots.outbox,
-        principal,
-        kind,
-        cancelled,
-    )
-    .await?;
+    let threads = if kind == NotificationTargetKind::PullRequest {
+        pull_request::read_threads(store, cx, basis, &roots.forge, principal, cancelled).await?
+    } else {
+        replay(
+            store,
+            cx,
+            basis.body().repository_id,
+            &roots.forge,
+            &roots.outbox,
+            principal,
+            kind,
+            cancelled,
+        )
+        .await?
+    };
     checkpoint(cancelled)?;
     Ok(NotificationSourceSnapshot {
         source_head: basis.id(),
@@ -125,6 +134,10 @@ fn frontiers<C: Fn() -> bool + Sync>(
     let (subject_prefix, preference_prefix) = match kind {
         NotificationTargetKind::Issue => ("issue/", "notify/"),
         NotificationTargetKind::Discussion => ("discussion/", "dnotify/"),
+        // PR activity needs RCR order across multiple independent streams.
+        NotificationTargetKind::PullRequest => {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
     };
     for entry in forge.entries() {
         checkpoint(cancelled)?;
@@ -174,6 +187,9 @@ fn parse_target(
         NotificationTargetKind::Discussion => number
             .and_then(DiscussionNumber::try_new)
             .map(NotificationTarget::Discussion),
+        NotificationTargetKind::PullRequest => number
+            .and_then(PullRequestNumber::try_new)
+            .map(NotificationTarget::PullRequest),
     };
     target.ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))
 }

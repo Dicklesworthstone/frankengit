@@ -152,7 +152,7 @@ mod tests {
         use fgit_forge::event::notification::{
             NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
         };
-        use fgit_forge::{DiscussionNumber, IssueNumber};
+        use fgit_forge::{DiscussionNumber, IssueNumber, PullRequestNumber};
 
         let actor = PrincipalId::from_bytes([0x39; 16]);
         let public = IssueCommand {
@@ -206,6 +206,7 @@ mod tests {
         for target in [
             NotificationTarget::Issue(IssueNumber::FIRST),
             NotificationTarget::Discussion(DiscussionNumber::FIRST),
+            NotificationTarget::PullRequest(PullRequestNumber::FIRST),
         ] {
             for action in [
                 NotificationAction::SetMode(NotificationMode::Participating),

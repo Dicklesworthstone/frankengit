@@ -7,9 +7,13 @@ use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::encode_body;
 use fgit_forge::ForgeEvent;
-use fgit_types::{Digest, PolicyEpoch, RefusalCode, RepositoryAuthorityHeadId, TxId};
+use fgit_types::{
+    Digest, PolicyEpoch, PrincipalSnapshotId, RefusalCode, RepositoryAuthorityHeadId, TxId,
+};
 
 mod history;
+mod selected;
+pub(super) use selected::{SelectedForgeEvent, SelectedHistoryLimits, read_selected_at};
 
 const MAX_PAGE: u16 = 100;
 const MAX_PAGE_EVENT_BYTES: usize = 16 * 1024 * 1024;
@@ -51,6 +55,7 @@ struct Record {
     sequence: u64,
     tx_id: TxId,
     policy_epoch: PolicyEpoch,
+    principal_snapshot_id: PrincipalSnapshotId,
     event_root: Digest,
 }
 

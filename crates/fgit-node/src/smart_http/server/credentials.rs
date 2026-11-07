@@ -217,12 +217,20 @@ impl Grant {
         mutation: bool,
     ) -> bool {
         let read = match kind {
-            fgit_forge::event::notification::NotificationTargetKind::Issue => Scope::IssuesRead,
+            fgit_forge::event::notification::NotificationTargetKind::Issue => {
+                self.scopes.contains(Scope::IssuesRead)
+            }
             fgit_forge::event::notification::NotificationTargetKind::Discussion => {
-                Scope::DiscussionsRead
+                self.scopes.contains(Scope::DiscussionsRead)
+            }
+            fgit_forge::event::notification::NotificationTargetKind::PullRequest => {
+                // Counts and unread state include review activity, which has
+                // its own disclosure grant. Never vary the canonical prefix
+                // according to the caller's available scopes.
+                self.scopes.contains(Scope::PullsRead) && self.scopes.contains(Scope::ReviewsRead)
             }
         };
-        self.scopes.contains(read) && (!mutation || self.scopes.contains(Scope::NotificationsWrite))
+        read && (!mutation || self.scopes.contains(Scope::NotificationsWrite))
     }
     /// PR metadata authority is separate from code publication and reviews.
     pub const fn permits_pulls(&self, mutation: bool) -> bool {
@@ -745,6 +753,40 @@ mod tests {
             assert!(grant(principal, scopes).is_err(), "{scopes}");
         }
     }
+    #[test]
+    fn pull_notification_disclosure_requires_both_content_scopes() {
+        use fgit_forge::event::notification::NotificationTargetKind as Kind;
+        let principal = PrincipalId::from_bytes([7; 16]);
+        for (scopes, read, write) in [
+            ("pulls-read", false, false),
+            ("reviews-read", false, false),
+            ("notifications-write", false, false),
+            ("pulls-read,notifications-write", false, false),
+            ("reviews-read,notifications-write", false, false),
+            (
+                "pulls-write,reviews-write,notifications-write",
+                false,
+                false,
+            ),
+            ("pulls-read,reviews-read", true, false),
+            ("pulls-read,reviews-read,notifications-write", true, true),
+        ] {
+            let selected = grant(principal, scopes).unwrap();
+            assert_eq!(
+                selected.permits_notifications_for(Kind::PullRequest, false),
+                read,
+                "{scopes}"
+            );
+            assert_eq!(
+                selected.permits_notifications_for(Kind::PullRequest, true),
+                write,
+                "{scopes}"
+            );
+            assert!(!selected.permits_notifications_for(Kind::Issue, false));
+            assert!(!selected.permits_notifications_for(Kind::Discussion, false));
+        }
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     fn binding() -> Binding {

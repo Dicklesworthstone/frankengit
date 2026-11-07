@@ -5,7 +5,9 @@ use fgit_forge::event::notification::{
     NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
     NotificationTargetKind,
 };
-use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
+use fgit_forge::{
+    AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber, PullRequestNumber,
+};
 use fgit_types::{
     GitHashAlgorithm, PrincipalId, RepositoryAuthorityHeadId, RepositoryId,
     RepositoryIncarnationId, TenantId,
@@ -131,7 +133,8 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let kind = match flags.get("--kind").copied().unwrap_or("issue") {
         "issue" => NotificationTargetKind::Issue,
         "discussion" => NotificationTargetKind::Discussion,
-        _ => return Err("--kind must be issue or discussion".into()),
+        "pull_request" => NotificationTargetKind::PullRequest,
+        _ => return Err("--kind must be issue, discussion or pull_request".into()),
     };
     let target = number
         .map(|number| match kind {
@@ -141,6 +144,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             NotificationTargetKind::Discussion => DiscussionNumber::try_new(number)
                 .map(NotificationTarget::Discussion)
                 .ok_or("discussion number must be positive"),
+            NotificationTargetKind::PullRequest => PullRequestNumber::try_new(number)
+                .map(NotificationTarget::PullRequest)
+                .ok_or("pull request number must be positive"),
         })
         .transpose()?;
     let operation = if mutate {

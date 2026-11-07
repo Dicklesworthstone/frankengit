@@ -1,8 +1,8 @@
 //! The CLI drives real reopened canonical stores; same-number domains stay separate.
 use super::*;
-use fgit_forge::DiscussionNumber;
 use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand};
 use fgit_forge::event::notification::{NotificationTarget, NotificationTargetKind};
+use fgit_forge::{DiscussionNumber, PullRequestNumber};
 
 #[test]
 fn every_inbox_operation_accepts_a_strict_kind_with_issue_as_the_default() {
@@ -31,27 +31,40 @@ fn every_inbox_operation_accepts_a_strict_kind_with_issue_as_the_default() {
             options::parse(&args).unwrap().kind,
             NotificationTargetKind::Issue
         );
-        let mut discussion = args.clone();
-        discussion.extend(["--kind".into(), "discussion".into()]);
-        let parsed = options::parse(&discussion).unwrap();
-        assert_eq!(parsed.kind, NotificationTargetKind::Discussion);
-        let target = match parsed.operation {
-            Operation::Read(read) => read.target,
-            Operation::Mutate(mutation) => Some(mutation.command.target),
-        };
-        assert_eq!(
-            target,
-            (operation != "list").then_some(NotificationTarget::Discussion(
-                DiscussionNumber::try_new(7).unwrap()
-            ))
-        );
-        for bad in ["", "Discussion", "pull", "issue,discussion"] {
+        for (kind, expected) in [
+            (
+                "discussion",
+                NotificationTarget::Discussion(DiscussionNumber::try_new(7).unwrap()),
+            ),
+            (
+                "pull_request",
+                NotificationTarget::PullRequest(PullRequestNumber::try_new(7).unwrap()),
+            ),
+        ] {
+            let mut selected = args.clone();
+            selected.extend(["--kind".into(), kind.into()]);
+            let parsed = options::parse(&selected).unwrap();
+            assert_eq!(parsed.kind, expected.kind());
+            let target = match parsed.operation {
+                Operation::Read(read) => read.target,
+                Operation::Mutate(mutation) => Some(mutation.command.target),
+            };
+            assert_eq!(target, (operation != "list").then_some(expected));
+            selected.extend(["--kind".into(), "issue".into()]);
+            assert!(options::parse(&selected).is_err());
+        }
+        for bad in [
+            "",
+            "Discussion",
+            "pull",
+            "pull-request",
+            "PullRequest",
+            "issue,discussion",
+        ] {
             let mut invalid = args.clone();
             invalid.extend(["--kind".into(), bad.into()]);
             assert!(options::parse(&invalid).is_err());
         }
-        discussion.extend(["--kind".into(), "issue".into()]);
-        assert!(options::parse(&discussion).is_err());
     }
 }
 

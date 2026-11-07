@@ -24,6 +24,7 @@ fn thread(value: &NotificationThreadView) -> Value {
             match value.target.kind() {
                 NotificationTargetKind::Issue => "issue_version",
                 NotificationTargetKind::Discussion => "discussion_version",
+                NotificationTargetKind::PullRequest => "activity_version",
             },
             text(value.thread_version.get().to_string()),
         ),
@@ -33,6 +34,7 @@ fn thread(value: &NotificationThreadView) -> Value {
             text(match value.state {
                 NotificationThreadState::Open => "open",
                 NotificationThreadState::Closed => "closed",
+                NotificationThreadState::Merged => "merged",
             }),
         ),
         (
@@ -118,6 +120,8 @@ pub(super) fn page(
                 (NotificationTargetKind::Issue, false) => "notification_inbox",
                 (NotificationTargetKind::Discussion, true) => "discussion_notification_thread",
                 (NotificationTargetKind::Discussion, false) => "discussion_notification_inbox",
+                (NotificationTargetKind::PullRequest, true) => "pull_request_notification_thread",
+                (NotificationTargetKind::PullRequest, false) => "pull_request_notification_inbox",
             }),
         ),
         ("schema_version", json::number(1)),
@@ -149,8 +153,8 @@ pub(super) fn page(
         ("read_only", Value::Bool(true)),
         ("node_closed", Value::Bool(true)),
     ]));
-    if options.kind == NotificationTargetKind::Discussion {
-        out.insert("target_kind".into(), text("discussion"));
+    if options.kind != NotificationTargetKind::Issue {
+        out.insert("target_kind".into(), text(options.kind.name()));
     }
     if let Some(target) = read.target {
         out.insert("number".into(), text(target.number().to_string()));
@@ -211,6 +215,7 @@ pub(super) fn mutation(
             text(match mutation.command.target.kind() {
                 NotificationTargetKind::Issue => "notification_publication",
                 NotificationTargetKind::Discussion => "discussion_notification_publication",
+                NotificationTargetKind::PullRequest => "pull_request_notification_publication",
             }),
         ),
         ("schema_version", json::number(1)),
@@ -241,8 +246,11 @@ pub(super) fn mutation(
         ("node_closed", Value::Bool(cleanup.is_none())),
         ("cleanup_error", cleanup.map_or(Value::Null, text)),
     ]));
-    if mutation.command.target.kind() == NotificationTargetKind::Discussion {
-        out.insert("target_kind".into(), text("discussion"));
+    if mutation.command.target.kind() != NotificationTargetKind::Issue {
+        out.insert(
+            "target_kind".into(),
+            text(mutation.command.target.kind().name()),
+        );
     }
     match mutation.command.action {
         NotificationAction::SetMode(mode) => {
@@ -261,4 +269,41 @@ pub(super) fn mutation(
             crate::publication_support::describe(tx, terminal)
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgit_forge::PullRequestNumber;
+    use fgit_forge::event::notification::{NotificationMode, NotificationTarget};
+
+    #[test]
+    fn pull_request_output_uses_exact_activity_cursor_and_merged_state() {
+        let activity = AggregateVersion::try_new(9_007_199_254_740_993).unwrap();
+        let row = NotificationThreadView {
+            target: NotificationTarget::PullRequest(PullRequestNumber::FIRST),
+            thread_version: activity,
+            title: "Reviewed and merged".into(),
+            state: NotificationThreadState::Merged,
+            preference_version: None,
+            mode: NotificationMode::Participating,
+            read_through: None,
+            latest_other_version: Some(activity),
+            reasons: Vec::new(),
+            unread: true,
+        };
+        let value = thread(&row);
+        let output = value.object().unwrap();
+        assert_eq!(output["activity_version"].text(), Some("9007199254740993"));
+        assert_eq!(output["latest_other_version"], output["activity_version"]);
+        assert_eq!(output["state"].text(), Some("merged"));
+        for other in [
+            "issue_version",
+            "discussion_version",
+            "pull_request_version",
+            "thread_version",
+        ] {
+            assert!(!output.contains_key(other));
+        }
+    }
 }

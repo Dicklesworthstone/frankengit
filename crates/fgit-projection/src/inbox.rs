@@ -39,17 +39,19 @@ pub const MAX_INBOX_ROWS: usize = 16_384;
 pub const MAX_INBOX_PAGE_SIZE: u16 = 100;
 
 /// A complete inbox covers one explicit thread namespace. Numbers are local to
-/// that namespace; a discussion and an issue may have the same number.
+/// that namespace; an issue, discussion and PR may have the same number.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InboxKind {
     Issue,
     Discussion,
+    PullRequest,
 }
 impl InboxKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Issue => "issue",
             Self::Discussion => "discussion",
+            Self::PullRequest => "pull_request",
         }
     }
 }
@@ -99,8 +101,10 @@ impl InboxReason {
     }
 }
 
-/// One thread, with source issue and preference versions kept separately.
-/// A preference mutation does not create new issue activity.
+/// One thread, with the observed activity prefix and preference version kept
+/// separately. Issues/discussions use their one aggregate version; PRs use the
+/// canonical reader's chronological activity ordinal across independent
+/// lifecycle, conversation and reviewer streams. Preferences create no activity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboxRow {
     pub thread_number: u64,

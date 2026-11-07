@@ -1,4 +1,4 @@
-//! Self-owned issue and discussion preferences and a disposable, exact-source sqlmodel inbox.
+//! Self-owned thread preferences and a disposable, exact-source sqlmodel inbox.
 use super::{issues::snapshots, native_merge::NodeNativeMergeProjection};
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
 use fgit_admission::merge::native::{notifications, objects::MergeObjectLimits};
@@ -21,6 +21,7 @@ use std::num::NonZeroU16;
 pub enum NotificationThreadState {
     Open,
     Closed,
+    Merged,
 }
 #[derive(Clone, Debug)]
 pub struct NotificationThreadView {
@@ -59,7 +60,9 @@ impl NotificationThreadView {
             target: thread.subject.target(),
             thread_version: thread.subject.version(),
             title: thread.subject.title().to_owned(),
-            state: if thread.subject.is_closed() {
+            state: if thread.subject.is_merged() {
+                NotificationThreadState::Merged
+            } else if thread.subject.is_closed() {
                 NotificationThreadState::Closed
             } else {
                 NotificationThreadState::Open
@@ -203,6 +206,7 @@ impl OneNode {
             kind: match kind {
                 NotificationTargetKind::Issue => InboxKind::Issue,
                 NotificationTargetKind::Discussion => InboxKind::Discussion,
+                NotificationTargetKind::PullRequest => InboxKind::PullRequest,
             },
             tenant: self.tenant_id,
             repository: self.repository_id,
@@ -215,6 +219,19 @@ impl OneNode {
         };
         let mut threads = BTreeMap::new();
         for thread in source.threads {
+            // A retained inbox snapshot never revives permission to see a PR.
+            // Filter both refs with CURRENT canonical policy before installing
+            // the derived projection or disclosing title, activity or reasons.
+            if thread
+                .subject
+                .pull_request_refs()
+                .is_some_and(|(source, target)| {
+                    current.hidden_refs.hides(source.as_bytes())
+                        || current.hidden_refs.hides(target.as_bytes())
+                })
+            {
+                continue;
+            }
             let view = NotificationThreadView::from_source(thread, principal);
             if view.target.kind() != kind || threads.insert(view.target.number(), view).is_some() {
                 return Err(NotificationReadRefusal::InvalidProjection);

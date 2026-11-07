@@ -422,7 +422,7 @@ fn required_tags_unknown_fields_and_every_truncation_fail_closed() {
         );
     }
     for (start, replacement) in [
-        (8, 14u32.to_be_bytes()),
+        (8, u32::MAX.to_be_bytes()),
         (52, 26u32.to_be_bytes()),
         (72, 3u32.to_be_bytes()),
         (108, 3u32.to_be_bytes()),

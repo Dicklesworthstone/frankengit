@@ -1,7 +1,10 @@
-//! Canonical self-owned issue/discussion subscription, mute and read-prefix commands.
+//! Canonical self-owned thread subscription, mute and read-prefix commands.
 //! Defaults and inbox membership are derived; only explicit preferences persist.
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
-use crate::{AggregateId, AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
+use crate::{
+    AggregateId, AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber,
+    PullRequestNumber,
+};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode};
 
@@ -9,12 +12,14 @@ use fgit_types::{PrincipalId, RefusalCode};
 pub enum NotificationTargetKind {
     Issue,
     Discussion,
+    PullRequest,
 }
 impl NotificationTargetKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Issue => "issue",
             Self::Discussion => "discussion",
+            Self::PullRequest => "pull_request",
         }
     }
 }
@@ -24,24 +29,28 @@ impl NotificationTargetKind {
 pub enum NotificationTarget {
     Issue(IssueNumber),
     Discussion(DiscussionNumber),
+    PullRequest(PullRequestNumber),
 }
 impl NotificationTarget {
     pub const fn kind(self) -> NotificationTargetKind {
         match self {
             Self::Issue(_) => NotificationTargetKind::Issue,
             Self::Discussion(_) => NotificationTargetKind::Discussion,
+            Self::PullRequest(_) => NotificationTargetKind::PullRequest,
         }
     }
     pub const fn number(self) -> u64 {
         match self {
             Self::Issue(number) => number.get(),
             Self::Discussion(number) => number.get(),
+            Self::PullRequest(number) => number.get(),
         }
     }
     pub const fn aggregate(self) -> AggregateId {
         match self {
             Self::Issue(number) => AggregateId::Issue(number),
             Self::Discussion(number) => AggregateId::Discussion(number),
+            Self::PullRequest(number) => AggregateId::PullRequest(number),
         }
     }
     pub const fn preference_aggregate(self, principal: PrincipalId) -> AggregateId {
@@ -50,6 +59,10 @@ impl NotificationTarget {
             Self::Discussion(discussion) => AggregateId::DiscussionNotificationPreference {
                 principal,
                 discussion,
+            },
+            Self::PullRequest(pull_request) => AggregateId::PullRequestNotificationPreference {
+                principal,
+                pull_request,
             },
         }
     }
@@ -62,6 +75,10 @@ impl NotificationTarget {
                 principal,
                 discussion,
             } => Some((principal, Self::Discussion(discussion))),
+            AggregateId::PullRequestNotificationPreference {
+                principal,
+                pull_request,
+            } => Some((principal, Self::PullRequest(pull_request))),
             _ => None,
         }
     }
@@ -87,6 +104,9 @@ impl NotificationMode {
 pub enum NotificationAction {
     SetMode(NotificationMode),
     /// Acknowledges only an explicitly observed subject prefix. None clears it.
+    /// Issues/discussions use their aggregate version. PRs use the derived
+    /// activity ordinal of lifecycle, conversation and review events in exact
+    /// repository-record/event order, never a lifecycle or reviewer version.
     SetReadThrough(Option<AggregateVersion>),
 }
 impl NotificationAction {

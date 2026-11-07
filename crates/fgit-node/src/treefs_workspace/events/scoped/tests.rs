@@ -177,6 +177,7 @@ fn private_notification_preferences_never_enter_the_shared_feed_even_with_both_g
         fgit_forge::event::notification::NotificationTarget::Discussion(
             fgit_forge::DiscussionNumber::FIRST,
         ),
+        fgit_forge::event::notification::NotificationTarget::PullRequest(PullRequestNumber::FIRST),
     ] {
         let private = NotificationCommand {
             target,

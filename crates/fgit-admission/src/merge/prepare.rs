@@ -424,14 +424,7 @@ pub fn prepare_event(
             else {
                 return Err(RefusalCode::EvidenceInvalid);
             };
-            let subject_stream =
-                AsciiSlug::try_new("forge_stream", target.aggregate().to_string().as_bytes())
-                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
-            let current = resolved
-                .forge
-                .entry(subject_stream)
-                .ok_or(RefusalCode::EvidenceMissing)?
-                .successor_position();
+            let current = notification_subject_version(target, &resolved.forge)?;
             if let fgit_forge::event::notification::NotificationAction::SetReadThrough(Some(
                 through,
             )) = change.action
@@ -484,11 +477,16 @@ pub fn prepare_event(
             if let Some(refresh) = verify_pull_request_seal(context, event, attempt)? {
                 let queue = AsciiSlug::try_new(
                     "forge_stream",
-                    fgit_forge::AggregateId::MergeQueue(refresh.number).to_string().as_bytes(),
+                    fgit_forge::AggregateId::MergeQueue(refresh.number)
+                        .to_string()
+                        .as_bytes(),
                 )
                 .map_err(|_| RefusalCode::EvidenceInvalid)?;
                 if basis.body().policy_epoch != refresh.expected_policy_epoch
-                    || resolved.forge.entry(queue).map(|entry| entry.successor_position())
+                    || resolved
+                        .forge
+                        .entry(queue)
+                        .map(|entry| entry.successor_position())
                         != Some(refresh.expected_queue_version.get())
                 {
                     return Err(RefusalCode::EvidenceStale);
@@ -826,6 +824,53 @@ pub(in crate::merge) fn prepare_coupled_events(
     })
 }
 
+/// The pure preparer independently checks the acknowledged prefix's upper
+/// bound. For PRs, the sum of the lifecycle, conversation and reviewer stream
+/// positions is the activity count. This sum does not assign event ordinals:
+/// the domain validator still reconstructs their authenticated chronological
+/// order and checks the selected prefix and current ref disclosure before CAS.
+fn notification_subject_version(
+    target: fgit_forge::event::notification::NotificationTarget,
+    forge: &CanonicalForgePositionState,
+) -> Result<u64, RefusalCode> {
+    use fgit_forge::AggregateId;
+    use fgit_forge::event::notification::NotificationTarget;
+
+    let label = |aggregate: AggregateId| {
+        AsciiSlug::try_new("forge_stream", aggregate.to_string().as_bytes())
+            .map_err(|_| RefusalCode::EvidenceInvalid)
+    };
+    let mut current = forge
+        .entry(label(target.aggregate())?)
+        .ok_or(RefusalCode::EvidenceMissing)?
+        .successor_position();
+    if let NotificationTarget::PullRequest(number) = target {
+        if let Some(entry) = forge.entry(label(AggregateId::PullRequestConversation(number))?) {
+            current = current
+                .checked_add(entry.successor_position())
+                .ok_or(RefusalCode::ResourceBudgetExceeded)?;
+        }
+        let prefix = format!("review/{number}/");
+        for entry in forge.entries() {
+            if let Some(raw) = entry.stream().as_str().strip_prefix(&prefix) {
+                let reviewer = fgit_types::PrincipalId::from_hex(raw)
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                if label(AggregateId::PullRequestReview {
+                    pull_request: number,
+                    reviewer,
+                })? != entry.stream()
+                {
+                    return Err(RefusalCode::EvidenceInvalid);
+                }
+                current = current
+                    .checked_add(entry.successor_position())
+                    .ok_or(RefusalCode::ResourceBudgetExceeded)?;
+            }
+        }
+    }
+    Ok(current)
+}
+
 /// An event position may differ from the original commitment only for the
 /// explicit additive profiles. Rebuild each supported request exactly; an
 /// additive payload alone cannot authorize changing a strict predecessor.
@@ -970,10 +1015,8 @@ fn verify_pull_request_seal(
     use fgit_forge::event::pull_request::PullRequestCommand;
     use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion};
 
-    let (
-        AggregateId::PullRequest(number),
-        ForgeEventPayload::PullRequestChangedNative(change),
-    ) = (event.aggregate, &event.payload)
+    let (AggregateId::PullRequest(number), ForgeEventPayload::PullRequestChangedNative(change)) =
+        (event.aggregate, &event.payload)
     else {
         return Err(RefusalCode::EvidenceInvalid);
     };

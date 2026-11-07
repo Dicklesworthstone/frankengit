@@ -471,3 +471,44 @@ fn identical_numbers_and_source_roots_cannot_cross_inbox_kinds() {
         session.close(&cx).await
     });
 }
+
+#[test]
+fn pull_request_activity_prefix_is_kind_bound_and_rebuilds_with_the_same_unread_state() {
+    run_case(|cx| async move {
+        let mut pull_binding = binding();
+        pull_binding.kind = InboxKind::PullRequest;
+        let mut pull_rows = snapshot();
+        pull_rows.binding = pull_binding;
+        // Independent native lifecycle/comment/reviewer versions have already
+        // been folded by the canonical reader into this observed activity prefix.
+        pull_rows.rows[0].thread_version = 14;
+        pull_rows.rows[0].latest_other_version = Some(13);
+        pull_rows.rows[0].read_through = Some(12);
+        let mut first = InboxSession::open_memory()?;
+        first.install_snapshot(&cx, pull_rows.clone()).await?;
+        let page = first.read_page(&cx, &pull_binding, query(100)).await?;
+        for kind in [InboxKind::Issue, InboxKind::Discussion] {
+            let other = InboxSnapshotBinding {
+                kind,
+                ..pull_binding
+            };
+            assert!(matches!(
+                first.read_page(&cx, &other, query(100)).await,
+                Err(InboxError::Refusal(InboxRefusal::SourceMismatch))
+            ));
+        }
+        first.close(&cx).await?;
+        let mut rebuilt = InboxSession::open_memory()?;
+        rebuilt.install_snapshot(&cx, pull_rows).await?;
+        assert_eq!(
+            rebuilt.read_page(&cx, &pull_binding, query(100)).await?,
+            page
+        );
+        assert_eq!(page.binding.kind.name(), "pull_request");
+        let activity = page.rows.iter().find(|row| row.thread_number == 4).unwrap();
+        assert_eq!(activity.thread_version, 14);
+        assert_eq!(activity.read_through, Some(12));
+        assert!(activity.unread());
+        rebuilt.close(&cx).await
+    });
+}

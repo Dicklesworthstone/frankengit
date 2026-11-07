@@ -21,7 +21,8 @@ use std::collections::BTreeSet;
 
 mod source;
 pub use source::{
-    NotificationSourceSnapshot, NotificationSubjectSnapshot, NotificationThread, read_source_at,
+    NotificationSourceSnapshot, NotificationSubjectSnapshot, NotificationThread,
+    PullRequestNotificationSnapshot, PullRequestNotificationState, read_source_at,
     read_source_for_kind_at,
 };
 
@@ -143,6 +144,21 @@ fn validate_current_thread(
     Ok(())
 }
 
+fn validate_current_thread_disclosure(
+    thread: Option<&NotificationThread>,
+    snapshot: &AdmissionSnapshot,
+    event: &ForgeEvent,
+) -> Result<(), RefusalCode> {
+    if let Some((source, target)) = thread.and_then(|thread| thread.subject.pull_request_refs()) {
+        if snapshot.hidden_refs.hides(source.as_bytes())
+            || snapshot.hidden_refs.hides(target.as_bytes())
+        {
+            return Err(RefusalCode::HiddenRefUnauthorized);
+        }
+    }
+    validate_current_thread(thread, event)
+}
+
 struct NotificationValidation;
 impl<S, P> metadata::MetadataValidation<S, P> for NotificationValidation
 where
@@ -158,7 +174,7 @@ where
         cx: &S::Context,
         basis: &PublicationBasis,
         _: &AuthenticatedHead,
-        _: &AdmissionSnapshot,
+        snapshot: &AdmissionSnapshot,
         _: &NativeMergeBasis,
         event: &ForgeEvent,
         projection: &P,
@@ -172,14 +188,12 @@ where
             projection.merge_checkpoint(cx).is_err()
         })
         .await?;
-        validate_current_thread(
-            source
-                .threads
-                .iter()
-                .find(|thread| thread.subject.target() == target),
-            event,
-        )
-        .map_err(ProjectionFailure::Refuse)?;
+        let thread = source
+            .threads
+            .iter()
+            .find(|thread| thread.subject.target() == target);
+        validate_current_thread_disclosure(thread, snapshot, event)
+            .map_err(ProjectionFailure::Refuse)?;
         projection
             .merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;

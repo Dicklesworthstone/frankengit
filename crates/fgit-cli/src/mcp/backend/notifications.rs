@@ -6,13 +6,15 @@ use fgit_forge::event::notification::{
     NotificationAction, NotificationCommand, NotificationMode, NotificationTarget,
     NotificationTargetKind,
 };
-use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber};
+use fgit_forge::{
+    AggregateVersion, DiscussionNumber, ExpectedVersion, IssueNumber, PullRequestNumber,
+};
 use fgit_node::{
     NotificationInboxPage, NotificationReadRefusal, NotificationThreadState, NotificationThreadView,
 };
 
 pub(super) fn read_permitted(options: &Options) -> bool {
-    (options.issues || options.discussions)
+    (options.issues || options.discussions || options.pulls)
         && options.principal.is_some()
         && options.incarnation.is_some()
 }
@@ -21,6 +23,7 @@ fn read_kind_permitted(options: &Options, kind: NotificationTargetKind) -> bool 
         && match kind {
             NotificationTargetKind::Issue => options.issues,
             NotificationTargetKind::Discussion => options.discussions,
+            NotificationTargetKind::PullRequest => options.pulls,
         }
 }
 pub(super) fn write_permitted(options: &Options) -> bool {
@@ -40,15 +43,15 @@ pub(super) fn is_write(name: &str) -> bool {
     )
 }
 pub(super) fn read_tools() -> Vec<Tool> {
-    [("frankengit_inbox_list", "Read your issue or discussion inbox. Optional kind defaults to issue and requires that kind's independent read grant. Reasons, read state and preferences derive from one exact canonical source. Continue with the original snapshot token and unchanged kind/filters. Launch identity owns the recipient.", false),
-     ("frankengit_inbox_show", "Read your preferences and activity for one issue or discussion, including an unfollowed thread. Optional kind defaults to issue and requires that kind's read grant plus launch-bound principal/incarnation. Reading does not acknowledge activity.", true)]
+    [("frankengit_inbox_list", "Read your issue, discussion or pull request inbox. Optional kind defaults to issue and requires that kind's independent read grant. Reasons, read state and preferences derive from one exact canonical source. Continue with the original snapshot token and unchanged kind/filters. Launch identity owns the recipient.", false),
+     ("frankengit_inbox_show", "Read your preferences and activity for one issue, discussion or pull request, including an unfollowed thread. Optional kind defaults to issue and requires that kind's read grant plus launch-bound principal/incarnation. Reading does not acknowledge activity.", true)]
         .into_iter().map(|(name, description, show)| Tool { name, description, schema: read_schema(show) }).collect()
 }
 pub(super) fn write_tools() -> Vec<Tool> {
-    [("frankengit_inbox_subscribe", "Subscribe yourself to an issue or discussion with notification-write plus the selected kind's read grant. Kind defaults to issue. Preference version zero creates your separate stream; preserve kind, number, predecessor and durable key on retry."),
-     ("frankengit_inbox_mute", "Mute your issue or discussion notifications at the exact preference version, preserving read state. Requires notification-write plus the selected kind's read grant; kind defaults to issue. No content or other recipient changes."),
+    [("frankengit_inbox_subscribe", "Subscribe yourself to an issue, discussion or pull request with notification-write plus the selected kind's read grant. Kind defaults to issue. Preference version zero creates your separate stream; preserve kind, number, predecessor and durable key on retry."),
+     ("frankengit_inbox_mute", "Mute your issue, discussion or pull request notifications at the exact preference version, preserving read state. Requires notification-write plus the selected kind's read grant; kind defaults to issue. No content or other recipient changes."),
      ("frankengit_inbox_automatic", "Restore author/participant selection, and assignee selection for issues, at the exact preference version while preserving read state. Requires notification-write plus the selected kind's read grant; kind defaults to issue."),
-     ("frankengit_inbox_read", "Mark your explicit observed issue or discussion prefix read, using positive read_through and exact preference version. Later activity stays unread. Requires notification-write plus the selected kind's read grant; kind defaults to issue. Preserve the original durable key."),
+     ("frankengit_inbox_read", "Mark your explicit observed issue, discussion or pull request prefix read, using positive read_through and exact preference version. For pull requests use activity_version, which includes lifecycle, comments and reviews. Later activity stays unread. Requires notification-write plus the selected kind's read grant; kind defaults to issue. Preserve the original durable key."),
      ("frankengit_inbox_unread", "Clear your read prefix at the exact preference version, preserving delivery mode. Requires notification-write plus the selected kind's read grant; kind defaults to issue. Retry the identical command and original key.")]
         .into_iter().map(|(name, description)| {
             let mut properties = common::base_properties();
@@ -63,13 +66,17 @@ fn kind_schema() -> Value {
         ("type", text("string")),
         (
             "enum",
-            Value::Array(vec![text("issue"), text("discussion")]),
+            Value::Array(vec![
+                text("issue"),
+                text("discussion"),
+                text("pull_request"),
+            ]),
         ),
         ("default", text("issue")),
-        ("maxLength", json::number(10)),
+        ("maxLength", json::number(12)),
         (
             "description",
-            text("Thread domain; requires its own issue or discussion read grant."),
+            text("Thread domain; requires its own issue, discussion or pull request read grant."),
         ),
     ])
 }
@@ -77,6 +84,7 @@ fn kind(args: &Object) -> Result<NotificationTargetKind, ToolError> {
     match string(args, "kind")?.unwrap_or("issue") {
         "issue" => Ok(NotificationTargetKind::Issue),
         "discussion" => Ok(NotificationTargetKind::Discussion),
+        "pull_request" => Ok(NotificationTargetKind::PullRequest),
         _ => Err(ToolError::invalid("invalid_notification_kind")),
     }
 }
@@ -89,6 +97,9 @@ fn target(args: &Object, kind: NotificationTargetKind) -> Result<NotificationTar
         NotificationTargetKind::Discussion => DiscussionNumber::try_new(number)
             .map(NotificationTarget::Discussion)
             .ok_or(ToolError::invalid("positive_discussion_number_required")),
+        NotificationTargetKind::PullRequest => PullRequestNumber::try_new(number)
+            .map(NotificationTarget::PullRequest)
+            .ok_or(ToolError::invalid("positive_pull_request_number_required")),
     }
 }
 fn read_schema(show: bool) -> Value {
@@ -219,10 +230,11 @@ pub(super) fn write(backend: &NodeTools, name: &str, args: &Object) -> Result<Va
         text(match command.target.kind() {
             NotificationTargetKind::Issue => "notification_publication",
             NotificationTargetKind::Discussion => "discussion_notification_publication",
+            NotificationTargetKind::PullRequest => "pull_request_notification_publication",
         }),
     );
-    if command.target.kind() == NotificationTargetKind::Discussion {
-        result.insert("target_kind".into(), text("discussion"));
+    if command.target.kind() != NotificationTargetKind::Issue {
+        result.insert("target_kind".into(), text(command.target.kind().name()));
     }
     result.insert("number".into(), text(command.target.number().to_string()));
     result.insert("action".into(), text(action_name(command.action)));
@@ -254,6 +266,7 @@ fn thread(row: &NotificationThreadView) -> Value {
             match row.target.kind() {
                 NotificationTargetKind::Issue => "issue_version",
                 NotificationTargetKind::Discussion => "discussion_version",
+                NotificationTargetKind::PullRequest => "activity_version",
             },
             text(row.thread_version.get().to_string()),
         ),
@@ -263,6 +276,7 @@ fn thread(row: &NotificationThreadView) -> Value {
             text(match row.state {
                 NotificationThreadState::Open => "open",
                 NotificationThreadState::Closed => "closed",
+                NotificationThreadState::Merged => "merged",
             }),
         ),
         (
@@ -395,6 +409,8 @@ pub(super) fn read(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
                 (NotificationTargetKind::Issue, false) => "notification_inbox",
                 (NotificationTargetKind::Discussion, true) => "discussion_notification_thread",
                 (NotificationTargetKind::Discussion, false) => "discussion_notification_inbox",
+                (NotificationTargetKind::PullRequest, true) => "pull_request_notification_thread",
+                (NotificationTargetKind::PullRequest, false) => "pull_request_notification_inbox",
             }),
         ),
         ("schema_version".into(), json::number(1)),
@@ -425,8 +441,8 @@ pub(super) fn read(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         ("next_after".into(), optional(page.next_after)),
         ("complete".into(), Value::Bool(page.next_after.is_none())),
     ]);
-    if kind == NotificationTargetKind::Discussion {
-        result.insert("target_kind".into(), text("discussion"));
+    if kind != NotificationTargetKind::Issue {
+        result.insert("target_kind".into(), text(kind.name()));
     }
     if let Some(target) = target {
         result.insert("number".into(), text(target.number().to_string()));

@@ -19,16 +19,17 @@ usage: fg inbox show <storage-root> <tenant-id> <repository-id> <thread-number>
 usage: fg inbox <subscribe|mute|automatic|read|unread> <storage-root> <tenant-id> <repository-id> <thread-number>
   --trusted-local --principal <id> --expected-version <preference-version>
   --idempotency-key <original-key> [--read-through <observed-thread-version>]
-All commands accept [--kind issue|discussion] (default issue),
+All commands accept [--kind issue|discussion|pull_request] (default issue),
 [--object-format sha1|sha256] and [--expected-incarnation <id>].
 
 The principal is this trusted local operator's identity, not a selected recipient.
-Issue and discussion inboxes have separate preference streams, even at the same number.
+Issue, discussion and pull request inboxes have separate preferences at the same number.
 Reasons, read state and delivery preferences come
 from the exact canonical source named by the response's snapshot token.
 Preference version 0 creates your own preference stream. All other versions are exact.
 read requires a positive --read-through from a previously observed thread version;
-newer activity stays unread. unread clears the read prefix. Neither changes mode.
+For pull requests, use activity_version: it counts lifecycle events, comments and reviews.
+Newer activity stays unread. unread clears the read prefix. Neither changes mode.
 subscribe selects the thread, mute suppresses it, automatic restores participation rules.
 List continuation requires the original snapshot token and unchanged kind/filters/principal.
 Retry uncertain mutations with the identical kind, number, action, version, read prefix and key,

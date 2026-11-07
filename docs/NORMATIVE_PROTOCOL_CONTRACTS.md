@@ -1161,8 +1161,8 @@ Discussion-specific notification preferences follow §20.2.8.
 
 ### 20.2.8 Self-owned discussion notification preferences
 
-Notification commands select a typed target: `Issue(IssueNumber)` or
-`Discussion(DiscussionNumber)`. The canonical preference owner is the
+Notification commands select a typed target: `Issue(IssueNumber)`,
+`Discussion(DiscussionNumber)`, or `PullRequest(PullRequestNumber)` (§20.2.9). The canonical preference owner is the
 authenticated principal. A target's kind is part of its identity; equal numeric
 issue and discussion identifiers MUST NOT alias preference state, activity,
 predecessors, source bindings or sealed commands.
@@ -1208,6 +1208,56 @@ require `notifications-write`. MCP enforces the corresponding selected-kind
 launch grant on each call. Issue grants never imply discussion disclosure.
 Both private preference aggregates remain excluded from shared event feeds and
 repository webhook batches, including wildcard subscriptions.
+
+### 20.2.9 Self-owned pull request activity preferences
+
+Pull request preferences use required aggregate escape **14**, after the zero
+`u64` escape, followed by a 16-byte principal and positive big-endian `u64` PR
+number. The canonical aggregate is
+`PullRequestNotificationPreference { principal, pull_request }` and the stream
+label is `pnotify/{principal}/{pull_request}`. Existing issue escape **10**,
+discussion escape **12**, notification payload kind **23**, action encoding and
+`notification.event-batch-root.v1` seal domain remain unchanged. A reader that
+does not understand escape 14 MUST refuse it. Actor and preference owner MUST
+match the authenticated principal. Private preferences MUST NOT enter shared
+repository event feeds or webhook batches, including wildcard subscriptions.
+
+The native PR inbox derives an append-stable positive `activity_version` by
+replaying PR lifecycle, conversation and individual-reviewer events in exact
+authenticated RCR/event order. It MUST NOT sort independent aggregates to assign
+activity ordinals, conflate their aggregate versions, or publish a second
+canonical activity stream. The selected source MUST verify the full history
+and each selected stream's final event root and range against the canonical
+forge frontier. Activity includes native open/update/close/reopen, comments,
+review changes and successful native merges. A merge's actor MUST come from
+its RCR-bound principal snapshot with verified identity and repository binding.
+The current reader and current credentials MUST NOT substitute for that actor.
+
+An acknowledgement's positive `read_through` refers to this derived PR activity
+prefix and MUST NOT exceed the activity present at the preference event's own
+canonical position. Replaying later activity MUST NOT retroactively validate a
+future acknowledgement. Admission uses the exact independent preference
+predecessor and the existing metadata publication path. Own activity and
+preference events do not advance the other-actor unread cursor. Native openers,
+commenters and reviewers participate; explicit subscription adds its own reason.
+Closed and merged state retain preferences and prefixes. PR threads have no
+issue-assignment reason. No activity ordinal depends on caller credentials.
+
+Current disclosure of both source and target refs MUST be enforced before
+returning current or retained inbox state and at preference admission. HTTP
+requires the enabled PR service, `pulls-read` and `reviews-read`; preference
+writes additionally require `notifications-write`. MCP uses its existing
+PR/review read group and the independent notification-write grant. A retained
+head or subscription MUST NOT confer current disclosure authority.
+
+Reconstruction uses one bounded authenticated history traversal. The initial
+profile permits at most 4,096 authority-history edges, 65,536 scanned events,
+128 MiB scanned event and merge-principal bytes, 32 MiB retained event bytes and
+16,384 PR subjects, with cancellation checkpoints. A bound or incomplete native
+history MUST produce a refusal rather than a partial successful inbox. Legacy
+digest-only PRs and standalone merge receipts without a native opener remain
+outside this profile. Disposable inbox markers bind target kind as well as
+principal, repository/incarnation and exact authenticated source roots.
 
 ### 20.3 Native protected-review quorums
 
