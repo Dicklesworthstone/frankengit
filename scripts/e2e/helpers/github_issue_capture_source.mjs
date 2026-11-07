@@ -1,5 +1,5 @@
 // Explicit synthetic GitHub source peer, used only by the native migration lane.
-// The preload is passed only to the source CLI; native HTTP uses stock fetch.
+// The preload is passed only to source commands; native HTTP uses stock fetch.
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { issueInventoryBytes, INVENTORY_SCHEMA } from '../../lib/github-issue-inventory.mjs';
@@ -14,13 +14,21 @@ const bytes = issueInventoryBytes({ schema: INVENTORY_SCHEMA,
   consistency: 'two-equal-observations-not-atomic', source: { repository, repository_id: repositoryId },
   batch_size: 1, issues: numbers.map(number => ({ number, id: issue(number).id })),
   excluded_pull_requests: [], complete: true });
-await writeFile(inventory, bytes, { mode: 0o600, flag: 'wx' });
+// This is a reference pin, not an output inventory. The actual discovery CLI
+// must create that file from the source observations below.
 const fixture = new URL('../../../tests/operator/fixtures/github_capture_source.mjs', import.meta.url).href;
-await writeFile(preload, `import { githubPeer } from ${JSON.stringify(fixture)};
+await writeFile(preload, `import assert from 'node:assert/strict';
+import { githubPeer, json } from ${JSON.stringify(fixture)};
 import { appendFile } from 'node:fs/promises';
 globalThis.fetch = githubPeer({ before: async ({ address }) => {
   await appendFile(${JSON.stringify(log)}, JSON.stringify({ address }) + '\\n', { mode: 0o600 });
+  const url = new URL(address);
+  if (url.pathname === ${JSON.stringify(`/repos/${repository}/issues`)}) {
+    assert.deepEqual([...url.searchParams], [['state','all'],['sort','created'],['direction','asc'],['per_page','100'],['page','1']]);
+    return json(${JSON.stringify(numbers.map(number => ({ ...issue(number),
+      url: `https://api.github.com/repos/${repository}/issues/${number}` })))});
+  }
 } }).fetchImpl;
 `, { mode: 0o600, flag: 'wx' });
-console.log(JSON.stringify({ inventory, inventory_sha256: recordDigest(bytes), preload, log, repository,
+console.log(JSON.stringify({ inventory, expected_inventory_sha256: recordDigest(bytes), preload, log, repository,
   issues: numbers.map(number => ({ ...issue(number), comment_body: comment(number).body })) }));
