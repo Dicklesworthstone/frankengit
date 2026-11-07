@@ -70,7 +70,7 @@ cells; it does not establish the full live-server operator matrix in
 optional oracle skips remain skips rather than native compatibility evidence.
 
 The same suite runs actual prebuilt-`fg` HTTP owner tests for normal shutdown,
-a failed stop-file write, and repeated SIGTERM/SIGINT during interrupted drain.
+failed startup-receipt and stop-file writes, and repeated SIGTERM/SIGINT during interrupted drain.
 The owner retains its process handle until reaping, records exceptional cleanup,
 and propagates the original failure. Forced termination is failure evidence,
 not a clean HTTP drain; cleanup failure retains ownership and reports containment

@@ -43,6 +43,8 @@ class HttpServiceOwnerTests(unittest.TestCase):
         # Retain the original Popen capability even when testing the old broken
         # owner. Cleanup never selects another session's process by a PID scan.
         if self.child is not None and self.child.poll() is None:
+            if not self.server.stop.exists():
+                self.server.stop.touch()
             self.child.send_signal(signal.SIGCONT)
             try:
                 self.child.wait(timeout=5)
@@ -95,6 +97,34 @@ class HttpServiceOwnerTests(unittest.TestCase):
         row = self.stop_record()
         self.assertTrue(row['forced'])
         self.assertEqual(row['close_error'], 'FileExistsError')
+
+    def test_failed_start_receipt_reaps_native_child(self):
+        record = self.campaign.record
+
+        def fail_start(**entry):
+            if entry['kind'] != 'service_start':
+                return record(**entry)
+            self.child = self.server.process
+            saved = self.work / 'commands-before-start.jsonl'
+            self.campaign.journal.rename(saved)
+            self.campaign.journal.mkdir()
+            try:
+                # An actual filesystem failure, not a synthesized native reply
+                # or a mocked Popen. Restore the original journal for cleanup.
+                return record(**entry)
+            finally:
+                self.campaign.journal.rmdir()
+                saved.rename(self.campaign.journal)
+
+        self.campaign.record = fail_start
+        with self.assertRaises(IsADirectoryError):
+            self.server.__enter__()
+        self.assertIsNotNone(self.child.poll(), 'failed startup left a native child alive')
+        self.assertIsNone(self.server.process)
+        rows = [json.loads(line) for line in self.campaign.journal.read_text().splitlines()]
+        stops = [row for row in rows if row['kind'] == 'service_stop']
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(stops[0]['pid'], self.child.pid)
 
     def interrupted_stop(self, number, error_type):
         self.start(stopped=True)

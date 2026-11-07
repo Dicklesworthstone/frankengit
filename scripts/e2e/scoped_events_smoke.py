@@ -139,11 +139,11 @@ class HttpServer:
         self.url = ""
 
     def __enter__(self) -> HttpServer:
-        with self.stdout_path.open("wb") as stdout, self.stderr_path.open("wb") as stderr:
-            self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
-        self.campaign.record(kind="service_start", command=self.command, pid=self.process.pid,
-                             stdout=str(self.stdout_path), stderr=str(self.stderr_path))
         try:
+            with self.stdout_path.open("wb") as stdout, self.stderr_path.open("wb") as stderr:
+                self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+            self.campaign.record(kind="service_start", command=self.command, pid=self.process.pid,
+                                 stdout=str(self.stdout_path), stderr=str(self.stderr_path))
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 require(self.process.poll() is None, "HTTP service exited before readiness")
@@ -160,8 +160,15 @@ class HttpServer:
                         return self
                 time.sleep(0.05)
             raise TimeoutError("HTTP service did not become ready")
-        except BaseException:
-            self.close()
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                if self.process is not None:
+                    raise RuntimeError("HTTP child containment failed after startup failure") from cleanup
+                # A failed startup stays a failure even if shutdown itself
+                # cannot produce a normal drain receipt. Preserve both causes.
+                raise error from cleanup
             raise
 
     def close(self) -> None:
