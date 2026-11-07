@@ -260,6 +260,8 @@ native listeners. For both Git hash domains and committed/refused transactions,
 it pairs complete confirmation with a two-session listener that publishes then
 retires before confirmation. Drained output and a real full, unread OS pipe
 must preserve the same error/receipt semantics. Separate `fg outcome` and issue
-reads bind the original key, transaction, decision and canonical effects. This
-bounded host-pipe campaign does not establish power-loss safety, browser/TLS
-behavior, every operator entrypoint or same-revision native build qualification.
+reads bind the original key, transaction, decision and canonical effects.
+The bounded Node HTTP profile admits low loopback ports; mixed Fetch campaigns
+retain their conservative port selection. This campaign does not establish
+power-loss safety, browser/TLS behavior, every operator entrypoint, or
+same-revision native build qualification.

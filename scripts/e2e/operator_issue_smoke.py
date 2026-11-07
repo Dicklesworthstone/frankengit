@@ -114,9 +114,10 @@ class OperatorCampaign(Campaign):
 @contextmanager
 def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt: str, *,
                  allow_issues=True, allow_discussions=False, max_sessions: int | None = None):
-    # Fetch rejects some ports even on loopback. Select only native-owned
-    # listeners above the pinned runtime's highest blocked port (10080),
-    # before any request. Every discarded listener must drain normally.
+    # Continuous campaigns include Fetch clients and keep its conservative
+    # port guard. Bounded output cases use node:http, which admits low loopback
+    # ports too; discarding those listeners would wait for their idle cap.
+    # Every actually discarded listener must still drain normally.
     for attempt in range(16):
         server = HttpServer(campaign, root, credentials, f"issue-{fmt}-{attempt}")
         if not allow_issues:
@@ -134,7 +135,7 @@ def issue_server(campaign: OperatorCampaign, root: Path, credentials: Path, fmt:
         with server:
             port = urlsplit(server.url).port
             require(port is not None, "native listener omitted its port")
-            if port <= 10080:
+            if max_sessions is None and port <= 10080:
                 campaign.record(kind="fetch_listener_discarded", port=port, attempt=attempt)
                 continue
             yield server
