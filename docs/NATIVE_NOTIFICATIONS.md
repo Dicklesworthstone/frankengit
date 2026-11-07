@@ -1,6 +1,6 @@
-# Native issue and discussion notifications
+# Native issue, discussion and pull request notifications
 
-FrankenGit provides repository issue and discussion inboxes for an explicit principal, with
+FrankenGit provides repository issue, discussion and pull request inboxes for an explicit principal, with
 automatic participation, subscription, mute and read-prefix controls. The
 browser, authenticated HTTP API, remote `forge_inbox.mjs` operator, local
 `fg inbox` commands and MCP adapters use
@@ -9,8 +9,95 @@ the same canonical thread histories and principal-owned preference events.
 Preferences are durable forge metadata. The inbox is a disposable projection of
 one authenticated source snapshot. Rebuilding that projection cannot subscribe
 someone, change a read cursor, edit an issue or publish a repository decision.
-This profile covers issue and discussion notifications. Email delivery,
-push delivery and PR notifications remain separate work.
+This profile covers native issue, discussion and pull request activity. Email
+delivery and push delivery remain separate work.
+
+## Pull request activity inboxes
+
+Pull request notifications combine native lifecycle changes, conversation
+comments and reviewer activity into one `activity_version` per PR. The version
+is a derived ordinal in authenticated repository-commit/event order. It is not
+the PR metadata version, comment version, or an individual reviewer's version.
+Appending an event cannot renumber an earlier prefix. No new canonical activity
+stream or mutable notification counter is introduced.
+
+The native PR opener receives `author` and `participant` reasons. Commenting or
+publishing a review establishes participation, and explicit subscription adds
+`subscribed`. PRs have no issue-assignment reason. Other actors' changes can be
+unread; the principal's own activity and preference changes never create new
+other-actor activity. The inbox retains subscriptions and read state when a PR
+is closed, reopened or merged, and reports `open`, `closed` or `merged` state.
+The merge actor comes from the original commit's authenticated principal
+snapshot, not the current reader or a later credential configuration.
+
+| Surface | Pull request selection |
+| --- | --- |
+| CLI | Add `--kind pull_request` to any `fg inbox` command |
+| Remote operator | Use `--kind pull_request` and the exact PR inbox URL with `node scripts/forge_inbox.mjs` |
+| MCP | Add `"kind":"pull_request"` to any of the seven `frankengit_inbox_*` tools |
+| Browser | Open `/{repository}/ui/pull-notifications/` |
+| HTTP list | `GET /api/v1/notifications/pulls` |
+| HTTP thread | `GET /api/v1/notifications/pulls/{number}` |
+| HTTP preference | `POST /api/v1/notifications/pulls/{number}/{action}` |
+
+The actions are `subscribe`, `mute`, `automatic`, `read` and `unread`.
+Thread rows include `target_kind:"pull_request"` and `activity_version`. HTTP
+response types are `pull_request_notification_page`,
+`pull_request_notification_thread` and `pull_request_notification_publication`;
+CLI and MCP use `pull_request_notification_inbox` for lists. Existing issue and
+discussion response fields and default selections are unchanged.
+
+HTTP requires the enabled PR service and **both `pulls-read` and
+`reviews-read`**, because activity counters and unread state disclose that a
+review occurred. Preference changes additionally require `notifications-write`.
+A content-write grant does not imply any of those grants. MCP's existing
+`--allow-pulls` group already includes review reads; inbox calls also require
+the launch-bound principal and incarnation, with
+`--allow-notification-writes` for changes. Current hidden-ref policy must permit
+both the PR's source and target refs, including when reading a retained
+snapshot. Canonical admission checks both refs again before a new preference
+publication. Subscription and participation grant no extra disclosure rights.
+
+A read acknowledgement uses the exact observed activity prefix. For example,
+if opening a PR is activity 1, a comment is activity 2 and a review is activity
+3, `read_through=2` leaves the review unread. A reviewer's second event can be
+activity 5 even though that review stream's own version is 2. Observing activity
+3 and then marking 3 read never acknowledges a concurrent activity 4. Future
+prefixes and stale preference predecessors are refused. Own comments can
+advance `activity_version` without advancing `latest_other_version`.
+
+```sh
+fg inbox read "$ROOT" "$TENANT" "$REPOSITORY" 7 \
+  --kind pull_request --trusted-local --principal "$PRINCIPAL" \
+  --expected-incarnation "$INCARNATION" \
+  --expected-version 0 --read-through 3 \
+  --idempotency-key pull-7-read-through-3
+```
+
+Keep the original kind, PR number, preference version, activity prefix, identity
+guards and key after an uncertain response. An identical retry recovers the
+original decision even after later comments, reviews or preference changes.
+Browser actions capture the displayed prefix and preserve pending requests
+through disconnects. PR retry receipts use their own digest domain, `fgpn`
+prefix and schema; equal issue, discussion and PR numbers cannot alias receipts.
+
+PR preferences use required aggregate escape **14**,
+`PullRequestNotificationPreference { principal, pull_request }`, and canonical
+stream `pnotify/{principal}/{pull_request}`. They reuse notification payload
+kind **23**, the metadata seal and the exact authority-head CAS. Issue escape
+10 and discussion escape 12 keep their existing bytes. All three preference
+families remain private and excluded from shared event feeds and webhooks.
+
+Reconstruction verifies the authenticated repository history once, replays
+selected events in commit/event order, and checks every selected stream against
+its canonical frontier. It accepts only complete native PR histories with an
+opener; legacy digest-only PRs and standalone merge receipts are outside this
+profile. Missing native predecessors or invalid original principal evidence
+produce a typed refusal, not invented activity. The initial profile is bounded
+by 4,096 authority-history edges, 65,536 scanned events, 128 MiB of scanned event
+and merge-principal bytes, 32 MiB of retained event bytes, and 16,384 native PRs.
+Exceeding a bound refuses the read rather than silently returning a partial
+inbox. Checkpoints preserve request cancellation throughout reconstruction.
 
 ## Discussion inboxes
 
@@ -258,7 +345,7 @@ JavaScript safe integers and refuses larger numeric IDs or versions.
 [`scripts/forge_inbox.mjs`](../scripts/forge_inbox.mjs) provides authenticated
 remote `list`, `show`, `subscribe`, `mute`, `automatic`, `read`, `unread`, `status`
 and exact-request `retry` commands. It uses the shipped notification clients,
-requires an explicit issue/discussion kind, pins multi-page reads to one source,
+requires an explicit issue, discussion or pull request kind, pins multi-page reads to one source,
 and carries principal/incarnation guards across saved continuations. New
 preference requests require exact observed versions and a new private custody
 file synchronized before dispatch. Interrupted operations recover with the
@@ -307,10 +394,10 @@ original-key recovery semantics as HTTP. They do not edit issue content.
 MCP exposes `frankengit_inbox_list`, `frankengit_inbox_show`,
 `frankengit_inbox_subscribe`, `frankengit_inbox_mute`,
 `frankengit_inbox_automatic`, `frankengit_inbox_read` and
-`frankengit_inbox_unread`. Reads require the issue-read launch grant
-`--allow-issues` and the launch-bound principal/incarnation. Preference writes
-add the independent `--allow-notification-writes` grant; issue-write permission
-does not imply it. Outcome recovery remains independently granted. Tool
+`frankengit_inbox_unread`. Reads require the selected kind's launch grant:
+`--allow-issues`, `--allow-discussions`, or `--allow-pulls`, together with the
+launch-bound principal/incarnation. Preference writes add the independent
+`--allow-notification-writes` grant; content-write permission does not imply it. Outcome recovery remains independently granted. Tool
 arguments cannot select a recipient or widen the process's launch grants.
 
 ## Canonical durability, projection and privacy
@@ -366,10 +453,8 @@ grants and operation with the issue service disabled. Privacy regressions cover 
 shared event feed and every webhook filter family, with permitted public-event
 twins. Browser tests exercise the request and recovery contract separately.
 
-These tests are not all executed results. Native node/HTTP/projection runtime
-tests were not executed in this development environment because full Asupersync
-code generation exceeds its memory limit; compilation metadata checks and
-separately executable adapter tests do not substitute for those runtime cases.
-Use revision-bound validation reports for the exact checks that ran. This slice
-does not close the broader notification work or claim email delivery, PR inboxes,
+Coverage descriptions identify regression source; executable evidence must name
+the tested revision and exact checks. Compilation metadata and adapter tests do
+not substitute for native node/HTTP/projection runtime cases. This slice
+does not close the broader notification work or claim email or push delivery,
 background delivery workers, or measured large-repository inbox performance.

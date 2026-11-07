@@ -10,7 +10,7 @@ import { listenForFetch } from '../fetch-peer.mjs';
 
 export const tenant = '11'.repeat(16), repository = '22'.repeat(16), principal = '33'.repeat(16);
 export const incarnation = '44'.repeat(16), token = 'ab'.repeat(32);
-export const versionField = kind => kind === 'discussion' ? 'discussion_version' : 'issue_version';
+export const versionField = kind => ({ issue: 'issue_version', discussion: 'discussion_version', pull_request: 'activity_version' })[kind];
 const clone = value => structuredClone(value);
 const initialRows = kind => [
   { number: 7, [versionField(kind)]: 4, title: 'A thread', state: 'open', preference_version: 2,
@@ -24,7 +24,7 @@ export async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'fg-inbox-operator-'));
   const tokenFile = join(root, 'token'); await writeFile(tokenFile, token + '\n', { mode: 0o600 });
   const f = { root, tokenFile, calls: [], decisions: new Map(), snapshots: new Map(), errors: [],
-    rows: { issue: initialRows('issue'), discussion: initialRows('discussion') }, generation: 0,
+    rows: { issue: initialRows('issue'), discussion: initialRows('discussion'), pull_request: initialRows('pull_request') }, generation: 0,
     principal, incarnation, mode: null, onMutation: null, onRead: null, afterRead: null };
   f.capture = () => {
     f.generation++;
@@ -53,11 +53,11 @@ export async function fixture(t) {
           decision: decision ? { kind: state, decision_sequence: decision.decision_sequence,
             repository_commit_id: decision.repository_commit_id, refusal_record_id: decision.refusal_record_id, code: decision.refusal_code } : null });
       }
-      const match = /^\/repo\/api\/v1\/notifications(\/discussions)?(?:\/(\d+)(?:\/(subscribe|mute|automatic|read|unread))?)?$/.exec(url.pathname);
+      const match = /^\/repo\/api\/v1\/notifications(\/(?:discussions|pulls))?(?:\/(\d+)(?:\/(subscribe|mute|automatic|read|unread))?)?$/.exec(url.pathname);
       if (!match) return respond(404, {});
-      const kind = match[1] ? 'discussion' : 'issue', number = match[2] === undefined ? null : Number(match[2]), action = match[3];
-      const prefix = kind === 'discussion' ? 'discussion_notification' : 'notification';
-      const target = kind === 'discussion' ? { target_kind: 'discussion' } : {};
+      const kind = match[1] === '/pulls' ? 'pull_request' : match[1] ? 'discussion' : 'issue', number = match[2] === undefined ? null : Number(match[2]), action = match[3];
+      const prefix = kind === 'issue' ? 'notification' : kind + '_notification';
+      const target = kind === 'issue' ? {} : { target_kind: kind };
       if (req.method === 'GET' && !action) {
         if (f.mode === 'wait-read') return;
         const head = url.searchParams.get('expected_head') ?? f.head, source = f.snapshots.get(head);
@@ -122,7 +122,7 @@ export async function fixture(t) {
     } catch (error) { f.errors.push(error); if (!res.headersSent) respond(500, {}); else res.destroy(); }
   });
   await listenForFetch(server);
-  f.href = kind => `http://127.0.0.1:${server.address().port}/repo/ui/${kind === 'discussion' ? 'discussion-notifications' : 'notifications'}/`;
+  f.href = kind => `http://127.0.0.1:${server.address().port}/repo/ui/${kind === 'pull_request' ? 'pull-notifications' : kind === 'discussion' ? 'discussion-notifications' : 'notifications'}/`;
   f.options = (operation = 'subscribe', kind = 'issue', record = join(root, 'request.json')) => ({
     operation, kind, href: f.href(kind), tenant, repository, tokenFile,
     ...(['list', 'show'].includes(operation) ? {} : { record }),

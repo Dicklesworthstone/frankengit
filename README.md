@@ -308,10 +308,10 @@ browser supports safe Markdown, prepared changes and saved recovery receipts.
 See [native discussions](docs/NATIVE_DISCUSSIONS.md) for commands, scopes,
 recovery, pagination and the initial lifecycle profile's limits.
 
-### Native issue and discussion notifications
+### Native issue, discussion and pull request notifications
 
-Each principal can subscribe to, mute, or follow issue and discussion participation, and mark an
-explicit observed prefix read or unread. The browser, authenticated HTTP API,
+Each principal can subscribe to, mute, or follow issue, discussion and pull request
+participation, and mark an explicit observed prefix read or unread. The browser, authenticated HTTP API,
 `fg inbox` and MCP use canonical preference events and the same selected-source
 inbox. Pages retain their authenticated snapshot across intervening writes;
 marking version N read leaves later activity unread. HTTP preference writes need
@@ -324,7 +324,13 @@ MCP `kind:"discussion"`, or `/api/v1/notifications/discussions`; issue and
 discussion preferences stay independent even when their numbers match.
 The discussion browser links to `/{repository}/ui/discussion-notifications/`,
 with unread/muted filters, observed-version actions and recoverable requests.
-Email delivery and PR notifications remain separate work.
+Pull requests use `--kind pull_request`, MCP `kind:"pull_request"`,
+`/api/v1/notifications/pulls`, and `/{repository}/ui/pull-notifications/`.
+Their `activity_version` orders lifecycle changes, comments and reviews together;
+marking an observed prefix read preserves later unread activity. HTTP requires
+both `pulls-read` and `reviews-read`, with `notifications-write` for preferences.
+Current source and target ref disclosure applies to retained snapshots too.
+Email and push delivery remain separate work.
 
 ### Sponsored agent source and metadata credentials
 

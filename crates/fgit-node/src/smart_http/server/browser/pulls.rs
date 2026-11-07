@@ -13,6 +13,20 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
     let suffix = target.split('?').next()?.as_bytes().strip_prefix(route)?;
     let script = "text/javascript; charset=utf-8";
     match suffix {
+        b"/ui/pull-notifications/" => Some((
+            "text/html; charset=utf-8",
+            include_str!("pull-notifications.html"),
+        )),
+        b"/ui/pull-notifications/notifications.mjs" => {
+            Some((script, include_str!("notifications.mjs")))
+        }
+        b"/ui/pull-notifications/notifications-view.mjs" => {
+            Some((script, include_str!("notifications-view.mjs")))
+        }
+        b"/ui/pull-notifications/issues.mjs" => Some((script, include_str!("issues.mjs"))),
+        b"/ui/pull-notifications/browser.css" => {
+            Some(("text/css; charset=utf-8", include_str!("browser.css")))
+        }
         b"/ui/pulls/" => Some(("text/html; charset=utf-8", include_str!("pulls.html"))),
         b"/ui/pulls.css" => Some(("text/css; charset=utf-8", include_str!("pulls.css"))),
         b"/ui/pulls-view.mjs" => Some((script, include_str!("pulls-view.mjs"))),
@@ -131,6 +145,11 @@ mod tests {
             "/ui/pulls-actions.mjs",
             "/ui/pulls-resolution.mjs",
             "/ui/pulls-resolution-view.mjs",
+            "/ui/pull-notifications/",
+            "/ui/pull-notifications/notifications.mjs",
+            "/ui/pull-notifications/notifications-view.mjs",
+            "/ui/pull-notifications/issues.mjs",
+            "/ui/pull-notifications/browser.css",
         ] {
             assert!(asset(b"/r.git", &format!("/r.git{suffix}")).is_some());
             assert!(asset(b"/r.git", &format!("/r.git-other{suffix}")).is_none());
@@ -145,6 +164,40 @@ mod tests {
             "/r.git/ui/pulls",
         ] {
             assert!(asset(b"/r.git", target).is_none());
+        }
+    }
+
+    #[test]
+    fn pull_inbox_assets_require_pull_service_even_when_issues_are_enabled() {
+        for suffix in [
+            "",
+            "notifications.mjs",
+            "notifications-view.mjs",
+            "issues.mjs",
+            "browser.css",
+        ] {
+            let target = format!("/repo.git/ui/pull-notifications/{suffix}");
+            assert!(asset(b"/repo.git", &target).is_some());
+            assert!(asset_enabled(b"/repo.git", &target, true, false));
+            assert!(!asset_enabled(b"/repo.git", &target, false, true));
+            let raw = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
+            let request = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            let (_, body) = asset(b"/repo.git", &target).unwrap();
+            assert!(
+                checked_asset(b"/repo.git", true, body.len() as u64, &request, false)
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(
+                checked_asset(b"/repo.git", false, u64::MAX, &request, false),
+                Err(Status::NotFound)
+            );
+            assert_eq!(
+                checked_asset(b"/repo.git", true, body.len() as u64 - 1, &request, false),
+                Err(Status::TooLarge)
+            );
         }
     }
 

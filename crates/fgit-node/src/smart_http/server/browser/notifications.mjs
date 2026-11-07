@@ -1,4 +1,4 @@
-// Native self-only issue and discussion inboxes. Preferences are sealed commands, never local
+// Native self-only issue, discussion and pull request inboxes. Preferences are sealed commands, never local
 // unread flags. The shared client retains exact request keys after ambiguity.
 import { IssueClient, natural, snapshotToken } from './issues.mjs';
 const fail = message => { throw new Error(message); };
@@ -28,14 +28,14 @@ export function notificationMutationRequest(number, version, action, fields = {}
   return { number, expected_version: version, action, fields: checked, body: form.toString() };
 }
 const checkedKind = kind => {
-  if (!['issue', 'discussion'].includes(kind)) fail('Unsupported notification target kind.');
+  if (!['issue', 'discussion', 'pull_request'].includes(kind)) fail('Unsupported notification target kind.');
   return kind;
 };
-const versionField = kind => checkedKind(kind) === 'discussion' ? 'discussion_version' : 'issue_version';
-const replyType = (kind, suffix) => checkedKind(kind) === 'discussion' ? `discussion_notification_${suffix}` : `notification_${suffix}`;
+export const notificationVersionField = kind => ({ issue: 'issue_version', discussion: 'discussion_version', pull_request: 'activity_version' })[checkedKind(kind)];
+export const notificationReplyType = (kind, suffix) => `${checkedKind(kind) === 'issue' ? 'notification' : kind + '_notification'}_${suffix}`;
 function identity(reply, previous, kind) {
   object(reply);
-  if (checkedKind(kind) === 'discussion' ? reply.target_kind !== 'discussion' : reply.target_kind !== undefined) fail('Notification target kind changed.');
+  if (checkedKind(kind) === 'issue' ? reply.target_kind !== undefined : reply.target_kind !== kind) fail('Notification target kind changed.');
   if (reply.schema_version !== 1) fail('Unsupported notification response version.');
   const binding = { tenant: id(reply.tenant_id, 'tenant'), repository: id(reply.repository_id, 'repository'),
     principal: id(reply.principal_id, 'principal'), incarnation: id(reply.repository_incarnation, 'incarnation') };
@@ -49,11 +49,11 @@ function identity(reply, previous, kind) {
 export function notificationState(row, kind = 'issue') {
   object(row);
   natural(row.number, 'thread number', 1);
-  const version = natural(row[versionField(kind)], 'thread version', 1);
-  if (Object.hasOwn(row, kind === 'discussion' ? 'issue_version' : 'discussion_version')) fail('Mixed notification target kinds.');
+  const version = natural(row[notificationVersionField(kind)], 'thread version', 1);
+  if (['issue_version', 'discussion_version', 'activity_version', 'pull_request_version'].some(field => field !== notificationVersionField(kind) && Object.hasOwn(row, field))) fail('Mixed notification target kinds.');
   if (typeof row.title !== 'string' || !row.title.trim() || new TextEncoder().encode(row.title).length > 256 ||
-      /[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(row.title)) fail('Invalid issue title.');
-  if (!['open', 'closed'].includes(row.state) || !['automatic', 'subscribed', 'muted'].includes(row.mode)) fail('Invalid notification state.');
+      /[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(row.title)) fail('Invalid notification title.');
+  if (!(kind === 'pull_request' ? ['open', 'closed', 'merged'] : ['open', 'closed']).includes(row.state) || !['automatic', 'subscribed', 'muted'].includes(row.mode)) fail('Invalid notification state.');
   optionalVersion(row.preference_version, 'preference version', Number.MAX_SAFE_INTEGER);
   optionalVersion(row.read_through, 'read-through version', version);
   optionalVersion(row.latest_other_version, 'latest other-actor version', version);
@@ -62,13 +62,13 @@ export function notificationState(row, kind = 'issue') {
   if (!Array.isArray(row.reasons) || row.reasons.length > reasons.length ||
       row.reasons.some((reason, index) => !reasons.includes(reason) || (index && reasons.indexOf(row.reasons[index - 1]) >= reasons.indexOf(reason))) ||
       row.reasons.includes('subscribed') !== (row.mode === 'subscribed')) fail('Invalid notification reasons.');
-  if (kind === 'discussion' && row.reasons.includes('assignee')) fail('Discussions do not have assignees.');
+  if (kind !== 'issue' && row.reasons.includes('assignee')) fail('Only issue notifications have assignees.');
   return row;
 }
 export function notificationPage(reply, { after = 0, limit = 20, head = null, binding = null, unreadOnly = false, includeMuted = false, kind = 'issue' } = {}) {
   const observed = identity(reply, binding, kind), snapshot = snapshotToken(reply.snapshot_token);
   if (head !== null && head !== snapshot) fail('Notification snapshot moved. Reload explicitly.');
-  if (reply.type !== replyType(kind, 'page') || reply.after !== after || reply.limit !== limit ||
+  if (reply.type !== notificationReplyType(kind, 'page') || reply.after !== after || reply.limit !== limit ||
       reply.unread_only !== unreadOnly || reply.include_muted !== includeMuted || !Array.isArray(reply.threads) || reply.threads.length > limit) fail('Invalid notification page.');
   let previous = after;
   for (const row of reply.threads) {
@@ -83,11 +83,11 @@ export function notificationPage(reply, { after = 0, limit = 20, head = null, bi
 export function notificationThread(reply, number, { head = null, binding = null, kind = 'issue' } = {}) {
   const observed = identity(reply, binding, kind), snapshot = snapshotToken(reply.snapshot_token);
   if (head !== null && head !== snapshot) fail('Notification snapshot moved. Reload explicitly.');
-  if (reply.type !== replyType(kind, 'thread') || typeof reply.found !== 'boolean') fail('Invalid notification thread response.');
+  if (reply.type !== notificationReplyType(kind, 'thread') || typeof reply.found !== 'boolean') fail('Invalid notification thread response.');
   if (reply.found) {
     notificationState(reply.thread, kind);
-    if (reply.thread.number !== number) fail('Notification issue number changed.');
-  } else if (reply.thread !== null) fail('Missing notification issue has state.');
+    if (reply.thread.number !== number) fail('Notification target number changed.');
+  } else if (reply.thread !== null) fail('Missing notification target has state.');
   return { reply, binding: observed, head: snapshot };
 }
 const profile = Object.freeze({ kind: 'notification', mutationRequest: notificationMutationRequest, page: notificationPage, history: notificationThread });
@@ -103,4 +103,14 @@ const discussionProfile = Object.freeze({
 export class DiscussionNotificationClient extends IssueClient {
   constructor(options) { super(options, discussionProfile); }
   get targetKind() { return 'discussion'; }
+}
+
+const pullRequestProfile = Object.freeze({
+  kind: 'pull_request_notification', mutationRequest: notificationMutationRequest,
+  page: (reply, options) => notificationPage(reply, { ...options, kind: 'pull_request' }),
+  history: (reply, number, options) => notificationThread(reply, number, { ...options, kind: 'pull_request' }),
+});
+export class PullRequestNotificationClient extends IssueClient {
+  constructor(options) { super(options, pullRequestProfile); }
+  get targetKind() { return 'pull_request'; }
 }
