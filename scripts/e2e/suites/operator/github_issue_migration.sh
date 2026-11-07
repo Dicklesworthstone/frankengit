@@ -53,8 +53,12 @@ import json
 import sys
 from pathlib import Path
 
+def require(condition, detail='issue acquisition journal check failed'):
+    if not condition:
+        raise AssertionError(detail)
+
 summary = json.loads(Path(sys.argv[1]).read_text())
-assert summary['complete'] is True
+require(summary['complete'] is True)
 root = Path(sys.argv[2])
 commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
 source_calls = []
@@ -66,19 +70,19 @@ for row in commands:
     index = 3 if preloaded else 1
     name, operation = Path(command[index]).name, command[index + 1]
     if name == 'import_github_issues.mjs' and operation in ('discover', 'inspect-inventory', 'capture-batch'):
-        assert preloaded
+        require(preloaded)
         args = command[index + 2:]
         flag = '--out' if operation == 'discover' else '--inventory'
         fmt = Path(args[args.index(flag) + 1]).relative_to(root).parts[0]
         source_calls.append((fmt, operation, row['exit']))
     elif name == 'capture_github_issue_migration.mjs':
-        assert preloaded
+        require(preloaded)
     elif name in ('import_github_issues.mjs', 'migrate_github_issues.mjs'):
-        assert not preloaded, 'native destination child received the source fixture'
+        require(not preloaded, 'native destination child received the source fixture')
 for fmt in ('sha1', 'sha256'):
     for operation in ('discover', 'inspect-inventory', 'capture-batch'):
         exits = {code for selected, op, code in source_calls if selected == fmt and op == operation}
-        assert {0, 2} <= exits, (fmt, operation, exits)
+        require({0, 2} <= exits, (fmt, operation, exits))
 print('both hash domains execute source discovery/inspection/batch-capture success and refusal; native children have no preload')
 PY
 fge_assert_exit OPERATOR-GITHUB-ISSUE-003 0 "$FGE_LAST_EXIT" 'actual source CLI success/refusal dispatch and native fixture isolation read back'
