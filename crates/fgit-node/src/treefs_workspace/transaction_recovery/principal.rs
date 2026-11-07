@@ -2,14 +2,15 @@
 //! Missing retained evidence never changes knowledge of the terminal decision.
 
 use super::{RecoveryFailure, RequestRecovery, recovery_checkpoint};
-use crate::{LoopbackReceiveSession, NodeRequestContext, OneNode};
-use fgit_admission::AdmissionContext;
+use crate::{AdmissionMaterializationRefusal, LoopbackReceiveSession, NodeRequestContext, OneNode};
 use fgit_admission::evidence::{PrincipalSnapshotRecord, RefusalEvidence, evidence_root};
-use fgit_authority::{AsyncAuthorityStore, HeadRead, ImmutableKey, ImmutableRead};
+use fgit_admission::{AdmissionContext, ProjectionFailure};
+use fgit_authority::{AsyncAuthorityStore, HeadRead, ImmutableKey, ImmutableRead, OutcomeFailure};
 use fgit_codec::{
-    CanonicalBody, CryptoBodyIdentity, DecodeLimits, RefusalRecordBody, body_id, decode_body,
+    CanonicalBody, CryptoBodyIdentity, DecodeLimits, RefusalRecordBody,
+    RepositoryAuthorityHeadBody, body_id, decode_body,
 };
-use fgit_types::{DecisionOutcome, Digest, InternalObjectId};
+use fgit_types::{DecisionOutcome, Digest, InternalObjectId, RefusalCode};
 
 const MAX_EVIDENCE_FRAME: usize = 64 * 1024;
 
@@ -70,18 +71,17 @@ impl OneNode {
             return Err(invalid("principal recovery repository"));
         }
         let mut walked = 0;
-        let cancelled = || recovery_checkpoint(request).is_err();
+        let checkpoint = || recovery_checkpoint(request);
         let (snapshot_id, basis) = loop {
             recovery_checkpoint(request).map_err(RecoveryFailure::Interrupted)?;
-            let (basis, batch) = match crate::capsule_history::predecessor_in(
+            let (basis, batch) = match history_step_in(
                 &self.authority,
                 request.authority(),
                 &successor,
                 &mut walked,
-                &cancelled,
+                &checkpoint,
             )
-            .await
-            .map_err(|_| invalid("original decision history unavailable"))?
+            .await?
             {
                 crate::capsule_history::HistoryStep::Genesis => {
                     return Err(invalid("original decision not retained"));
@@ -198,6 +198,54 @@ impl OneNode {
         recovery_checkpoint(request).map_err(RecoveryFailure::Interrupted)?;
         Ok(Some(snapshot))
     }
+}
+
+/// Read one authenticated history edge without changing an already established
+/// terminal outcome. The shared reader still owns identity, transition and
+/// replay-bound checks; this boundary preserves why it could not finish.
+pub(super) async fn history_step_in<S, C>(
+    store: &S,
+    cx: &S::Context,
+    successor: &RepositoryAuthorityHeadBody,
+    walked: &mut usize,
+    checkpoint: &C,
+) -> Result<crate::capsule_history::HistoryStep, RecoveryFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
+    crate::capsule_history::predecessor_in(store, cx, successor, walked, &|| checkpoint().is_err())
+        .await
+        .map_err(|error| {
+            if let AdmissionMaterializationRefusal::DecisionHistory(ref cause) = error
+                && let OutcomeFailure::ReplayBoundExceeded { limit } = cause.as_ref()
+            {
+                return RecoveryFailure::BoundExceeded {
+                    field: "principal history",
+                    limit: *limit,
+                    observed: walked.saturating_add(1),
+                };
+            }
+            match error {
+                AdmissionMaterializationRefusal::Cancelled => RecoveryFailure::Interrupted(
+                    checkpoint()
+                        .err()
+                        .unwrap_or(RefusalCode::CancellationInProgress),
+                ),
+                AdmissionMaterializationRefusal::Authority(error) => {
+                    RecoveryFailure::Authority(error)
+                }
+                error => match crate::async_projection_unavailable(error) {
+                    ProjectionFailure::Unavailable(
+                        code @ (RefusalCode::CancellationInProgress
+                        | RefusalCode::ResourceBudgetExceeded
+                        | RefusalCode::DurabilityProfileUnavailable
+                        | RefusalCode::ExternalEffectIndeterminate),
+                    ) => RecoveryFailure::Interrupted(code),
+                    _ => invalid("original decision history unavailable"),
+                },
+            }
+        })
 }
 
 async fn read_frame(

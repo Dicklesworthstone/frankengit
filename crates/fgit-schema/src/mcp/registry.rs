@@ -82,7 +82,7 @@ const fn entry() -> McpToolEntry {
     panic!("native branch registry contract missing")
 }
 const TRANSACTION: McpToolEntry = entry();
-const ADDITIONS: [McpToolEntry; 52] = [
+const ADDITIONS: &[McpToolEntry] = &[
     agent_context::ENTRY,
     artifacts::INSPECT,
     artifacts::READ,

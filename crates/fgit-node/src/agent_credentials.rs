@@ -61,6 +61,18 @@ fn refused(code: RefusalCode) -> NodeReceiveTransportRefusal {
     )))
 }
 
+fn materialization_refused(
+    error: crate::AdmissionMaterializationRefusal,
+) -> NodeReceiveTransportRefusal {
+    // Selection has not authorized a request or published a decision. Preserve
+    // the materializer's interruption, availability and integrity distinctions
+    // instead of reporting every failed read as a stale authority receipt.
+    match crate::async_projection_unavailable(error) {
+        fgit_admission::ProjectionFailure::Unavailable(code)
+        | fgit_admission::ProjectionFailure::Refuse(code) => refused(code),
+    }
+}
+
 fn checkpoint(request: &NodeRequestContext) -> Result<(), NodeReceiveTransportRefusal> {
     match crate::checkpoint_pack_context(request.authority()) {
         crate::PackContextCheckpoint::Live => Ok(()),
@@ -142,7 +154,7 @@ impl OneNode {
         let selected = self
             .materialize_admission_in(request)
             .await
-            .map_err(|_| refused(RefusalCode::AuthorityReceiptStale))?;
+            .map_err(materialization_refused)?;
         let states = ledger::read_all_at(
             &self.authority,
             request.authority(),
@@ -204,7 +216,7 @@ impl OneNode {
         let selected = self
             .materialize_admission_in(request)
             .await
-            .map_err(|_| refused(RefusalCode::AuthorityReceiptStale))?;
+            .map_err(materialization_refused)?;
         let id = agent_credential_id(bearer)
             .map_err(|_| NodeReceiveTransportRefusal::Unauthenticated)?;
         let state = ledger::read_at(

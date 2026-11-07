@@ -19,6 +19,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../../tests/authority_read_fault.rs"]
+mod read_fault;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
@@ -295,6 +298,168 @@ fn committed_and_refused_outcomes_recover_after_reopen_without_inputs_or_serving
         }
         assert_eq!(head(&reopened), before);
         reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn principal_history_faults_preserve_their_class_and_the_known_terminal_outcome() {
+    use read_fault::{Fault, ReadFault};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let command = imported(&node, &scratch, format);
+        let original_session = session(b"history-read-faults");
+        let terminal = node
+            .runtime()
+            .block_on(node.admit_pull_request_durable_in(
+                &node.request_context(),
+                &original_session,
+                &command,
+                AdmissionLimits::default(),
+            ))
+            .unwrap()
+            .1;
+        assert!(matches!(
+            terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let report = recover(&node, b"history-read-faults").unwrap();
+        assert_eq!(report.terminal(), Some(terminal));
+        let original = node
+            .runtime()
+            .block_on(node.recover_transaction_principal_in(
+                &node.request_context(),
+                &original_session,
+                &report,
+            ))
+            .unwrap()
+            .unwrap();
+        let before = head(&node);
+        let fgit_authority::HeadRead::Present(receipt) = &before else {
+            panic!("a real committed decision has an authority head");
+        };
+        let successor: fgit_codec::RepositoryAuthorityHeadBody =
+            fgit_codec::decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT).unwrap();
+
+        // Fail both the predecessor and decision-body read after reaching an
+        // already authenticated head. These are real history readers, native
+        // contexts and frames; only the exact selected read is intercepted.
+        for identity in [
+            *successor
+                .predecessor_head_id
+                .unwrap()
+                .as_internal_object_id(),
+            *successor.decision_tail_id.unwrap().as_internal_object_id(),
+        ] {
+            let key = fgit_authority::body_key_for_id(&identity).unwrap();
+            for (fault, expected) in [
+                (Fault::Cancel, Some(RefusalCode::CancellationInProgress)),
+                (Fault::Deadline, Some(RefusalCode::CancellationInProgress)),
+                (Fault::Capacity, Some(RefusalCode::ResourceBudgetExceeded)),
+                (
+                    Fault::Unavailable,
+                    Some(RefusalCode::DurabilityProfileUnavailable),
+                ),
+                (
+                    Fault::NoResponse,
+                    Some(RefusalCode::ExternalEffectIndeterminate),
+                ),
+                (Fault::Absent, None),
+                (Fault::Corrupt, None),
+            ] {
+                let store = ReadFault::new(&node, key.clone(), fault);
+                let request = node.request_context();
+                let error = node
+                    .runtime()
+                    .block_on(super::principal::history_step_in(
+                        &store,
+                        request.authority(),
+                        &successor,
+                        &mut 0,
+                        &|| Ok(()),
+                    ))
+                    .unwrap_err();
+                assert!(
+                    store.fired(),
+                    "selected history read must be reached: {fault:?}"
+                );
+                match expected {
+                    Some(expected) => assert!(
+                        matches!(&error, RecoveryFailure::Interrupted(code) if *code == expected),
+                        "x2mv.4.51: {fault:?} must retain {expected:?}, got {error:?}"
+                    ),
+                    None => assert!(
+                        matches!(error, RecoveryFailure::Integrity { .. }),
+                        "x2mv.4.51 integrity twin: {fault:?} must remain an integrity failure: {error:?}"
+                    ),
+                }
+                assert_eq!(report.terminal(), Some(terminal));
+                assert_eq!(head(&node), before, "a provenance read never publishes");
+                assert_eq!(
+                    node.runtime()
+                        .block_on(node.recover_transaction_principal_in(
+                            &node.request_context(),
+                            &original_session,
+                            &report,
+                        ))
+                        .unwrap(),
+                    Some(original.clone()),
+                    "permitted twin: retry recovers the original principal without another decision"
+                );
+            }
+        }
+
+        // The history reader only receives a cancellation predicate. Retain
+        // the actual caller checkpoint reason when a resource budget ends it.
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let mut walked = 0;
+        let request = node.request_context();
+        let error = node
+            .runtime()
+            .block_on(super::principal::history_step_in(
+                &node.authority,
+                request.authority(),
+                &successor,
+                &mut walked,
+                &|| {
+                    if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(())
+                    } else {
+                        Err(RefusalCode::ResourceBudgetExceeded)
+                    }
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(walked, 1, "the budget expires inside the history step");
+        assert!(matches!(
+            error,
+            RecoveryFailure::Interrupted(RefusalCode::ResourceBudgetExceeded)
+        ));
+
+        let mut walked = fgit_authority::MAX_REPLAY_BATCHES;
+        let error = node
+            .runtime()
+            .block_on(super::principal::history_step_in(
+                &node.authority,
+                request.authority(),
+                &successor,
+                &mut walked,
+                &|| Ok(()),
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RecoveryFailure::BoundExceeded {
+                field: "principal history",
+                limit: fgit_authority::MAX_REPLAY_BATCHES,
+                observed,
+            } if observed == fgit_authority::MAX_REPLAY_BATCHES + 1
+        ));
+        assert_eq!(report.terminal(), Some(terminal));
+        assert_eq!(recover(&node, b"history-read-faults").unwrap(), report);
+        node.shutdown().unwrap();
     }
 }
 

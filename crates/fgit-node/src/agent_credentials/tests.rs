@@ -19,6 +19,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "../tests/authority_read_fault.rs"]
+mod read_fault;
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
@@ -197,6 +200,90 @@ fn install_administrators(node: &OneNode) {
             ))
             .unwrap(),
     );
+}
+
+#[test]
+fn agent_materialization_preserves_interruption_availability_and_integrity() {
+    use read_fault::{Fault, ReadFault};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = scratch.node(format);
+        let token = bearer('a');
+        committed(credential(
+            &node,
+            &issue_command(&token, grant(&node)),
+            actor(1),
+            "materialization-fault-twin",
+        ));
+        let live = node.request_context();
+        let selected = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&live))
+            .unwrap();
+        let key = crate::admission_immutable_key(
+            crate::ADMISSION_REF_STATE_KEY_PREFIX,
+            node.repository_id,
+            selected.basis().body().ref_root,
+        )
+        .unwrap();
+        for (fault, expected) in [
+            (Fault::Cancel, RefusalCode::CancellationInProgress),
+            (Fault::Deadline, RefusalCode::CancellationInProgress),
+            (Fault::Capacity, RefusalCode::ResourceBudgetExceeded),
+            (
+                Fault::Unavailable,
+                RefusalCode::DurabilityProfileUnavailable,
+            ),
+            (Fault::NoResponse, RefusalCode::ExternalEffectIndeterminate),
+            (Fault::Absent, RefusalCode::EvidenceMissing),
+            (Fault::Corrupt, RefusalCode::CanonicalFramingInvalid),
+        ] {
+            let store = ReadFault::new(&node, key.clone(), fault);
+            let request = node.request_context();
+            let error = node
+                .runtime()
+                .block_on(node.admission_materializer.materialize_exact_in(
+                    &store,
+                    request.authority(),
+                    node.repository_id,
+                    selected.basis(),
+                    selected.authenticated(),
+                    &|| false,
+                ))
+                .unwrap_err();
+            assert!(
+                store.fired(),
+                "the selected canonical read was reached: {fault:?}"
+            );
+            let surfaced = materialization_refused(error);
+            assert!(
+                matches!(
+                    &surfaced,
+                    NodeReceiveTransportRefusal::Admission(error)
+                        if matches!(error.as_ref(), AdmissionError::AsyncProjectionUnavailable(code) if *code == expected)
+                ),
+                "x2mv.4.51: {fault:?} must retain {expected:?}, got {surfaced:?}"
+            );
+
+            // The read fault cannot revoke a credential or alter canonical
+            // authority. Both public callers succeed with a fresh live request.
+            let listed = node
+                .runtime()
+                .block_on(node.read_agent_credentials_in(&node.request_context()))
+                .unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, agent_credential_id(token.as_bytes()).unwrap());
+            let run = authentication(&node, &token, "after-materialization-fault", ISSUES_READ);
+            assert_eq!(run.authentication.agent(), actor(2));
+            let retry = node
+                .runtime()
+                .block_on(node.materialize_admission_in(&node.request_context()))
+                .unwrap();
+            assert_eq!(retry.basis(), selected.basis());
+        }
+        node.shutdown().unwrap();
+    }
 }
 
 #[test]
