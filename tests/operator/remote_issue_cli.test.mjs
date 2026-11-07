@@ -9,6 +9,7 @@ import { mkdtemp, readFile, writeFile, chmod, mkdir, stat, readdir, symlink, lin
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { once } from 'node:events';
 import { prepareIssue, issueCanonical, parseIssueJson } from '../../scripts/operator/remote_issue.mjs';
 import { saveIssueIntent, loadIssueIntent, readIssuePrivate, saveIssueRecord } from '../../scripts/operator/issue_files.mjs';
 import { runIssueCli } from '../../scripts/remote_issue.mjs';
@@ -330,4 +331,111 @@ test('CLI unsupported append never silently retries using strict comment', async
   const sent = await invoke(f.sendArgs(p.value.key)); assert.equal(sent.code, 3); assert.equal(sent.value.outcome_unknown, true);
   assert.equal(f.calls.length, 2); assert.equal(f.calls[1].path, '/repo.git/api/v1/issues/7/append-comment');
   assert.equal((await loadIssueIntent(f.slot)).key, p.value.key);
+});
+
+async function boundedOutput(promise, milliseconds = 4000) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('remote issue CLI retained blocked output')), milliseconds);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+function blockedOutput(t, args, { fillOut = false, fillError = false } = {}) {
+  // Host-IO control only: real inherited descriptors reach EAGAIN. The peer,
+  // command, request bytes and canonical outcome are never replaced by it.
+  const loader = `import {writeSync} from 'node:fs'; void process.stdout; void process.stderr;
+    const fds=${JSON.stringify([...(fillOut ? [1] : []), ...(fillError ? [2] : [])])};
+    const bytes=Buffer.alloc(4096,32); let blocked;
+    const fill=()=>{blocked=fds.map(fd=>{for(let i=0;i<2048;i++){try{writeSync(fd,bytes);}catch(e){
+      if(!['EAGAIN','EWOULDBLOCK'].includes(e.code))throw e;return true;}}return false;});};
+    fill(); await new Promise(resolve=>setTimeout(resolve,20)); fill();
+    writeSync(3,blocked.every(Boolean)?'B':'N');`;
+  const prefill = fillOut || fillError;
+  const child = spawn(process.execPath, [...(prefill ? ['--import', 'data:text/javascript,' + encodeURIComponent(loader)] : []), cli, ...args],
+    { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+  const errors = [], control = [];
+  if (!fillError) child.stderr.on('data', bytes => errors.push(bytes));
+  child.stdio[3].on('data', bytes => control.push(bytes));
+  const exited = once(child, 'exit').then(([code, signal]) => ({ code, signal }));
+  const started = once(child.stdout, 'readable'), errorsClosed = once(child.stderr, 'close'), controlClosed = once(child.stdio[3], 'close');
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+    child.stdout.destroy(); child.stderr.destroy(); child.stdio[3].destroy();
+  });
+  return { child, exited, started, errorsClosed, controlClosed,
+    errors: () => Buffer.concat(errors).toString(), control: () => Buffer.concat(control).toString() };
+}
+
+test('large inspect output drains intact without changing the saved request', async t => {
+  const f = await fixture(t, { input: { fields: { body: '\u007f'.repeat(48 * 1024) } } });
+  assert.equal((await f.prepare()).code, 0);
+  const before = await readFile(join(f.slot, 'intent.json')), result = await invoke(['inspect', '--request-dir', f.slot]);
+  assert.equal(result.code, 0); assert.equal(result.signal, null); assert.ok(result.stdout.length > 400000);
+  assert.deepEqual(result.value.intent, JSON.parse(before)); assert.equal(f.calls.length, 0);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});
+for (const signal of ['SIGINT', 'SIGTERM']) test(`large inspect output drains on ${signal} with custody intact`, async t => {
+  const f = await fixture(t, { input: { fields: { body: '\u007f'.repeat(48 * 1024) } } });
+  assert.equal((await f.prepare()).code, 0);
+  const before = await readFile(join(f.slot, 'intent.json'));
+  const run = blockedOutput(t, ['inspect', '--request-dir', f.slot]);
+  await boundedOutput(run.started, 2000); assert.ok(run.child.stdout.readableLength > 0);
+  run.child.kill(signal);
+  assert.deepEqual(await boundedOutput(run.exited, 1500), { code: 3, signal: null }); await run.errorsClosed;
+  const error = JSON.parse(run.errors());
+  assert.equal(error.type, 'remote_issue_output_failure'); assert.equal(error.code, 'operator_output_cancelled_or_deadline');
+  assert.equal(error.operation_completed, true); assert.equal(error.native_result, null);
+  assert.equal(error.absence_proves_non_commit, false); assert.equal(f.calls.length, 0);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});
+
+for (const operation of ['send', 'recover']) test(`${operation} deadline bounds blocked output and preserves the terminal result`, async t => {
+  const f = await fixture(t), p = await f.prepare(); assert.equal(p.code, 0);
+  const before = await readFile(join(f.slot, 'intent.json')), record = join(f.directory, 'result.json');
+  if (operation === 'recover') f.setState('committed');
+  const args = operation === 'send' ? f.sendArgs(p.value.key) : f.recoverArgs;
+  const run = blockedOutput(t, [...args, '--timeout-ms', '1500', '--record', record], { fillOut: true });
+  assert.deepEqual(await boundedOutput(run.exited), { code: 3, signal: null }); await run.errorsClosed; await run.controlClosed;
+  assert.equal(run.control(), 'B');
+  const error = JSON.parse(run.errors()), saved = JSON.parse(await readFile(record, 'utf8'));
+  assert.equal(error.type, 'remote_issue_output_failure'); assert.equal(error.code, 'operator_output_cancelled_or_deadline');
+  assert.equal(error.operation_completed, true); assert.equal(error.outcome_unknown, false);
+  assert.equal(error.absence_proves_non_commit, false); assert.deepEqual(error.native_result, saved);
+  assert.equal(saved.outcome.state, 'committed'); assert.equal(saved.key, p.value.key);
+  assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, operation === 'send' ? 1 : 0);
+  const recovered = await invoke([...f.recoverArgs, '--timeout-ms', '1500', '--known', record]);
+  assert.equal(recovered.code, 0); assert.equal(recovered.value.outcome.state, 'committed'); assert.equal(recovered.value.key, p.value.key);
+  assert.equal(f.calls.filter(call => !call.path.endsWith('/outcomes')).length, operation === 'send' ? 1 : 0);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+});
+
+test('blocked output and diagnostics both drain without losing a saved terminal record', async t => {
+  const f = await fixture(t), p = await f.prepare(); assert.equal(p.code, 0); f.setState('committed');
+  const before = await readFile(join(f.slot, 'intent.json')), record = join(f.directory, 'result.json');
+  const run = blockedOutput(t, [...f.recoverArgs, '--timeout-ms', '1500', '--record', record], { fillOut: true, fillError: true });
+  assert.deepEqual(await boundedOutput(run.exited), { code: 3, signal: null }); await run.controlClosed;
+  assert.equal(run.control(), 'B');
+  const saved = JSON.parse(await readFile(record, 'utf8')); assert.equal(saved.outcome.state, 'committed');
+  assert.equal(saved.key, p.value.key); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].body, '');
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
+  const recovered = await invoke([...f.recoverArgs, '--known', record]); assert.equal(recovered.code, 0);
+  assert.deepEqual(recovered.value.outcome, saved.outcome); assert.equal(recovered.value.key, saved.key);
+});
+
+test('repeated cancellation remains owned until blocked diagnostics finish draining', async t => {
+  const f = await fixture(t, { input: { fields: { body: '\u007f'.repeat(48 * 1024) } } });
+  assert.equal((await f.prepare()).code, 0);
+  const before = await readFile(join(f.slot, 'intent.json'));
+  const run = blockedOutput(t, ['inspect', '--request-dir', f.slot], { fillError: true });
+  await boundedOutput(run.started, 2000); assert.ok(run.child.stdout.readableLength > 0);
+  run.child.kill('SIGTERM');
+  // Send repeats inside the 250ms diagnostics drain, not indefinitely through
+  // Node's later runtime teardown where its signal watchers no longer exist.
+  for (let i = 0; i < 3; i++) {
+    await new Promise(resolve => setTimeout(resolve, 25)); run.child.kill('SIGTERM');
+  }
+  assert.deepEqual(await boundedOutput(run.exited, 1500), { code: 3, signal: null });
+  await run.controlClosed; assert.equal(run.control(), 'B'); assert.equal(f.calls.length, 0);
+  assert((await readFile(join(f.slot, 'intent.json'))).equals(before));
 });
