@@ -1,14 +1,14 @@
-# Remote issue and discussion inbox operator
+# Remote issue, discussion and pull request inbox operator
 
 `node scripts/forge_inbox.mjs` reads an authenticated principal's inbox and
 publishes subscription, mute and read-prefix changes through the existing native
-HTTP notification API. It supports both issue and discussion inboxes, retained
+HTTP notification API. It supports issue, discussion and pull request inboxes, retained
 snapshot pagination, and recovery from a saved original request after an
 interruption or a process restart. It does not need access to the server's
 storage directory.
 
 The operator uses the shipped `NotificationClient` and
-`DiscussionNotificationClient`. Their existing form encoding, request-key
+`DiscussionNotificationClient` and `PullRequestNotificationClient`. Their form encoding, request-key
 domains, credential binding, response checks and outcome lookup remain in
 charge. The HTTP server authenticates the actor on every request. The
 `expected-principal` and `expected-incarnation` options are equality guards;
@@ -35,6 +35,7 @@ Select the target kind and its exact UI URL explicitly:
 | --- | --- | --- |
 | `issue` | `/REPOSITORY_ROUTE/ui/notifications/` | `issues-read` |
 | `discussion` | `/REPOSITORY_ROUTE/ui/discussion-notifications/` | `discussions-read` |
+| `pull_request` | `/REPOSITORY_ROUTE/ui/pull-notifications/` | `pulls-read` and `reviews-read` |
 
 The corresponding native service must be enabled. Preference writes additionally
 require `notifications-write`; status and retry outcome lookup require the
@@ -53,7 +54,9 @@ response and saved request.
 
 The examples assume `TOKEN_FILE`, `TENANT` and `REPOSITORY` identify the intended
 connection. Start with a current read to observe the principal, incarnation,
-thread version and preference version:
+thread version and preference version. For PRs, `activity_version` is the
+observed prefix across lifecycle changes, comments and reviews; it is independent
+of the PR metadata version and each reviewer's own version:
 
 ```sh
 node scripts/forge_inbox.mjs list \
@@ -115,7 +118,7 @@ control characters without changing the parsed string values.
 
 Every new mutation requires a new `--record` path, the exact observed preference
 version, and both observed identity guards. The preference version is independent
-of the issue or discussion version. Use `--expected-version 0` when the returned
+of the issue or discussion version and the PR activity prefix. Use `--expected-version 0` when the returned
 `preference_version` is `null`.
 
 | Operation | Change |
@@ -145,8 +148,10 @@ performs canonical admission after that check: a racing preference write can
 produce a terminal refusal, while a new comment at thread version 5 remains
 unread after a successful acknowledgement through version 4.
 
-Issue 7 and discussion 7 have independent state and request-key domains. Changing
-the URL or kind cannot reinterpret an issue request as a discussion preference.
+Issue 7, discussion 7 and PR 7 have independent state and request-key domains.
+Changing the URL or kind cannot reinterpret one kind's saved request as another
+kind's preference. For PR `read` operations, pass the observed `activity_version`
+as `--read-through`; concurrent review or comment activity remains unread.
 
 ## Durable request custody and recovery
 
@@ -231,15 +236,14 @@ node --test tests/operator/forge-inbox.test.mjs
 
 The suite exercises the production operator and shipped clients through real
 loopback HTTP, private files, synchronization failures and fresh CLI processes.
-It covers both namespaces, all five preference actions, snapshot and identity
+It covers all three namespaces, all five preference actions, snapshot and identity
 drift, bounded reads, racing activity, original-key retry, a lost reply,
 `SIGKILL` restart, malformed terminal replies, tampering, cancellation and
 unsafe file permissions. Its HTTP authority is deliberately simulated; these
 tests are not a native Rust server campaign or evidence that every platform's
 storage durability profile has been qualified. See
 [native notifications](NATIVE_NOTIFICATIONS.md) for the server protocol and
-remaining notification functionality, including PR inboxes and external
-notification delivery.
+remaining notification functionality, including external notification delivery.
 
 The discovered `scripts/e2e/suites/operator/remote_issue.sh` campaign also runs
 the shipped inbox CLI against `fg serve-http`, with separate `fg inbox` reads

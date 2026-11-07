@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Pull request inbox</title>
+  <link rel="stylesheet" href="browser.css">
+  <script type="module" src="notifications-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Pull request inbox</span><a href="../notifications/">Issue inbox</a><a href="../discussion-notifications/">Discussion inbox</a><a href="../pulls/">Pull requests</a><a href="../">Source browser</a></header>
+  <main>
+    <h1>Your pull request inbox</h1>
+    <p>Follow pull requests you opened, commented on, reviewed, or explicitly subscribed to. Your read state and preferences follow your repository identity.</p>
+    <form id="inbox-connect"><label>Access token<input id="inbox-token" type="password" maxlength="64" autocomplete="off" spellcheck="false" required></label><button type="submit">Connect</button><button id="inbox-disconnect" type="button">Disconnect</button></form>
+    <p class="hint">Use pulls-read and reviews-read to browse all PR activity, plus notifications-write to manage your inbox. outcomes-read allows recovery of an interrupted change. Your token stays in memory.</p>
+    <p id="inbox-status" role="status" aria-live="polite">Connect your repository token.</p>
+    <form id="inbox-filters"><label><input id="inbox-unread" type="checkbox">Unread only</label><label><input id="inbox-muted" type="checkbox">Include muted pull requests</label><button type="submit">Refresh inbox</button><button id="inbox-cancel" type="button">Cancel read</button></form>
+    <form id="inbox-show"><label>Find a pull request to follow<input id="inbox-number" inputmode="numeric" autocomplete="off" required></label><button type="submit">Show pull request preferences</button></form>
+    <p id="inbox-snapshot" class="hint"></p>
+    <section id="inbox-content" aria-label="Notification threads"></section>
+    <nav id="inbox-paging" aria-label="Inbox pagination"></nav>
+    <section id="inbox-pending" hidden aria-labelledby="pending-title">
+      <h2 id="pending-title">Unresolved preference change</h2>
+      <p>A missing response does not establish whether the change committed. Keep its original request while checking the outcome or retrying.</p>
+      <pre id="inbox-pending-summary"></pre>
+      <button id="inbox-recover" type="button">Check outcome</button><button id="inbox-retry" type="button">Retry original request</button><button id="inbox-save" type="button">Save recovery receipt</button><button id="inbox-discard" type="button">Discard unsent change</button>
+    </section>
+    <section><h2>Resume an interrupted change</h2><label>Saved recovery receipt<input id="inbox-restore" type="file" accept="application/json,.json"></label><p class="hint">Connect the original token before restoring. A receipt contains the exact request and retry key, but no token. Restoring does not send it.</p></section>
+  </main>
+  <footer>Pull requests are ordered by number. A read action covers the activity version shown, including lifecycle changes, comments and reviews; later activity stays unread. Muting suppresses the thread until you subscribe or restore automatic participation.</footer>
+</body>
+</html>

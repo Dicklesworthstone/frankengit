@@ -7,11 +7,12 @@ import { operatorError, operatorJson } from './lib/forge-operator-io.mjs';
 import { runOperatorCli } from './lib/forge-operator-cli.mjs';
 
 export const HELP = `Usage: node scripts/forge_inbox.mjs OPERATION
-  --kind issue|discussion --url EXACT_INBOX_PAGE_URL
+  --kind issue|discussion|pull_request --url EXACT_INBOX_PAGE_URL
   --tenant-id HEX --repository-id HEX --token-file PRIVATE_FILE
 
 Issue URL: https://HOST/REPOSITORY_ROUTE/ui/notifications/
 Discussion URL: https://HOST/REPOSITORY_ROUTE/ui/discussion-notifications/
+Pull request URL: https://HOST/REPOSITORY_ROUTE/ui/pull-notifications/
 list: [--limit 1..100 --max-pages 1..100] [--unread-only] [--include-muted]
   [--after N --expected-head TOKEN --expected-principal HEX --expected-incarnation HEX]
 show: --number N [--expected-head TOKEN --expected-principal HEX --expected-incarnation HEX]
@@ -24,7 +25,10 @@ subscribe|mute|automatic|unread:
 read: the same fields plus --read-through OBSERVED_THREAD_VERSION
 expected-version is the exact PREFERENCE version; use 0 for no preference stream.
 Identity guards constrain the authenticated recipient; they never choose one.
-read acknowledges only the given prefix, even if a newer comment arrives.
+read acknowledges only the given prefix, even if newer activity arrives.
+For pull_request use activity_version: lifecycle changes, comments and reviews.
+Pull request HTTP operations require pulls-read and reviews-read; preference changes
+also require notifications-write.
 
 status|retry: connection options and ORIGINAL --record only.
 status never writes. retry observes first, then may send the SAME request/key once.

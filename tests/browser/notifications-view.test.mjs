@@ -4,18 +4,19 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Element } from './search-dom-fixture.mjs';
-import { NotificationClient, DiscussionNotificationClient } from '../../crates/fgit-node/src/smart_http/server/browser/notifications.mjs';
+import { NotificationClient, DiscussionNotificationClient, PullRequestNotificationClient } from '../../crates/fgit-node/src/smart_http/server/browser/notifications.mjs';
 import { mountNotificationInbox } from '../../crates/fgit-node/src/smart_http/server/browser/notifications-view.mjs';
 
-for (const kind of ['issue', 'discussion']) {
+for (const kind of ['issue', 'discussion', 'pull_request']) {
   const test = (name, ...args) => nodeTest(kind + ': ' + name, ...args);
-  const Client = kind === 'discussion' ? DiscussionNotificationClient : NotificationClient;
-  const versionField = kind === 'discussion' ? 'discussion_version' : 'issue_version';
-  const responseType = suffix => kind === 'discussion' ? 'discussion_notification_' + suffix : 'notification_' + suffix;
-  const href = 'https://forge.example/repo.git/ui/' + (kind === 'discussion' ? 'discussion-notifications' : 'notifications') + '/';
+  const Client = ({ issue: NotificationClient, discussion: DiscussionNotificationClient, pull_request: PullRequestNotificationClient })[kind];
+  const versionField = ({ issue: 'issue_version', discussion: 'discussion_version', pull_request: 'activity_version' })[kind];
+  const pageName = ({ issue: 'notifications', discussion: 'discussion-notifications', pull_request: 'pull-notifications' })[kind];
+  const responseType = suffix => (kind === 'issue' ? 'notification' : kind + '_notification') + '_' + suffix;
+  const href = 'https://forge.example/repo.git/ui/' + pageName + '/';
   const token = 'c'.repeat(64), head = `alg:2:${'b'.repeat(64)}`;
   const ids = { schema_version: 1, tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32),
-    principal_id: '3'.repeat(32), repository_incarnation: '4'.repeat(32), ...(kind === 'discussion' ? { target_kind: 'discussion' } : {}) };
+    principal_id: '3'.repeat(32), repository_incarnation: '4'.repeat(32), ...(kind === 'issue' ? {} : { target_kind: kind }) };
   const row = { number: 7, [versionField]: 4, title: 'Private issue 雪 <script>inert</script>', state: 'open',
     preference_version: 2, mode: 'automatic', read_through: 1, latest_other_version: 3,
     unread: true, reasons: ['author', 'participant'] };
@@ -34,7 +35,7 @@ for (const kind of ['issue', 'discussion']) {
     fire(name, event = { preventDefault() {} }) { return Promise.all((this.listeners.get(name) ?? []).map(fn => fn(event))); }
   }
   function harness(respond = () => json(page), cryptoImpl = webcrypto) {
-    const html = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/' + (kind === 'discussion' ? 'discussion-notifications' : 'notifications') + '.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/' + pageName + '.html', import.meta.url), 'utf8');
     const elements = new Map();
     const document = { getElementById: id => elements.get(id), createElement: tag => new ViewElement(tag, document) };
     document.defaultView = new ViewElement('window', document);

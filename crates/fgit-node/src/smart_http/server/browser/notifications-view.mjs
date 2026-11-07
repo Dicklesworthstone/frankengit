@@ -1,11 +1,11 @@
-import { NotificationClient, DiscussionNotificationClient, notificationState } from './notifications.mjs';
+import { NotificationClient, DiscussionNotificationClient, PullRequestNotificationClient, notificationState, notificationVersionField, notificationReplyType } from './notifications.mjs';
 import { decimal, MAX_RECEIPT_BYTES } from './issues.mjs';
 
 // Capture the observed thread/preference versions, never a later refreshed one.
 export function threadAction(row, action, kind = 'issue') {
   notificationState(row, kind);
   if (!['read', 'unread', 'subscribe', 'mute', 'automatic'].includes(action)) throw new Error('Unknown inbox action.');
-  return [row.number, row.preference_version ?? 0, action, action === 'read' ? { read_through: row[kind === 'discussion' ? 'discussion_version' : 'issue_version'] } : {}];
+  return [row.number, row.preference_version ?? 0, action, action === 'read' ? { read_through: row[notificationVersionField(kind)] } : {}];
 }
 export class NotificationInboxController {
   #client; #epoch = 0; #page = null; #options = { unreadOnly: false, includeMuted: false };
@@ -15,7 +15,7 @@ export class NotificationInboxController {
   disconnect() { this.cancel(); this.#client.disconnect(); this.#page = null; }
   async load(options = this.#options, continuation = false) {
     const previous = this.#page;
-    const type = this.#client.targetKind === 'discussion' ? 'discussion_notification_page' : 'notification_page';
+    const type = notificationReplyType(this.#client.targetKind ?? 'issue', 'page');
     if (continuation && (!previous || previous.reply.type !== type || previous.reply.next_after === null)) throw new Error('No inbox continuation.');
     this.cancel(); const epoch = this.#epoch;
     const selected = continuation ? this.#options : { unreadOnly: options.unreadOnly, includeMuted: options.includeMuted };
@@ -37,12 +37,15 @@ export class NotificationInboxController {
   }
 }
 export function mountNotificationInbox({ document, href, client = null }) {
-  client ??= new (new URL(href).pathname.endsWith('/ui/discussion-notifications/') ? DiscussionNotificationClient : NotificationClient)({ href });
-  const kind = client.targetKind ?? 'issue', discussion = kind === 'discussion';
-  const label = discussion ? 'Discussion' : 'Issue';
-  const pageType = discussion ? 'discussion_notification_page' : 'notification_page';
-  const threadType = discussion ? 'discussion_notification_thread' : 'notification_thread';
-  const versionField = discussion ? 'discussion_version' : 'issue_version';
+  const path = new URL(href).pathname;
+  client ??= new (path.endsWith('/ui/pull-notifications/') ? PullRequestNotificationClient
+    : path.endsWith('/ui/discussion-notifications/') ? DiscussionNotificationClient : NotificationClient)({ href });
+  const kind = client.targetKind ?? 'issue', noun = kind === 'pull_request' ? 'pull request' : kind;
+  const label = noun[0].toUpperCase() + noun.slice(1);
+  const pageType = notificationReplyType(kind, 'page');
+  const threadType = notificationReplyType(kind, 'thread');
+  const versionField = notificationVersionField(kind);
+  const versionLabel = kind === 'pull_request' ? 'activity version' : noun + ' version';
   let session = 0;
   const controller = new NotificationInboxController(client);
   const get = id => document.getElementById(id);
@@ -98,11 +101,11 @@ export function mountNotificationInbox({ document, href, client = null }) {
     content.replaceChildren(); paging.replaceChildren();
     const rows = page.reply.type === pageType ? page.reply.threads : page.reply.found ? [page.reply.thread] : [];
     get('inbox-snapshot').textContent = 'Recipient ' + page.binding.principal + ' · snapshot ' + page.head;
-    if (!rows.length) content.append(element('p', page.reply.type === threadType ? label + ' not found.' : 'No ' + kind + 's match this inbox view.'));
+    if (!rows.length) content.append(element('p', page.reply.type === threadType ? label + ' not found.' : 'No ' + noun + 's match this inbox view.'));
     for (const row of rows) {
       const article = element('article', '');
       article.append(element('h2', (row.unread ? 'Unread · ' : '') + '#' + row.number + ' ' + row.title));
-      article.append(element('p', row.state + ' · ' + row.mode + ' · ' + (row.reasons.length ? row.reasons.join(', ') : 'No automatic participation') + ' · ' + kind + ' version ' + row[versionField]));
+      article.append(element('p', row.state + ' · ' + row.mode + ' · ' + (row.reasons.length ? row.reasons.join(', ') : 'No automatic participation') + ' · ' + versionLabel + ' ' + row[versionField]));
       const actions = element('div', ''); actions.className = 'issue-actions';
       for (const [action, label] of [['read', 'Mark read'], ['unread', 'Mark unread'], ['subscribe', 'Subscribe'], ['mute', 'Mute'], ['automatic', 'Automatic participation']]) {
         const button = element('button', label); button.type = 'button';
@@ -115,7 +118,7 @@ export function mountNotificationInbox({ document, href, client = null }) {
       const more = element('button', 'Next page'); more.type = 'button';
       more.addEventListener('click', () => run(async () => { draw(await controller.load(undefined, true)); })); paging.append(more);
     }
-    status(rows.length + ' ' + kind + (rows.length === 1 ? '' : 's') + ' shown.'); pending();
+    status(rows.length + ' ' + noun + (rows.length === 1 ? '' : 's') + ' shown.'); pending();
   };
   get('inbox-connect').addEventListener('submit', event => {
     event.preventDefault();
@@ -132,7 +135,7 @@ export function mountNotificationInbox({ document, href, client = null }) {
     draw(await controller.load({ unreadOnly: get('inbox-unread').checked, includeMuted: get('inbox-muted').checked }));
   }); });
   get('inbox-show').addEventListener('submit', event => { event.preventDefault(); void run(async () => {
-    draw(await controller.show(decimal(get('inbox-number').value, kind + ' number', 1)));
+    draw(await controller.show(decimal(get('inbox-number').value, noun + ' number', 1)));
   }); });
   get('inbox-cancel').addEventListener('click', () => { controller.cancel(); status('Read cancelled.'); });
   get('inbox-retry').addEventListener('click', () => run(async () => showTerminal(await client.send())));
@@ -143,7 +146,7 @@ export function mountNotificationInbox({ document, href, client = null }) {
   get('inbox-discard').addEventListener('click', () => run(async () => { client.discardUnsent(); status('Unsent preparation discarded.'); }));
   get('inbox-save').addEventListener('click', () => run(async () => {
     const blob = new Blob([client.exportReceipt()], { type: 'application/json' }), url = URL.createObjectURL(blob);
-    const link = document.createElement('a'); link.href = url; link.download = discussion ? 'frankengit-discussion-notification-retry.json' : 'frankengit-notification-retry.json'; link.click();
+    const link = document.createElement('a'); link.href = url; link.download = kind === 'issue' ? 'frankengit-notification-retry.json' : `frankengit-${kind.replaceAll('_', '-')}-notification-retry.json`; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }));
   get('inbox-restore').addEventListener('change', () => run(async () => {

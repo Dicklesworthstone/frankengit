@@ -1,7 +1,7 @@
 // Authenticated self-only inbox operations over the shipped notification clients.
 // Private records retain original request custody; they never establish authority.
 import { natural, snapshotToken, MAX_RECEIPT_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
-import { NotificationClient, DiscussionNotificationClient, notificationMutationRequest }
+import { NotificationClient, DiscussionNotificationClient, PullRequestNotificationClient, notificationMutationRequest, notificationVersionField }
   from '../../crates/fgit-node/src/smart_http/server/browser/notifications.mjs';
 import { connectIssueToken, issueOperatorFetch } from './forge-issue-operator.mjs';
 import { operatorError, operatorPath, operatorJson, privateRecordPath, absentRecord,
@@ -17,7 +17,7 @@ const own = (value, key) => Object.hasOwn(value, key);
 const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && keys.every(key => own(value, key));
 const identity = value => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
-const clientType = kind => kind === 'discussion' ? DiscussionNotificationClient : NotificationClient;
+const clientType = kind => kind === 'pull_request' ? PullRequestNotificationClient : kind === 'discussion' ? DiscussionNotificationClient : NotificationClient;
 
 export function inboxOperatorOptions(raw) {
   const keys = ['operation', 'kind', 'href', 'tenant', 'repository', 'tokenFile', 'record',
@@ -26,7 +26,7 @@ export function inboxOperatorOptions(raw) {
     'timeoutMs', 'signal', 'onProgress'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !keys.includes(key))) fail('inbox_operator_options');
   const o = { ...raw, timeoutMs: raw.timeoutMs ?? 30000, onProgress: raw.onProgress ?? (() => {}) };
-  if (!['issue', 'discussion'].includes(o.kind)) fail('inbox_operator_kind_required');
+  if (!['issue', 'discussion', 'pull_request'].includes(o.kind)) fail('inbox_operator_kind_required');
   if (![...READS, ...ACTIONS, ...RECOVERY].includes(o.operation)) fail('inbox_operator_operation');
   if (!identity(o.tenant) || !identity(o.repository)) fail('inbox_operator_repository_identity');
   if (typeof o.href !== 'string' || o.href.length > 4096 || /[\u0000-\u0020\u007f-\u009f\uD800-\uDFFF]/u.test(o.href) ||
@@ -94,14 +94,14 @@ function restoreRecord(bytes, o) {
 // Export only the fields the shipped client validated, never arbitrary extra
 // server response data. A view is a server observation, not a signed proof.
 function checkedPage(page, o) {
-  const reply = page.reply, version = o.kind === 'discussion' ? 'discussion_version' : 'issue_version';
+  const reply = page.reply, version = notificationVersionField(o.kind);
   const thread = row => row === null ? null : Object.fromEntries([
     'number', version, 'title', 'state', 'preference_version', 'mode', 'read_through',
     'latest_other_version', 'unread', 'reasons',
   ].map(key => [key, row[key]]));
   const result = { type: reply.type, schema_version: reply.schema_version, tenant_id: page.binding.tenant,
     repository_id: page.binding.repository, principal_id: page.binding.principal, repository_incarnation: page.binding.incarnation,
-    ...(o.kind === 'discussion' ? { target_kind: 'discussion' } : {}), snapshot_token: page.head,
+    ...(o.kind === 'issue' ? {} : { target_kind: o.kind }), snapshot_token: page.head,
     source_positions: Object.fromEntries(['authority_head_generation', 'forge_position_root', 'outbox_root', 'complete']
       .map(key => [key, reply.source_positions[key]])) };
   return o.operation === 'show' ? { ...result, found: reply.found, thread: thread(reply.thread) }
@@ -169,7 +169,7 @@ export async function runInboxOperation(raw) {
       const row = observed.reply.thread;
       if ((row.preference_version ?? 0) !== o.expectedVersion) fail('inbox_operator_preference_moved');
       const fields = o.operation === 'read' ? { read_through: o.readThrough } : {};
-      if (o.operation === 'read' && o.readThrough > row[o.kind === 'discussion' ? 'discussion_version' : 'issue_version']) fail('inbox_operator_read_prefix_unobserved');
+      if (o.operation === 'read' && o.readThrough > row[notificationVersionField(o.kind)]) fail('inbox_operator_read_prefix_unobserved');
       progress('source_checked');
       await client.stage(o.number, o.expectedVersion, o.operation, fields); check();
       const exported = client.exportReceipt();

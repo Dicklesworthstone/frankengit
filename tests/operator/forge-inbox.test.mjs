@@ -11,7 +11,8 @@ import { fixture, mutations, reads, command, flags, guards, principal, incarnati
 const interrupted = ({ phase }) => { if (phase === 'receipt_saved') throw Error('simulated interruption before dispatch'); };
 const originalBytes = f => readFile(f.options().record);
 
-for (const kind of ['issue', 'discussion']) {
+const kinds = ['issue', 'discussion', 'pull_request'];
+for (const kind of kinds) {
   test(`${kind}: complete list, exact show and canonical absence use the correct authenticated namespace`, async t => {
     const f = await fixture(t);
     const list = await runInboxOperation(f.options('list', kind));
@@ -22,7 +23,7 @@ for (const kind of ['issue', 'discussion']) {
     assert.equal(show.pages[0].thread.number, 7); assert.equal(show.pages[0].found, true);
     const absent = await runInboxOperation({ ...f.options('show', kind), number: 99 });
     assert.equal(absent.pages[0].found, false); assert.equal(absent.pages[0].thread, null); assert.equal(absent.complete, true);
-    const family = kind === 'discussion' ? '/repo/api/v1/notifications/discussions' : '/repo/api/v1/notifications';
+    const family = '/repo/api/v1/notifications' + ({ issue: '', discussion: '/discussions', pull_request: '/pulls' })[kind];
     assert.deepEqual(reads(f).map(call => call.path), [family, family + '/7', family + '/99']);
     assert.equal(mutations(f).length, 0); assert.deepEqual(await readdir(f.root), ['token']);
   });
@@ -37,8 +38,8 @@ for (const kind of ['issue', 'discussion']) {
     assert.deepEqual(result.pages.map(page => page.source_positions.authority_head_generation), [1, 1]);
   });
 
-  test(`${kind}: all preference operations preserve the other namespace and use exact predecessor versions`, async t => {
-    const f = await fixture(t), otherKind = kind === 'issue' ? 'discussion' : 'issue', other = structuredClone(f.rows[otherKind]);
+  test(`${kind}: all preference operations preserve the other namespaces and use exact predecessor versions`, async t => {
+    const f = await fixture(t), others = Object.fromEntries(kinds.filter(other => other !== kind).map(other => [other, structuredClone(f.rows[other])]));
     const actions = ['subscribe', 'mute', 'automatic', 'read', 'unread'];
     for (const [index, action] of actions.entries()) {
       const options = f.options(action, kind, join(f.root, action + '.json'));
@@ -53,9 +54,10 @@ for (const kind of ['issue', 'discussion']) {
       assert.equal(form.get('expected_version'), String(2 + index));
       assert.equal(form.get('expected_principal'), principal); assert.equal(form.get('expected_incarnation'), incarnation);
       assert.equal(form.get('read_through'), action === 'read' ? '3' : null);
-      assert.match(call.key, kind === 'discussion' ? /^fgdn-[0-9a-f]{32}-[0-9a-f]{64}$/ : /^fgni-[0-9a-f]{32}-[0-9a-f]{64}$/);
+      assert.match(call.key, new RegExp('^' + ({ issue: 'fgni', discussion: 'fgdn', pull_request: 'fgpn' })[kind] + '-[0-9a-f]{32}-[0-9a-f]{64}$'));
     }
-    assert.deepEqual(f.rows[otherKind], other); assert.equal(mutations(f).length, actions.length);
+    for (const [otherKind, rows] of Object.entries(others)) assert.deepEqual(f.rows[otherKind], rows);
+    assert.equal(mutations(f).length, actions.length);
   });
 
   test(`${kind}: read acknowledges precisely the observed prefix across a racing comment`, async t => {
@@ -243,7 +245,7 @@ test('record scope, credential and committed request bytes are checked before an
   const f = await fixture(t); await runInboxOperation(f.options());
   const bytes = await originalBytes(f), calls = f.calls.length;
   await writeFile(f.tokenFile, 'cd'.repeat(32)); await assert.rejects(runInboxOperation(f.options('retry'))); await writeFile(f.tokenFile, token);
-  await assert.rejects(runInboxOperation(f.options('retry', 'discussion')));
+  for (const kind of ['discussion', 'pull_request']) await assert.rejects(runInboxOperation(f.options('retry', kind)));
   await assert.rejects(runInboxOperation({ ...f.options('retry'), repository: '55'.repeat(16) }));
   for (const modify of [
     value => { value.receipt.request.action = 'mute'; },
@@ -329,11 +331,41 @@ test('closed CLI grammar requires kind, paired identities, exact recovery and sa
     [...flags(f, 'retry'), '--expected-version', '2'], [...flags(f, 'status'), '--expected-principal', principal, '--expected-incarnation', incarnation],
     [...list, '--after', '9007199254740992'], [...list, '--limit', '01'], [...list, '--limit', '101'],
   ]) assert.throws(() => inboxArguments(args));
-  assert.throws(() => inboxOperatorOptions({ ...f.options(), kind: 'pull_request' }));
+  assert.throws(() => inboxOperatorOptions({ ...f.options(), kind: 'pull' }));
+  for (const kind of kinds) assert.equal(inboxArguments([...flags(f, 'show', kind), '--number', '7']).kind, kind);
   assert.throws(() => inboxOperatorOptions({ ...f.options(), href: 'http://example.com/repo/ui/notifications/' }));
   assert.throws(() => inboxOperatorOptions({ ...f.options(), href: f.href('discussion') }));
   assert.throws(() => inboxOperatorOptions({ ...f.options(), expectedVersion: Number.MAX_SAFE_INTEGER }));
   assert.throws(() => inboxOperatorOptions({ ...f.options(), record: f.tokenFile }));
   assert.equal(inboxArguments(mutation).expectedVersion, 2); assert.equal(f.calls.length, 0);
   assert.deepEqual(JSON.parse(operatorJson({ title: 'a\u202eb' })), { title: 'a\u202eb' });
+});
+
+test('PR CLI uses the activity cursor and recovers a lost preference reply from the original private record', async t => {
+  const f = await fixture(t), kind = 'pull_request';
+  const show = await command([...flags(f, 'show', kind), '--number', '7']).done;
+  assert.equal(show.code, 0);
+  const observed = JSON.parse(show.stdout).pages[0].thread;
+  assert.equal(observed.activity_version, 4);
+  assert.equal(observed.pull_request_version, undefined);
+  f.mode = 'lost-reply';
+  const lost = await command([...flags(f, 'read', kind), ...guards(2), '--read-through', String(observed.activity_version)]).done;
+  assert.equal(lost.code, 2);
+  const bytes = await readFile(f.options('read', kind).record), receipt = JSON.parse(bytes);
+  assert.equal(receipt.kind, 'pull_request');
+  assert.equal(receipt.receipt.schema, 'frankengit-pull_request_notification-retry-v1');
+  assert.match(receipt.receipt.request.key, /^fgpn-/);
+  assert.equal(f.row(kind).read_through, 4);
+  const calls = f.calls.length;
+  for (const other of ['issue', 'discussion']) await assert.rejects(runInboxOperation(f.options('retry', other)));
+  assert.equal(f.calls.length, calls, 'cross-kind records are rejected before network access');
+  f.mode = null;
+  const recovered = await command(flags(f, 'retry', kind)).done;
+  assert.equal(recovered.code, 0);
+  assert.equal(JSON.parse(recovered.stdout).result.outcome, 'committed');
+  assert.equal(JSON.parse(recovered.stdout).mutation_submitted, false);
+  assert.equal(mutations(f).length, 1);
+  assert.equal(mutations(f)[0].path, '/repo/api/v1/notifications/pulls/7/read');
+  assert.deepEqual(await readFile(f.options('read', kind).record), bytes);
+  assert.equal(f.row('issue').read_through, 1); assert.equal(f.row('discussion').read_through, 1);
 });
