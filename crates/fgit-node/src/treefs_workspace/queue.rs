@@ -5,6 +5,7 @@
 
 mod candidate;
 mod preparation;
+mod refresh;
 pub use preparation::PreparedQueueHeadBundle;
 
 use super::issues::snapshots;

@@ -226,7 +226,7 @@ fn write_read_report(output: &mut impl Write, report: &str) -> Result<(), String
         .map_err(|error| format!("PR read/report output failed: {error}"))
 }
 
-fn read_body_file(path: &Path) -> Result<String, String> {
+pub(crate) fn read_body_file(path: &Path) -> Result<String, String> {
     // Stable operator-owned regular file, not a hostile host-filesystem API.
     // Never interpret the content as options, a policy or shell instructions.
     let metadata =

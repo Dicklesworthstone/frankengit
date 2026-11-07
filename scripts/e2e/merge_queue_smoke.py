@@ -137,7 +137,7 @@ def verify_queue(report, version, order):
 
 
 def landing_campaign(binary, root, algorithm):
-    """Land one existing head, then prepare and land its divergent successor."""
+    """Land a head, refresh its successor without requeue, then prepare and land."""
     root.mkdir(parents=True, exist_ok=False)
     source = root / "source"
     f = fixture(source, algorithm)
@@ -245,18 +245,56 @@ def landing_campaign(binary, root, algorithm):
     require(c.show(1, token=pinned["snapshot_token"]) == pinned, "landing rewrote retained queue state")
     require(show_pull(7, pinned["snapshot_token"]) == pull_before, "landing rewrote retained PR state")
 
-    # The surviving sibling cannot reuse the old target observation, and an
-    # explicitly refreshed PR/queue still fails the native ancestry check.
+    # Refresh only the surviving head's recorded target. Its exact complete PR
+    # data is retained by the caller; retry must not read today's PR to rebuild it.
     c.mutate("land", 1, 5, "survivor-old-target",
              landing_flags(9, 1, "refs/heads/second", second, f["target"], epoch), "TargetRefMoved")
-    c.pull("update", 9, 1, "refs/heads/second", second, first, "refresh-survivor-target")
-    c.mutate("enqueue", 1, 5, "refresh-survivor-queue",
-             enqueue_flags(9, 2, "refs/heads/second", second, first))
-    c.mutate("land", 1, 6, "divergent-survivor",
-             landing_flags(9, 2, "refs/heads/second", second, first, epoch), "NonFastForwardRefused")
-    verify_queue(c.show(1), 6, [9])
+    body_file = root / "retained-head-body.txt"
+    body_file.write_bytes(survivor_before["data"]["body"].encode("utf-8"))
+    refresh_flags = landing_flags(9, 1, "refs/heads/second", second, first, epoch) + [
+        "--expected-recorded-target-tip", f["target"],
+        "--title", survivor_before["data"]["title"], "--body-file", body_file,
+    ]
+    stale_refresh = c.mutate("refresh", 1, 4, "refresh-stale-queue", refresh_flags, "EvidenceStale")
+    for flag, value in [
+        ("--expected-recorded-target-tip", f["base"]),
+        ("--expected-pull-version", 2),
+        ("--expected-policy-epoch", epoch + 1),
+        ("--title", "An unrelated metadata edit"),
+    ]:
+        changed = list(refresh_flags)
+        changed[changed.index(flag) + 1] = value
+        c.mutate("refresh", 1, 5, f"refresh-refuse-{flag}", changed, "EvidenceStale")
+    before_refresh = c.show(1)
+    require(before_refresh["queue"] == completed["queue"], "refused refresh changed queue entries")
+    require(show_pull(9)["pull_request"] == survivor_before, "refused refresh changed PR metadata")
+    require(c.run(refs_args).stdout == refs_after, "refused refresh changed a ref")
+    refreshed = c.mutate("refresh", 1, 5, "refresh-survivor-target", refresh_flags)
+    require(refreshed["proposed_action"] == dict(
+        name="refresh", pull_request=9, expected_pull_request_version=1,
+        expected_policy_epoch=epoch, source_ref="refs/heads/second",
+        source_ref_hex="refs/heads/second".encode().hex(), head_tip=second,
+        expected_recorded_target_tip=f["target"], expected_target_tip=first,
+    ), "refresh receipt lost the old or new target observation")
+    after_refresh = c.show(1)
+    verify_queue(after_refresh, 5, [9])
+    require(after_refresh["queue"] == before_refresh["queue"],
+            "refresh changed queue version, order, priority, actor or FIFO position")
     survivor = show_pull(9)["pull_request"]
-    require(survivor["state"] == "open" and survivor["version"] == 2, "divergent refusal merged a PR")
+    require(survivor["state"] == "open" and survivor["version"] == 2 and
+            survivor["last_action"] == "update", "refresh must publish exactly one PR update")
+    require(survivor["data"] == dict(survivor_before["data"], target_tip=first) and
+            survivor["opened_by"] == survivor_before["opened_by"],
+            "refresh changed PR source, branch identity, title, body or opener")
+    require(c.run(refs_args).stdout == refs_after, "refresh moved a ref")
+    require(c.show(1, token=before_refresh["snapshot_token"]) == before_refresh,
+            "refresh rewrote retained queue state")
+
+    # A refreshed target is not an assertion that a divergent source can fast-forward.
+    c.mutate("land", 1, 5, "divergent-survivor",
+             landing_flags(9, 2, "refs/heads/second", second, first, epoch), "NonFastForwardRefused")
+    verify_queue(c.show(1), 5, [9])
+    require(show_pull(9)["pull_request"] == survivor, "divergent refusal changed the refreshed PR")
     require(c.run(refs_args).stdout == refs_after, "divergent refusal moved the target")
     # A real two-parent candidate handles the divergent survivor without
     # changing the existing fast-forward method or inventing passed checks.
@@ -264,7 +302,7 @@ def landing_campaign(binary, root, algorithm):
     before_preparation = c.show(1)
     bundle = root / "queue-head.bundle"
     prepare = c.queue_args(
-        "prepare", 1, "--expected-version", 6, "--target-ref", TARGET,
+        "prepare", 1, "--expected-version", 5, "--target-ref", TARGET,
         *candidate_guards, "--profile", "path-v1", "--author", "Queue <queue@example.invalid>",
         "--timestamp", 1700000000, "--message", "Integrate divergent queue head\n",
         "--output-bundle", bundle,
@@ -273,7 +311,7 @@ def landing_campaign(binary, root, algorithm):
     c.header(prepared)
     require(prepared["type"] == "merge_queue_preparation" and prepared["outcome"] == "prepared",
             "divergent queue head did not produce a candidate")
-    require(prepared["number"] == 1 and prepared["expected_version"] == 6 and
+    require(prepared["number"] == 1 and prepared["expected_version"] == 5 and
             prepared["pull_request"] == 9 and prepared["expected_pull_request_version"] == 2 and
             prepared["expected_policy_epoch"] == epoch, "candidate lost exact guards")
     require(prepared["expected_source_tip"] == second and prepared["expected_target_tip"] == first and
@@ -296,9 +334,9 @@ def landing_campaign(binary, root, algorithm):
             "same observed head and explicit metadata produced nondeterministic candidate bytes")
     candidate_flags = candidate_guards + ["--merge-base", prepared["merge_base"],
                                          "--expected-commit", candidate, "--bundle", bundle]
-    refused_candidate = c.mutate("land-candidate", 1, 5, "candidate-stale-queue", candidate_flags, "EvidenceStale")
-    candidate_landed = c.mutate("land-candidate", 1, 6, "land-divergent", candidate_flags)
-    verify_queue(c.show(1), 8, [])
+    refused_candidate = c.mutate("land-candidate", 1, 4, "candidate-stale-queue", candidate_flags, "EvidenceStale")
+    candidate_landed = c.mutate("land-candidate", 1, 5, "land-divergent", candidate_flags)
+    verify_queue(c.show(1), 7, [])
     candidate_pr = show_pull(9)["pull_request"]
     require(candidate_pr["version"] == 3 and candidate_pr["state"] == "merged" and
             candidate_pr["merge"]["commit"] == candidate and
@@ -314,24 +352,33 @@ def landing_campaign(binary, root, algorithm):
             "candidate landing rewrote retained queue history")
     next_epoch = clear_policy(1, epoch, "later-policy")
     latest = c.show(1)
-    verify_queue(latest, 8, [])
+    verify_queue(latest, 7, [])
 
     # Every invocation is a new process. Retry the original observations and
     # client key after queue and policy advancement; never refresh the request.
     require(c.mutate("land", 1, 3, "land-first", flags) == landed, "landing retry lost its original receipt")
     require(c.mutate("land", 1, 2, "stale-queue", old_flags, "EvidenceStale") == stale,
             "historical landing refusal changed after later publications")
-    require(c.mutate("land-candidate", 1, 6, "land-divergent", candidate_flags) == candidate_landed,
+    require(c.mutate("land-candidate", 1, 5, "land-divergent", candidate_flags) == candidate_landed,
             "candidate retry lost its original receipt")
-    require(c.mutate("land-candidate", 1, 5, "candidate-stale-queue", candidate_flags, "EvidenceStale") ==
+    require(c.mutate("land-candidate", 1, 4, "candidate-stale-queue", candidate_flags, "EvidenceStale") ==
             refused_candidate, "candidate refusal changed after later publications")
+    require(c.mutate("refresh", 1, 5, "refresh-survivor-target", refresh_flags) == refreshed,
+            "refresh retry rebuilt its original PR payload or lost its terminal decision")
+    require(c.mutate("refresh", 1, 4, "refresh-stale-queue", refresh_flags, "EvidenceStale") ==
+            stale_refresh, "refresh refusal changed after later landing or policy replacement")
+    changed_refresh = list(refresh_flags)
+    changed_refresh[changed_refresh.index("--title") + 1] = "A new intention under an old key"
+    c.run(c.mutation_args("refresh", 1, 5, "refresh-survivor-target", changed_refresh), 2)
     changed_candidate = list(candidate_flags)
     changed_candidate[changed_candidate.index("--expected-commit") + 1] = f["candidate"]
-    c.run(c.mutation_args("land-candidate", 1, 6, "land-divergent", changed_candidate), 2)
+    c.run(c.mutation_args("land-candidate", 1, 5, "land-divergent", changed_candidate), 2)
     c.run(c.mutation_args("land", 1, 3, "land-first",
                          landing_flags(7, 2, SOURCE, first, f["target"], next_epoch)), 2)
     for key, expected, receipt in [("land-first", 0, landed), ("stale-queue", 3, stale),
-                                   ("land-divergent", 0, candidate_landed)]:
+                                   ("land-divergent", 0, candidate_landed),
+                                   ("refresh-survivor-target", 0, refreshed),
+                                   ("refresh-stale-queue", 3, stale_refresh)]:
         outcome = document(c.run([
             "outcome", c.node, TENANT, REPOSITORY, "--trusted-local", "--object-format", algorithm,
             "--principal", PRINCIPAL, "--idempotency-key", key,
@@ -344,7 +391,7 @@ def landing_campaign(binary, root, algorithm):
         campaign="native_merge_queue_head_landing", object_format=algorithm, command_count=c.calls,
         transaction=landed["tx_id"], original_target=f["target"], landed_target=first,
         candidate_transaction=candidate_landed["tx_id"], candidate_target=candidate,
-        queue_version=8, merged_pull_request_version=3,
+        refresh_transaction=refreshed["tx_id"], queue_version=7, merged_pull_request_version=3,
         passed=["native_fast_forward_head", "atomic_target_pr_queue_post_state", "two_queue_versions_one_pr_version",
                 "priority_and_reorder_head_guard", "stale_queue_guard", "same_tip_pr_version_guard",
                 "policy_epoch_guard", "exact_source_and_target_guards", "retained_pre_landing_snapshots",
@@ -352,7 +399,10 @@ def landing_campaign(binary, root, algorithm):
                 "changed_guard_key_reuse_refusal", "original_outcome_recovery", "unrelated_refs_unchanged",
                 "divergent_head_native_preparation", "read_only_same_head_artifact",
                 "deterministic_create_only_bundle", "atomic_two_parent_candidate_landing",
-                "candidate_stale_guard_and_original_outcome_recovery"],
+                "candidate_stale_guard_and_original_outcome_recovery",
+                "guarded_head_refresh_preserves_queue_order_priority_and_refs",
+                "refresh_preserves_exact_pr_metadata_and_advances_pr_once",
+                "refresh_stale_guard_and_original_outcome_recovery"],
     )
     (root / "results.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result

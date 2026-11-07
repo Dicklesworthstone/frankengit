@@ -1,4 +1,4 @@
-//! Canonical queue management, candidate preparation and guarded atomic landing.
+//! Canonical queue management, head refresh, preparation and atomic landing.
 mod candidate;
 mod options;
 mod output;
@@ -28,6 +28,16 @@ usage: fg queue <enqueue|dequeue|reorder> <storage-root> <tenant-id> <repository
            [--priority <0..4294967295>]
   dequeue: --pull-request <number> --reason <withdrawn|conflict|check-failed|base-moved|evicted|admin-override>
   reorder: --entry <pull-request-number> ... (the complete nonempty order, at most 1024 entries)
+
+usage: fg queue refresh <storage-root> <tenant-id> <repository-id> <queue-number>
+  --trusted-local --principal <id> --expected-incarnation <id> --idempotency-key <key>
+  --expected-version <positive-version> --expected-policy-epoch <positive-epoch>
+  --pull-request <number> --expected-pull-version <positive-version>
+  --source-ref <refs/heads/source> --target-ref <refs/heads/target>
+  --expected-source-tip <oid> --expected-recorded-target-tip <old-recorded-oid>
+  --expected-target-tip <new-live-target-oid> --title <exact-current-title>
+  (--body <exact-current-body> | --body-file <utf8-file-at-most-65536-bytes>)
+  [--object-format sha1|sha256]
 
 usage: fg queue land <storage-root> <tenant-id> <repository-id> <queue-number>
   --trusted-local --principal <id> --expected-incarnation <id> --idempotency-key <key>
@@ -61,6 +71,10 @@ All changes publish canonical forge events under the exact queue predecessor and
 Retry the identical command and key after a lost response, or use fg outcome; never refresh retry versions.
 Receipts describe that terminal decision; use show for the latest queue state.
 Enqueue, dequeue and reorder change queue metadata only.
+Refresh updates only the exact queue-head PR's recorded target tip after the target moves.
+Its source, title and body must remain identical. The PR version advances once; queue version,
+order, priority and refs stay unchanged. No check or review is granted by refreshing.
+Retain the entire original refresh command, including title and body bytes, for retries.
 Land requires the exact queue-head PR and performs FastForwardOnly native merge admission,
 including current review, required-check and protected-ref rules. The target ref, PR merge
 and queue completion publish atomically; the queue advances twice and the PR once.
@@ -88,6 +102,7 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                     | "enqueue"
                     | "dequeue"
                     | "reorder"
+                    | "refresh"
                     | "land"
                     | "prepare"
                     | "land-candidate"
@@ -96,7 +111,23 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
         write_read(out, USAGE)?;
         return Ok(0);
     }
-    let options = options::parse(args)?;
+    let mut options = options::parse(args)?;
+    if let Operation::Refresh {
+        principal,
+        command,
+        body_file,
+        ..
+    } = &mut options.operation
+    {
+        // Freeze the complete explicit metadata before opening a repository.
+        // Recovery must not rebuild this payload from today's PR or branch tips.
+        if let Some(path) = body_file {
+            command.pull_request.data.body = crate::pull_request::read_body_file(path)?;
+        }
+        command
+            .proposed_event(*principal, options.format)
+            .map_err(|_| "invalid queue refresh PR command or metadata".to_owned())?;
+    }
     let bundle = match &options.operation {
         Operation::Prepare(preparation) => {
             crate::merge_apply::preparation::require_absent(&preparation.output)?;
@@ -132,6 +163,26 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             let session = LoopbackReceiveSession::authenticated(*principal, key.clone());
             node.runtime()
                 .block_on(node.admit_queue_durable_in(
+                    &request,
+                    &session,
+                    command,
+                    Default::default(),
+                ))
+                .map(|(tx, outcome)| Completed::Mutation(tx, outcome))
+                .map_err(|error| match service {
+                    Ok(()) => error.to_string(),
+                    Err(service) => format!("{error}; service intake also refused: {service}"),
+                })
+        }
+        Operation::Refresh {
+            principal,
+            key,
+            command,
+            ..
+        } => {
+            let session = LoopbackReceiveSession::authenticated(*principal, key.clone());
+            node.runtime()
+                .block_on(node.refresh_queue_head_durable_in(
                     &request,
                     &session,
                     command,
@@ -281,10 +332,13 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             });
             if matches!(
                 &options.operation,
-                Operation::Mutate { .. } | Operation::Land { .. } | Operation::LandCandidate { .. }
+                Operation::Mutate { .. }
+                    | Operation::Refresh { .. }
+                    | Operation::Land { .. }
+                    | Operation::LandCandidate { .. }
             ) {
                 Err(format!(
-                    "no terminal queue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover with fg outcome using the same principal and key, or retry the identical command, incarnation, versions and tips. Do not replace the key or refresh the expected versions"
+                    "no terminal queue outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover with fg outcome using the same principal and key, or retry the identical command, incarnation, versions, tips and PR metadata. Do not replace the key or refresh the expected versions"
                 ))
             } else {
                 Err(format!(

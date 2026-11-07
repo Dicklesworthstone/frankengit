@@ -481,6 +481,19 @@ pub fn prepare_event(
             {
                 return Err(RefusalCode::EvidenceInvalid);
             }
+            if let Some(refresh) = verify_pull_request_seal(context, event, attempt)? {
+                let queue = AsciiSlug::try_new(
+                    "forge_stream",
+                    fgit_forge::AggregateId::MergeQueue(refresh.number).to_string().as_bytes(),
+                )
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                if basis.body().policy_epoch != refresh.expected_policy_epoch
+                    || resolved.forge.entry(queue).map(|entry| entry.successor_position())
+                        != Some(refresh.expected_queue_version.get())
+                {
+                    return Err(RefusalCode::EvidenceStale);
+                }
+            }
             // Closing preserves already recorded coordinates even after a
             // branch is deleted. Opening/updating must name both current tips.
             if change.action != PullRequestAction::Close
@@ -945,3 +958,49 @@ fn verify_pull_request_comment_seal(
 
 #[cfg(test)]
 mod pull_comment_seal_tests;
+
+/// Preserve the byte-identical ordinary PR profile while independently checking
+/// every guard of the explicitly requested queue-head target refresh. A partial
+/// refresh seal cannot fall through as an ordinary metadata update.
+fn verify_pull_request_seal(
+    context: &AdmissionContext,
+    event: &ForgeEvent,
+    attempt: &SealAttempt,
+) -> Result<Option<super::native::queue::QueueHeadRefreshCommand>, RefusalCode> {
+    use fgit_forge::event::pull_request::PullRequestCommand;
+    use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion};
+
+    let (
+        AggregateId::PullRequest(number),
+        ForgeEventPayload::PullRequestChangedNative(change),
+    ) = (event.aggregate, &event.payload)
+    else {
+        return Err(RefusalCode::EvidenceInvalid);
+    };
+    let expected_version = if event.version == AggregateVersion::FIRST {
+        ExpectedVersion::NewStream
+    } else {
+        ExpectedVersion::Exactly(
+            AggregateVersion::try_new(event.version.get() - 1)
+                .ok_or(RefusalCode::EvidenceInvalid)?,
+        )
+    };
+    let command = PullRequestCommand {
+        number,
+        expected_version,
+        action: change.action,
+        data: change.data.clone(),
+    };
+    let (expected, ordinary) = super::native::pull_request::proposal(context, &command)
+        .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if expected != *event {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    if ordinary == *attempt {
+        return Ok(None);
+    }
+    super::native::queue::verify_refresh_event_seal(context, event, attempt).map(Some)
+}
+
+#[cfg(test)]
+mod queue_refresh_seal_tests;

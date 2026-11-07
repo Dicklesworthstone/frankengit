@@ -1,7 +1,9 @@
 //! Complete bounded JSON snapshots and historical terminal decisions.
 use super::options::{Operation, Options, head_token, hex, version};
 use crate::publication_support::quote;
-use fgit_admission::merge::native::queue::{QueueCandidateLandingCommand, QueueLandingCommand};
+use fgit_admission::merge::native::queue::{
+    QueueCandidateLandingCommand, QueueHeadRefreshCommand, QueueLandingCommand,
+};
 use fgit_authority::TerminalOutcome;
 use fgit_forge::QueueNumber;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
@@ -232,6 +234,26 @@ fn action(value: &QueueCommandAction) -> String {
     }
 }
 
+fn refresh_action(command: &QueueHeadRefreshCommand) -> String {
+    let pull_request = &command.pull_request;
+    format!(
+        concat!(
+            "{{\"name\":\"refresh\",\"pull_request\":{},",
+            "\"expected_pull_request_version\":{},\"expected_policy_epoch\":{},",
+            "\"source_ref\":{},\"source_ref_hex\":{},\"head_tip\":{},",
+            "\"expected_recorded_target_tip\":{},\"expected_target_tip\":{}}}"
+        ),
+        pull_request.number.get(),
+        version(pull_request.expected_version),
+        command.expected_policy_epoch.get(),
+        reference(&pull_request.data.source_ref),
+        quote(&hex(pull_request.data.source_ref.as_bytes())),
+        quote(&pull_request.data.source_tip.to_string()),
+        quote(&command.expected_recorded_target_tip.to_string()),
+        quote(&pull_request.data.target_tip.to_string()),
+    )
+}
+
 fn landing_action(command: &QueueLandingCommand) -> String {
     format!(
         concat!(
@@ -286,6 +308,16 @@ pub(super) fn publication(
                 &command.target_ref,
                 version(command.expected_version),
                 action(&command.action),
+                false,
+            ),
+            Operation::Refresh {
+                principal, command, ..
+            } => (
+                principal,
+                command.number,
+                &command.pull_request.data.target_ref,
+                command.expected_queue_version.get(),
+                refresh_action(command),
                 false,
             ),
             Operation::Land {

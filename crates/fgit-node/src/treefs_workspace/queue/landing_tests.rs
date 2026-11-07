@@ -32,6 +32,7 @@ use std::{future::Future, task::Poll};
 
 mod candidate;
 mod protection;
+mod refresh;
 
 fn version(value: u64) -> AggregateVersion {
     AggregateVersion::try_new(value).unwrap()

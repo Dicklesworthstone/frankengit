@@ -1,7 +1,10 @@
 //! Bounded, exact-predecessor queue commands parsed before repository IO.
-use fgit_admission::merge::native::queue::{QueueCandidateLandingCommand, QueueLandingCommand};
+use fgit_admission::merge::native::queue::{
+    QueueCandidateLandingCommand, QueueHeadRefreshCommand, QueueLandingCommand,
+};
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::NativeMerge;
+use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::merge_queue::{DequeueReason, QueueCommand, QueueCommandAction};
@@ -40,6 +43,12 @@ pub(super) enum Operation {
         principal: PrincipalId,
         key: IdempotencyKey,
         command: QueueCommand,
+    },
+    Refresh {
+        principal: PrincipalId,
+        key: IdempotencyKey,
+        command: QueueHeadRefreshCommand,
+        body_file: Option<PathBuf>,
     },
     Land {
         principal: PrincipalId,
@@ -81,7 +90,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let action = args[0].as_str();
     if !matches!(
         action,
-        "show" | "list" | "enqueue" | "dequeue" | "reorder" | "land" | "prepare" | "land-candidate"
+        "show" | "list" | "enqueue" | "dequeue" | "reorder" | "refresh" | "land" | "prepare" | "land-candidate"
     ) {
         return Err(super::USAGE.to_owned());
     }
@@ -145,7 +154,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                                 | "--expected-pull-version"
                                 | "--priority"
                         ),
-                        "land" | "land-candidate" => {
+                        "refresh" | "land" | "land-candidate" => {
                             matches!(
                                 flag,
                                 "--pull-request"
@@ -154,7 +163,14 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                                     | "--expected-target-tip"
                                     | "--expected-pull-version"
                                     | "--expected-policy-epoch"
-                            ) || (action == "land-candidate"
+                            ) || (action == "refresh"
+                                && matches!(
+                                    flag,
+                                    "--expected-recorded-target-tip"
+                                        | "--title"
+                                        | "--body"
+                                        | "--body-file"
+                                )) || (action == "land-candidate"
                                 && matches!(
                                     flag,
                                     "--merge-base" | "--expected-commit" | "--bundle"
@@ -256,11 +272,28 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             ExpectedVersion::NewStream
         } else {
             let version = AggregateVersion::try_new(raw_version).ok_or("invalid queue version")?;
-            version.next().map_err(|_| "queue version is exhausted")?;
+            if action != "refresh" {
+                version.next().map_err(|_| "queue version is exhausted")?;
+            }
             ExpectedVersion::Exactly(version)
         };
         let target_ref = branch(required(&flags, "--target-ref")?)?;
-        if action == "land-candidate" {
+        if action == "refresh" {
+            let (command, body_file) = refresh(
+                &flags,
+                number.ok_or("queue number is required")?,
+                expected_version,
+                target_ref,
+                principal,
+                format,
+            )?;
+            Operation::Refresh {
+                principal,
+                key,
+                command,
+                body_file,
+            }
+        } else if action == "land-candidate" {
             let guard = landing(
                 &flags,
                 number.ok_or("queue number is required")?,
@@ -378,6 +411,63 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         format,
         operation,
     })
+}
+
+fn refresh(
+    flags: &BTreeMap<&str, &str>,
+    number: QueueNumber,
+    expected_version: ExpectedVersion,
+    target_ref: RefName,
+    principal: PrincipalId,
+    format: GitHashAlgorithm,
+) -> Result<(QueueHeadRefreshCommand, Option<PathBuf>), String> {
+    let ExpectedVersion::Exactly(expected_queue_version) = expected_version else {
+        return Err("refresh requires a positive queue version".into());
+    };
+    let expected_pull_version =
+        AggregateVersion::try_new(decimal(required(flags, "--expected-pull-version")?)?)
+            .ok_or("expected PR version must be positive")?;
+    let expected_recorded_target_tip =
+        oid(required(flags, "--expected-recorded-target-tip")?, format)?;
+    let target_tip = oid(required(flags, "--expected-target-tip")?, format)?;
+    if expected_recorded_target_tip == target_tip {
+        return Err("queue refresh requires a changed recorded target tip".into());
+    }
+    let (body, body_file) = match (flags.get("--body"), flags.get("--body-file")) {
+        (Some(body), None) => ((*body).to_owned(), None),
+        (None, Some(path)) if !path.is_empty() => {
+            (String::new(), Some(PathBuf::from(*path)))
+        }
+        _ => return Err("supply exactly one of --body or a nonempty --body-file (empty --body is permitted)".into()),
+    };
+    let pull_request = PullRequestCommand {
+        number: pull_number(required(flags, "--pull-request")?)?,
+        expected_version: ExpectedVersion::Exactly(expected_pull_version),
+        action: PullRequestAction::Update,
+        data: PullRequestData {
+            source_ref: branch(required(flags, "--source-ref")?)?,
+            target_ref,
+            source_tip: oid(required(flags, "--expected-source-tip")?, format)?,
+            target_tip,
+            title: required(flags, "--title")?.to_owned(),
+            body,
+        },
+    };
+    let command = QueueHeadRefreshCommand {
+        number,
+        expected_queue_version,
+        expected_policy_epoch: PolicyEpoch::try_new(decimal(required(
+            flags,
+            "--expected-policy-epoch",
+        )?)?)
+        .map_err(|_| "expected policy epoch must be positive")?,
+        expected_recorded_target_tip,
+        pull_request,
+    };
+    command
+        .proposed_event(principal, format)
+        .map_err(|_| "invalid queue refresh PR coordinates, metadata or version")?;
+    Ok((command, body_file))
 }
 
 fn landing(

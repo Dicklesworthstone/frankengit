@@ -7,16 +7,22 @@ recoverable terminal transaction outcome. `fg queue land` executes an exact
 queue-head PR through native fast-forward admission and atomically publishes the
 target move, PR merge and queue completion.
 
+`fg queue refresh` updates the current head PR's recorded target after the target
+branch advances. It preserves the queue's order, priority and membership, and
+requires the original complete PR metadata and exact observations.
+
 `fg queue prepare` constructs a real two-parent merge candidate for a divergent
 queue head. `fg queue land-candidate` validates its bundle and publishes the
 candidate with the same atomic queue/PR/ref transition. Both landing profiles
 handle one exact queue head. A [queue workflow watcher](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md)
 can select the current head, prepare its real candidate, execute it on a fixed
-CI branch and publish exact checks. The read-only
+CI branch and publish exact checks. With single-head automatic landing explicitly
+enabled, the watcher can land that exact candidate after its required checks
+complete. The read-only
 [HTTP prefix preparation endpoint](NATIVE_HTTP_QUEUE_PREFIX_PREPARATION.md) can
 construct up to 16 ordered PRs against successive projected candidates and
 return their complete native bundle. Multi-PR landing and evidence, synthetic
-queue refs and autonomous landing remain separate work under
+queue refs and autonomous target refresh remain separate work under
 `frankengit-fg083a-merge-queue-impl-95fm`. Queue membership and
 preparation do not grant approval; landing enforces current review, check,
 authentication and protected-ref rules.
@@ -233,16 +239,68 @@ durable stale refusal. An identical retry of the winning request recovers the
 original decision even after later queue edits, policy replacement or restart.
 
 Successful landing receipts report `refs_changed: true`. Membership command
-receipts and canonical refusals report `false`. Receipt output failure preserves
+receipts, head-refresh receipts and canonical refusals report `false`. Receipt
+output failure preserves
 the known terminal transaction identity in the diagnostic; recover it with the
 original key instead of interpreting the failure as rollback.
+
+## Refresh the surviving head after the target moves
+
+When an earlier entry lands, the next PR still records its previous target tip.
+Read the current queue, PR and live refs, then explicitly update only that PR's
+recorded target. Retain the exact current title and body from the PR view:
+
+```bash
+fg queue refresh "$STORAGE" "$TENANT" "$REPOSITORY" 1 \
+  --trusted-local --principal "$PRINCIPAL" \
+  --expected-incarnation "$INCARNATION" \
+  --idempotency-key refresh-queue-1-pr-43-observation-1 \
+  --expected-version "$QUEUE_VERSION" \
+  --expected-policy-epoch "$POLICY_EPOCH" \
+  --pull-request 43 --expected-pull-version "$PR_VERSION" \
+  --source-ref refs/heads/next-feature --target-ref refs/heads/main \
+  --expected-source-tip "$SOURCE_COMMIT" \
+  --expected-recorded-target-tip "$PR_RECORDED_TARGET" \
+  --expected-target-tip "$LIVE_TARGET_COMMIT" \
+  --title "$EXACT_CURRENT_TITLE" --body-file retained-pr-body.txt
+```
+
+`--expected-recorded-target-tip` is the PR's old recorded target;
+`--expected-target-tip` is the newly observed live target. They must differ.
+Supply exactly one of `--body` or `--body-file`; `--body ''` explicitly retains
+an empty body. A body file must be regular, valid UTF-8, contain no NUL and be at
+most 65,536 bytes. The CLI reads it completely before opening the repository.
+
+Admission checks the exact queue and PR versions, current policy epoch, the
+idle queue's first entry, both live refs and the PR's old recorded target against
+one publication basis. The PR must still be open and visible. Its source branch,
+source tip, target branch, title and body must be identical to the submitted
+values. A source change needs a separate explicit PR update and re-enqueue;
+refresh cannot silently replace the queued candidate or edit its text.
+
+Success publishes one ordinary PR update and one recoverable terminal decision.
+The PR version advances by one. Queue version, order, priorities, enqueue actor,
+FIFO positions and every Git ref remain unchanged. Read or calculate the new PR
+version before preparing or landing this head; keep the queue version unchanged
+unless another queue command has published. Existing reviews and checks for the
+old PR version or candidate cannot substitute for evidence required by the new
+subject. Refresh grants no review, check result or protected-ref permission.
+
+Keep the entire original command, including the old target, expected versions,
+title and body bytes, when retrying after a lost response. The exact decided
+request recovers its original outcome even after later queue changes, another
+target move, policy replacement or restart. The CLI never rereads today's PR to
+reconstruct an earlier payload. If the retained body file is unavailable, recover
+with `fg outcome` and the original principal/key. A new refresh after resolving
+that outcome is a new intended operation with a new key and current observations.
 
 ## Prepare and land a divergent head
 
 Independent PRs commonly diverge after an earlier queue entry moves the target.
-First update the surviving PR's recorded target to the observed live target,
-and re-enqueue it with the exact current queue and PR versions. This is a new
-intended operation; never refresh guards merely to recover an earlier request.
+First use `fg queue refresh` to update the surviving head's recorded target to
+the observed live target while preserving its queue position. Use the resulting
+PR version and unchanged queue version. This is a new intended operation; never
+refresh guards merely to recover an earlier request.
 The queue's first entry then supplies the exact preparation subject:
 
 ```bash
@@ -373,7 +431,11 @@ review withdrawal and reapproval, missing required checks, competing attempts,
 and activated authentication policies with recorded evidence.
 Candidate tests exercise real divergent histories, two-parent object validation,
 exact subject selection, malformed bundles, stale guards and original outcomes.
+Refresh tests cover complete explicit metadata, both recorded and live target
+guards, unchanged queue ordering, one PR-version advance and original outcomes
+after later landing and policy changes.
 `scripts/e2e/suites/product/merge_queue.sh` drives the prebuilt `FG_BIN` across
-fresh CLI processes, including a fast-forward head followed by preparation and
-two-parent landing of its divergent successor. It reports its own results; presence of the suite is not a
+fresh CLI processes, including a fast-forward head followed by guarded refresh,
+preparation and two-parent landing of its divergent successor. It reports its own
+results; presence of the suite is not a
 claim that the full speculative merge-queue acceptance has passed.

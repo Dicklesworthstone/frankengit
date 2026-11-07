@@ -20,6 +20,11 @@ use fgit_forge::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_types::{AsciiSlug, GitOid, RefusalCode};
 use std::collections::BTreeSet;
 
+mod refresh;
+pub use refresh::{
+    QueueHeadRefreshCommand, admit_queue_head_refresh_async, queue_head_refresh_proposal,
+};
+pub(in crate::merge) use refresh::verify_refresh_event_seal;
 mod read;
 pub use read::{QueuePage, read_page_at, read_queue_at};
 mod landing;
