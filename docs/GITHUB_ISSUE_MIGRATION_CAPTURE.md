@@ -166,6 +166,22 @@ closed/stalled output and the complete 128-batch boundary. It covers multi-page 
 restart, bounds, corruption, source changes, credentials, cancellation, ownership
 and path replacement. It is not a live GitHub or Rust/native-server test.
 
+The separate native lane is
+`scripts/e2e/suites/operator/github_issue_migration.sh`, included by
+`./scripts/verify.sh operator`. Its capture path runs the shipped command's
+offline prepare, bounded resume, status and completed resume before feeding the
+pinned `sources.json` into the shipped migration command. An explicit test-only
+Node preload supplies the existing GitHub response-schema fixture to source
+commands only; destination children use unmodified native HTTP. Wrong session
+and handoff pins must refuse before source work or native preparation,
+respectively. Both object formats check original capture/request custody,
+source-independent recovery and canonical Rust issue/history reads, including
+literal text, lifecycle and authenticated native authorship. Its receipt records
+the selected source revision and native binary digest. A retained binary run
+qualifies that producer only; current-source and independent full-lane
+qualification remain separate. This lane does not establish live GitHub access
+or source authenticity.
+
 The local execution environment used the unchanged first 98 lines of the
 production `issues.mjs` module (the complete dependency closure of the native
 mutation encoder used by source capture), not its unrelated browser HTTP client.

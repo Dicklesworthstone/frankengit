@@ -42,9 +42,137 @@ def without_issue_service(campaign: OperatorCampaign, root: Path, credentials: P
     raise AssertionError('native Fetch-compatible listener selection exhausted')
 
 
+def run_capture_case(campaign: OperatorCampaign, fmt: str, directory: Path) -> None:
+    """Actual capture CLI, explicit synthetic source, actual native destination."""
+    directory.mkdir(mode=0o700)
+    source = campaign.node_command(ROOT / 'scripts/e2e/helpers/github_issue_capture_source.mjs', [str(directory)])
+    capture = ROOT / 'scripts/capture_github_issue_migration.mjs'
+    migration = ROOT / 'scripts/migrate_github_issues.mjs'
+    preload, log = Path(source['preload']), Path(source['log'])
+    workdir = directory / 'capture'
+
+    def source_command(operation: str, fields: list[str], expected: int = 0, *, error_reply=False):
+        return campaign.node_command(capture, [operation, '--workdir', str(workdir), *fields],
+                                     expected, error_reply=error_reply, preload=preload)
+
+    root = directory / 'repository'
+    campaign.run('init', root, TENANT, REPOSITORY, fmt)
+    credentials, _ = campaign.credentials(root, directory)
+    header = credentials.read_text(encoding='utf-8').splitlines()[0]
+    credentials.write_text(f'{header}\n{hashlib.sha256(TOKEN.encode()).hexdigest()} {PRINCIPAL} issues-read,issues-write,outcomes-read\n')
+    token = directory / 'native-token'
+    token.write_text(TOKEN, encoding='ascii')
+
+    def canonical(number: int | None = None):
+        args: list[Any] = ['issue', 'list' if number is None else 'show', root, TENANT, REPOSITORY]
+        if number is not None:
+            args.append(number)
+        page = json.loads(campaign.run(*args, '--trusted-local', '--object-format', fmt, '--limit', 100))
+        require(page['node_closed'] is True, 'capture readback did not close native node')
+        return page
+
+    before = canonical()
+    prepared = source_command('prepare', ['--inventory', source['inventory'], '--inventory-sha256',
+        source['inventory_sha256'], '--offset', '5000'])
+    require(not prepared['complete'] and prepared['requests'] == 0 and not log.exists()
+            and canonical() == before, 'offline source preparation accessed source or native state')
+    original = {name: (workdir / name).read_bytes() for name in ('inventory.json', 'session.json')}
+    Path(source['inventory']).unlink()
+    pin = prepared['session_sha256']
+    campaign.facts[f'{fmt}_capture_offline_prepare'] = True
+
+    wrong = '0' * 64 if pin != '0' * 64 else '1' * 64
+    rejected = source_command('resume', ['--confirm', wrong], 2, error_reply=True)
+    require(rejected['native_mutation_submitted'] is False and not log.exists()
+            and canonical() == before and not (workdir / 'capture.owner').exists(),
+            'wrong session pin started source/native work or retained a new owner')
+    campaign.facts[f'{fmt}_capture_pin_refusal'] = True
+
+    prefix = source_command('resume', ['--confirm', pin, '--max-batches', '1'], 3)
+    first = {path.name: path.read_bytes() for path in workdir.glob('capture-*.json')}
+    require(prefix['captured_batches'] == prefix['newly_captured_batches'] == len(first) == 1
+            and not prefix['complete'] and not (workdir / 'sources.json').exists(),
+            'source capture exceeded its batch budget or published an incomplete handoff')
+    first_log = log.read_bytes()
+    status = source_command('status', ['--confirm', pin], 3)
+    require(status['captured_batches'] == 1 and status['requests'] == 0
+            and log.read_bytes() == first_log and canonical() == before,
+            'source status performed work or lost its captured prefix')
+    complete = source_command('resume', ['--confirm', pin])
+    later = [json.loads(line)['address'] for line in log.read_bytes()[len(first_log):].splitlines()]
+    require(complete['complete'] and complete['captured_batches'] == 2 and complete['newly_captured_batches'] == 1
+            and complete['steps'] == 5 and later and all('/issues/1' not in address for address in later)
+            and all((workdir / name).read_bytes() == value for name, value in {**original, **first}.items())
+            and canonical() == before, 'source resume recaptured, changed selection or mutated native state')
+    campaign.facts[f'{fmt}_capture_bounded_resume'] = True
+
+    sources = complete['sources']
+    require(file_sha256(Path(sources['path'])) == sources['sha256'], 'source handoff digest differs')
+    custody = {path.name: path.read_bytes() for path in workdir.iterdir()}
+    all_log = log.read_bytes()
+    for operation in ('status', 'resume'):
+        observed = source_command(operation, ['--confirm', pin])
+        require(observed['complete'] and observed['sources'] == sources and observed['requests'] == 0
+                and log.read_bytes() == all_log and canonical() == before,
+                'completed source recovery repeated source/native work')
+    require({path.name: path.read_bytes() for path in workdir.iterdir()} == custody,
+            'completed source recovery changed original custody')
+    campaign.facts[f'{fmt}_capture_offline_recovery'] = True
+
+    with issue_server(campaign, root, credentials, 'github-capture-' + fmt) as server:
+        destination = directory / 'native-prepared'
+        connection = ['--url', server.url + '/ui/issues/', '--tenant', TENANT, '--repository', REPOSITORY,
+                      '--token-file', str(token), '--workdir', str(destination)]
+        selection = ['--sources', sources['path'], '--sources-sha256', sources['sha256']]
+        wrong_selection = [*selection[:-1], '0' * 64 if sources['sha256'] != '0' * 64 else '1' * 64]
+        rejected = campaign.node_command(migration, ['prepare', *connection, *wrong_selection], 2, error_reply=True)
+        require(rejected['message'] == 'github_migration_sources_pin_mismatch'
+                and rejected.get('migration_progress') is None and not destination.exists() and canonical() == before,
+                'wrong source handoff pin prepared requests or changed native state')
+        plan = campaign.node_command(migration, ['prepare', *connection, *selection])
+        require(plan['steps'] == 5 and canonical() == before, 'native preparation changed canonical state')
+        campaign.facts[f'{fmt}_capture_handoff_pin_refusal'] = True
+        sealed = requests(destination)
+        recovery = [*connection, '--confirm', plan['plan_sha256']]
+        # Native execution must use owned captures after original source custody
+        # moves away; no test preload is installed in these destination children.
+        workdir.rename(directory / 'retained-capture')
+        result = campaign.node_command(migration, ['run', *recovery])
+        require(result['complete'] and result['committed_observed'] == result['mutation_calls'] == 5,
+                'captured source did not produce the exact native mutation population')
+        for issue in source['issues']:
+            page = canonical(5000 + issue['number'])
+            actual, events = page['issue'], page['events']
+            expected_version = 2 if issue['state'] == 'open' else 3
+            require(page['found'] and not page['has_more'] and actual['title'] == issue['title']
+                    and actual['body'].endswith(issue['body']) and actual['state'] == issue['state']
+                    and actual['labels'] == ['feature'] and actual['comments'] == 1
+                    and actual['version'] == len(events) == expected_version
+                    and actual['assignees'] == [] and actual['opened_by'] == actual['last_actor'] == PRINCIPAL
+                    and 'source-author' in actual['body']
+                    and f"https://github.com/{source['repository']}/issues/{issue['number']}" in actual['body'],
+                    'captured source text/lifecycle/attribution/authenticated native actor differs')
+            comments = [event['action']['body'] for event in events if event['action']['name'] == 'comment']
+            require(len(comments) == 1 and comments[0].endswith(issue['comment_body'])
+                    and all(event['actor'] == PRINCIPAL for event in events), 'captured comment or native actor differs')
+        campaign.facts[f'{fmt}_capture_native_readback'] = True
+        final = canonical()
+        require([issue['number'] for issue in final['issues']] == [5001, 5002],
+                'captured migration published an unexpected native issue population')
+        for operation in ('status', 'run'):
+            recovered = campaign.node_command(migration, [operation, *recovery])
+            require(recovered['complete'] and recovered['mutation_calls'] == 0 and canonical() == final,
+                    'completed captured migration repeated native effects')
+        require(requests(destination) == sealed and log.read_bytes() == all_log
+                and {path.name: path.read_bytes() for path in (directory / 'retained-capture').iterdir()} == custody,
+                'native migration changed source or request custody')
+        campaign.facts[f'{fmt}_capture_native_recovery'] = True
+
+
 def run_case(campaign: OperatorCampaign, fmt: str) -> None:
     directory = campaign.work / fmt
     directory.mkdir(mode=0o700)
+    run_capture_case(campaign, fmt, directory / 'capture-flow')
     root = directory / 'repository'
     campaign.run('init', root, TENANT, REPOSITORY, fmt)
     credentials, _ = campaign.credentials(root, directory)

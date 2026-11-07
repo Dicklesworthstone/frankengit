@@ -39,7 +39,8 @@ class OperatorCampaign(Campaign):
     def node_command(self, script: Path, args: list[str], expected: int = 0, *,
                      error_reply: bool = False, timeout: float = 40,
                      json_lines: bool = False, text_reply: bool = False,
-                     block_stdout: bool = False) -> dict[str, Any] | list[dict[str, Any]] | str:
+                     block_stdout: bool = False,
+                     preload: Path | None = None) -> dict[str, Any] | list[dict[str, Any]] | str:
         if json_lines and text_reply:
             raise ValueError("NDJSON and text replies are mutually exclusive")
         if not 0 < timeout <= 40:
@@ -48,7 +49,10 @@ class OperatorCampaign(Campaign):
             raise ValueError("blocked output must explicitly expect a failed command and stderr reply")
         self.client_serial += 1
         stem = self.work / f"operator-{self.client_serial:03d}"
-        command = [str(self.node), str(script), *args]
+        command = [str(self.node)]
+        if preload is not None:
+            command += ['--import', preload.resolve(strict=True).as_uri()]
+        command += [str(script), *args]
         started = time.monotonic()
         with stem.with_suffix(".stdout").open("wb") as out, stem.with_suffix(".stderr").open("wb") as err, \
                 output_sink(out, block_stdout) as (sink, prefilled):
