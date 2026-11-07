@@ -196,8 +196,13 @@ Omit `--known` until a complete result record exists. It must be a result for
 this exact request; an arbitrary native outcome or another issue's receipt is
 refused before I/O. `--record` always names a new file and never replaces a prior
 observation. `--ca-file` selects a private PEM trust bundle, not permission to
-skip TLS verification. `--timeout-ms` bounds the entire network operation;
-SIGINT/SIGTERM request cancellation and socket cleanup. SIGKILL cannot run
+skip TLS verification. For send/recover, `--timeout-ms` bounds the whole
+invocation, including local intake, network work and asynchronous stdout
+delivery (30 seconds by default, at most 300 seconds). Local-only commands
+use the same 30-second default. SIGINT/SIGTERM request cancellation, socket
+cleanup and release of blocked output. Synchronous work and blocking host
+filesystem calls cannot be preempted. Final diagnostics have a separate drain
+capped at 250 ms, which authorizes no further remote work. SIGKILL cannot run
 cleanup, but the already saved request remains the recovery input on restart.
 
 `prepare` and `inspect` perform no network operations. Preparing creates a new
@@ -232,6 +237,10 @@ Exit codes are 0 for local preparation/inspection or a confirmed native commit,
 1 for a canonical terminal refusal, 2 for a local input/file refusal before the
 network operation, and 3 for a nonterminal/unknown operation or result-output
 failure. Inspect the structured result: output failure can follow a known commit.
+The `remote_issue_output_failure` diagnostic names its error code and whether
+command work completed before output failed. When available, `native_result`
+preserves the validated terminal observation; output cancellation never rolls
+back publication or changes the original request, key or saved result record.
 Neither a nonzero exit nor an absent key is evidence that nothing happened.
 
 Run `bash scripts/verify_remote_issues.sh` for the complete client/CLI lane.

@@ -31,12 +31,14 @@ async function write(stream, text, signal) {
 
 // Called once by the executable, not by the reusable command APIs. Their
 // operation timers remain; this owner also covers serialization/output delivery.
-export async function runOperatorCli(args, { timeout, run, failure }) {
+export async function runOperatorCli(args, { timeout, run, failure, failureExitCode = 2 }) {
   const started = performance.now(), stop = new AbortController(), abort = () => stop.abort();
   let completed = false, timer;
-  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  // Repeated cancellation still belongs to this owner while work/diagnostics
+  // drain; removing a once listener early restores the default abrupt exit.
+  process.on('SIGINT', abort); process.on('SIGTERM', abort);
   // Keep these process-owned error handlers through asynchronous stdio closure.
-  const unavailable = () => { abort(); process.exitCode = 2; };
+  const unavailable = () => { abort(); process.exitCode = failureExitCode; };
   process.stdout.on('error', unavailable); process.stderr.on('error', unavailable);
   try {
     const milliseconds = timeout(args);
@@ -51,7 +53,7 @@ export async function runOperatorCli(args, { timeout, run, failure }) {
     await write(process.stdout, result.text, stop.signal);
     if (performance.now() >= deadline) throw operatorError('operator_output_cancelled_or_deadline');
   } catch (error) {
-    process.exitCode = 2;
+    process.exitCode = failureExitCode;
     // Final diagnostics have a separate finite drain, never a new operation
     // budget. A blocked stderr cannot keep the failed process alive forever.
     const diagnostics = new AbortController(), drain = setTimeout(() => diagnostics.abort(), 250);

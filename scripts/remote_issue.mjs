@@ -7,6 +7,7 @@ import { prepareIssue, submitIssue, recoverIssue, validateIssuePublication, pars
 import { validateOutcomeReply } from './operator/transaction_outcome.mjs';
 import { readIssuePrivate, readIssueToken, saveIssueIntent, loadIssueIntent,
   checkIssueRecordDestination, saveIssueRecord } from './operator/issue_files.mjs';
+import { runOperatorCli } from './lib/forge-operator-cli.mjs';
 
 export const HELP = `Usage: node scripts/remote_issue.mjs <prepare|inspect|send|recover> [options]
 
@@ -16,7 +17,7 @@ send --request-dir EXISTING_SLOT --token-file ORIGINAL_TOKEN --confirm-key EXACT
 recover --request-dir EXISTING_SLOT --token-file ORIGINAL_OR_ROTATED_TOKEN
 
 send/recover additionally accept:
-  --timeout-ms 1..300000      Whole network operation, default 30000
+  --timeout-ms 1..300000      Whole invocation including output, default 30000
   --ca-file PRIVATE_PEM      Explicit trusted CA; verification cannot be disabled
   --known PRIVATE_RECORD    Retained result from THIS request, to refuse regression
   --record NEW_PRIVATE_JSON Write a complete, synced, create-only result record
@@ -126,21 +127,24 @@ export async function runIssueCli(args, { signal } = {}) {
   }
 }
 async function entry() {
-  const controller = new AbortController(), abort = () => controller.abort();
-  process.on('SIGINT', abort); process.on('SIGTERM', abort);
-  // Keep stream errors inside the result-output path, not an unhandled event.
-  const observe = () => {}; process.stdout.on('error', observe);
   let result;
-  try {
-    result = await runIssueCli(process.argv.slice(2), { signal: controller.signal });
-    const output = result.text ?? issueCanonical(result.value);
-    await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
-    process.exitCode = result.exitCode;
-  } catch {
-    process.exitCode = 3;
-    const native = result?.value?.type === 'remote_issue_result' ? result.value : result?.value?.native_result ?? null;
-    process.stderr.write(issueCanonical({ type: 'remote_issue_output_failure', outcome_unknown: native ? !native.outcome.terminal : true,
-      native_result: native, absence_proves_non_commit: false }));
-  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
+  await runOperatorCli(process.argv.slice(2), {
+    timeout: args => {
+      // Preserve runIssueCli's original local-input error envelope/exit code.
+      // Parsing is bounded and performs no I/O; local-only commands use 30s.
+      try { return parse(args).timeoutMs ?? 30000; } catch { return 30000; }
+    },
+    run: async (args, signal) => {
+      result = await runIssueCli(args, { signal });
+      return { text: result.text ?? issueCanonical(result.value), exitCode: result.exitCode };
+    },
+    failureExitCode: 3,
+    failure: (error, completed) => {
+      const native = result?.value?.type === 'remote_issue_result' ? result.value : result?.value?.native_result ?? null;
+      return issueCanonical({ type: 'remote_issue_output_failure', code: error.code ?? 'issue_output_failed',
+        operation_completed: completed, outcome_unknown: native ? !native.outcome.terminal : true,
+        native_result: native, absence_proves_non_commit: false });
+    },
+  });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await entry();
