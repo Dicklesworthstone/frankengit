@@ -60,6 +60,10 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Private source, refs, metadata, graph/search/vector data, context, logs, evidence, artifacts, repair symbols, and secrets remain inside authorization/encryption domains.
 - Dedup, caches, timing, range requests, embeddings, and error messages do not become cross-tenant existence or membership oracles.
 - Secrets are brokered, least privilege, short lived, redacted, and absent from prompts/context/logs unless explicitly authorized.
+- The existing JavaScript GitHub source reader returns a typed decode refusal
+  without raw parser messages or causes that could quote private response bytes.
+  Its controlled HTTP regressions check both rejected bodies and unchanged valid
+  content; they do not establish live-GitHub access or a broader security assessment.
 - Training/external model use is separate opt-in authority, never inferred from hosting or indexing permission.
 
 ### 1.5 Availability and bounded work

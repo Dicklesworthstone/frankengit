@@ -25,13 +25,20 @@ export function githubRepository(value) {
 // Never round GitHub numeric aliases through IEEE-754. The Node profile must
 // provide the JSON reviver's original numeric source, as the capture did before.
 function githubJson(bytes) {
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
-    if (typeof value !== 'number') return value;
-    const raw = context?.source;
-    if (typeof raw !== 'string' || !/^(0|[1-9][0-9]*)$/.test(raw)) fail('numeric_wire_value');
-    if (key === 'id') return githubIdentity(raw);
-    return integer(value, 0, Number.MAX_SAFE_INTEGER, 'numeric_wire_value');
-  });
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
+      if (typeof value !== 'number') return value;
+      const raw = context?.source;
+      if (typeof raw !== 'string' || !/^(0|[1-9][0-9]*)$/.test(raw)) fail('numeric_wire_value');
+      if (key === 'id') return githubIdentity(raw);
+      return integer(value, 0, Number.MAX_SAFE_INTEGER, 'numeric_wire_value');
+    });
+  } catch (error) {
+    // Preserve our typed field refusals. Native decoder/parser diagnostics can
+    // quote private response bytes, so never expose them or retain a raw cause.
+    if (typeof error?.code === 'string' && error.code.startsWith('github_import_')) throw error;
+    fail('source_json');
+  }
 }
 function seconds(value) {
   return typeof value === 'string' && /^[0-9]{1,10}$/.test(value) ? Number(value) : null;

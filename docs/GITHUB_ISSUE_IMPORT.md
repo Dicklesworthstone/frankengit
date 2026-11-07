@@ -63,6 +63,11 @@ link must still have the same host, repository identity, issue, page size and ne
 page number. The importer then constructs its own canonical request URL; it never
 uses a server-provided URL as a credential destination.
 
+The shared source reader returns `github_import_source_json` when UTF-8 or JSON
+decoding fails. It omits raw parser messages and causes, which can quote private
+response content. Existing typed numeric/identity refusals remain distinct;
+decode failure does not trigger a source retry or create a usable capture.
+
 Limits are explicit: 100 issues, 2,000 total comments, a canonical 1 MiB package,
 8 MiB per source reply and 64 MiB aggregate source reads by default. The aggregate
 ceiling can be selected with `--max-read-bytes` up to 256 MiB. Both passes count.
