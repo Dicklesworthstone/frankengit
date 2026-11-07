@@ -48,14 +48,14 @@ for format in sha1 sha256; do
     fge_assert_eq "OPERATOR-GITHUB-ISSUE-$format-$name" true "$(fact "${format}_$name")" "$name"
   done
 done
-fge_capture acquisition-command-readback python3 - "$SUMMARY" <<'PY' || true
+fge_capture acquisition-command-readback python3 - "$SUMMARY" "$WORK/campaign" <<'PY' || true
 import json
 import sys
 from pathlib import Path
 
 summary = json.loads(Path(sys.argv[1]).read_text())
 assert summary['complete'] is True
-root = Path(summary['artifacts'])
+root = Path(sys.argv[2])
 commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
 source_calls = []
 for row in commands:
