@@ -166,13 +166,17 @@ Inspect that file; never infer a remote result from its apparent filesystem phas
 
 ## Bounds and results
 
-`--timeout-ms` covers command intake, reads, persistence and network work, with a
+`--timeout-ms` covers command intake, reads, persistence, network work and
+asynchronous stdout delivery, with a
 30-second default and a 300-second maximum. Cancellation aborts the outstanding
 HTTP request; that does not cancel a possibly committed server transaction.
 Blocking host filesystem calls and synchronous work are not preemptible. A
 confirmed terminal result is not retroactively rolled back by later cancellation
 or failed stdout. Output errors return failure with `operation_completed` set
 when the command had already produced its result; the original record survives.
+SIGINT/SIGTERM also releases a blocked output write after command work drains.
+Final diagnostics have a separate drain capped at 250 ms; blocked stderr is
+abandoned too, without authorizing further remote work.
 
 Titles, bodies, labels, assignees, safe-integer counters and response limits retain the
 shipped client profile. This does not expand it to the native u64 domain. Body

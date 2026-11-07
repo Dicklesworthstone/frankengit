@@ -8,7 +8,7 @@ fge_init operator-remote-issue
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
 fge_context evidence_class real_js_cli_native_http_and_canonical_reads
-fge_context non_claim 'Three issue/inbox operator entrypoints in SHA-1/SHA-256; not discussion inboxes, the complete operator matrix, browser UI, TLS, D10 or same-revision native build qualification.'
+fge_context non_claim 'Three issue/inbox operator entrypoints and both inbox namespaces in SHA-1/SHA-256; not the complete operator matrix, browser UI, TLS, D10 or same-revision native build qualification.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
@@ -53,6 +53,9 @@ for format in sha1 sha256; do
   fge_assert_eq "OPERATOR-ISSUE-$format-015" true "$(fact "${format}_inbox_independent_grant_twins")" 'notification-write denial preserves original custody; restored grant admits its exact retry'
   fge_assert_eq "OPERATOR-ISSUE-$format-016" true "$(fact "${format}_inbox_missing_native_service_refusal")" 'disabled native inbox service cannot produce a complete operator observation'
   fge_assert_eq "OPERATOR-ISSUE-$format-017" true "$(fact "${format}_inbox_prefix_bounds_and_read_toggle")" 'future read prefix refuses; exact observed prefix clears unread and old recovery preserves a later explicit unread'
+  for property in actions_prefix_and_original_recovery retained_reads_and_canonical_state stale_and_identity_refusals independent_grant_twins prefix_bounds_and_read_toggle missing_native_service_refusal namespace_isolation disclosure_grant_twins; do
+    fge_assert_eq "OPERATOR-ISSUE-$format-discussion-$property" true "$(fact "${format}_discussion_inbox_$property")" "native discussion inbox $property"
+  done
 done
 fge_capture entrypoint-receipts python3 - "$SUMMARY" "$FG_BIN" "$E2E_ROOT/../.." <<'PY' || true
 import hashlib, json, sys

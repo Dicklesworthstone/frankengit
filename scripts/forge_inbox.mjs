@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { decimal } from '../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { inboxOperatorOptions, runInboxOperation } from './lib/forge-inbox-operator.mjs';
 import { operatorError, operatorJson } from './lib/forge-operator-io.mjs';
+import { runOperatorCli } from './lib/forge-operator-cli.mjs';
 
 export const HELP = `Usage: node scripts/forge_inbox.mjs OPERATION
   --kind issue|discussion --url EXACT_INBOX_PAGE_URL
@@ -81,20 +82,12 @@ export async function runInboxCommand(args, signal) {
 }
 
 async function main() {
-  const stop = new AbortController(), abort = () => stop.abort();
-  process.once('SIGINT', abort); process.once('SIGTERM', abort);
-  let completed = false;
-  process.stdout.on('error', () => { abort(); process.exitCode = 2; });
-  process.stderr.on('error', () => { abort(); process.exitCode = 2; });
-  try {
-    const result = await runInboxCommand(process.argv.slice(2), stop.signal); completed = true;
-    process.exitCode = result.exitCode;
-    await new Promise((resolve, reject) => process.stdout.write(result.text, error => error ? reject(error) : resolve()));
-  } catch (error) {
-    process.exitCode = 2;
-    process.stderr.write(operatorJson({ type: 'forge_inbox_operator_error', code: error.code ?? 'inbox_operator_failed',
+  await runOperatorCli(process.argv.slice(2), {
+    timeout: args => args.length === 1 && args[0] === '--help' ? 30000 : inboxArguments(args).timeoutMs ?? 30000,
+    run: runInboxCommand,
+    failure: (error, completed) => operatorJson({ type: 'forge_inbox_operator_error', code: error.code ?? 'inbox_operator_failed',
       operation_completed: completed, state: error.operator_state ?? null, record: error.record ?? null,
-      record_sha256: error.record_sha256 ?? null, http_status: error.status ?? null, absence_proves_non_commit: false }));
-  } finally { process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); }
+      record_sha256: error.record_sha256 ?? null, http_status: error.status ?? null, absence_proves_non_commit: false }),
+  });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

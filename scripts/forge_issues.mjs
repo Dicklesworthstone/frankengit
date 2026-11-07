@@ -5,6 +5,7 @@ import { decimal } from '../crates/fgit-node/src/smart_http/server/browser/issue
 import { issueReadOptions, runIssueRead } from './lib/forge-issue-reader.mjs';
 import { issueOperatorOptions, runIssueOperation } from './lib/forge-issue-operator.mjs';
 import { operatorError, operatorJson, readPrivateOperatorFile, operatorPath } from './lib/forge-operator-io.mjs';
+import { runOperatorCli } from './lib/forge-operator-cli.mjs';
 
 export const HELP = `Usage: node scripts/forge_issues.mjs OPERATION
   --url https://HOST/REPOSITORY_ROUTE/ui/issues/
@@ -111,20 +112,12 @@ export async function runIssueCommand(args, signal) {
   return { text: operatorJson(result), exitCode: result.state !== 'terminal_observed' ? 2 : result.result.outcome === 'committed' ? 0 : 3 };
 }
 async function main() {
-  const stop = new AbortController(), abort = () => stop.abort();
-  process.once('SIGINT', abort); process.once('SIGTERM', abort);
-  let completed = false;
-  process.stdout.on('error', () => { abort(); process.exitCode = 2; });
-  process.stderr.on('error', () => { abort(); process.exitCode = 2; });
-  try {
-    const result = await runIssueCommand(process.argv.slice(2), stop.signal); completed = true;
-    process.exitCode = result.exitCode;
-    await new Promise((resolve, reject) => process.stdout.write(result.text, e => e ? reject(e) : resolve()));
-  } catch (e) {
-    process.exitCode = 2;
-    process.stderr.write(operatorJson({ type: 'forge_issue_operator_error', code: e.code ?? 'issue_operator_failed',
+  await runOperatorCli(process.argv.slice(2), {
+    timeout: args => args.length === 1 && args[0] === '--help' ? 30000 : issueArguments(args).options.timeoutMs,
+    run: runIssueCommand,
+    failure: (e, completed) => operatorJson({ type: 'forge_issue_operator_error', code: e.code ?? 'issue_operator_failed',
       operation_completed: completed, state: e.operator_state ?? null, record: e.record ?? null,
-      record_sha256: e.record_sha256 ?? null, http_status: e.status ?? null }));
-  } finally { process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); }
+      record_sha256: e.record_sha256 ?? null, http_status: e.status ?? null }),
+  });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
