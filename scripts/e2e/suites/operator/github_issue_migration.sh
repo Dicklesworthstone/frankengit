@@ -41,7 +41,9 @@ PY
 for format in sha1 sha256; do
   for name in offline_preparation global_budget_and_status owned_sources_and_resume \
     denied_write_and_exact_retry canonical_text_lifecycle_and_actor completed_recovery \
-    occupied_target_refusal later_request_tamper disabled_service_and_exact_retry owned_services_drained; do
+    occupied_target_refusal later_request_tamper disabled_service_and_exact_retry owned_services_drained \
+    capture_offline_prepare capture_pin_refusal capture_bounded_resume capture_offline_recovery \
+    capture_handoff_pin_refusal capture_native_readback capture_native_recovery; do
     fge_assert_eq "OPERATOR-GITHUB-ISSUE-$format-$name" true "$(fact "${format}_$name")" "$name"
   done
 done
