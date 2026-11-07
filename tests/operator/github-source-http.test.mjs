@@ -2,8 +2,10 @@
 // controlled GitHub responses; they are not live-GitHub or native-forge E2E proof.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { createGithubSource, githubRetryDelay, githubIdentity, githubRepository,
   API_VERSION, SOURCE_RETRY_LIMIT } from '../../scripts/lib/github-source-http.mjs';
+import { listenForFetch } from '../fetch-peer.mjs';
 
 const path = '/repos/owner/project';
 const json = (body = '{"id":42}', headers = {}) => new Response(body, { headers: { 'Content-Type': 'application/json', ...headers } });
@@ -207,4 +209,52 @@ test('source option and alias validation refuses unsupported bounds', () => {
   assert.equal(githubIdentity('18446744073709551615'), '18446744073709551615');
   for (const value of ['01', 0, -1, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => githubIdentity(value));
   for (const value of ['owner/..', '../repo', 'owner/repo?token=secret']) assert.throws(() => githubRepository(value));
+});
+
+// Real loopback HTTP responses exercise decode/cleanup. The URL adapter remains
+// a source fixture, not live GitHub or native-forge evidence.
+async function wireSource(t, body, inspect) {
+  let contacts = 0;
+  const server = createServer((request, response) => {
+    contacts++;
+    assert.equal(request.url, path);
+    assert.match(request.headers['user-agent'], /^frankengit-/);
+    response.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });
+    response.end(body);
+  });
+  t.after(async () => {
+    if (!server.listening) return;
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  await listenForFetch(server);
+  await run({ signal: t.signal, timeoutMs: 1000, maxSourceRetries: 1, fetchImpl: async (url, request) => {
+    assert.equal(url, `https://api.github.com${path}`);
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${path}`, request);
+    return new Response(response.body, { status: response.status, headers: response.headers });
+  } }, async source => {
+    await inspect(source);
+    assert.equal(contacts, 1);
+    assert.deepEqual(source.statistics(), { requests: 1, read_bytes: body.length, source_retries: 0 });
+  });
+}
+const privateSource = 'FGSECRET';
+for (const [name, body, code] of [
+  ['syntax', Buffer.from(privateSource), 'github_import_source_json'],
+  ['UTF-8', Buffer.concat([Buffer.from([0xff]), Buffer.from(privateSource)]), 'github_import_source_json'],
+  ['numeric domain', Buffer.from(`{"id":42,"number":1.5,"note":"${privateSource}"}`), 'github_import_numeric_wire_value'],
+]) test(`real HTTP ${name} failure has a redacted typed error and no retry`, { timeout: 5000 }, async t => {
+  await wireSource(t, body, source => assert.rejects(source.get(path), error => {
+    assert.equal(`${error.message}\n${error.stack}\n${JSON.stringify(error)}`.includes(privateSource), false,
+      'a source response fragment escaped through a decode error');
+    assert.equal(error.code, code);
+    assert.equal(error.cause, undefined, 'a raw parser cause must not retain the response fragment');
+    return true;
+  }));
+});
+test('real HTTP valid source JSON retains exact private content and full-width identity', { timeout: 5000 }, async t => {
+  const body = Buffer.from(`{"id":18446744073709551615,"note":"${privateSource}"}`);
+  await wireSource(t, body, async source => {
+    assert.deepEqual((await source.get(path)).value, { id: '18446744073709551615', note: privateSource });
+  });
 });

@@ -37,6 +37,22 @@ async function fixture(t, failOperator = false) {
       await copyFile(join(repository, 'scripts/e2e', entry.name), join(root, 'scripts/e2e', entry.name));
     }
   }
+  // Controller-only stand-in: validate dispatch and executable/workdir handoff.
+  // The actual repository suite separately runs the real native owner tests;
+  // Node is deliberately the sentinel executable in this miniature workspace.
+  await writeFile(join(root, 'scripts/e2e/selftests/test_http_service_owner.py'), `import json, os, unittest
+from pathlib import Path
+class DispatchFixtureTest(unittest.TestCase):
+    def test_selected_executable_and_workdir_handoff(self):
+        self.assertEqual(os.environ['FG_BIN'], os.environ['FG_OPERATOR_FIXTURE_NODE'])
+        work = Path(os.environ['FGE_HTTP_OWNER_WORKDIR'])
+        self.assertTrue(work.is_dir())
+        root = Path(${JSON.stringify(root)})
+        self.assertEqual(root.stat().st_mode & 0o077, 0)
+        self.assertEqual(work, root / 'receipt/work/native-http-owner')
+        Path(${JSON.stringify(join(root, 'native-owner-entered.json'))}).write_text(json.dumps({'kind':'dispatcher_fixture_only','fg_bin':os.environ['FG_BIN']}))
+if __name__ == '__main__': unittest.main()
+`);
   await writeFile(join(root, 'tests/node-version'), process.versions.node + '\n');
   const probe = (scope, extra = '') => `import test from 'node:test';import assert from 'node:assert/strict';import {writeFileSync} from 'node:fs';import vm from 'node:vm';test('${scope} fixture',()=>{${extra}assert.equal(process.env.FG_NATIVE_BIN,process.execPath);writeFileSync(new URL('${scope === 'supervisor' ? '../' : '../../'}${scope}-entered',import.meta.url),'executed');});\n`;
   await writeFile(join(root, 'tests/operator/probe.test.mjs'), probe('operator', failOperator ? "assert.fail('planted operator failure');" : ''));
@@ -67,6 +83,9 @@ test('discovered operator suite executes both actual profile scopes and hands of
   assert.equal(result.code, 0, result.stderr.toString());
   assert.equal(result.signal, null);
   assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-OWNER-001')?.result.status, 'pass');
+  assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-HTTP-OWNER-001')?.result.status, 'pass');
+  assert.deepEqual(JSON.parse(await readFile(join(f.root, 'native-owner-entered.json'), 'utf8')),
+    { kind: 'dispatcher_fixture_only', fg_bin: process.execPath });
   for (const scope of ['operator', 'scripts']) {
     assert.equal(await readFile(join(f.root, `${scope}-entered`), 'utf8'), 'executed');
     for (const suffix of ['001', '002']) {
@@ -119,6 +138,7 @@ test('missing ownership selftests fail only their gate while both module scopes 
   const result = await f.run();
   assert.notEqual(result.code, 0);
   assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-OWNER-001')?.result.status, 'fail');
+  assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-HTTP-OWNER-001')?.result.status, 'pass');
   for (const scope of ['operator', 'scripts']) {
     assert.equal(await readFile(join(f.root, `${scope}-entered`), 'utf8'), 'executed');
     for (const suffix of ['001', '002']) {
@@ -128,5 +148,23 @@ test('missing ownership selftests fail only their gate while both module scopes 
   assert.equal(await readFile(join(f.root, 'supervisor-entered'), 'utf8'), 'executed');
   assert.equal(result.records.at(-1).terminal.status, 'fail');
   assert.deepEqual(result.records.at(-1).terminal.failed_ids, ['OPERATOR-CONTRACT-OWNER-001']);
+  f.complete();
+});
+
+test('missing native HTTP ownership tests fail their gate while both profiles still run', { timeout: 45000 }, async t => {
+  const f = await fixture(t);
+  await unlink(join(f.root, 'scripts/e2e/selftests/test_http_service_owner.py'));
+  const result = await f.run();
+  assert.notEqual(result.code, 0);
+  assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-OWNER-001')?.result.status, 'pass');
+  assert.equal(result.records.find(row => row.acceptance_id === 'OPERATOR-CONTRACT-HTTP-OWNER-001')?.result.status, 'fail');
+  for (const scope of ['operator', 'scripts']) {
+    assert.equal(await readFile(join(f.root, `${scope}-entered`), 'utf8'), 'executed');
+    for (const suffix of ['001', '002']) {
+      assert.equal(result.records.find(row => row.acceptance_id === `OPERATOR-CONTRACT-${scope}-${suffix}`)?.result.status, 'pass');
+    }
+  }
+  assert.equal(result.records.at(-1).terminal.status, 'fail');
+  assert.deepEqual(result.records.at(-1).terminal.failed_ids, ['OPERATOR-CONTRACT-HTTP-OWNER-001']);
   f.complete();
 });

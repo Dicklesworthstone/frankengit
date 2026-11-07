@@ -43,10 +43,11 @@ def without_issue_service(campaign: OperatorCampaign, root: Path, credentials: P
 
 
 def run_capture_case(campaign: OperatorCampaign, fmt: str, directory: Path) -> None:
-    """Actual capture CLI, explicit synthetic source, actual native destination."""
+    """Actual discovery/batch/capture CLIs and synthetic source, native destination."""
     directory.mkdir(mode=0o700)
     source = campaign.node_command(ROOT / 'scripts/e2e/helpers/github_issue_capture_source.mjs', [str(directory)])
     capture = ROOT / 'scripts/capture_github_issue_migration.mjs'
+    inventory_cli = ROOT / 'scripts/import_github_issues.mjs'
     migration = ROOT / 'scripts/migrate_github_issues.mjs'
     preload, log = Path(source['preload']), Path(source['log'])
     workdir = directory / 'capture'
@@ -54,6 +55,10 @@ def run_capture_case(campaign: OperatorCampaign, fmt: str, directory: Path) -> N
     def source_command(operation: str, fields: list[str], expected: int = 0, *, error_reply=False):
         return campaign.node_command(capture, [operation, '--workdir', str(workdir), *fields],
                                      expected, error_reply=error_reply, preload=preload)
+
+    def inventory_command(operation: str, fields: list[str], expected: int = 0, *, error_reply=False):
+        return campaign.node_command(inventory_cli, [operation, *fields], expected,
+                                     error_reply=error_reply, preload=preload)
 
     root = directory / 'repository'
     campaign.run('init', root, TENANT, REPOSITORY, fmt)
@@ -72,9 +77,46 @@ def run_capture_case(campaign: OperatorCampaign, fmt: str, directory: Path) -> N
         return page
 
     before = canonical()
+    inventory_file = Path(source['inventory'])
+    require(not inventory_file.exists(), 'fixture synthesized the inventory instead of invoking discovery')
+    discovery_args = ['--repository', source['repository'], '--out', str(inventory_file), '--batch-size', '1']
+    discovered = inventory_command('discover', discovery_args)
+    inventory_pin = discovered['sha256']
+    require(discovered['issues'] == discovered['total_batches'] == 2 and discovered['batch_size'] == 1
+            and discovered['excluded_pull_requests'] == 0 and discovered['mutation_submitted'] is False
+            and inventory_pin == source['expected_inventory_sha256'] == file_sha256(inventory_file)
+            and canonical() == before, 'discovery CLI changed fixed source selection or native authority')
+    campaign.facts[f'{fmt}_discovery_cli_pinned_inventory'] = True
+    discovery_log = log.read_bytes()
+    rejected = inventory_command('discover', discovery_args, 2, error_reply=True)
+    require(rejected['code'] == 'operator_record_exists' and log.read_bytes() == discovery_log
+            and file_sha256(inventory_file) == inventory_pin and canonical() == before,
+            'duplicate discovery replaced its inventory or performed source/native work')
+    selected_args = ['--inventory', str(inventory_file), '--confirm', inventory_pin, '--batch', '1']
+    inspected = inventory_command('inspect-inventory', selected_args)
+    wrong_args = selected_args.copy()
+    wrong_args[3] = '0' * 64
+    rejected = inventory_command('inspect-inventory', wrong_args, 2, error_reply=True)
+    require(inspected['selection']['numbers'] == [1] and inspected['mutation_submitted'] is False
+            and rejected['code'] == 'github_inventory_pin_mismatch' and log.read_bytes() == discovery_log
+            and canonical() == before, 'offline inventory pin twin accessed source or changed selection')
+    campaign.facts[f'{fmt}_inventory_offline_pin_twins'] = True
+    batch_file = directory / 'batch-from-cli.json'
+    rejected = inventory_command('capture-batch', [*wrong_args, '--out', str(batch_file)], 2, error_reply=True)
+    require(rejected['code'] == 'github_inventory_pin_mismatch' and not batch_file.exists()
+            and log.read_bytes() == discovery_log and canonical() == before,
+            'wrong batch pin performed source/native work or created a capture')
+    batch = inventory_command('capture-batch', [*selected_args, '--out', str(batch_file)])
+    batch_bytes = batch_file.read_bytes()
+    require(batch['sha256'] == file_sha256(batch_file) and batch['issues'] == 1
+            and batch['selection']['inventory_sha256'] == inventory_pin
+            and batch['selection']['numbers'] == [1] and batch['mutation_submitted'] is False
+            and canonical() == before, 'standalone batch capture lost its original discovery pin')
+    initial_log = log.read_bytes()
     prepared = source_command('prepare', ['--inventory', source['inventory'], '--inventory-sha256',
-        source['inventory_sha256'], '--offset', '5000'])
-    require(not prepared['complete'] and prepared['requests'] == 0 and not log.exists()
+        inventory_pin, '--offset', '5000'])
+    require(not prepared['complete'] and prepared['requests'] == 0 and log.read_bytes() == initial_log
+            and prepared['inventory_sha256'] == inventory_pin
             and canonical() == before, 'offline source preparation accessed source or native state')
     original = {name: (workdir / name).read_bytes() for name in ('inventory.json', 'session.json')}
     Path(source['inventory']).unlink()
@@ -83,7 +125,7 @@ def run_capture_case(campaign: OperatorCampaign, fmt: str, directory: Path) -> N
 
     wrong = '0' * 64 if pin != '0' * 64 else '1' * 64
     rejected = source_command('resume', ['--confirm', wrong], 2, error_reply=True)
-    require(rejected['native_mutation_submitted'] is False and not log.exists()
+    require(rejected['native_mutation_submitted'] is False and log.read_bytes() == initial_log
             and canonical() == before and not (workdir / 'capture.owner').exists(),
             'wrong session pin started source/native work or retained a new owner')
     campaign.facts[f'{fmt}_capture_pin_refusal'] = True
@@ -93,6 +135,9 @@ def run_capture_case(campaign: OperatorCampaign, fmt: str, directory: Path) -> N
     require(prefix['captured_batches'] == prefix['newly_captured_batches'] == len(first) == 1
             and not prefix['complete'] and not (workdir / 'sources.json').exists(),
             'source capture exceeded its batch budget or published an incomplete handoff')
+    require(next(iter(first.values())) == batch_bytes,
+            'resumable capture differs from the standalone CLI capture of the same pinned batch')
+    campaign.facts[f'{fmt}_batch_cli_matches_capture'] = True
     first_log = log.read_bytes()
     status = source_command('status', ['--confirm', pin], 3)
     require(status['captured_batches'] == 1 and status['requests'] == 0

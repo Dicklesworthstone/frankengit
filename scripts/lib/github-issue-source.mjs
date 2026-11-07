@@ -1,7 +1,7 @@
 // FG-049: bounded GitHub issue capture and translation into the shipped native
 // issue commands. Imported actors are attribution, never local principals.
 import { mutationRequest, natural } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
-import { recordDigest, operatorError } from './forge-operator-io.mjs';
+import { recordDigest, operatorError, parseOperatorJson } from './forge-operator-io.mjs';
 import { createGithubSource, githubIdentity as id, githubRepository, GITHUB_API as API } from './github-source-http.mjs';
 export { API_VERSION, githubRepository } from './github-source-http.mjs';
 
@@ -108,7 +108,7 @@ export function captureBytes(value) {
 }
 export function parseCapture(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.length > CAPTURE_LIMIT) fail('capture_bytes');
-  const v = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  const v = parseOperatorJson(bytes, 'github_import_capture_json');
   if (!captureBytes(v).equals(Buffer.from(bytes))) fail('noncanonical_capture');
   return v;
 }

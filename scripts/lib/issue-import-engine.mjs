@@ -8,7 +8,7 @@ import { MilestoneClient, milestoneMutationRequest } from '../../crates/fgit-nod
 import { issueConnectionOptions, connectIssueToken, runIssueOperation } from './forge-issue-operator.mjs';
 import { runMilestoneOperation } from './forge-milestone-operator.mjs';
 import { operatorError, operatorPath, privateRecordPath, readPrivateOperatorFile,
-  readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
+  readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest, parseOperatorJson } from './forge-operator-io.mjs';
 
 // Source adapters are repository code, never supplied by a custody file or CLI.
 // Both adapters share the exact native request, terminal, lock and retry path.
@@ -75,7 +75,7 @@ async function tokenFingerprint(path, check) {
   } finally { bytes.fill(0); }
 }
 function canonical(bytes) {
-  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  const value = parseOperatorJson(bytes, `${kind}${milestone ? '_milestone' : ''}_import_json`);
   if (!encode(value).equals(bytes)) fail('journal_encoding');
   return value;
 }

@@ -9,7 +9,7 @@ import { prepareGithubIssueImport, inspectPreparedGithubIssueImport } from './gi
 import { parseCapture, issueImportSteps, CAPTURE_LIMIT } from './github-issue-source.mjs';
 import { parseIssueInventory, INVENTORY_LIMIT } from './github-issue-inventory.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, readPrivateOperatorFile,
-  readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
+  readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest, parseOperatorJson } from './forge-operator-io.mjs';
 
 export const MIGRATION_SCHEMA = 'frankengit-github-issue-migration-v1';
 export const MIGRATION_LIMITS = Object.freeze({ batches: 128, captureBytes: 64 * 1024 * 1024,
@@ -177,7 +177,7 @@ async function loadMigration(o, life) {
   separate(root, o.tokenFile); separate(root, await realpath(o.tokenFile));
   const bytes = await readSynchronizedOperatorRecord(join(root, 'migration.json'), MANIFEST_LIMIT, life.check);
   if (recordDigest(bytes) !== o.confirm) fail('pin_mismatch');
-  const m = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  const m = parseOperatorJson(bytes, 'github_migration_json');
   fields(m, ['schema', 'href', 'tenant', 'repository', 'inventory_sha256', 'offset', 'capture_bytes', 'request_bytes', 'step_count', 'batches']);
   if (!encode(m).equals(bytes) || m.schema !== MIGRATION_SCHEMA || m.href !== o.href || m.tenant !== o.tenant || m.repository !== o.repository) fail('manifest_mismatch');
   pin(m.inventory_sha256); integer(m.offset, 0, Number.MAX_SAFE_INTEGER, 'offset');

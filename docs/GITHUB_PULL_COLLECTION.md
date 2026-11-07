@@ -203,3 +203,18 @@ fixtures, not physical power-loss tests. No Rust server, native reachability/
 admission/CAS, full-workspace, 10,000-PR full-content collection throughput, or
 release gate is claimed. No Rust, dependencies, native retry formats or grant
 rules change. The wider FG-049 feature remains partial.
+
+The separate `scripts/e2e/suites/operator/github_pull_migration.sh` lane, also
+included by `./scripts/verify.sh operator`, runs the shipped discovery and
+collection CLIs before the existing branch bootstrap and PR migration CLIs.
+Only source children preload the existing GitHub response-schema peer; native
+destination HTTP uses the real Rust service. The lane checks wrong inventory
+and collection pins, bounded acquisition, unchanged checkpointed captures,
+source-independent completion and pinned handoff into canonical native PR,
+discussion and ref reads. A single-capture migration consumes the discovery
+CLI's capture; the collection migration consumes the collector's output.
+The existing sandboxed, pinned Git oracle validates the fixture objects.
+Source fixtures do not establish live GitHub access or source authenticity.
+Receipts bind the selected source revision and native binary digest; a retained
+binary run does not qualify a current-source build, the full operator matrix,
+release readiness or independent review.
