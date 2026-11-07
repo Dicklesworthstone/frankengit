@@ -64,6 +64,11 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
   without raw parser messages or causes that could quote private response bytes.
   Its controlled HTTP regressions check both rejected bodies and unchanged valid
   content; they do not establish live-GitHub access or a broader security assessment.
+- Private GitHub issue inventory, capture, selection and retained migration/
+  session records also replace UTF-8/JSON parser failures with stable codes.
+  The migration CLI must not echo private record fragments in preparation or
+  inspection errors. Real CLI file regressions cover malformed inputs and
+  unchanged valid private text; other error/output classes remain separate.
 - Training/external model use is separate opt-in authority, never inferred from hosting or indexing permission.
 
 ### 1.5 Availability and bounded work

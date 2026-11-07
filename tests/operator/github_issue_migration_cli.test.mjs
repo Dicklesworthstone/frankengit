@@ -1,9 +1,13 @@
-// Real CLI parsing, streams and signals; native migration execution is injected.
+// Real CLI parsing, files, streams and signals; native publication is injected.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Writable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
+import { readFile, writeFile, lstat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { main } from '../../scripts/migrate_github_issues.mjs';
+import { recordDigest } from '../../scripts/lib/forge-operator-io.mjs';
+import { fixture, requestFile } from './github-migration-fixture.mjs';
 
 const argv = ['run', '--workdir', '/private/migration', '--confirm', 'a'.repeat(64),
   '--url', 'https://forge.example/repository/', '--tenant', '1'.repeat(32), '--repository', '2'.repeat(32),
@@ -119,4 +123,74 @@ test('the installed CLI help executes without loading native client dependencies
   const run = spawnSync(process.execPath, ['scripts/migrate_github_issues.mjs', '--help'], { encoding: 'utf8', timeout: 10000 });
   assert.equal(run.status, 0, run.stderr); assert.match(JSON.parse(run.stdout).usage, /run\|status/);
   assert.match(run.stdout, /NOT a cross-batch transaction/);
+});
+
+function child(args) {
+  return spawnSync(process.execPath, ['scripts/migrate_github_issues.mjs', ...args],
+    { encoding: 'utf8', timeout: 15000 });
+}
+function connection(f) {
+  return ['--workdir', f.workdir, '--url', f.common.href, '--tenant', f.common.tenant,
+    '--repository', f.common.repository, '--token-file', f.tokenFile];
+}
+const privateMarker = 'FGSECRET';
+const malformedInputs = [['JSON', Buffer.from(privateMarker)], ['UTF8', Buffer.from([0xff, ...Buffer.from(privateMarker)])]];
+for (const [label, bytes] of malformedInputs) {
+  for (const [input, message] of [['sources', 'github_migration_sources_json'],
+    ['inventory', 'github_inventory_json'], ['capture', 'github_import_capture_json']]) {
+    test(`actual prepare CLI redacts malformed ${label} in pinned private ${input}`, async t => {
+      const f = await fixture(t, { batches: 1, batchSize: 1, comments: 0 });
+      const descriptor = { schema: 'frankengit-github-issue-migration-sources-v1',
+        inventory: { path: f.options.inventoryFile, sha256: f.options.inventorySha256 },
+        captures: f.captures.map(row => ({ ...row })) };
+      const sources = join(f.dir, 'sources.json');
+      if (input !== 'sources') {
+        const target = input === 'inventory' ? descriptor.inventory : descriptor.captures[0];
+        await writeFile(target.path, bytes); target.sha256 = recordDigest(bytes);
+      }
+      const selected = input === 'sources' ? bytes : Buffer.from(JSON.stringify(descriptor) + '\n');
+      await writeFile(sources, selected, { mode: 0o600 });
+      const result = child(['prepare', ...connection(f), '--sources', sources, '--sources-sha256', recordDigest(selected)]);
+      assert.equal(result.status, 2, result.stderr); assert.equal(result.stdout, '');
+      assert.equal(result.stderr.includes(privateMarker), false);
+      assert.equal(JSON.parse(result.stderr).message, message);
+      await assert.rejects(lstat(f.workdir), { code: 'ENOENT' });
+      assert.deepEqual(await readFile(sources), selected);
+      if (input !== 'sources') assert.deepEqual(await readFile(input === 'inventory' ? f.options.inventoryFile : f.captures[0].path), bytes);
+    });
+  }
+  for (const [input, message] of [['migration', 'github_migration_json'], ['request', 'github_import_json']]) {
+    test(`actual inspection CLI redacts malformed ${label} in retained private ${input}`, async t => {
+      const f = await fixture(t, { batches: 1, batchSize: 1, comments: 0 }), prepared = await f.prepare();
+      const valid = child(['inspect', ...connection(f), '--confirm', prepared.plan_sha256]);
+      assert.equal(valid.status, 0, valid.stderr); assert.equal(JSON.parse(valid.stdout).network_accessed, false);
+      const target = input === 'migration' ? join(f.workdir, 'migration.json') : requestFile(f.workdir, 1);
+      await writeFile(target, bytes);
+      const result = child(['inspect', ...connection(f), '--confirm', input === 'migration' ? recordDigest(bytes) : prepared.plan_sha256]);
+      assert.equal(result.status, 2, result.stderr); assert.equal(result.stdout, '');
+      assert.equal(result.stderr.includes(privateMarker), false);
+      assert.equal(JSON.parse(result.stderr).message, message);
+      assert.deepEqual(await readFile(target), bytes);
+    });
+  }
+}
+
+test('actual offline prepare and inspect retain valid private text and full-width source aliases', async t => {
+  const f = await fixture(t, { batches: 1, batchSize: 1, comments: 0 });
+  const capture = JSON.parse(await readFile(f.captures[0].path)); capture.issues[0].body = privateMarker;
+  const bytes = Buffer.from(JSON.stringify(capture) + '\n');
+  await writeFile(f.captures[0].path, bytes); f.captures[0].sha256 = recordDigest(bytes);
+  const selected = Buffer.from(JSON.stringify({ schema: 'frankengit-github-issue-migration-sources-v1',
+    inventory: { path: f.options.inventoryFile, sha256: f.options.inventorySha256 }, captures: f.captures }) + '\n');
+  const sources = join(f.dir, 'sources.json'); await writeFile(sources, selected, { mode: 0o600 });
+  const prepared = child(['prepare', ...connection(f), '--sources', sources, '--sources-sha256', recordDigest(selected)]);
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const result = JSON.parse(prepared.stdout);
+  assert.equal(result.mutation_submitted, false); assert.equal(result.source.repository_id, '18446744073709551615');
+  const inspected = child(['inspect', ...connection(f), '--confirm', result.plan_sha256]);
+  assert.equal(inspected.status, 0, inspected.stderr); assert.equal(JSON.parse(inspected.stdout).network_accessed, false);
+  const request = JSON.parse(await readFile(requestFile(f.workdir, 1))).receipt.request;
+  assert.ok(request.fields.body.endsWith(privateMarker));
+  assert.ok(request.fields.body.includes(capture.issues[0].id));
+  assert.deepEqual(await readFile(join(f.workdir, 'capture-000001.json')), bytes);
 });

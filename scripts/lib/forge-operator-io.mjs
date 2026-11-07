@@ -6,6 +6,12 @@ import { resolve, dirname, basename, join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export function operatorError(code) { const e = new Error(code); e.code = code; return e; }
+// Callers enforce their byte limits and canonical/schema checks. Native JSON
+// diagnostics may quote private input, so retain only the caller's stable code.
+export function parseOperatorJson(bytes, code = 'operator_json') {
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
+  catch { throw operatorError(code); }
+}
 export function operatorPath(value) {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 4096 || /[\0\r\n\uD800-\uDFFF]/u.test(value)) {
     throw operatorError('operator_invalid_path');

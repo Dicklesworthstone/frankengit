@@ -68,6 +68,15 @@ decoding fails. It omits raw parser messages and causes, which can quote private
 response content. Existing typed numeric/identity refusals remain distinct;
 decode failure does not trigger a source retry or create a usable capture.
 
+Private inventory, capture, source-selection and retained issue-import/session
+JSON records use the same diagnostic boundary: malformed JSON or UTF-8 returns
+a stable code without the native parser's message or cause. This also applies
+when `migrate_github_issues.mjs` reports preparation or inspection errors; private
+record fragments do not belong in stderr. Valid source text and full-width
+aliases are preserved, and existing pin, canonical-encoding and semantic checks
+still run. This is a decode-error boundary, not general redaction of filesystem
+errors or explicitly requested inspection output.
+
 Limits are explicit: 100 issues, 2,000 total comments, a canonical 1 MiB package,
 8 MiB per source reply and 64 MiB aggregate source reads by default. The aggregate
 ceiling can be selected with `--max-read-bytes` up to 256 MiB. Both passes count.

@@ -1,7 +1,7 @@
 // FG-049: bounded, read-only repository discovery. GitHub aliases and membership
 // are source data, never local principals, publication authority or a snapshot proof.
 import { createGithubSource, githubIdentity, githubRepository, GITHUB_API } from './github-source-http.mjs';
-import { operatorError, recordDigest } from './forge-operator-io.mjs';
+import { operatorError, recordDigest, parseOperatorJson } from './forge-operator-io.mjs';
 
 export const INVENTORY_SCHEMA = 'frankengit-github-issue-inventory-v1';
 export const INVENTORY_LIMIT = 1024 * 1024;
@@ -58,7 +58,7 @@ export function issueInventoryBytes(value) {
 export function parseIssueInventory(input) {
   if (!(input instanceof Uint8Array) || input.buffer instanceof SharedArrayBuffer || !input.length || input.length > INVENTORY_LIMIT) fail('bytes');
   const bytes = Buffer.from(input);
-  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  const value = parseOperatorJson(bytes, 'github_inventory_json');
   if (!issueInventoryBytes(value).equals(bytes)) fail('noncanonical');
   return value;
 }

@@ -3,6 +3,7 @@ import { constants as F } from 'node:fs';
 import { open, lstat, realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { parseOperatorJson } from './forge-operator-io.mjs';
 
 const MAX_BYTES = 1024 * 1024;
 const fail = reason => { throw new Error(`github_migration_sources_${reason}`); };
@@ -25,7 +26,7 @@ function integer(value, min, max) {
 }
 export function parseGithubIssueMigrationSources(bytes) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_BYTES) fail('size');
-  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  const value = parseOperatorJson(bytes, 'github_migration_sources_json');
   // Two documented serializations avoid ambiguous duplicate keys and rounded
   // numeric spellings without introducing a second general-purpose JSON parser.
   if (![undefined, 2].some(indent => bytes.equals(Buffer.from(JSON.stringify(value, null, indent) + '\n')))) fail('json_encoding');
