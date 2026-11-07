@@ -241,6 +241,11 @@ The `remote_issue_output_failure` diagnostic names its error code and whether
 command work completed before output failed. When available, `native_result`
 preserves the validated terminal observation; output cancellation never rolls
 back publication or changes the original request, key or saved result record.
+If command work already failed, stderr instead preserves its original
+`remote_issue_error`, including the error code, phase, dispatch flag and any
+publication receipt. An added `output_failure` names the separate output
+problem. A publication receipt without completed incarnation-bound confirmation
+still leaves `outcome_unknown:true`; recovery uses the original request.
 Neither a nonzero exit nor an absent key is evidence that nothing happened.
 
 Run `bash scripts/verify_remote_issues.sh` for the complete client/CLI lane.
