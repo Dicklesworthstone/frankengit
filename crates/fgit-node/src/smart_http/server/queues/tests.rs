@@ -2,6 +2,7 @@ use super::*;
 mod candidate;
 mod prefix;
 mod preparation;
+mod refresh;
 use fgit_forge::merge_queue::QueueCommandAction;
 use fgit_forge::{ExpectedVersion, QueueNumber};
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryIncarnationId};

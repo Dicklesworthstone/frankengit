@@ -252,6 +252,32 @@ fn action(command: &Command) -> (Object, &'static str) {
                 "reorder"
             }
         },
+        Command::Refresh(command) => {
+            let pull = &command.pull_request;
+            fields.insert("pull_request".into(), text(pull.number.get().to_string()));
+            fields.insert(
+                "expected_pull_request_version".into(),
+                text(
+                    match pull.expected_version {
+                        ExpectedVersion::Exactly(version) => version.get(),
+                        ExpectedVersion::NewStream => 0,
+                    }
+                    .to_string(),
+                ),
+            );
+            fields.insert(
+                "expected_policy_epoch".into(),
+                text(command.expected_policy_epoch.get().to_string()),
+            );
+            reference(&mut fields, "source_reference", &pull.data.source_ref);
+            fields.insert("expected_source".into(), text(pull.data.source_tip.to_string()));
+            fields.insert("expected_target".into(), text(pull.data.target_tip.to_string()));
+            fields.insert(
+                "expected_recorded_target".into(),
+                text(command.expected_recorded_target_tip.to_string()),
+            );
+            "refresh"
+        }
         Command::Landing(command) => {
             fields.insert("method".into(), text("fast-forward-only"));
             fields.insert(
@@ -326,6 +352,12 @@ pub(super) fn publication(
                 ExpectedVersion::Exactly(version) => version.get(),
             },
             &command.target_ref,
+            false,
+        ),
+        Command::Refresh(command) => (
+            command.number,
+            command.expected_queue_version.get(),
+            &command.pull_request.data.target_ref,
             false,
         ),
         Command::Landing(command) => (

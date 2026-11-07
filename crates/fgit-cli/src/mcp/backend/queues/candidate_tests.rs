@@ -208,9 +208,9 @@ fn candidate_landing_shares_only_the_independent_landing_ceiling() {
         for write in [false, true] {
             for land in [false, true] {
                 let grants = QueueGrants { read, write, land };
-                assert_eq!(permitted(grants, LAND_CANDIDATE), land);
-                assert_eq!(is_mutation(grants, LAND_CANDIDATE), land);
-                let discovered = tools(grants);
+                assert_eq!(permitted(grants, false, LAND_CANDIDATE), land);
+                assert_eq!(is_mutation(grants, false, LAND_CANDIDATE), land);
+                let discovered = tools(grants, false);
                 assert_eq!(
                     discovered.iter().any(|tool| tool.name == LAND_CANDIDATE),
                     land

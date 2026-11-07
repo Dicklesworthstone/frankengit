@@ -1,9 +1,10 @@
 //! Closed typed commands; no latest-state refresh, principal or force.
 use std::collections::BTreeSet;
 
-use fgit_admission::merge::native::queue::QueueLandingCommand;
+use fgit_admission::merge::native::queue::{QueueHeadRefreshCommand, QueueLandingCommand};
 use fgit_authority::IdempotencyKey;
 use fgit_forge::event::NativeMerge;
+use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
 use fgit_forge::merge_queue::{DequeueReason, QueueCommand, QueueCommandAction};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{GitHashAlgorithm, PolicyEpoch, RefName, RepositoryIncarnationId};
@@ -14,6 +15,7 @@ use super::*;
 #[derive(Debug)]
 pub(super) enum Command {
     Management(QueueCommand),
+    Refresh(QueueHeadRefreshCommand),
     Landing(QueueLandingCommand),
     CandidateLanding {
         command: QueueCandidateLandingCommand,
@@ -47,7 +49,7 @@ pub(super) fn parse(
 ) -> Result<(IdempotencyKey, Command), ToolError> {
     let mut allowed = COMMON.to_vec();
     match name {
-        ENQUEUE | LAND | LAND_CANDIDATE => {
+        ENQUEUE | LAND | LAND_CANDIDATE | REFRESH => {
             allowed.extend(CANDIDATE);
             allowed.push(if name == ENQUEUE {
                 "priority"
@@ -56,6 +58,9 @@ pub(super) fn parse(
             });
             if name == LAND_CANDIDATE {
                 allowed.extend(["merge_base", "candidate_commit", "bundle_hex_chunks"]);
+            }
+            if name == REFRESH {
+                allowed.extend(["expected_recorded_target", "title", "body"]);
             }
         }
         DEQUEUE => allowed.extend(["pull_request", "reason"]),
@@ -84,14 +89,16 @@ pub(super) fn parse(
     } else {
         let version = AggregateVersion::try_new(previous)
             .ok_or(ToolError::invalid("positive_version_required"))?;
-        version
-            .next()
-            .map_err(|_| ToolError::invalid("version_exhausted"))?;
+        if name != REFRESH {
+            version
+                .next()
+                .map_err(|_| ToolError::invalid("version_exhausted"))?;
+        }
         ExpectedVersion::Exactly(version)
     };
     let target_ref = branch(args, "target_reference", "target_reference_hex")?;
     let command = match name {
-        ENQUEUE | LAND | LAND_CANDIDATE => {
+        ENQUEUE | LAND | LAND_CANDIDATE | REFRESH => {
             let pull_request = pull_number(common::required(args, "pull_request")?)?;
             let expected_pull_request_version =
                 AggregateVersion::try_new(common::number(args, "expected_pull_request_version")?)
@@ -102,7 +109,45 @@ pub(super) fn parse(
             }
             let head_tip = pull_writes::oid(args, "expected_source", format)?;
             let expected_target_tip = pull_writes::oid(args, "expected_target", format)?;
-            if matches!(name, LAND | LAND_CANDIDATE) {
+            if name == REFRESH {
+                let ExpectedVersion::Exactly(expected_queue_version) = version else {
+                    unreachable!()
+                };
+                expected_pull_request_version
+                    .next()
+                    .map_err(|_| ToolError::invalid("pr_version_exhausted"))?;
+                let expected_policy_epoch =
+                    PolicyEpoch::try_new(common::number(args, "expected_policy_epoch")?)
+                        .map_err(|_| ToolError::invalid("positive_policy_epoch_required"))?;
+                let expected_recorded_target_tip =
+                    pull_writes::oid(args, "expected_recorded_target", format)?;
+                let data = PullRequestData {
+                    source_ref,
+                    target_ref,
+                    source_tip: head_tip,
+                    target_tip: expected_target_tip,
+                    title: common::required(args, "title")?.to_owned(),
+                    body: common::body(args, "body")?
+                        .ok_or(ToolError::invalid("body_required"))?,
+                };
+                data.validate()
+                    .map_err(|_| ToolError::invalid("invalid_pull_request_data"))?;
+                if expected_recorded_target_tip == data.target_tip {
+                    return Err(ToolError::invalid("queue_refresh_requires_target_change"));
+                }
+                Command::Refresh(QueueHeadRefreshCommand {
+                    number,
+                    expected_queue_version,
+                    expected_policy_epoch,
+                    expected_recorded_target_tip,
+                    pull_request: PullRequestCommand {
+                        number: pull_request,
+                        expected_version: ExpectedVersion::Exactly(expected_pull_request_version),
+                        action: PullRequestAction::Update,
+                        data,
+                    },
+                })
+            } else if matches!(name, LAND | LAND_CANDIDATE) {
                 if head_tip == expected_target_tip {
                     return Err(ToolError::invalid("invalid_queue_command"));
                 }

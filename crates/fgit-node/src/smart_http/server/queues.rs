@@ -5,6 +5,7 @@ mod output;
 mod prefix;
 mod preparation;
 mod request;
+mod refresh;
 #[cfg(test)]
 mod tests;
 
@@ -68,6 +69,11 @@ pub(super) fn authenticate(
             && grant.permits(Service::UploadPack)
             && grant.permits_pulls(false)
             && grant.permits_queues(false)
+    } else if request.is_refresh() {
+        profile.config.http_queue_management_enabled()
+            && profile.allow_pulls()
+            && grant.permits_queues(true)
+            && grant.permits_pulls(true)
     } else if request.is_landing() {
         profile.config.http_queue_landings_enabled() && grant.permits_queue_landing()
     } else {
@@ -128,6 +134,11 @@ pub(super) fn execute(
             maximum_response,
         )
         .map(Reply::Preparation);
+    }
+    if let Operation::Refresh { number } = &request.operation {
+        return refresh::execute(
+            node, *number, session, framing, reader, limits, maximum_response,
+        ).map(Reply::Json);
     }
     let principal = authenticated.principal_id();
     let deadline = GitDaemonSessionDeadline::new(
@@ -312,6 +323,6 @@ pub(super) fn execute(
                 terminal: Some((tx, terminal)),
             }))
         }
-        Operation::Prepare { .. } | Operation::PreparePrefix { .. } => Err(ApiError::unavailable()),
+        Operation::Prepare { .. } | Operation::PreparePrefix { .. } | Operation::Refresh { .. } => Err(ApiError::unavailable()),
     }
 }

@@ -183,17 +183,18 @@ the read succeeded even though the historical mutation was refused.
 
 ## Merge queue management and native landing
 
-Three independent launch grants expose the canonical merge queue APIs:
+Independent launch grants expose the canonical merge queue APIs:
 
 | Grant | Tools | Effect |
 | --- | --- | --- |
 | `--allow-queues` | `frankengit_queue_list`, `frankengit_queue_show` | Complete visible snapshots. |
 | `--allow-queue-writes` | `frankengit_queue_enqueue`, `frankengit_queue_dequeue`, `frankengit_queue_reorder` | Queue membership and order only. |
 | `--allow-queue-landings` | `frankengit_queue_land`, `frankengit_queue_land_candidate` | Exact queue-head fast-forward or uploaded two-parent merge, coupled PR merge and queue completion. |
+| Both `--allow-queue-writes` and `--allow-pull-writes` | `frankengit_queue_refresh` | Update only the exact idle head PR's recorded target tip after the target advances; preserve queue intent and Git refs. |
 
 None implies another grant, PR/source access, approval authority, or outcome
 recovery. A queue writer cannot land, and a landing-only process cannot edit
-membership. Both mutation grants require a canonical lowercase launch principal
+membership. Queue mutations require a canonical lowercase launch principal
 and exact repository incarnation. The existing trusted-local operator sponsors
 the action; no client argument authenticates a remote principal.
 
@@ -231,6 +232,7 @@ fields are rejected before admission.
 | `enqueue` | `pull_request`, positive `expected_pull_request_version`, exactly one `source_reference` or `source_reference_hex`, `expected_source`, `expected_target`; optional `priority` from `"0"` through `"4294967295"`, default `"0"`. |
 | `dequeue` | `pull_request` and `reason`: `withdrawn`, `conflict`, `check-failed`, `base-moved`, `evicted`, or `admin-override`. |
 | `reorder` | `order`, the complete desired array of 1–256 distinct positive PR-number strings, without added or omitted members. |
+| `refresh` | The enqueue candidate coordinates without `priority`, plus positive `expected_policy_epoch`, original `expected_recorded_target`, and the complete unchanged original `title` and `body`; `expected_target` is the explicit new live target. |
 | `land` | The enqueue candidate coordinates without `priority`, plus positive `expected_policy_epoch`. |
 | `land_candidate` | The `land` coordinates, plus exact `merge_base`, `candidate_commit`, and an inline `bundle_hex_chunks` upload; omit the upload or supply `[]` to recover an existing terminal outcome. |
 
@@ -302,6 +304,58 @@ Complete queue results are limited to 1 MiB. Native queues can hold 1024 entries
 use the CLI or HTTP profile for complete reorders above 256 entries. Oversized
 reads fail without a partial result. Multi-PR speculative execution and workflow
 execution are not exposed by these tools.
+
+## Refresh the recorded target of an idle queue head
+
+After an earlier queue entry lands or another authorized writer advances the
+target, the next PR can retain its original recorded target tip.
+`frankengit_queue_refresh` explicitly reconciles that one observation before
+preparing a new candidate. Discovery and dispatch require **both**
+`--allow-queue-writes` and `--allow-pull-writes`, plus the trusted-local
+launch principal and incarnation. Reads, ordinary merges and queue landing
+grants do not substitute for either grant. The agent-token MCP profile still
+rejects queue access.
+
+Supply the exact queue number/version, head PR number/version, current policy
+epoch, original source branch/tip, original target branch and
+`expected_recorded_target`. Set `expected_target` to the explicitly observed
+new live target. Both target OIDs must be nonzero, belong to the launch hash
+format and differ. Include the **complete original title and body unchanged**:
+the title is at most 256 UTF-8 bytes, and this MCP profile bounds the body to
+16 KiB with no NUL. Text is literal data and cannot grant authority. Every branch
+retains the mutually exclusive UTF-8/lowercase-hex representations described
+above.
+
+Native admission verifies the idle queue head, queue/PR versions, policy epoch,
+current visibility, original full PR metadata and live branch tips. It refuses
+a different head, moved source, changed title/body, retargeted branch, closed or
+merged PR, stale predecessor or mismatched recorded target. The single committed
+event is a PR Update: only its recorded target changes and its PR version
+advances once. Queue membership, order, priority, enqueuing actor and version
+remain unchanged. Refresh therefore needs a PR successor but no queue
+successor. Git refs, approvals and checks do not change.
+
+After a committed refresh, use a deliberately observed current PR version and
+target for a new `prepare_queue_merge` operation. Existing candidate reviews and
+checks do not become evidence for the new candidate. Candidate preparation,
+review, workflow execution and landing still require their independent
+authority. Refresh is an explicit operator-sponsored tool; it does not make the
+queue runner refresh observations autonomously.
+
+Choose a fresh durable key for this new intent. A lost reply, disconnect or
+timeout does not prove rollback: retry the same tool with the identical full
+metadata, old/new target tips, versions, epoch and original key, using a new
+JSON-RPC ID. Do not fetch replacement fields into that pending request. Native
+recovery returns its original terminal decision even after the PR or queue
+changes and after reopen with intake stopped. Reusing the key with changed
+content is an error. Independently granted `frankengit_transaction_outcome`
+can query the original key without resubmission.
+
+The receipt uses `action: "refresh"`, `refs_changed: false` and
+`historical_outcome: true`. Its `proposed_action` preserves original PR,
+source, old/new target and policy guards; it does not echo the title, body or
+client key. Queue-head refresh uses the same native boundary as
+`fg queue refresh` and `POST /{repository}/api/v1/queues/{number}/refresh`.
 
 ## Verification and remaining scope
 

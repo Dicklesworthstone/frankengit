@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 
 use fgit_admission::merge::native::queue::{
-    QueueCandidateLandingCommand, QueueLandingCommand, QueuePage,
+    QueueCandidateLandingCommand, QueueHeadRefreshCommand, QueueLandingCommand, QueuePage,
 };
 use fgit_authority::TerminalOutcome;
 use fgit_forge::event::queue::MAX_QUEUE_ENTRIES;
@@ -441,5 +441,48 @@ pub(super) fn candidate_landing(
         refusal,
         code,
         committed
+    )
+}
+
+pub(super) fn refresh(
+    node: &OneNode,
+    principal: PrincipalId,
+    command: &QueueHeadRefreshCommand,
+    tx: TxId,
+    terminal: TerminalOutcome,
+) -> String {
+    let (outcome, committed, record, refusal, code) = match terminal.outcome {
+        DecisionOutcome::Committed { repository_commit_id } => (
+            "committed", true, quote(&repository_commit_id.to_string()), "null".into(), "null".into(),
+        ),
+        DecisionOutcome::Refused { code, refusal_record_id } => (
+            "refused", false, "null".into(), quote(&refusal_record_id.to_string()),
+            quote(&format!("{code:?}")),
+        ),
+    };
+    let pull = &command.pull_request;
+    let version = match pull.expected_version {
+        ExpectedVersion::Exactly(version) => version.get(),
+        ExpectedVersion::NewStream => 0,
+    };
+    format!(
+        concat!(
+            "{{\"type\":\"merge_queue_publication\",{},\"principal_id\":{},\"number\":{},{},\"expected_version\":{},",
+            "\"proposed_action\":{{\"name\":\"refresh\",\"pull_request\":{},\"expected_pull_request_version\":{},",
+            "\"expected_policy_epoch\":{},{},\"expected_source_tip\":{},\"expected_recorded_target_tip\":{},",
+            "\"expected_target_tip\":{}}},\"tx_id\":{},\"decision_sequence\":{},\"outcome\":{},\"committed\":{},",
+            "\"repository_commit_id\":{},\"refusal_record_id\":{},\"refusal_code\":{},",
+            "\"refs_changed\":false,\"queue_changed\":false,\"pull_request_changed\":{},",
+            "\"delivery_acknowledged\":null,\"historical_outcome\":true,\"complete\":true}}"
+        ),
+        scope(node), quote(&principal.to_string()), command.number.get(),
+        ref_fields("target_ref", &pull.data.target_ref), command.expected_queue_version.get(),
+        pull.number.get(), version, command.expected_policy_epoch.get(),
+        ref_fields("source_ref", &pull.data.source_ref),
+        quote(&pull.data.source_tip.to_string()),
+        quote(&command.expected_recorded_target_tip.to_string()),
+        quote(&pull.data.target_tip.to_string()),
+        quote(&tx.to_string()), terminal.decision_sequence.get(), quote(outcome), committed,
+        record, refusal, code, committed,
     )
 }

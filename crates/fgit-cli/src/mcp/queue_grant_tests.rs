@@ -120,3 +120,51 @@ fn existing_grants_do_not_gain_queue_capabilities() {
         assert!(parse_options(&duplicate).is_err());
     }
 }
+
+#[test]
+fn queue_refresh_requires_both_independent_metadata_grants() {
+    for mask in 0..16 {
+        let mut args = base();
+        args.push("--allow-outcomes".into());
+        identity(&mut args);
+        for (bit, flag) in [
+            (1, "--allow-queue-writes"),
+            (2, "--allow-pull-writes"),
+            (4, "--allow-queues"),
+            (8, "--allow-queue-landings"),
+        ] {
+            if mask & bit != 0 {
+                args.push(flag.into());
+            }
+        }
+        let options = parse_options(&args).unwrap();
+        let tools = backend::tools_for_options(&options);
+        assert_eq!(
+            tools.iter().any(|tool| tool.name == "frankengit_queue_refresh"),
+            mask & 3 == 3,
+            "grant mask {mask}"
+        );
+        assert_eq!(options.writes.pulls, mask & 2 != 0);
+        assert!(!options.writes.source && !options.writes.merges && !options.writes.reviews);
+    }
+}
+
+#[test]
+fn queue_refresh_does_not_open_the_agent_token_profile() {
+    let base = vec![
+        "/unused".to_owned(),
+        "11".repeat(16),
+        "22".repeat(16),
+        "--agent-token-file".into(),
+        "/unused/private-agent-token".into(),
+        "--expected-incarnation".into(),
+        "cd".repeat(16),
+        "--allow-pull-writes".into(),
+    ];
+    assert!(parse_options(&base).is_ok());
+    for flag in ["--allow-queues", "--allow-queue-writes", "--allow-queue-landings"] {
+        let mut args = base.clone();
+        args.push(flag.into());
+        assert!(parse_options(&args).is_err(), "{flag}");
+    }
+}

@@ -5,6 +5,8 @@ mod candidate_tests;
 mod input;
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod refresh_tests;
 mod output;
 mod schema;
 #[cfg(test)]
@@ -24,6 +26,7 @@ pub(super) const SHOW: &str = "frankengit_queue_show";
 pub(super) const ENQUEUE: &str = "frankengit_queue_enqueue";
 pub(super) const DEQUEUE: &str = "frankengit_queue_dequeue";
 pub(super) const REORDER: &str = "frankengit_queue_reorder";
+pub(super) const REFRESH: &str = "frankengit_queue_refresh";
 pub(super) const LAND: &str = "frankengit_queue_land";
 pub(super) const LAND_CANDIDATE: &str = "frankengit_queue_land_candidate";
 const MAX_RESPONSE: usize = 1024 * 1024;
@@ -32,29 +35,31 @@ const MAX_RESPONSE: usize = 1024 * 1024;
 const MAX_ORDER: usize = 256;
 const MAX_BRANCH: usize = 1024;
 
-pub(super) fn permitted(grants: QueueGrants, name: &str) -> bool {
+pub(super) fn permitted(grants: QueueGrants, pull_write: bool, name: &str) -> bool {
     match name {
         LIST | SHOW => grants.read,
         ENQUEUE | DEQUEUE | REORDER => grants.write,
+        REFRESH => grants.write && pull_write,
         LAND | LAND_CANDIDATE => grants.land,
         _ => false,
     }
 }
-pub(super) fn is_mutation(grants: QueueGrants, name: &str) -> bool {
-    permitted(grants, name) && !matches!(name, LIST | SHOW)
+pub(super) fn is_mutation(grants: QueueGrants, pull_write: bool, name: &str) -> bool {
+    permitted(grants, pull_write, name) && !matches!(name, LIST | SHOW)
 }
-pub(super) fn tools(grants: QueueGrants) -> Vec<Tool> {
+pub(super) fn tools(grants: QueueGrants, pull_write: bool) -> Vec<Tool> {
     [
         (LIST, "List complete visible merge queues in numeric order at one authority head. A continuation requires the original snapshot token; current hidden-ref policy still applies."),
         (SHOW, "Read one complete canonical merge queue at an optional retained snapshot. A hidden target or source hides the entire queue; absence grants no merge permission."),
         (ENQUEUE, "Enqueue or replace one open PR using its exact version and observed source/target tips. Requires the independent queue-write grant; changes queue intent only, never Git refs or approvals."),
         (DEQUEUE, "Remove one PR from an exact queue version with an explicit reason. Requires the independent queue-write grant; no Git ref or PR state changes."),
         (REORDER, "Replace the complete order of an exact queue with 1..256 distinct PR numbers. No member may be added or omitted. Requires the independent queue-write grant."),
+        (REFRESH, "Refresh only the exact idle queue-head PR's recorded target tip after target advancement. Requires BOTH independent queue-write and PR-write grants, original complete PR title/body/source metadata, queue/PR versions, policy epoch, recorded old target and explicit new live target. Native admission verifies every guard and changes no refs, queue membership/order, reviews or checks. Retry identical coordinates and the same durable key after uncertainty; no implicit latest-state lookup."),
         (LAND, "Atomically fast-forward the exact queue-head PR and publish its PR merge plus queue completion. Requires the independent queue-landing grant and exact queue/PR versions, policy epoch and native tips. Current review/check/protected-ref rules remain mandatory; no new commit, force, implicit refresh or merge-method fallback."),
         (LAND_CANDIDATE, "Atomically land one exact two-parent queue-head candidate, its PR merge and queue completion. Requires the independent queue-landing grant, exact queue/PR versions, policy epoch, source/target/base/candidate commits and an inline native bundle of at most 24 KiB. Current protected-ref, review and check requirements remain mandatory. Retry the original coordinates and key; absent or empty chunks can recover an already terminal outcome without another upload."),
     ]
     .into_iter()
-    .filter(|(name, _)| permitted(grants, name))
+    .filter(|(name, _)| permitted(grants, pull_write, name))
     .map(|(name, description)| Tool { name, description, schema: schema::for_tool(name) })
     .collect()
 }
@@ -75,7 +80,7 @@ pub(super) fn parse_candidate_landing(
 }
 
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
-    if !permitted(backend.options.queues, name) {
+    if !permitted(backend.options.queues, backend.options.writes.pulls, name) {
         return Err(ToolError::invalid("tool_not_granted"));
     }
     if matches!(name, LIST | SHOW) {
@@ -99,12 +104,27 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             .proposed_event(principal, backend.options.format)
             .map_err(|_| ToolError::invalid("invalid_queue_command"))?;
     }
+    if let Command::Refresh(command) = &command {
+        command
+            .proposed_event(principal, backend.options.format)
+            .map_err(|_| ToolError::invalid("invalid_queue_refresh_command"))?;
+    }
     let request = fgit_cli::command_request_context(&backend.node);
     let result = match &command {
         Command::Management(command) => backend
             .node
             .runtime()
             .block_on(backend.node.admit_queue_durable_in(
+                &request,
+                &session,
+                command,
+                Default::default(),
+            ))
+            .map_err(|_| ToolError::uncertain("queue_mutation_outcome_unknown")),
+        Command::Refresh(command) => backend
+            .node
+            .runtime()
+            .block_on(backend.node.refresh_queue_head_durable_in(
                 &request,
                 &session,
                 command,

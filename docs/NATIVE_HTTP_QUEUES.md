@@ -1,7 +1,8 @@
 # Authenticated HTTP merge queues
 
-The smart HTTP server exposes durable queue reads, enqueue, dequeue, reorder and
-independently authorized fast-forward or prepared two-parent queue-head landing through the native
+The smart HTTP server exposes durable queue reads, enqueue, dequeue, reorder,
+guarded queue-head target refresh and independently authorized fast-forward or
+prepared two-parent queue-head landing through the native
 repository authority. Writes use the same canonical commands, exact predecessor
 checks and recoverable outcomes as `fg queue`. No separate queue database is
 introduced.
@@ -22,7 +23,7 @@ Add the required independent scopes to a credential row:
 | Scope | Permission |
 |---|---|
 | `queues-read` | List/read queues; with `read,pulls-read`, prepare an exact queue-head candidate |
-| `queues-write` | Enqueue, dequeue and reorder |
+| `queues-write` | Enqueue, dequeue and reorder; with `pulls-write`, refresh the exact queue head's recorded target |
 | `queues-land` | Land exactly the first queued PR by fast-forward or an uploaded two-parent candidate, subject to its target ref ceiling and canonical protection |
 | `outcomes-read` | Recover a prior transaction through the separate outcome API |
 
@@ -58,6 +59,7 @@ The paths below follow the configured repository route, for example
 | `POST` | `/api/v1/queues/{number}/enqueue` | Insert or replace an exact PR candidate |
 | `POST` | `/api/v1/queues/{number}/dequeue` | Remove an entry with an explicit reason |
 | `POST` | `/api/v1/queues/{number}/reorder` | Set the complete nonempty execution order |
+| `POST` | `/api/v1/queues/{number}/refresh` | Update only the current head PR's recorded target, preserving queue state |
 | `POST` | `/api/v1/queues/{number}/prepare` | Read-only preparation of the exact queue-head/PR candidate at one authority head |
 | `POST` | `/api/v1/queues/{number}/land` | Atomically fast-forward the exact queue head and merge its PR |
 | `POST` | `/api/v1/queues/{number}/land-candidate` | Atomically publish an uploaded two-parent candidate for the exact queue head |
@@ -120,6 +122,80 @@ an explicit reorder persists its supplied order.
 
 The target branch remains bound to the queue number after all entries are
 removed. An empty existing queue requires its current positive version.
+
+## Refresh the next queue head after a target move
+
+`POST /api/v1/queues/{number}/refresh` updates the current idle queue head's
+recorded target to an explicitly observed live target. Enable both
+`--allow-queues` and `--allow-pulls`, and grant both `queues-write` and
+`pulls-write` to the same credential. A queue-only, PR-only, read or landing
+credential does not authorize this operation. A v2 ref-write ceiling of `none`
+is sufficient because refresh publishes no Git ref change.
+
+Refresh requires all common write coordinates and the following exact original
+observations:
+
+| Field | Meaning |
+|---|---|
+| `pull_request` | Current first queued PR |
+| `expected_pull_request_version` | Exact current PR version, with room for one successor |
+| `expected_policy_epoch` | Exact current repository policy epoch |
+| `source_ref` or `source_ref_hex` | Exactly one encoding of the unchanged source branch |
+| `expected_source_tip` | Unchanged source commit, matching the PR, queue entry and live ref |
+| `expected_recorded_target_tip` | Target commit currently recorded in the PR |
+| `expected_target_tip` | Newly observed live target commit, distinct from the recorded target |
+| `title` | Exact current PR title |
+| `body` | Exact current PR body, including an explicitly empty value |
+
+The full original title and body are part of the sealed request. The server
+does not fill them from the latest PR state or overwrite a concurrent edit.
+Queue and PR versions and the policy epoch must be positive. The queue version
+does not advance and needs no successor capacity.
+
+```bash
+curl --fail-with-body "$BASE/api/v1/queues/1/refresh" \
+  -H "Authorization: Bearer $QUEUE_AND_PULL_TOKEN" \
+  -H 'Idempotency-Key: refresh-pr-43-target-observation-1' \
+  --data-urlencode "expected_incarnation=$INCARNATION" \
+  --data-urlencode "object_format=$OBJECT_FORMAT" \
+  --data-urlencode "expected_version=$QUEUE_VERSION" \
+  --data-urlencode "expected_policy_epoch=$POLICY_EPOCH" \
+  --data-urlencode 'pull_request=43' \
+  --data-urlencode "expected_pull_request_version=$PR_VERSION" \
+  --data-urlencode 'source_ref=refs/heads/next-feature' \
+  --data-urlencode 'target_ref=refs/heads/main' \
+  --data-urlencode "expected_source_tip=$SOURCE_COMMIT" \
+  --data-urlencode "expected_recorded_target_tip=$RECORDED_TARGET_COMMIT" \
+  --data-urlencode "expected_target_tip=$LIVE_TARGET_COMMIT" \
+  --data-urlencode "title=$EXACT_PR_TITLE" \
+  --data-urlencode 'body@exact-pr-body.txt'
+```
+
+Success publishes one native PR Update event and one Repository Commit Record.
+It advances the PR by one version while preserving its other metadata and the
+entire queue, including membership, version, order, priorities and enqueue
+actors. The response records `proposed_action.name: "refresh"`, both target
+observations, `refs_changed: false`, `queue_changed: false` and
+`pull_request_changed: true`. A canonical refusal reports the latter as
+`false`.
+
+Prepare the new exact PR version against the new target, then obtain the
+required evidence for that candidate before landing. Refresh supplies no
+review, workflow check, merge authority or automatic workflow execution.
+Changed source content, a different head, an active queue batch, stale
+versions, changed policy and mismatched metadata refuse. Refresh is an explicit
+operator or client action; the workflow watcher does not perform it implicitly.
+
+The refresh form is bounded to 256 KiB so a percent-encoded native PR body of up
+to 64 KiB fits. Titles retain the native 256-byte bound. Smaller configured
+server limits take precedence. Both content-length and chunked framing follow
+the existing bounded form parser.
+
+If the response is lost, retry the complete original form and key. A terminal
+result remains the original result after a subsequent PR edit, queue landing
+or restart. Current credential and deployment grants still apply before
+recovery; `outcomes-read` remains an independent recovery path for the original
+principal and key.
 
 ## Exact queue-head landing
 
@@ -246,8 +322,8 @@ snapshot. If a target or any source entry is hidden, the entire queue is hidden.
 Single hidden and absent queues share the same `404` response. Responses include
 lossless `*_ref_hex` fields for non-UTF-8 reference names.
 
-Form commands are bounded to 64 KiB; candidate uploads have the separate
-bundle/envelope limits above. The queue is bounded to 1,024 entries, and complete
+Membership and landing forms are bounded to 64 KiB; target refresh forms to
+256 KiB. Candidate uploads have the separate bundle/envelope limits above. The queue is bounded to 1,024 entries, and complete
 JSON responses to the smaller of 8 MiB and the server response limit. The native
 history scan bounds documented in [NATIVE_MERGE_QUEUE.md](NATIVE_MERGE_QUEUE.md)
 also apply. Request a smaller list page if its complete response is too large.
@@ -299,7 +375,8 @@ contracts apply.
 The adapter lives in `fgit-node/src/smart_http/server/queues`; it invokes
 `OneNode::admit_queue_durable_in` and the canonical snapshot APIs directly.
 Fast-forward landing invokes `OneNode::land_queue_head_durable_in`; candidate
-landing invokes `OneNode::land_queue_head_bundle_durable_in`. Both retain the
+landing invokes `OneNode::land_queue_head_bundle_durable_in`. Target refresh
+invokes `OneNode::refresh_queue_head_durable_in`. These paths retain the
 credential's authenticated session and unchanged original key.
 `crates/fgit-node/tests/queue_http.rs` exercises real TCP requests, both object
 formats, live credential changes, exact retries, disconnect recovery, pagination,
@@ -316,3 +393,10 @@ two-parent candidates with queue-required protection, both hash formats,
 malformed/stale/scoped refusals, atomic native post-state, a lost reply and
 bundle-free original recovery after process restart. These test sources do not
 establish a runtime result unless executed at the named revision.
+
+`crates/fgit-node/tests/queue_landing_http/refresh.rs` covers both hash formats,
+minimal dual-scope credentials with no ref-write permission, exact target-only
+publication, unchanged FIFO and refs, stale observations, lost-response retry,
+subsequent PR edits, original refused/committed outcomes and process restart.
+Parser and credential tests cover both deployment ceilings, same-credential
+grants before body acceptance, raw ref bytes and full-size encoded PR bodies.

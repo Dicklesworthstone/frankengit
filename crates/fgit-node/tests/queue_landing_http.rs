@@ -7,6 +7,9 @@ use support::*;
 #[path = "queue_landing_http/candidate.rs"]
 mod candidate;
 
+#[path = "queue_landing_http/refresh.rs"]
+mod refresh;
+
 use std::io::Write;
 use std::net::Shutdown;
 

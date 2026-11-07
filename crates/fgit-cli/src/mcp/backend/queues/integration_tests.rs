@@ -1,5 +1,6 @@
 //! Real protocol calls, persisted native objects and original terminal recovery.
 mod candidate;
+mod refresh;
 mod support;
 use super::super::super::json::{self, object, text};
 use super::super::super::{

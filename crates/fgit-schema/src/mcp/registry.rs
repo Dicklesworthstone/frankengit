@@ -124,6 +124,7 @@ const ADDITIONS: [McpToolEntry; 52] = [
     queues::LAND,
     queues::LAND_CANDIDATE,
     queues::LIST,
+    queues::REFRESH,
     queues::REORDER,
     queues::SHOW,
     historical::BLOB,

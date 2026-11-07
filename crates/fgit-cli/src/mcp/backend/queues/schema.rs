@@ -63,7 +63,7 @@ pub(super) fn for_tool(name: &str) -> Value {
         "object_format",
     ];
     let mut references = vec![("target_reference", "target_reference_hex")];
-    if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE) {
+    if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE | REFRESH) {
         for field in ["pull_request", "expected_pull_request_version"] {
             properties.insert(field.into(), positive());
             required.push(field);
@@ -71,6 +71,15 @@ pub(super) fn for_tool(name: &str) -> Value {
         let mut commits = vec!["expected_source", "expected_target"];
         if name == LAND_CANDIDATE {
             commits.extend(["merge_base", "candidate_commit"]);
+        }
+        if name == REFRESH {
+            commits.push("expected_recorded_target");
+            properties.insert("title".into(), common::text_schema(256));
+            properties.insert(
+                "body".into(),
+                common::text_schema(common::MAX_TEXT_BYTES as u64),
+            );
+            required.extend(["title", "body"]);
         }
         for field in commits {
             properties.insert(field.into(), object([
@@ -81,7 +90,7 @@ pub(super) fn for_tool(name: &str) -> Value {
             required.push(field);
         }
         references.push(("source_reference", "source_reference_hex"));
-        if matches!(name, LAND | LAND_CANDIDATE) {
+        if matches!(name, LAND | LAND_CANDIDATE | REFRESH) {
             properties.insert("expected_policy_epoch".into(), positive());
             required.push("expected_policy_epoch");
             if name == LAND_CANDIDATE {

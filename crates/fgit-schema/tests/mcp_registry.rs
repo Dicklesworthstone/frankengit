@@ -121,7 +121,7 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 99);
+    assert_eq!(REGISTRY.len(), 100);
     // Milestone edits expose an explicit null date clear as a real JSON Schema
     // union; a literal "string|null" type would not describe callable input.
     assert!(fgit_schema::emit::mcp_schema().contains("\"type\": [\"string\", \"null\"]"));
@@ -452,8 +452,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 99"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 95"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 100"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 96"));
     assert!(
         mcp_tools
             .contents
@@ -471,7 +471,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 99"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 100"));
 }
 
 #[test]
@@ -481,7 +481,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 95);
+    assert_eq!(active_names.len(), 96);
     assert!(active_names.contains(&"frankengit_issue_add_assignees"));
     assert!(active_names.contains(&"frankengit_issue_add_labels"));
     assert!(active_names.contains(&"frankengit_pull_append_comment"));
@@ -519,7 +519,7 @@ fn queue_registry_separates_read_management_and_landing_authority() {
         .iter()
         .filter(|tool| tool.name.starts_with("frankengit_queue_"))
         .collect();
-    assert_eq!(queue_tools.len(), 7);
+    assert_eq!(queue_tools.len(), 8);
     for tool in queue_tools {
         assert_eq!(tool.support_profile, SupportProfile::Active);
         assert_eq!(tool.owner_subsystem, "forge");
@@ -864,4 +864,53 @@ fn symlink_patch_profile_is_an_explicit_read_only_candidate_selector() {
     assert_eq!(output.classification, FieldClassification::SystemMetadata);
     assert!(tool.refusal_codes.contains(&"unsupported_patch_profile"));
     assert!(admit_call(tool.name, 1, "{}", &["read_canonical_object"], None).is_ok());
+}
+
+#[test]
+fn queue_refresh_keeps_both_grants_and_the_complete_immutable_original_command() {
+    let tool = find_tool("frankengit_queue_refresh").unwrap();
+    assert_eq!(tool.cli_command, "fg queue refresh");
+    assert_eq!(
+        tool.rest_api_path,
+        "POST /{repository}/api/v1/queues/{number}/refresh"
+    );
+    assert_eq!(tool.read_mutation, ReadMutationClass::Mutation);
+    assert_eq!(tool.capability, CapabilityRequirement::MUTATE_FORGE_ENTITY);
+    assert_eq!(tool.principal, PrincipalRequirement::OperatorBound);
+    assert_eq!(tool.idempotency, IdempotencyRequirement::RequiredDurableKey);
+    assert_eq!(
+        tool.authority_root,
+        InputAuthorityRootRequirement::ExactPredecessorVersion
+    );
+    for grant in ["--allow-queue-writes", "--allow-pull-writes"] {
+        assert!(tool.description.contains(grant));
+    }
+    for name in [
+        "number",
+        "expected_version",
+        "expected_pull_request_version",
+        "expected_policy_epoch",
+        "pull_request",
+        "expected_source",
+        "expected_target",
+        "expected_recorded_target",
+        "expected_incarnation",
+        "object_format",
+        "idempotency_key",
+    ] {
+        let field = tool.input_fields.iter().find(|field| field.name == name).unwrap();
+        assert!(field.required, "{name}");
+        assert_eq!(field.classification, FieldClassification::SelectorPosition);
+    }
+    for (name, limit) in [("title", 256), ("body", 16_384)] {
+        let field = tool.input_fields.iter().find(|field| field.name == name).unwrap();
+        assert!(field.required);
+        assert_eq!(field.classification, FieldClassification::UntrustedContent);
+        assert_eq!(field.max_bytes, Some(limit));
+    }
+    for name in ["principal", "force", "approved", "priority", "order", "bundle_hex_chunks"] {
+        assert!(!tool.input_fields.iter().any(|field| field.name == name));
+    }
+    assert!(tool.description.contains("moves no Git ref"));
+    assert!(tool.description.contains("agent-token MCP profile remains ineligible"));
 }

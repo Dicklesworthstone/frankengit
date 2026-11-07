@@ -32,6 +32,9 @@ pub(super) enum Operation {
         number: QueueNumber,
         action: Action,
     },
+    Refresh {
+        number: QueueNumber,
+    },
     Land {
         number: QueueNumber,
     },
@@ -174,6 +177,22 @@ impl<'a> Request<'a> {
                         },
                     });
                 }
+                if let Some(number_text) = suffix
+                    .strip_prefix('/')
+                    .and_then(|text| text.strip_suffix("/refresh"))
+                {
+                    if matches!(head.body, BodyFraming::ContentLength(size)
+                        if size > super::refresh::MAX_COMMAND_BYTES as u64)
+                    {
+                        return Err(ApiError::too_large());
+                    }
+                    return Ok(Self {
+                        repository_route,
+                        operation: Operation::Refresh {
+                            number: number(number_text)?,
+                        },
+                    });
+                }
                 if matches!(head.body, BodyFraming::ContentLength(size) if size > MAX_COMMAND_BYTES as u64)
                 {
                     return Err(ApiError::too_large());
@@ -212,7 +231,7 @@ impl<'a> Request<'a> {
     pub(in crate::smart_http::server) const fn is_mutation(&self) -> bool {
         matches!(
             self.operation,
-            Operation::Mutate { .. } | Operation::Land { .. } | Operation::LandCandidate { .. }
+            Operation::Mutate { .. } | Operation::Land { .. } | Operation::LandCandidate { .. } | Operation::Refresh { .. }
         )
     }
 
@@ -225,6 +244,10 @@ impl<'a> Request<'a> {
             self.operation,
             Operation::Prepare { .. } | Operation::PreparePrefix { .. }
         )
+    }
+
+    pub(super) const fn is_refresh(&self) -> bool {
+        matches!(self.operation, Operation::Refresh { .. })
     }
 
     pub(super) const fn is_landing(&self) -> bool {

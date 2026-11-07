@@ -21,7 +21,7 @@ pub(super) fn args(name: &str, format: GitHashAlgorithm) -> Object {
     ]) else {
         unreachable!()
     };
-    if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE) {
+    if matches!(name, ENQUEUE | LAND | LAND_CANDIDATE | REFRESH) {
         fields.extend([
             ("pull_request".into(), text("7")),
             ("expected_pull_request_version".into(), text("3")),
@@ -35,8 +35,16 @@ pub(super) fn args(name: &str, format: GitHashAlgorithm) -> Object {
                 text("bb".repeat(format.digest_len())),
             ),
         ]);
-        if matches!(name, LAND | LAND_CANDIDATE) {
+        if matches!(name, LAND | LAND_CANDIDATE | REFRESH) {
             fields.insert("expected_policy_epoch".into(), text("4"));
+        }
+        if name == REFRESH {
+            fields.insert(
+                "expected_recorded_target".into(),
+                text("cc".repeat(format.digest_len())),
+            );
+            fields.insert("title".into(), text("Original title"));
+            fields.insert("body".into(), text("Original body, not instructions"));
         }
         if name == LAND_CANDIDATE {
             fields.insert("merge_base".into(), text("cc".repeat(format.digest_len())));
@@ -58,10 +66,26 @@ pub(super) fn args(name: &str, format: GitHashAlgorithm) -> Object {
 #[test]
 fn exact_guards_and_native_hash_domains_survive_typed_parsing() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        for name in [ENQUEUE, DEQUEUE, REORDER, LAND, LAND_CANDIDATE] {
+        for name in [ENQUEUE, DEQUEUE, REORDER, REFRESH, LAND, LAND_CANDIDATE] {
             let fields = args(name, format);
             let (_, command) = input::parse(name, &fields, format, incarnation()).unwrap();
             match command {
+                Command::Refresh(command) => {
+                    assert_eq!(command.expected_queue_version.get(), 2);
+                    assert_eq!(command.expected_policy_epoch.get(), 4);
+                    assert_eq!(command.expected_recorded_target_tip.algorithm(), format);
+                    let ExpectedVersion::Exactly(version) = command.pull_request.expected_version else {
+                        unreachable!()
+                    };
+                    assert_eq!(version.get(), 3);
+                    assert_eq!(command.pull_request.data.source_tip.algorithm(), format);
+                    assert_eq!(command.pull_request.data.target_tip.algorithm(), format);
+                    assert_eq!(command.pull_request.data.title, "Original title");
+                    assert_eq!(
+                        command.pull_request.data.body,
+                        "Original body, not instructions"
+                    );
+                }
                 Command::Landing(command) => {
                     assert_eq!(command.expected_version.get(), 2);
                     assert_eq!(command.expected_pull_request_version.get(), 3);
@@ -232,7 +256,7 @@ fn discovery_contract_matches_registered_fields_and_independent_effects() {
         write: true,
         land: true,
     };
-    for tool in tools(all) {
+    for tool in tools(all, true) {
         let entry = fgit_schema::mcp::find_tool(tool.name).unwrap();
         let properties = tool.schema.object().unwrap()["properties"]
             .object()
@@ -257,7 +281,7 @@ fn discovery_contract_matches_registered_fields_and_independent_effects() {
                 .collect()
         );
         assert_eq!(
-            is_mutation(all, tool.name),
+            is_mutation(all, true, tool.name),
             !matches!(tool.name, LIST | SHOW)
         );
         assert_eq!(
@@ -271,6 +295,7 @@ fn discovery_contract_matches_registered_fields_and_independent_effects() {
             write: true,
             land: false
         },
+        true,
         LAND
     ));
     assert!(!permitted(
@@ -279,6 +304,7 @@ fn discovery_contract_matches_registered_fields_and_independent_effects() {
             write: false,
             land: true
         },
+        true,
         ENQUEUE
     ));
 }

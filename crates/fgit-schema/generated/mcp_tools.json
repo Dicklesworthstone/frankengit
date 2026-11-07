@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 99,
-  "active_count": 95,
+  "total_count": 100,
+  "active_count": 96,
   "unsupported_count": 4,
   "tools": [
     {
@@ -1935,7 +1935,7 @@
       "disclosure": "public_repository_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "invalid_queue_refresh_command", "queue_refresh_requires_target_change", "body_required", "invalid_bounded_text", "invalid_pull_request_data", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
       "cli_command": "fg queue dequeue",
       "rest_api_path": "POST /{repository}/api/v1/queues/{number}/dequeue"
     },
@@ -1963,7 +1963,7 @@
       "disclosure": "public_repository_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "invalid_queue_refresh_command", "queue_refresh_requires_target_change", "body_required", "invalid_bounded_text", "invalid_pull_request_data", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
       "cli_command": "fg queue enqueue",
       "rest_api_path": "POST /{repository}/api/v1/queues/{number}/enqueue"
     },
@@ -1991,7 +1991,7 @@
       "disclosure": "public_repository_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "invalid_queue_refresh_command", "queue_refresh_requires_target_change", "body_required", "invalid_bounded_text", "invalid_pull_request_data", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
       "cli_command": "fg queue land",
       "rest_api_path": "POST /{repository}/api/v1/queues/{number}/land"
     },
@@ -2019,7 +2019,7 @@
       "disclosure": "public_repository_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "invalid_queue_refresh_command", "queue_refresh_requires_target_change", "body_required", "invalid_bounded_text", "invalid_pull_request_data", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
       "cli_command": "fg queue land-candidate",
       "rest_api_path": "POST /{repository}/api/v1/queues/{number}/land-candidate"
     },
@@ -2052,6 +2052,34 @@
       "rest_api_path": "GET /{repository}/api/v1/queues"
     },
     {
+      "name": "frankengit_queue_refresh",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Refresh only the exact idle queue-head PR's recorded target observation after the target advances. Requires BOTH independent --allow-queue-writes and --allow-pull-writes launch grants plus the trusted-local principal and incarnation. The full original PR title/body/source metadata, queue/PR versions, policy epoch, old recorded target and explicit new live target are immutable request fields. Native admission verifies that only the target tip changes and preserves queue membership, order, priority and actor. This publishes one PR Update, moves no Git ref and supplies no approval or check. Retry the identical command and original key; no latest-state lookup refreshes an uncertain request. The agent-token MCP profile remains ineligible for queue access.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "exact_predecessor_version",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 1048576,
+        "max_depth": 16,
+        "max_items": 256,
+        "max_fan_out": 1,
+        "max_duration_ms": 300000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "public_repository_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "invalid_queue_refresh_command", "queue_refresh_requires_target_change", "body_required", "invalid_bounded_text", "invalid_pull_request_data", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
+      "cli_command": "fg queue refresh",
+      "rest_api_path": "POST /{repository}/api/v1/queues/{number}/refresh"
+    },
+    {
       "name": "frankengit_queue_reorder",
       "version": 1,
       "kind": "tool",
@@ -2075,7 +2103,7 @@
       "disclosure": "public_repository_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "incarnation_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "invalid_idempotency_key", "invalid_repository_incarnation", "repository_incarnation_mismatch", "object_format_mismatch", "positive_queue_number_required", "positive_version_required", "version_exhausted", "positive_pull_number_required", "positive_pull_version_required", "pr_version_exhausted", "positive_policy_epoch_required", "exactly_one_branch_encoding_required", "branch_name_limit", "full_branch_required", "invalid_branch", "invalid_hex_bytes", "distinct_branches_required", "invalid_native_oid", "invalid_priority", "invalid_dequeue_reason", "queue_order_required", "queue_order_limit", "duplicate_queue_entry", "invalid_queue_command", "invalid_queue_refresh_command", "queue_refresh_requires_target_change", "body_required", "invalid_bounded_text", "invalid_pull_request_data", "bundle_chunks_required", "bundle_chunk_limit", "bundle_chunk_must_be_hex", "invalid_bundle_chunk", "bundle_byte_limit", "allocation_refused", "queue_mutation_outcome_unknown"],
       "cli_command": "fg queue reorder",
       "rest_api_path": "POST /{repository}/api/v1/queues/{number}/reorder"
     },

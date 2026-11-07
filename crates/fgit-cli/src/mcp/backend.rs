@@ -222,7 +222,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if notifications::write_permitted(options) {
         tools.extend(notifications::write_tools());
     }
-    tools.extend(queues::tools(options.queues));
+    tools.extend(queues::tools(options.queues, options.writes.pulls));
     if options.agent_context {
         tools.push(agent_context::tool());
     }
@@ -380,7 +380,7 @@ impl ReadTools for NodeTools {
             || (self.options.writes.source && tags::is_write(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
             || (self.options.writes.merges && merge_writes::is_tool(name))
-            || queues::is_mutation(self.options.queues, name)
+            || queues::is_mutation(self.options.queues, self.options.writes.pulls, name)
     }
     fn result_is_error(&self, name: &str, value: &Value) -> bool {
         self.is_mutation(name)
@@ -408,7 +408,7 @@ impl NodeTools {
         if notifications::write_permitted(&self.options) && notifications::is_write(name) {
             return notifications::write(self, name, args);
         }
-        if queues::permitted(self.options.queues, name) {
+        if queues::permitted(self.options.queues, self.options.writes.pulls, name) {
             return queues::call(self, name, args);
         }
         if name == events::NAME && (self.options.issues || self.options.pulls) {
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 95);
+        assert_eq!(server_names.len(), 96);
         assert!(server_names.contains(&pull_writes::REOPEN));
         assert!(server_names.contains(&source::HISTORICAL_TREE));
         assert!(server_names.contains(&source::HISTORICAL_BLOB));

@@ -32,13 +32,14 @@ applies, including hiding a complete queue when one of its sources is hidden.
 
 | Stage | Required launch grants | Caller action |
 | --- | --- | --- |
+| Head target refresh | Both `--allow-queue-writes --allow-pull-writes` | When the target advanced, submit the exact original head PR metadata and explicit old/new target observations to `frankengit_queue_refresh`. |
 | Queue preparation | `--allow-source --allow-pulls --allow-queues` | Supply the exact queue and PR subject plus explicit commit metadata. |
 | Candidate inspection | `--allow-source --allow-pulls` | Submit the returned `inspection_arguments` to `frankengit_source_candidate`. |
 | Candidate review | `--allow-review-writes` | Submit `candidate_arguments` to `frankengit_pull_review` with an independently chosen decision, reviewer version and original key. |
 | Queue landing | `--allow-queue-landings` | Submit the original queue `publication_arguments` to `frankengit_queue_land_candidate` with a caller-owned original key. |
 | Outcome recovery | `--allow-outcomes` | Query `frankengit_transaction_outcome` with the original key. |
 
-Review, landing and outcome sessions require the launch-bound `--principal` and
+Refresh, review, landing and outcome sessions require the launch-bound `--principal` and
 `--expected-incarnation`. The operator sponsors each mutation as that principal;
 tool arguments and commit author/committer text cannot choose another actor.
 Granting ordinary reviewed merges does not grant queue landing. See
@@ -193,6 +194,25 @@ fields. Complete preparation responses remain bounded to 2 MiB. Use the
 [native queue CLI](NATIVE_MERGE_QUEUE.md) to prepare larger artifacts and the CLI
 or binary HTTP candidate-landing surface to publish them; the MCP chunk limits
 remain fixed.
+
+## Continue after the target advances
+
+An earlier queue entry can land while the next PR still records the previous
+target. Before constructing its next candidate, an independently authorized
+session can call `frankengit_queue_refresh` with both queue-write and PR-write
+grants. This exact idle-head operation verifies the original complete PR
+title/body, original source branch/tip, target branch, old recorded target,
+explicit new live target, queue/PR versions and current policy epoch. It
+publishes one target-only PR Update without moving refs or changing queue
+membership, order, priority, enqueuing actor or queue version.
+
+After the refresh commits, prepare a new candidate using the updated PR version
+and target observation. Previously prepared candidate arguments and old review
+or check evidence remain bound to their original subject; they cannot be
+silently rewritten into the new attempt. The tool is an explicit mutation with
+its own immutable durable key, not an automatic read-time adjustment or a new
+queue-runner authorization. Full fields, text bounds and recovery behavior are
+documented in [MCP queue refresh](MCP_METADATA_WRITES.md#refresh-the-recorded-target-of-an-idle-queue-head).
 
 ## Staleness and original-key recovery
 

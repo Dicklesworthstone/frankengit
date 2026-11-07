@@ -61,7 +61,7 @@ pub(super) fn invoke(backend: &mut NodeTools, name: &str, args: Object) -> Value
         .unwrap();
     let result = reply.object().unwrap()["result"].object().unwrap();
     let value = result["structuredContent"].clone();
-    if is_mutation(backend.options.queues, name) {
+    if is_mutation(backend.options.queues, backend.options.writes.pulls, name) {
         assert_eq!(
             result["isError"],
             Value::Bool(value.object().unwrap()["outcome"].text() == Some("refused"))
