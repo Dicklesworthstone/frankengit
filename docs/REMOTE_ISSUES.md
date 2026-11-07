@@ -254,3 +254,12 @@ CLI cases execute real child processes and private filesystem publication,
 including exact-key restart recovery after dropped responses, SIGTERM, SIGKILL,
 closed stdout, conflicting result publication, scope/history pins and refused
 unsafe input files. Native replies remain explicit protocol peers, not `fg`.
+
+The separate `scripts/e2e/suites/operator/remote_issue.sh` campaign uses actual
+native listeners. For both Git hash domains and committed/refused transactions,
+it pairs complete confirmation with a two-session listener that publishes then
+retires before confirmation. Drained output and a real full, unread OS pipe
+must preserve the same error/receipt semantics. Separate `fg outcome` and issue
+reads bind the original key, transaction, decision and canonical effects. This
+bounded host-pipe campaign does not establish power-loss safety, browser/TLS
+behavior, every operator entrypoint or same-revision native build qualification.

@@ -56,6 +56,11 @@ for format in sha1 sha256; do
   for property in actions_prefix_and_original_recovery retained_reads_and_canonical_state stale_and_identity_refusals independent_grant_twins prefix_bounds_and_read_toggle missing_native_service_refusal namespace_isolation disclosure_grant_twins; do
     fge_assert_eq "OPERATOR-ISSUE-$format-discussion-$property" true "$(fact "${format}_discussion_inbox_$property")" "native discussion inbox $property"
   done
+  for state in committed refused; do
+    for mode in complete confirmation blocked; do
+      fge_assert_eq "OPERATOR-ISSUE-$format-output-$state-$mode" true "$(fact "${format}_output_${state}_${mode}")" "native $state receipt and original-key recovery survive $mode output"
+    done
+  done
 done
 fge_capture entrypoint-receipts python3 - "$SUMMARY" "$FG_BIN" "$E2E_ROOT/../.." <<'PY' || true
 import hashlib, json, sys
