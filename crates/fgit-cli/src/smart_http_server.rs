@@ -48,6 +48,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
+   [--workflow-land-queue-head --workflow-landing-principal <id>]
    [--workflow-pull-request <number> | --workflow-merge-queue <number> |
     --workflow-pull-requests [--workflow-max-pull-requests <1..64>]]
    [--workflow-artifact-logs]
@@ -114,9 +115,15 @@ Use --workflow-merge-candidate-ref-hex for raw branch bytes instead of text.
 --workflow-merge-queue selects the current canonical queue head using --workflow-ref
 as its fixed target. It requires the complete merge-candidate group and two-parent
 merge-commit style. Queue custody and reporting span changes of head PR; unresolved
-work blocks later execution. This runs candidate CI without landing a protected
-target or changing queue membership. The retained landing.bundle is ready for
-guarded queue landing. Queue/PR/tip/policy changes are revalidated.
+work blocks later execution. Target landing is disabled by default. The separate
+--workflow-land-queue-head --workflow-landing-principal <id> pair authorizes guarded
+landing of the exact tested candidate after successful check publication. It
+requires --workflow-publish-checks, the complete queue/candidate configuration and
+--expected-incarnation. CI writing, check publication and target landing use
+independently configured principals; none grants an HTTP request authority.
+Current queue/PR/tips/policy, checks and reviews are revalidated. Missing approval
+waits without sealing a refusal; unknown landing outcomes stop later execution.
+Original landing custody survives restart. No landing starts before readiness.
 --workflow-pull-requests discovers visible open same-repository PRs targeting
 --workflow-ref and executes their source heads, one member per poll in rotating
 order. It requires --expected-incarnation and trusts scripts from every current
@@ -401,6 +408,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--continuous"
                 | "--workflow-trusted-local"
                 | "--workflow-publish-checks"
+                | "--workflow-land-queue-head"
                 | "--workflow-pull-requests"
                 | "--workflow-artifact-logs"
         );
@@ -442,6 +450,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--workflow-interval-ms"
                     | "--workflow-attempt-timeout-secs"
                     | "--workflow-principal"
+                    | "--workflow-landing-principal"
                     | "--workflow-pull-request"
                     | "--workflow-max-pull-requests"
                     | "--workflow-merge-queue"

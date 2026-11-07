@@ -184,7 +184,13 @@ fn waiting_review_does_not_poison_the_landing_key_and_ready_uses_the_same_admiss
         );
         assert!(read(&node, 1, None).queue.unwrap().is_empty());
         assert_eq!(
-            publish(&node, &offered, b"lost original bundle", "readiness-landing").unwrap(),
+            publish(
+                &node,
+                &offered,
+                b"lost original bundle",
+                "readiness-landing"
+            )
+            .unwrap(),
             landed
         );
         node.shutdown().unwrap();

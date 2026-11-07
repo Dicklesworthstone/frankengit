@@ -65,6 +65,13 @@ impl TrustedWorkflowCheckSet {
     pub const fn identity(&self) -> [u8; 32] {
         self.identity
     }
+    pub(crate) fn all_succeeded(&self) -> bool {
+        !self.checks.is_empty()
+            && self.checks.iter().all(|check| {
+                check.observation.record.conclusion == WorkflowCheckConclusion::Success
+            })
+    }
+
     /// This manifest excludes evidence bodies and cannot be submitted as a check.
     pub fn to_json(&self) -> String {
         let checks = self.checks.iter().enumerate().map(|(i, c)| format!(
@@ -345,6 +352,69 @@ impl OneNode {
         Ok(set)
     }
 
+    /// Observe the original canonical decisions without submitting any check.
+    /// A local reporting marker is not evidence of successful publication.
+    /// These historical observations do not waive current landing policy.
+    pub(crate) async fn trusted_workflow_check_set_committed_in(
+        &self,
+        request: &NodeRequestContext,
+        set: &TrustedWorkflowCheckSet,
+    ) -> Result<bool, TrustedWorkflowFailure> {
+        use fgit_admission::AdmissionContext;
+        use fgit_admission::merge::native::workflow_checks;
+        use fgit_authority::OutcomeLookup;
+
+        let invalid = TrustedWorkflowFailure::InvalidInput;
+        if (set.tenant, set.repository, set.incarnation)
+            != (
+                self.tenant_id(),
+                self.repository_id(),
+                self.repository_incarnation_id(),
+            )
+        {
+            return Err(invalid("saved check-set repository incarnation mismatch"));
+        }
+        if set.is_empty() {
+            return Ok(false);
+        }
+        for check in &set.checks {
+            if !request.checkpoint_is_live() {
+                return Err(invalid("check outcome observation stopped"));
+            }
+            let context = AdmissionContext {
+                head_key: self.head_key.clone(),
+                tenant_id: self.tenant_id(),
+                repository_id: self.repository_id(),
+                principal_id: set.publisher,
+                idempotency_key: check.key.clone(),
+                object_format: self.object_format(),
+            };
+            let (_, attempt) = workflow_checks::proposal(&context, &check.observation.record)
+                .map_err(|error| invalid_owned(error.to_string()))?;
+            let tx = attempt
+                .derive()
+                .map_err(|error| invalid_owned(error.to_string()))?
+                .0;
+            let outcome = self
+                .resolve_outcome_checkpointed_in(request, tx)
+                .await
+                .map_err(|error| invalid_owned(error.to_string()))?;
+            if !matches!(
+                outcome,
+                OutcomeLookup::Decided(TerminalOutcome {
+                    outcome: DecisionOutcome::Committed { .. },
+                    ..
+                })
+            ) {
+                return Ok(false);
+            }
+        }
+        if !request.checkpoint_is_live() {
+            return Err(invalid("check outcome observation stopped"));
+        }
+        Ok(true)
+    }
+
     /// Publish verified jobs serially with their deterministic original child
     /// keys. An observer runs AFTER each real decision; its failure stops later
     /// admission without discarding the already-known terminal result. The set
@@ -466,5 +536,12 @@ const fn conclusion(value: WorkflowCheckConclusion) -> &'static str {
         WorkflowCheckConclusion::Failure => "failure",
         WorkflowCheckConclusion::Cancelled => "cancelled",
         WorkflowCheckConclusion::TimedOut => "timed_out",
+    }
+}
+
+fn invalid_owned(detail: String) -> TrustedWorkflowFailure {
+    TrustedWorkflowFailure::Io {
+        operation: "verify original workflow check decisions",
+        source: std::io::Error::other(detail),
     }
 }

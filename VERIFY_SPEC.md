@@ -547,6 +547,19 @@ Region close must report zero unresolved obligations or a typed containment fail
 
 ## 16. Forge/product state verification
 
+The opt-in native queue watcher landing path must verify complete successful
+execution and the original committed check transactions before observing
+readiness. Native readiness tests require unchanged authority/queue state,
+no request seal and no terminal outcome while reviews/checks are missing;
+later approval must permit the same unsubmitted key. Actual admission must
+still refuse a queue/ref/policy race after a ready observation. Integration
+tests use real candidate execution and persisted native state, including both
+Git hash formats, disabled-by-default behavior, failed CI, lost terminal output,
+reopen recovery after queue movement and a missing landing bundle. Custody
+tests cover original identity binding, corruption, links and bounded attempts.
+Local acknowledgements never count as green execution or canonical outcomes.
+These cells do not establish speculative trains or hosted runner isolation.
+
 Version-independent PR comments exercise the real metadata admission driver with
 forced CAS loss, lost publication responses, bounded retry and same-key recovery.
 The paired strict-comment path keeps its exact predecessor. Native persisted-node

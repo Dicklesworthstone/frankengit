@@ -794,9 +794,8 @@ where
     }
     // Preserve source -> target -> workspace refusal precedence. Publication
     // resolves historical terminal outcomes before entering this preparation.
-    if sealed.is_some_and(|package| {
-        package.workspace_epoch_now != package.attempt.workspace_epoch
-    }) {
+    if sealed.is_some_and(|package| package.workspace_epoch_now != package.attempt.workspace_epoch)
+    {
         return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
     }
     let resolved = projection
@@ -805,21 +804,17 @@ where
     if resolved.refs.refs() != &snapshot.refs
         || resolved.refs.head_target() != snapshot.head_target.as_ref()
     {
-        return Err(
-            ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
-        );
+        return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into());
     }
     let positions = load_forge_positions(store, cx, basis).await?;
     if positions != resolved.forge {
-        return Err(
-            ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into(),
-        );
+        return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into());
     }
     let validated_landing = match (landing, landing_events) {
         (Some(command), Some(events)) => Some(
             queue::validate_landing_at(
-                store, cx, context, basis, &snapshot, &resolved, command, events, intent,
-                attempt, projection,
+                store, cx, context, basis, &snapshot, &resolved, command, events, intent, attempt,
+                projection,
             )
             .await?,
         ),

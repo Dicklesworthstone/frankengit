@@ -53,8 +53,7 @@ where
     let intent = command.intent()?;
     let (events, attempt) = candidate_landing_proposal(context, command)?;
     let tx_id = attempt.derive().map_err(AdmissionError::from)?.0;
-    let (basis, _, authenticated) =
-        crate::read_basis_async(store, cx, &context.head_key).await?;
+    let (basis, _, authenticated) = crate::read_basis_async(store, cx, &context.head_key).await?;
     let preparation = prepare_merge_attempt_at(
         store,
         cx,

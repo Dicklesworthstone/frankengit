@@ -4,6 +4,7 @@
 
 use super::super::super::validate_inputs;
 pub use super::pull_request_merge::PullRequestMergeWatchConfig;
+pub use super::queue_landing::TrustedQueueLanding;
 use super::{
     Owner, check_directory, hex, lower_hash, merge_queue, pull_request, pull_request_merge,
     reporting,
@@ -40,6 +41,7 @@ pub struct WorkflowWatchConfig {
     interval: Duration,
     attempt_timeout: GitDaemonSessionTimeout,
     publisher: Option<PrincipalId>,
+    landing_principal: Option<PrincipalId>,
     pull_request: Option<u64>,
     pull_requests: Option<usize>,
     merge_queue: Option<u64>,
@@ -81,6 +83,7 @@ impl WorkflowWatchConfig {
             interval,
             attempt_timeout: GitDaemonSessionTimeout::DEFAULT,
             publisher: None,
+            landing_principal: None,
             pull_request: None,
             pull_requests: None,
             merge_queue: None,
@@ -90,8 +93,9 @@ impl WorkflowWatchConfig {
         })
     }
 
-    /// One finite deadline covers reconciliation, source selection, execution
-    /// and check publication. A later poll starts only after this attempt drains.
+    /// One finite deadline covers reconciliation, source selection, execution,
+    /// check publication and optional landing. A later poll starts only after
+    /// this attempt drains.
     pub fn with_attempt_timeout(mut self, timeout: Duration) -> io::Result<Self> {
         if timeout > Duration::from_secs(3600) {
             return Err(invalid(
@@ -110,6 +114,17 @@ impl WorkflowWatchConfig {
     #[must_use]
     pub const fn with_publisher(mut self, publisher: PrincipalId) -> Self {
         self.publisher = Some(publisher);
+        self
+    }
+
+    /// Explicit trusted-operator authority to land the exact tested queue head
+    /// through ordinary protected queue admission. This identity is separate
+    /// from the CI branch writer and check publisher and binds durably on first
+    /// use. [`Self::validate`] requires a complete queue candidate and publisher;
+    /// this option does not grant an HTTP caller any additional permission.
+    #[must_use]
+    pub const fn with_landing_principal(mut self, principal: PrincipalId) -> Self {
+        self.landing_principal = Some(principal);
         self
     }
 
@@ -201,6 +216,7 @@ impl WorkflowWatchConfig {
     pub fn validate(&self) -> io::Result<()> {
         if self.reference.as_bytes().starts_with(b"refs/tags/")
             && (self.publisher.is_some()
+                || self.landing_principal.is_some()
                 || self.pull_request.is_some()
                 || self.pull_requests.is_some()
                 || self.merge_queue.is_some()
@@ -208,6 +224,15 @@ impl WorkflowWatchConfig {
         {
             return Err(invalid(
                 "tag workflow service supports ordinary execution only; check publication, PR and queue modes require a branch",
+            ));
+        }
+        if self.landing_principal.is_some()
+            && (self.merge_queue.is_none()
+                || self.merge_candidate.is_none()
+                || self.publisher.is_none())
+        {
+            return Err(invalid(
+                "automatic queue landing requires a queue, merge candidate and check publisher",
             ));
         }
         merge_queue::validate_selection(
@@ -266,6 +291,10 @@ impl WorkflowWatchConfig {
         self.publisher
     }
     #[must_use]
+    pub const fn landing_principal(&self) -> Option<PrincipalId> {
+        self.landing_principal
+    }
+    #[must_use]
     pub const fn pull_request(&self) -> Option<u64> {
         self.pull_request
     }
@@ -310,6 +339,11 @@ pub struct WorkflowWatchReceipt {
     pub dispatched: u64,
     pub checks_committed: u64,
     pub checks_refused: u64,
+    pub landings_committed: u64,
+    pub landings_refused: u64,
+    pub landings_previously_decided: u64,
+    pub landings_waiting: u64,
+    pub landings_stale: u64,
     pub non_green: bool,
     pub interrupted: bool,
     pub requires_reconciliation: bool,
@@ -330,7 +364,9 @@ impl WorkflowWatchReceipt {
             concat!(
                 "{{\"type\":\"workflow_service_drained\",\"schema_version\":1,",
                 "\"polls\":{},\"dispatched\":{},\"checks_committed\":{},",
-                "\"checks_refused\":{},\"non_green\":{},\"interrupted\":{},",
+                "\"checks_refused\":{},\"landings_committed\":{},\"landings_refused\":{},",
+                "\"landings_previously_decided\":{},\"landings_waiting\":{},\"landings_stale\":{},",
+                "\"non_green\":{},\"interrupted\":{},",
                 "\"requires_reconciliation\":{},\"publication_pending\":{},\"pending_execution\":{},",
                 "\"node_closed\":{},\"service_failed\":{},\"execution_retried\":false}}"
             ),
@@ -338,6 +374,11 @@ impl WorkflowWatchReceipt {
             self.dispatched,
             self.checks_committed,
             self.checks_refused,
+            self.landings_committed,
+            self.landings_refused,
+            self.landings_previously_decided,
+            self.landings_waiting,
+            self.landings_stale,
             self.non_green,
             self.interrupted,
             self.requires_reconciliation,
@@ -600,6 +641,20 @@ fn attempt(
     if !execute || control.is_stopped() {
         return Ok(());
     }
+    // The startup reconciliation pass uses execute=false. Fresh target
+    // publication, like script execution, begins only after readiness succeeds.
+    if land(node, request, config, receipt)? {
+        return stopped(
+            control,
+            "attempt budget stopped queue landing reconciliation",
+        );
+    }
+    if control.is_stopped() {
+        return Ok(());
+    }
+    if !request.checkpoint_is_live() {
+        return stopped(control, "attempt budget stopped before queue selection");
+    }
     let poll = node
         .runtime()
         .block_on(async {
@@ -713,13 +768,21 @@ fn attempt(
         ));
     }
     if publish(node, request, config, receipt)? {
-        stopped(
+        return stopped(
             control,
             "attempt budget stopped before completed checks could be reported",
-        )
-    } else {
-        Ok(())
+        );
     }
+    if control.is_stopped() {
+        return Ok(());
+    }
+    if land(node, request, config, receipt)? {
+        return stopped(
+            control,
+            "attempt budget stopped before queue landing completed",
+        );
+    }
+    Ok(())
 }
 
 fn stopped(control: &WorkflowWatchControl, detail: &str) -> Result<(), WorkflowWatchError> {
@@ -823,6 +886,61 @@ fn publish(
     // still refuses readiness until the recovery pass completes without stop.
     if !result.request_stopped {
         receipt.publication_pending = false;
+    }
+    Ok(result.request_stopped)
+}
+
+/// This pass follows a complete check publication pass under the SAME finite
+/// request. The retained execution and canonical admission determine readiness;
+/// no aggregate counter or local "reported" marker authorizes target mutation.
+fn land(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    config: &WorkflowWatchConfig,
+    receipt: &mut WorkflowWatchReceipt,
+) -> Result<bool, WorkflowWatchError> {
+    let Some(lander) = config.landing_principal else {
+        return Ok(false);
+    };
+    if !request.checkpoint_is_live() {
+        return Ok(true);
+    }
+    let (Some(number), Some(publisher), Some(merge)) = (
+        config.merge_queue,
+        config.publisher,
+        config.merge_candidate.as_ref(),
+    ) else {
+        return Err(WorkflowWatchError::Attempt(
+            "automatic queue landing requires its complete operator configuration".into(),
+        ));
+    };
+    let result = node
+        .runtime()
+        .block_on(node.land_trusted_queue_head_merge_workflows_in(
+            request,
+            &config.reference,
+            number,
+            &config.directory,
+            &config.run_parent,
+            publisher,
+            merge,
+            lander,
+            |_| Ok(()),
+        ));
+    receipt.non_green |= result.refused != 0;
+    receipt.interrupted |= result.request_stopped;
+    receipt.requires_reconciliation |= result.error.is_some();
+    receipt.publication_pending |= result.error.is_some();
+    add(&mut receipt.landings_committed, result.committed)?;
+    add(&mut receipt.landings_refused, result.refused)?;
+    add(
+        &mut receipt.landings_previously_decided,
+        result.previously_decided,
+    )?;
+    add(&mut receipt.landings_waiting, result.waiting)?;
+    add(&mut receipt.landings_stale, result.stale)?;
+    if let Some(error) = result.error {
+        return Err(WorkflowWatchError::Attempt(error));
     }
     Ok(result.request_stopped)
 }

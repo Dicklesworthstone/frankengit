@@ -725,3 +725,172 @@ fn watch_log_only_capture_preserves_poll_options_and_derived_execution_identity(
     input.push("--artifact-logs".into());
     assert!(options(&input).is_err());
 }
+
+fn landing_args() -> Vec<String> {
+    let mut input = queue_args();
+    input.extend([
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "55".repeat(16),
+        "--land-queue-head".into(),
+        "--landing-principal".into(),
+        "66".repeat(16),
+    ]);
+    input
+}
+
+#[test]
+fn queue_landing_requires_its_own_explicit_grant_and_keeps_three_identities() {
+    assert!(options(&args()).unwrap().landing_principal.is_none());
+    assert!(options(&merge_args()).unwrap().landing_principal.is_none());
+    assert!(options(&queue_args()).unwrap().landing_principal.is_none());
+    let mut check_only = queue_args();
+    check_only.extend([
+        "--publish-checks".into(),
+        "--principal-id".into(),
+        "55".repeat(16),
+    ]);
+    assert!(options(&check_only).unwrap().landing_principal.is_none());
+
+    let parsed = options(&landing_args()).unwrap();
+    assert_eq!(parsed.merge_queue, Some(7));
+    assert!(parsed.pull_request.is_none());
+    assert_eq!(
+        parsed.landing_principal,
+        Some(fgit_types::PrincipalId::from_bytes([0x66; 16]))
+    );
+    assert_eq!(
+        parsed.publisher,
+        Some(fgit_types::PrincipalId::from_bytes([0x55; 16]))
+    );
+    assert_eq!(
+        parsed.merge_candidate.unwrap().principal,
+        fgit_types::PrincipalId::from_bytes([0x33; 16])
+    );
+
+    let mut continuous = landing_args();
+    continuous.extend([
+        "--continuous".into(),
+        "--stop-file".into(),
+        "/private/queue.stop".into(),
+        "--attempt-timeout-secs".into(),
+        "120".into(),
+    ]);
+    let parsed = options(&continuous).unwrap();
+    assert_eq!(parsed.attempt_timeout, Duration::from_secs(120));
+    assert!(parsed.landing_principal.is_some());
+}
+
+#[test]
+fn queue_landing_refuses_incomplete_authority_before_opening_storage() {
+    for (flag, width) in [
+        ("--land-queue-head", 1),
+        ("--landing-principal", 2),
+        ("--publish-checks", 1),
+        ("--principal-id", 2),
+        ("--expected-incarnation", 2),
+        ("--merge-queue", 2),
+        ("--merge-candidate-ref", 2),
+        ("--merge-principal", 2),
+        ("--merge-author", 2),
+        ("--merge-committer", 2),
+        ("--merge-timestamp", 2),
+        ("--merge-message", 2),
+    ] {
+        let mut input = landing_args();
+        let at = input.iter().position(|value| value == flag).unwrap();
+        input.drain(at..at + width);
+        let expected = options(&input).err().expect(flag);
+        // The public entrypoint must return the same parser refusal; opening
+        // /not-opened would instead fail with an infrastructure error.
+        assert_eq!(run(&input).unwrap_err(), expected, "{flag}");
+    }
+    for extra in [
+        vec!["--land-queue-head"],
+        vec!["--landing-principal", "66666666666666666666666666666666"],
+        vec!["--landing-principal"],
+        vec!["--pull-request", "7"],
+        vec!["--merge-method", "squash"],
+    ] {
+        let mut input = landing_args();
+        input.extend(extra.into_iter().map(str::to_owned));
+        assert!(options(&input).is_err(), "{input:?}");
+    }
+    for invalid in ["", "66", "not-a-principal", "--publish-checks"] {
+        let mut input = landing_args();
+        let at = input
+            .iter()
+            .position(|value| value == "--landing-principal")
+            .unwrap();
+        input[at + 1] = invalid.into();
+        assert!(options(&input).is_err(), "{invalid:?}");
+    }
+    let mut pr = landing_args();
+    let at = pr
+        .iter()
+        .position(|value| value == "--merge-queue")
+        .unwrap();
+    pr[at] = "--pull-request".into();
+    assert!(options(&pr).is_err());
+    let mut tag = landing_args();
+    tag[4] = "refs/tags/v1".into();
+    assert!(options(&tag).is_err());
+}
+
+#[test]
+fn landing_flags_inside_workflow_values_never_grant_target_authority() {
+    for literal in ["--land-queue-head", "--landing-principal"] {
+        let mut input = queue_args();
+        let at = input
+            .iter()
+            .position(|value| value == "--merge-message")
+            .unwrap();
+        input[at + 1] = literal.into();
+        let parsed = options(&input).unwrap();
+        assert!(parsed.landing_principal.is_none());
+        assert_eq!(
+            parsed.merge_candidate.unwrap().metadata.message,
+            literal.as_bytes()
+        );
+    }
+    let mut input = landing_args();
+    input[4] = "726566732f68656164732fff".into();
+    input.push("--ref-hex".into());
+    let parsed = options(&input).unwrap();
+    assert_eq!(parsed.execution.reference.as_bytes(), b"refs/heads/\xff");
+    assert!(parsed.landing_principal.is_some());
+}
+
+#[test]
+fn waiting_or_stale_landing_observations_are_distinct_from_unresolved_publication() {
+    let mut summary = Summary {
+        publication_enabled: true,
+        queue_landing_enabled: true,
+        landings_committed: 1,
+        landings_previously_decided: 2,
+        landings_waiting: 3,
+        landings_stale: 4,
+        ..Default::default()
+    };
+    let mut output = Vec::new();
+    assert_eq!(finish(&mut output, &summary, None, None).unwrap(), 0);
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("\"queue_landing_enabled\":true"));
+    assert!(text.contains("\"landings_committed\":1"));
+    assert!(text.contains("\"landings_previously_decided\":2"));
+    assert!(text.contains("\"landings_waiting\":3"));
+    assert!(text.contains("\"landings_stale\":4"));
+    assert!(text.contains("\"requires_reconciliation\":false"));
+    summary.reconcile = true;
+    assert_eq!(finish(&mut Vec::new(), &summary, None, None).unwrap(), 1);
+    assert_eq!(
+        finish(
+            &mut Vec::new(),
+            &summary,
+            Some("landing outcome unknown"),
+            None
+        )
+        .unwrap(),
+        2
+    );
+}

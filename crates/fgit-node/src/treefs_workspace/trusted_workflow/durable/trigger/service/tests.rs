@@ -148,3 +148,108 @@ fn invalid_tag_publication_refuses_before_opening_node_or_readiness() {
     assert!(!ready.get());
     assert!(!root.exists());
 }
+
+#[test]
+fn automatic_queue_landing_is_disabled_until_separately_configured() {
+    let publisher = PrincipalId::from_bytes([7; 16]);
+    let lander = PrincipalId::from_bytes([8; 16]);
+    let queue = config(b"refs/heads/main")
+        .unwrap()
+        .with_merge_queue(3)
+        .unwrap()
+        .with_merge_candidate(candidate())
+        .unwrap()
+        .with_publisher(publisher);
+    assert!(queue.validate().is_ok());
+    assert!(queue.landing_principal().is_none());
+    assert!(
+        config(b"refs/heads/main")
+            .unwrap()
+            .landing_principal()
+            .is_none()
+    );
+
+    for landing_first in [false, true] {
+        let mut configured = config(b"refs/heads/main").unwrap();
+        if landing_first {
+            configured = configured.with_landing_principal(lander);
+        }
+        configured = configured
+            .with_publisher(publisher)
+            .with_merge_queue(3)
+            .unwrap()
+            .with_merge_candidate(candidate())
+            .unwrap();
+        if !landing_first {
+            configured = configured.with_landing_principal(lander);
+        }
+        assert!(configured.validate().is_ok());
+        assert_eq!(configured.landing_principal(), Some(lander));
+        assert_eq!(configured.publisher(), Some(publisher));
+        assert_eq!(
+            configured.merge_candidate().unwrap().principal(),
+            PrincipalId::from_bytes([3; 16])
+        );
+    }
+}
+
+#[test]
+fn incomplete_queue_landing_refuses_before_opening_node_or_readiness() {
+    let publisher = PrincipalId::from_bytes([7; 16]);
+    let lander = PrincipalId::from_bytes([8; 16]);
+    let branch = config(b"refs/heads/main").unwrap();
+    let cases = [
+        branch.clone(),
+        branch.clone().with_publisher(publisher),
+        branch
+            .clone()
+            .with_merge_queue(3)
+            .unwrap()
+            .with_publisher(publisher),
+        branch
+            .clone()
+            .with_merge_queue(3)
+            .unwrap()
+            .with_merge_candidate(candidate())
+            .unwrap(),
+        branch
+            .clone()
+            .with_pull_request(7)
+            .unwrap()
+            .with_merge_candidate(candidate())
+            .unwrap()
+            .with_publisher(publisher),
+        branch
+            .with_pull_requests(16)
+            .unwrap()
+            .with_publisher(publisher),
+        config(b"refs/tags/v1").unwrap(),
+    ];
+    for (index, selection) in cases.into_iter().enumerate() {
+        let root = std::env::temp_dir().join(format!(
+            "fgit-invalid-queue-landing-service-{}-{index}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+        let mut selection = selection.with_landing_principal(lander);
+        selection.run_parent = root.join("runs");
+        let node = NodeConfig::new(
+            root.join("node"),
+            TenantId::from_bytes([1; 16]),
+            RepositoryId::from_bytes([2; 16]),
+        );
+        let ready = std::cell::Cell::new(false);
+        let error =
+            run_service_with_ready(node, selection, WorkflowWatchControl::default(), || {
+                ready.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, WorkflowWatchError::Configuration(_)),
+            "{index}"
+        );
+        assert!(!ready.get(), "{index}");
+        assert!(!root.exists(), "{index}");
+    }
+}

@@ -174,6 +174,31 @@ impl WatchPrestartIntent {
         Ok(bytes)
     }
 
+    /// Load the target-addressed copy of the original queue candidate. The
+    /// same private descriptor, byte bound and commitment checks used for CI
+    /// publication apply before these bytes reach queue admission.
+    pub fn load_landing_bundle(
+        &self,
+        directory: &Path,
+        live: &dyn Fn() -> bool,
+    ) -> Result<Vec<u8>, WatchPrestartRefusal> {
+        self.validate()?;
+        let (digest, length) = self
+            .landing
+            .ok_or_else(|| invalid("original intent has no queue landing bundle"))?;
+        let original = private_directory(directory)?;
+        let bytes = read_verified(
+            &directory.join("landing.bundle"),
+            Some(length),
+            MAX_BUNDLE_BYTES,
+            digest,
+            true,
+            live,
+        )?;
+        same_directory(directory, &original)?;
+        Ok(bytes)
+    }
+
     fn validate(&self) -> Result<(), WatchPrestartRefusal> {
         if self.bundle_len == 0
             || self.bundle_len > MAX_BUNDLE_BYTES

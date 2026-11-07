@@ -18,6 +18,7 @@ mod merge_queue;
 mod prestart;
 mod pull_request;
 mod pull_request_merge;
+mod queue_landing;
 mod reporting;
 pub mod service;
 

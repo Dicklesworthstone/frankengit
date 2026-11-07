@@ -8,10 +8,11 @@ use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{DecisionOutcome, PrincipalId};
 use std::fmt::Write as _;
 mod sources;
-use sources::Sources;
+pub(super) use sources::Sources;
 pub(super) use sources::read_private;
 mod settlement;
 pub(super) use settlement::recover as recover_settlement;
+pub(super) use settlement::verify_complete;
 
 /// Counts refer to observed canonical decisions, including historical retries.
 /// Previously reported events are suppression records, never passing checks.
@@ -275,16 +276,21 @@ pub(super) fn scope(node: &OneNode, reference: &RefName, directory: &[u8]) -> [u
 pub(super) fn event_entries(root: &Path) -> Result<Vec<fs::DirEntry>, TrustedWorkflowFailure> {
     let mut entries = fs::read_dir(root)
         .map_err(io)?
-        .take(MAX_EVENTS + 4)
+        .take(MAX_EVENTS + 5)
         .collect::<Result<Vec<_>, _>>()
         .map_err(io)?;
-    if entries.len() > MAX_EVENTS + 3 {
+    if entries.len() > MAX_EVENTS + 4 {
         return Err(invalid("ref watcher retained-event limit exceeded"));
     }
     entries.retain(|entry| {
-        !["owner.lock", "publisher", "merge-config"]
-            .iter()
-            .any(|name| entry.file_name() == *name)
+        ![
+            "owner.lock",
+            "publisher",
+            "merge-config",
+            "landing-principal",
+        ]
+        .iter()
+        .any(|name| entry.file_name() == *name)
     });
     if entries.len() > MAX_EVENTS {
         return Err(invalid("ref watcher retained-event limit exceeded"));
@@ -347,7 +353,7 @@ fn reported(path: &Path, expected: &[u8; 32]) -> Result<bool, TrustedWorkflowFai
         .map_err(io)?;
     Ok(true)
 }
-fn digest(bytes: [u8; 32]) -> Result<Digest, TrustedWorkflowFailure> {
+pub(super) fn digest(bytes: [u8; 32]) -> Result<Digest, TrustedWorkflowFailure> {
     Ok(Digest::new(
         DigestAlgorithm::Sha256.id(),
         DigestBytes::try_new(&bytes).map_err(|_| invalid("invalid watch digest"))?,
@@ -359,7 +365,7 @@ fn failure(path: &Path, detail: String) -> TrustedWorkflowFailure {
         detail,
     }
 }
-fn quote(text: &str) -> String {
+pub(super) fn quote(text: &str) -> String {
     let mut s = String::from("\"");
     for c in text.chars() {
         match c {

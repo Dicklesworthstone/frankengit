@@ -105,6 +105,14 @@ pub(super) fn read(
 }
 
 impl Pending {
+    pub(super) fn load_landing_bundle(
+        &self,
+        path: &Path,
+        live: &dyn Fn() -> bool,
+    ) -> Result<Vec<u8>, TrustedWorkflowFailure> {
+        Ok(self.intent.load_landing_bundle(path, live)?)
+    }
+
     pub(super) fn load_bundle(
         &mut self,
         path: &Path,
@@ -126,6 +134,32 @@ impl Pending {
         .map_err(|error| invalid_owned(error.to_string()))?;
         Ok(())
     }
+}
+
+/// Recover immutable queue coordinates independently of the execution fence.
+/// This produces no execution handle and never changes the no-start predicate.
+/// A new landing requires separate completed-execution verification; a submitted
+/// transaction instead resolves its original outcome before current policy.
+pub(super) fn read_landing(
+    node: &OneNode,
+    reference: &RefName,
+    directory: &[u8],
+    path: &Path,
+    scope: &[u8; 32],
+    key: &str,
+    config: &PullRequestMergeWatchConfig,
+    live: &dyn Fn() -> bool,
+) -> Result<Pending, TrustedWorkflowFailure> {
+    checkpoint(live)?;
+    let event = metadata::hash(key)?;
+    let intent = Intent::read(path, scope, &event, &config.identity(), live)?
+        .ok_or_else(|| invalid("queue landing requires the original candidate intent"))?;
+    let pending =
+        metadata::reconstruct(node, reference, directory, path, key, config, intent, live)?;
+    if pending.prepared.queue.is_none() {
+        return Err(invalid("queue landing requires a queue candidate"));
+    }
+    Ok(pending)
 }
 
 /// The last durable record enables recovery only after all original bytes

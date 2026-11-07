@@ -17,6 +17,7 @@ const USAGE: &str =
    --merge-timestamp <positive-unix-seconds> --merge-message <text>
    [--merge-profile path|exact-renames] [--merge-method merge-commit|squash]]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
+  [--land-queue-head --landing-principal <id>]
   [--continuous --stop-file <initially-absent-path> [--attempt-timeout-secs <1..3600>]]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
   [--artifact-root <absolute-private-directory>] [--artifact-logs]
@@ -76,8 +77,15 @@ It prepares and runs only the exact current head, retaining queue version, tips,
 PR version and policy epoch. Queue changes select new events; unresolved custody
 blocks the entire queue scope, even if its head changes or disappears. Original
 settled checks can still publish after removal without rerunning scripts. The watch
-retains landing.bundle for guarded queue landing of the exact tested commit. It
-does not land the target or change queue membership itself.
+retains landing.bundle for guarded queue landing of the exact tested commit.
+Target landing is disabled by default. --land-queue-head --landing-principal <id>
+explicitly authorizes automatic landing through ordinary queue admission, and
+requires --merge-queue, --publish-checks and --expected-incarnation. This principal
+is configured independently from the CI branch writer and check publisher. Only
+verified successful executions qualify; current checks, reviews, queue membership,
+tips and policy still govern publication. Missing approval waits without sealing
+a refusal. Pending original landing outcomes reconcile before another candidate;
+an unknown outcome stops the watch. Retain the same landing identity on restart.
 PR metadata versions (including reopen), source decisions and observed target tips
 select distinct events; unrelated comments/checks do not. Closed/merged/missing
 PRs execute nothing. Old reporting can recover after closure without rerunning code.
@@ -93,6 +101,7 @@ struct WatchOptions {
     polls: u32,
     interval: Duration,
     publisher: Option<fgit_types::PrincipalId>,
+    landing_principal: Option<fgit_types::PrincipalId>,
     pull_request: Option<u64>,
     merge_queue: Option<u64>,
     merge_candidate: Option<crate::workflow_merge_watch::Options>,
@@ -124,6 +133,8 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let (mut polls, mut interval) = (None, None);
     let mut publish = false;
     let mut publisher = None;
+    let mut land = false;
+    let mut landing_principal = None;
     let mut pull_request = None;
     let mut merge_queue = None;
     let mut merge_fields = std::collections::BTreeMap::new();
@@ -179,6 +190,20 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
                 return Err("duplicate --publish-checks".into());
             }
             publish = true;
+        } else if flag == "--land-queue-head" {
+            if land {
+                return Err("duplicate --land-queue-head".into());
+            }
+            land = true;
+        } else if flag == "--landing-principal" {
+            let value = args.get(i).ok_or("missing --landing-principal")?;
+            i += 1;
+            super::publish::fixed_hex(value, 16)?;
+            let id = fgit_types::PrincipalId::from_hex(value)
+                .map_err(|_| "invalid queue landing principal")?;
+            if landing_principal.replace(id).is_some() {
+                return Err("duplicate --landing-principal".into());
+            }
         } else if flag == "--principal-id" {
             let value = args.get(i).ok_or("missing --principal-id")?;
             i += 1;
@@ -220,6 +245,8 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     if tag
         && (publish
             || publisher.is_some()
+            || land
+            || landing_principal.is_some()
             || pull_request.is_some()
             || merge_queue.is_some()
             || merge_candidate.is_some())
@@ -253,6 +280,21 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     if publish && execution.incarnation.is_none() {
         return Err("automatic check publication requires --expected-incarnation".into());
     }
+    if land != landing_principal.is_some() {
+        return Err("--land-queue-head and --landing-principal must be supplied together".into());
+    }
+    if land
+        && (merge_queue.is_none()
+            || merge_candidate.is_none()
+            || !publish
+            || execution.incarnation.is_none())
+    {
+        return Err(concat!(
+            "automatic queue landing requires --merge-queue, the complete merge-candidate group, ",
+            "--publish-checks and --expected-incarnation",
+        )
+        .into());
+    }
     if continuous != stop_file.is_some() {
         return Err("--continuous and --stop-file must be supplied together".into());
     }
@@ -264,6 +306,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     }
     Ok(WatchOptions {
         publisher,
+        landing_principal,
         pull_request,
         merge_queue,
         merge_candidate,
@@ -302,6 +345,12 @@ struct Summary {
     publication_enabled: bool,
     checks_committed: usize,
     checks_refused: usize,
+    queue_landing_enabled: bool,
+    landings_committed: usize,
+    landings_refused: usize,
+    landings_previously_decided: usize,
+    landings_waiting: usize,
+    landings_stale: usize,
     continuous: bool,
     operator_stopped: bool,
     lifetime_expired: bool,
@@ -332,6 +381,7 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
     .map_err(|e| e.to_string())?;
     let mut summary = Summary {
         publication_enabled: options.publisher.is_some(),
+        queue_landing_enabled: options.landing_principal.is_some(),
         continuous: stop_file.is_some(),
         ..Summary::default()
     };
@@ -406,6 +456,9 @@ fn poll_once(
     output: &mut impl Write,
 ) -> Result<(), String> {
     let opt = &options.execution;
+    if summary.reconcile {
+        return Ok(());
+    }
     if summary.stopped || !request.checkpoint_is_live() {
         summary.stopped = true;
         return Ok(());
@@ -437,6 +490,11 @@ fn poll_once(
             output,
         )?;
     }
+    if summary.stopped || !request.checkpoint_is_live() {
+        summary.stopped = true;
+        return Ok(());
+    }
+    land_pending(node, request, options, merge.as_ref(), summary, output)?;
     if summary.stopped || !request.checkpoint_is_live() {
         summary.stopped = true;
         return Ok(());
@@ -543,8 +601,77 @@ fn poll_once(
             output,
         )?;
     }
+    land_pending(node, request, options, merge.as_ref(), summary, output)?;
     if !request.checkpoint_is_live() {
         summary.stopped = true;
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn land_pending(
+    node: &fgit_node::OneNode,
+    request: &fgit_node::NodeRequestContext,
+    options: &WatchOptions,
+    merge: Option<&fgit_node::workflow_watch::PullRequestMergeWatchConfig>,
+    summary: &mut Summary,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let Some(lander) = options.landing_principal else {
+        return Ok(());
+    };
+    if summary.stopped || summary.reconcile || !request.checkpoint_is_live() {
+        summary.stopped |= !request.checkpoint_is_live();
+        return Ok(());
+    }
+    let (Some(number), Some(publisher), Some(merge)) =
+        (options.merge_queue, options.publisher, merge)
+    else {
+        return Err("automatic queue landing requires its complete operator configuration".into());
+    };
+    let opt = &options.execution;
+    let result = node
+        .runtime()
+        .block_on(node.land_trusted_queue_head_merge_workflows_in(
+            request,
+            &opt.reference,
+            number,
+            &opt.workflow,
+            &opt.parent,
+            publisher,
+            merge,
+            lander,
+            |text| {
+                writeln!(output, "{text}")
+                    .and_then(|()| output.flush())
+                    .map_err(|error| error.to_string())
+            },
+        ));
+    summary.non_green |= result.refused != 0;
+    summary.reconcile |= result.error.is_some();
+    summary.stopped |= result.request_stopped;
+    // These are observed canonical outcomes, including recovered attempts.
+    // Waiting for approvals and stale candidates do not grant a passing check.
+    for (counter, amount) in [
+        (&mut summary.landings_committed, result.committed),
+        (&mut summary.landings_refused, result.refused),
+        (
+            &mut summary.landings_previously_decided,
+            result.previously_decided,
+        ),
+        (&mut summary.landings_waiting, result.waiting),
+        (&mut summary.landings_stale, result.stale),
+    ] {
+        *counter = counter
+            .checked_add(amount)
+            .ok_or("queue landing observation counter exhausted")?;
+    }
+    writeln!(output, "{}", result.to_json())
+        .and_then(|()| output.flush())
+        .map_err(|error| {
+            format!("watch landing receipt failed; preserve original custody: {error}")
+        })?;
+    if let Some(error) = result.error {
+        return Err(error);
     }
     Ok(())
 }
@@ -660,7 +787,40 @@ fn finish(
     cleanup: Option<&str>,
 ) -> Result<u8, String> {
     let optional = |value: Option<&str>| value.map_or_else(|| "null".into(), super::quote);
-    writeln!(output,"{{\"type\":\"workflow_watch_result\",\"schema_version\":1,\"continuous\":{},\"operator_stopped\":{},\"polls\":{},\"dispatched\":{},\"non_green\":{},\"request_stopped\":{},\"requires_reconciliation\":{},\"publication_enabled\":{},\"committed_check_decisions\":{},\"refused_check_decisions\":{},\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}",summary.continuous,summary.operator_stopped,summary.polls,summary.dispatched,summary.non_green,summary.stopped,summary.reconcile,summary.publication_enabled,summary.checks_committed,summary.checks_refused,cleanup.is_none(),optional(operation),optional(cleanup)).and_then(|()|output.flush()).map_err(|e|format!("watch summary output incomplete: {e}"))?;
+    writeln!(
+        output,
+        concat!(
+            "{{\"type\":\"workflow_watch_result\",\"schema_version\":1,",
+            "\"continuous\":{},\"operator_stopped\":{},\"polls\":{},\"dispatched\":{},",
+            "\"non_green\":{},\"request_stopped\":{},\"requires_reconciliation\":{},",
+            "\"publication_enabled\":{},\"committed_check_decisions\":{},",
+            "\"refused_check_decisions\":{},",
+            "\"queue_landing_enabled\":{},\"landings_committed\":{},\"landings_refused\":{},",
+            "\"landings_previously_decided\":{},\"landings_waiting\":{},\"landings_stale\":{},",
+            "\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}"
+        ),
+        summary.continuous,
+        summary.operator_stopped,
+        summary.polls,
+        summary.dispatched,
+        summary.non_green,
+        summary.stopped,
+        summary.reconcile,
+        summary.publication_enabled,
+        summary.checks_committed,
+        summary.checks_refused,
+        summary.queue_landing_enabled,
+        summary.landings_committed,
+        summary.landings_refused,
+        summary.landings_previously_decided,
+        summary.landings_waiting,
+        summary.landings_stale,
+        cleanup.is_none(),
+        optional(operation),
+        optional(cleanup),
+    )
+    .and_then(|()| output.flush())
+    .map_err(|error| format!("watch summary output incomplete: {error}"))?;
     Ok(if operation.is_some() || cleanup.is_some() {
         2
     } else {

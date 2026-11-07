@@ -241,3 +241,60 @@ fn cancellation_during_streaming_retains_preparation_without_admitting_an_intent
         candidate
     );
 }
+
+#[test]
+fn landing_loader_requires_the_original_bounded_private_target_bundle() {
+    let scratch = Scratch::new();
+    let mut intent = sample(true);
+    let landing = vec![29; 3 * 16 * 1024 + 1];
+    intent.landing = Some((sha256_digest(&landing), landing.len() as u64));
+    write_new(&scratch.0.join("landing.bundle"), &landing).unwrap();
+    // Loading the target-addressed bytes does not load a second CI bundle.
+    assert!(!scratch.0.join("candidate.bundle").exists());
+    let calls = Cell::new(0);
+    assert_eq!(
+        intent
+            .load_landing_bundle(&scratch.0, &|| {
+                calls.set(calls.get() + 1);
+                true
+            })
+            .unwrap(),
+        landing
+    );
+    for stop in 0..calls.get() {
+        let observed = Cell::new(0);
+        assert!(
+            intent
+                .load_landing_bundle(&scratch.0, &|| {
+                    let previous = observed.get();
+                    observed.set(previous + 1);
+                    previous < stop
+                })
+                .is_err()
+        );
+    }
+    assert!(
+        sample(false)
+            .load_landing_bundle(&scratch.0, &|| true)
+            .is_err()
+    );
+    let path = scratch.0.join("landing.bundle");
+    fs::write(&path, &landing[..landing.len() - 1]).unwrap();
+    assert!(intent.load_landing_bundle(&scratch.0, &|| true).is_err());
+    let mut corrupt = landing.clone();
+    corrupt[0] ^= 1;
+    fs::write(&path, &corrupt).unwrap();
+    assert!(intent.load_landing_bundle(&scratch.0, &|| true).is_err());
+    fs::write(&path, &landing).unwrap();
+    fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+    assert!(intent.load_landing_bundle(&scratch.0, &|| true).is_err());
+    fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+    let alias = scratch.0.join("landing-alias");
+    fs::hard_link(&path, &alias).unwrap();
+    assert!(intent.load_landing_bundle(&scratch.0, &|| true).is_err());
+    fs::remove_file(&alias).unwrap();
+    fs::rename(&path, &alias).unwrap();
+    symlink(&alias, &path).unwrap();
+    assert!(intent.load_landing_bundle(&scratch.0, &|| true).is_err());
+    assert_eq!(fs::read(&alias).unwrap(), landing);
+}

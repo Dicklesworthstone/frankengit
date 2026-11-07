@@ -70,6 +70,21 @@ pub(super) fn parse(
             PrincipalId::from_hex(publisher).map_err(|_| "invalid workflow check publisher")?,
         );
     }
+    if flags.contains_key("--workflow-land-queue-head")
+        != flags.contains_key("--workflow-landing-principal")
+    {
+        return Err(
+            "--workflow-land-queue-head and --workflow-landing-principal must be supplied together"
+                .into(),
+        );
+    }
+    if let Some(lander) = flags.get("--workflow-landing-principal") {
+        required("--expected-incarnation")?;
+        config = config.with_landing_principal(
+            PrincipalId::from_hex(lander)
+                .map_err(|_| "invalid workflow queue landing principal")?,
+        );
+    }
     if [
         "--workflow-pull-request",
         "--workflow-merge-queue",
@@ -777,5 +792,153 @@ mod tests {
         assert!(parse(&flags, inputs()).is_err());
         flags.insert("--artifact-root", "/private/artifacts");
         assert!(parse(&flags, inputs()).is_ok());
+    }
+
+    fn landing_arguments() -> Vec<String> {
+        let mut arguments = queue_arguments();
+        arguments.extend([
+            "--workflow-publish-checks".into(),
+            "--workflow-principal".into(),
+            "55".repeat(16),
+            "--workflow-land-queue-head".into(),
+            "--workflow-landing-principal".into(),
+            "66".repeat(16),
+        ]);
+        arguments
+    }
+
+    #[test]
+    fn queue_landing_service_grant_is_independent_of_ci_reporting_and_http_permissions() {
+        let check_only = parse_server(&queue_arguments()).unwrap();
+        assert!(
+            check_only
+                .workflow_service
+                .unwrap()
+                .landing_principal()
+                .is_none()
+        );
+        let mut endpoint_only = queue_arguments();
+        endpoint_only.extend([
+            "--allow-queue-landings".into(),
+            "--workflow-publish-checks".into(),
+            "--workflow-principal".into(),
+            "55".repeat(16),
+        ]);
+        let endpoint_only = parse_server(&endpoint_only).unwrap();
+        assert!(endpoint_only.allow_queue_landings);
+        assert!(
+            endpoint_only
+                .workflow_service
+                .unwrap()
+                .landing_principal()
+                .is_none()
+        );
+
+        let options = parse_server(&landing_arguments()).unwrap();
+        assert!(!options.allow_queue_landings);
+        assert!(!options.allow_queues);
+        assert!(!options.allow_receive);
+        assert!(!options.allow_pulls);
+        assert!(!options.allow_source);
+        let service = options.workflow_service.unwrap();
+        assert_eq!(service.merge_queue(), Some(7));
+        assert!(service.pull_request().is_none());
+        assert!(service.pull_requests().is_none());
+        assert_eq!(
+            service.landing_principal(),
+            Some(PrincipalId::from_bytes([0x66; 16]))
+        );
+        assert_eq!(
+            service.publisher(),
+            Some(PrincipalId::from_bytes([0x55; 16]))
+        );
+        assert_eq!(
+            service.merge_candidate().unwrap().principal(),
+            PrincipalId::from_bytes([0x33; 16])
+        );
+        assert!(service.validate().is_ok());
+    }
+
+    #[test]
+    fn queue_landing_service_requires_complete_explicit_trust_identity_and_selection() {
+        for (flag, width) in [
+            ("--workflow-land-queue-head", 1),
+            ("--workflow-landing-principal", 2),
+            ("--workflow-publish-checks", 1),
+            ("--workflow-principal", 2),
+            ("--expected-incarnation", 2),
+            ("--workflow-merge-queue", 2),
+            ("--workflow-merge-candidate-ref", 2),
+            ("--workflow-merge-principal", 2),
+            ("--workflow-merge-author", 2),
+            ("--workflow-merge-committer", 2),
+            ("--workflow-merge-timestamp", 2),
+            ("--workflow-merge-message", 2),
+            ("--workflow-trusted-local", 1),
+            ("--credentials-file", 2),
+            ("--continuous", 1),
+            ("--stop-file", 2),
+        ] {
+            let mut arguments = landing_arguments();
+            let at = arguments.iter().position(|value| value == flag).unwrap();
+            arguments.drain(at..at + width);
+            assert!(parse_server(&arguments).is_err(), "{flag}");
+        }
+        for extra in [
+            vec!["--workflow-land-queue-head"],
+            vec![
+                "--workflow-landing-principal",
+                "66666666666666666666666666666666",
+            ],
+            vec!["--workflow-landing-principal"],
+            vec!["--workflow-pull-request", "7"],
+            vec!["--workflow-pull-requests"],
+            vec!["--workflow-merge-method", "squash"],
+        ] {
+            let mut arguments = landing_arguments();
+            arguments.extend(extra.into_iter().map(str::to_owned));
+            assert!(parse_server(&arguments).is_err(), "{arguments:?}");
+        }
+        for invalid in ["", "66", "not-a-principal", "--workflow-publish-checks"] {
+            let mut arguments = landing_arguments();
+            let at = arguments
+                .iter()
+                .position(|value| value == "--workflow-landing-principal")
+                .unwrap();
+            arguments[at + 1] = invalid.into();
+            assert!(parse_server(&arguments).is_err(), "{invalid:?}");
+        }
+        let mut pr = landing_arguments();
+        let at = pr
+            .iter()
+            .position(|value| value == "--workflow-merge-queue")
+            .unwrap();
+        pr[at] = "--workflow-pull-request".into();
+        assert!(parse_server(&pr).is_err());
+        let mut tag = landing_arguments();
+        let at = tag
+            .iter()
+            .position(|value| value == "--workflow-ref")
+            .unwrap();
+        tag[at + 1] = "refs/tags/v1".into();
+        assert!(parse_server(&tag).is_err());
+    }
+
+    #[test]
+    fn landing_switches_in_literal_merge_metadata_do_not_enable_automatic_writes() {
+        for literal in ["--workflow-land-queue-head", "--workflow-landing-principal"] {
+            let mut arguments = queue_arguments();
+            let at = arguments
+                .iter()
+                .position(|value| value == "--workflow-merge-message")
+                .unwrap();
+            arguments[at + 1] = literal.into();
+            let service = parse_server(&arguments).unwrap().workflow_service.unwrap();
+            assert!(service.landing_principal().is_none());
+            assert_eq!(
+                service.merge_candidate().unwrap().metadata().message,
+                literal.as_bytes()
+            );
+        }
     }
 }

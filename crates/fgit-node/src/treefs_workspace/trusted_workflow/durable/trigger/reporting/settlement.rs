@@ -51,8 +51,57 @@ pub(in super::super) fn recover(
     key: &str,
     live: &dyn Fn() -> bool,
 ) -> Result<bool, TrustedWorkflowFailure> {
+    verify(
+        node,
+        reference,
+        workflow_directory,
+        path,
+        scope,
+        key,
+        false,
+        live,
+    )
+}
+
+/// Automatic landing requires the complete original dispatch, even when a
+/// local settlement marker already exists. A stopped prefix or empty selection
+/// never qualifies; every original child and its compiled plan are reverified.
+/// Individual successful conclusions and their canonical admission are checked
+/// separately by the landing owner.
+pub(in super::super) fn verify_complete(
+    node: &OneNode,
+    reference: &RefName,
+    workflow_directory: &[u8],
+    path: &Path,
+    scope: &[u8; 32],
+    key: &str,
+    live: &dyn Fn() -> bool,
+) -> Result<bool, TrustedWorkflowFailure> {
+    verify(
+        node,
+        reference,
+        workflow_directory,
+        path,
+        scope,
+        key,
+        true,
+        live,
+    )
+}
+
+fn verify(
+    node: &OneNode,
+    reference: &RefName,
+    workflow_directory: &[u8],
+    path: &Path,
+    scope: &[u8; 32],
+    key: &str,
+    require_complete: bool,
+    live: &dyn Fn() -> bool,
+) -> Result<bool, TrustedWorkflowFailure> {
     checkpoint(live)?;
-    if settled(path, key)? {
+    let already_settled = settled(path, key)?;
+    if already_settled && !require_complete {
         return Ok(true);
     }
     if !lower_hash(key) {
@@ -85,6 +134,13 @@ pub(in super::super) fn recover(
         .filter(|definition| definition.selected)
         .collect::<Vec<_>>();
     sources.verify_selection(selected.len(), dispatch.identity)?;
+    if require_complete
+        && (sources.terminal.is_some()
+            || selected.is_empty()
+            || sources.runs.len() != selected.len())
+    {
+        return Ok(false);
+    }
     if sources
         .runs
         .iter()
@@ -139,9 +195,11 @@ pub(in super::super) fn recover(
     checkpoint(live)?;
     // Create-only: a corrupt/partial existing marker is never replaced. Once
     // this write begins, finish its sync independently of a later cancellation.
-    write_new(&path.join("settled"), key.as_bytes())
-        .and_then(|()| event_directory.file.sync_all())
-        .map_err(io)?;
+    if !already_settled {
+        write_new(&path.join("settled"), key.as_bytes())
+            .and_then(|()| event_directory.file.sync_all())
+            .map_err(io)?;
+    }
     event_directory.verify()?;
     settled(path, key)
 }

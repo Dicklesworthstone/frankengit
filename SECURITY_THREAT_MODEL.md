@@ -557,6 +557,20 @@ missing execution custody or unknown closure stops the controller. Ordinary
 head movement defers discovery without admitting a partial set. Source-head
 results do not supply exact merge-candidate evidence or hostile-code isolation.
 
+Native queue automatic landing is also an explicit trusted-host opt-in. Its
+landing identity is configured separately from the CI writer and check
+publisher and bound to permanent queue custody. Repository text cannot select
+it. Every selected workflow must have a verified complete successful execution
+and original committed check decisions; local completion/reporting markers are
+insufficient. Read-only readiness consumes no seal and grants no permission.
+Actual landing rechecks current authentication, reviews, checks and exact
+queue/PR/ref/policy guards through ordinary atomic native admission. Original
+attempts are synchronized before submission and reconcile before new work;
+missing responses cannot mint refreshed retry keys. Corrupt or unresolved
+custody blocks progress. Private-file checks and bounded records protect this
+trusted operator profile; they do not isolate hostile scripts from their host
+account or grant any remote token a landing permission.
+
 The Linux sparse-directory candidate in `fgit-runner::sparse_workspace`
 uses a broker-owned private parent descriptor, no-symlink/no-cross-mount
 resolution, exclusive creates and workspace leases, and manifest-directed

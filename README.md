@@ -389,11 +389,15 @@ and the credential's target reference ceiling. Queue membership and preparation
 alone never grant publication approval. The [queue candidate CI
 watcher](docs/NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md) selects the current head,
 prepares and executes its actual two-parent candidate on a fixed CI branch, and
-optionally publishes canonical checks. Its queue-wide custody survives head
-changes and restart. [Verified completed-watch recovery](docs/NATIVE_WORKFLOW_WATCH_RECOVERY.md)
+optionally publishes canonical checks. With an explicit landing principal, it
+can automatically land that tested candidate after verifying complete successful
+execution, original check decisions and current native protection. Missing
+reviews/checks wait without consuming the landing key; durable original attempts
+recover across lost responses and queue movement. Its queue-wide custody survives
+head changes and restart. [Verified completed-watch recovery](docs/NATIVE_WORKFLOW_WATCH_RECOVERY.md)
 can restore a missing final settlement from original closed execution records
 without replaying scripts. Speculative multi-PR trains, synthetic queue refs and
-autonomous target landing remain work under FG-083a.
+the plan's hosted policy classes remain work under FG-083a.
 See [Native merge queues](docs/NATIVE_MERGE_QUEUE.md) for exact commands,
 [branch protection](docs/MANDATORY_REVIEW_PROTECTION.md) for queue-required
 policies, and the HTTP guide for upload limits and recovery.

@@ -1,4 +1,4 @@
-# CI for the current native merge-queue head
+# CI and optional landing for the native merge-queue head
 
 The native workflow watcher can follow a merge queue, prepare the current head's
 actual two-parent merge candidate, admit it on a fixed CI branch and execute that
@@ -7,9 +7,10 @@ usable by existing exact-candidate branch protection. When the head changes, the
 same controller selects its next eligible PR and source branch.
 
 Queue selection, preparation, CI publication, execution custody and check
-admission use the existing native implementations. The watch does not land the
-target or change queue membership. Use the guarded [queue landing
-commands](NATIVE_MERGE_QUEUE.md) after the required checks and reviews exist.
+admission use the existing native implementations. An explicit automatic-landing
+option joins those steps to the ordinary guarded landing admission. It requires
+its own operator-selected principal and is disabled by default. The guarded
+[queue landing commands](NATIVE_MERGE_QUEUE.md) remain available for manual use.
 
 ## Start a foreground or continuous watcher
 
@@ -50,8 +51,9 @@ For sustained operation, replace `--polls` with:
 
 The stop file must initially be absent. Creating it, SIGTERM or SIGINT requests
 drain; it is never removed by the watcher. Each continuous attempt includes
-pending check recovery, one selection/dispatch and resulting check publication
-under a finite deadline. A global `--timeout-secs`, when supplied, still bounds
+pending check and landing recovery, one selection/dispatch, resulting check
+publication and optional landing under a finite deadline. A global
+`--timeout-secs`, when supplied, still bounds
 the entire service. See [native watch lifetime](NATIVE_REF_WORKFLOW_WATCH.md).
 
 This is Linux trusted-host execution. The operator must trust every future
@@ -96,7 +98,7 @@ idle result is not proof of successful CI. Ordinary failed builds can settle,
 but their check conclusions remain failures. Existing poll and final summary
 receipts distinguish non-green, stopped and unresolved work.
 
-## Publish exact checks and submit a guarded landing
+## Publish exact checks and optionally land automatically
 
 `--publish-checks` requires `--principal-id` and explicit incarnation. The
 CI writer and check publisher are independently chosen identities. Without
@@ -110,6 +112,43 @@ cannot satisfy protection for a different merge commit, and exact candidate
 reviews remain independent requirements. A branch can also require canonical
 queue landing through `--require-merge-queue`; ordinary PR publication remains
 ineligible for that requirement.
+
+To enable automatic landing, add both options to the queue watcher above:
+
+```sh
+--land-queue-head --landing-principal LANDING_PRINCIPAL
+```
+
+This requires the queue selector, complete two-parent merge configuration,
+`--publish-checks`, check publisher and exact repository incarnation. The CI
+writer, check publisher and landing principal are configured independently.
+They may be the same operator identity where policy permits, but none is
+inferred from another or from repository text. A local operator principal
+retains its actual authentication classification; enabling this option does
+not manufacture HTTP-token authentication or exempt it from branch policy.
+
+After publishing checks, the controller verifies every selected workflow's
+original completed execution, exact journal pin and successful job conclusions.
+It also resolves the original check transactions and requires all to have
+committed. Empty selections, failed or stopped runs, incomplete dispatches and
+local `reported` or `settled` markers alone cannot authorize landing. These
+requirements apply even when the branch has no required-check rule.
+
+The controller then observes readiness through the same native preparation
+used by actual admission. Missing reviews or required checks wait without
+reserving a landing key or publishing a permanent refusal. Readiness grants
+no authority: submission independently revalidates the current queue, PR,
+policy, authentication, source/target refs, candidate objects and evidence.
+One canonical decision moves the target, merges the PR and completes the queue
+entry. Races can still produce an ordinary immutable terminal refusal.
+
+Each pass lands at most one newly eligible head. Waiting and stale observations
+appear separately from unresolved custody in JSON. The foreground and service
+summaries include `landings_committed`, `landings_refused`,
+`landings_previously_decided`, `landings_waiting` and `landings_stale`.
+Previously decided counts report local retry suppression, not new commits.
+
+### Manual landing of the same tested candidate
 
 The retained event directory contains a ready `landing.bundle` addressed to the
 actual target branch. Use this artifact with `fg queue land-candidate` or the
@@ -158,9 +197,9 @@ target-ref ceiling remain mandatory.
 
 One permanent watch scope binds repository incarnation, queue number, configured
 target and workflow directory. It does not change when the head PR or its
-source branch changes. Merge configuration and the first check publisher are
-bound inside that scope; changing them refuses instead of escaping an old
-responsibility under a replacement identity.
+source branch changes. Merge configuration, the first check publisher and,
+when enabled, the landing principal are bound inside that scope; changing them
+refuses instead of escaping an old responsibility under a replacement identity.
 
 An unresolved event blocks later execution across the entire queue, including
 after reordering, dequeue, head landing or queue removal. Keep the private run
@@ -174,6 +213,23 @@ recover after the selected PR disappears or the queue becomes empty; recovery
 uses retained candidate identities, not the current head. Failure after candidate
 reservation retains the original key and lease and requires reconciliation.
 Neither a disconnected client nor a missing final response proves rollback.
+
+Automatic landing retains a bounded, creation-only attempt record before its
+first submission. The retry key binds the original scope, operator, event and
+observed authority basis. Reconstruction uses the original candidate's exact
+command; it never refreshes source/target tips or queue versions under that key.
+All outstanding landing attempts reconcile before current queue selection or
+new work. A decided transaction recovers without the original `landing.bundle`,
+including after queue removal, head movement or a lost terminal-output response.
+An undecided transaction still requires its original verified bundle. Durable
+acknowledgements suppress repeats and do not act as canonical evidence.
+
+There are at most 32 retained landing attempts per event and 1,024 per scope,
+in addition to the event bound. An acknowledged raced refusal can be followed
+by a new attempt only after readiness succeeds at a later authority basis;
+the original refusal remains unchanged. Unknown, malformed, orphaned or
+excessive custody blocks progress. No automatic record deletion or identity
+rotation evades these limits. Preserve the whole scope across restart.
 
 New candidate events carry a versioned intent that permits ordinary restart to
 resume an uncertain CI publication and begin the original candidate's first
@@ -194,8 +250,8 @@ failed checks. Missing or incomplete completion evidence still blocks the
 queue. See [bounded native-watch recovery](NATIVE_WORKFLOW_WATCH_RECOVERY.md).
 
 This slice executes one current queue head at a time. Speculative multi-PR
-trains, a synthetic queue-ref namespace and autonomous target landing under the
-plan's named policy classes remain separate functionality.
+trains, a synthetic queue-ref namespace and the plan's named hosted policy
+classes remain separate functionality. It adds no hostile-code isolation.
 
 ## Own the controller with the HTTP service
 
@@ -219,8 +275,15 @@ fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
   --workflow-publish-checks --workflow-principal CHECK_PUBLISHER
 ```
 
+To enable the same optional landing path in that service, add:
+
+```sh
+--workflow-land-queue-head --workflow-landing-principal LANDING_PRINCIPAL
+```
+
 The controller waits for successful HTTP readiness before new candidate
-publication or execution, and drains with the listener. No workflow flag grants
+publication, execution or target landing, and drains with the listener. Startup
+check reconciliation does not submit a fresh landing before readiness. No workflow flag grants
 network queue management, landing, receive or read permissions. Those endpoints
 retain their independent deployment switches and token scopes. See
 [HTTP-owned native CI](NATIVE_HTTP_WORKFLOW_SERVICE.md) for lifecycle and
@@ -230,6 +293,8 @@ credential details.
 
 ```sh
 cargo test --locked -p fgit-node --test trusted_queue_merge_watch -- --test-threads=1
+cargo test --locked -p fgit-node --lib queue::landing_tests::candidate::readiness -- --test-threads=1
+cargo test --locked -p fgit-node --lib queue_landing::custody -- --test-threads=1
 cargo test --locked -p fgit-cli --bin fg workflow_command::watch
 cargo test --locked -p fgit-cli --bin fg smart_http_server::workflow
 cargo test --locked -p fgit-cli --test workflow_queue_merge -- --test-threads=1
