@@ -9,12 +9,12 @@ import { migrationFixture,ROTATED } from './github-pull-import-fixture.mjs';
 import { parseGithubPullCapture } from '../../scripts/lib/github-pull-source.mjs';
 import { pullHash } from '../../scripts/operator/pull_command.mjs';
 const script=new URL('../../scripts/migrate_github_pulls.mjs',import.meta.url).pathname;
-function start(t,args){const child=spawn(process.execPath,[script,...args]);let stdout='',stderr='';
+function start(t,args,preload){const child=spawn(process.execPath,[...(preload?['--import',preload]:[]),script,...args]);let stdout='',stderr='';
  const done=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('CLI test deadline'));},10000);
   child.stdout.on('data',b=>{stdout+=b;if(stdout.length>1024*1024)child.kill('SIGKILL');});child.stderr.on('data',b=>stderr+=b);
   child.once('error',e=>{clearTimeout(timer);reject(e);});child.once('close',(code,signal)=>{clearTimeout(timer);resolve({code,signal,stdout,stderr});});});
  t.after(()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');});return {child,done};}
-const run=(t,args)=>start(t,args).done;
+const run=(t,args,preload)=>start(t,args,preload).done;
 function value(r,code=0){assert.equal(r.code,code,r.stderr);assert.equal(r.signal,null);assert.equal(r.stderr,'');return JSON.parse(r.stdout);}
 const args=(f,verb)=>[verb,'--workdir',f.workdir,'--confirm',f.prepared.plan_sha256];
 const sendArgs=(f,verb='run')=>[...args(f,verb),'--token-file',f.tokenFile];
@@ -61,4 +61,125 @@ test('prepare source tamper and invalid native metadata do not create a job',asy
  const f=await migrationFixture(t,{prepare:false}),selection=join(f.root,'selection.json');await writeFile(selection,JSON.stringify(f.input.selection),{mode:0o600});
  await writeFile(f.captureFile,'{}\n');const r=await run(t,['prepare','--workdir',f.workdir,'--capture',f.captureFile,'--capture-confirm',f.captured.sha256,'--selection',selection,'--token-file',f.tokenFile]);
  assert.equal(r.code,2);assert.equal(f.peer.calls.length,0);await assert.rejects(readdir(f.workdir));
+});
+
+async function preparationArgs(f) {
+ const selection=join(f.root,'selection.json');await writeFile(selection,JSON.stringify(f.input.selection),{mode:0o600});
+ return ['prepare-begin','--workdir',f.workdir,'--capture',f.captureFile,'--capture-confirm',f.captured.sha256,
+  '--selection',selection,'--token-file',f.tokenFile];
+}
+const draftArgs=(f,verb,pin)=>[verb,'--workdir',f.workdir,'--confirm',pin];
+
+test('restartable CLI preserves its bounded prefix without source, credential or destination access',async t=>{
+ const f=await migrationFixture(t,{prepare:false}),beginArgs=await preparationArgs(f);
+ const begun=value(await run(t,beginArgs));
+ assert.equal(begun.preparation_complete,false);assert.equal(begun.execution_complete,false);
+ assert.equal(begun.network_accessed,false);assert.equal(begun.mutation_submitted,false);
+ const pin=begun.preparation_sha256,header=await readFile(join(f.workdir,'preparation.json'));
+ const duplicate=await run(t,beginArgs);assert.equal(duplicate.code,2);
+ assert.equal(JSON.parse(duplicate.stderr).code,'github_pull_preparation_exists');
+ assert((await readFile(join(f.workdir,'preparation.json'))).equals(header));
+ const prefix=value(await run(t,[...draftArgs(f,'prepare-resume',pin),'--max-requests','1']),3);
+ assert.equal(prefix.prepared_steps,1);assert.equal(prefix.new_steps,1);assert.equal(prefix.preparation_complete,false);
+ assert.equal(prefix.mutation_submitted,false);assert.equal(prefix.execution_complete,false);
+ const request=join(f.workdir,'import/requests/step-000001/intent.json'),original=await readFile(request);
+ await assert.rejects(readFile(join(f.workdir,'import/manifest.json')),{code:'ENOENT'});
+ await unlink(f.captureFile);await unlink(f.tokenFile);assert.equal(f.peer.calls.length,0);await f.peer.close();
+ for(const verb of ['prepare-status','prepare-resume']){
+  const refused=await run(t,draftArgs(f,verb,'0'.repeat(64)));assert.equal(refused.code,2);
+  assert.equal(JSON.parse(refused.stderr).code,'github_pull_preparation_pin_mismatch');
+  assert((await readFile(request)).equals(original));
+ }
+ const status=value(await run(t,draftArgs(f,'prepare-status',pin)));
+ assert.equal(status.prepared_steps,1);assert.equal(status.local_read_only,true);assert.equal(status.preparation_complete,false);
+ const complete=value(await run(t,draftArgs(f,'prepare-resume',pin)));
+ assert.equal(complete.preparation_complete,true);assert.equal(complete.plan_sha256,begun.plan_sha256);
+ assert.equal(complete.new_steps,complete.steps-1);assert.equal(complete.network_accessed,false);
+ assert((await readFile(request)).equals(original));
+ const inspected=value(await run(t,['inspect','--workdir',complete.import_workdir,'--confirm',complete.plan_sha256]));
+ assert.equal(inspected.capture_sha256,f.captured.sha256);
+ const repeated=value(await run(t,draftArgs(f,'prepare-resume',pin)));
+ assert.equal(repeated.new_steps,0);assert.equal(repeated.plan_sha256,complete.plan_sha256);
+ assert((await readFile(request)).equals(original));assert((await readFile(join(f.workdir,'preparation.json'))).equals(header));
+});
+
+test('restartable CLI produces an ordinary job for the existing sender and remains inspectable after execution',async t=>{
+ const f=await migrationFixture(t,{prepare:false}),begun=value(await run(t,await preparationArgs(f)));
+ const ready=value(await run(t,draftArgs(f,'prepare-resume',begun.preparation_sha256)));
+ const original=await readFile(join(ready.import_workdir,'requests/step-000001/intent.json'));
+ const common=['--workdir',ready.import_workdir,'--confirm',ready.plan_sha256];
+ const done=value(await run(t,['run',...common,'--token-file',f.tokenFile]));
+ assert.equal(done.complete,true);assert.equal(f.peer.mutations.length,ready.steps);
+ await unlink(f.tokenFile);await f.peer.close();
+ for(const verb of ['prepare-status','prepare-resume']){
+  const status=value(await run(t,draftArgs(f,verb,begun.preparation_sha256)));
+  assert.equal(status.preparation_complete,true);assert.equal(status.execution_complete,false);
+  assert.equal(status.mutation_submitted,false);assert.equal(status.network_accessed,false);
+ }
+ assert((await readFile(join(ready.import_workdir,'requests/step-000001/intent.json'))).equals(original));
+ assert.equal(value(await run(t,['run',...common])).complete,true);
+});
+
+test('restartable CLI keeps request-budget grammar closed and refuses wrong options before preparing slots',async t=>{
+ const f=await migrationFixture(t,{prepare:false}),begun=value(await run(t,await preparationArgs(f)));
+ for(const extra of [['--max-requests','0'],['--max-requests','8193'],['--max-requests','1.5'],['--max-requests','1e2'],
+  ['--max-requests','1','--max-requests','2'],['--token-file',f.tokenFile],['--max-operations','1'],['--retry-key','invented']]){
+  const r=await run(t,[...draftArgs(f,'prepare-resume',begun.preparation_sha256),...extra]);
+  assert.equal(r.code,2);assert.equal(r.stdout,'');
+ }
+ for(const extra of [['--max-requests','1'],['--token-file',f.tokenFile],['--capture',f.captureFile]]){
+  const r=await run(t,[...draftArgs(f,'prepare-status',begun.preparation_sha256),...extra]);assert.equal(r.code,2);
+ }
+ assert.deepEqual(await readdir(join(f.workdir,'import/requests')),[]);assert.equal(f.peer.calls.length,0);
+ assert.equal(value(await run(t,draftArgs(f,'prepare-resume',begun.preparation_sha256))).preparation_complete,true);
+});
+
+test('restartable CLI preserves the preparation pin when output fails after beginning',async t=>{
+ const f=await migrationFixture(t,{prepare:false});let text='';
+ const output=new Writable({write(_b,_e,cb){cb(new Error('broken preparation output'));}});
+ const errors=new Writable({write(b,_e,cb){text+=b;cb();}});
+ const code=await main(await preparationArgs(f),{stdout:output,stderr:errors});assert.equal(code,4);
+ const report=JSON.parse(text);assert.equal(report.retained_result.preparation_complete,false);
+ assert.equal(report.mutation_submitted,false);assert.equal(report.outcome_unknown,false);
+ const pin=report.retained_result.preparation_sha256;
+ assert.equal(value(await run(t,draftArgs(f,'prepare-resume',pin))).preparation_complete,true);
+ assert.equal(f.peer.calls.length,0);
+});
+
+test('restartable CLI exposes all offline phases in installed help',async t=>{
+ const result=value(await run(t,['--help']));
+ for(const command of ['prepare-begin','prepare-resume','prepare-status'])assert.ok(result.usage.includes(command));
+});
+
+test('restartable CLI retains verified preparation custody after a filesystem write fault',async t=>{
+ const f=await migrationFixture(t,{prepare:false}),begun=value(await run(t,await preparationArgs(f)));
+ const pending=join(f.workdir,'pending/request'),header=await readFile(join(f.workdir,'preparation.json'));
+ // A test-only syscall fault is portable to privileged test runners, where a
+ // chmod-based write refusal would not be reliable. No native reply is replaced.
+ const preload=join(f.root,'write-fault.mjs');
+ await writeFile(preload,`import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const mkdir=fs.promises.mkdir;
+fs.promises.mkdir=async function(path,...args){
+ if(path===${JSON.stringify(pending)}){const e=new Error('controlled preparation write fault');e.code='EIO';throw e;}
+ return mkdir.call(this,path,...args);
+};
+syncBuiltinESMExports();\n`,{mode:0o600});
+ const r=await run(t,draftArgs(f,'prepare-resume',begun.preparation_sha256),preload);assert.equal(r.code,4);
+ const report=JSON.parse(r.stderr);assert.equal(report.code,'EIO');
+ assert.equal(report.preparation_progress.preparation_sha256,begun.preparation_sha256);
+ assert.equal(report.preparation_progress.preparation_verified,true);assert.equal(report.preparation_progress.new_steps,0);
+ assert.equal(report.mutation_submitted,false);assert.equal(report.outcome_unknown,false);
+ assert((await readFile(join(f.workdir,'preparation.json'))).equals(header));
+ assert.equal(value(await run(t,draftArgs(f,'prepare-resume',begun.preparation_sha256))).preparation_complete,true);
+ assert.equal(f.peer.calls.length,0);
+});
+
+test('restartable CLI cancellation before begin creates no custody and a later permitted begin succeeds',async t=>{
+ const f=await migrationFixture(t,{prepare:false}),beginArgs=await preparationArgs(f);let text='';
+ const output=new Writable({write(_b,_e,cb){cb();}}),errors=new Writable({write(b,_e,cb){text+=b;cb();}});
+ const code=await main(beginArgs,{stdout:output,stderr:errors,signal:AbortSignal.abort()});
+ assert.equal(code,2);assert.equal(JSON.parse(text).mutation_submitted,false);
+ await assert.rejects(readdir(f.workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
+ assert.equal(value(await run(t,beginArgs)).preparation_complete,false);
 });

@@ -6,6 +6,43 @@ one-shot preparation and completed import jobs remain unchanged. This is local
 request custody, not Git validation, authorization, publication or a new retry
 protocol. The existing native sender remains the only execution path.
 
+## CLI workflow
+
+The shipped `migrate_github_pulls.mjs` command exposes the existing preparer:
+
+```bash
+node scripts/migrate_github_pulls.mjs prepare-begin \
+  --capture /srv/import/github-pulls.json --capture-confirm CAPTURE_SHA256 \
+  --selection /srv/import/destination.json --token-file /srv/import/native-writer.token \
+  --workdir /srv/import/preparation
+
+# Retain the returned preparation_sha256 independently for both commands below.
+node scripts/migrate_github_pulls.mjs prepare-resume \
+  --workdir /srv/import/preparation --confirm PREPARATION_SHA256 --max-requests 100
+node scripts/migrate_github_pulls.mjs prepare-status \
+  --workdir /srv/import/preparation --confirm PREPARATION_SHA256
+```
+
+A successful begin or preparation status exits 0, including a paused draft.
+Bounded resume exits 3 while preparation is incomplete and 0 when it completes.
+Resume accepts only the preparation pin and its request/time bounds; status
+accepts no credential, capture, retry or mutation option. Neither phase sends a
+request to GitHub or the destination. The original capture and native-token paths
+may disappear after begin succeeds. Existing one-shot `prepare` is still available.
+
+Only `preparation_complete:true` permits the returned `import_workdir` and
+`plan_sha256` to be used with the ordinary import commands. The preparation pin
+is not that import-plan pin. Inspect the finished job, provision its required
+branches, and authorize execution through the existing workflow documented in
+[GitHub PR migration](GITHUB_PULL_MIGRATION.md). Beginning, resuming or checking
+preparation never invokes the sender, and `execution_complete:false` remains
+explicit even when preparation status reads a job that was executed previously.
+
+Input errors exit 2. An error after preparation custody is created or verified,
+or a failed output after an operation returns, exits 4 and retains
+`preparation_progress` or `retained_result`. Preserve the entire directory and
+its original pins; do not begin a replacement draft to resolve that error.
+
 ## Library workflow
 
 ```js
@@ -114,5 +151,14 @@ check bounded resumptions, exact original bytes, staged-request adoption,
 concurrent preparers, source/credential removal, full u64 destination numbering,
 encoded-capacity preflight, corruption and explicit noncompletion. Source test
 captures come from the existing loopback response-schema peer, not live GitHub.
-No Rust/native admission, deployed-server, hardware durability or full-workspace
-verification is implied. FG-049 remains partial.
+The focused verifier also exercises the actual CLI phases, closed grammar,
+source/credential removal, exact prefix preservation and output failure.
+
+The separate `scripts/e2e/suites/operator/github_pull_migration.sh` lane adds a
+restartable-preparation profile alongside its existing single and collection
+profiles. Actual CLI begin, bounded resume, status and completion feed the
+ordinary sender, branch provisioning and canonical Rust readback. The source
+responses remain explicit synthetic inputs. This lane's evidence is bound to
+its source and native binary digest; the library/CLI fixture tests do not imply
+Rust admission, deployed-server, hardware durability or full-workspace
+qualification. FG-049 remains partial.

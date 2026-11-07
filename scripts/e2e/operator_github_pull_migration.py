@@ -29,8 +29,11 @@ PROFILE_FACTS = (
     "collision_terminal_and_original_keys", "stopped_service_credential_free_completion",
 )
 SOURCE_FACTS = ["source_cli_discovery", "source_pin_refusals", "source_bounded_collection_resume", "source_offline_completion"]
-FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained", *SOURCE_FACTS] + [
-    f"{profile}_{fact}" for profile in ("single", "collection") for fact in PROFILE_FACTS]
+PREPARATION_FACTS = ["preparation_cli_bounded_prefix", "preparation_cli_original_custody",
+                     "preparation_cli_offline_completion", "preparation_cli_completed_recovery"]
+FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained",
+         *SOURCE_FACTS, *PREPARATION_FACTS] + [
+    f"{profile}_{fact}" for profile in ("single", "collection", "prepared") for fact in PROFILE_FACTS]
 
 
 def private_json(path, value):
@@ -189,10 +192,10 @@ def run_case(c, oracle_run):
     grants()
     profiles = []
     with native_service(c, root, credentials) as server:
-        for name, count, start in [("single", 1, 100), ("collection", 2, 200)]:
+        for name, count, start in [("single", 1, 100), ("collection", 2, 200), ("prepared", 1, 300)]:
             directory = home / name
             directory.mkdir(mode=0o700)
-            script = ROOT / ("scripts/migrate_github_pulls.mjs" if name == "single" else "scripts/migrate_github_pull_collection.mjs")
+            script = ROOT / ("scripts/migrate_github_pull_collection.mjs" if name == "collection" else "scripts/migrate_github_pulls.mjs")
             scope = {"tenant_id": TENANT, "repository_id": REPOSITORY, "repository_incarnation": incarnation,
                      "principal_id": PRINCIPAL, "object_format": "sha1"}
             selection = {"endpoint": server.url, "scope": scope, "number_start": str(start),
@@ -202,7 +205,7 @@ def run_case(c, oracle_run):
 
             def preparation(job, selected_file, script=script, name=name):
                 source_args = (["--capture", selected["single_capture"], "--capture-confirm", selected["single_capture_sha256"]]
-                    if name == "single" else ["--collection-dir", selected["collection_dir"],
+                    if name != "collection" else ["--collection-dir", selected["collection_dir"],
                         "--collection-confirm", selected["collection_confirm"], "--complete-confirm", selected["complete_confirm"]])
                 return ["prepare", *source_args, "--selection", str(selected_file), "--workdir", str(job), "--token-file", str(token)]
 
@@ -213,16 +216,66 @@ def run_case(c, oracle_run):
                         "GitHub SHA-1 input was silently translated into a SHA-256 destination")
                 c.facts["sha256_destination_refusal"] = True
             before = read("list")
-            prepared = c.node_command(script, preparation(workdir, selection_file))
+            draft = None
+            if name == "prepared":
+                draft_args = preparation(workdir, selection_file)
+                draft_args[0] = "prepare-begin"
+                begun = c.node_command(script, draft_args)
+                draft = dict(workdir=workdir, common=["--workdir", str(workdir), "--confirm", begun["preparation_sha256"]],
+                             header=(workdir / "preparation.json").read_bytes())
+                snapshot = {str(p.relative_to(workdir)): file_sha256(p) for p in workdir.rglob("*") if p.is_file()}
+                refused = c.node_command(script, draft_args, 2, error_reply=True)
+                require(refused["code"] == "github_pull_preparation_exists"
+                        and snapshot == {str(p.relative_to(workdir)): file_sha256(p) for p in workdir.rglob("*") if p.is_file()},
+                        "duplicate preparation replaced its selected identity")
+                prepared = c.node_command(script, ["prepare-resume", *draft["common"], "--max-requests", "1"], 3)
+                workdir = Path(prepared["import_workdir"])
+                require(prepared["prepared_steps"] == prepared["new_steps"] == 1 and not prepared["preparation_complete"]
+                        and not prepared["execution_complete"] and not prepared["mutation_submitted"]
+                        and not (workdir / "manifest.json").exists(), "bounded preparation exceeded its one-slot prefix")
+                c.facts["preparation_cli_bounded_prefix"] = True
+                snapshot = {str(p.relative_to(draft["workdir"])): file_sha256(p) for p in draft["workdir"].rglob("*") if p.is_file()}
+                for operation in ("prepare-status", "prepare-resume"):
+                    refused = c.node_command(script, [operation, "--workdir", str(draft["workdir"]), "--confirm", "0" * 64], 2, error_reply=True)
+                    require(refused["code"] == "github_pull_preparation_pin_mismatch" and not refused["mutation_submitted"],
+                            "wrong preparation pin did not refuse before work")
+                status = c.node_command(script, ["prepare-status", *draft["common"]])
+                require(status["prepared_steps"] == 1 and status["local_read_only"] and not status["network_accessed"]
+                        and snapshot == {str(p.relative_to(draft["workdir"])): file_sha256(p) for p in draft["workdir"].rglob("*") if p.is_file()}
+                        and read("list") == before and refs() == original_refs, "preparation inspection/refusal changed custody or authority")
+                c.facts["preparation_cli_original_custody"] = True
+            else:
+                prepared = c.node_command(script, preparation(workdir, selection_file))
             common = ["--workdir", str(workdir), "--confirm", prepared["plan_sha256"]]
             require(prepared["network_accessed"] is False and read("list") == before,
                     "offline planning contacted or changed native authority")
             profiles.append(dict(name=name, count=count, start=start, directory=directory, script=script,
                 selection=selection, selection_file=selection_file, workdir=workdir, common=common,
-                prepared=prepared, originals=request_hashes(workdir)))
+                prepared=prepared, originals=request_hashes(workdir), preparation=draft))
 
         # Each plan must own all input bytes before the source path disappears.
         inputs.rename(home / "retained-source-inputs")
+        for p in profiles:
+            if p["preparation"] is None:
+                continue
+            draft = p["preparation"]
+            before = read("list")
+            token_hold = token.with_name("preparation-without-token")
+            token.rename(token_hold)
+            try:
+                ready = c.node_command(p["script"], ["prepare-resume", *draft["common"]])
+            finally:
+                token_hold.rename(token)
+            final = request_hashes(p["workdir"])
+            require(ready["preparation_complete"] and ready["plan_sha256"] == p["prepared"]["plan_sha256"]
+                    and ready["new_steps"] == ready["steps"] - 1 and not ready["network_accessed"]
+                    and not ready["mutation_submitted"] and not ready["execution_complete"]
+                    and all(final.get(name) == digest for name, digest in p["originals"].items())
+                    and (draft["workdir"] / "preparation.json").read_bytes() == draft["header"]
+                    and read("list") == before and refs() == original_refs,
+                    "offline preparation completion lost its prefix, pin or native boundary")
+            p["prepared"], p["originals"] = ready, final
+            c.facts["preparation_cli_offline_completion"] = True
         for p in profiles:
             name, directory, script, common = p["name"], p["directory"], p["script"], p["common"]
             c.node_command(script, ["inspect", *common])
@@ -328,7 +381,7 @@ def run_case(c, oracle_run):
                     "occupied-branch recovery replaced its key or redispatched")
             retained = home / "retained-source-inputs"
             source_args = (["--capture", str(retained / Path(selected["single_capture"]).relative_to(inputs)),
-                            "--capture-confirm", selected["single_capture_sha256"]] if name == "single" else [
+                            "--capture-confirm", selected["single_capture_sha256"]] if name != "collection" else [
                             "--collection-dir", str(retained / Path(selected["collection_dir"]).relative_to(inputs)),
                             "--collection-confirm", selected["collection_confirm"], "--complete-confirm", selected["complete_confirm"]])
             collision_plan = directory / "pr-collision"
@@ -357,6 +410,14 @@ def run_case(c, oracle_run):
                 settled = c.node_command(job["script"], [operation, *job["common"]])
                 require(settled.get("network_accessed") is False, "completed branch custody needed a stopped endpoint or token")
         c.facts[f"{p['name']}_stopped_service_credential_free_completion"] = True
+        if p["preparation"] is not None:
+            for operation in ("prepare-status", "prepare-resume"):
+                settled = c.node_command(p["script"], [operation, *p["preparation"]["common"]])
+                require(settled["preparation_complete"] and not settled["network_accessed"]
+                        and not settled["execution_complete"] and not settled["mutation_submitted"]
+                        and request_hashes(p["workdir"]) == p["originals"],
+                        "completed preparation recovery altered original native custody")
+            c.facts["preparation_cli_completed_recovery"] = True
     c.facts["all_services_drained"] = True
 
 
