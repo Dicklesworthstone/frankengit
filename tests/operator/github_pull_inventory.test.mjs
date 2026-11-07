@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { Server } from 'node:http';
 import { discoverGithubPulls, parseGithubPullInventory, githubPullInventoryBytes, selectGithubPullBatch,
   captureGithubPullBatch, GITHUB_PULL_INVENTORY_LIMITS as L } from '../../scripts/lib/github-pull-inventory.mjs';
 import { createGithubPullCaptureSession, captureGithubPulls, parseGithubPullCapture } from '../../scripts/lib/github-pull-source.mjs';
@@ -7,6 +8,20 @@ import { recordDigest } from '../../scripts/lib/forge-operator-io.mjs';
 import { inventoryPeer, REPO, TOKEN } from './github-pull-inventory-fixture.mjs';
 
 const population=n=>Array.from({length:n},(_,i)=>i+1);
+test('inventory source peer retires an actual Fetch-blocked ephemeral allocation',async t=>{
+  const listen=Server.prototype.listen;let injected=false;
+  // Inject only the first allocator result. Every bind and source request is
+  // real; this must not synthesize an inventory or change the GitHub client.
+  Server.prototype.listen=function(port,...args){
+    if(port===0&&!injected){injected=true;return listen.call(this,10080,...args);}
+    return listen.call(this,port,...args);
+  };
+  t.after(()=>{Server.prototype.listen=listen;});
+  const f=await inventoryPeer(t),r=await discoverGithubPulls({...f.options,batchSize:1});
+  assert.equal(injected,true);assert.notEqual(new URL(f.origin).port,'10080');
+  assert.deepEqual(r.inventory.pulls.map(row=>row.number),[9,17]);
+  assert.equal(r.statistics.requests,f.calls.length);assert(f.calls.length>0);
+});
 const link=(page=2,path=`/repos/${REPO}/pulls`,extra='')=>`<https://api.github.com${path}?state=all&sort=created&direction=asc&per_page=100&page=${page}${extra}>; rel="next"`;
 for(const count of [0,1,100,101,203])test(`discovers all ${count} PR aliases without treating a full page as EOF`,async t=>{
   const f=await inventoryPeer(t,{pulls:population(count)}),r=await discoverGithubPulls({...f.options,batchSize:25});

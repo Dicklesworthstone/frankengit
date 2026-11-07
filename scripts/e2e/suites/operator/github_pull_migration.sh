@@ -7,7 +7,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init operator-github-pull-migration
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.59
-fge_context non_claim 'Three real native destination entrypoints with synthetic GitHub inputs; not live GitHub, SHA-256 translation, every operator, independent batch, D10 or full/release qualification.'
+fge_context non_claim 'Five shipped source/destination CLIs with synthetic GitHub source and real native destination; not live GitHub, SHA-256 translation, every operator, independent batch, D10 or full/release qualification.'
 fge_phase setup
 NODE="${FGE_NODE:-$(command -v node || true)}"
 if [ -z "$NODE" ] || [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ] || ! command -v python3 >/dev/null; then
@@ -43,9 +43,11 @@ with Path(sys.argv[2]).open('rb') as stream:
 digest = hasher.hexdigest()
 assert summary['complete'] is True and summary['binary_sha256'] == digest
 assert summary['oracle_pin'] == 'git-2.54.0'
-assert len(summary['selected_facts']) == len(set(summary['selected_facts'])) == 20
+assert len(summary['selected_facts']) == len(set(summary['selected_facts'])) == 24
 assert set(summary['facts']) == set(summary['selected_facts']) and all(v is True for v in summary['facts'].values())
-entrypoints = {'scripts/bootstrap_native_branches.mjs', 'scripts/migrate_github_pulls.mjs', 'scripts/migrate_github_pull_collection.mjs'}
+native_entrypoints = {'scripts/bootstrap_native_branches.mjs', 'scripts/migrate_github_pulls.mjs', 'scripts/migrate_github_pull_collection.mjs'}
+source_entrypoints = {'scripts/discover_github_pulls.mjs', 'scripts/collect_github_pulls.mjs'}
+entrypoints = native_entrypoints | source_entrypoints
 assert {row['path'] for row in summary['entrypoints']} == entrypoints
 assert all(row['binary_sha256'] == digest for row in summary['entrypoints'])
 commands = [json.loads(line) for line in (Path(summary['artifacts']) / 'commands.jsonl').read_text().splitlines()]
@@ -54,14 +56,16 @@ assert native and all(row['exit'] == 0 for row in native)
 assert all(any(row['command'][1:3] == ['pr', op] for row in native) for op in ['show', 'comments', 'reviews'])
 operators = [row for row in commands if row.get('kind') == 'operator']
 for name in entrypoints:
-    calls = [row for row in operators if Path(row['command'][1]).name == Path(name).name]
-    assert any(row['exit'] == 0 for row in calls) and any(row['exit'] == 1 for row in calls)
+    calls = [row for row in operators
+             if Path(row['command'][3 if row['command'][1] == '--import' else 1]).name == Path(name).name]
+    assert any(row['exit'] == 0 for row in calls) and any(row['exit'] == (1 if name in native_entrypoints else 2) for row in calls)
+    assert all(('--import' in row['command']) == (name in source_entrypoints) for row in calls)
 starts = [row for row in commands if row.get('kind') == 'service_start']
 drains = [row for row in commands if row.get('kind') == 'service_stop']
 assert 1 <= len(starts) <= 16 and len(starts) == len(drains)
 assert {row['pid'] for row in starts} == {row['pid'] for row in drains}
 assert all(row['exit'] == 0 and row['forced'] is False for row in drains)
-print('20 selected facts, three native entrypoint/digest rows and all native owner drains verified')
+print('24 selected facts, five source/native entrypoint/digest rows and all native owner drains verified')
 PY
 fge_assert_exit GITHUB-PULL-MIGRATION-005 0 "$FGE_LAST_EXIT" 'exact facts, entrypoint success/refusal, native reads and owner drains read back'
 cp "$ORACLE_RUN/work/campaign/commands.jsonl" "$WORK/native-github-pull-commands.jsonl"

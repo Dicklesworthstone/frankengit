@@ -28,7 +28,8 @@ PROFILE_FACTS = (
     "pr_refusal_and_exact_retry", "pr_resume_and_canonical_attribution",
     "collision_terminal_and_original_keys", "stopped_service_credential_free_completion",
 )
-FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained"] + [
+SOURCE_FACTS = ["source_cli_discovery", "source_pin_refusals", "source_bounded_collection_resume", "source_offline_completion"]
+FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained", *SOURCE_FACTS] + [
     f"{profile}_{fact}" for profile in ("single", "collection") for fact in PROFILE_FACTS]
 
 
@@ -94,8 +95,76 @@ def run_case(c, oracle_run):
     original_refs = refs()
     inputs = home / "source-inputs"
     inputs.mkdir(mode=0o700)
-    selected = c.node_command(ROOT / "scripts/e2e/helpers/github_pull_migration_source.mjs",
-                              [str(inputs), objects["source"], objects["target"]])
+    helper = ROOT / "scripts/e2e/helpers/github_pull_migration_source.mjs"
+    source = c.node_command(helper, ["setup", str(inputs), objects["source"], objects["target"]])
+    discover = ROOT / "scripts/discover_github_pulls.mjs"
+    collector = ROOT / "scripts/collect_github_pulls.mjs"
+    preload, log = Path(source["preload"]), Path(source["log"])
+
+    def source_command(script, args, expected=0, *, error_reply=False):
+        return c.node_command(script, args, expected, error_reply=error_reply, preload=preload)
+
+    before_source = read("list")
+    inventory = source_command(discover, ["discover", "--repository", source["repository"], "--out", source["inventory"],
+        "--token-file", source["token"], "--batch-size", "1"])
+    require(inventory["pulls"] == inventory["total_batches"] == 2 and not inventory["mutation_submitted"]
+            and file_sha256(Path(source["inventory"])) == inventory["inventory_sha256"], "CLI discovery lost its pinned inventory")
+    inventory_args = ["--inventory", source["inventory"], "--confirm", inventory["inventory_sha256"]]
+    inspected = source_command(discover, ["inspect", *inventory_args, "--batch", "1"])
+    require(inspected["selection"]["numbers"] == [9] and not inspected["network_accessed"], "offline inventory selection differs")
+    capture = inputs / "single-capture.json"
+    refused_args = ["capture-batch", "--inventory", source["inventory"], "--confirm", "0" * 64,
+                    "--batch", "1", "--out", str(capture), "--token-file", source["token"]]
+    previous = log.read_bytes()
+    refused = source_command(discover, refused_args, 2, error_reply=True)
+    require(refused["code"] == "github_pull_inventory_pin_mismatch" and log.read_bytes() == previous
+            and not capture.exists(), "wrong inventory pin started capture or published bytes")
+    captured = source_command(discover, ["capture-batch", *inventory_args, "--batch", "1", "--out", str(capture),
+                                        "--token-file", source["token"]])
+    require(captured["pulls"] == 1 and file_sha256(capture) == captured["capture_sha256"], "CLI batch capture differs from its pin")
+    c.facts["source_cli_discovery"] = True
+
+    previous = log.read_bytes()
+    prepared_source = source_command(collector, ["prepare", "--workdir", source["collection"],
+        "--inventory", source["inventory"], "--inventory-confirm", inventory["inventory_sha256"]])
+    require(not prepared_source["complete"] and not prepared_source["network_accessed"] and log.read_bytes() == previous,
+            "collection preparation made a source request or falsely completed")
+    Path(source["inventory"]).unlink()
+    collection_args = ["--workdir", source["collection"], "--confirm", prepared_source["plan_sha256"]]
+    refused = source_command(collector, ["run", "--workdir", source["collection"], "--confirm", "0" * 64], 2, error_reply=True)
+    require(not refused["mutation_submitted"] and log.read_bytes() == previous
+            and read("list") == before_source and refs() == original_refs, "wrong collection pin performed source/native work")
+    c.facts["source_pin_refusals"] = True
+    prefix = source_command(collector, ["run", *collection_args, "--token-file", source["token"], "--max-batches", "1"], 3)
+    first = Path(source["collection"]) / "captures/batch-000001.json"
+    original_first = first.read_bytes()
+    require(not prefix["complete"] and prefix["checkpointed_batches"] == 1 and prefix["next_batch"] == 2
+            and file_sha256(first) == captured["capture_sha256"], "bounded collection lost its original capture or exceeded one batch")
+    previous = log.read_bytes()
+    status = source_command(collector, ["status", *collection_args])
+    require(status["checkpointed_batches"] == 1 and not status["complete"] and log.read_bytes() == previous,
+            "partial collection status performed source work or lost its checkpoint")
+    complete_source = source_command(collector, ["run", *collection_args, "--token-file", source["token"]])
+    later = [json.loads(line)["address"] for line in log.read_bytes()[len(previous):].splitlines()]
+    require(complete_source["complete"] and complete_source["new_batches"] == 1 and later
+            and all("/pulls/9" not in address and "/issues/9" not in address for address in later)
+            and first.read_bytes() == original_first, "collection resume recaptured or changed the checkpointed batch")
+    c.facts["source_bounded_collection_resume"] = True
+    custody = {str(p.relative_to(inputs)): file_sha256(p) for p in Path(source["collection"]).rglob("*") if p.is_file()}
+    previous = log.read_bytes()
+    Path(source["token"]).unlink()
+    for operation in ("status", "run"):
+        observed = source_command(collector, [operation, *collection_args,
+            *(["--complete-confirm", complete_source["complete_sha256"]] if operation == "status" else [])])
+        require(observed["complete"] and not observed["network_accessed"]
+                and observed["complete_sha256"] == complete_source["complete_sha256"] and log.read_bytes() == previous,
+                "completed collection needed a source credential or repeated source work")
+    require(custody == {str(p.relative_to(inputs)): file_sha256(p) for p in Path(source["collection"]).rglob("*") if p.is_file()}
+            and read("list") == before_source and refs() == original_refs, "source acquisition changed custody or native state")
+    c.facts["source_offline_completion"] = True
+    selected = c.node_command(helper, ["inspect", str(inputs)])
+    require(selected["collection_confirm"] == prepared_source["plan_sha256"]
+            and selected["complete_confirm"] == complete_source["complete_sha256"], "source helper changed independently retained pins")
     require(selected["source_class"] == "synthetic-github-input-only" and len(selected["pulls"]) == 2,
             "synthetic source population is incomplete or misclassified")
     c.facts["synthetic_source_collection"] = True
@@ -304,7 +373,8 @@ def main():
         "binary_sha256": file_sha256(fg), "node_sha256": file_sha256(node), "artifacts": str(c.work),
         "oracle_pin": PIN, "oracle_run": str(args.oracle_run),
         "entrypoints": [{"path": "scripts/" + name, "binary_sha256": file_sha256(fg)} for name in (
-            "bootstrap_native_branches.mjs", "migrate_github_pulls.mjs", "migrate_github_pull_collection.mjs")],
+            "bootstrap_native_branches.mjs", "migrate_github_pulls.mjs", "migrate_github_pull_collection.mjs",
+            "discover_github_pulls.mjs", "collect_github_pulls.mjs")],
         "non_claim": "Synthetic GitHub source inputs and real native SHA-1 destination; not live GitHub, SHA-256 translation, every entrypoint, independent batch, D10 or full/release qualification."}
 
     def stop(_number, _frame):

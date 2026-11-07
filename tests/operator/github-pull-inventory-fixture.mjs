@@ -1,6 +1,7 @@
 // Local schema peer; no live GitHub, Git object validation, or native authority.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { listenForFetch } from '../fetch-peer.mjs';
 import { rawPull, rawDiscussion, rawReview, rawInline, SOURCE, REPO, TOKEN } from './github-pull-fixture.mjs';
 export { REPO, TOKEN, SOURCE };
 export async function inventoryPeer(t,{pulls=[9,17],records=0,alter=null}={}) {
@@ -33,12 +34,16 @@ export async function inventoryPeer(t,{pulls=[9,17],records=0,alter=null}={}) {
     }catch(error){res.writeHead(500,{'content-type':'application/json'});res.end(JSON.stringify({error:error.message}));}
   });
   server.on('connection',s=>{sockets.add(s);s.on('close',()=>sockets.delete(s));});
-  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`;
+  await listenForFetch(server);const origin=`http://127.0.0.1:${server.address().port}`;
   let closed=false;const close=async()=>{if(closed)return;closed=true;for(const s of sockets)s.destroy();await new Promise(r=>server.close(r));};t.after(close);
   const fetchImpl=async(input,options)=>{
     const url=new URL(input);assert.equal(url.origin,'https://api.github.com');assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');
     const response=await fetch(origin+url.pathname+url.search,options);
     return new Response(response.body,{status:response.status,headers:response.headers});
   };
-  return {calls,origin,close,fetchImpl,options:{repository:REPO,token:TOKEN,fetchImpl}};
+  // Preloaded CLI fixtures have no test-runner teardown callback. Let their
+  // operation own liveness, then close this peer at beforeExit. Active client
+  // work/deadlines remain referenced; idle server handles must not pin Node.
+  const unref=()=>{server.unref();for(const socket of sockets)socket.unref();server.on('connection',socket=>socket.unref());};
+  return {calls,origin,close,unref,fetchImpl,options:{repository:REPO,token:TOKEN,fetchImpl}};
 }
