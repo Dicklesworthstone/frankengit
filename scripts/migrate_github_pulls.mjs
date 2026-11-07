@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Explicit GitHub observations and native PR migration. Saved links grant no authority.
 import { dirname, join } from 'node:path';
-import { lstat } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { prepareGithubPullImport,inspectGithubPullImport,executeGithubPullImport,githubPullBranchRequirements } from './lib/github-pull-import.mjs';
@@ -58,10 +58,14 @@ function options(args){
 function decimal(v){if(!/^(0|[1-9][0-9]*)$/.test(v))throw operatorError('github_pull_decimal');return pullSourceNumber(Number(v));}
 async function outsideWorktree(value){
   const path=operatorPath(value);
-  for(let cursor=dirname(path);;cursor=dirname(cursor)){
-    if(cursor.split('/').includes('.git'))throw operatorError('github_pull_worktree');
-    try{await lstat(join(cursor,'.git'));throw operatorError('github_pull_worktree');}catch(e){if(e.code!=='ENOENT')throw e;}
-    if(dirname(cursor)===cursor)break;
+  // Keep the final component untouched for O_NOFOLLOW. Check both the spelling
+  // supplied by the caller and its real parent, including parent symlinks.
+  for(const parent of new Set([dirname(path),await realpath(dirname(path))])){
+    for(let cursor=parent;;cursor=dirname(cursor)){
+      if(cursor.split('/').includes('.git'))throw operatorError('github_pull_worktree');
+      try{await lstat(join(cursor,'.git'));throw operatorError('github_pull_worktree');}catch(e){if(e.code!=='ENOENT')throw e;}
+      if(dirname(cursor)===cursor)break;
+    }
   }
   return path;
 }

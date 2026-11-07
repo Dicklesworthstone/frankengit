@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Read-only repository PR discovery and capture. Destination migration is explicit.
 import { dirname, join } from 'node:path';
-import { lstat } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { discoverGithubPulls, parseGithubPullInventory, selectGithubPullBatch, captureGithubPullBatch,
@@ -46,10 +46,14 @@ function parse(args) {
 }
 async function externalPath(value) {
   const path=operatorPath(value);
-  for(let cursor=dirname(path);;cursor=dirname(cursor)) {
-    if(cursor.split('/').includes('.git')) fail('worktree');
-    try{await lstat(join(cursor,'.git'));fail('worktree');}catch(e){if(e.code!=='ENOENT')throw e;}
-    if(dirname(cursor)===cursor)break;
+  // Resolve only the parent: final-file symlinks must still meet the existing
+  // O_NOFOLLOW/create-only checks. An external alias may not hide a worktree.
+  for(const parent of new Set([dirname(path),await realpath(dirname(path))])) {
+    for(let cursor=parent;;cursor=dirname(cursor)) {
+      if(cursor.split('/').includes('.git')) fail('worktree');
+      try{await lstat(join(cursor,'.git'));fail('worktree');}catch(e){if(e.code!=='ENOENT')throw e;}
+      if(dirname(cursor)===cursor)break;
+    }
   }
   return path;
 }

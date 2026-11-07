@@ -47,7 +47,7 @@ with Path(sys.argv[2]).open('rb') as stream:
 digest = hasher.hexdigest()
 require(summary['complete'] is True and summary['binary_sha256'] == digest)
 require(summary['oracle_pin'] == 'git-2.54.0')
-require(len(summary['selected_facts']) == len(set(summary['selected_facts'])) == 38)
+require(len(summary['selected_facts']) == len(set(summary['selected_facts'])) == 41)
 require(set(summary['facts']) == set(summary['selected_facts']) and all(v is True for v in summary['facts'].values()))
 native_entrypoints = {'scripts/bootstrap_native_branches.mjs', 'scripts/migrate_github_pulls.mjs', 'scripts/migrate_github_pull_collection.mjs'}
 source_entrypoints = {'scripts/discover_github_pulls.mjs', 'scripts/collect_github_pulls.mjs'}
@@ -71,12 +71,23 @@ for operation, expected in [('prepare-begin', {0, 2}), ('prepare-resume', {0, 2,
 capacity = [row for row in operators if Path(row['command'][1]).name == 'migrate_github_pull_collection.mjs'
             and row['command'][2] == 'prepare' and '--max-request-bytes' in row['command']]
 require({0, 2} <= {row['exit'] for row in capacity})
+def path_call(row, script, operation, flag, parent):
+    command = row['command']
+    offset = 3 if command[1] == '--import' else 1
+    return (Path(command[offset]).name == script and command[offset + 1] == operation
+            and flag in command and Path(command[command.index(flag) + 1]).parent.name == parent)
+for script, operation, flag in [('discover_github_pulls.mjs', 'discover', '--out'),
+                                 ('discover_github_pulls.mjs', 'inspect', '--inventory'),
+                                 ('migrate_github_pulls.mjs', 'requirements', '--out')]:
+    require(any(row['exit'] == 2 and path_call(row, script, operation, flag, 'worktree-path-alias') for row in operators))
+require(any(row['exit'] == 0 and path_call(row, 'discover_github_pulls.mjs', 'discover', '--out', 'source-input-alias')
+            for row in operators))
 starts = [row for row in commands if row.get('kind') == 'service_start']
 drains = [row for row in commands if row.get('kind') == 'service_stop']
 require(1 <= len(starts) <= 16 and len(starts) == len(drains))
 require({row['pid'] for row in starts} == {row['pid'] for row in drains})
 require(all(row['exit'] == 0 and row['forced'] is False for row in drains))
-print('38 selected facts, encoded capacity, bounded preparation phases, five entrypoint/digest rows and native owner drains verified')
+print('41 selected facts, parent aliases, encoded capacity, bounded preparation phases, five entrypoint/digest rows and native owner drains verified')
 PY
 fge_assert_exit GITHUB-PULL-MIGRATION-005 0 "$FGE_LAST_EXIT" 'exact facts, entrypoint success/refusal, native reads and owner drains read back'
 cp "$ORACLE_RUN/work/campaign/commands.jsonl" "$WORK/native-github-pull-commands.jsonl"

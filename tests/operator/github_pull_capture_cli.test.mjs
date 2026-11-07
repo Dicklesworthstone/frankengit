@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp,writeFile,readFile,chmod,unlink,rm,access,mkdir } from 'node:fs/promises';
+import { mkdtemp,writeFile,readFile,chmod,unlink,rm,access,mkdir,symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -22,6 +22,35 @@ async function env(t,options={}){
   return {root,token,out,peer,capture,start,run:args=>start(args).done};
 }
 const okay=r=>{assert.equal(r.code,0,r.stderr);assert.equal(r.stderr,'');return JSON.parse(r.stdout);};
+for(const field of ['output','token','capture'])test(`worktree parent aliases cannot hide PR ${field} paths`,async t=>{
+  const e=await env(t),repo=join(e.root,'worktree'),privateDir=join(repo,'private'),alias=join(e.root,'alias');
+  await mkdir(repo,{mode:0o700});await mkdir(privateDir,{mode:0o700});
+  if(field==='token')await writeFile(join(repo,'.git'),'gitdir: inert-linked-worktree-fixture\n');else await mkdir(join(repo,'.git'));
+  await symlink(privateDir,alias);
+  const args=[...e.capture];let count=0,original;
+  if(field==='capture'){
+    const saved=okay(await e.run(e.capture));original=await readFile(e.out);
+    await writeFile(join(privateDir,'capture.json'),original,{mode:0o600});count=e.peer.calls.length;await e.peer.close();
+    args.splice(0,args.length,'inspect-capture','--capture',join(alias,'capture.json'),'--confirm',saved.capture_sha256);
+  }else if(field==='token'){
+    // This is the existing fixture token, not a real credential.
+    await writeFile(join(privateDir,'token'),TOKEN,{mode:0o600});args[args.indexOf('--token-file')+1]=join(alias,'token');
+  }else args[args.indexOf('--out')+1]=join(alias,'capture.json');
+  const r=await e.run(args);assert.equal(r.code,2);assert.equal(r.stdout,'');
+  assert.equal(JSON.parse(r.stderr).code,'github_pull_worktree');assert.equal(e.peer.calls.length,count);
+  if(field==='capture')assert((await readFile(join(privateDir,'capture.json'))).equals(original));
+  else await assert.rejects(access(field==='output'?join(privateDir,'capture.json'):e.out),{code:'ENOENT'});
+});
+test('worktree parent aliases still permit external capture paths without following a final symlink',async t=>{
+  const e=await env(t),safe=join(e.root,'safe'),alias=join(e.root,'alias');await mkdir(safe,{mode:0o700});await symlink(safe,alias);
+  await writeFile(join(safe,'token'),TOKEN,{mode:0o600});const args=[...e.capture];
+  args[args.indexOf('--out')+1]=join(alias,'capture.json');args[args.indexOf('--token-file')+1]=join(alias,'token');
+  const r=okay(await e.run(args)),original=await readFile(join(safe,'capture.json'));assert.equal(e.peer.calls.length,14);await e.peer.close();
+  assert.equal(okay(await e.run(['inspect-capture','--capture',join(alias,'capture.json'),'--confirm',r.capture_sha256])).network_accessed,false);
+  await symlink(join(safe,'capture.json'),join(safe,'final-link.json'));
+  assert.equal((await e.run(['inspect-capture','--capture',join(alias,'final-link.json'),'--confirm',r.capture_sha256])).code,2);
+  assert((await readFile(join(safe,'capture.json'))).equals(original));
+});
 test('fresh CLI captures to private file and inspects offline with independent pin',async t=>{
   const e=await env(t),r=okay(await e.run(e.capture));assert.equal(r.pulls,1);assert.equal(e.peer.calls.length,14);
   const bytes=await readFile(e.out);assert(bytes.length>0);assert(!bytes.includes(Buffer.from(TOKEN)));await e.peer.close();await unlink(e.token);
