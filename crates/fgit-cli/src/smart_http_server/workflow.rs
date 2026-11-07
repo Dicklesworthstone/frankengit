@@ -85,6 +85,23 @@ pub(super) fn parse(
                 .map_err(|_| "invalid workflow queue landing principal")?,
         );
     }
+    if flags.contains_key("--workflow-refresh-queue-head")
+        != flags.contains_key("--workflow-refresh-principal")
+    {
+        return Err(
+            "--workflow-refresh-queue-head and --workflow-refresh-principal must be supplied together"
+                .into(),
+        );
+    }
+    if let Some(refresher) = flags.get("--workflow-refresh-principal") {
+        required("--expected-incarnation")?;
+        let principal = PrincipalId::from_hex(refresher)
+            .map_err(|_| "invalid workflow queue refresh principal")?;
+        if principal.to_string() != *refresher {
+            return Err("invalid workflow queue refresh principal".into());
+        }
+        config = config.with_queue_refresh_principal(principal);
+    }
     if [
         "--workflow-pull-request",
         "--workflow-merge-queue",
@@ -207,6 +224,7 @@ mod tests {
 
     mod artifacts;
     mod collection;
+    mod refresh;
 
     fn flags() -> BTreeMap<&'static str, &'static str> {
         BTreeMap::from([

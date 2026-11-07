@@ -18,11 +18,12 @@ handle one exact queue head. A [queue workflow watcher](NATIVE_MERGE_QUEUE_WORKF
 can select the current head, prepare its real candidate, execute it on a fixed
 CI branch and publish exact checks. With single-head automatic landing explicitly
 enabled, the watcher can land that exact candidate after its required checks
-complete. The read-only
+complete. A separately configured refresh principal can then update the next
+head's recorded target so the same queue pipeline continues. The read-only
 [HTTP prefix preparation endpoint](NATIVE_HTTP_QUEUE_PREFIX_PREPARATION.md) can
 construct up to 16 ordered PRs against successive projected candidates and
-return their complete native bundle. Multi-PR landing and evidence, synthetic
-queue refs and autonomous target refresh remain separate work under
+return their complete native bundle. Multi-PR landing and evidence and synthetic
+queue refs remain separate work under
 `frankengit-fg083a-merge-queue-impl-95fm`. Queue membership and
 preparation do not grant approval; landing enforces current review, check,
 authentication and protected-ref rules.

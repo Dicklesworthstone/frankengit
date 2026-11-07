@@ -18,6 +18,7 @@ const USAGE: &str =
    [--merge-profile path|exact-renames] [--merge-method merge-commit|squash]]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
   [--land-queue-head --landing-principal <id>]
+  [--refresh-queue-head --refresh-principal <id>]
   [--continuous --stop-file <initially-absent-path> [--attempt-timeout-secs <1..3600>]]
   [--ref-hex] [--workflow-hex <hex> instead of --workflow] [--input-hex <hex>]
   [--artifact-root <absolute-private-directory>] [--artifact-logs]
@@ -86,6 +87,15 @@ verified successful executions qualify; current checks, reviews, queue membershi
 tips and policy still govern publication. Missing approval waits without sealing
 a refusal. Pending original landing outcomes reconcile before another candidate;
 an unknown outcome stops the watch. Retain the same landing identity on restart.
+Target refresh is also disabled by default. --refresh-queue-head --refresh-principal
+<id> additionally authorizes a target-only PR update before preparing a stale queue
+head. It requires automatic queue landing and its complete configuration. This
+separate principal does not inherit authority from any execution or publication role.
+The complete original metadata, guards, key and transaction are retained before
+submission. Recovery precedes later work; only the recorded target can change.
+Queue order, priority and source content stay unchanged, while the new PR version
+requires a freshly prepared candidate and current review/check evidence. No script
+is retried. Keep the same refresh identity and all custody across restart.
 PR metadata versions (including reopen), source decisions and observed target tips
 select distinct events; unrelated comments/checks do not. Closed/merged/missing
 PRs execute nothing. Old reporting can recover after closure without rerunning code.
@@ -102,6 +112,7 @@ struct WatchOptions {
     interval: Duration,
     publisher: Option<fgit_types::PrincipalId>,
     landing_principal: Option<fgit_types::PrincipalId>,
+    queue_refresh_principal: Option<fgit_types::PrincipalId>,
     pull_request: Option<u64>,
     merge_queue: Option<u64>,
     merge_candidate: Option<crate::workflow_merge_watch::Options>,
@@ -135,6 +146,8 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let mut publisher = None;
     let mut land = false;
     let mut landing_principal = None;
+    let mut refresh = false;
+    let mut queue_refresh_principal = None;
     let mut pull_request = None;
     let mut merge_queue = None;
     let mut merge_fields = std::collections::BTreeMap::new();
@@ -204,6 +217,20 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
             if landing_principal.replace(id).is_some() {
                 return Err("duplicate --landing-principal".into());
             }
+        } else if flag == "--refresh-queue-head" {
+            if refresh {
+                return Err("duplicate --refresh-queue-head".into());
+            }
+            refresh = true;
+        } else if flag == "--refresh-principal" {
+            let value = args.get(i).ok_or("missing --refresh-principal")?;
+            i += 1;
+            super::publish::fixed_hex(value, 16)?;
+            let principal = fgit_types::PrincipalId::from_hex(value)
+                .map_err(|_| "invalid queue refresh principal")?;
+            if queue_refresh_principal.replace(principal).is_some() {
+                return Err("duplicate --refresh-principal".into());
+            }
         } else if flag == "--principal-id" {
             let value = args.get(i).ok_or("missing --principal-id")?;
             i += 1;
@@ -247,6 +274,8 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
             || publisher.is_some()
             || land
             || landing_principal.is_some()
+            || refresh
+            || queue_refresh_principal.is_some()
             || pull_request.is_some()
             || merge_queue.is_some()
             || merge_candidate.is_some())
@@ -295,6 +324,12 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
         )
         .into());
     }
+    if refresh != queue_refresh_principal.is_some() {
+        return Err("--refresh-queue-head and --refresh-principal must be supplied together".into());
+    }
+    if refresh && !land {
+        return Err("automatic queue target refresh requires --land-queue-head and its complete queue, candidate and check-publication configuration".into());
+    }
     if continuous != stop_file.is_some() {
         return Err("--continuous and --stop-file must be supplied together".into());
     }
@@ -307,6 +342,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     Ok(WatchOptions {
         publisher,
         landing_principal,
+        queue_refresh_principal,
         pull_request,
         merge_queue,
         merge_candidate,
@@ -351,6 +387,12 @@ struct Summary {
     landings_previously_decided: usize,
     landings_waiting: usize,
     landings_stale: usize,
+    queue_refresh_enabled: bool,
+    refreshes_committed: usize,
+    refreshes_refused: usize,
+    refreshes_previously_decided: usize,
+    refreshes_waiting: usize,
+    refresh_pending: bool,
     continuous: bool,
     operator_stopped: bool,
     lifetime_expired: bool,
@@ -382,6 +424,7 @@ fn execute(options: WatchOptions, output: &mut impl Write) -> Result<u8, String>
     let mut summary = Summary {
         publication_enabled: options.publisher.is_some(),
         queue_landing_enabled: options.landing_principal.is_some(),
+        queue_refresh_enabled: options.queue_refresh_principal.is_some(),
         continuous: stop_file.is_some(),
         ..Summary::default()
     };
@@ -477,6 +520,18 @@ fn poll_once(
                 .ok_or("queue watch requires merge candidate configuration")
         })
         .transpose()?;
+    if options.queue_refresh_principal.is_none() {
+        validate_refresh_custody(node, request, options, summary)?;
+    }
+    refresh_pending(
+        node, request, options, merge.as_ref(),
+        fgit_node::workflow_watch::QueueRefreshMode::RecoverOnly,
+        summary, output,
+    )?;
+    if summary.stopped || summary.reconcile || !request.checkpoint_is_live() {
+        summary.stopped |= !request.checkpoint_is_live();
+        return Ok(());
+    }
     if let Some(publisher) = options.publisher {
         publish_pending(
             node,
@@ -497,6 +552,15 @@ fn poll_once(
     land_pending(node, request, options, merge.as_ref(), summary, output)?;
     if summary.stopped || !request.checkpoint_is_live() {
         summary.stopped = true;
+        return Ok(());
+    }
+    refresh_pending(
+        node, request, options, merge.as_ref(),
+        fgit_node::workflow_watch::QueueRefreshMode::RecoverAndSelect,
+        summary, output,
+    )?;
+    if summary.stopped || summary.reconcile || !request.checkpoint_is_live() {
+        summary.stopped |= !request.checkpoint_is_live();
         return Ok(());
     }
     let poll = node
@@ -604,6 +668,108 @@ fn poll_once(
     land_pending(node, request, options, merge.as_ref(), summary, output)?;
     if !request.checkpoint_is_live() {
         summary.stopped = true;
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn validate_refresh_custody(
+    node: &fgit_node::OneNode,
+    request: &fgit_node::NodeRequestContext,
+    options: &WatchOptions,
+    summary: &mut Summary,
+) -> Result<(), String> {
+    let Some(number) = options.merge_queue else {
+        return Ok(());
+    };
+    if !request.checkpoint_is_live() {
+        summary.stopped = true;
+        return Ok(());
+    }
+    let merge = options.merge_candidate.as_ref()
+        .ok_or("queue watch requires merge candidate configuration")?
+        .node_config()?;
+    let opt = &options.execution;
+    let pending = node.runtime().block_on(
+        node.validate_trusted_queue_head_refresh_custody_in(
+            request, &opt.reference, number, &opt.workflow, &opt.parent,
+            &merge, options.queue_refresh_principal,
+        ),
+    ).map_err(|error| {
+        summary.reconcile = true;
+        summary.stopped |= !request.checkpoint_is_live();
+        error.to_string()
+    })?;
+    // Startup validation observes responsibility without submitting it. Only a
+    // later complete recovery pass may clear this observation.
+    summary.refresh_pending |= pending;
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn refresh_pending(
+    node: &fgit_node::OneNode,
+    request: &fgit_node::NodeRequestContext,
+    options: &WatchOptions,
+    merge: Option<&fgit_node::workflow_watch::PullRequestMergeWatchConfig>,
+    mode: fgit_node::workflow_watch::QueueRefreshMode,
+    summary: &mut Summary,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let Some(refresher) = options.queue_refresh_principal else {
+        return Ok(());
+    };
+    if summary.stopped || summary.reconcile || !request.checkpoint_is_live() {
+        summary.stopped |= !request.checkpoint_is_live();
+        return Ok(());
+    }
+    let (Some(number), Some(merge), Some(publisher), Some(lander)) =
+        (options.merge_queue, merge, options.publisher, options.landing_principal)
+    else {
+        return Err("automatic queue refresh requires its complete operator configuration".into());
+    };
+    let opt = &options.execution;
+    let result = node.runtime().block_on(
+        node.refresh_trusted_queue_head_merge_workflows_in(
+            request,
+            &opt.reference,
+            number,
+            &opt.workflow,
+            &opt.parent,
+            merge,
+            publisher,
+            lander,
+            refresher,
+            mode,
+            |text| {
+                writeln!(output, "{text}")
+                    .and_then(|()| output.flush())
+                    .map_err(|error| error.to_string())
+            },
+        ),
+    );
+    summary.non_green |= result.refused != 0;
+    if result.error.is_none() && !result.request_stopped {
+        summary.refresh_pending = result.pending;
+    } else {
+        summary.refresh_pending |= result.pending;
+    }
+    summary.reconcile |= result.error.is_some() || summary.refresh_pending;
+    summary.stopped |= result.request_stopped;
+    for (counter, amount) in [
+        (&mut summary.refreshes_committed, result.committed),
+        (&mut summary.refreshes_refused, result.refused),
+        (&mut summary.refreshes_previously_decided, result.previously_decided),
+        (&mut summary.refreshes_waiting, result.waiting),
+    ] {
+        *counter = counter.checked_add(amount)
+            .ok_or("queue refresh observation counter exhausted")?;
+    }
+    writeln!(output, "{}", result.to_json())
+        .and_then(|()| output.flush())
+        .map_err(|error| {
+            format!("watch refresh receipt failed; preserve original custody: {error}")
+        })?;
+    if let Some(error) = result.error {
+        return Err(error);
     }
     Ok(())
 }
@@ -797,6 +963,8 @@ fn finish(
             "\"refused_check_decisions\":{},",
             "\"queue_landing_enabled\":{},\"landings_committed\":{},\"landings_refused\":{},",
             "\"landings_previously_decided\":{},\"landings_waiting\":{},\"landings_stale\":{},",
+            "\"queue_refresh_enabled\":{},\"refreshes_committed\":{},\"refreshes_refused\":{},",
+            "\"refreshes_previously_decided\":{},\"refreshes_waiting\":{},\"refresh_pending\":{},",
             "\"node_closed\":{},\"operation_error\":{},\"cleanup_error\":{}}}"
         ),
         summary.continuous,
@@ -815,6 +983,12 @@ fn finish(
         summary.landings_previously_decided,
         summary.landings_waiting,
         summary.landings_stale,
+        summary.queue_refresh_enabled,
+        summary.refreshes_committed,
+        summary.refreshes_refused,
+        summary.refreshes_previously_decided,
+        summary.refreshes_waiting,
+        summary.refresh_pending,
         cleanup.is_none(),
         optional(operation),
         optional(cleanup),
@@ -827,6 +1001,7 @@ fn finish(
         u8::from(
             summary.non_green
                 || summary.reconcile
+                || summary.refresh_pending
                 || summary.lifetime_expired
                 || (summary.stopped && !(summary.continuous && summary.operator_stopped)),
         )

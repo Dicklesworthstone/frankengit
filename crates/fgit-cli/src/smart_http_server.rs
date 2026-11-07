@@ -49,6 +49,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
    [--workflow-publish-checks --workflow-principal <id>]
    [--workflow-land-queue-head --workflow-landing-principal <id>]
+   [--workflow-refresh-queue-head --workflow-refresh-principal <id>]
    [--workflow-pull-request <number> | --workflow-merge-queue <number> |
     --workflow-pull-requests [--workflow-max-pull-requests <1..64>]]
    [--workflow-artifact-logs]
@@ -124,6 +125,15 @@ independently configured principals; none grants an HTTP request authority.
 Current queue/PR/tips/policy, checks and reviews are revalidated. Missing approval
 waits without sealing a refusal; unknown landing outcomes stop later execution.
 Original landing custody survives restart. No landing starts before readiness.
+--workflow-refresh-queue-head --workflow-refresh-principal <id> separately enables
+a guarded target-only PR update when the next queue head records an older target.
+It requires automatic queue landing and its complete configuration. The refresh
+principal is explicit and independent from CI writing, check publication and landing.
+Full original metadata and guards are retained before submission; uncertain original
+outcomes recover before later work. Queue order and source content stay unchanged.
+The new PR version needs a new candidate and current evidence. No refresh starts
+before readiness, and pending refresh custody still fences work if the grant is
+removed on restart. These operator flags never grant an HTTP request permission.
 --workflow-pull-requests discovers visible open same-repository PRs targeting
 --workflow-ref and executes their source heads, one member per poll in rotating
 order. It requires --expected-incarnation and trusts scripts from every current
@@ -409,6 +419,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--workflow-trusted-local"
                 | "--workflow-publish-checks"
                 | "--workflow-land-queue-head"
+                | "--workflow-refresh-queue-head"
                 | "--workflow-pull-requests"
                 | "--workflow-artifact-logs"
         );
@@ -451,6 +462,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--workflow-attempt-timeout-secs"
                     | "--workflow-principal"
                     | "--workflow-landing-principal"
+                    | "--workflow-refresh-principal"
                     | "--workflow-pull-request"
                     | "--workflow-max-pull-requests"
                     | "--workflow-merge-queue"

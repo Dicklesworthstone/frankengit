@@ -1,6 +1,6 @@
 //! Operator-owned service lifetime; every polling attempt keeps finite authority.
 
-use super::{Summary, WatchOptions, poll_once, wait_interval};
+use super::{Summary, WatchOptions, poll_once, validate_refresh_custody, wait_interval};
 use crate::service_stop::StopFile;
 use fgit_node::{
     GitDaemonSessionTimeout, OneNode, TerminationSignals, TrustedWorkflowArtifactConfig,
@@ -96,6 +96,35 @@ pub(super) fn run(
     })));
     if control.observe(summary)? {
         return Ok(());
+    }
+    if options.merge_queue.is_some() {
+        // Read-only custody validation precedes readiness. Pending original
+        // requests are submitted only by the first post-readiness attempt.
+        let timeout = match control.attempt_timeout(options.attempt_timeout) {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                if control.observe(summary)? {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
+        let parent = node.command_request_context(Some(timeout));
+        let probe = control.clone();
+        let (result, cleanup) = parent.run_until_stopped(
+            node.runtime(),
+            move || probe.requested(),
+            |request| validate_refresh_custody(node, request, options, summary),
+        ).map_err(|error| error.to_string())?;
+        *monitor = cleanup.err().map(|error| error.to_string());
+        let stopped = match (result, control.observe(summary)) {
+            (Err(operation), Err(control)) => return Err(format!("{operation}; {control}")),
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+            (Ok(()), Ok(stopped)) => stopped,
+        };
+        if stopped || monitor.is_some() || summary.stopped || summary.reconcile {
+            return Ok(());
+        }
     }
     let attempt = lifetime.map_or(options.attempt_timeout, |limit| {
         options.attempt_timeout.min(limit)

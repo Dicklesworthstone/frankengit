@@ -184,7 +184,9 @@ required evidence for that candidate before landing. Refresh supplies no
 review, workflow check, merge authority or automatic workflow execution.
 Changed source content, a different head, an active queue batch, stale
 versions, changed policy and mismatched metadata refuse. Refresh is an explicit
-operator or client action; the workflow watcher does not perform it implicitly.
+operator or client action. The [workflow watcher](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md)
+performs it only when its separate automatic-refresh principal is explicitly
+configured; an HTTP queue grant does not enable that controller.
 
 The refresh form is bounded to 256 KiB so a percent-encoded native PR body of up
 to 64 KiB fits. Titles retain the native 256-byte bound. Smaller configured

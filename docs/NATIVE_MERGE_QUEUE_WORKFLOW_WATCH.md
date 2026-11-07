@@ -1,4 +1,4 @@
-# CI and optional landing for the native merge-queue head
+# CI, target refresh and optional landing for the native merge-queue head
 
 The native workflow watcher can follow a merge queue, prepare the current head's
 actual two-parent merge candidate, admit it on a fixed CI branch and execute that
@@ -9,8 +9,10 @@ same controller selects its next eligible PR and source branch.
 Queue selection, preparation, CI publication, execution custody and check
 admission use the existing native implementations. An explicit automatic-landing
 option joins those steps to the ordinary guarded landing admission. It requires
-its own operator-selected principal and is disabled by default. The guarded
-[queue landing commands](NATIVE_MERGE_QUEUE.md) remain available for manual use.
+its own operator-selected principal and is disabled by default. A separate
+opt-in target-refresh principal lets the controller update the next head's
+recorded target after a landing, then prepare and test its new exact candidate.
+The guarded [queue commands](NATIVE_MERGE_QUEUE.md) remain available for manual use.
 
 ## Start a foreground or continuous watcher
 
@@ -51,8 +53,9 @@ For sustained operation, replace `--polls` with:
 
 The stop file must initially be absent. Creating it, SIGTERM or SIGINT requests
 drain; it is never removed by the watcher. Each continuous attempt includes
-pending check and landing recovery, one selection/dispatch, resulting check
-publication and optional landing under a finite deadline. A global
+pending refresh, check and landing recovery, at most one new target refresh,
+one selection/dispatch, resulting check publication and optional landing under
+a finite deadline. A global
 `--timeout-secs`, when supplied, still bounds
 the entire service. See [native watch lifetime](NATIVE_REF_WORKFLOW_WATCH.md).
 
@@ -148,6 +151,55 @@ summaries include `landings_committed`, `landings_refused`,
 `landings_previously_decided`, `landings_waiting` and `landings_stale`.
 Previously decided counts report local retry suppression, not new commits.
 
+### Continue to the next head with automatic target refresh
+
+A successful landing advances the target while the next PR may still record
+the old target. The default watcher reports that head as stale. To authorize
+a guarded target-only refresh, add both of these options to a watcher already
+configured for automatic landing:
+
+```sh
+--refresh-queue-head --refresh-principal REFRESH_PRINCIPAL
+```
+
+The refresh principal is a fourth explicit operator role alongside the CI
+writer, check publisher and lander. The operator may deliberately choose the
+same identity for several roles; configuring one role never grants another.
+This profile requires the queue selector, complete two-parent candidate
+configuration, check publication, automatic landing and exact incarnation.
+It remains disabled for ordinary push, tag, source-PR and PR collection watches.
+
+Before selecting fresh metadata, the controller recovers any retained refresh
+command, settles check publication and reconciles prior landing responsibility.
+A refresh waits while prior candidate execution or a never-started candidate
+needs its original recovery path. It never skips that work or retries a script.
+
+Fresh selection reads the queue and complete original PR at one authenticated
+authority basis. Only the idle current head qualifies, and its queued source,
+recorded source and live source must still agree. The recorded target must
+differ from the current live target. The controller freezes the complete
+original title, body, branches, source tip, PR and queue versions, policy epoch,
+old target and new live target before submitting the native refresh command.
+Native admission independently checks those observations at publication.
+
+Success advances only the PR version. Queue version, membership, order,
+priorities, enqueue actors, source content and Git refs remain unchanged.
+The ordinary next poll prepares the new exact PR version and target, executes
+that candidate and publishes its own checks. Current candidate reviews and
+protected landing rules still apply; refresh supplies none of that evidence.
+A changed source, concurrent metadata edit or queue/policy race cannot be
+silently folded into the retained request.
+
+The controller reserves at most one new refresh per pass. Foreground summaries
+identify `queue_refresh_enabled`; both foreground and service summaries expose
+`refreshes_committed`, `refreshes_refused`,
+`refreshes_previously_decided` and `refreshes_waiting`.
+These count observed outcomes and waits; they are not passing checks.
+`refresh_pending` retains outstanding refresh responsibility when a stop or
+output failure occurs after intent retention. An acknowledged canonical refusal
+suppresses new automatic attempts for the same complete command; changed guards
+or metadata can select a new intention while the original refusal stays final.
+
 ### Manual landing of the same tested candidate
 
 The retained event directory contains a ready `landing.bundle` addressed to the
@@ -198,7 +250,8 @@ target-ref ceiling remain mandatory.
 One permanent watch scope binds repository incarnation, queue number, configured
 target and workflow directory. It does not change when the head PR or its
 source branch changes. Merge configuration, the first check publisher and,
-when enabled, the landing principal are bound inside that scope; changing them
+when enabled, the landing and refresh principals are bound inside that scope;
+changing them
 refuses instead of escaping an old responsibility under a replacement identity.
 
 An unresolved event blocks later execution across the entire queue, including
@@ -230,6 +283,27 @@ by a new attempt only after readiness succeeds at a later authority basis;
 the original refusal remains unchanged. Unknown, malformed, orphaned or
 excessive custody blocks progress. No automatic record deletion or identity
 rotation evades these limits. Preserve the whole scope across restart.
+
+Automatic refresh retains a separate, versioned, creation-only intent containing
+the complete original native command, operator/repository binding, original key,
+transaction and observed basis. The private file and directory are synchronized
+before admission. A 256 KiB record cap accommodates a native 64 KiB body and
+lossless encoded branch/text fields; at most 1,024 refresh attempts are retained
+per queue scope, with at most one unresolved attempt.
+
+A retry resolves or resubmits that complete original command before selecting
+current metadata. Queue removal, later PR edits, source movement and restart
+cannot replace its fields. The original semantic request contributes to the
+durable key, so different metadata cannot masquerade as the same retained intent.
+Terminal output is flushed before acknowledgement. Every acknowledged outcome
+is checked against canonical authority before it can suppress recovery; a local
+file is not proof that a PR update committed.
+
+Missing, foreign, corrupt, orphaned or excessive refresh custody blocks later
+candidate polling and landing. Removing the refresh option or changing the
+principal cannot escape an unacknowledged attempt. Startup validates retained
+records without submitting an undecided request or a fresh PR update before
+readiness. Preserve the entire private scope across restart and restore.
 
 New candidate events carry a versioned intent that permits ordinary restart to
 resume an uncertain CI publication and begin the original candidate's first
@@ -281,9 +355,16 @@ To enable the same optional landing path in that service, add:
 --workflow-land-queue-head --workflow-landing-principal LANDING_PRINCIPAL
 ```
 
+To continue through stale recorded targets after those landings, also add:
+
+```sh
+--workflow-refresh-queue-head --workflow-refresh-principal REFRESH_PRINCIPAL
+```
+
 The controller waits for successful HTTP readiness before new candidate
-publication, execution or target landing, and drains with the listener. Startup
-check reconciliation does not submit a fresh landing before readiness. No workflow flag grants
+publication, execution, target refresh or landing, and drains with the listener.
+Startup custody validation does not submit an undecided refresh or a fresh PR
+update before readiness; check reconciliation does not submit a fresh landing. No workflow flag grants
 network queue management, landing, receive or read permissions. Those endpoints
 retain their independent deployment switches and token scopes. See
 [HTTP-owned native CI](NATIVE_HTTP_WORKFLOW_SERVICE.md) for lifecycle and
@@ -295,6 +376,7 @@ credential details.
 cargo test --locked -p fgit-node --test trusted_queue_merge_watch -- --test-threads=1
 cargo test --locked -p fgit-node --lib queue::landing_tests::candidate::readiness -- --test-threads=1
 cargo test --locked -p fgit-node --lib queue_landing::custody -- --test-threads=1
+cargo test --locked -p fgit-node --lib queue_refresh::custody -- --test-threads=1
 cargo test --locked -p fgit-cli --bin fg workflow_command::watch
 cargo test --locked -p fgit-cli --bin fg smart_http_server::workflow
 cargo test --locked -p fgit-cli --test workflow_queue_merge -- --test-threads=1

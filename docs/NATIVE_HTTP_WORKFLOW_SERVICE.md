@@ -166,6 +166,25 @@ service. No target landing, queue-management grant or remote execution endpoint
 is implied. See the [queue candidate CI guide](NATIVE_MERGE_QUEUE_WORKFLOW_WATCH.md)
 for complete commands, exact check/landing coordinates and recovery behavior.
 
+Automatic landing requires the explicit
+`--workflow-land-queue-head --workflow-landing-principal LANDING_PRINCIPAL`
+pair, together with the queue/candidate selection, check publisher and exact
+incarnation. To refresh the next head's recorded target and continue that
+pipeline, also supply
+`--workflow-refresh-queue-head --workflow-refresh-principal REFRESH_PRINCIPAL`.
+These are separate operator authorities; neither grants any HTTP endpoint
+permission.
+
+The refresh controller durably retains the complete original PR metadata and
+queue/PR/policy/target observations before submission. It preserves queue order,
+priority, source content and refs, and advances only the PR version. Candidate
+preparation, execution, current reviews and exact checks still govern the next
+landing. Pending original refreshes recover before later candidate work, and
+missing or changed refresh authority on restart cannot abandon their custody.
+Startup validates this custody without admitting a fresh or undecided PR update
+before listener readiness. See the queue guide for retention bounds and outcome
+recovery.
+
 ### File outputs and dependent jobs
 
 The owned HTTP controller can capture exact output files and deliver them to
