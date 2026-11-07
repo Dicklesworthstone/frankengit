@@ -42,11 +42,50 @@ for format in sha1 sha256; do
   for name in offline_preparation global_budget_and_status owned_sources_and_resume \
     denied_write_and_exact_retry canonical_text_lifecycle_and_actor completed_recovery \
     occupied_target_refusal later_request_tamper disabled_service_and_exact_retry owned_services_drained \
+    discovery_cli_pinned_inventory inventory_offline_pin_twins batch_cli_matches_capture \
     capture_offline_prepare capture_pin_refusal capture_bounded_resume capture_offline_recovery \
     capture_handoff_pin_refusal capture_native_readback capture_native_recovery; do
     fge_assert_eq "OPERATOR-GITHUB-ISSUE-$format-$name" true "$(fact "${format}_$name")" "$name"
   done
 done
+fge_capture acquisition-command-readback python3 - "$SUMMARY" "$WORK/campaign" <<'PY' || true
+import json
+import sys
+from pathlib import Path
+
+def require(condition, detail='issue acquisition journal check failed'):
+    if not condition:
+        raise AssertionError(detail)
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+require(summary['complete'] is True)
+root = Path(sys.argv[2])
+commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
+source_calls = []
+for row in commands:
+    if row.get('kind') != 'operator':
+        continue
+    command = row['command']
+    preloaded = command[1:2] == ['--import']
+    index = 3 if preloaded else 1
+    name, operation = Path(command[index]).name, command[index + 1]
+    if name == 'import_github_issues.mjs' and operation in ('discover', 'inspect-inventory', 'capture-batch'):
+        require(preloaded)
+        args = command[index + 2:]
+        flag = '--out' if operation == 'discover' else '--inventory'
+        fmt = Path(args[args.index(flag) + 1]).relative_to(root).parts[0]
+        source_calls.append((fmt, operation, row['exit']))
+    elif name == 'capture_github_issue_migration.mjs':
+        require(preloaded)
+    elif name in ('import_github_issues.mjs', 'migrate_github_issues.mjs'):
+        require(not preloaded, 'native destination child received the source fixture')
+for fmt in ('sha1', 'sha256'):
+    for operation in ('discover', 'inspect-inventory', 'capture-batch'):
+        exits = {code for selected, op, code in source_calls if selected == fmt and op == operation}
+        require({0, 2} <= exits, (fmt, operation, exits))
+print('both hash domains execute source discovery/inspection/batch-capture success and refusal; native children have no preload')
+PY
+fge_assert_exit OPERATOR-GITHUB-ISSUE-003 0 "$FGE_LAST_EXIT" 'actual source CLI success/refusal dispatch and native fixture isolation read back'
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" github-issue-migration-summary; fi
 if [ -f "$WORK/campaign/commands.jsonl" ]; then fge_artifact "$WORK/campaign/commands.jsonl" native-and-operator-command-journal; fi
 fge_phase teardown

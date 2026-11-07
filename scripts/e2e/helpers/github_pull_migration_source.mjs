@@ -1,41 +1,46 @@
-// Synthetic GitHub INPUT only. This peer supplies no native response/authority.
-// Destination commands run separately against the actual Rust node.
+// Synthetic GitHub INPUT only. Actual source/destination CLIs run separately.
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { inventoryPeer } from '../../../tests/operator/github-pull-inventory-fixture.mjs';
-import { discoverGithubPulls } from '../../lib/github-pull-inventory.mjs';
-import { prepareGithubPullCollection, collectGithubPulls } from '../../lib/github-pull-collection.mjs';
+import { REPO, TOKEN } from '../../../tests/operator/github-pull-inventory-fixture.mjs';
 import { batchName } from '../../lib/github-pull-collection-store.mjs';
 import { parseGithubPullCapture } from '../../lib/github-pull-source.mjs';
 import { recordDigest } from '../../lib/forge-operator-io.mjs';
 
-if (process.argv.length !== 5 || process.argv.slice(3).some(s => !/^[0-9a-f]{40}$/.test(s))) {
-  throw new Error('private source directory and two SHA-1 fixture tips required');
-}
-const [root, head, base] = process.argv.slice(2), numbers = [9, 17];
-const peer = await inventoryPeer({ after() {} }, { pulls: numbers, records: 1, alter: ({ kind, n, value }) => {
-  if (kind === 'pull') {
-    value.head.sha = head; value.base.sha = base;
-    value.title += ' 雪';
-    if (n === 17) { value.state = 'closed'; value.closed_at = value.updated_at; }
-  } else if (kind === 'reviews' || kind === 'inline') {
-    for (const row of value) { row.commit_id = head; if (kind === 'inline') row.original_commit_id = base; }
+const [mode, root, head, base] = process.argv.slice(2);
+if (mode === 'setup' && process.argv.length === 6 && [head, base].every(s => /^[0-9a-f]{40}$/.test(s))) {
+  const preload = join(root, 'source-peer.mjs'), log = join(root, 'source-requests.ndjson');
+  const token = join(root, 'source-token');
+  const fixture = new URL('../../../tests/operator/github-pull-inventory-fixture.mjs', import.meta.url).href;
+  await writeFile(preload, `import { inventoryPeer } from ${JSON.stringify(fixture)};
+import { appendFile } from 'node:fs/promises';
+const head=${JSON.stringify(head)},base=${JSON.stringify(base)};
+const peer=await inventoryPeer({after(){}},{pulls:[9,17],records:1,alter:({kind,n,value})=>{
+  if(kind==='pull'){
+    value.head.sha=head;value.base.sha=base;value.title+=' 雪';
+    if(n===17){value.state='closed';value.closed_at=value.updated_at;}
+  }else if(kind==='reviews'||kind==='inline'){
+    for(const row of value){row.commit_id=head;if(kind==='inline')row.original_commit_id=base;}
   }
-} });
-try {
-  const inventory = await discoverGithubPulls({ ...peer.options, batchSize: 1 });
-  const inventoryFile = join(root, 'inventory.json');
-  await writeFile(inventoryFile, inventory.bytes, { mode: 0o600, flag: 'wx' });
+}});
+peer.unref();process.once('beforeExit',()=>peer.close());
+globalThis.fetch=async(address,options)=>{
+  await appendFile(${JSON.stringify(log)},JSON.stringify({address})+'\\n',{mode:0o600});
+  return peer.fetchImpl(address,options);
+};
+`, { mode: 0o600, flag: 'wx' });
+  await writeFile(token, TOKEN, { mode: 0o600, flag: 'wx' });
+  console.log(JSON.stringify({ preload, log, token, repository: REPO, inventory: join(root, 'inventory.json'),
+    collection: join(root, 'collection') }));
+} else if (mode === 'inspect' && process.argv.length === 4) {
   const collectionDir = join(root, 'collection');
-  const prepared = await prepareGithubPullCollection({ workdir: collectionDir, inventoryFile, inventoryConfirm: inventory.sha256 });
-  const collected = await collectGithubPulls({ workdir: collectionDir, confirm: prepared.plan_sha256, fetchImpl: peer.fetchImpl });
-  if (!collected.complete || collected.captured_batches !== 2) throw new Error('synthetic source collection incomplete');
-  const captures = await Promise.all(numbers.map(async (_, index) => {
+  const captures = await Promise.all([0, 1].map(async index => {
     const path = join(collectionDir, 'captures', batchName(index)), bytes = await readFile(path);
     return { path, sha256: recordDigest(bytes), capture: parseGithubPullCapture(bytes) };
   }));
   console.log(JSON.stringify({ source_class: 'synthetic-github-input-only', collection_dir: collectionDir,
-    collection_confirm: prepared.plan_sha256, complete_confirm: collected.complete_sha256,
-    single_capture: captures[0].path, single_capture_sha256: captures[0].sha256,
-    pulls: captures.flatMap(item => item.capture.pulls), source_requests: peer.calls.length }));
-} finally { await peer.close(); }
+    collection_confirm: recordDigest(await readFile(join(collectionDir, 'plan.json'))),
+    complete_confirm: recordDigest(await readFile(join(collectionDir, 'complete.json'))),
+    single_capture: join(root, 'single-capture.json'),
+    single_capture_sha256: recordDigest(await readFile(join(root, 'single-capture.json'))),
+    pulls: captures.flatMap(item => item.capture.pulls) }));
+} else throw new Error('setup ROOT HEAD BASE or inspect ROOT required');

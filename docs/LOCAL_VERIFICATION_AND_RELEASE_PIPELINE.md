@@ -69,6 +69,14 @@ cells; it does not establish the full live-server operator matrix in
 `x2mv.4.59`. Missing prerequisites, failed profiles and empty TAP are non-pass;
 optional oracle skips remain skips rather than native compatibility evidence.
 
+The same suite runs actual prebuilt-`fg` HTTP owner tests for normal shutdown,
+failed startup-receipt and stop-file writes, and repeated SIGTERM/SIGINT during interrupted drain.
+The owner retains its process handle until reaping, records exceptional cleanup,
+and propagates the original failure. Forced termination is failure evidence,
+not a clean HTTP drain; cleanup failure retains ownership and reports containment
+failure. These local process tests do not establish power-loss recovery or a
+current-source native build when the selected executable is retained.
+
 The dedicated `operator` command checks the existing
 [`verify_js.mjs runtime`](../scripts/verify_js.mjs) identity before native
 compilation. `FGE_NODE` selects that executable; otherwise it uses Node on PATH.

@@ -16,6 +16,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -138,11 +139,11 @@ class HttpServer:
         self.url = ""
 
     def __enter__(self) -> HttpServer:
-        with self.stdout_path.open("wb") as stdout, self.stderr_path.open("wb") as stderr:
-            self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
-        self.campaign.record(kind="service_start", command=self.command, pid=self.process.pid,
-                             stdout=str(self.stdout_path), stderr=str(self.stderr_path))
         try:
+            with self.stdout_path.open("wb") as stdout, self.stderr_path.open("wb") as stderr:
+                self.process = subprocess.Popen(self.command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+            self.campaign.record(kind="service_start", command=self.command, pid=self.process.pid,
+                                 stdout=str(self.stdout_path), stderr=str(self.stderr_path))
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 require(self.process.poll() is None, "HTTP service exited before readiness")
@@ -159,27 +160,69 @@ class HttpServer:
                         return self
                 time.sleep(0.05)
             raise TimeoutError("HTTP service did not become ready")
-        except BaseException:
-            self.close()
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                if self.process is not None:
+                    raise RuntimeError("HTTP child containment failed after startup failure") from cleanup
+                # A failed startup stays a failure even if shutdown itself
+                # cannot produce a normal drain receipt. Preserve both causes.
+                raise error from cleanup
             raise
 
     def close(self) -> None:
         if self.process is None:
             return
-        process, self.process = self.process, None
+        process = self.process
         started = time.monotonic()
-        self.stop.touch(exist_ok=False)
         forced = False
         try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            forced = True
-            process.terminate()
+            self.stop.touch(exist_ok=False)
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+                forced = True
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        except BaseException as error:
+            # A failed stop-file write or cancellation still owns this child.
+            # Keep its Popen capability and finish the bounded reap before
+            # propagating the original failure. Repeated cancellation must not
+            # interrupt this final drain or silently turn it into success.
+            handlers = {}
+            try:
+                if threading.current_thread() is threading.main_thread():
+                    for number in (signal.SIGTERM, signal.SIGINT):
+                        handlers[number] = signal.signal(number, signal.SIG_IGN)
+                try:
+                    if process.poll() is None:
+                        forced = True
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                except BaseException as cleanup:
+                    self.campaign.record(kind="service_stop", pid=process.pid, exit=process.poll(),
+                                         forced=forced, close_error=type(error).__name__,
+                                         cleanup_error=type(cleanup).__name__,
+                                         duration_ms=round((time.monotonic() - started) * 1000))
+                    raise RuntimeError("HTTP child containment failed during interrupted close") from cleanup
+                self.process = None
+                self.campaign.record(kind="service_stop", pid=process.pid, exit=process.returncode,
+                                     forced=forced, close_error=type(error).__name__,
+                                     duration_ms=round((time.monotonic() - started) * 1000))
+            finally:
+                for number, handler in handlers.items():
+                    signal.signal(number, handler)
+            raise
+        self.process = None
         self.campaign.record(kind="service_stop", pid=process.pid, exit=process.returncode, forced=forced,
                              duration_ms=round((time.monotonic() - started) * 1000))
         # Always retain and show actual service diagnostics; do not suppress an

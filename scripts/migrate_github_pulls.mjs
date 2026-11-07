@@ -14,6 +14,9 @@ import { operatorPath,privateRecordPath,absentRecord,readPrivateOperatorFile,sav
 const HELP=`usage: node scripts/migrate_github_pulls.mjs capture --repository OWNER/REPO --pull NUMBER [--pull NUMBER...] --out NEW_PRIVATE_FILE [--token-file PRIVATE_GITHUB_TOKEN]
        node scripts/migrate_github_pulls.mjs inspect-capture --capture PRIVATE_FILE --confirm CAPTURE_SHA256
        node scripts/migrate_github_pulls.mjs prepare --capture PRIVATE_FILE --capture-confirm CAPTURE_SHA256 --selection PRIVATE_JSON --workdir NEW_JOB --token-file NATIVE_TOKEN
+       node scripts/migrate_github_pulls.mjs prepare-begin --capture PRIVATE_FILE --capture-confirm CAPTURE_SHA256 --selection PRIVATE_JSON --workdir NEW_PREPARATION --token-file NATIVE_TOKEN
+       node scripts/migrate_github_pulls.mjs prepare-resume --workdir PREPARATION --confirm PREPARATION_SHA256 [--max-requests 1..8192]
+       node scripts/migrate_github_pulls.mjs prepare-status --workdir PREPARATION --confirm PREPARATION_SHA256
        node scripts/migrate_github_pulls.mjs inspect|status --workdir JOB --confirm PLAN_SHA256
        node scripts/migrate_github_pulls.mjs run|recover --workdir JOB --confirm PLAN_SHA256 [--token-file NATIVE_TOKEN] [--ca-file PRIVATE_PEM] [--max-operations 1..8192]
        node scripts/migrate_github_pulls.mjs requirements --workdir JOB --confirm PLAN_SHA256 --principal HEX32 --out NEW_BRANCH_SELECTION
@@ -23,15 +26,23 @@ Two equal GitHub observations are NOT an atomic snapshot. Quiesce source edits.
 Preparation retains original native open/comment/close requests; reviews become
 attributed comments, never approvals. Source/destination credentials are independent.
 Required Git objects and exact generated branches must be provisioned separately.
+Restartable preparation is offline. Retain preparation_sha256 to resume/status;
+only preparation_complete:true permits import_workdir and plan_sha256 to be
+passed to the existing sender. The preparation and import-plan pins differ.
+Resume/status need no source path or credential and never submit mutations.
 Keep original capture/plan pins. Normal resumption recovers uncertainty, not resends.
 Exit 0: success (inspect/status may report incomplete); 1: native refusal;
-2: preflight refusal; 3: incomplete execution; 4: retained/uncertain custody or output.`;
+2: preflight refusal; 3: incomplete execution or bounded prepare-resume;
+4: retained/uncertain custody or output.`;
 function options(args){
   if(!Array.isArray(args)||args.length>230||args.some(v=>typeof v!=='string'||v.length>4096)||args.reduce((n,s)=>n+s.length,0)>32768)throw operatorError('github_pull_arguments');
   const operation=args[0],definitions={
     capture:[['--repository','--pull','--out'],['--token-file','--max-requests','--max-read-bytes']],
     'inspect-capture':[['--capture','--confirm'],[]],
     prepare:[['--capture','--capture-confirm','--selection','--workdir','--token-file'],[]],
+    'prepare-begin':[['--capture','--capture-confirm','--selection','--workdir','--token-file'],[]],
+    'prepare-resume':[['--workdir','--confirm'],['--max-requests']],
+    'prepare-status':[['--workdir','--confirm'],[]],
     inspect:[['--workdir','--confirm'],[]],status:[['--workdir','--confirm'],[]],
     run:[['--workdir','--confirm'],['--token-file','--ca-file','--max-operations','--retry-key']],
     recover:[['--workdir','--confirm'],['--token-file','--ca-file','--max-operations']],
@@ -92,10 +103,16 @@ export async function main(args,{stdout=process.stdout,stderr=process.stderr,sig
         pulls:capture.pulls.map(e=>({number:e.pull.number,state:e.pull.state,draft:e.pull.draft,merged:e.pull.merged,
           head:e.pull.head,base:e.pull.base,discussion:e.discussion.length,reviews:e.reviews.length,inline:e.inline.length})),
         consistency:capture.consistency,network_accessed:false,mutation_submitted:false};
-    }else if(o.operation==='prepare'){
+    }else if(o.operation==='prepare'||o.operation==='prepare-begin'){
       const selected=parsePullJson(await readPrivateOperatorFile(await outsideWorktree(f.get('--selection')),1024*1024,check));
-      result=await prepareGithubPullImport({workdir:operatorPath(f.get('--workdir')),captureFile:operatorPath(f.get('--capture')),
+      const prepare=o.operation==='prepare'?prepareGithubPullImport:(await import('./lib/github-pull-preparation.mjs')).beginGithubPullPreparation;
+      result=await prepare({workdir:operatorPath(f.get('--workdir')),captureFile:operatorPath(f.get('--capture')),
         captureConfirm:f.get('--capture-confirm'),selection:selected,tokenFile:operatorPath(f.get('--token-file')),timeoutMs:remaining(),signal:combined});
+    }else if(o.operation==='prepare-resume'||o.operation==='prepare-status'){
+      const {resumeGithubPullPreparation,inspectGithubPullPreparation}=await import('./lib/github-pull-preparation.mjs');
+      const operation=o.operation==='prepare-resume'?resumeGithubPullPreparation:inspectGithubPullPreparation;
+      result=await operation({workdir:operatorPath(f.get('--workdir')),confirm:f.get('--confirm'),
+        ...(f.has('--max-requests')?{maxRequests:decimal(f.get('--max-requests'))}:{}),timeoutMs:remaining(),signal:combined});
     }else if(o.operation==='requirements'){
       const path=await privateRecordPath(await outsideWorktree(f.get('--out')));await absentRecord(path);check();
       const r=await githubPullBranchRequirements({workdir:operatorPath(f.get('--workdir')),confirm:f.get('--confirm'),principal:f.get('--principal'),timeoutMs:remaining(),signal:combined});
@@ -111,12 +128,15 @@ export async function main(args,{stdout=process.stdout,stderr=process.stderr,sig
         timeoutMs:remaining(),signal:combined});
     }
     await write(stdout,result,Math.min(10000,remaining()));
+    if(o.operation==='prepare-resume')return result.preparation_complete?0:3;
     return execution?(result.complete?0:result.state==='refused'?1:3):0;
   }catch(error){
     try{await write(stderr,{type:'github_pull_error',code:typeof error.code==='string'&&/^[A-Za-z0-9_]+$/.test(error.code)?error.code:'github_pull_operation_failed',
       ...(pending?{capture_progress:pending}:{}),...(error.import_progress?{import_progress:error.import_progress}:{}),
+      ...(error.preparation_progress?{preparation_progress:error.preparation_progress}:{}),
       ...(result?{retained_result:result}:{}),mutation_submitted:execution?null:false,outcome_unknown:execution},10000);}catch{}
-    return pending||result||error.import_progress?.directory_created||error.import_progress?.plan_verified?4:2;
+    return pending||result||error.import_progress?.directory_created||error.import_progress?.plan_verified||
+      error.preparation_progress?.directory_created||error.preparation_progress?.preparation_verified?4:2;
   }finally{clearTimeout(timer);process.removeListener('SIGTERM',abort);process.removeListener('SIGINT',abort);}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)process.exitCode=await main(process.argv.slice(2));

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { Server, createServer } from 'node:http';
 import { discoverGithubPulls, parseGithubPullInventory, githubPullInventoryBytes, selectGithubPullBatch,
   captureGithubPullBatch, GITHUB_PULL_INVENTORY_LIMITS as L } from '../../scripts/lib/github-pull-inventory.mjs';
 import { createGithubPullCaptureSession, captureGithubPulls, parseGithubPullCapture } from '../../scripts/lib/github-pull-source.mjs';
@@ -7,6 +8,55 @@ import { recordDigest } from '../../scripts/lib/forge-operator-io.mjs';
 import { inventoryPeer, REPO, TOKEN } from './github-pull-inventory-fixture.mjs';
 
 const population=n=>Array.from({length:n},(_,i)=>i+1);
+test('inventory source peer retires an actual Fetch-blocked ephemeral allocation',async t=>{
+  // Occupy the first candidate ourselves unless another session already does.
+  // Neither case permits contacting, closing or stealing that other listener.
+  const blocker=createServer();
+  t.after(async()=>{
+    if(!blocker.listening)return;
+    blocker.closeAllConnections();
+    await new Promise((resolve,reject)=>blocker.close(error=>error?reject(error):resolve()));
+  });
+  await new Promise((resolve,reject)=>{
+    const failed=error=>{blocker.removeListener('listening',ready);error.code==='EADDRINUSE'?resolve():reject(error);};
+    const ready=()=>{blocker.removeListener('error',failed);resolve();};
+    blocker.once('error',failed);blocker.once('listening',ready);blocker.listen(10080,'127.0.0.1');
+  });
+  const heldHere=blocker.listening;
+  const descriptor=Object.getOwnPropertyDescriptor(Server.prototype,'listen'),listen=Server.prototype.listen;
+  const collisions=[];let f,selected,firstBound,retired=false;
+  try {
+    for(const restricted of [10080,6667,6666,6000]){
+      let injected=false;firstBound=undefined;retired=false;
+      // Every successful control binds a real forbidden port and is closed by
+      // the unchanged allocator before any source request. Only a busy test
+      // prerequisite selects another control; other errors remain failures.
+      Server.prototype.listen=function(port,...args){
+        if(port===0&&!injected){
+          injected=true;
+          this.once('listening',()=>{firstBound=this.address().port;this.once('close',()=>{retired=true;});});
+          return listen.call(this,restricted,...args);
+        }
+        return listen.call(this,port,...args);
+      };
+      try {f=await inventoryPeer(t);selected=restricted;assert.equal(injected,true);break;}
+      catch(error){if(error.code!=='EADDRINUSE')throw error;collisions.push(restricted);}
+    }
+  } finally {
+    if(descriptor)Object.defineProperty(Server.prototype,'listen',descriptor);
+    else delete Server.prototype.listen;
+  }
+  assert(f,'none of the four real Fetch-blocked controls was available');
+  assert.deepEqual(Object.getOwnPropertyDescriptor(Server.prototype,'listen'),descriptor);
+  // A foreign listener may disappear after the initial collision. Only our
+  // own live handle proves the first port must remain occupied throughout.
+  if(heldHere){assert.equal(blocker.listening,true);assert(collisions.includes(10080),'the occupied control did not refuse');}
+  assert.equal(firstBound,selected);assert.equal(retired,true);
+  assert.notEqual(new URL(f.origin).port,String(selected));
+  const r=await discoverGithubPulls({...f.options,batchSize:1});
+  assert.deepEqual(r.inventory.pulls.map(row=>row.number),[9,17]);
+  assert.equal(r.statistics.requests,f.calls.length);assert(f.calls.length>0);
+});
 const link=(page=2,path=`/repos/${REPO}/pulls`,extra='')=>`<https://api.github.com${path}?state=all&sort=created&direction=asc&per_page=100&page=${page}${extra}>; rel="next"`;
 for(const count of [0,1,100,101,203])test(`discovers all ${count} PR aliases without treating a full page as EOF`,async t=>{
   const f=await inventoryPeer(t,{pulls:population(count)}),r=await discoverGithubPulls({...f.options,batchSize:25});

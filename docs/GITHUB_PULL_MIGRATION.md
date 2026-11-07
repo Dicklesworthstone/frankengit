@@ -110,6 +110,13 @@ and original native credential fingerprint. It is published only after private
 file synchronization and complete source/request readback. Interrupted or damaged
 preparation refuses in place; no automatic repair or new replacement keys.
 
+For bounded offline preparation across invocations, use the existing CLI's
+`prepare-begin`, `prepare-resume` and `prepare-status` phases described in
+[restartable preparation](GITHUB_PULL_PREPARATION.md). They preserve selected
+request identities and publish the same ordinary import format when complete.
+Keep the preparation pin distinct from the resulting import-plan pin; these
+phases never execute the sender or provision branches.
+
 ### Provision the required historical branches
 
 `inspect` reports every required branch and exact tip. `requirements` emits a

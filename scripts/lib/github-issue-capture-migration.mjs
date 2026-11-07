@@ -6,7 +6,7 @@ import { dirname, join, sep } from 'node:path';
 import { createGithubIssueCaptureSession, parseCapture, issueImportSteps, CAPTURE_LIMIT } from './github-issue-source.mjs';
 import { parseIssueInventory, selectIssueInventoryBatch, INVENTORY_LIMIT } from './github-issue-inventory.mjs';
 import { parseGithubIssueMigrationSources } from './github-issue-migration-sources.mjs';
-import { operatorError, operatorPath, privateRecordPath, absentRecord, recordDigest,
+import { operatorError, operatorPath, privateRecordPath, absentRecord, recordDigest, parseOperatorJson,
   readPrivateOperatorFile, readSynchronizedOperatorRecord, saveOperatorRecord } from './forge-operator-io.mjs';
 
 const SCHEMA = 'frankengit-github-issue-capture-session-v1';
@@ -123,7 +123,7 @@ async function entries(root) {
   return result.sort();
 }
 function canonical(bytes) {
-  const value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+  const value = parseOperatorJson(bytes, 'github_capture_migration_json');
   if (!encode(value).equals(bytes)) fail('noncanonical');
   return value;
 }

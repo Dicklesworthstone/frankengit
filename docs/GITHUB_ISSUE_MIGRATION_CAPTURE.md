@@ -170,7 +170,15 @@ The separate native lane is
 `scripts/e2e/suites/operator/github_issue_migration.sh`, included by
 `./scripts/verify.sh operator`. Its capture path runs the shipped command's
 offline prepare, bounded resume, status and completed resume before feeding the
-pinned `sources.json` into the shipped migration command. An explicit test-only
+pinned `sources.json` into the shipped migration command. Before that session,
+the lane runs `import_github_issues.mjs discover` to create the inventory from
+source observations, then invokes its offline inspection and standalone batch
+capture. Duplicate discovery and wrong inventory pins refuse without new GETs;
+the standalone batch's exact bytes must match the first resumable capture.
+The helper supplies source responses and a reference pin, not an inventory file.
+Command-journal readback requires success/refusal for all three inventory
+operations in both destination hash formats and rejects source preloads on
+native destination children. An explicit test-only
 Node preload supplies the existing GitHub response-schema fixture to source
 commands only; destination children use unmodified native HTTP. Wrong session
 and handoff pins must refuse before source work or native preparation,

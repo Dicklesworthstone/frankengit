@@ -32,6 +32,15 @@ fge_capture operator-owner-selftests env FGE_NODE="$NODE" python3 "$E2E_ROOT/sel
 fge_phase assert
 fge_assert_exit OPERATOR-CONTRACT-OWNER-001 0 "$FGE_LAST_EXIT" 'real-process operator owner success, refusal, interruption, timeout and forced-containment regressions complete'
 
+fge_phase action
+HTTP_OWNER_WORK="$(fge_tempdir native-http-owner)"
+fge_preserve "$HTTP_OWNER_WORK" 'retain real native HTTP owner fault inputs and process receipts'
+fge_capture native-http-owner-selftests env FG_BIN="$FG_BIN" \
+  FGE_HTTP_OWNER_WORKDIR="$HTTP_OWNER_WORK" \
+  python3 "$E2E_ROOT/selftests/test_http_service_owner.py" || true
+fge_phase assert
+fge_assert_exit OPERATOR-CONTRACT-HTTP-OWNER-001 0 "$FGE_LAST_EXIT" 'actual native HTTP child ownership survives stop-file failure and repeated cancellation'
+
 for scope in operator scripts; do
   fge_phase action
   test_exit=0
