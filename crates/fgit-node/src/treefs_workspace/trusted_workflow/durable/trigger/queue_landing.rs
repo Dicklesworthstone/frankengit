@@ -97,6 +97,9 @@ impl OneNode {
             let root = parent.join(format!("watch-{}", hex(&scope)));
             let _owner = Owner::open(&root)?;
             merge.bind(&root)?;
+            super::queue_refresh::ensure_resolved_in(
+                self, request, target, number, &root, &scope, merge,
+            ).await?;
             let reporter = commitment(&[
                 b"frankengit/watch-reporter/v1", &scope, publisher.as_bytes(),
             ]);
@@ -398,6 +401,81 @@ impl OneNode {
         custody::acknowledge(path, attempt, &terminal)?;
         Ok(committed)
     }
+}
+
+/// Read-only prerequisite for a fresh metadata refresh. Existing landing
+/// records are decoded under their explicitly configured publisher and lander;
+/// a local ACK alone cannot discharge a pending code-publication obligation.
+pub(super) async fn settled_for_refresh_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    target: &RefName,
+    directory: &[u8],
+    root: &Path,
+    scope: &[u8; 32],
+    merge: &pull_request_merge::PullRequestMergeWatchConfig,
+    publisher: PrincipalId,
+    lander: PrincipalId,
+) -> Result<bool, TrustedWorkflowFailure> {
+    let identity = commitment(&[
+        b"frankengit/queue-watch-lander/v1", scope, &merge.identity(),
+        publisher.as_bytes(), lander.as_bytes(),
+    ]);
+    let reporter = commitment(&[
+        b"frankengit/watch-reporter/v1", scope, publisher.as_bytes(),
+    ]);
+    let mut attempts = 0usize;
+    let mut settled = true;
+    for entry in reporting::event_entries(root)? {
+        if !request.checkpoint_is_live() {
+            return Err(invalid("queue refresh landing verification stopped"));
+        }
+        let path = entry.path();
+        check_directory(&path)?;
+        let name = entry.file_name();
+        let key = name.to_str().and_then(|name| name.strip_prefix("event-"))
+            .filter(|key| lower_hash(key))
+            .ok_or_else(|| invalid("invalid queue landing event custody"))?;
+        let records = custody::records(&path)?;
+        attempts = attempts.checked_add(records.len())
+            .filter(|count| *count <= MAX_SCOPE_ATTEMPTS)
+            .ok_or_else(|| invalid("automatic queue landing scope attempt bound exceeded"))?;
+        if records.is_empty() { continue; }
+        if reporting::read_private(&root.join("publisher"), 32)? != reporter
+            || reporting::read_private(&root.join("landing-principal"), 32)? != identity
+        {
+            return Err(invalid("queue refresh cannot adopt another landing identity"));
+        }
+        let original = prestart::read_landing(
+            node, target, directory, &path, scope, key, merge,
+            &|| request.checkpoint_is_live(),
+        )?;
+        let command = command(&original)?;
+        for (name, bytes) in records {
+            if !request.checkpoint_is_live() {
+                return Err(invalid("queue refresh landing verification stopped"));
+            }
+            let attempt = Attempt::decode(
+                node, lander, &command, identity, original.event_id, &name, &bytes,
+            )?;
+            let Some((ack, sequence)) = custody::acknowledged(&path, &attempt)? else {
+                settled = false;
+                continue;
+            };
+            let outcome = node.resolve_outcome_checkpointed_in(request, attempt.tx_id)
+                .await.map_err(|error| invalid_owned(error.to_string()))?;
+            let OutcomeLookup::Decided(terminal) = outcome else {
+                return Err(invalid("queue landing acknowledgement lacks its canonical outcome"));
+            };
+            if terminal.decision_sequence.get() != sequence
+                || matches!(terminal.outcome, DecisionOutcome::Committed { .. })
+                    != (ack == Acknowledgement::Committed)
+            {
+                return Err(invalid("queue landing acknowledgement differs from its canonical outcome"));
+            }
+        }
+    }
+    Ok(settled)
 }
 
 fn command(

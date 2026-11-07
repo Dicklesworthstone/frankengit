@@ -8,6 +8,9 @@ use support::*;
 #[path = "trusted_queue_merge_watch/automatic_landing.rs"]
 mod automatic_landing;
 
+#[path = "trusted_queue_merge_watch/automatic_refresh.rs"]
+mod automatic_refresh;
+
 use fgit_admission::merge::native::queue::QueueCandidateLandingCommand;
 use fgit_authority::IdempotencyKey;
 use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};

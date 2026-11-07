@@ -276,10 +276,10 @@ pub(super) fn scope(node: &OneNode, reference: &RefName, directory: &[u8]) -> [u
 pub(super) fn event_entries(root: &Path) -> Result<Vec<fs::DirEntry>, TrustedWorkflowFailure> {
     let mut entries = fs::read_dir(root)
         .map_err(io)?
-        .take(MAX_EVENTS + 5)
+        .take(MAX_EVENTS + 7)
         .collect::<Result<Vec<_>, _>>()
         .map_err(io)?;
-    if entries.len() > MAX_EVENTS + 4 {
+    if entries.len() > MAX_EVENTS + 6 {
         return Err(invalid("ref watcher retained-event limit exceeded"));
     }
     entries.retain(|entry| {
@@ -288,6 +288,8 @@ pub(super) fn event_entries(root: &Path) -> Result<Vec<fs::DirEntry>, TrustedWor
             "publisher",
             "merge-config",
             "landing-principal",
+            "refresh-principal",
+            "queue-refresh",
         ]
         .iter()
         .any(|name| entry.file_name() == *name)

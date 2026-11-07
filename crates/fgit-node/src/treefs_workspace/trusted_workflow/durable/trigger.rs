@@ -19,6 +19,7 @@ mod prestart;
 mod pull_request;
 mod pull_request_merge;
 mod queue_landing;
+mod queue_refresh;
 mod reporting;
 pub mod service;
 
@@ -211,6 +212,12 @@ impl OneNode {
         let owner = Owner::open(&root)?;
         if let Some(config) = merge_config {
             config.bind(&root)?;
+        }
+        if let (Some(number), Some(merge)) = (queue_number, merge_config) {
+            queue_refresh::ensure_resolved_in(
+                self, request, reference, number, &root, &scope, merge,
+            )
+            .await?;
         }
         let entries = reporting::event_entries(&root)?;
         let mut pending = None;

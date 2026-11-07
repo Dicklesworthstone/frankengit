@@ -10,6 +10,9 @@ use super::{
 };
 use fgit_admission::merge::native::queue;
 use fgit_forge::event::review::ReviewSubject;
+use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand};
+use fgit_forge::{ExpectedVersion, ForgeEventPayload};
+use super::queue_refresh::RefreshSelection;
 use fgit_forge::merge_queue::MergeQueueSnapshot;
 use fgit_forge::preparation::MergeCommitStyle;
 use fgit_forge::{AggregateVersion, QueueNumber};
@@ -231,6 +234,107 @@ impl OneNode {
             source: entry.source_ref.clone(),
         });
         Ok(Selection::Ready(selected))
+    }
+
+    /// Select a complete target-only refresh at one authenticated authority
+    /// basis. Every original PR text and source field is retained. This is a
+    /// read: it never alters the ordinary stale-candidate selector or retries
+    /// an earlier command with newly observed metadata.
+    pub(super) async fn select_queue_target_refresh_in(
+        &self,
+        request: &NodeRequestContext,
+        target: &RefName,
+        number: u64,
+    ) -> Result<RefreshSelection, TrustedWorkflowFailure> {
+        let number =
+            QueueNumber::try_new(number).ok_or_else(|| invalid("queue number must be positive"))?;
+        let state = self
+            .materialize_admission_in(request)
+            .await
+            .map_err(|error| {
+                TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Authority(Box::new(error)))
+            })?;
+        let visible = |name: &RefName| !state.snapshot().hidden_refs.hides(name.as_bytes());
+        let selected_queue = queue::read_queue_at(
+            &self.authority,
+            request.authority(),
+            state.basis(),
+            number,
+            &visible,
+            &|| !workspace_request_live(request),
+        )
+        .await
+        .map_err(|error| invalid_owned(error.to_string()))?;
+        let Some(selected_queue) = selected_queue.filter(|queue| queue.target_ref == *target) else {
+            return Ok(RefreshSelection::Unneeded);
+        };
+        if selected_queue.active_batch.is_some() {
+            return Ok(RefreshSelection::Waiting);
+        }
+        let Some(entry) = selected_queue.entries.first() else {
+            return Ok(RefreshSelection::Unneeded);
+        };
+        let page = self
+            .read_pull_requests_in(
+                request,
+                &RefVisibility::new(),
+                entry.pull_request.get() - 1,
+                1,
+                None,
+            )
+            .await
+            .map_err(|error| invalid_owned(error.to_string()))?;
+        if page.source_head != state.basis().id() {
+            return Ok(RefreshSelection::Waiting);
+        }
+        let Some(view) = page
+            .pull_requests
+            .into_iter()
+            .find(|view| view.number == entry.pull_request)
+        else {
+            return Ok(RefreshSelection::Waiting);
+        };
+        let version = view.event.version;
+        let ForgeEventPayload::PullRequestChangedNative(event) = view.event.payload else {
+            return Ok(RefreshSelection::Waiting);
+        };
+        let mut data = event.data;
+        if event.action == PullRequestAction::Close
+            || data.source_ref != entry.source_ref
+            || data.target_ref != *target
+            || data.source_tip != entry.head_tip
+            || state.snapshot().refs.get(&data.source_ref) != Some(&data.source_tip)
+            || !visible(&data.source_ref)
+            || !visible(&data.target_ref)
+        {
+            return Ok(RefreshSelection::Waiting);
+        }
+        let Some(new_target) = state.snapshot().refs.get(target).copied() else {
+            return Ok(RefreshSelection::Waiting);
+        };
+        if data.target_tip == new_target {
+            return Ok(RefreshSelection::Unneeded);
+        }
+        if version.next().is_err() {
+            return Ok(RefreshSelection::Waiting);
+        }
+        let old_target = data.target_tip;
+        data.target_tip = new_target;
+        Ok(RefreshSelection::Ready {
+            basis: state.basis().id(),
+            command: queue::QueueHeadRefreshCommand {
+                number,
+                expected_queue_version: selected_queue.version,
+                expected_policy_epoch: state.basis().body().policy_epoch,
+                expected_recorded_target_tip: old_target,
+                pull_request: PullRequestCommand {
+                    number: entry.pull_request,
+                    expected_version: ExpectedVersion::Exactly(version),
+                    action: PullRequestAction::Update,
+                    data,
+                },
+            },
+        })
     }
 
     /// Revalidate a prepared queue selection and its full PR subject at one

@@ -5,8 +5,10 @@
 use super::super::super::validate_inputs;
 pub use super::pull_request_merge::PullRequestMergeWatchConfig;
 pub use super::queue_landing::TrustedQueueLanding;
+pub use super::queue_refresh::{QueueRefreshMode, TrustedQueueRefresh};
 use super::{
     Owner, check_directory, hex, lower_hash, merge_queue, pull_request, pull_request_merge,
+    queue_refresh,
     reporting,
 };
 use crate::treefs_workspace::TrustedWorkflowArtifactConfig;
@@ -42,6 +44,7 @@ pub struct WorkflowWatchConfig {
     attempt_timeout: GitDaemonSessionTimeout,
     publisher: Option<PrincipalId>,
     landing_principal: Option<PrincipalId>,
+    queue_refresh_principal: Option<PrincipalId>,
     pull_request: Option<u64>,
     pull_requests: Option<usize>,
     merge_queue: Option<u64>,
@@ -84,6 +87,7 @@ impl WorkflowWatchConfig {
             attempt_timeout: GitDaemonSessionTimeout::DEFAULT,
             publisher: None,
             landing_principal: None,
+            queue_refresh_principal: None,
             pull_request: None,
             pull_requests: None,
             merge_queue: None,
@@ -125,6 +129,17 @@ impl WorkflowWatchConfig {
     #[must_use]
     pub const fn with_landing_principal(mut self, principal: PrincipalId) -> Self {
         self.landing_principal = Some(principal);
+        self
+    }
+
+    /// Separate trusted-operator authority for queue-head metadata management
+    /// and its sole PR Update after the target advances. No CI, check, read or
+    /// landing identity implies this grant. The first retained intent binds it
+    /// permanently; omitted authority cannot bypass pending original custody.
+    /// This initial profile requires the complete automatic queue landing mode.
+    #[must_use]
+    pub const fn with_queue_refresh_principal(mut self, principal: PrincipalId) -> Self {
+        self.queue_refresh_principal = Some(principal);
         self
     }
 
@@ -217,6 +232,7 @@ impl WorkflowWatchConfig {
         if self.reference.as_bytes().starts_with(b"refs/tags/")
             && (self.publisher.is_some()
                 || self.landing_principal.is_some()
+                || self.queue_refresh_principal.is_some()
                 || self.pull_request.is_some()
                 || self.pull_requests.is_some()
                 || self.merge_queue.is_some()
@@ -224,6 +240,16 @@ impl WorkflowWatchConfig {
         {
             return Err(invalid(
                 "tag workflow service supports ordinary execution only; check publication, PR and queue modes require a branch",
+            ));
+        }
+        if self.queue_refresh_principal.is_some()
+            && (self.merge_queue.is_none()
+                || self.merge_candidate.is_none()
+                || self.publisher.is_none()
+                || self.landing_principal.is_none())
+        {
+            return Err(invalid(
+                "automatic queue refresh requires a queue, merge candidate, check publisher and explicit landing principal",
             ));
         }
         if self.landing_principal.is_some()
@@ -295,6 +321,10 @@ impl WorkflowWatchConfig {
         self.landing_principal
     }
     #[must_use]
+    pub const fn queue_refresh_principal(&self) -> Option<PrincipalId> {
+        self.queue_refresh_principal
+    }
+    #[must_use]
     pub const fn pull_request(&self) -> Option<u64> {
         self.pull_request
     }
@@ -339,6 +369,11 @@ pub struct WorkflowWatchReceipt {
     pub dispatched: u64,
     pub checks_committed: u64,
     pub checks_refused: u64,
+    pub refreshes_committed: u64,
+    pub refreshes_refused: u64,
+    pub refreshes_previously_decided: u64,
+    pub refreshes_waiting: u64,
+    pub refresh_pending: bool,
     pub landings_committed: u64,
     pub landings_refused: u64,
     pub landings_previously_decided: u64,
@@ -364,7 +399,9 @@ impl WorkflowWatchReceipt {
             concat!(
                 "{{\"type\":\"workflow_service_drained\",\"schema_version\":1,",
                 "\"polls\":{},\"dispatched\":{},\"checks_committed\":{},",
-                "\"checks_refused\":{},\"landings_committed\":{},\"landings_refused\":{},",
+                "\"checks_refused\":{},\"refreshes_committed\":{},\"refreshes_refused\":{},",
+                "\"refreshes_previously_decided\":{},\"refreshes_waiting\":{},\"refresh_pending\":{},",
+                "\"landings_committed\":{},\"landings_refused\":{},",
                 "\"landings_previously_decided\":{},\"landings_waiting\":{},\"landings_stale\":{},",
                 "\"non_green\":{},\"interrupted\":{},",
                 "\"requires_reconciliation\":{},\"publication_pending\":{},\"pending_execution\":{},",
@@ -374,6 +411,11 @@ impl WorkflowWatchReceipt {
             self.dispatched,
             self.checks_committed,
             self.checks_refused,
+            self.refreshes_committed,
+            self.refreshes_refused,
+            self.refreshes_previously_decided,
+            self.refreshes_waiting,
+            self.refresh_pending,
             self.landings_committed,
             self.landings_refused,
             self.landings_previously_decided,
@@ -540,6 +582,10 @@ pub fn run_service_with_ready(
         }
         Ok(())
     })();
+    // Readiness failure or an operator stop may occur before the first
+    // recovery pass. Retained refresh responsibility remains visible on exit,
+    // without a sticky flag blocking a successfully recovered active poll.
+    receipt.requires_reconciliation |= receipt.refresh_pending;
     if let Err(error) = node.shutdown() {
         // Keep this controller's lock until process exit when node quiescence
         // was not established. Existing event markers also prohibit reexecution.
@@ -632,6 +678,9 @@ fn attempt(
     if control.is_stopped() {
         return Ok(());
     }
+    if execute && refresh(node, request, config, receipt, QueueRefreshMode::RecoverOnly)? {
+        return stopped(control, "attempt budget stopped queue refresh recovery");
+    }
     if publish(node, request, config, receipt)? {
         return stopped(
             control,
@@ -648,6 +697,12 @@ fn attempt(
             control,
             "attempt budget stopped queue landing reconciliation",
         );
+    }
+    if control.is_stopped() {
+        return Ok(());
+    }
+    if refresh(node, request, config, receipt, QueueRefreshMode::RecoverAndSelect)? {
+        return stopped(control, "attempt budget stopped queue target refresh");
     }
     if control.is_stopped() {
         return Ok(());
@@ -885,7 +940,7 @@ fn publish(
     // do not turn an idle recovery scan into new pending publication. Startup
     // still refuses readiness until the recovery pass completes without stop.
     if !result.request_stopped {
-        receipt.publication_pending = false;
+        receipt.publication_pending = receipt.refresh_pending;
     }
     Ok(result.request_stopped)
 }
@@ -893,6 +948,63 @@ fn publish(
 /// This pass follows a complete check publication pass under the SAME finite
 /// request. The retained execution and canonical admission determine readiness;
 /// no aggregate counter or local "reported" marker authorizes target mutation.
+fn refresh(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    config: &WorkflowWatchConfig,
+    receipt: &mut WorkflowWatchReceipt,
+    mode: QueueRefreshMode,
+) -> Result<bool, WorkflowWatchError> {
+    let Some(refresher) = config.queue_refresh_principal else {
+        return Ok(false);
+    };
+    if !request.checkpoint_is_live() {
+        return Ok(true);
+    }
+    let (Some(number), Some(publisher), Some(lander), Some(merge)) = (
+        config.merge_queue,
+        config.publisher,
+        config.landing_principal,
+        config.merge_candidate.as_ref(),
+    ) else {
+        return Err(WorkflowWatchError::Attempt(
+            "automatic queue refresh requires its complete operator configuration".into(),
+        ));
+    };
+    let result = node.runtime().block_on(
+        node.refresh_trusted_queue_head_merge_workflows_in(
+            request,
+            &config.reference,
+            number,
+            &config.directory,
+            &config.run_parent,
+            merge,
+            publisher,
+            lander,
+            refresher,
+            mode,
+            |_| Ok(()),
+        ),
+    );
+    receipt.non_green |= result.refused != 0;
+    receipt.interrupted |= result.request_stopped;
+    receipt.requires_reconciliation |= result.error.is_some();
+    if result.error.is_none() && !result.request_stopped {
+        receipt.refresh_pending = result.pending;
+    } else {
+        receipt.refresh_pending |= result.pending || result.error.is_some();
+    }
+    receipt.publication_pending |= receipt.refresh_pending;
+    add(&mut receipt.refreshes_committed, result.committed)?;
+    add(&mut receipt.refreshes_refused, result.refused)?;
+    add(&mut receipt.refreshes_previously_decided, result.previously_decided)?;
+    add(&mut receipt.refreshes_waiting, result.waiting)?;
+    if let Some(error) = result.error {
+        return Err(WorkflowWatchError::Attempt(error));
+    }
+    Ok(result.request_stopped)
+}
+
 fn land(
     node: &OneNode,
     request: &NodeRequestContext,
@@ -975,6 +1087,8 @@ impl ServiceCustody {
         } else {
             let custody = Custody::open(node, config, control)?;
             receipt.pending_execution = custody.pending_execution;
+            receipt.refresh_pending = custody.refresh_pending;
+            receipt.publication_pending |= custody.refresh_pending;
             Ok(Self::Single(custody))
         }
     }
@@ -1004,6 +1118,7 @@ struct Custody {
     watch_metadata: fs::Metadata,
     watch_owner: fs::File,
     pending_execution: u64,
+    refresh_pending: bool,
 }
 
 impl Custody {
@@ -1012,8 +1127,12 @@ impl Custody {
         config: &WorkflowWatchConfig,
         control: &WorkflowWatchControl,
     ) -> Result<Self, WorkflowWatchError> {
-        let request = node.command_request_context(Some(config.attempt_timeout));
-        Self::open_in(node, config, control, &request)
+        controlled_operation(node, config, control, |request| {
+            if control.is_stopped() {
+                return Err(WorkflowWatchError::StoppedBeforeReadiness);
+            }
+            Self::open_in(node, config, control, request)
+        })
     }
 
     fn open_in(
@@ -1061,6 +1180,28 @@ impl Custody {
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
         let watch_owner = fs::File::open(events.join("owner.lock"))
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
+        let refresh_pending = match (config.merge_queue, config.merge_candidate.as_ref()) {
+            (Some(number), Some(merge)) => node.runtime().block_on(
+                queue_refresh::validated_pending_in(
+                    node, request, &config.reference, number, &events, &scope, merge,
+                    config.queue_refresh_principal,
+                ),
+            ).map_err(|error| {
+                if control.is_stopped()
+                    && matches!(
+                        &error,
+                        super::TrustedWorkflowFailure::InvalidInput(
+                            "queue refresh custody verification stopped"
+                        )
+                    )
+                {
+                    WorkflowWatchError::StoppedBeforeReadiness
+                } else {
+                    custody(error)
+                }
+            })?,
+            _ => false,
+        };
         let mut result = Self {
             parent: config.run_parent.clone(),
             parent_metadata,
@@ -1070,6 +1211,7 @@ impl Custody {
             watch_metadata,
             watch_owner,
             pending_execution: 0,
+            refresh_pending,
         };
         result.check()?;
         drop(_event_owner);
