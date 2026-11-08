@@ -10,6 +10,31 @@ Set `FGIT_ORACLE_ROOT` to a dedicated absolute directory outside this checkout
 root inside the repository, an unpinned identity, receipt drift, a wrong
 binary version, a missing Bubblewrap sandbox, or path/config/credential escape
 arguments. It creates no fallback to a host `git` binary.
+Root initialization requires `realpath -m` to resolve physical parent aliases
+and normalized components before creating a missing directory. Canonical `/`
+and source-tree roots refuse before creation; regular-file roots and failed
+initialization cannot become a missing-installation result. External parent
+aliases remain permitted. The final directory is checked again after creation.
+These path checks assume a cooperative local filesystem; they do not isolate a
+hostile same-account process racing parent replacement.
+
+The native bundle-verifier, import-fixture and recovery tests retain their exact
+Git 2.47.3 oracle through the `git-2.47.3` pin. Build that pin with the same
+source-verification and sandbox commands below. Their test-only adapter invokes
+`verify`, `create-run` and `capture`; it retains each command's transcripts in
+the reported external run directory. An absent installation is an explicit test
+skip. Receipt drift, a missing sandbox or another refusal fails the test. These
+checks establish upstream readability of controlled fixtures, not current Rust
+qualification, repository authority or live-source authenticity. The 2.46.4 and
+2.54.0 oracle selections of other campaigns are unchanged.
+
+Builds select GNU C11 explicitly and record that choice in the binary receipt.
+This avoids compiler-default drift: Git 2.47.3's `unreachable` function conflicts
+with the C23 macro exposed by GCC 15's default dialect. The upstream source is
+unchanged; no warning suppression or oracle assertion is relaxed. Existing
+receipted installations keep their original build fingerprints.
+Configuration failures propagate through the archive/install/receipt and run
+path helpers as refusals; they are not converted into missing-installation skips.
 
 For a network-free build, place the independently verified release archive at
 `$FGIT_ORACLE_ROOT/downloads/<archive-name>` and run:

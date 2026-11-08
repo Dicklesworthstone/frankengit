@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export RCH_CARGO_WRAPPER_BYPASS=1
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fg-native-bundle-${USER:-local}}"
+# The caller owns its pane target; preserve normal RCH dispatch.
+: "${CARGO_TARGET_DIR:?set CARGO_TARGET_DIR to your private /data/frankengit-targets/<pane-label> directory}"
+export CARGO_TARGET_DIR
 case "${1:-test}" in
   check) cargo check --locked -p fgit-node -p fgit-cli --all-targets ;;
   test)
