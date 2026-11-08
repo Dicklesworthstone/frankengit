@@ -24,6 +24,35 @@ test('a broken report stream is a controlled failure, including a late error eve
   assert.equal(output.listenerCount('error'), 0);
 });
 
+for (const [name, value] of [
+  ['null', null], ['undefined', undefined], ['false', false], ['zero', 0],
+  ['empty string', ''], ['NaN', NaN], ['zero bigint', 0n],
+]) test(`a falsy thrown ${name} remains a reporting failure and closes its stream`, async () => {
+  const output = new Writable({ write() { throw value; } });
+  const closed = new Promise(resolve => output.once('close', resolve));
+  try {
+    await assert.rejects(writeRecord(output, { cycle: 1 }), error => Object.is(error, value));
+    await closed;
+    assert.equal(output.destroyed, true);
+    assert.equal(output.listenerCount('error'), 0);
+    assert.equal(output.listenerCount('close'), 0);
+  } finally { output.destroy(); }
+});
+
+test('a null write callback remains successful across consecutive reports', async () => {
+  const chunks = [];
+  const output = new Writable({ write(bytes, _encoding, done) { chunks.push(bytes); done(null); } });
+  try {
+    await writeRecord(output, { cycle: 1 });
+    await writeRecord(output, { cycle: 2 });
+    await tick();
+    assert.equal(Buffer.concat(chunks).toString(), '{"cycle":1}\n{"cycle":2}\n');
+    assert.equal(output.destroyed, false);
+    assert.equal(output.listenerCount('error'), 0);
+    assert.equal(output.listenerCount('close'), 0);
+  } finally { output.destroy(); }
+});
+
 test('closed output and a stalled reader cannot keep a service running indefinitely', async () => {
   const closed = new Writable({ write() { this.destroy(); } });
   await assert.rejects(writeRecord(closed, {}), /stream closed/);
