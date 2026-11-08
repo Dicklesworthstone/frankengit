@@ -196,6 +196,12 @@ test('HTTPS verifies explicit private CA and hostname; untrusted or wrong-name p
   const matching = await tls('matching', 'IP:127.0.0.1'), f = await fixture(t, { tls: matching });
   await assert.rejects(f.send()); assert.equal(f.calls.length, 0);
   await f.send({ ca: matching.cert }); assert((await readFile(f.output)).equals(f.bytes));
+  const c = await fixture(t, { tls: matching }), ca = join(c.dir, 'ca.pem');
+  await writeFile(ca, matching.cert, { mode: 0o600 });
+  const delivered = await c.invoke(['--ca-file', ca]);
+  assert.equal(delivered.code, 0, delivered.stderr); assert.equal(delivered.stderr, '');
+  assert.deepEqual(await readFile(c.output), c.bytes); assert.deepEqual(await readFile(ca), matching.cert);
+  assert.equal(JSON.parse(delivered.stdout).payload_sha256_verified, true); assert.equal(c.calls.length, 2);
   const wrong = await tls('wrong', 'DNS:wrong.example'), p = await fixture(t, { tls: wrong });
   await assert.rejects(p.send({ ca: wrong.cert })); assert.equal(p.calls.length, 0);
   await assert.rejects(stat(p.output), { code: 'ENOENT' });
@@ -223,6 +229,31 @@ test('CLI duplicate/widened options refuse before I/O', async t => {
     const f = await fixture(t), r = await f.invoke(args); assert.equal(r.code, 2);
     assert.equal(f.calls.length, 0); await assert.rejects(stat(f.output), { code: 'ENOENT' });
   }
+});
+
+for (const [label, args, permitted] of [
+  ['omitted optional options', [], true],
+  ['explicit deadline', ['--timeout-ms', '5000'], true],
+  ['empty deadline', ['--timeout-ms', ''], false],
+  ['empty CA path', ['--ca-file', ''], false],
+]) test(`CLI ${label} distinguishes omission from an empty supplied value`, async t => {
+  const f = await fixture(t), r = await f.invoke(args);
+  const custody = [['input', f.input], ['receipt', f.receipt]];
+  for (const [name, value] of custody) assert.equal(await readFile(join(f.dir, name), 'utf8'), JSON.stringify(value));
+  assert.equal(await readFile(join(f.dir, 'token'), 'utf8'), token + '\n');
+  assert.equal(r.code, permitted ? 0 : 2, r.stderr);
+  if (permitted) {
+    assert.equal(r.stderr, ''); assert.deepEqual(await readFile(f.output), f.bytes);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.payload_sha256, hash(f.bytes)); assert.equal(result.payload_sha256_verified, true);
+    assert.equal(result.execution_performed, false); assert.equal(result.canonical_repository_published, false);
+    assert.equal((await stat(f.output)).mode & 0o777, 0o600); assert.equal(f.calls.length, 2);
+  } else {
+    assert.equal(r.stdout, ''); assert.equal(JSON.parse(r.stderr).code, 'artifact_arguments_invalid');
+    assert.equal(f.calls.length, 0); await assert.rejects(stat(f.output), { code: 'ENOENT' });
+    assert.deepEqual((await readdir(f.dir)).sort(), ['input', 'receipt', 'token']);
+  }
+  assert(!r.stdout.includes(token) && !r.stderr.includes(token));
 });
 
 for (const stream of ['stdout', 'stderr']) for (const complete of [true, false]) {

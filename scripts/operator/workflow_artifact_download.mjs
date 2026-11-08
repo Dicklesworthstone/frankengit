@@ -280,7 +280,8 @@ export async function artifactDownloadCommand(args, { signal } = {}) {
   const flags = {};
   for (let i = 0; i < args.length; i += 2) {
     if (!['--input', '--receipt', '--token-file', '--output', '--timeout-ms', '--ca-file'].includes(args[i]) ||
-        Object.hasOwn(flags, args[i]) || typeof args[i + 1] !== 'string' || args[i + 1].startsWith('--')) refuse('artifact_arguments_invalid');
+        Object.hasOwn(flags, args[i]) || typeof args[i + 1] !== 'string' || args[i + 1].length === 0 ||
+        args[i + 1].startsWith('--')) refuse('artifact_arguments_invalid');
     flags[args[i]] = args[i + 1];
   }
   if (['--input', '--receipt', '--token-file', '--output'].some(k => !flags[k]) ||
