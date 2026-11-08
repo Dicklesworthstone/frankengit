@@ -426,7 +426,8 @@ preserved.
 Only canonical HTTPS or numeric-loopback HTTP is accepted. TLS certificate and
 hostname checks remain enabled; `--ca-file` may select an explicit private CA
 bundle. `--timeout-ms 1..300000` bounds both network requests together (default
-30000). SIGINT/SIGTERM cancel outstanding reads. A refusal, corrupt/partial
+30000). Supplied options require nonempty values; omit an optional flag to use
+its default. SIGINT/SIGTERM cancel outstanding reads. A refusal, corrupt/partial
 response or cancellation before publication leaves no new destination. There is
 no redirect, retry, alternate-ID or local-custody fallback. Once verified file
 publication begins it completes through cleanup; a late stop or output/sync
