@@ -362,4 +362,6 @@ if grep -F --quiet -- "${HOME}" "${FGIT_ORACLE_BWRAP_LOG}"; then
 else
     fge_pass FG-000B-ORACLE-011 "user HOME is absent from the Bubblewrap invocation"
 fi
-fge_artifact "${TEST_ROOT}/verdict.json" oracle-verdict
+VERDICT_ARTIFACT="$(fge_artifact_path oracle-verdict.json)"
+cp -- "${TEST_ROOT}/verdict.json" "${VERDICT_ARTIFACT}"
+fge_artifact "${VERDICT_ARTIFACT}" oracle-verdict
