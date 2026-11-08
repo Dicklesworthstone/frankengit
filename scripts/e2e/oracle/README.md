@@ -10,6 +10,13 @@ Set `FGIT_ORACLE_ROOT` to a dedicated absolute directory outside this checkout
 root inside the repository, an unpinned identity, receipt drift, a wrong
 binary version, a missing Bubblewrap sandbox, or path/config/credential escape
 arguments. It creates no fallback to a host `git` binary.
+Root initialization requires `realpath -m` to resolve physical parent aliases
+and normalized components before creating a missing directory. Canonical `/`
+and source-tree roots refuse before creation; regular-file roots and failed
+initialization cannot become a missing-installation result. External parent
+aliases remain permitted. The final directory is checked again after creation.
+These path checks assume a cooperative local filesystem; they do not isolate a
+hostile same-account process racing parent replacement.
 
 The native bundle-verifier, import-fixture and recovery tests retain their exact
 Git 2.47.3 oracle through the `git-2.47.3` pin. Build that pin with the same

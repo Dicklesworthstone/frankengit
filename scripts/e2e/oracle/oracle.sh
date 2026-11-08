@@ -60,9 +60,25 @@ oracle_root() {
             oracle_die "CONFIG" "FGIT_ORACLE_ROOT must be outside the source repository"
             ;;
     esac
-    mkdir -p "${root}"
-    root="$(cd "${root}" && pwd -P)"
+    # Resolve existing parent aliases even when the final directory is absent.
+    # Reject protected locations before mkdir can leave anything behind there.
+    oracle_require_command realpath
+    root="$(realpath -m -- "${root}")" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
     case "${root}" in
+        /)
+            oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a dedicated absolute non-root directory"
+            ;;
+        "${REPOSITORY_ROOT}"|"${REPOSITORY_ROOT}"/*)
+            oracle_die "CONFIG" "FGIT_ORACLE_ROOT resolves inside the source repository"
+            ;;
+    esac
+    [[ ! -e "${root}" || -d "${root}" ]] || oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a directory"
+    mkdir -p "${root}" || oracle_die "UNAVAILABLE" "cannot create oracle root"
+    root="$(cd "${root}" && pwd -P)" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
+    case "${root}" in
+        /)
+            oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a dedicated absolute non-root directory"
+            ;;
         "${REPOSITORY_ROOT}"|"${REPOSITORY_ROOT}"/*)
             oracle_die "CONFIG" "FGIT_ORACLE_ROOT resolves inside the source repository"
             ;;

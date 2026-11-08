@@ -238,6 +238,29 @@ expect_exit FG-000B-ORACLE-047 64 "invalid root refuses before selecting an arch
     env FGIT_ORACLE_ROOT=/ "${ORACLE}" build testgit
 expect_file_contains FG-000B-ORACLE-049 FGIT_ORACLE_CONFIG \
     "${TEST_ROOT}/FG-000B-ORACLE-046.stderr" "invalid root retains its configuration diagnostic"
+expect_exit FG-000B-ORACLE-050 64 "normalized filesystem root is refused" \
+    env FGIT_ORACLE_ROOT=/tmp/.. "${ORACLE}" verify testgit
+ln -s / "${TEST_ROOT}/filesystem-root"
+expect_exit FG-000B-ORACLE-051 64 "aliased filesystem root is refused" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/filesystem-root" "${ORACLE}" verify testgit
+printf 'private root fixture\n' > "${TEST_ROOT}/regular-root"
+expect_exit FG-000B-ORACLE-052 64 "a regular file cannot be an oracle root" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/regular-root" "${ORACLE}" verify testgit
+# Copy the real command and its library into a synthetic source layout. This
+# tests pre-creation source exclusion without touching the actual checkout.
+SHADOW_REPO="${TEST_ROOT}/shadow-repository"
+mkdir -p "${SHADOW_REPO}/scripts/e2e/oracle"
+cp -- "${ORACLE}" "${SHADOW_REPO}/scripts/e2e/oracle/oracle.sh"
+cp -- "${SCRIPT_DIR}/../../lib.sh" "${SHADOW_REPO}/scripts/e2e/lib.sh"
+ln -s "${SHADOW_REPO}" "${TEST_ROOT}/source-alias"
+expect_exit FG-000B-ORACLE-053 64 "source alias refuses before root initialization" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/source-alias/new-oracle" "${SHADOW_REPO}/scripts/e2e/oracle/oracle.sh" verify testgit
+fge_assert_cmd FG-000B-ORACLE-054 'refused source alias creates no directory in the synthetic checkout' \
+    test ! -e "${SHADOW_REPO}/new-oracle"
+expect_exit FG-000B-ORACLE-057 69 "an inaccessible parent reports root initialization failure" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/regular-root/child" "${ORACLE}" verify testgit
+expect_file_contains FG-000B-ORACLE-058 'FGIT_ORACLE_UNAVAILABLE: cannot create oracle root' \
+    "${TEST_ROOT}/FG-000B-ORACLE-057.stderr" "root initialization failure is not a missing-installation diagnostic"
 
 printf '#!/bin/sh\nprintf "git version 9.9.9\\n"\n' > "${FAKE_GIT}"
 chmod 700 "${FAKE_GIT}"
@@ -248,8 +271,26 @@ cp --preserve=mode -- "${TEST_ROOT}/valid-git" "${FAKE_GIT}"
 read -r FAKE_HASH _ < <(sha256sum "${FAKE_GIT}")
 write_fake_receipt "${FAKE_HASH}"
 
+mkdir -p "${TEST_ROOT}/safe-parent"
+cp -a -- "${TEST_ROOT}/oracle-root" "${TEST_ROOT}/safe-parent/oracle-root"
+ln -s "${TEST_ROOT}/safe-parent" "${TEST_ROOT}/safe-parent-alias"
+SAFE_CANONICAL_PARENT="$(cd "${TEST_ROOT}/safe-parent" && pwd -P)"
+expect_exit FG-000B-ORACLE-055 0 "external parent aliases and normalized components remain permitted" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/safe-parent-alias/./oracle-root/../oracle-root" "${ORACLE}" create-run testgit permitted-root
+expect_file_contains FG-000B-ORACLE-056 "${SAFE_CANONICAL_PARENT}/oracle-root/runs/" \
+    "${TEST_ROOT}/FG-000B-ORACLE-055.stdout" "permitted alias reports its canonical run path"
+mkdir -p "${TEST_ROOT}/no-realpath-bin"
+for required_command in bash dirname mkdir sha256sum bwrap env; do
+    required_path="$(command -v "${required_command}")"
+    ln -s "${required_path}" "${TEST_ROOT}/no-realpath-bin/${required_command}"
+done
+expect_exit FG-000B-ORACLE-059 69 "missing physical path resolver fails closed" \
+    env PATH="${TEST_ROOT}/no-realpath-bin" "${ORACLE}" verify testgit
+expect_file_contains FG-000B-ORACLE-060 'required command is unavailable: realpath' \
+    "${TEST_ROOT}/FG-000B-ORACLE-059.stderr" "resolver absence has its own diagnostic"
+
 mkdir -p "${TEST_ROOT}/no-bwrap-bin"
-for required_command in bash dirname mkdir sha256sum; do
+for required_command in bash dirname mkdir sha256sum realpath; do
     required_path="$(command -v "${required_command}")"
     ln -s "${required_path}" "${TEST_ROOT}/no-bwrap-bin/${required_command}"
 done
