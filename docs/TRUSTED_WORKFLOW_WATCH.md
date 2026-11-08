@@ -260,6 +260,10 @@ The executable exits only after `main` has awaited its native owners, output
 callbacks and finalizers. It exits explicitly so a failed stdout or stderr write
 cannot keep the process alive after the existing ten-second output deadline.
 The exported `main` function continues to return its selected exit code.
+The real-node operator campaign also blocks artifact-download stdout after local
+file publication. It checks exact file and binary/empty log bytes, private mode,
+staging cleanup and original custody. Retrying the same destination after the
+native listener stops refuses before fetching or overwriting the retained file.
 
 ## Validation boundary
 

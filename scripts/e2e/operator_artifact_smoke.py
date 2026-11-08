@@ -84,14 +84,14 @@ def artifact_case(c, home, repository, config, credentials, incarnation, token, 
     cli = ROOT / "scripts/fg_workflow_watch.mjs"
     descriptor = home / "artifact-input.json"
 
-    def download(server, index, destination, expected=0, receipt_override=None):
+    def download(server, index, destination, expected=0, receipt_override=None, *, block_stdout=False):
         path, receipt, selector, _ = selections[index]
         descriptor.write_text(json.dumps({"endpoint": server.url, "scope": {"tenant_id": TENANT,
             "repository_id": REPOSITORY, "repository_incarnation_id": incarnation,
             "trust_domain": "trusted-workflow-local-owner"}, "job_id_hex": receipt["manifest"]["job_id_hex"], **selector}))
         return c.node_command(cli, ["artifact-download", "--input", str(descriptor),
             "--receipt", str(receipt_override or path), "--token-file", str(token), "--output", str(destination)],
-            expected, error_reply=expected != 0)
+            expected, error_reply=expected != 0, block_stdout=block_stdout)
 
     def refused(server, name):
         row = selected_row(output, selections[0][2])
@@ -154,6 +154,38 @@ def artifact_case(c, home, repository, config, credentials, incarnation, token, 
         refused(server, "revoked-artifact")
         grants("artifact-read")
         c.facts[fmt + "_artifact_download_grant_and_ceiling_twins"] = True
+    # Output loss follows actual create-only file publication. Cover an output
+    # file, binary stderr and empty failed stderr beside their normal downloads.
+    retained_outputs = 0
+    for index, (_, receipt, selector, expected) in enumerate(selections):
+        if "stream" in selector and selector["stream"] != "stderr":
+            continue
+        lost = home / f"unreported-artifact-{index}"
+        reporting = HttpServer(c, repository, credentials, f"operator-artifacts-output-{fmt}-{index}")
+        reporting.command.extend(["--artifact-root", str(artifact_root), "--expected-incarnation", incarnation])
+        with reporting:
+            result = download(reporting, index, lost, 3, block_stdout=True)
+        require(result["type"] == "workflow_artifact_download_error"
+                and result["code"] == "artifact_download_local_or_output_failure"
+                and result["output_may_exist"] is True
+                and result["execution_performed"] is result["canonical_repository_published"] is False,
+                "artifact report loss concealed possible local publication or changed its typed failure")
+        require(lost.read_bytes() == expected == (home / f"native-artifact-{index}").read_bytes()
+                and hashlib.sha256(lost.read_bytes()).hexdigest() == selected_row(receipt, selector)["payload_sha256"]
+                and lost.stat().st_mode & 0o777 == 0o600 and lost.stat().st_nlink == 1
+                and not any(home.glob("*.writing-*")),
+                "lost report did not retain exact private native bytes with completed staging cleanup")
+        # The native listener has stopped. Retry must refuse the existing local
+        # result before any metadata/content fetch, without replacing its bytes.
+        collision = download(reporting, index, lost, 2)
+        require(collision["code"] == "artifact_output_exists" and lost.read_bytes() == expected
+                and all(path.read_bytes() == data for path, data in saved.items())
+                and (home / "executions").read_bytes() == b"sf"
+                and c.run("at", repository, TENANT, REPOSITORY, "latest") == before,
+                "offline retry changed original output, receipts, execution or canonical state")
+        retained_outputs += 1
+    require(retained_outputs == 3, "report-loss coverage must include output, binary log and empty failed log")
+    c.facts[fmt + "_artifact_output_loss_retains_bytes"] = True
     # Restart without original jobs/receipts at their old paths. The client has
     # only exact copied receipts; the server retains its immutable artifact store.
     runs, retained = Path(config["run_parent"]), home / "retained-artifact-runs"
