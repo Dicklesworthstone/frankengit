@@ -47,7 +47,7 @@ against the explicitly older `a9d65885` native binary identified below. Receipt:
 SHA-256 `0de21b1bcd9760e5b6fc35d132ec95ffe18d7d4c363f47e576659ff74ab20133`.
 The full operator matrix and current-source native qualification remain open.
 
-The shared GitHub pull peer and issue operator fixture allocate listeners through
+The shared GitHub pull peer, issue operator and issue archive fixtures allocate listeners through
 `tests/fetch-peer.mjs`. Hosts may assign ephemeral ports that Fetch refuses
 before any TCP request. The helper retires those selections before exposing a
 URL, preserves an already usable listener, and fails after sixteen forbidden
@@ -218,3 +218,6 @@ before a planted containment fault could be checked. A real long-argument
 process fixture exercises that failure beside the unchanged cancellation and
 denied-signal assertions. The fixed capture limit, one-second bound on each
 `ps` call, and existing test/controller deadlines are unchanged.
+The padding children report readiness and remain live through observation;
+their output streams are captured, and bounded teardown retains ownership
+until their process handles close.

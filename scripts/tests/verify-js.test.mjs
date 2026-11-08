@@ -3,7 +3,7 @@
 // not FrankenGit product, compatibility or live-fg evidence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, copyFile, writeFile, readFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, writeFile, readFile, rename, rm, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
@@ -97,8 +97,8 @@ function testRunnerGroup(run, root) {
 
 async function unrelatedArguments(t, root) {
   const script = join(root, 'unrelated-arguments.mjs');
-  await writeFile(script, 'setTimeout(() => {}, 60000);\n');
-  // Bound each padding argv to 160 KiB, but together exceed the default
+  await writeFile(script, "process.stdout.write('ready\\n');setTimeout(() => {}, 60000);\n");
+  // Each child carries 160 KiB of padding; together they exceed the default
   // 1 MiB execFileSync buffer. These are real, separately owned
   // processes; none is a child of the controller being inspected.
   const children = [], closed = [];
@@ -115,11 +115,26 @@ async function unrelatedArguments(t, root) {
     } finally { clearTimeout(timer); clearTimeout(deadline); }
   });
   for (let at = 0; at < 8; at++) {
-    const child = spawn(process.execPath, [script, ...Array(20).fill('p'.repeat(8192))], { stdio: 'ignore' });
-    children.push(child);
-    closed.push(new Promise(resolve => child.once('close', resolve)));
-    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    const stdout = await open(join(root, `argv-${at}.stdout`), 'wx', 0o600);
+    try {
+      const stderr = await open(join(root, `argv-${at}.stderr`), 'wx', 0o600);
+      try {
+        const child = spawn(process.execPath, [script, ...Array(20).fill('p'.repeat(8192))], {
+          stdio: ['ignore', stdout.fd, stderr.fd],
+        });
+        children.push(child);
+        closed.push(new Promise(resolve => child.once('close', resolve)));
+        await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      } finally { await stderr.close(); }
+    } finally { await stdout.close(); }
   }
+  const until = performance.now() + 3000;
+  while (true) {
+    assert(children.every(child => child.exitCode === null && child.signalCode === null), `argv fixture exited; see ${root}/argv-*.stderr`);
+    if ((await Promise.all(children.map((_, at) => readFile(join(root, `argv-${at}.stdout`), 'utf8')))).every(text => text === 'ready\n')) break;
+    assert(performance.now() < until, `argv fixtures did not become ready; see ${root}/argv-*`);await sleep(10);
+  }
+  return children;
 }
 
 test('actual profile verifies its selected source and completes a real one-test corpus', { timeout: 15000 }, async t => {
@@ -217,7 +232,7 @@ test('runtime-only command checks the same pin before Git metadata or corpus res
 
 test('a denied process-group probe during cancellation is containment failure, not ordinary interruption', { timeout: 15000 }, async t => {
   const f = await fixture(t, "import test from 'node:test';import {writeFileSync} from 'node:fs';test('held corpus',async()=>{writeFileSync(new URL('../../entered',import.meta.url),'ready');await new Promise(r=>setTimeout(r,60000));});\n");
-  await unrelatedArguments(t, f.root);
+  const padding = await unrelatedArguments(t, f.root);
   const loader = join(f.root, 'denied-probe.mjs');
   // Fault only the controller's OS liveness observation, after the real corpus
   // starts. Git initialization and actual TERM/KILL calls remain unchanged.
@@ -230,6 +245,7 @@ test('a denied process-group probe during cancellation is containment failure, n
     catch (e) { if (e.code !== 'ENOENT') throw e; }
     assert(performance.now() < until, r.stderr);await sleep(10);
   }
+  assert(padding.every(child => child.exitCode === null && child.signalCode === null), 'long argv fixtures must remain live during observation');
   const group = testRunnerGroup(r, f.root);
   assert(group, 'actual owned test-runner group was not observed');
   r.ownedPids.add(group);r.ownedGroups.add(group);
