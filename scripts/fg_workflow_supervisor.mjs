@@ -71,7 +71,12 @@ export function writeRecord(stream, value, timeoutMs = 30_000) {
       settled = true; clearTimeout(timer); stream.removeListener('close', closed);
       // Writable may emit its error just after invoking the write callback.
       setImmediate(() => stream.removeListener('error', failed));
-      if (error) reject(error); else resolve();
+      if (error) {
+        // Release ordinary writable streams. Node deliberately keeps stdout's
+        // descriptor open; the CLI error boundary exits after main has drained.
+        stream.destroy();
+        reject(error);
+      } else resolve();
     };
     const failed = error => finish(error), closed = () => finish(new Error('Supervisor report stream closed.'));
     const timer = setTimeout(() => finish(new Error('Supervisor report deadline exceeded.')), timeoutMs);
@@ -95,6 +100,21 @@ export async function main(argv = process.argv.slice(2)) {
     process.exitCode = exitCode(result);
   } finally { process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); }
 }
+// Called only after main's awaited owners/finalizers have settled. Merely setting
+// exitCode cannot terminate a process with an outstanding blocked stdout write.
+export function reportCliFailure(error) {
+  process.exitCode = 1;
+  const timer = setTimeout(() => process.exit(1), 1000);
+  try {
+    process.stderr.write(`workflow-supervisor: ${error?.message ?? String(error)}\n`, () => {
+      clearTimeout(timer);
+      process.exit(1);
+    });
+  } catch {
+    clearTimeout(timer);
+    process.exit(1);
+  }
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(error => { process.stderr.write(`workflow-supervisor: ${error.message}\n`); process.exitCode = 1; });
+  main().catch(reportCliFailure);
 }
