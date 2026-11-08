@@ -212,6 +212,10 @@ they can still inspect preserved custody and reports while the native installati
 is unavailable. Loss of stdout can therefore be reconciled without replay. Missing or
 contradictory evidence stays pending.
 
+Reconciliation observes SIGTERM/SIGINT through its existing cancellation
+checkpoints. An in-flight filesystem read settles before the next checkpoint;
+stopping preserves original reports, execution responsibility and owner locks.
+
 SIGTERM/SIGINT stop new work and **drain** an active native dispatch. Killing the
 native owner immediately would undermine its own step cleanup. The native
 600-second deadline remains in force; the external last-resort watchdog is 660

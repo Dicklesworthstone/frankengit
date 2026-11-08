@@ -1,7 +1,7 @@
 // Actual filesystem/process tests against an explicit native-schema peer, not fg.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, readdir, symlink, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, readdir, symlink, unlink, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -366,6 +366,53 @@ test('actual CLI SIGKILL between polls retains the owner lock; restart never ste
   assert.equal((await reconcile(f.config)).records[0].state, 'observed_succeeded');
   assert.equal((await status(f.config)).owner_present, true);
 });
+
+for (const signal of [null, 'SIGINT', 'SIGTERM']) {
+  test(`CLI reconciliation ${signal ? `honors delivered ${signal}` : 'completes with no stop request'} without replay`, async t => {
+    const f = await fixture(t, 'sha1', { drop_stdout: true });
+    await assert.rejects(once(f.config), /Dispatch unresolved/);
+    const original = (await status(f.config)).records[0];
+    const reportPath = join(original.native_directory, 'report.json'), report = await readFile(reportPath);
+    const calls = await f.lines('calls.ndjson'), effects = await f.lines('effects.ndjson');
+    const entries = await readdir(f.config.state_directory);
+    const custody = await Promise.all(entries.map(async name => [name, await readFile(join(f.config.state_directory, name))]));
+    const owner = join(f.config.state_directory, 'owner.lock');
+    await mkdir(owner, { mode: 0o700 }); const identity = await lstat(owner);
+    await unlink(f.config.fg); // Reconciliation must use saved reports, never an executable.
+    const listeners = ['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name));
+    let output = '', diagnostic = '';
+    const stdout = new Writable({ write(chunk, _encoding, done) { output += chunk; done(); } });
+    const stderr = new Writable({ write(chunk, _encoding, done) { diagnostic += chunk; done(); } });
+    const pending = main(['reconcile', '--config', f.configFile, '--trusted-local'], { stdout, stderr });
+    // main installs its stop handlers synchronously, before configuration I/O.
+    // Deliver the event there so the existing reconciliation checkpoint sees it.
+    if (signal) assert.equal(process.emit(signal), true);
+    assert.equal(await pending, signal ? 3 : 0);
+    assert.deepEqual(['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name)), listeners);
+    if (signal) {
+      assert.equal(output, '');
+      const error = JSON.parse(diagnostic);
+      assert.equal(error.type, 'workflow_watch_error'); assert.match(error.message, /stop requested/i);
+      assert.equal(error.execution_retried, false); assert.equal(error.absence_proves_non_execution, false);
+      assert.deepEqual((await readdir(f.config.state_directory)).sort(), [...entries, 'owner.lock'].sort());
+      assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
+      // The same original custody remains recoverable on a later uncancelled call.
+      output = ''; diagnostic = '';
+      assert.equal(await main(['reconcile', '--config', f.configFile, '--trusted-local'], { stdout, stderr }), 0);
+      assert.equal(JSON.parse(output).records[0].state, 'observed_succeeded'); assert.equal(diagnostic, '');
+    } else {
+      assert.equal(diagnostic, '');
+      assert.equal(JSON.parse(output).records[0].state, 'observed_succeeded');
+    }
+    assert.deepEqual(await readFile(reportPath), report);
+    assert.deepEqual(['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name)), listeners);
+    for (const [name, bytes] of custody) assert.deepEqual(await readFile(join(f.config.state_directory, name)), bytes);
+    const retainedOwner = await lstat(owner);
+    assert.equal(retainedOwner.dev, identity.dev); assert.equal(retainedOwner.ino, identity.ino);
+    assert.deepEqual(await f.lines('calls.ndjson'), calls); assert.deepEqual(await f.lines('effects.ndjson'), effects);
+    stdout.destroy(); stderr.destroy();
+  });
+}
 
 test('CLI output failure after native completion retains the result and reports delivery failure', async t => {
   const f = await fixture(t); let diagnostic = '';
