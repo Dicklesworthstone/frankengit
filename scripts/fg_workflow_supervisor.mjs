@@ -66,19 +66,30 @@ export function writeRecord(stream, value, timeoutMs = 30_000) {
   if (bytes.length > 1024 * 1024) throw new Error('Supervisor observation exceeds its output byte budget.');
   return new Promise((resolve, reject) => {
     let settled = false;
+    const cleanup = () => {
+      stream.removeListener('close', closed); stream.removeListener('error', failed);
+    };
     const finish = error => {
       if (settled) return;
-      settled = true; clearTimeout(timer); stream.removeListener('close', closed);
-      // Writable may emit its error just after invoking the write callback.
-      setImmediate(() => stream.removeListener('error', failed));
+      settled = true; clearTimeout(timer);
       if (error) {
         // Release ordinary writable streams. Node deliberately keeps stdout's
         // descriptor open; the CLI error boundary exits after main has drained.
+        // An asynchronous _destroy can still fail later: observe errors until
+        // close, without delaying this rejection beyond the report deadline.
         stream.destroy();
+        if (stream.closed) setImmediate(cleanup);
         reject(error);
-      } else resolve();
+      } else {
+        stream.removeListener('close', closed);
+        // Writable may emit its error just after invoking the write callback.
+        setImmediate(cleanup);
+        resolve();
+      }
     };
-    const failed = error => finish(error), closed = () => finish(new Error('Supervisor report stream closed.'));
+    const failed = error => finish(error), closed = () => {
+      finish(new Error('Supervisor report stream closed.')); cleanup();
+    };
     const timer = setTimeout(() => finish(new Error('Supervisor report deadline exceeded.')), timeoutMs);
     stream.on('error', failed); stream.once('close', closed);
     try { stream.write(bytes, error => finish(error)); } catch (error) { finish(error); }

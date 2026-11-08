@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Writable } from 'node:stream';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -37,6 +37,43 @@ test('report size and deadline controls are bounded before writing', () => {
   assert.throws(() => writeRecord(output, {}, 0), /timeout/);
   assert.throws(() => writeRecord(output, {}, 30001), /timeout/); output.destroy();
 });
+
+for (const destroyFails of [false, true]) {
+  test(`report deadline preserves ${destroyFails ? 'failed' : 'successful'} asynchronous destruction`, () => {
+    // A real Writable emits an asynchronous _destroy error before close. Run
+    // in a child so an unhandled error must be observable as a process failure.
+    const source = `
+      import assert from 'node:assert/strict';
+      import { Writable } from 'node:stream';
+      import { writeRecord } from ${JSON.stringify(new URL('./fg_workflow_supervisor.mjs', import.meta.url).href)};
+      let destructionSettled = false;
+      const output = new Writable({
+        write() {},
+        destroy(error, done) {
+          setTimeout(() => {
+            destructionSettled = true;
+            done(${destroyFails ? "new Error('delayed destroy failure')" : 'error'});
+          }, 30);
+        },
+      });
+      const closed = new Promise(resolve => output.once('close', resolve));
+      await assert.rejects(writeRecord(output, { cycle: 1 }, 5), /report deadline exceeded/);
+      assert.equal(destructionSettled, false, 'the report deadline must not await stream destruction');
+      await closed;
+      assert.equal(output.listenerCount('error'), 0);
+      assert.equal(output.listenerCount('close'), 0);
+      process.stdout.write('original deadline retained; destruction settled\\n');
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+      timeout: 2000, maxBuffer: 1024 * 1024,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stderr.toString());
+    assert.equal(result.stderr.toString(), '');
+    assert.equal(result.stdout.toString(), 'original deadline retained; destruction settled\n');
+  });
+}
 
 for (const [label, draining, drainErrors] of [
   ['stdout drains and exits successfully', true, true],
