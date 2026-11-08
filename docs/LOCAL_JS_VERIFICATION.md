@@ -47,9 +47,10 @@ against the explicitly older `a9d65885` native binary identified below. Receipt:
 SHA-256 `0de21b1bcd9760e5b6fc35d132ec95ffe18d7d4c363f47e576659ff74ab20133`.
 The full operator matrix and current-source native qualification remain open.
 
-The shared GitHub pull peer, issue operator and issue archive fixtures allocate listeners through
-`tests/fetch-peer.mjs`. Hosts may assign ephemeral ports that Fetch refuses
-before any TCP request. The helper retires those selections before exposing a
+The shared GitHub pull peer, source package peer, issue operator and issue archive
+fixtures allocate listeners through `tests/fetch-peer.mjs`. Hosts may assign
+ephemeral ports that Fetch refuses before any TCP request. The helper retires
+those selections before exposing a
 URL, preserves an already usable listener, and fails after sixteen forbidden
 selections. Tests exercise a real blocked listener, its permitted Fetch twin and
 bounded exhaustion. This changes fixture allocation, with no production request

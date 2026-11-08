@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
+import { listenForFetch } from '../../tests/fetch-peer.mjs';
 export const TOKEN = 'b'.repeat(64);
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (kind, bytes, format) => createHash(format).update(`${kind} ${bytes.length}\0`).update(bytes).digest('hex');
@@ -84,8 +85,11 @@ export async function peer(t, f = fixture(), alter = () => {}, { token = TOKEN }
     } catch (error) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: error.message })); }
   });
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  await listenForFetch(server);
   const endpoint = `http://127.0.0.1:${server.address().port}/repo`;
   const selected = { endpoint, tenant_id: f.envelope.tenant_id, repository_id: f.envelope.repository_id,
     repository_incarnation: f.envelope.repository_incarnation, object_format: f.format, ref: f.envelope.ref,
