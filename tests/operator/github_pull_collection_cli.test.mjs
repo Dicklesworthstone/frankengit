@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { Writable } from 'node:stream';
-import { writeFile, readFile, unlink, readdir } from 'node:fs/promises';
+import { writeFile, readFile, unlink, readdir, mkdir, symlink, access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { main } from '../../scripts/collect_github_pulls.mjs';
@@ -39,6 +39,44 @@ function result(raw,code=0) {
   assert.equal(raw.stdout.trim().split('\n').length,1);return JSON.parse(raw.stdout);
 }
 
+for(const marker of ['directory','linked'])for(const field of ['inventory','token'])test(`collector worktree parent aliases refuse ${field} with ${marker} marker`,async t=>{
+  const f=await fixture(t),repo=join(f.root,'worktree'),privateDir=join(repo,'private'),alias=join(f.root,'alias');
+  await mkdir(repo,{mode:0o700});await mkdir(privateDir,{mode:0o700});
+  if(marker==='directory')await mkdir(join(repo,'.git'));
+  else await writeFile(join(repo,'.git'),'gitdir: inert-linked-worktree-fixture\n');
+  await symlink(privateDir,alias);
+  const source=field==='inventory'?f.inventoryFile:f.tokenFile,bytes=await readFile(source),hidden=join(privateDir,field);
+  await writeFile(hidden,bytes,{mode:0o600});
+  const newJob=join(f.root,'new-job'),before=await readFile(join(f.workdir,'plan.json')),count=f.calls.length;
+  const argv=field==='inventory'?['prepare','--inventory',join(alias,field),'--inventory-confirm',f.inventory.sha256,'--workdir',newJob]:
+    [...args(f),'--token-file',join(alias,field)];
+  const refused=await run(t,f,argv);assert.equal(refused.code,field==='inventory'?2:4);assert.equal(refused.signal,null);assert.equal(refused.stdout,'');
+  assert.equal(JSON.parse(refused.stderr).code,'github_pull_collection_worktree');assert.equal(f.calls.length,count);
+  assert((await readFile(hidden)).equals(bytes));assert((await readFile(join(f.workdir,'plan.json'))).equals(before));
+  assert.deepEqual(await readdir(join(f.workdir,'captures')),[]);assert.deepEqual(await readdir(join(f.workdir,'journal')),[]);
+  await assert.rejects(access(newJob),{code:'ENOENT'});
+});
+test('collector worktree parent aliases permit external inputs and retain final-file nofollow',async t=>{
+  const f=await fixture(t),safe=join(f.root,'safe'),alias=join(f.root,'alias');
+  await mkdir(safe,{mode:0o700});await symlink(safe,alias);
+  for(const [name,path] of [['inventory',f.inventoryFile],['token',f.tokenFile]])await writeFile(join(safe,name),await readFile(path),{mode:0o600});
+  const newJob=join(f.root,'alias-job'),prepare=['prepare','--inventory',join(alias,'inventory'),'--inventory-confirm',f.inventory.sha256,'--workdir',newJob];
+  const prepared=result(await run(t,f,prepare));assert.equal(prepared.network_accessed,false);assert.equal(prepared.plan_sha256,f.prepared.plan_sha256);
+  const done=result(await run(t,f,['run','--workdir',newJob,'--confirm',prepared.plan_sha256,'--token-file',join(alias,'token')]));
+  assert.equal(done.complete,true);assert.equal(done.checkpointed_batches,2);
+  const direct=result(await run(t,f,collect(f)));assert.equal(done.complete_sha256,direct.complete_sha256);
+  // Parent aliases are allowed; final components are still opened O_NOFOLLOW.
+  const count=f.calls.length;await symlink(join(safe,'inventory'),join(safe,'inventory-link'));
+  const refused=await run(t,f,['prepare','--inventory',join(alias,'inventory-link'),'--inventory-confirm',f.inventory.sha256,'--workdir',join(f.root,'link-job')]);
+  assert.equal(refused.code,2);assert.equal(refused.stdout,'');assert.equal(JSON.parse(refused.stderr).code,'ELOOP');
+  await assert.rejects(access(join(f.root,'link-job')),{code:'ENOENT'});
+  await symlink(join(safe,'token'),join(safe,'token-link'));
+  // A fresh uncollected plan must inspect the token instead of returning offline.
+  const pending=join(f.root,'pending-job');result(await run(t,f,[...prepare.slice(0,-1),pending]));
+  const tokenRefusal=await run(t,f,['run','--workdir',pending,'--confirm',prepared.plan_sha256,'--token-file',join(alias,'token-link')]);
+  assert.equal(tokenRefusal.code,4);assert.equal(JSON.parse(tokenRefusal.stderr).code,'ELOOP');assert.equal(tokenRefusal.stdout,'');
+  assert.equal(f.calls.length,count);
+});
 test('actual CLI prepares, pauses, completes and selects a pinned native-compatible batch',async t=>{
   const f=await fixture(t,{records:1}),newJob=join(f.root,'cli-job');
   const p=result(await run(t,f,['prepare','--inventory',f.inventoryFile,'--inventory-confirm',f.inventory.sha256,'--workdir',newJob]));

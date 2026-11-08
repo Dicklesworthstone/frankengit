@@ -580,9 +580,10 @@ custody blocks progress. Private-file checks and bounded records protect this
 trusted operator profile; they do not isolate hostile scripts from their host
 account or grant any remote token a landing permission.
 
-The external GitHub PR capture/discovery CLIs check both supplied and resolved
-parent ancestry before reading private inputs or publishing outputs. A parent
-symlink cannot hide a Git worktree; aliases outside worktrees remain permitted.
+The external GitHub PR capture/discovery CLIs and collection input guard check
+both supplied and resolved parent ancestry before reading private inputs or
+publishing outputs. A parent symlink cannot hide a Git worktree; aliases outside
+worktrees remain permitted.
 Final-file symlink, owner, single-link and create-only checks remain separate.
 This assumes a cooperative local filesystem, not a hostile same-account parent
 that races directory replacement. These paths grant no native authority.

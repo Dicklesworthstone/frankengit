@@ -33,7 +33,12 @@ node scripts/collect_github_pulls.mjs status \
 Preparation is offline. It retains the original inventory and cumulative saved
 capture/record limits, synchronizes the new directories and inventory, and
 publishes `plan.json` last. It generates no native idempotency key. The original
-inventory file can be removed after preparation.
+inventory file can be removed after preparation. Inventory and token paths are
+checked against both supplied and resolved parent ancestry: a parent alias may
+not hide a Git worktree, including a linked-worktree marker. Parent aliases
+outside worktrees remain permitted for these inputs, while final-file symlinks
+refuse. Collection directories still require canonical paths. These checks assume
+a cooperative local filesystem, not a hostile-parent sandbox.
 
 `run` captures at most `--max-batches` batches per invocation (default 5, at most
 10,000). A valid paused run returns exit **3** and `complete:false`. Invoke `run`

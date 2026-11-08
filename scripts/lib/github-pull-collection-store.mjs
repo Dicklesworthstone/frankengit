@@ -26,10 +26,14 @@ export async function collectionDirectory(path,expected=null) {
 }
 export async function outsideWorktree(path) {
   collectionPath(path);
-  for(let at=path;;at=dirname(at)) {
-    if(at.split('/').includes('.git'))fail('collection_worktree');
-    try{await lstat(join(at,'.git'));fail('collection_worktree');}catch(e){if(e.code!=='ENOENT'&&e.code!=='ENOTDIR')throw e;}
-    if(dirname(at)===at)break;
+  // Input files may have parent aliases. Check their real ancestry while
+  // leaving the final component untouched for the private reader's O_NOFOLLOW.
+  for(const start of new Set([path,await realpath(dirname(path))])) {
+    for(let at=start;;at=dirname(at)) {
+      if(at.split('/').includes('.git'))fail('collection_worktree');
+      try{await lstat(join(at,'.git'));fail('collection_worktree');}catch(e){if(e.code!=='ENOENT'&&e.code!=='ENOTDIR')throw e;}
+      if(dirname(at)===at)break;
+    }
   }
   return path;
 }
