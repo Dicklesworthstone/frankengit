@@ -261,6 +261,19 @@ expect_exit FG-000B-ORACLE-057 69 "an inaccessible parent reports root initializ
     env FGIT_ORACLE_ROOT="${TEST_ROOT}/regular-root/child" "${ORACLE}" verify testgit
 expect_file_contains FG-000B-ORACLE-058 'FGIT_ORACLE_UNAVAILABLE: cannot create oracle root' \
     "${TEST_ROOT}/FG-000B-ORACLE-057.stderr" "root initialization failure is not a missing-installation diagnostic"
+expect_exit FG-000B-ORACLE-061 64 "a root ending in LF is refused without trimming it" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/raw-root"$'\n' "${ORACLE}" verify testgit
+fge_assert_cmd FG-000B-ORACLE-062 'LF refusal creates no directory at the unselected trimmed path' \
+    test ! -e "${TEST_ROOT}/raw-root"
+ln -s "${TEST_ROOT}/resolved-root"$'\n' "${TEST_ROOT}/resolved-root-alias"
+expect_exit FG-000B-ORACLE-063 64 "an alias resolving to a root ending in LF is refused" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/resolved-root-alias" "${ORACLE}" verify testgit
+fge_assert_cmd FG-000B-ORACLE-064 'resolved LF refusal creates no directory at the trimmed target' \
+    test ! -e "${TEST_ROOT}/resolved-root"
+expect_exit FG-000B-ORACLE-065 64 "a root containing CR is refused before creation" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/cr-root"$'\r' "${ORACLE}" verify testgit
+fge_assert_cmd FG-000B-ORACLE-066 'CR refusal leaves the selected path absent' \
+    test ! -e "${TEST_ROOT}/cr-root"$'\r'
 
 printf '#!/bin/sh\nprintf "git version 9.9.9\\n"\n' > "${FAKE_GIT}"
 chmod 700 "${FAKE_GIT}"
@@ -279,6 +292,11 @@ expect_exit FG-000B-ORACLE-055 0 "external parent aliases and normalized compone
     env FGIT_ORACLE_ROOT="${TEST_ROOT}/safe-parent-alias/./oracle-root/../oracle-root" "${ORACLE}" create-run testgit permitted-root
 expect_file_contains FG-000B-ORACLE-056 "${SAFE_CANONICAL_PARENT}/oracle-root/runs/" \
     "${TEST_ROOT}/FG-000B-ORACLE-055.stdout" "permitted alias reports its canonical run path"
+cp -a -- "${TEST_ROOT}/oracle-root" "${TEST_ROOT}/space λ cache"
+expect_exit FG-000B-ORACLE-067 0 "space and Unicode root bytes remain permitted" \
+    env FGIT_ORACLE_ROOT="${TEST_ROOT}/space λ cache" "${ORACLE}" create-run testgit exact-bytes
+expect_file_contains FG-000B-ORACLE-068 'space λ cache/runs/' \
+    "${TEST_ROOT}/FG-000B-ORACLE-067.stdout" "permitted root bytes survive the run path"
 mkdir -p "${TEST_ROOT}/no-realpath-bin"
 for required_command in bash dirname mkdir sha256sum bwrap env; do
     required_path="$(command -v "${required_command}")"

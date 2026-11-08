@@ -50,6 +50,9 @@ PIN_ARCHIVE=""
 oracle_root() {
     local root="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
     case "${root}" in
+        *$'\n'*|*$'\r'*)
+            oracle_die "CONFIG" "FGIT_ORACLE_ROOT must be a single-line path"
+            ;;
         ""|/)
             oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a dedicated absolute non-root directory"
             ;;
@@ -63,8 +66,15 @@ oracle_root() {
     # Resolve existing parent aliases even when the final directory is absent.
     # Reject protected locations before mkdir can leave anything behind there.
     oracle_require_command realpath
-    root="$(realpath -m -- "${root}")" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
+    # The sentinel preserves pathname LFs through command substitution. Remove
+    # only the sentinel and the tool's one line terminator before validation.
+    root="$(realpath -m -- "${root}" && printf .)" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
+    root="${root%.}"
+    root="${root%$'\n'}"
     case "${root}" in
+        *$'\n'*|*$'\r'*)
+            oracle_die "CONFIG" "FGIT_ORACLE_ROOT must be a single-line path"
+            ;;
         /)
             oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a dedicated absolute non-root directory"
             ;;
@@ -74,8 +84,13 @@ oracle_root() {
     esac
     [[ ! -e "${root}" || -d "${root}" ]] || oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a directory"
     mkdir -p "${root}" || oracle_die "UNAVAILABLE" "cannot create oracle root"
-    root="$(cd "${root}" && pwd -P)" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
+    root="$(cd "${root}" && pwd -P && printf .)" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
+    root="${root%.}"
+    root="${root%$'\n'}"
     case "${root}" in
+        *$'\n'*|*$'\r'*)
+            oracle_die "CONFIG" "FGIT_ORACLE_ROOT must be a single-line path"
+            ;;
         /)
             oracle_die "CONFIG" "FGIT_ORACLE_ROOT must name a dedicated absolute non-root directory"
             ;;

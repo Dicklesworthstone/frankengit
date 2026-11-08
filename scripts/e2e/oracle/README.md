@@ -17,6 +17,10 @@ initialization cannot become a missing-installation result. External parent
 aliases remain permitted. The final directory is checked again after creation.
 These path checks assume a cooperative local filesystem; they do not isolate a
 hostile same-account process racing parent replacement.
+Raw or resolved root paths containing CR/LF are explicitly unsupported and
+refuse before creation. Path-tool output is captured without trimming pathname
+bytes; only its one output terminator is removed. Spaces and Unicode names
+remain permitted.
 
 The native bundle-verifier, import-fixture and recovery tests retain their exact
 Git 2.47.3 oracle through the `git-2.47.3` pin. Build that pin with the same
