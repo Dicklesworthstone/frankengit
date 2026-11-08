@@ -52,7 +52,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in watch_execution_and_input_selection watch_dedup_and_reconcile artifact_native_capture_and_delivery artifact_download_grant_and_ceiling_twins artifact_binary_empty_failed_logs artifact_restart_custody_and_no_reexecution canonical_success_failure_and_skip publisher_dedup_and_original_keys outcome_grant_twins_and_service_drain recovery_no_execution_or_publication; do
+  for property in watch_execution_and_input_selection watch_dedup_and_reconcile artifact_native_capture_and_delivery artifact_download_grant_and_ceiling_twins artifact_binary_empty_failed_logs artifact_output_loss_retains_bytes artifact_restart_custody_and_no_reexecution canonical_success_failure_and_skip publisher_dedup_and_original_keys watch_output_failure_no_execution publication_output_failure_retains_terminal outcome_grant_twins_and_service_drain recovery_no_execution_or_publication; do
     fge_assert_eq "OPERATOR-WORKFLOW-$format-$property" true "$(fact "${format}_$property")" "native workflow operator $property"
   done
 done

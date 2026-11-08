@@ -82,7 +82,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     const config = await loadConfiguration(args[2]);
     value = await (args[0] === 'once' ? once(config, { signal: stop.signal })
       : args[0] === 'serve' ? serve(config, { ...loop, signal: stop.signal, onObservation: event => write(stdout, event) })
-      : args[0] === 'status' ? status(config) : reconcile(config));
+      : args[0] === 'status' ? status(config) : reconcile(config, { signal: stop.signal }));
     await write(stdout, value);
     if (value.records?.some(row => ['execution_unknown', 'queued'].includes(row.state))) return 3;
     return ['observed_failed', 'observed_stopped'].includes(value.outcome) || value.failed_runs > 0 || value.stopped_runs > 0 ? 1 : 0;
@@ -95,4 +95,6 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     return error.containment_unknown || /unresolved|incomplete|Dispatch unresolved|stop requested/i.test(error.message) ? 3 : 2;
   } finally { process.removeListener('SIGTERM', abort); process.removeListener('SIGINT', abort); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await main(process.argv.slice(2));
+// main has awaited its owners, output callbacks and finalizers. A failed stdio
+// write may still keep Node alive after its deadline unless the CLI exits.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exit(await main(process.argv.slice(2)));

@@ -191,6 +191,10 @@ Exit 0 means selected publications are committed, or there was no selected work;
 3 means pending/unknown publication or a reached publication-work limit;
 4 means a terminal or complete operation was observed but local cleanup/output
 failed. No exit code independently authorizes a merge.
+The executable exits explicitly after `main` has awaited its owners, output
+callbacks and finalizers. This prevents failed stdout or stderr writes from
+keeping Node alive after the existing ten-second deadline. The exported `main`
+function still returns its selected code; retained terminal custody is preserved.
 
 ## Verification boundary
 
