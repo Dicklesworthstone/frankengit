@@ -68,7 +68,12 @@ function requireAbsentTargets(oracle, root, format, from, to) {
   const existing = new Set([...from.values()].map(v => hashObject(format, 'blob', v.bytes)));
   for (const v of to.values()) {
     const id = hashObject(format, 'blob', v.bytes);
-    if (!existing.has(id)) assert.equal(git(oracle, root, ['cat-file', '-e', id]).status, 1, 'desired object must be absent before apply');
+    if (!existing.has(id)) {
+      const result = git(oracle, root, ['cat-file', '-e', id]);
+      assert.equal(result.status, 1, 'desired object must be absent before apply');
+      assert.equal(result.stdout.length, 0);
+      assert.equal(result.stderr.length, 0, 'missing-object refusal must come from Git, not a sandbox failure');
+    }
   }
 }
 for (const format of ['sha1', 'sha256']) for (const scenario of ['mixed', 'raw-edited', 'binary-modes', 'empty']) {
@@ -104,7 +109,10 @@ for (const format of ['sha1', 'sha256']) test(`${format}: occupied destination r
   const { before } = images(rows); before.set(hex('dest'), { mode: 0o100644, bytes: Buffer.from('occupied\n') });
   const root = join(home, 'repo'); await populate(oracle, root, format, before); const initial = ok(oracle, root, ['write-tree']);
   const patch = join(home, 'change.patch'); await writeFile(patch, compileSourceRefactoring(format, rows).patch);
-  assert.equal(git(oracle, root, ['apply', '--index', relative(root, patch)]).status, 1);
+  const refused = git(oracle, root, ['apply', '--index', relative(root, patch)]);
+  assert.equal(refused.status, 1);
+  assert.equal(refused.stdout.length, 0);
+  assert.equal(refused.stderr.toString(), 'error: dest: already exists in index\n');
   assert.deepEqual(ok(oracle, root, ['write-tree']), initial); assert.equal((await readFile(join(root, 'a'))).toString(), 'before\n');
 });
 for (const format of ['sha1', 'sha256']) test(`${format}: actual private-plan CLI output applies and reverses independently (Git 2.47.3)`, async t => {
