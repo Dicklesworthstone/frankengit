@@ -210,3 +210,11 @@ cancellation. It is never downgraded to an ordinary timeout/interruption. Stop
 escalates after five seconds and allows at most another five seconds for leader
 closure; inability to establish closure retires the local child handle and
 reports containment failure, without claiming the child was reaped.
+
+The controller fault tests discover PID, parent and group metadata before
+reading the command line of the owned runner. They do not collect unrelated
+process arguments, which previously overflowed the fixed subprocess buffer
+before a planted containment fault could be checked. A real long-argument
+process fixture exercises that failure beside the unchanged cancellation and
+denied-signal assertions. The fixed capture limit, one-second bound on each
+`ps` call, and existing test/controller deadlines are unchanged.
