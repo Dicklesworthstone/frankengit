@@ -1,13 +1,13 @@
-// Git is only a separately invoked test oracle. Each direction gets a new object store.
+// Exact pinned sandbox Git is test-only. Each direction gets a new object store.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, chmod, rm, realpath, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdir, writeFile, chmod, readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compileSourceRefactoring } from '../../scripts/operator/source_edit_replacements.mjs';
+import { pinnedNativeGitOracle } from './fixtures/pinned-native-git-oracle.mjs';
 const hashObject = (format, kind, body) => createHash(format).update(`${kind} ${body.length}\0`).update(body).digest('hex');
 const hex = b => Buffer.from(b).toString('hex');
 const side = (format, bytes, mode = 0o100644, original = false) => ({ mode, bytes: Buffer.from(bytes),
@@ -16,19 +16,11 @@ function row(format, from, before, to, after, mode = 0o100644) {
   return { path_hex: hex(from), ...(to === null ? {} : { destination_hex: hex(to) }),
     before: before === null ? null : side(format, before, 0o100644, true), after: after === null ? null : side(format, after, mode) };
 }
-function git(root, args, input) {
-  const r = spawnSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.filemode=true', '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null', '-C', root, ...args], {
-    input, timeout: 15000, maxBuffer: 8 * 1024 * 1024,
-    env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_'))),
-      LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ATTR_NOSYSTEM: '1',
-      GIT_AUTHOR_NAME: 'Oracle', GIT_AUTHOR_EMAIL: 'oracle@example.invalid', GIT_COMMITTER_NAME: 'Oracle', GIT_COMMITTER_EMAIL: 'oracle@example.invalid',
-      GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' },
-  });
-  if (r.error) throw r.error;
-  return r;
+function git(oracle, root, args) {
+  return oracle.capture(args, relative(oracle.work, root) || '.');
 }
-function ok(root, args, input) {
-  const r = git(root, args, input); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr.toString()}`); return r.stdout;
+function ok(oracle, root, args) {
+  const r = git(oracle, root, args); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr.toString()}`); return r.stdout;
 }
 function images(rows) {
   const before = new Map(), after = new Map();
@@ -56,88 +48,101 @@ function treeRoot(format, files) {
   }
   return tree(root);
 }
-async function populate(root, format, files) {
-  await mkdir(root); ok(root, ['init', '-q', '--template=', `--object-format=${format}`]);
+async function populate(oracle, root, format, files) {
+  await mkdir(root); ok(oracle, root, ['init', '-q', `--object-format=${format}`]);
+  // The sandbox supplies an empty template and fixed hook/config policy.
+  for (const [key, value] of [['core.autocrlf', 'false'], ['core.filemode', 'true'],
+    ['user.name', 'Oracle'], ['user.email', 'oracle@example.invalid']]) {
+    ok(oracle, root, ['config', '--local', key, value]);
+  }
   for (const [name, side] of files) {
     const raw = Buffer.from(name, 'hex'), slash = raw.lastIndexOf(47);
     if (slash >= 0) await mkdir(Buffer.concat([Buffer.from(root + '/'), raw.subarray(0, slash)]), { recursive: true });
     const filename = Buffer.concat([Buffer.from(root + '/'), raw]);
     await writeFile(filename, side.bytes); await chmod(filename, side.mode & 0o777);
   }
-  ok(root, ['add', '--all']); ok(root, ['commit', '-q', '-m', 'fixture']);
-  assert.equal(ok(root, ['write-tree']).toString().trim(), treeRoot(format, files));
+  ok(oracle, root, ['add', '--all']); ok(oracle, root, ['commit', '-q', '--date=2000-01-01T00:00:00Z', '-m', 'fixture']);
+  assert.equal(ok(oracle, root, ['write-tree']).toString().trim(), treeRoot(format, files));
 }
-function requireAbsentTargets(root, format, from, to) {
+function requireAbsentTargets(oracle, root, format, from, to) {
   const existing = new Set([...from.values()].map(v => hashObject(format, 'blob', v.bytes)));
   for (const v of to.values()) {
     const id = hashObject(format, 'blob', v.bytes);
-    if (!existing.has(id)) assert.notEqual(git(root, ['cat-file', '-e', id]).status, 0, 'desired object must be absent before apply');
+    if (!existing.has(id)) {
+      const result = git(oracle, root, ['cat-file', '-e', id]);
+      assert.equal(result.status, 1, 'desired object must be absent before apply');
+      assert.equal(result.stdout.length, 0);
+      assert.equal(result.stderr.length, 0, 'missing-object refusal must come from Git, not a sandbox failure');
+    }
   }
 }
 for (const format of ['sha1', 'sha256']) for (const scenario of ['mixed', 'raw-edited', 'binary-modes', 'empty']) {
-  test(`${format}: ${scenario} applies and reverses in independent repositories`, async () => {
-    const home = await mkdtemp(join(await realpath(tmpdir()), 'fg-refactor-oracle-'));
-    try {
-      let rows;
-      if (scenario === 'mixed') rows = [row(format, 'src/moved', 'old\nlast', 'lib/tool', 'new\r\nlast!', 0o100755),
-        row(format, 'src/raw.bin', Buffer.from([0, 255, 1]), 'lib/raw.bin', Buffer.from([0, 255, 1])),
-        row(format, 'delete', 'gone\n', null, null), row(format, 'create', null, null, 'born\n'),
-        row(format, 'data', Buffer.from([0, 1, 2]), null, Buffer.from([0, 2, 3]))];
-      if (scenario === 'raw-edited') rows = [row(format, Buffer.from([0xff, 32, 34, 92, 10]), 'old\r\n', Buffer.from([0xfe, 9, 13]), Buffer.from([255, 10]))];
-      if (scenario === 'binary-modes') rows = [row(format, 'a', Buffer.from([0, 255]), 'b', Buffer.from([0, 255]), 0o100755)];
-      if (scenario === 'empty') rows = [row(format, 'old', '', 'new', ''), row(format, 'another', null, null, '')];
-      const r = compileSourceRefactoring(format, rows, { binary: 'delta-runs' }), { before, after } = images(rows);
-      const patch = join(home, 'edit.patch'); await writeFile(patch, r.patch);
-      for (const [direction, from, to] of [['forward', before, after], ['reverse', after, before]]) {
-        const root = join(home, direction); await populate(root, format, from);
-        requireAbsentTargets(root, format, from, to);
-        ok(root, ['apply', '--index', '--binary', ...(direction === 'reverse' ? ['--reverse'] : []), patch]);
-        assert.equal(ok(root, ['write-tree']).toString().trim(), treeRoot(format, to));
-        for (const [name, side] of to) assert.deepEqual(await readFile(Buffer.concat([Buffer.from(root + '/'), Buffer.from(name, 'hex')])), side.bytes);
-      }
-    } finally { await rm(home, { recursive: true, force: true }); }
+  test(`${format}: ${scenario} applies and reverses in independent repositories (Git 2.47.3)`, async t => {
+    const oracle = pinnedNativeGitOracle(t, `refactor-${format}-${scenario}`); if (!oracle) return;
+    const home = oracle.work;
+    let rows;
+    if (scenario === 'mixed') rows = [row(format, 'src/moved', 'old\nlast', 'lib/tool', 'new\r\nlast!', 0o100755),
+      row(format, 'src/raw.bin', Buffer.from([0, 255, 1]), 'lib/raw.bin', Buffer.from([0, 255, 1])),
+      row(format, 'delete', 'gone\n', null, null), row(format, 'create', null, null, 'born\n'),
+      row(format, 'data', Buffer.from([0, 1, 2]), null, Buffer.from([0, 2, 3]))];
+    if (scenario === 'raw-edited') rows = [row(format, Buffer.from([0xff, 32, 34, 92, 10]), 'old\r\n', Buffer.from([0xfe, 9, 13]), Buffer.from([255, 10]))];
+    if (scenario === 'binary-modes') rows = [row(format, 'a', Buffer.from([0, 255]), 'b', Buffer.from([0, 255]), 0o100755)];
+    if (scenario === 'empty') rows = [row(format, 'old', '', 'new', ''), row(format, 'another', null, null, '')];
+    const r = compileSourceRefactoring(format, rows, { binary: 'delta-runs' }), { before, after } = images(rows);
+    const patch = join(home, 'edit.patch'); await writeFile(patch, r.patch);
+    for (const [direction, from, to] of [['forward', before, after], ['reverse', after, before]]) {
+      const root = join(home, direction); await populate(oracle, root, format, from);
+      requireAbsentTargets(oracle, root, format, from, to);
+      ok(oracle, root, ['apply', '--index', '--binary', ...(direction === 'reverse' ? ['--reverse'] : []), relative(root, patch)]);
+      assert.equal(ok(oracle, root, ['write-tree']).toString().trim(), treeRoot(format, to));
+      for (const [name, side] of to) assert.deepEqual(await readFile(Buffer.concat([Buffer.from(root + '/'), Buffer.from(name, 'hex')])), side.bytes);
+      // Also exercise the adapter's raw-byte result with the existing binary sibling.
+      const sibling = to.get(hex('untouched/sibling.bin'));
+      assert.deepEqual(ok(oracle, root, ['cat-file', 'blob', hashObject(format, 'blob', sibling.bytes)]), sibling.bytes);
+    }
   });
 }
-for (const format of ['sha1', 'sha256']) test(`${format}: occupied destination refuses the entire batch in the oracle`, async () => {
-  const home = await mkdtemp(join(await realpath(tmpdir()), 'fg-refactor-occupied-'));
-  try {
-    const rows = [row(format, 'a', 'before\n', null, 'after\n'), row(format, 'src', 'original\n', 'dest', 'moved\n')];
-    const { before } = images(rows); before.set(hex('dest'), { mode: 0o100644, bytes: Buffer.from('occupied\n') });
-    const root = join(home, 'repo'); await populate(root, format, before); const initial = ok(root, ['write-tree']);
-    const patch = join(home, 'change.patch'); await writeFile(patch, compileSourceRefactoring(format, rows).patch);
-    assert.notEqual(git(root, ['apply', '--index', patch]).status, 0);
-    assert.deepEqual(ok(root, ['write-tree']), initial); assert.equal((await readFile(join(root, 'a'))).toString(), 'before\n');
-  } finally { await rm(home, { recursive: true, force: true }); }
+for (const format of ['sha1', 'sha256']) test(`${format}: occupied destination refuses the entire batch in the oracle (Git 2.47.3)`, async t => {
+  const oracle = pinnedNativeGitOracle(t, `refactor-occupied-${format}`); if (!oracle) return;
+  const home = oracle.work;
+  const rows = [row(format, 'a', 'before\n', null, 'after\n'), row(format, 'src', 'original\n', 'dest', 'moved\n')];
+  const { before } = images(rows); before.set(hex('dest'), { mode: 0o100644, bytes: Buffer.from('occupied\n') });
+  const root = join(home, 'repo'); await populate(oracle, root, format, before); const initial = ok(oracle, root, ['write-tree']);
+  const patch = join(home, 'change.patch'); await writeFile(patch, compileSourceRefactoring(format, rows).patch);
+  const refused = git(oracle, root, ['apply', '--index', relative(root, patch)]);
+  assert.equal(refused.status, 1);
+  assert.equal(refused.stdout.length, 0);
+  assert.equal(refused.stderr.toString(), 'error: dest: already exists in index\n');
+  assert.deepEqual(ok(oracle, root, ['write-tree']), initial); assert.equal((await readFile(join(root, 'a'))).toString(), 'before\n');
 });
-for (const format of ['sha1', 'sha256']) test(`${format}: actual private-plan CLI output applies and reverses independently`, async () => {
-  const home = await mkdtemp(join(await realpath(tmpdir()), 'fg-refactor-cli-oracle-'));
-  try {
-    const rows = [row(format, 'src/tool', 'before\n', 'lib/tool', 'after\n', 0o100755),
-      row(format, Buffer.from([0xff]), Buffer.from([0, 255]), Buffer.from([0xfe]), Buffer.from([0, 255])),
-      row(format, 'obsolete', 'remove\n', null, null), row(format, 'created', null, null, 'added\n'),
-      row(format, 'binary', Buffer.from([0, 2]), null, Buffer.from([0, 3]))];
-    const plan = { schema: 'frankengit-source-refactoring-v1', object_format: format, changes: [] };
-    for (const [i, r] of rows.entries()) {
-      const edit = { path_hex: r.path_hex, ...(r.destination_hex ? { destination_hex: r.destination_hex } : {}), before: null, after: null };
-      for (const name of ['before', 'after']) if (r[name]) {
-        const filename = join(home, `${i}-${name}`); await writeFile(filename, r[name].bytes, { mode: 0o600 });
-        edit[name] = { file: filename, mode: r[name].mode, ...(name === 'before' ? { blob: r.before.blob } : {}) };
-      }
-      if (r.destination_hex && r.before.bytes.equals(r.after.bytes)) delete edit.after.file;
-      plan.changes.push(edit);
+for (const format of ['sha1', 'sha256']) test(`${format}: actual private-plan CLI output applies and reverses independently (Git 2.47.3)`, async t => {
+  const oracle = pinnedNativeGitOracle(t, `refactor-cli-${format}`); if (!oracle) return;
+  const home = oracle.work;
+  const rows = [row(format, 'src/tool', 'before\n', 'lib/tool', 'after\n', 0o100755),
+    row(format, Buffer.from([0xff]), Buffer.from([0, 255]), Buffer.from([0xfe]), Buffer.from([0, 255])),
+    row(format, 'obsolete', 'remove\n', null, null), row(format, 'created', null, null, 'added\n'),
+    row(format, 'binary', Buffer.from([0, 2]), null, Buffer.from([0, 3]))];
+  const plan = { schema: 'frankengit-source-refactoring-v1', object_format: format, changes: [] };
+  for (const [i, r] of rows.entries()) {
+    const edit = { path_hex: r.path_hex, ...(r.destination_hex ? { destination_hex: r.destination_hex } : {}), before: null, after: null };
+    for (const name of ['before', 'after']) if (r[name]) {
+      const filename = join(home, `${i}-${name}`); await writeFile(filename, r[name].bytes, { mode: 0o600 });
+      edit[name] = { file: filename, mode: r[name].mode, ...(name === 'before' ? { blob: r.before.blob } : {}) };
     }
-    const input = join(home, 'plan.json'), patch = join(home, 'change.patch'); await writeFile(input, JSON.stringify(plan), { mode: 0o600 });
-    const cli = new URL('../../scripts/fg_source_refactor.mjs', import.meta.url);
-    const response = spawnSync(process.execPath, [fileURLToPath(cli), 'compile', '--plan-file', input, '--output', patch, '--binary', 'delta'], { timeout: 15000 });
-    assert.equal(response.status, 0, response.stderr.toString());
-    const receipt = JSON.parse(response.stdout), output = await readFile(patch);
-    assert.equal(receipt.patch_sha256, createHash('sha256').update(output).digest('hex'));
-    assert.equal(receipt.plan_sha256, createHash('sha256').update(await readFile(input)).digest('hex'));
-    const { before, after } = images(rows);
-    for (const [direction, from, to] of [['forward', before, after], ['reverse', after, before]]) {
-      const root = join(home, direction); await populate(root, format, from); requireAbsentTargets(root, format, from, to);
-      ok(root, ['apply', '--index', '--binary', ...(direction === 'reverse' ? ['--reverse'] : []), patch]);
-      assert.equal(ok(root, ['write-tree']).toString().trim(), treeRoot(format, to));
-    }
-  } finally { await rm(home, { recursive: true, force: true }); }
+    if (r.destination_hex && r.before.bytes.equals(r.after.bytes)) delete edit.after.file;
+    plan.changes.push(edit);
+  }
+  const input = join(home, 'plan.json'), patch = join(home, 'change.patch'); await writeFile(input, JSON.stringify(plan), { mode: 0o600 });
+  const cli = new URL('../../scripts/fg_source_refactor.mjs', import.meta.url);
+  const response = spawnSync(process.execPath, [fileURLToPath(cli), 'compile', '--plan-file', input, '--output', patch, '--binary', 'delta'], { timeout: 15000 });
+  assert.equal(response.status, 0, response.stderr.toString());
+  const receipt = JSON.parse(response.stdout), output = await readFile(patch);
+  assert.equal(receipt.patch_sha256, createHash('sha256').update(output).digest('hex'));
+  assert.equal(receipt.plan_sha256, createHash('sha256').update(await readFile(input)).digest('hex'));
+  const { before, after } = images(rows);
+  for (const [direction, from, to] of [['forward', before, after], ['reverse', after, before]]) {
+    const root = join(home, direction); await populate(oracle, root, format, from); requireAbsentTargets(oracle, root, format, from, to);
+    ok(oracle, root, ['apply', '--index', '--binary', ...(direction === 'reverse' ? ['--reverse'] : []), relative(root, patch)]);
+    assert.equal(ok(oracle, root, ['write-tree']).toString().trim(), treeRoot(format, to));
+  }
 });
