@@ -256,6 +256,10 @@ failure or safely settled native stop; 2 means input/observation/output failure;
 3 means unresolved execution
 or containment. No exit code independently authorizes a merge. Saved native and
 watcher observations survive a failed CLI stdout write.
+The executable exits only after `main` has awaited its native owners, output
+callbacks and finalizers. It exits explicitly so a failed stdout or stderr write
+cannot keep the process alive after the existing ten-second output deadline.
+The exported `main` function continues to return its selected exit code.
 
 ## Validation boundary
 
