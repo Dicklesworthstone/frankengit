@@ -4,13 +4,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fsPromises, { appendFile, chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeNativeBundleExpectation, normalizeNativeBundleOptions, verifyNativeGitBundle, verifyNativeGitBundleFile, withVerifiedNativeGitBundleFile } from '../../scripts/lib/native-bundle-verifier.mjs';
+import { pinnedNativeGitOracle } from './fixtures/pinned-native-git-oracle.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cli = join(root, 'scripts/verify_git_bundle_native.mjs');
@@ -655,17 +656,12 @@ function gitFixture(format) {
 }
 
 test('test-only SHA-1/SHA-256 fixtures pass the exact Git 2.47.3 local oracle', async t => {
-  const probe = spawnSync('git', ['--version'], { encoding: 'utf8' });
-  if (probe.status !== 0 || probe.stdout.trim() !== 'git version 2.47.3') { t.skip('pinned local Git 2.47.3 oracle unavailable'); return; }
-  const directory = await sandbox(t);
-  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file' };
+  const oracle = pinnedNativeGitOracle(t, 'native-verifier-fixtures'); if (!oracle) return;
   for (const format of ['sha1', 'sha256']) {
-    const fixture = gitFixture(format), path = join(directory, `${format}.bundle`), repo = join(directory, format);
-    await writeFile(path, fixture.bytes);
-    for (const args of [['init', '--bare', `--object-format=${format}`, repo], ['-C', repo, 'bundle', 'verify', path],
-      ['-C', repo, 'fetch', path, 'refs/heads/main:refs/heads/main'], ['-C', repo, 'fsck', '--strict']]) {
-      const result = spawnSync('git', args, { env, encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr);
-    }
+    const fixture = gitFixture(format); await writeFile(join(oracle.work, `${format}.bundle`), fixture.bytes);
+    oracle.run(['init', '--bare', `--object-format=${format}`, format]);
+    for (const args of [['bundle', 'verify', `../${format}.bundle`],
+      ['fetch', `../${format}.bundle`, 'refs/heads/main:refs/heads/main'], ['fsck', '--strict']]) oracle.run(args, format);
   }
 });
 

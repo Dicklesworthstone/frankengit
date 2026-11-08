@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, access, readdir, lstat } from 'node:fs/promises';
+import { readFile, writeFile, access, readdir, lstat, cp } from 'node:fs/promises';
 import { join } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { recoverGitBundle } from '../../scripts/lib/source-recovery.mjs';
 import { harness, readFixture } from './fixtures/native-recovery-harness.mjs';
+import { pinnedNativeGitOracle } from './fixtures/pinned-native-git-oracle.mjs';
 const marker = '.frankengit-source-recovery.json';
 const absent = async path => assert.rejects(access(path), { code: 'ENOENT' });
 
@@ -120,15 +121,11 @@ for (const phase of ['staged:config', 'published']) test(`SIGKILL at ${phase} re
 });
 
 for (const format of ['sha1', 'sha256']) test(`pinned Git 2.47.3 reads the recovered ${format} fixture`, async t => {
-  const git = '/usr/bin/git';
-  if (spawnSync(git, ['--version'], { encoding: 'utf8' }).stdout?.trim() !== 'git version 2.47.3') {
-    t.skip('exact pinned Git 2.47.3 oracle unavailable'); return;
-  }
+  const oracle = pinnedNativeGitOracle(t, `native-recovery-${format}`); if (!oracle) return;
   const h = await harness(t, format);
   await recoverGitBundle(h.bytes, h.destination, h.request, h.options);
-  const env = { PATH: '/usr/bin:/bin', HOME: h.root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ALLOW_PROTOCOL: 'file' };
-  const run = args => { const r = spawnSync(git, ['--git-dir', h.destination, ...args], { env, encoding: 'utf8', timeout: 10000 });
-    assert.equal(r.status, 0, r.stderr); return r.stdout; };
+  await cp(h.destination, join(oracle.work, 'recovered.git'), { recursive: true });
+  const run = args => oracle.run(args, 'recovered.git');
   run(['fsck', '--strict']);
   assert.equal(run(['show', 'HEAD:a.txt']), 'alpha changed\n');
   assert.equal(run(['symbolic-ref', 'HEAD']).trim(), 'refs/heads/main');

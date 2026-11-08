@@ -232,6 +232,12 @@ export PATH="${TEST_ROOT}/bin:/usr/bin:/bin"
 fge_phase action
 expect_exit FG-000B-ORACLE-001 64 "unpinned Git identity is refused" "${ORACLE}" verify unknown-git
 expect_exit FG-000B-ORACLE-002 69 "missing source archive reports UNAVAILABLE" "${ORACLE}" build testgit
+expect_exit FG-000B-ORACLE-046 64 "invalid root remains a configuration refusal during verification" \
+    env FGIT_ORACLE_ROOT=/ "${ORACLE}" verify testgit
+expect_exit FG-000B-ORACLE-047 64 "invalid root refuses before selecting an archive or starting a build" \
+    env FGIT_ORACLE_ROOT=/ "${ORACLE}" build testgit
+expect_file_contains FG-000B-ORACLE-049 FGIT_ORACLE_CONFIG \
+    "${TEST_ROOT}/FG-000B-ORACLE-046.stderr" "invalid root retains its configuration diagnostic"
 
 printf '#!/bin/sh\nprintf "git version 9.9.9\\n"\n' > "${FAKE_GIT}"
 chmod 700 "${FAKE_GIT}"
@@ -253,6 +259,8 @@ expect_exit FG-000B-ORACLE-012 69 "missing Bubblewrap reports typed UNAVAILABLE 
 export PATH="${TEST_ROOT}/bin:/usr/bin:/bin"
 
 RUN_DIRECTORY="$("${ORACLE}" create-run testgit reproducible)"
+expect_exit FG-000B-ORACLE-048 64 "capture propagates an invalid root before creating a transcript" \
+    env FGIT_ORACLE_ROOT=/ "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . invalid-root -- emit
 expect_exit FG-000B-ORACLE-004 64 "sandbox path-steering argument is refused" \
     "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . escape -- --git-dir=/etc
 # frankengit-mey1: global options before the subcommand stay refused, and so

@@ -12,6 +12,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { importNativeSource, readNativeImportOutcome, retryNativeSourceImport } from '../../scripts/lib/native-source-import.mjs';
 import { signSourceBackup } from '../../scripts/lib/source-attestation.mjs';
+import { pinnedNativeGitOracle } from './fixtures/pinned-native-git-oracle.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(HERE, '../../scripts/import_git_bundle_native.mjs');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -587,24 +588,16 @@ test('native cleanup failure cannot turn an explicit terminal receipt into nonco
   assert.equal((await readNativeImportOutcome(f.config.recovery, f.recovery)).outcome, 'committed');
 });
 
-test('real SHA-1/SHA-256 native-test fixtures pass the pinned Git 2.47.3 oracle', {
-  skip: spawnSync('git', ['--version'], { encoding: 'utf8' }).stdout?.trim() !== 'git version 2.47.3'
-    && 'pinned Git 2.47.3 unavailable; this is fixture evidence only',
-}, async t => {
+test('real SHA-1/SHA-256 native-test fixtures pass the pinned Git 2.47.3 oracle', async t => {
+  const oracle = pinnedNativeGitOracle(t, 'native-import-fixtures'); if (!oracle) return;
   for (const format of ['sha1', 'sha256']) {
-    const f = await fixture(t), bare = join(f.root, 'oracle.git');
-    await writeFile(f.source, realBundle(format));
-    const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null', GIT_ALLOW_PROTOCOL: 'file', HOME: f.root };
-    const git = args => {
-      const result = spawnSync('git', args, { encoding: 'utf8', timeout: 10000, env });
-      assert.equal(result.status, 0, result.stderr); return result.stdout;
-    };
-    git(['init', '--bare', '--object-format=' + format, bare]);
-    git(['-C', bare, 'bundle', 'verify', f.source]);
-    git(['-C', bare, 'fetch', f.source, 'refs/heads/main:refs/heads/main']);
-    git(['-C', bare, 'fsck', '--strict']);
-    assert.equal(git(['-C', bare, 'show', 'refs/heads/main:restored.txt']), 'native source restoration\n');
+    await writeFile(join(oracle.work, `${format}.bundle`), realBundle(format));
+    oracle.run(['init', '--bare', '--object-format=' + format, format]);
+    const git = args => oracle.run(args, format);
+    git(['bundle', 'verify', `../${format}.bundle`]);
+    git(['fetch', `../${format}.bundle`, 'refs/heads/main:refs/heads/main']);
+    git(['fsck', '--strict']);
+    assert.equal(git(['show', 'refs/heads/main:restored.txt']), 'native source restoration\n');
   }
 });
 for (const phase of ['hang-before', 'hang-after']) test(`SIGKILL of the operator retains recovery across ${phase}`, { timeout: 15000 }, async t => {

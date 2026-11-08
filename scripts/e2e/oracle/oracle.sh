@@ -151,15 +151,21 @@ oracle_load_pin() {
 }
 
 oracle_archive_path() {
-    printf '%s/downloads/%s\n' "$(oracle_root)" "${PIN_ARCHIVE}"
+    local root=""
+    root="$(oracle_root)" || return "$?"
+    printf '%s/downloads/%s\n' "${root}" "${PIN_ARCHIVE}"
 }
 
 oracle_install_dir() {
-    printf '%s/installs/%s\n' "$(oracle_root)" "${PIN_ID}"
+    local root=""
+    root="$(oracle_root)" || return "$?"
+    printf '%s/installs/%s\n' "${root}" "${PIN_ID}"
 }
 
 oracle_receipt_path() {
-    printf '%s/receipt.tsv\n' "$(oracle_install_dir)"
+    local install_dir=""
+    install_dir="$(oracle_install_dir)" || return "$?"
+    printf '%s/receipt.tsv\n' "${install_dir}"
 }
 
 oracle_verify_archive() {
@@ -375,9 +381,9 @@ oracle_build() {
         --setenv GIT_CONFIG_NOSYSTEM 1 \
         --setenv GIT_CONFIG_GLOBAL /dev/null \
         --setenv MAKEFLAGS "-j${jobs}" \
-        -- /bin/sh -ec 'make configure; ./configure --prefix=/prefix; make NO_TCLTK=YesPlease NO_GETTEXT=YesPlease; make install NO_TCLTK=YesPlease NO_GETTEXT=YesPlease'
+        -- /bin/sh -ec 'make configure; ./configure --prefix=/prefix; make CFLAGS="-g -O2 -Wall -std=gnu11" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease; make install CFLAGS="-g -O2 -Wall -std=gnu11" NO_TCLTK=YesPlease NO_GETTEXT=YesPlease'
 
-    oracle_write_receipt "${install_staging}" "configure:--prefix=/prefix;make:NO_TCLTK=YesPlease,NO_GETTEXT=YesPlease"
+    oracle_write_receipt "${install_staging}" "configure:--prefix=/prefix;make:CFLAGS=-g -O2 -Wall -std=gnu11,NO_TCLTK=YesPlease,NO_GETTEXT=YesPlease"
     mv -- "${install_staging}" "${install_dir}"
     oracle_note "OK" "built, pinned, and receipted ${PIN_ID} without network access; retained source at ${source_root}"
 }
@@ -494,10 +500,11 @@ oracle_require_work_directory() {
 
 oracle_validate_run_directory() {
     local run_directory="$1"
-    local root="$(oracle_root)"
+    local root=""
     local canonical_root=""
     local canonical_run=""
 
+    root="$(oracle_root)" || return "$?"
     mkdir -p "${root}/runs"
     canonical_root="$(oracle_canonical_directory "${root}/runs")"
     canonical_run="$(oracle_canonical_directory "${run_directory}")"

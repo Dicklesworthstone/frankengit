@@ -1,4 +1,5 @@
 # fgit-git-oracle-pins-v1
 # id	version	tag	commit	source_url	source_sha256	archive_name
 git-2.46.4	2.46.4	v2.46.4	47d3b506d48b7971080f09770f5b06b42569c967	https://www.kernel.org/pub/software/scm/git/git-2.46.4.tar.xz	0d5c029edfea24abb4cbda385eff2b66ae946dd74849a350e4420f1eefa71aad	git-2.46.4.tar.xz
+git-2.47.3	2.47.3	v2.47.3	a52a24e03c8c711f1d5e252fba78f9276908129b	https://www.kernel.org/pub/software/scm/git/git-2.47.3.tar.xz	9c2eb1250781b3e5bfef098572d07fdf132d67e6c065e4307332ade9819a1501	git-2.47.3.tar.xz
 git-2.54.0	2.54.0	v2.54.0	94f057755b7941b321fd11fec1b2e3ca5313a4e0	https://www.kernel.org/pub/software/scm/git/git-2.54.0.tar.xz	f689162364c10de79ef89aa8dbf48731eb057e34edbbd20aca510ce0154681a3	git-2.54.0.tar.xz
