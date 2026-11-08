@@ -22,15 +22,18 @@ refuse before creation. Path-tool output is captured without trimming pathname
 bytes; only its one output terminator is removed. Spaces and Unicode names
 remain permitted.
 
-The native bundle-verifier, import-fixture and recovery tests retain their exact
-Git 2.47.3 oracle through the `git-2.47.3` pin. Build that pin with the same
-source-verification and sandbox commands below. Their test-only adapter invokes
+The native bundle-verifier, import-fixture, recovery and source-refactoring tests
+use the exact Git 2.47.3 oracle through the `git-2.47.3` pin. Build that pin with
+the same source-verification and sandbox commands below. Their test-only adapter invokes
 `verify`, `create-run` and `capture`; it retains each command's transcripts in
 the reported external run directory. An absent installation is an explicit test
 skip. Receipt drift, a missing sandbox or another refusal fails the test. These
-checks establish upstream readability of controlled fixtures, not current Rust
-qualification, repository authority or live-source authenticity. The 2.46.4 and
+checks establish upstream readability and patch application of controlled
+fixtures, not current Rust qualification, repository authority or live-source authenticity. The 2.46.4 and
 2.54.0 oracle selections of other campaigns are unchanged.
+The adapter checks each capture's pin, exit status and output digests before
+returning its raw bytes. Expected Git refusals require their exact exit status;
+a missing receipt, timeout or configuration refusal cannot count as that result.
 
 Builds select GNU C11 explicitly and record that choice in the binary receipt.
 This avoids compiler-default drift: Git 2.47.3's `unreachable` function conflicts

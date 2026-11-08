@@ -1,6 +1,7 @@
 // Test-only upstream oracle. Production recovery never invokes Git.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,12 +24,26 @@ export function pinnedNativeGitOracle(t, label) {
   assert.equal(created.status, 0, created.error?.message ?? created.stderr);
   const root = created.stdout.trim(); let sequence = 0;
   t.diagnostic(`exact pinned Git 2.47.3 oracle transcripts: ${root}`);
-  return { work: join(root, 'work'), run(args, workdir = '.') {
+  const capture = (args, workdir = '.') => {
     const name = `check-${++sequence}`, transcript = join(root, 'transcripts', name);
     const result = invoke(['capture', pin, root, workdir, name, '--', ...args]);
-    const diagnostic = join(transcript, 'stderr.bin');
-    assert.equal(result.status, 0, result.error?.message ??
-      result.stderr + (existsSync(diagnostic) ? readFileSync(diagnostic, 'utf8') : ''));
-    return readFileSync(join(transcript, 'stdout.bin'), 'utf8');
+    assert.ifError(result.error);
+    assert.equal(result.signal, null, result.stderr);
+    const receipt = new Map(readFileSync(join(transcript, 'receipt.tsv'), 'utf8').trim().split('\n')
+      .map(line => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]; }));
+    const stdout = readFileSync(join(transcript, 'stdout.bin'));
+    const stderr = readFileSync(join(transcript, 'stderr.bin'));
+    assert.equal(receipt.get('schema_version'), '1');
+    assert.equal(receipt.get('oracle_id'), pin);
+    assert.equal(receipt.get('exit_code'), String(result.status));
+    for (const [name, bytes] of [['stdout', stdout], ['stderr', stderr]]) {
+      assert.equal(receipt.get(`${name}_sha256`), createHash('sha256').update(bytes).digest('hex'));
+    }
+    return { status: result.status, stdout, stderr };
+  };
+  return { work: join(root, 'work'), capture, run(args, workdir = '.') {
+    const result = capture(args, workdir);
+    assert.equal(result.status, 0, result.stderr.toString());
+    return result.stdout.toString('utf8');
   } };
 }
