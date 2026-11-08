@@ -212,6 +212,10 @@ they can still inspect preserved custody and reports while the native installati
 is unavailable. Loss of stdout can therefore be reconciled without replay. Missing or
 contradictory evidence stays pending.
 
+Reconciliation observes SIGTERM/SIGINT through its existing cancellation
+checkpoints. An in-flight filesystem read settles before the next checkpoint;
+stopping preserves original reports, execution responsibility and owner locks.
+
 SIGTERM/SIGINT stop new work and **drain** an active native dispatch. Killing the
 native owner immediately would undermine its own step cleanup. The native
 600-second deadline remains in force; the external last-resort watchdog is 660
@@ -256,6 +260,14 @@ failure or safely settled native stop; 2 means input/observation/output failure;
 3 means unresolved execution
 or containment. No exit code independently authorizes a merge. Saved native and
 watcher observations survive a failed CLI stdout write.
+The executable exits only after `main` has awaited its native owners, output
+callbacks and finalizers. It exits explicitly so a failed stdout or stderr write
+cannot keep the process alive after the existing ten-second output deadline.
+The exported `main` function continues to return its selected exit code.
+The real-node operator campaign also blocks artifact-download stdout after local
+file publication. It checks exact file and binary/empty log bytes, private mode,
+staging cleanup and original custody. Retrying the same destination after the
+native listener stops refuses before fetching or overwriting the retained file.
 
 ## Validation boundary
 

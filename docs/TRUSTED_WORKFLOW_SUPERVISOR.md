@@ -119,6 +119,14 @@ not elapsed service time. JSON output is capped at 1 MiB per record. Reporting
 waits for the stream's write callback; a stalled reader stops the service after
 a 30-second reporting deadline instead of accumulating unbounded output or
 starting more executions without reporting the prior cycle.
+Failed or timed-out reporting stops admission and releases ordinary writable
+streams. Their error listener remains until close so asynchronous destruction
+errors cannot escape after the original report failure has been returned.
+After awaited supervisor cleanup, the CLI reports the failure to stderr
+and exits explicitly: Node keeps stdout's descriptor open even after destroying
+that stream, so a blocked pipe write must not keep the failed process alive.
+Error reporting itself has a one-second fallback when stderr cannot drain.
+Successfully delivered reports leave the output stream open for the next cycle.
 
 SIGINT/SIGTERM interrupts the polling wait and stops new native admissions while
 already admitted owners drain. If a lane reports unknown containment, no later

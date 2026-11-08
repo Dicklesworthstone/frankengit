@@ -336,6 +336,36 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
         require(rows[-1]["runs"][0]["committed"] == 3 and rows[-1].get("publications", 0) == 0,
                 "settled check publication was dispatched again")
     c.facts[f"{fmt}_publisher_dedup_and_original_keys"] = True
+    # Actual complete entrypoints on a prefilled unread stdout pipe. Their
+    # original ten-second writer deadline must not leave a Node owner alive.
+    def custody_bytes():
+        return {str(directory): {p.name: p.read_bytes() if p.is_file() else None
+                                 for p in directory.iterdir()} for directory in (watch_state, pub_state)}
+
+    original_custody = custody_bytes()
+    watch_status = c.node_command(watch_cli, ["status", *watch_args])
+    publication_status = node_rows(c, check_cli, ["status", *pub_args])[-1]
+    watch_error = c.node_command(watch_cli, ["status", *watch_args], 2,
+                                 error_reply=True, block_stdout=True)
+    require(watch_error["type"] == "workflow_watch_error"
+            and watch_error["retained_observation"] == watch_status
+            and watch_error["execution_retried"] is False,
+            "watcher output loss did not retain the original read-only observation")
+    require(custody_bytes() == original_custody and marker.read_bytes() == b"sf"
+            and canonical() == page and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
+            "watcher output failure changed custody, execution or canonical state")
+    c.facts[f"{fmt}_watch_output_failure_no_execution"] = True
+    publication_error = c.node_command(check_cli, ["status", *pub_args], 4,
+                                       error_reply=True, block_stdout=True)
+    require(publication_error["type"] == "workflow_check_error"
+            and publication_error["retained_operation"] == publication_status
+            and publication_error["publication_unknown"] is False
+            and publication_error["execution_retried"] is False,
+            "publisher output loss changed a known completed observation to unknown")
+    require(custody_bytes() == original_custody and marker.read_bytes() == b"sf"
+            and canonical() == page and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
+            "publisher output failure changed original keys, terminal custody or canonical state")
+    c.facts[f"{fmt}_publication_output_failure_retains_terminal"] = True
     saved = home / "retained-terminals"
     saved.mkdir(mode=0o700)
     terminals = list(pub_state.glob("terminal-*.json"))
