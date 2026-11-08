@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile,writeFile,unlink,readdir } from 'node:fs/promises';
+import { readFile,writeFile,unlink,readdir,mkdir,symlink,access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { main } from '../../scripts/migrate_github_pulls.mjs';
@@ -18,6 +18,20 @@ const run=(t,args,preload)=>start(t,args,preload).done;
 function value(r,code=0){assert.equal(r.code,code,r.stderr);assert.equal(r.signal,null);assert.equal(r.stderr,'');return JSON.parse(r.stdout);}
 const args=(f,verb)=>[verb,'--workdir',f.workdir,'--confirm',f.prepared.plan_sha256];
 const sendArgs=(f,verb='run')=>[...args(f,verb),'--token-file',f.tokenFile];
+
+for(const field of ['selection','requirements'])test(`worktree parent aliases cannot hide migration ${field} paths`,async t=>{
+ const f=await migrationFixture(t,{prepare:field==='requirements'}),repo=join(f.root,'worktree'),privateDir=join(repo,'private'),alias=join(f.root,'alias');
+ await mkdir(repo,{mode:0o700});await mkdir(join(repo,'.git'));await mkdir(privateDir,{mode:0o700});await symlink(privateDir,alias);
+ let command;
+ if(field==='selection'){
+  await writeFile(join(privateDir,'selection.json'),JSON.stringify(f.input.selection),{mode:0o600});
+  command=['prepare','--workdir',f.workdir,'--capture',f.captureFile,'--capture-confirm',f.captured.sha256,
+   '--selection',join(alias,'selection.json'),'--token-file',f.tokenFile];
+ }else command=[...args(f,'requirements'),'--principal','77'.repeat(16),'--out',join(alias,'branches.json')];
+ const r=await run(t,command);assert.equal(r.code,2);assert.equal(r.stdout,'');
+ assert.equal(JSON.parse(r.stderr).code,'github_pull_worktree');assert.equal(f.peer.calls.length,0);
+ await assert.rejects(access(field==='selection'?f.workdir:join(privateDir,'branches.json')),{code:'ENOENT'});
+});
 
 test('CLI prepares and executes capture as original native PRs with offline branch requirements',async t=>{
  const f=await migrationFixture(t,{prepare:false}),selection=join(f.root,'selection.json');await writeFile(selection,JSON.stringify(f.input.selection),{mode:0o600});
@@ -182,4 +196,22 @@ test('restartable CLI cancellation before begin creates no custody and a later p
  assert.equal(code,2);assert.equal(JSON.parse(text).mutation_submitted,false);
  await assert.rejects(readdir(f.workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
  assert.equal(value(await run(t,beginArgs)).preparation_complete,false);
+});
+
+test('one-shot CLI encoded capacity preflight creates no custody and the exact byte limit remains usable',async t=>{
+ const f=await migrationFixture(t),workdir=join(f.root,'exact-capacity'),selection=join(f.root,'capacity-selection.json');
+ const original=await readFile(join(f.workdir,'requests/step-000001/intent.json'));
+ const selected={...f.input.selection,max_request_bytes:f.prepared.request_bytes-1};
+ await writeFile(selection,JSON.stringify(selected),{mode:0o600});
+ const command=['prepare','--workdir',workdir,'--capture',f.captureFile,'--capture-confirm',f.captured.sha256,
+  '--selection',selection,'--token-file',f.tokenFile];
+ const refused=await run(t,command);assert.equal(refused.code,2);
+ const report=JSON.parse(refused.stderr);assert.equal(report.code,'github_pull_import_request_limit');
+ assert.equal(report.import_progress.directory_created,false);assert.equal(report.mutation_submitted,false);
+ await assert.rejects(readdir(workdir),{code:'ENOENT'});assert.equal(f.peer.calls.length,0);
+ assert((await readFile(join(f.workdir,'requests/step-000001/intent.json'))).equals(original));
+ selected.max_request_bytes=f.prepared.request_bytes;await writeFile(selection,JSON.stringify(selected));
+ const accepted=value(await run(t,command));assert.equal(accepted.request_bytes,f.prepared.request_bytes);
+ const done=value(await run(t,['run','--workdir',workdir,'--confirm',accepted.plan_sha256,'--token-file',f.tokenFile]));
+ assert.equal(done.complete,true);assert.equal(f.peer.mutations.length,accepted.steps);
 });

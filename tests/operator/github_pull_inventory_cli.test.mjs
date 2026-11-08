@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { Writable } from 'node:stream';
-import { mkdtemp, chmod, writeFile, readFile, rm, readdir, unlink } from 'node:fs/promises';
+import { mkdtemp, chmod, writeFile, readFile, rm, readdir, unlink, mkdir, symlink, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,31 @@ const run=(t,f,p,args)=>start(t,f,p,args).finished;
 function value(r,code=0){assert.equal(r.code,code,r.stderr);assert.equal(r.signal,null);assert.equal(r.stderr,'');return JSON.parse(r.stdout);}
 const discover=f=>['discover','--repository',REPO,'--out',f.inventory,'--token-file',f.token,'--batch-size','1'];
 const captured=(f,pin)=>['capture-batch','--inventory',f.inventory,'--confirm',pin,'--batch','2','--out',f.capture,'--token-file',f.token];
+
+for(const field of ['output','token','inventory'])test(`worktree parent aliases cannot hide inventory ${field} paths`,async t=>{
+  const f=await files(t),p=await inventoryPeer(t),repo=join(f.root,'worktree'),privateDir=join(repo,'private'),alias=join(f.root,'alias');
+  await mkdir(repo,{mode:0o700});await mkdir(privateDir,{mode:0o700});await symlink(privateDir,alias);
+  if(field==='token')await writeFile(join(repo,'.git'),'gitdir: inert-linked-worktree-fixture\n');else await mkdir(join(repo,'.git'));
+  const args=discover(f);let count=0,original;
+  if(field==='inventory'){
+    const saved=value(await run(t,f,p,args));original=await readFile(f.inventory);
+    await writeFile(join(privateDir,'inventory.json'),original,{mode:0o600});count=p.calls.length;await p.close();
+    args.splice(0,args.length,'inspect','--inventory',join(alias,'inventory.json'),'--confirm',saved.inventory_sha256);
+  }else if(field==='token'){
+    await writeFile(join(privateDir,'token'),TOKEN,{mode:0o600});args[args.indexOf('--token-file')+1]=join(alias,'token');
+  }else args[args.indexOf('--out')+1]=join(alias,'inventory.json');
+  const r=await run(t,f,p,args);assert.equal(r.code,2);assert.equal(r.stdout,'');
+  assert.equal(JSON.parse(r.stderr).code,'github_pull_inventory_worktree');assert.equal(p.calls.length,count);
+  if(field==='inventory')assert((await readFile(join(privateDir,'inventory.json'))).equals(original));
+  else await assert.rejects(access(field==='output'?join(privateDir,'inventory.json'):f.inventory),{code:'ENOENT'});
+});
+test('worktree parent aliases still permit external inventory output, token and offline inspection',async t=>{
+  const f=await files(t),p=await inventoryPeer(t),safe=join(f.root,'safe'),alias=join(f.root,'alias');
+  await mkdir(safe,{mode:0o700});await symlink(safe,alias);await writeFile(join(safe,'token'),TOKEN,{mode:0o600});
+  const args=discover(f);args[args.indexOf('--out')+1]=join(alias,'inventory.json');args[args.indexOf('--token-file')+1]=join(alias,'token');
+  const d=value(await run(t,f,p,args));assert.equal(p.calls.length,6);await p.close();
+  assert.equal(value(await run(t,f,p,['inspect','--inventory',join(alias,'inventory.json'),'--confirm',d.inventory_sha256])).network_accessed,false);
+});
 
 test('real CLI discovers, inspects a pin and writes an ordinary migration capture',async t=>{
   const f=await files(t),p=await inventoryPeer(t,{records:1}),d=value(await run(t,f,p,discover(f)));

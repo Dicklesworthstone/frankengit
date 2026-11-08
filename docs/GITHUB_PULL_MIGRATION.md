@@ -22,6 +22,10 @@ Keep the returned `capture_sha256` independently. A source token is optional for
 public resources; it is never accepted as an argument value or retained in the
 capture. All files are owner-private, with new output created exclusively outside
 Git worktrees. Existing or partial files are not overwritten or repaired.
+The guard checks both the supplied parent path and its resolved ancestry, so
+a parent symlink cannot hide a worktree. Parent aliases outside worktrees remain
+permitted for capture/inspection files; final-file symlinks still refuse. This
+requires a cooperative local filesystem, not a hostile-parent sandbox.
 Inspection is offline and requires the exact capture pin. Output failure retains
 the completed capture and pin rather than repeating requests. Exit 0 is success,
 2 is refusal, and 4 reports retained/potentially published custody or output error.

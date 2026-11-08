@@ -32,6 +32,8 @@ SOURCE_FACTS = ["source_cli_discovery", "source_pin_refusals", "source_bounded_c
 PREPARATION_FACTS = ["preparation_cli_bounded_prefix", "preparation_cli_original_custody",
                      "preparation_cli_offline_completion", "preparation_cli_completed_recovery"]
 FACTS = ["pinned_git_fixture", "synthetic_source_collection", "sha256_destination_refusal", "all_services_drained",
+         "collection_encoded_capacity_preflight", "collection_exact_capacity_handoff",
+         "source_worktree_alias_refusals", "source_external_alias_handoff", "requirements_worktree_alias_refusal",
          *SOURCE_FACTS, *PREPARATION_FACTS] + [
     f"{profile}_{fact}" for profile in ("single", "collection", "prepared") for fact in PROFILE_FACTS]
 
@@ -108,10 +110,39 @@ def run_case(c, oracle_run):
         return c.node_command(script, args, expected, error_reply=error_reply, preload=preload)
 
     before_source = read("list")
-    inventory = source_command(discover, ["discover", "--repository", source["repository"], "--out", source["inventory"],
+    # Explicit local path fixtures, not native authority or a hostile-parent
+    # sandbox. Keep the original source population and permitted aliases.
+    path_worktree = home / "path-worktree-fixture"
+    path_worktree.mkdir(mode=0o700)
+    (path_worktree / ".git").mkdir(mode=0o700)
+    private = path_worktree / "private"
+    private.mkdir(mode=0o700)
+    hidden = home / "worktree-path-alias"
+    hidden.symlink_to(private, target_is_directory=True)
+    outside_alias = home / "source-input-alias"
+    outside_alias.symlink_to(inputs, target_is_directory=True)
+    source_log = log.read_bytes() if log.exists() else b""
+    refused = source_command(discover, ["discover", "--repository", source["repository"],
+        "--out", str(hidden / "inventory.json"), "--token-file", source["token"]], 2, error_reply=True)
+    require(refused["code"] == "github_pull_inventory_worktree" and not (private / "inventory.json").exists()
+            and (log.read_bytes() if log.exists() else b"") == source_log,
+            "parent alias hid a worktree output or started source requests")
+    inventory = source_command(discover, ["discover", "--repository", source["repository"], "--out", str(outside_alias / "inventory.json"),
         "--token-file", source["token"], "--batch-size", "1"])
     require(inventory["pulls"] == inventory["total_batches"] == 2 and not inventory["mutation_submitted"]
             and file_sha256(Path(source["inventory"])) == inventory["inventory_sha256"], "CLI discovery lost its pinned inventory")
+    c.facts["source_external_alias_handoff"] = True
+    original_inventory = Path(source["inventory"]).read_bytes()
+    (private / "inventory.json").write_bytes(original_inventory)
+    (private / "inventory.json").chmod(0o600)
+    source_log = log.read_bytes()
+    refused = source_command(discover, ["inspect", "--inventory", str(hidden / "inventory.json"),
+        "--confirm", inventory["inventory_sha256"]], 2, error_reply=True)
+    require(refused["code"] == "github_pull_inventory_worktree" and log.read_bytes() == source_log
+            and (private / "inventory.json").read_bytes() == original_inventory
+            and read("list") == before_source and refs() == original_refs,
+            "aliased worktree inventory read changed files, source or native state")
+    c.facts["source_worktree_alias_refusals"] = True
     inventory_args = ["--inventory", source["inventory"], "--confirm", inventory["inventory_sha256"]]
     inspected = source_command(discover, ["inspect", *inventory_args, "--batch", "1"])
     require(inspected["selection"]["numbers"] == [9] and not inspected["network_accessed"], "offline inventory selection differs")
@@ -246,6 +277,27 @@ def run_case(c, oracle_run):
                 c.facts["preparation_cli_original_custody"] = True
             else:
                 prepared = c.node_command(script, preparation(workdir, selection_file))
+                if name == "collection":
+                    # Measure the already validated real intents, not a form-body
+                    # estimate. The insufficient attempt must leave this new
+                    # path reusable by an exact-boundary permitted preparation.
+                    original_workdir, originals = workdir, request_hashes(workdir)
+                    exact_bytes = sum(path.stat().st_size for path in workdir.glob("batches/*/requests/*/intent.json"))
+                    require(exact_bytes == prepared["request_bytes"], "prepared byte count differs from retained intents")
+                    workdir = directory / "capacity-job"
+                    command = preparation(workdir, selection_file)
+                    refused = c.node_command(script, [*command, "--max-request-bytes", str(exact_bytes - 1)], 2, error_reply=True)
+                    require(refused["code"] == "github_pull_migration_plan_capacity"
+                            and refused["migration_progress"]["directory_created"] is False
+                            and not workdir.exists() and request_hashes(original_workdir) == originals
+                            and read("list") == before and refs() == original_refs,
+                            "encoded capacity refusal created custody or changed native state")
+                    c.facts["collection_encoded_capacity_preflight"] = True
+                    prepared = c.node_command(script, [*command, "--max-request-bytes", str(exact_bytes)])
+                    require(prepared["preparation_complete"] and prepared["request_bytes"] == exact_bytes
+                            and request_hashes(original_workdir) == originals,
+                            "exact-capacity preparation did not preserve the reference job")
+                    c.facts["collection_exact_capacity_handoff"] = True
             common = ["--workdir", str(workdir), "--confirm", prepared["plan_sha256"]]
             require(prepared["network_accessed"] is False and read("list") == before,
                     "offline planning contacted or changed native authority")
@@ -285,6 +337,14 @@ def run_case(c, oracle_run):
                 requirements = directory / f"requirements-{index}.json"
                 args = ["requirements", *common, *(["--batch", str(index)] if name == "collection" else []),
                         "--principal", BRANCH_PRINCIPAL, "--out", str(requirements)]
+                if name == "single" and index == 1:
+                    refused_args = [*args]
+                    refused_args[-1] = str(hidden / "branches.json")
+                    refused = c.node_command(script, refused_args, 2, error_reply=True)
+                    require(refused["code"] == "github_pull_worktree" and not (private / "branches.json").exists()
+                            and request_hashes(p["workdir"]) == p["originals"],
+                            "aliased worktree branch output changed original custody")
+                    c.facts["requirements_worktree_alias_refusal"] = True
                 c.node_command(script, args)
                 requirement = json.loads(requirements.read_text())
                 source_pull = entry["pull"]

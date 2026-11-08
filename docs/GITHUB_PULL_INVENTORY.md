@@ -77,7 +77,11 @@ argument value or sent to a pagination-selected foreign origin.
 
 Private output files are create-only, synchronized and read back through the
 existing operator file helpers. No overwrite, repair or deletion is attempted.
-The output path and token must be outside Git worktrees. Inspection is offline;
+The output path and token must be outside Git worktrees. The CLI checks supplied
+and resolved parent ancestry for output, token and inventory paths. Parent aliases
+outside worktrees remain permitted; they cannot hide a worktree, and final-file
+symlinks retain the existing refusal. These checks require a cooperative local
+filesystem and are not a hostile-parent sandbox. Inspection is offline;
 public source resources may be read without a token. Exit 0 means the selected
 operation succeeded, 2 means refusal, and 4 means an error with retained or
 potentially published custody/output. A broken output pipe retains the original

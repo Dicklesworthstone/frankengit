@@ -10,7 +10,7 @@ import { directory, readPrivate, writeNew, syncDirectory, encode, digest, pin, s
 import { loadGithubPullCollection, collectionGuard, collectionRead, collectionLifetime, batchName }
   from './github-pull-collection-store.mjs';
 import { parseGithubPullCapture } from './github-pull-source.mjs';
-import { githubPullImportSelection, compileGithubPullImport } from './github-pull-import-plan.mjs';
+import { githubPullImportSelection, compileGithubPullImport, githubPullImportRequestBytes } from './github-pull-import-plan.mjs';
 import { prepareGithubPullImport, loadGithubPullImport, executeGithubPullImport,
   githubPullBranchRequirements } from './github-pull-import.mjs';
 import { readImportJournal } from './native-pull-import-journal.mjs';
@@ -46,10 +46,10 @@ async function preflight(source,selection,maxSteps,maxBytes,life) {
   for(let i=0;i<source.rows.length;i++) {
     const {capture}=await captureAt(source,i,life);
     const compiled=compileGithubPullImport(capture,selectionAt(selection,i*source.inventory.batch_size));
-    steps+=compiled.steps.length;bytes+=compiled.encodedBytes;
+    steps+=compiled.steps.length;bytes+=githubPullImportRequestBytes(compiled,life.check);
     if(steps>maxSteps||bytes>maxBytes)fail('plan_capacity');
   }
-  return steps;
+  return {steps,bytes};
 }
 async function copyCollection(source,target,life) {
   await mkdir(target,{mode:0o700});
@@ -164,7 +164,7 @@ export async function prepareGithubPullMigration(raw) {
     life.check();await privatePullDirectory(dirname(o.workdir));
     try{await lstat(o.workdir);fail('workdir_exists');}catch(e){if(e.code!=='ENOENT')throw e;}
     const original=await loadGithubPullCollection(o.collectionDir,o.collectionConfirm,life,false,o.completeConfirm);
-    const expectedSteps=await preflight(original,o.selection,o.maxSteps,o.maxRequestBytes,life);
+    const expected=await preflight(original,o.selection,o.maxSteps,o.maxRequestBytes,life);
     const credential=pullTokenFingerprint(await readPullToken(o.tokenFile));life.check();
     await mkdir(o.workdir,{mode:0o700});created=true;await syncDirectory(dirname(o.workdir));const identity=await directory(o.workdir);
     const source=await copyCollection(original,join(o.workdir,'collection'),life);
@@ -181,7 +181,7 @@ export async function prepareGithubPullMigration(raw) {
       rows.push({batch:i+1,first_index:first,pulls:source.rows[i].pulls,plan_sha256:child.plan_sha256,
         capture_sha256:source.rows[i].capture_sha256,steps:child.steps,request_bytes:child.request_bytes});
     }
-    if(steps!==expectedSteps)fail('plan_changed');
+    if(steps!==expected.steps||bytes!==expected.bytes)fail('plan_changed');
     const m=manifest({schema:SCHEMA,collection_plan_sha256:o.collectionConfirm,collection_complete_sha256:o.completeConfirm,
       selection:o.selection,credential_fingerprint:credential,max_steps:o.maxSteps,max_request_bytes:o.maxRequestBytes,
       pulls:source.pulls,steps,request_bytes:bytes,batches:rows});
