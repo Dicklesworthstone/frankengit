@@ -130,8 +130,13 @@ node --test tests/operator/source_edit_refactoring.test.mjs \
 ```
 
 The tests exercise the actual Node CLI, private files, competing processes and
-broken stdout. A separately invoked installed Git is a **test-only oracle**, not
-a product dependency. Each forward/reverse application starts in an independent
+broken stdout. The Git scenarios use the exact `git-2.47.3` pin through the
+[canonical sandbox oracle](../scripts/e2e/oracle/README.md), never a host Git
+selected from PATH. This is a **test-only oracle**, not a product dependency.
+An absent installation is an explicit skip; configuration, sandbox and receipt
+failures fail the test. Each command retains stdout/stderr and a digest-checked
+receipt in the reported external run directory, including expected Git failures.
+Each forward/reverse application starts in an independent
 repository, verifies desired novel objects are absent before application, and
 compares the whole resulting tree against independently calculated bytes in both
 Git hash formats. This does not certify native Rust integration, remote source
