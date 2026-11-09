@@ -147,9 +147,21 @@ pub(super) fn execute(
             base,
             candidate,
         } if request.operation == Operation::Inspect => {
-            let inspected = drive_request_while(
-                node,
-                &context,
+            let inspection = async {
+                if let Some(candidate_request) = candidate_request.as_ref() {
+                    return node
+                        .inspect_agent_source_bundle_in(
+                            candidate_request,
+                            &reference,
+                            base,
+                            candidate,
+                            payload,
+                            &RefVisibility::new(),
+                            None,
+                            &ReviewOptions::default(),
+                        )
+                        .await;
+                }
                 node.inspect_workspace_bundle_in(
                     &context,
                     &reference,
@@ -159,12 +171,13 @@ pub(super) fn execute(
                     &RefVisibility::new(),
                     None,
                     &ReviewOptions::default(),
-                ),
-                &mut live,
-            )
-            // The inspector's evidence failures never turn into an empty
-            // diff or an invented approval. No transaction was attempted.
-            .map_err(|_| ApiError::unavailable())?;
+                )
+                .await
+            };
+            let inspected = drive_request_while(node, &context, inspection, &mut live)
+                // The inspector's evidence failures never turn into an empty
+                // diff or an invented approval. No transaction was attempted.
+                .map_err(|_| ApiError::unavailable())?;
             drop(bytes);
             let body = output::inspection(
                 node,

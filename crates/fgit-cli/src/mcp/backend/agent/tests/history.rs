@@ -187,7 +187,10 @@ fn sponsored_history_tools_read_real_ancestry_and_diffs_in_both_formats() {
                 }
                 "frankengit_source_historical_blob" => {
                     assert_eq!(result["bytes_hex"], text(hex(OLD)));
-                    assert_eq!(result["source_commit"], text(fixture.fixture.tip.to_string()));
+                    assert_eq!(
+                        result["source_commit"],
+                        text(fixture.fixture.tip.to_string())
+                    );
                     assert_eq!(result["source_ref_tip"], text(fixture.tip.to_string()));
                 }
                 "frankengit_source_compare" => {
@@ -228,7 +231,9 @@ fn sponsored_history_tools_read_real_ancestry_and_diffs_in_both_formats() {
         );
         let next = backend.call(TOOLS[0], &recent).unwrap();
         assert_eq!(
-            rows(&next.object().unwrap()["commits"])[0].object().unwrap()["id"],
+            rows(&next.object().unwrap()["commits"])[0]
+                .object()
+                .unwrap()["id"],
             text(fixture.fixture.tip.to_string())
         );
 
@@ -257,18 +262,11 @@ fn sponsored_history_scope_is_independent_of_prior_scopes_and_launch_flags() {
         let mut options = fixture.options.clone();
         options.agent_token_file = fixture.fixture.replacement(byte).agent_token_file;
         let mut backend = NodeTools::open(options).unwrap();
-        let current = object([
-            ("reference", text(TOPIC)),
-            ("path_hex", text(hex(b"file"))),
-        ])
-        .object()
-        .unwrap()
-        .clone();
-        assert!(
-            backend
-                .call("frankengit_source_blob", &current)
-                .is_ok()
-        );
+        let current = object([("reference", text(TOPIC)), ("path_hex", text(hex(b"file")))])
+            .object()
+            .unwrap()
+            .clone();
+        assert!(backend.call("frankengit_source_blob", &current).is_ok());
         for name in TOOLS {
             // Refusal precedes parsing, even with every legacy bit enabled.
             assert_eq!(
@@ -297,7 +295,6 @@ fn sponsored_history_scope_is_independent_of_prior_scopes_and_launch_flags() {
     }
     for name in [
         "frankengit_pull_diff",
-        "frankengit_source_candidate",
         "frankengit_source_publish",
         "frankengit_source_verified_blob",
     ] {
@@ -307,6 +304,16 @@ fn sponsored_history_scope_is_independent_of_prior_scopes_and_launch_flags() {
             "tool_not_granted"
         );
     }
+    assert_eq!(
+        backend
+            .call(
+                "frankengit_source_candidate",
+                object([("operation", text("inspect"))]).object().unwrap(),
+            )
+            .unwrap_err()
+            .code,
+        "agent_operation_not_granted"
+    );
     backend.options.source = false;
     for name in TOOLS {
         assert!(!backend.tools().iter().any(|tool| tool.name == name));

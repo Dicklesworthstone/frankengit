@@ -45,9 +45,14 @@ Current source browsing, search, reference listing and initial/context retrieval
 require --allow-source and the canonical source-read scope. --allow-agent-context
 independently exposes the authenticated Agent Protocol context document under
 that same canonical scope; neither launch flag grants the other tool group.
-These source reads preserve the credential's real agent, sponsor and request
-deadline, and create no durable execution run. Source writes, history, candidate
-preparation/inspection, diffs, Git transport and bundles remain unavailable.
+History, blame, historical tree/blob and reference comparison tools independently
+require source-history-read. With source-candidates, --allow-source exposes only
+prepare_patch (regular-file exact-tree-v1) and single-parent inspect operations of
+frankengit_source_candidate. Candidate data grants no publication authority.
+Source work preserves the credential's real agent, sponsor and original request
+deadline, and creates no durable execution run. Source writes, initial-history,
+symlink/replay/rebase/PR/queue candidate preparation, PR-specific diffs, Git
+transport and general bundle export/import remain unavailable.
 Issue, PR metadata/conversation, discussion and own-principal outcome tools keep
 their independent grants. Milestones, notifications, checks, reviews, artifacts,
 queues, events and administration remain unavailable.

@@ -10,7 +10,7 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
+    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -49,7 +49,8 @@ impl Profile {
 
 /// One exhaustive list owns both discovery and dispatch. Do not derive this
 /// from broad operator groups: those also grant milestones, notifications,
-/// checks, reviews, candidates and events not covered by these grants.
+/// checks, reviews and events not covered by these grants. Candidate operations
+/// have an additional closed argument gate before authentication and dispatch.
 pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     match name {
         "frankengit_issue_list" | "frankengit_issue_show" if options.issues => Some(ISSUES_READ),
@@ -115,6 +116,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
             Some(SOURCE_READ)
         }
         "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
+        super::candidate::NAME if options.source => Some(SOURCE_CANDIDATES),
         "frankengit_source_log"
         | "frankengit_source_blame"
         | "frankengit_source_historical_tree"
@@ -172,6 +174,9 @@ pub(super) fn call(backend: &mut NodeTools, name: &str, args: &Object) -> Result
     // direct backend calls that do not pass through protocol discovery.
     let operation =
         operation(&backend.options, name).ok_or(ToolError::invalid("tool_not_granted"))?;
+    if operation == SOURCE_CANDIDATES {
+        super::candidate::agent_operation(args)?;
+    }
     let key = if is_write(operation) || operation == OUTCOMES_READ {
         mutations::key(args)?
     } else {
@@ -273,6 +278,20 @@ pub(super) fn source_read_context(
         .and_then(|profile| profile.request.as_ref())
         .ok_or(ToolError::failed("agent_request_required"))?
         .mcp_source_read_context(&backend.node)
+        .map_err(auth_error)
+}
+
+/// A candidate handler cannot convert a missing request, another operation's
+/// reservation, or public attribution into trusted local source authority.
+pub(super) fn source_candidate_request(
+    backend: &NodeTools,
+) -> Result<fgit_node::agent_credentials::SourceCandidateRequest<'_>, ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .source_candidates(&backend.node)
         .map_err(auth_error)
 }
 

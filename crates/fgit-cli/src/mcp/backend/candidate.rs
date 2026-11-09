@@ -49,11 +49,56 @@ pub(super) fn tool() -> Tool {
     }
 }
 
+/// Sponsored discovery describes the same closed operations enforced at
+/// dispatch. It does not advertise the trusted-local tool's other planners.
+pub(super) fn agent_tool() -> Tool {
+    Tool {
+        name: NAME,
+        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1) or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
+        schema: object([
+            ("type", text("object")),
+            (
+                "oneOf",
+                Value::Array(vec![prepare::agent_schema(), inspect::schema()]),
+            ),
+        ]),
+    }
+}
+
+/// This tool multiplexes independently privileged native engines. An agent
+/// grant for its name is insufficient: reject every other operation/profile
+/// before looking up credentials, allocating upload bytes or reading source.
+pub(super) fn agent_operation(args: &Object) -> Result<(), ToolError> {
+    match required(args, "operation")? {
+        "prepare_patch" => match string(args, "profile")? {
+            None | Some("exact-tree-v1") => Ok(()),
+            Some(_) => Err(ToolError::invalid("unsupported_patch_profile")),
+        },
+        "inspect" => Ok(()),
+        _ => Err(ToolError::invalid("tool_not_granted")),
+    }
+}
+
+fn agent_request<'a>(
+    backend: &'a NodeTools,
+    args: &Object,
+) -> Result<Option<fgit_node::agent_credentials::SourceCandidateRequest<'a>>, ToolError> {
+    if !backend.options.source {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
+    if backend.options.agent_token_file.is_none() && backend.agent.is_none() {
+        return Ok(None);
+    }
+    agent_operation(args)?;
+    super::agent::source_candidate_request(backend).map(Some)
+}
+
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     // Also protect direct handler callers, before parsing or touching the node.
     if !backend.options.source {
         return Err(ToolError::invalid("tool_not_granted"));
     }
+    agent_request(backend, args)?;
     let result = match required(args, "operation")? {
         "prepare_patch" => prepare::call(backend, args)?,
         "prepare_initial" => initial::call(backend, args)?,

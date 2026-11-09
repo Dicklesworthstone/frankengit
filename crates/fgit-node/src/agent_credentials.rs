@@ -371,7 +371,9 @@ impl AgentRequest {
     /// A public provenance record, source-read grant or metadata grant cannot
     /// construct this boundary. Native adapters still enforce the exact source
     /// selection, canonical visibility, path limits and original deadline.
-    pub(crate) fn source_candidates(
+    /// The host must account for its full input and response envelopes against
+    /// this request and authenticate again for the next tool or HTTP operation.
+    pub fn source_candidates(
         &self,
         node: &OneNode,
     ) -> Result<SourceCandidateRequest<'_>, NodeReceiveTransportRefusal> {
@@ -486,7 +488,9 @@ impl AgentRequest {
 
 /// Unforgeable, request-borrowed authority for ephemeral source candidates.
 /// It has no session, publication, credential-refresh or current-source API.
-pub(crate) struct SourceCandidateRequest<'a>(&'a AgentRequest);
+/// Native entrypoints bound raw inputs; adapters retain responsibility for the
+/// complete serialized request/response reservation and disclosure checkpoints.
+pub struct SourceCandidateRequest<'a>(&'a AgentRequest);
 
 impl SourceCandidateRequest<'_> {
     pub(crate) fn context(
@@ -504,6 +508,23 @@ impl SourceCandidateRequest<'_> {
         self.0
             .check(0, 0)
             .map_err(|_| crate::NodeWorkspaceRefusal::Cancelled { exhaustion: None })
+    }
+
+    /// The public native boundary retains at least the raw input reservation.
+    /// Each transport separately accounts for its complete framing and output.
+    pub(crate) fn check_input(&self, bytes: usize) -> Result<(), crate::NodeWorkspaceRefusal> {
+        self.check()?;
+        let bytes =
+            u64::try_from(bytes).map_err(|_| crate::NodeWorkspaceRefusal::WorkspaceCapacity)?;
+        if !self
+            .0
+            .run
+            .resource_budget()
+            .dominates(&ResourceVector::single(Grade::Bytes, bytes))
+        {
+            return Err(crate::NodeWorkspaceRefusal::WorkspaceCapacity);
+        }
+        Ok(())
     }
 
     pub(crate) fn workspace_id(&self) -> [u8; 16] {

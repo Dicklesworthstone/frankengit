@@ -2,6 +2,8 @@
 //! Parent visibility selects the original-object capability before any uploaded
 //! REF_DELTA can request bytes. Nothing in this module stages or publishes.
 
+#[path = "bundle_review/agent.rs"]
+mod agent;
 #[path = "bundle_review/candidate_inputs.rs"]
 mod candidate_inputs;
 #[path = "bundle_review/pack.rs"]

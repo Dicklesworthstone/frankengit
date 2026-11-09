@@ -88,14 +88,14 @@ observation schema. This grants no agent source-import capability.
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 | `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
-| `source-candidates` | HTTP exact-patch candidate preparation and supplied single-parent bundle inspection against an explicit current branch |
+| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch` and single-parent `inspect`, against an explicit current branch |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
 Current-source reads require an explicit `source-read` grant; history and
 comparison reads require `source-history-read`. Candidate preparation and
-inspection require `source-candidates` and the HTTP server's `--allow-source`
-switch. Current-source and history reads require that switch or the MCP launch
-ceilings described below.
+inspection require `source-candidates` and the HTTP server's or MCP launch's
+`--allow-source` switch. Current-source and history reads require that switch or
+the MCP launch ceilings described below.
 Metadata scopes, including all seven previously
 available flags, grant no source access. The HTTP adapter admits a closed set of
 current-source, history and candidate routes; it does not interpret arbitrary GET requests or the
@@ -108,8 +108,9 @@ reviews, checks, merges, queue operations, milestones, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
 external effects are outside this profile. MCP offers the closed sponsored
 source and metadata tools described below and keeps its existing trusted-local
-profile. Its source ceiling does not include the operator profile's candidate
-or bundle tools. History tools require their independent credential scope.
+profile. Its source ceiling exposes only the two independently granted candidate
+operations below, not the operator profile's other candidate engines or general
+bundle tools. History tools require their independent credential scope.
 
 A separate source-only credential can be issued with `--operations source-read`.
 Combine it with a metadata scope only when both capabilities are intended. Source
@@ -249,10 +250,18 @@ keys and leave canonical authority unchanged, including on refusals.
 
 `apply`, ref mutation, PR source publication, review, checks, merge and queue
 landing remain unavailable. A sponsor or independently authorized operator must
-review and publish the returned artifact through ordinary admission. MCP's
-sponsored profile does not expose candidate tools, even when the token includes
-`source-candidates`. This bounded HTTP capability does not create a durable agent
-run or grant process, network, secret or external-integration access.
+review and publish the returned artifact through ordinary admission. MCP exposes
+the same request-borrowed capability through `frankengit_source_candidate`, with
+only regular-file `prepare_patch` (`exact-tree-v1`) and single-parent `inspect`.
+Its discovery schema omits the other candidate engines, and dispatch rejects
+initial-history, symlink/replay/rebase/PR/queue preparation before authentication.
+MCP retains its narrower 16 KiB text-patch / 24 KiB decoded patch-or-bundle bounds,
+bounded inspection, 2 MiB tool result and 8 MiB response envelope. The native
+entrypoints also refuse raw input exceeding the original request reservation;
+transport framing and output remain independently accounted. See
+[MCP source candidates](MCP_SOURCE_CANDIDATES.md) for exact fields and handoff.
+These capabilities do not create a durable agent run or grant process, network,
+secret or external-integration access.
 
 ## Use the credential with MCP
 
@@ -309,10 +318,13 @@ fg mcp ./repository TENANT_ID REPOSITORY_ID \
 | --- | --- | --- |
 | `--allow-source` | `source-read` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_search_index`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
 | `--allow-source` | `source-history-read` | `frankengit_source_log`, `frankengit_source_blame`, `frankengit_source_historical_tree`, `frankengit_source_historical_blob`, `frankengit_source_compare` |
+| `--allow-source` | `source-candidates` | `frankengit_source_candidate`, limited to regular-file `prepare_patch` and single-parent `inspect` |
 | `--allow-agent-context` | `source-read` | `frankengit_agent_context` |
 
 Each call requires its listed canonical scope. Neither launch flag implies the
-other, and a metadata-only credential cannot use either. Source
+other, and a metadata-only credential cannot use either. Candidate discovery does
+not authorize a call; `source-read` and `source-history-read` cannot substitute
+for `source-candidates`. Source
 search retains its existing bounded literal and regex operations. Structured
 Initial, source-context and agent-context retrieval require existing current
 indexes; reads do not create or rebuild them. Current visible-source filtering

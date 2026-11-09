@@ -14,7 +14,7 @@ impl OneNode {
     /// TreeFS capability grants writes only to both sides of declared edits,
     /// retains the original expiry and shares finite read-byte/object budgets.
     /// No staging, ref authority, host workspace or process is created.
-    pub(crate) async fn prepare_agent_source_patch_in(
+    pub async fn prepare_agent_source_patch_in(
         &self,
         candidate_request: &SourceCandidateRequest<'_>,
         reference: &RefName,
@@ -24,6 +24,7 @@ impl OneNode {
         binary_refactor: bool,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         let context = candidate_request.context(self)?;
+        candidate_request.check_input(patch_bytes.len())?;
         let candidate = self
             .prepare_repository_patch_profile_in(
                 &context,

@@ -106,6 +106,7 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
         "frankengit_source_historical_tree",
         "frankengit_source_historical_blob",
         "frankengit_source_compare",
+        "frankengit_source_candidate",
     ]);
     for (flags, expected) in [
         (vec!["--allow-source"], source_tools.clone()),

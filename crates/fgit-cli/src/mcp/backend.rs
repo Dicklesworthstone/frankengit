@@ -249,7 +249,11 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.extend(source::tools());
         tools.push(verified_blob::tool());
         tools.extend(search::tools());
-        tools.push(candidate::tool());
+        tools.push(if options.agent_token_file.is_some() {
+            candidate::agent_tool()
+        } else {
+            candidate::tool()
+        });
         tools.push(refs::tool());
         tools.extend(retrieval::tools());
         tools.push(tags::read_tool());
