@@ -368,8 +368,17 @@ fn prepare_fetch_after_graph(
         .unwrap();
     let context = node.session_pack_materialization_context(&deadline);
     after_graph();
-    node.prepare_upload_pack_selection(&head, &scope, &fetch, &deadline, &context, &mut || true)
-        .map(|selection| (head, selection))
+    node.prepare_upload_pack_selection(
+        &head,
+        &scope,
+        &fetch,
+        &deadline,
+        &context,
+        node.request_context().authority(),
+        &Cell::new(None),
+        &mut || true,
+    )
+    .map(|selection| (head, selection))
 }
 
 #[test]

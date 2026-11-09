@@ -48,6 +48,14 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 
 ## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
 
+Current implementation supports `sparse:oid=<exact visible blob OID>` through
+the shared native selector. Symbolic blob expressions and `sparse:path` remain
+unsupported. See [the supported grammar and bounds](PARTIAL_CLONE_SERVING.md#sparse-pattern-blobs).
+The historical sparse-refusal results below remain tied to their named
+revision. The stock-transport helper now exercises exact-OID omission and lazy
+checkout against Git's own omitted set, but that updated campaign requires its
+own execution; the old passing result does not validate the new capability.
+
 These rows come from one discovered suite, `suites-transport-stock_transport_capabilities`
 (`scripts/e2e/suites/transport/stock_transport_capabilities.sh`, helper
 `scripts/e2e/helpers/stock_transport_capabilities.py`; frankengit-root-doctrine-x2mv.4.33).

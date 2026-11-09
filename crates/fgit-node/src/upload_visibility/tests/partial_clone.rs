@@ -3,6 +3,7 @@ use super::*;
 use fgit_wire::ObjectFilter;
 
 mod blob_limits;
+mod sparse;
 mod streaming_blobs;
 
 fn request(wants: Vec<GitOid>, haves: Vec<GitOid>, filter: Option<ObjectFilter>) -> PackRequest {
@@ -247,11 +248,10 @@ fn unsupported_controls_fail_instead_of_silently_returning_an_unfiltered_pack() 
     let graph = graph(&source, &[blob]);
     for filter in [
         ObjectFilter::SparsePath(b"secret".to_vec()),
-        ObjectFilter::SparseObject(blob),
         ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
         ObjectFilter::Combine(vec![
             ObjectFilter::BlobNone,
-            ObjectFilter::SparseObject(blob),
+            ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
         ]),
     ] {
         let mut ids = vec![blob];
@@ -585,6 +585,7 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
         ObjectFilter::BlobNone,
         ObjectFilter::BlobLimit(1024),
         ObjectFilter::TreeDepth(0),
+        ObjectFilter::SparseObject(blob),
         ObjectFilter::Combine(vec![
             ObjectFilter::BlobLimit(1),
             ObjectFilter::Combine(vec![ObjectFilter::TreeDepth(2), ObjectFilter::BlobNone]),
@@ -593,7 +594,6 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
         assert_eq!(engine::unserved_filter_name(&served), None, "{served:?}");
     }
     for (refused, name) in [
-        (ObjectFilter::SparseObject(blob), "sparse:oid"),
         (
             ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
             "sparse:oid",

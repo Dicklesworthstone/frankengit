@@ -20,6 +20,9 @@ pub(super) fn pack_line(refusal: &NodePackMaterializationRefusal) -> Option<Vec<
             refusal.to_string()
         }
         NodePackMaterializationRefusal::BudgetClassExhausted { .. } => refusal.to_string(),
+        // These grammar/profile labels are static server-owned strings. In
+        // particular a sparse pattern refusal contains no client bytes or OID.
+        NodePackMaterializationRefusal::UnsupportedFetch(_) => refusal.to_string(),
         _ => return None,
     };
     Some(bounded_line(&message))

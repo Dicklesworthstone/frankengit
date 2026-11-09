@@ -10370,6 +10370,8 @@ impl OneNode {
         request: &PackRequest,
         deadline: &GitDaemonSessionDeadline,
         pack_context: &FsqliteCx,
+        database_context: &FsqliteCx,
+        database_exhaustion: &Cell<Option<Exhaustion>>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<PreparedUploadPack, NodePackMaterializationRefusal> {
         disclosure.closure_for(materialized)?;
@@ -10378,8 +10380,27 @@ impl OneNode {
         }
         let (limits, write_profile, maximum_object_bytes) =
             self.selected_pack_write_envelope(selected_fetch_write_profile(request));
-        let (keys, held, expanded_bytes) =
-            disclosure.prepare_selection(request, &limits, maximum_object_bytes, live)?;
+        let session_is_live = || !deadline.expired();
+        let mut load_pattern = |id, maximum: usize| {
+            let source = VerifiedFabricPackSource {
+                fabric: &self.fabric,
+                object_format: self.object_format,
+                maximum_object_bytes: maximum.min(maximum_object_bytes),
+                database_context,
+                database_exhaustion,
+                session_is_live: Some(&session_is_live),
+            };
+            source
+                .read_object(&id)
+                .map_err(NodePackMaterializationRefusal::from)
+        };
+        let (keys, held, expanded_bytes) = disclosure.prepare_selection(
+            request,
+            &limits,
+            maximum_object_bytes,
+            &mut load_pattern,
+            live,
+        )?;
         // The caller's checkpoint retains peer cancellation and exact Transfer
         // exhaustion. Neither a refused selection nor a stopped peer earns time.
         if !live() {
@@ -10601,7 +10622,16 @@ impl OneNode {
             };
         if let Some((scope, request)) = fetch {
             scope.closure_for(materialized)?;
-            scope.select_partial(&mut ids, request, &limits, is_live)?;
+            let mut load_pattern = |id, maximum: usize| {
+                let bounded = VerifiedFabricPackSource {
+                    maximum_object_bytes: maximum.min(source.maximum_object_bytes),
+                    ..source
+                };
+                bounded
+                    .read_object(&id)
+                    .map_err(NodePackMaterializationRefusal::from)
+            };
+            scope.select_partial(&mut ids, request, &limits, &mut load_pattern, is_live)?;
             if request.options.include_tag() {
                 scope.tags.extend_selected(&mut ids, &limits, is_live)?;
             }
@@ -10940,6 +10970,8 @@ impl OneNode {
                         pack_request,
                         &deadline,
                         &pack_context,
+                        request.authority(),
+                        &database_exhaustion,
                         &mut is_live,
                     )
                     .and_then(|prepared| {

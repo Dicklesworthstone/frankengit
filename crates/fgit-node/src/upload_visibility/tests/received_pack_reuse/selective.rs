@@ -382,7 +382,16 @@ fn prepare_thin(fixture: &SelectiveFixture) -> (MaterializedAdmission, PreparedU
     let context = fixture.node.session_pack_materialization_context(&deadline);
     let selection = fixture
         .node
-        .prepare_upload_pack_selection(&head, &scope, &fetch, &deadline, &context, &mut || true)
+        .prepare_upload_pack_selection(
+            &head,
+            &scope,
+            &fetch,
+            &deadline,
+            &context,
+            fixture.node.request_context().authority(),
+            &Cell::new(None),
+            &mut || true,
+        )
         .unwrap();
     assert!(selection.write_profile.thin);
     (head, selection)

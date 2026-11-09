@@ -5,6 +5,10 @@ use super::{
     PackRequest, PackWriteError, RefusalCode, disclosure_refusal,
 };
 use fgit_wire::ObjectFilter;
+mod sparse;
+
+pub(super) type PatternLoader<'a> =
+    dyn FnMut(GitOid, usize) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> + 'a;
 
 /// The upstream configuration name (`uploadpackfilter.<name>.allow`) of the
 /// first filter term this node does not serve, if any.
@@ -17,13 +21,16 @@ pub fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
     let mut pending = vec![filter];
     while let Some(filter) = pending.pop() {
         match filter {
-            ObjectFilter::SparseObject(_) | ObjectFilter::SparseObjectName(_) => {
+            ObjectFilter::SparseObjectName(_) => {
                 return Some("sparse:oid");
             }
             ObjectFilter::SparsePath(_) => return Some("sparse:path"),
             // The wire grammar bounds both nesting and the total term count.
             ObjectFilter::Combine(parts) => pending.extend(parts.iter().rev()),
-            ObjectFilter::BlobNone | ObjectFilter::BlobLimit(_) | ObjectFilter::TreeDepth(_) => {}
+            ObjectFilter::BlobNone
+            | ObjectFilter::BlobLimit(_)
+            | ObjectFilter::TreeDepth(_)
+            | ObjectFilter::SparseObject(_) => {}
         }
     }
     None
@@ -66,6 +73,7 @@ impl<F: FnMut() -> bool> Work<'_, F> {
 struct Predicate {
     blob_limit: Option<u64>,
     tree_depth: Option<u32>,
+    sparse: BTreeSet<GitOid>,
 }
 impl Predicate {
     fn compile(
@@ -98,9 +106,16 @@ impl Predicate {
                         .map_err(|_| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
                     pending.extend(parts.iter().rev());
                 }
-                ObjectFilter::SparseObject(_)
-                | ObjectFilter::SparseObjectName(_)
-                | ObjectFilter::SparsePath(_) => {
+                ObjectFilter::SparseObject(id) => {
+                    work.count(
+                        result
+                            .sparse
+                            .len()
+                            .saturating_add(usize::from(!result.sparse.contains(id))),
+                    )?;
+                    result.sparse.insert(*id);
+                }
+                ObjectFilter::SparseObjectName(_) | ObjectFilter::SparsePath(_) => {
                     return Err(NodePackMaterializationRefusal::UnsupportedFetch(
                         "sparse filters",
                     ));
@@ -143,11 +158,39 @@ fn object(
 
 /// Install the filtered selection atomically, after all controls and bounds pass.
 /// `objects` can only be supplied by the parent's complete visible-graph proof.
+#[cfg(test)]
 pub(super) fn apply_selection(
     objects: &BTreeMap<GitOid, FilterObject>,
     ids: &mut Vec<GitOid>,
     request: &PackRequest,
     limits: &PackLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), NodePackMaterializationRefusal> {
+    apply_selection_with_sparse(
+        objects,
+        &BTreeMap::new(),
+        ids,
+        request,
+        limits,
+        &mut |_, _| {
+            Err(NodePackMaterializationRefusal::UnsupportedFetch(
+                "sparse filter context required",
+            ))
+        },
+        live,
+    )
+}
+
+/// Native selection supplies the exact verified tree names and a bounded loader
+/// using the original request's Database context. The helper above deliberately
+/// cannot authorize a pattern-object read by itself.
+pub(super) fn apply_selection_with_sparse(
+    objects: &BTreeMap<GitOid, FilterObject>,
+    facts: &BTreeMap<GitOid, super::WalkFacts>,
+    ids: &mut Vec<GitOid>,
+    request: &PackRequest,
+    limits: &PackLimits,
+    load_pattern: &mut PatternLoader<'_>,
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), NodePackMaterializationRefusal> {
     let mut work = Work {
@@ -175,6 +218,7 @@ pub(super) fn apply_selection(
         object(objects, id)?;
         selected.insert(id);
     }
+    let direct_haves: BTreeSet<_> = request.haves.iter().copied().collect();
     let mut explicit = BTreeSet::new();
     for &id in &request.wants {
         work.tick()?;
@@ -186,7 +230,43 @@ pub(super) fn apply_selection(
         }
         explicit.insert(id);
     }
-    let direct_haves: BTreeSet<_> = request.haves.iter().copied().collect();
+    // Git propagates user-given status through an explicitly requested tag
+    // chain. Its terminal blob/tree bypasses filters, but descendants do not.
+    // A directly held tag cuts this restoration just like a held target; no
+    // physical lookup or additional disclosure permission is involved.
+    for &id in &request.wants {
+        let mut target = id;
+        let mut seen = BTreeSet::new();
+        loop {
+            work.tick()?;
+            if direct_haves.contains(&target) {
+                break;
+            }
+            let item = object(objects, target)?;
+            if item.kind != ObjectType::Tag {
+                if target != id && matches!(item.kind, ObjectType::Blob | ObjectType::Tree) {
+                    work.count(
+                        explicit
+                            .len()
+                            .saturating_add(usize::from(!explicit.contains(&target))),
+                    )?;
+                    explicit.insert(target);
+                }
+                break;
+            }
+            if !seen.insert(target) {
+                return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
+            }
+            work.count(seen.len())?;
+            let [(child, kind)] = item.edges.as_slice() else {
+                return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
+            };
+            if object(objects, *child)?.kind != *kind {
+                return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
+            }
+            target = *child;
+        }
+    }
     // A partial client's have-commit does not prove that an explicitly wanted
     // blob/tree is present. Restore those lazy object roots and their subtree,
     // never commit history. Explicit have of the same object still wins.
@@ -228,14 +308,29 @@ pub(super) fn apply_selection(
     } else {
         BTreeMap::new()
     };
+    let sparse_blobs = sparse::select(
+        objects,
+        facts,
+        &selected,
+        &explicit,
+        &predicate.sparse,
+        limits,
+        load_pattern,
+        &mut work,
+    )?;
     let mut result = Vec::new();
     result
         .try_reserve_exact(selected.len())
         .map_err(|_| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
     for id in selected {
         work.tick()?;
+        let item = object(objects, id)?;
         if explicit.contains(&id)
-            || predicate.permits(object(objects, id)?, depths.get(&id).copied())?
+            || (predicate.permits(item, depths.get(&id).copied())?
+                && (item.kind != ObjectType::Blob
+                    || sparse_blobs
+                        .as_ref()
+                        .is_none_or(|blobs| blobs.contains(&id))))
         {
             result.push(id);
         }

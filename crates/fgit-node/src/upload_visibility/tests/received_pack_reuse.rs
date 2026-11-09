@@ -243,6 +243,8 @@ fn prepare(
         &fetch,
         &deadline,
         &context,
+        node.request_context().authority(),
+        &Cell::new(None),
         &mut || true,
     )
     .map(|prepared| (materialized, prepared))

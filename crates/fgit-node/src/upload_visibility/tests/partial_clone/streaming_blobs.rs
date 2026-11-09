@@ -254,6 +254,8 @@ fn a_blob_above_32_mib_uses_verified_file_chunks_and_never_enters_buffered_loadi
             &fetch,
             &deadline,
             &pack_context,
+            node.request_context().authority(),
+            &Cell::new(None),
             &mut || true,
         )
         .unwrap();

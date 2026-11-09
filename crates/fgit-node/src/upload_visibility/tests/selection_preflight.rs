@@ -48,6 +48,7 @@ fn preflight_reports_the_complete_selected_total_before_any_body_read() {
                 &request,
                 &node.selected_pack_limits,
                 usize::MAX,
+                &mut |_, _| panic!("ordinary filters never read a pattern blob"),
                 &mut || true,
             )
             .unwrap();
@@ -66,6 +67,8 @@ fn preflight_reports_the_complete_selected_total_before_any_body_read() {
                 &request,
                 &deadline,
                 &pack_context,
+                node.request_context().authority(),
+                &Cell::new(None),
                 &mut || true,
             )
             .unwrap_err();
@@ -92,7 +95,7 @@ fn preflight_reports_the_complete_selected_total_before_any_body_read() {
         node.selected_pack_limits.max_object_bytes = 4095;
         assert!(matches!(
             node.prepare_upload_pack_selection(
-                &materialized, &scope, &request, &deadline, &pack_context, &mut || true,
+                &materialized, &scope, &request, &deadline, &pack_context, node.request_context().authority(), &Cell::new(None), &mut || true,
             ),
             Err(NodePackMaterializationRefusal::Pack(error))
                 if matches!(error.as_ref(), PackWriteError::Pack(PackError::ObjectSizeLimit {
@@ -115,6 +118,8 @@ fn preflight_reports_the_complete_selected_total_before_any_body_read() {
                 &request,
                 &deadline,
                 &pack_context,
+                node.request_context().authority(),
+                &Cell::new(None),
                 &mut || true,
             )
             .unwrap();
@@ -198,6 +203,8 @@ fn preflight_reports_the_complete_selected_total_before_any_body_read() {
                 &request,
                 &fresh_deadline,
                 &pack_context,
+                node.request_context().authority(),
+                &Cell::new(None),
                 &mut || true,
             ),
             RefusalCode::AuthorityReceiptStale,
@@ -324,6 +331,8 @@ fn selected_work_follows_have_subtraction_filters_shallow_and_explicit_lazy_want
                     &request,
                     &deadline,
                     &pack_context,
+                    node.request_context().authority(),
+                    &Cell::new(None),
                     &mut || true,
                 )
                 .unwrap();
@@ -340,6 +349,7 @@ fn selected_work_follows_have_subtraction_filters_shallow_and_explicit_lazy_want
                     &request,
                     &node.selected_pack_limits,
                     usize::MAX,
+                    &mut |_, _| panic!("ordinary filters never read a pattern blob"),
                     &mut || true,
                 )
                 .unwrap();
@@ -351,6 +361,7 @@ fn selected_work_follows_have_subtraction_filters_shallow_and_explicit_lazy_want
                 &request,
                 &node.selected_pack_limits,
                 usize::MAX,
+                &mut |_, _| panic!("ordinary filters never read a pattern blob"),
                 &mut || true,
             );
             scope.path_hashes = hints;
@@ -453,7 +464,13 @@ fn preflight_allows_streamed_blob_metadata_above_the_buffered_body_cap() {
         ..PackLimits::default()
     };
     let (keys, _, bytes) = scope
-        .prepare_selection(&fetch(blob), &limits, 32 * 1024 * 1024, &mut || true)
+        .prepare_selection(
+            &fetch(blob),
+            &limits,
+            32 * 1024 * 1024,
+            &mut |_, _| panic!("ordinary filters never read a pattern blob"),
+            &mut || true,
+        )
         .unwrap();
     assert_eq!(selected_ids(&keys), BTreeSet::from([blob]));
     assert_eq!(keys[0].path_hash, scope.path_hash_of(&blob));
@@ -464,7 +481,7 @@ fn preflight_allows_streamed_blob_metadata_above_the_buffered_body_cap() {
         .unwrap()
         .size = large;
     assert!(
-        matches!(scope.prepare_selection(&fetch(public), &limits, 32 * 1024 * 1024, &mut || true),
+        matches!(scope.prepare_selection(&fetch(public), &limits, 32 * 1024 * 1024, &mut |_, _| panic!("ordinary filters never read a pattern blob"), &mut || true),
             Err(NodePackMaterializationRefusal::Pack(error)) if matches!(error.as_ref(),
                 PackWriteError::Pack(PackError::ObjectSizeLimit { actual, limit })
                     if *actual == large && *limit == 32 * 1024 * 1024)

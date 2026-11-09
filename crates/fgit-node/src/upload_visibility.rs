@@ -133,6 +133,7 @@ struct VisibleProjection {
     key: Option<StoredKey>,
     graph: VisibleGraph,
     objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
+    facts: Arc<BTreeMap<GitOid, WalkFacts>>,
 }
 
 #[derive(Debug)]
@@ -147,6 +148,7 @@ struct StoredKey {
 impl VisibleProjection {
     fn new(key: Option<&ProjectionKey<'_>>, mut graph: VisibleGraph) -> Self {
         let objects = Arc::new(core::mem::take(&mut graph.objects));
+        let facts = Arc::new(core::mem::take(&mut graph.facts));
         Self {
             key: key.map(|key| StoredKey {
                 binding: key.binding,
@@ -157,6 +159,7 @@ impl VisibleProjection {
             }),
             graph,
             objects,
+            facts,
         }
     }
 
@@ -179,7 +182,7 @@ impl VisibleProjection {
     fn memo(&self) -> ProjectionMemo<'_> {
         ProjectionMemo {
             objects: &self.objects,
-            facts: &self.graph.facts,
+            facts: &self.facts,
         }
     }
 
@@ -201,6 +204,9 @@ pub struct VisibleUploadPack {
     repository: AdmissionUploadPackRepository,
     pub(super) tags: tags::TagProjection,
     objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
+    /// Exact local tree names from verified bodies, shared with the projection.
+    /// No complete paths or per-request copies are retained here.
+    facts: Arc<BTreeMap<GitOid, WalkFacts>>,
     /// One deterministic ordering hint per named visible object. These never
     /// authorize membership or retain names; body verification still governs
     /// every selected object. Unnamed roots retain the zero hint.
@@ -208,13 +214,15 @@ pub struct VisibleUploadPack {
 }
 
 impl VisibleUploadPack {
-    /// Selects once over the verified graph, then counts only the final pack's
-    /// exact object bytes. No object-fabric body is read by this preparation.
+    /// Selects once over the verified graph, then counts the final pack's exact
+    /// object bytes. Sparse filters may read their bounded authorized pattern
+    /// blobs; no selected pack body is read by this preparation.
     pub(super) fn prepare_selection(
         &self,
         request: &PackRequest,
         limits: &PackLimits,
         buffered_object_bytes: usize,
+        load_pattern: &mut partial_clone::PatternLoader<'_>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<PackOrderKey>, BTreeSet<GitOid>, usize), NodePackMaterializationRefusal> {
         let (mut ids, held) = if shallow::requested(request) {
@@ -233,7 +241,7 @@ impl VisibleUploadPack {
                 limits,
             )?
         };
-        self.select_partial(&mut ids, request, limits, live)?;
+        self.select_partial(&mut ids, request, limits, load_pattern, live)?;
         if request.options.include_tag() {
             self.tags.extend_selected(&mut ids, limits, live)?;
         }
@@ -296,10 +304,19 @@ impl VisibleUploadPack {
         ids: &mut Vec<GitOid>,
         request: &PackRequest,
         limits: &PackLimits,
+        load_pattern: &mut partial_clone::PatternLoader<'_>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(), NodePackMaterializationRefusal> {
         if !shallow::requested(request) {
-            return partial_clone::apply_selection(&self.objects, ids, request, limits, live);
+            return partial_clone::apply_selection_with_sparse(
+                &self.objects,
+                &self.facts,
+                ids,
+                request,
+                limits,
+                load_pattern,
+                live,
+            );
         }
         let mut selected = shallow::select(&self.objects, request, limits, live)?;
         // History has already been clipped and validated. Reuse the existing
@@ -310,7 +327,15 @@ impl VisibleUploadPack {
         filtered.deepen = None;
         filtered.deepen_since = None;
         filtered.deepen_not.clear();
-        partial_clone::apply_selection(&self.objects, &mut selected, &filtered, limits, live)?;
+        partial_clone::apply_selection_with_sparse(
+            &self.objects,
+            &self.facts,
+            &mut selected,
+            &filtered,
+            limits,
+            load_pattern,
+            live,
+        )?;
         *ids = selected;
         Ok(())
     }
@@ -487,6 +512,7 @@ impl OneNode {
             repository,
             tags,
             objects,
+            facts: Arc::clone(&projection.facts),
             path_hashes: projection.graph.path_hashes.clone(),
         })
     }
@@ -594,6 +620,9 @@ struct WalkFacts {
     charged: usize,
     /// For a tree, the basename hint of each local edge, in edge order.
     hints: Vec<u64>,
+    /// Exact local names in edge order; gitlinks are omitted. Their bytes are
+    /// bounded by the original tree-body bytes charged to this walk's budget.
+    names: Vec<Vec<u8>>,
 }
 
 /// Facts from an earlier walk under the same object format and limits.
@@ -847,13 +876,14 @@ fn walk_within_edge_budget_and_root_blobs(
             &mut required,
             &mut pending,
         )?;
-        let hints = if let Some(ParsedObject::Tree(entries)) = &parsed {
+        let (hints, names) = if let Some(ParsedObject::Tree(entries)) = &parsed {
             // Every local edge was admitted and charged above, so this map
             // cannot grow beyond the bounded set of required objects. The
-            // parser already owns the names; retain only one hash per object.
-            tree_path_hints(source, entries, &edges)?
+            // Retained local names fit within the already charged tree body.
+            // Sessions share them; sparse traversal never caches full paths.
+            tree_path_facts(source, entries, &edges)?
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         merge_path_hints(&edges, &hints, &mut path_hashes);
         objects.insert(
@@ -865,7 +895,14 @@ fn walk_within_edge_budget_and_root_blobs(
                 edges,
             },
         );
-        facts.insert(id, WalkFacts { charged, hints });
+        facts.insert(
+            id,
+            WalkFacts {
+                charged,
+                hints,
+                names,
+            },
+        );
     }
     source.checkpoint()?;
     Ok(VisibleGraph {
@@ -934,12 +971,19 @@ fn merge_path_hints(
 /// The mode's type bits, rather than spelling, exclude imported gitlinks.
 /// Multiple names choose the minimum hash independent of root or tree order;
 /// collisions can affect compression only, never object disclosure.
-fn tree_path_hints(
+fn tree_path_facts(
     source: &impl VisibilitySource,
     entries: &[fgit_git_object::TreeEntry],
     edges: &[(GitOid, ObjectType)],
-) -> Result<Vec<u64>, NodePackMaterializationRefusal> {
-    let mut hints = Vec::with_capacity(edges.len());
+) -> Result<(Vec<u64>, Vec<Vec<u8>>), NodePackMaterializationRefusal> {
+    let mut hints = Vec::new();
+    let mut names = Vec::new();
+    hints
+        .try_reserve_exact(edges.len())
+        .map_err(|_| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
+    names
+        .try_reserve_exact(edges.len())
+        .map_err(|_| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
     let mut local_edges = edges.iter();
     for entry in entries {
         source.checkpoint()?;
@@ -959,11 +1003,16 @@ fn tree_path_hints(
         let hint = basename_path_hash(&entry.name);
         source.checkpoint()?;
         hints.push(hint);
+        let mut name = Vec::new();
+        name.try_reserve_exact(entry.name.len())
+            .map_err(|_| disclosure_refusal(RefusalCode::ResourceBudgetExceeded))?;
+        name.extend_from_slice(&entry.name);
+        names.push(name);
     }
     if local_edges.next().is_some() {
         return Err(disclosure_refusal(RefusalCode::EvidenceInvalid));
     }
-    Ok(hints)
+    Ok((hints, names))
 }
 
 fn enqueue(

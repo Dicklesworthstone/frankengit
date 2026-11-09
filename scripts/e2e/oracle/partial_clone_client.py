@@ -89,7 +89,8 @@ def main():
                 command.append("--unshallow")
             command.append("origin")
         elif operation == "clone":
-            if value not in {"blob:none", "tree:0", "tree:1", "blob:limit=21", "combine:tree:1+blob:none"}:
+            sparse_oid = re.fullmatch(r"sparse:oid=(?:[0-9a-f]{40}|[0-9a-f]{64})", value)
+            if value not in {"blob:none", "tree:0", "tree:1", "blob:limit=21", "combine:tree:1+blob:none"} and not sparse_oid:
                 refuse("filter is outside the pinned campaign")
             command = ["clone", "--no-local", "--no-checkout", "--filter=" + value, url, client]
         else:
