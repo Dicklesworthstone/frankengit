@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import http, { createServer } from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, writeFile, readFile, readdir, rm, chmod, rename, mkdir, symlink, link } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportIssueArchive, inspectIssueArchive, readIssueArchive } from '../../scripts/lib/forge-issue-archive.mjs';
 import { recordDigest } from '../../scripts/lib/forge-operator-io.mjs';
+import { listenForFetch } from '../fetch-peer.mjs';
 
 const tenant = '1'.repeat(32), repository = '2'.repeat(32), token = 'a'.repeat(64);
 const actor = '3'.repeat(32), other = '4'.repeat(32), assignee = '5'.repeat(32);
@@ -55,8 +57,12 @@ export async function fixture(t, { items = data(), change = null, handle = null 
       res.writeHead(status ?? 200, { 'Content-Type': 'application/json' }); res.end(encode(body));
     } catch (error) { res.writeHead(500); res.end(String(error)); }
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(parent, { recursive: true, force: true }); });
+  t.after(async () => {
+    server.closeAllConnections();
+    if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await rm(parent, { recursive: true, force: true });
+  });
+  await listenForFetch(server);
   const options = { workdir: join(parent, 'archive'), href: `http://127.0.0.1:${server.address().port}/repo/ui/issues/`,
     tenant, repository, tokenFile, pageSize: 1 };
   return { parent, options, calls, server };
@@ -66,6 +72,36 @@ async function mutateRoot(options, edit) {
   const path = join(options.workdir, 'archive.json'); const value = JSON.parse(await readFile(path)); edit(value);
   const bytes = encode(value); await writeFile(path, bytes); return recordDigest(bytes);
 }
+
+test('archive fixture retires a forbidden allocation before exposing its Fetch URL', async t => {
+  // Fault only the allocator's address observation; retain real HTTP/Fetch and
+  // archive validation. Shared peer tests also bind actual forbidden ports.
+  const create = http.createServer;
+  let retired = 0;
+  http.createServer = (...args) => {
+    const server = create(...args), address = server.address.bind(server);
+    let first = true;
+    server.address = () => {
+      const bound = address();
+      if (bound && first) { first = false; return { ...bound, port: 6000 }; }
+      return bound;
+    };
+    server.on('close', () => retired++);
+    return server;
+  };
+  syncBuiltinESMExports();
+  try {
+    const f = await fixture(t), result = await exportIssueArchive(f.options);
+    assert.equal(result.complete, true);
+    assert.deepEqual([result.issues, result.events, f.calls.length], [2, 6, 8]);
+    assert(retired >= 1, 'forbidden allocation was not retired before requests');
+    assert.notEqual(new URL(f.options.href).port, '6000');
+    assert.equal((await inspectIssueArchive({ workdir: f.options.workdir, confirm: result.archive_sha256 })).complete, true);
+  } finally {
+    http.createServer = create;
+    syncBuiltinESMExports();
+  }
+});
 
 test('real HTTP client exports every issue, raw comment and history at one pinned snapshot', async t => {
   const f = await fixture(t), result = await exportIssueArchive(f.options);

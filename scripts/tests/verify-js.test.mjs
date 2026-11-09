@@ -3,7 +3,7 @@
 // not FrankenGit product, compatibility or live-fg evidence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, copyFile, writeFile, readFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, writeFile, readFile, rename, rm, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
@@ -81,6 +81,60 @@ async function metadataChild(run) {
     await sleep(10);
   }
   throw new Error('metadata process did not reach the blocked index');
+}
+
+function testRunnerGroup(run, root) {
+  // Peer argv can exceed the fixed capture bound. Discover only process
+  // identities globally, then inspect arguments for our controller's child.
+  const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,comm='], { encoding: 'utf8', timeout: 1000 });
+  for (const line of rows.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if (!m || Number(m[2]) !== run.child.pid || Number(m[1]) !== Number(m[3])) continue;
+    const command = execFileSync('ps', ['-p', m[1], '-o', 'command='], { encoding: 'utf8', timeout: 1000 });
+    if (command.includes(root) && command.includes('--test')) return Number(m[3]);
+  }
+}
+
+async function unrelatedArguments(t, root) {
+  const script = join(root, 'unrelated-arguments.mjs');
+  await writeFile(script, "process.stdout.write('ready\\n');setTimeout(() => {}, 60000);\n");
+  // Each child carries 160 KiB of padding; together they exceed the default
+  // 1 MiB execFileSync buffer. These are real, separately owned
+  // processes; none is a child of the controller being inspected.
+  const children = [], closed = [];
+  t.after(async () => {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    const timer = setTimeout(() => {
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }, 1000);
+    let deadline;
+    try {
+      await Promise.race([Promise.all(closed), new Promise((_, reject) => {
+        deadline = setTimeout(() => reject(new Error('unrelated argv fixtures did not drain')), 3000);
+      })]);
+    } finally { clearTimeout(timer); clearTimeout(deadline); }
+  });
+  for (let at = 0; at < 8; at++) {
+    const stdout = await open(join(root, `argv-${at}.stdout`), 'wx', 0o600);
+    try {
+      const stderr = await open(join(root, `argv-${at}.stderr`), 'wx', 0o600);
+      try {
+        const child = spawn(process.execPath, [script, ...Array(20).fill('p'.repeat(8192))], {
+          stdio: ['ignore', stdout.fd, stderr.fd],
+        });
+        children.push(child);
+        closed.push(new Promise(resolve => child.once('close', resolve)));
+        await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      } finally { await stderr.close(); }
+    } finally { await stdout.close(); }
+  }
+  const until = performance.now() + 3000;
+  while (true) {
+    assert(children.every(child => child.exitCode === null && child.signalCode === null), `argv fixture exited; see ${root}/argv-*.stderr`);
+    if ((await Promise.all(children.map((_, at) => readFile(join(root, `argv-${at}.stdout`), 'utf8')))).every(text => text === 'ready\n')) break;
+    assert(performance.now() < until, `argv fixtures did not become ready; see ${root}/argv-*`);await sleep(10);
+  }
+  return children;
 }
 
 test('actual profile verifies its selected source and completes a real one-test corpus', { timeout: 15000 }, async t => {
@@ -178,6 +232,7 @@ test('runtime-only command checks the same pin before Git metadata or corpus res
 
 test('a denied process-group probe during cancellation is containment failure, not ordinary interruption', { timeout: 15000 }, async t => {
   const f = await fixture(t, "import test from 'node:test';import {writeFileSync} from 'node:fs';test('held corpus',async()=>{writeFileSync(new URL('../../entered',import.meta.url),'ready');await new Promise(r=>setTimeout(r,60000));});\n");
+  const padding = await unrelatedArguments(t, f.root);
   const loader = join(f.root, 'denied-probe.mjs');
   // Fault only the controller's OS liveness observation, after the real corpus
   // starts. Git initialization and actual TERM/KILL calls remain unchanged.
@@ -190,15 +245,10 @@ test('a denied process-group probe during cancellation is containment failure, n
     catch (e) { if (e.code !== 'ENOENT') throw e; }
     assert(performance.now() < until, r.stderr);await sleep(10);
   }
-  const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,command='], { encoding: 'utf8', timeout: 1000 });
-  let group;
-  for (const line of rows.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-    if (m && Number(m[2]) === r.child.pid && Number(m[1]) === Number(m[3]) && m[4].includes(f.root) && m[4].includes('--test')) {
-      group = Number(m[3]);r.ownedPids.add(group);r.ownedGroups.add(group);break;
-    }
-  }
+  assert(padding.every(child => child.exitCode === null && child.signalCode === null), 'long argv fixtures must remain live during observation');
+  const group = testRunnerGroup(r, f.root);
   assert(group, 'actual owned test-runner group was not observed');
+  r.ownedPids.add(group);r.ownedGroups.add(group);
   r.child.kill('SIGTERM');const result = await r.closed;
   assert.equal(result.code, 1, r.stderr);assert.equal(result.signal, null);
   assert.match(r.stderr, /js_profile_containment_failed.*cause=EPERM/);
@@ -227,12 +277,7 @@ test('denied stop signals bound controller retirement and report unproved contai
     catch(e) { if(e.code!=='ENOENT')throw e; }
     assert(performance.now()<until,r.stderr);await sleep(10);
   }
-  const rows=execFileSync('ps',['-axo','pid=,ppid=,pgid=,command='],{encoding:'utf8',timeout:1000});
-  let group;
-  for(const line of rows.split('\n')) {
-    const m=/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-    if(m&&Number(m[2])===r.child.pid&&Number(m[1])===Number(m[3])&&m[4].includes(f.root)&&m[4].includes('--test')){group=Number(m[3]);break;}
-  }
+  const group = testRunnerGroup(r, f.root);
   assert(group,'actual owned runner group not observed');r.ownedPids.add(group);r.ownedGroups.add(group);
   try {
     r.child.kill('SIGTERM');const result=await exited;
