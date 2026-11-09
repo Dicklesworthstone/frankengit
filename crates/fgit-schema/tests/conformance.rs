@@ -550,6 +550,14 @@ fn verified_read_proof_descriptors_account_for_the_native_wire_bodies() {
             RefStateNonMembershipProof::EmptyState,
         )),
     );
+    for head_target in [None, Some(wire_name(b"refs/heads/unborn-\xff"))] {
+        assert_describes(
+            &registry::VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
+            &payload_of(&RefStateNonMembershipProofBody::new(
+                RefStateNonMembershipProof::HeadOnly { head_target },
+            )),
+        );
+    }
 }
 
 #[test]

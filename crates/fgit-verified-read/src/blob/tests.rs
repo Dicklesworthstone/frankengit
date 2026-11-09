@@ -1,6 +1,9 @@
 use super::*;
 use fgit_codec::{CryptoBodyIdentity, RepositoryConfigurationBody, body_id, harness::genesis_head};
-use fgit_crypto::{git_object_id, ref_state_membership_proof, ref_state_merkle_root};
+use fgit_crypto::{
+    git_object_id, ref_state_membership_proof, ref_state_membership_proof_v2,
+    ref_state_merkle_root, ref_state_merkle_root_v2,
+};
 use fgit_types::{Digest, RootLayoutVersion};
 use std::cell::Cell;
 
@@ -38,9 +41,27 @@ fn envelope_for(
     trees: Vec<Vec<u8>>,
     blob: Vec<u8>,
 ) -> VerifiedBlobEnvelope {
+    envelope_for_layout(
+        format,
+        path,
+        commit,
+        trees,
+        blob,
+        RootLayoutVersion::RefStateMerkleV1,
+    )
+}
+
+fn envelope_for_layout(
+    format: GitHashAlgorithm,
+    path: &[u8],
+    commit: Vec<u8>,
+    trees: Vec<Vec<u8>>,
+    blob: Vec<u8>,
+    layout: RootLayoutVersion,
+) -> VerifiedBlobEnvelope {
     let tip = git_object_id(format, GitObjectKind::Commit, &commit);
     let configuration = RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        root_layout: layout,
         object_format: format,
         hidden_ref_rules: vec![],
     };
@@ -51,8 +72,13 @@ fn envelope_for(
         (reference(), tip),
         (RefName::try_new(b"refs/heads/other").unwrap(), tip),
     ];
-    head.ref_root = ref_state_merkle_root(&entries).unwrap();
-    let (_, proof) = ref_state_membership_proof(&entries, &reference()).unwrap();
+    let (_, proof) = if layout.uses_head_aware_ref_merkle() {
+        head.ref_root = ref_state_merkle_root_v2(&entries, Some(&reference())).unwrap();
+        ref_state_membership_proof_v2(&entries, Some(&reference()), &reference()).unwrap()
+    } else {
+        head.ref_root = ref_state_merkle_root(&entries).unwrap();
+        ref_state_membership_proof(&entries, &reference()).unwrap()
+    };
     let proof = VerifiedReadEnvelope::new(
         head,
         Some(configuration),
@@ -112,6 +138,58 @@ fn both_hash_domains_verify_complete_nested_raw_binary_executable_and_symlink_da
             assert_eq!(
                 result.source_commit,
                 git_object_id(format, GitObjectKind::Commit, &envelope.commit)
+            );
+        }
+    }
+}
+
+#[test]
+fn v2_blob_frames_verify_both_hashes_and_remain_bound_to_the_original_head() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let original = fixture(format, b"src/\xff.bin", b"100755", b"\0exact\xffbytes");
+        for layout in [
+            RootLayoutVersion::RefStateMerkleV2,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+        ] {
+            let envelope = envelope_for_layout(
+                format,
+                original.path(),
+                original.commit.clone(),
+                original.trees.clone(),
+                original.blob.clone(),
+                layout,
+            );
+            let trusted_head = pin(&envelope);
+            let wire = encode_verified_blob_envelope(&envelope).unwrap();
+            let decoded = decode_verified_blob_envelope(&wire).unwrap();
+            let result =
+                verify_blob_against_head(trusted_head, &reference(), original.path(), &decoded)
+                    .unwrap();
+            assert_eq!(result.bytes, original.blob);
+            assert_eq!(result.kind, VerifiedBlobKind::Executable);
+            assert_eq!(encode_verified_blob_envelope(&decoded).unwrap(), wire);
+
+            let other = RefName::try_new(b"refs/heads/other").unwrap();
+            let tip = git_object_id(format, GitObjectKind::Commit, &original.commit);
+            let entries = vec![(reference(), tip), (other.clone(), tip)];
+            let mut changed_head = decoded.clone();
+            changed_head.ref_proof.head.ref_root =
+                ref_state_merkle_root_v2(&entries, Some(&other)).unwrap();
+            assert!(matches!(
+                verify_blob_against_head(
+                    trusted_head,
+                    &reference(),
+                    original.path(),
+                    &changed_head
+                ),
+                Err(VerifiedBlobRefusal::HeadMismatch)
+            ));
+            assert!(
+                matches!(
+                    verified(&changed_head),
+                    Err(VerifiedBlobRefusal::RefProof(_))
+                ),
+                "a separately trusted successor still requires a new inclusion proof"
             );
         }
     }

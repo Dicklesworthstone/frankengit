@@ -36,11 +36,13 @@ use fgit_authority::{
     OutcomeFailure, ProposedNew, PutOutcome, PutResolution, RefCommand, RequestRejection,
     SealAdmission, SealAttempt, SealFailure, SemanticRequest, StoreInstanceId, admission_key,
     head_selected_ref_state_absence_proof, head_selected_ref_state_absence_proof_async,
-    read_admission, read_admission_async, read_seal_async, record_admission,
-    record_admission_async, resolve_ambiguous_cas, resolve_ambiguous_cas_async,
-    resolve_ambiguous_put, resolve_ambiguous_put_async, root_layout_for_proof_async,
-    root_layout_for_verification, root_layout_for_verification_async, seal_request,
-    seal_request_async, stage_repository_configuration, stage_repository_configuration_async,
+    head_selected_ref_state_absence_proof_with_head,
+    head_selected_ref_state_absence_proof_with_head_async, read_admission, read_admission_async,
+    read_seal_async, record_admission, record_admission_async, resolve_ambiguous_cas,
+    resolve_ambiguous_cas_async, resolve_ambiguous_put, resolve_ambiguous_put_async,
+    root_layout_for_proof_async, root_layout_for_verification, root_layout_for_verification_async,
+    seal_request, seal_request_async, stage_repository_configuration,
+    stage_repository_configuration_async,
 };
 use fgit_codec::RepositoryConfigurationBody;
 use fgit_codec::wire::encode_body;
@@ -901,6 +903,46 @@ fn both_surfaces_emit_the_same_absence_proof_and_refuse_together() {
                 "{layout:?}: the surfaces disagreed about whether a proof exists: \
                  sync={left:?} async={right:?}"
             ),
+        }
+
+        // Matching producer results are insufficient: they could both have
+        // emitted a V1 proof for a V2 root. Bind each permitted result to the
+        // authenticated layout and exact symbolic HEAD value as well.
+        for head_target in [None, Some(&entries[0].0)] {
+            let explicit = head_selected_ref_state_absence_proof_with_head(
+                &sync_store,
+                &root,
+                &entries,
+                head_target,
+                &absent,
+            );
+            let asynchronous = poll_ready(head_selected_ref_state_absence_proof_with_head_async(
+                &view,
+                &(),
+                &async_root,
+                &entries,
+                head_target,
+                &absent,
+            ));
+            if !layout.admits_ref_state_membership_proof() {
+                assert!(matches!(explicit, Err(OutcomeFailure::MerkleShape(_))));
+                assert!(matches!(asynchronous, Err(OutcomeFailure::MerkleShape(_))));
+                continue;
+            }
+            let explicit = explicit.expect("selected Merkle layout admits the exact state");
+            let asynchronous = asynchronous.expect("async producer admits the same exact state");
+            assert_eq!(explicit, asynchronous);
+            let ref_root = if layout.uses_head_aware_ref_merkle() {
+                fgit_crypto::ref_state_merkle_root_v2(&entries, head_target).unwrap()
+            } else {
+                fgit_crypto::ref_state_merkle_root(&entries).unwrap()
+            };
+            assert_eq!(
+                fgit_crypto::verify_ref_state_non_membership_under(
+                    *layout, &ref_root, &absent, &explicit,
+                ),
+                Ok(true),
+            );
         }
     }
 }

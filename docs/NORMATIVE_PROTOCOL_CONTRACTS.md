@@ -580,6 +580,62 @@ as Merkle layouts or disclosed as a fallback. Selecting an existing supported
 Merkle layout during new repository initialization is distinct from migrating
 an existing repository.
 
+### 16.5 Authenticated symbolic HEAD and ref Merkle layout V2
+
+The authority-selected `ref_root` MUST commit to the exact symbolic `HEAD`
+target, including the distinction between no target and an unborn target.
+Direct refs alone cannot authorize a default-branch advertisement or the
+deletion protection associated with `HEAD`.
+
+Root-layout code points 0, 1 and 2 retain their historical meanings. Code 0
+(`LegacyWholeBody`) commits to the complete canonical ref-state body. Codes 1
+and 2 commit only to sorted direct refs and do not authenticate the body's
+`head_target`; a live node MUST refuse those layouts even when the decoded
+target is absent. Historical direct-ref proofs remain verifiable under their
+original definitions. Code point 3 remains reserved for forge-position work.
+
+Codes 4 (`RefStateMerkleV2`) and 5
+(`RefStateAndObjectClosureMerkleV2`) use schema family `ref-state-merkle`,
+version `2.0`, for every ref-tree leaf and interior node. Index zero is always
+the HEAD leaf. Its payload parts are discriminator `0`, option tag `0` for no
+target or `1` followed by the big-endian `u32` target-byte length and the exact
+target bytes. A present target MUST be a valid `refs/heads/*` reference. Each
+remaining leaf has discriminator `1`, the big-endian `u32` ref-name length,
+the exact ref-name bytes, the native hash algorithm's big-endian `u16` code point,
+and the native OID bytes. Direct refs follow canonical raw-byte name order;
+duplicates refuse. The registered Merkle identity domains, hash algorithms,
+part framing and odd-width node rule remain unchanged. No fake Git OID or
+configuration-field alias represents HEAD.
+
+After folding the leaves, V2 wraps the raw apex in the registered `MerkleNode`
+identity domain with schema `ref-state-merkle` version `2.0` and payload
+`02 || u64be(total_leaf_count) || raw_apex32`. The count includes HEAD and is
+at least one. This 41-byte root payload is distinct from a 64-byte interior
+node payload. A verifier MUST reconstruct the raw apex and wrap it using the
+proof's count before comparing with `ref_root`. Authenticating the count is
+required: odd-node promotion otherwise permits relabelling a final leaf as
+the first direct ref and claiming an existing earlier ref absent.
+
+Code 4 leaves other root families unchanged from code 1. Code 5 retains the
+object-closure proof semantics of code 2. V2 direct-ref membership proofs MUST
+have an index above zero. Ordered absence uses direct neighbours beginning at
+index one; a state with no direct refs is represented by the single HEAD leaf.
+The verified-read absence tag `4` (`HeadOnly`) carries that exact optional
+target and verifies the wrapped one-leaf root; it is valid only under V2.
+Existing absence tags and frame meanings
+remain unchanged. A server MUST authorize every disclosed neighbour, and
+both HEAD and its target when a HeadOnly witness discloses them. A proof's
+validity never grants disclosure permission.
+
+New repositories may explicitly select `ref-merkle-v2`; the default whole-body
+layout remains valid. Initialization MUST refuse the old Merkle layouts before
+staging anything. Reopening or reading a historical V1 node MUST NOT infer a
+default, erase the target, relabel the old root, or silently migrate it.
+Existing V1 data require an explicitly authorized recovery from independently
+verified source and an independently selected default branch. This repair
+does not provide an in-place migration or authenticate a past target that was
+never committed.
+
 ## 17. Object fabric and segmentation
 
 Canonical Git objects preserve native OIDs and exact logical bytes. Internal envelopes may add strong digest/type/length. Object-aware segments provide:

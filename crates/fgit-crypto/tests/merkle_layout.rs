@@ -1213,7 +1213,7 @@ fn every_layout_version_admits_exactly_the_proof_families_it_publishes() {
     // asserted here, in the same file as the expectations it guards.
     assert_eq!(
         RootLayoutVersion::ALL.len(),
-        3,
+        5,
         "a layout version was added or removed without updating this table"
     );
 
@@ -1222,6 +1222,12 @@ fn every_layout_version_admits_exactly_the_proof_families_it_publishes() {
         (RootLayoutVersion::RefStateMerkleV1, true, false),
         (
             RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            true,
+            true,
+        ),
+        (RootLayoutVersion::RefStateMerkleV2, true, false),
+        (
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
             true,
             true,
         ),

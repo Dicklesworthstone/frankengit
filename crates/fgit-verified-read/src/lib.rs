@@ -15,11 +15,13 @@
 //!
 //! # Typed non-claim: forge positions
 //!
-//! The V1 ref layout admits ordered non-membership proofs only after the
-//! disclosure boundary has authorized the lookup. The independent Merkle
-//! verifier's sorted-tree precondition is discharged by an authenticated V1
-//! ref root built through the canonical layout; an arbitrary opaque root is
-//! not enough. Likewise,
+//! Ref layouts admit ordered non-membership proofs only after the disclosure
+//! boundary has authorized the lookup and every name revealed by its witness.
+//! The independent Merkle verifier's sorted-tree precondition is discharged
+//! by an authenticated ref root built through the selected canonical layout;
+//! an arbitrary opaque root is not enough. Historical V1 roots keep their
+//! direct-ref-only meaning. V2 roots also commit the optional symbolic HEAD
+//! target, and an empty direct-ref map's witness discloses that target. Likewise,
 //! `forge_position_root` has no published canonical Merkle layout yet, so
 //! forge-position proof generation is a typed refusal.
 
@@ -465,6 +467,59 @@ where
     Ok(AuthorizedRefAbsence { name })
 }
 
+/// Authorizes every additional name revealed by an ordered ref absence proof.
+///
+/// The serving boundary must call this after [`authorize_ref_absence`] and
+/// proof construction, before returning the witness. A permitted query can
+/// still have a hidden neighbouring ref. An empty V2 direct-ref map instead
+/// reveals whether HEAD has a symbolic target, including the exact unborn
+/// branch name when present; both HEAD and that target require disclosure.
+/// Hash siblings in a populated tree reveal no additional names.
+///
+/// This check grants no membership, root selection, or freshness claim.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::RefNotFoundOrUnauthorized`] when any name
+/// disclosed by the witness is outside the caller's authorized scope.
+pub fn authorize_ref_absence_witness<P>(
+    policy: &P,
+    proof: &RefStateNonMembershipProof,
+) -> Result<(), VerifiedReadRefusal>
+where
+    P: RefDisclosurePolicy + ?Sized,
+{
+    let permitted = match proof {
+        RefStateNonMembershipProof::EmptyState => true,
+        RefStateNonMembershipProof::BeforeFirst { first } => {
+            policy.permits_ref_disclosure(first.name())
+        }
+        RefStateNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            policy.permits_ref_disclosure(predecessor.name())
+                && policy.permits_ref_disclosure(successor.name())
+        }
+        RefStateNonMembershipProof::AfterLast { last } => {
+            policy.permits_ref_disclosure(last.name())
+        }
+        RefStateNonMembershipProof::HeadOnly { head_target } => {
+            let head = RefName::try_new_one_level(b"HEAD")
+                .map_err(|_| VerifiedReadRefusal::RefNotFoundOrUnauthorized)?;
+            policy.permits_ref_disclosure(&head)
+                && head_target
+                    .as_ref()
+                    .is_none_or(|target| policy.permits_ref_disclosure(target))
+        }
+    };
+    if permitted {
+        Ok(())
+    } else {
+        Err(VerifiedReadRefusal::RefNotFoundOrUnauthorized)
+    }
+}
+
 /// Applies authorization before looking up a possible object absence.
 ///
 /// A denied caller receives exactly [`VerifiedReadRefusal::ObjectNotFoundOrUnauthorized`]
@@ -886,6 +941,10 @@ fn write_non_membership_proof_payload(
             out.write_raw_byte(3);
             write_ref_state_neighbour(out, last)?;
         }
+        RefStateNonMembershipProof::HeadOnly { head_target } => {
+            out.write_raw_byte(4);
+            out.write_option(head_target.as_ref(), Encoder::write_ref_name)?;
+        }
     }
     Ok(())
 }
@@ -905,6 +964,12 @@ fn read_non_membership_proof_payload(
         }),
         3 => Ok(RefStateNonMembershipProof::AfterLast {
             last: Box::new(read_ref_state_neighbour(input)?),
+        }),
+        4 => Ok(RefStateNonMembershipProof::HeadOnly {
+            head_target: input.read_option(
+                "ref_state_non_membership_proof.head_target",
+                Decoder::read_ref_name,
+            )?,
         }),
         observed => Err(CodecRefusal::VariantUnknown {
             field: "RefStateNonMembershipProof",

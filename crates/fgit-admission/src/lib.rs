@@ -1667,9 +1667,10 @@ pub type AsyncProjectionFailure = ProjectionFailure;
 /// the ordering rule, rather than an incidental property of `BTreeMap`.
 ///
 /// `HEAD` itself is not a direct ref and therefore cannot appear in `refs`.
-/// Its target is nevertheless part of this body: an upload-pack advertisement
-/// derived from it is consequently bound to the same authority-selected
-/// `ref_root` as the direct refs it exposes.
+/// Its target is nevertheless part of this body. Whole-body and V2 Merkle
+/// layouts authenticate it in the same `ref_root` as direct refs. Historical
+/// V1 Merkle layouts omitted it and must not authorize a HEAD advertisement
+/// merely because this frame decodes (see [`ref_state_root`]).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CanonicalRefState {
     refs: BTreeMap<RefName, fgit_types::GitOid>,
@@ -1970,8 +1971,11 @@ pub fn canonical_ref_state_root(state: &CanonicalRefState) -> Result<Digest, Ref
 /// configuration.
 ///
 /// The legacy layout commits to the complete canonical state body.  The
-/// Merkle layout commits only to the sorted ref entries, exactly as the
-/// verified-read proof codec does.  `CanonicalRefState` holds refs in a
+/// historical V1 Merkle layouts commit only to sorted direct refs; their
+/// decoded HEAD target is NOT authenticated. V2 commits to an explicit HEAD
+/// leaf (including its absence) followed by the sorted direct refs. Historical
+/// roots retain their original meaning; live node materialization refuses V1.
+/// `CanonicalRefState` holds refs in a
 /// `BTreeMap`, so the duplicate-name refusal of the Merkle constructor is an
 /// internal-invariant breach rather than a client-selectable outcome.
 pub fn ref_state_root(
@@ -1988,6 +1992,16 @@ pub fn ref_state_root(
                 .map(|(name, oid)| (name.clone(), *oid))
                 .collect::<Vec<_>>();
             ref_state_merkle_root(&entries).map_err(|_| RefusalCode::InternalInvariantBreach)
+        }
+        RootLayoutVersion::RefStateMerkleV2
+        | RootLayoutVersion::RefStateAndObjectClosureMerkleV2 => {
+            let entries = state
+                .refs()
+                .iter()
+                .map(|(name, oid)| (name.clone(), *oid))
+                .collect::<Vec<_>>();
+            fgit_crypto::ref_state_merkle_root_v2(&entries, state.head_target())
+                .map_err(|_| RefusalCode::InternalInvariantBreach)
         }
     }
 }

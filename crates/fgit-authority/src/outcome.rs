@@ -37,7 +37,8 @@ use fgit_codec::{
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, MerkleRefusal, RefStateNonMembershipProof, merkle_leaf,
-    merkle_proof, merkle_root, ref_state_non_membership_proof, verify_merkle_proof,
+    merkle_proof, merkle_root, ref_state_non_membership_proof, ref_state_non_membership_proof_v2,
+    verify_merkle_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
@@ -272,6 +273,11 @@ pub enum OutcomeFailure {
     OutcomeNotIndexed(Box<TxId>),
     /// The shared Merkle core refused to build or walk the tree.
     MerkleShape(Box<MerkleRefusal>),
+    /// This ref layout also commits HEAD, but the caller supplied only direct
+    /// refs. An omitted HEAD value cannot be assumed to mean an absent target.
+    RefHeadTargetRequired {
+        layout: RootLayoutVersion,
+    },
     /// A head's `configuration_root` names no decodable configuration body.
     ///
     /// Refused only on the PROOF-GENERATION path. Verification treats the same
@@ -378,6 +384,10 @@ impl core::fmt::Display for OutcomeFailure {
                  proof exists"
             ),
             Self::MerkleShape(refusal) => write!(f, "outcome-index tree refused: {refusal}"),
+            Self::RefHeadTargetRequired { layout } => write!(
+                f,
+                "ref layout {layout:?} requires the exact authenticated optional HEAD target for proof generation",
+            ),
             Self::ConfigurationUnresolvable => f.write_str(
                 "the head's configuration_root names no decodable configuration body, so the \
                  root layout cannot be established for proof generation",
@@ -1707,7 +1717,10 @@ pub fn outcome_index_proof(
 /// [`OutcomeFailure::ConfigurationUnresolvable`] when the head's configuration
 /// cannot be read, and [`OutcomeFailure::MerkleShape`] carrying
 /// [`MerkleRefusal::LayoutAdmitsNoProof`] under a layout with no tree or
-/// [`MerkleRefusal::RefIsPresent`] when the ref is in fact there.
+/// [`MerkleRefusal::RefIsPresent`] when the ref is in fact there. V2 layouts
+/// return [`OutcomeFailure::RefHeadTargetRequired`]: use
+/// [`head_selected_ref_state_absence_proof_with_head`] with the authenticated
+/// optional HEAD target instead of interpreting an omitted value as `None`.
 pub fn head_selected_ref_state_absence_proof<S>(
     store: &S,
     configuration_root: &Digest,
@@ -1743,12 +1756,63 @@ where
     absence_proof_under(version, entries, name)
 }
 
+/// Generates an absence proof using the selected layout and exact optional HEAD.
+///
+/// `entries` and `head_target` must come from the same authenticated ref-state
+/// body. The resulting proof still requires verification against that body's
+/// root. `None` explicitly supplies the absence of a symbolic target; it is
+/// distinct from calling the older direct-ref-only helper without HEAD data.
+/// Historical V1 layouts keep their original direct-ref-only proof bytes.
+///
+/// # Errors
+///
+/// Returns configuration, unsupported-layout, malformed HEAD and present-ref
+/// refusals without synthesizing an absent HEAD or changing the selected layout.
+pub fn head_selected_ref_state_absence_proof_with_head<S>(
+    store: &S,
+    configuration_root: &Digest,
+    entries: &[(RefName, GitOid)],
+    head_target: Option<&RefName>,
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let version = root_layout_for_proof(store, configuration_root)?;
+    absence_proof_under_with_head(version, entries, head_target, name)
+}
+
+/// Production async twin of [`head_selected_ref_state_absence_proof_with_head`].
+///
+/// The caller supplies HEAD from the same authenticated basis as `entries`.
+///
+/// # Errors
+///
+/// The same refusals as [`head_selected_ref_state_absence_proof_with_head`].
+pub async fn head_selected_ref_state_absence_proof_with_head_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration_root: &Digest,
+    entries: &[(RefName, GitOid)],
+    head_target: Option<&RefName>,
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let version = root_layout_for_proof_async(store, cx, configuration_root).await?;
+    absence_proof_under_with_head(version, entries, head_target, name)
+}
+
 /// The shared decision both surfaces delegate to.
 fn absence_proof_under(
     version: RootLayoutVersion,
     entries: &[(RefName, GitOid)],
     name: &RefName,
 ) -> Result<RefStateNonMembershipProof, OutcomeFailure> {
+    if version.uses_head_aware_ref_merkle() {
+        return Err(OutcomeFailure::RefHeadTargetRequired { layout: version });
+    }
     if !version.admits_ref_state_membership_proof() {
         return Err(OutcomeFailure::MerkleShape(Box::new(
             MerkleRefusal::LayoutAdmitsNoProof { version },
@@ -1756,6 +1820,20 @@ fn absence_proof_under(
     }
     ref_state_non_membership_proof(entries, name)
         .map_err(|refusal| OutcomeFailure::MerkleShape(Box::new(refusal)))
+}
+
+fn absence_proof_under_with_head(
+    version: RootLayoutVersion,
+    entries: &[(RefName, GitOid)],
+    head_target: Option<&RefName>,
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, OutcomeFailure> {
+    if version.uses_head_aware_ref_merkle() {
+        ref_state_non_membership_proof_v2(entries, head_target, name)
+            .map_err(|refusal| OutcomeFailure::MerkleShape(Box::new(refusal)))
+    } else {
+        absence_proof_under(version, entries, name)
+    }
 }
 
 /// Whether `proof` shows this decision is committed to by `root`.

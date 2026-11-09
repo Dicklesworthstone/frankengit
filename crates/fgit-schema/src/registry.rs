@@ -421,7 +421,7 @@ pub static VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF: SchemaDescriptor = SchemaDesc
             name: "ref-state-non-membership-proof",
         },
         cardinality: Cardinality::Required,
-        doc: "The empty, boundary, or between-neighbours absence shape.",
+        doc: "The historical empty, V2 HEAD-only, boundary, or between-neighbours absence shape.",
     }],
 };
 
@@ -692,7 +692,7 @@ pub static VERIFIED_READ_CONFIGURATION: UnionDescriptor = UnionDescriptor {
     ],
 };
 
-/// The four ordered-neighbour shapes the non-membership verifier accepts.
+/// Ordered-neighbour shapes and the layout-specific empty direct-ref proofs.
 pub static REF_STATE_NON_MEMBERSHIP_PROOF: UnionDescriptor = UnionDescriptor {
     name: "ref-state-non-membership-proof",
     doc: "An absence proof selected by the requested name's ordered position.",
@@ -739,6 +739,20 @@ pub static REF_STATE_NON_MEMBERSHIP_PROOF: UnionDescriptor = UnionDescriptor {
                 "ref-state-neighbour",
                 "The authenticated last neighbour.",
             )],
+        },
+        UnionVariant {
+            name: "HeadOnly",
+            discriminant: 4,
+            doc: "The V2 tree contains only its mandatory typed HEAD leaf; invalid under V1.",
+            fields: &[FieldDescriptor {
+                cardinality: Cardinality::Optional,
+                ..bytes(
+                    "head_target",
+                    1,
+                    REF_NAME_MAX,
+                    "Exact optional symbolic branch target, including an unborn branch.",
+                )
+            }],
         },
     ],
 };

@@ -231,8 +231,18 @@ class RefStateNonMembershipProofAfterLast:
     last: RefStateNeighbour
 
 
+@dataclass(frozen=True, slots=True)
+class RefStateNonMembershipProofHeadOnly:
+    """The V2 tree contains only its mandatory typed HEAD leaf; invalid under V1."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 4
+    # Exact optional symbolic branch target, including an unborn branch.
+    head_target: str | None = None
+
+
 # An absence proof selected by the requested name's ordered position.
-RefStateNonMembershipProof = RefStateNonMembershipProofEmptyState | RefStateNonMembershipProofBeforeFirst | RefStateNonMembershipProofBetween | RefStateNonMembershipProofAfterLast
+RefStateNonMembershipProof = RefStateNonMembershipProofEmptyState | RefStateNonMembershipProofBeforeFirst | RefStateNonMembershipProofBetween | RefStateNonMembershipProofAfterLast | RefStateNonMembershipProofHeadOnly
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,7 +518,7 @@ class VerifiedReadRefNonMembershipProofV1:
     schema verified-read-ref-non-membership-proof v1.0, domain frankengit/verified-read-ref-non-membership-proof/v1
     """
 
-    # The empty, boundary, or between-neighbours absence shape.
+    # The historical empty, V2 HEAD-only, boundary, or between-neighbours absence shape.
     proof: RefStateNonMembershipProof
 
 
