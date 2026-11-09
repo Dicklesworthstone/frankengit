@@ -20,12 +20,14 @@ use fgit_forge::event::review::{
 use fgit_forge::{AggregateId, ExpectedVersion, ForgeEventPayload};
 use fgit_reference::intent::TransactionRequest;
 use fgit_types::{AsciiSlug, PolicyEpoch, PrincipalId, RefusalCode, TxId};
+use std::collections::BTreeSet;
 use std::future::Future;
 
 pub const MAX_REQUIRED_REVIEWERS: usize = 32;
 
 /// Every named reviewer must currently approve the exact candidate. Names are
-/// sorted once; duplicates, empty sets, submitter/opener votes never satisfy it.
+/// sorted once; duplicates, empty sets, submitter/opener/declared-agent votes
+/// never satisfy it.
 /// The caller must be authorized to choose the requirements. This is not a
 /// replacement for repository-wide protected-ref administration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -404,18 +406,33 @@ where
     let opener = pr
         .opened_by
         .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+    // A review can predate the principal's first agent declaration. Checking
+    // only at review submission would let that old vote authorize a later
+    // merge under the newly declared identity. Re-read the retained registry
+    // at this exact merge basis, including revoked grants; neither revocation
+    // nor another transport turns a declared agent into an eligible reviewer.
+    // Branch, path and caller-selected quorums all share this consumer gate.
+    let agents: BTreeSet<_> =
+        super::super::super::agent_credentials::read_all_at(store, cx, basis, cancelled)
+            .await
+            .map_err(infrastructure)?
+            .into_iter()
+            .map(|state| state.grant.agent)
+            .collect();
+    let eligible = |reviewer: &PrincipalId| {
+        *reviewer != opener && *reviewer != submitter && !agents.contains(reviewer)
+    };
     let unanimous = usize::from(required_approvals) == required.reviewers.len();
     if unanimous
         && required
             .reviewers
             .iter()
-            .any(|reviewer| *reviewer == opener || *reviewer == submitter)
+            .any(|reviewer| !eligible(reviewer))
     {
         return Err(ProjectionFailure::Refuse(
             RefusalCode::ProtectedRefTransitionDenied,
         ));
     }
-    let eligible = |reviewer: &PrincipalId| *reviewer != opener && *reviewer != submitter;
     if required
         .reviewers
         .iter()

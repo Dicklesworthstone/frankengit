@@ -423,6 +423,14 @@ is rejected. Existing authentication predicates see single-factor strength;
 this profile adds no human-kind, sponsor, membership, MFA or hardware policy
 predicate. Ordinary HTTP and SSH credentials never imply a human principal.
 
+Required-review gates recheck canonical agent eligibility at the merge's exact
+authority basis. A review written before the reviewer's agent declaration stops
+counting after that declaration, including after credential revocation. This
+applies to explicit reviewers and branch/path quorums; independent eligible
+votes must still meet the original threshold. Historical replay uses its named
+basis, and an unattached grant body cannot change eligibility. This exclusion
+does not establish a human-review identity profile.
+
 This implements bounded current-source/history reads and metadata operations within
 `frankengit-root-doctrine-x2mv.4.34`, and provides source access needed by the
 agent-day integration in `frankengit-root-doctrine-x2mv.4.24`. Sponsored code

@@ -568,5 +568,7 @@ fn cancellation_during_the_last_selected_review_never_returns_a_page_or_approval
 
 // Explicit, because rustc and rustfmt resolve a child of this #[path]-loaded
 // file in different directories; `cargo fmt` aborted on the bare form.
+#[path = "read_tests/agent_eligibility.rs"]
+mod agent_eligibility;
 #[path = "read_tests/quorum.rs"]
 mod quorum;

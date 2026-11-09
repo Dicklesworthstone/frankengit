@@ -71,6 +71,14 @@ reviewer set includes the PR opener, both remaining independent reviewers must
 approve. If a configured set cannot supply enough independent reviewers, the
 merge remains blocked.
 
+Canonical agent declarations also exclude a reviewer, even when the approval
+predates the declaration or the credential has since been revoked. Admission
+reads those declarations at the exact merge basis for branch, path and explicit
+review requirements. Their exclusion does not lower the numeric threshold or
+prevent a sufficient quorum of other independent eligible reviewers. Missing
+or corrupt selected identity evidence refuses the merge. An undeclared
+principal remains unclassified; this rule does not attest that it is human.
+
 `RequestChanges` and `Withdraw` supersede that reviewer's older approval and
 contribute zero. **A change request is not an additional veto over a quorum
 from other eligible reviewers.** Under 2-of-3, two current exact approvals and
