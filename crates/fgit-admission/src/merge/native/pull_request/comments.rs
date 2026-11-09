@@ -276,56 +276,36 @@ where
     let end = after.saturating_add(u64::from(limit));
     let mut seen = BTreeMap::new();
     let mut selected = BTreeMap::new();
-    let mut batches = BTreeSet::new();
-    let mut scanned_events = 0usize;
-    let mut scanned_bytes = 0usize;
-    for entry in state.outbox.entries() {
-        super::checkpoint(cancelled)?;
-        if !batches.insert(entry.payload_root()) {
-            continue;
-        }
-        let batch =
-            storage::read_events(store, cx, basis.body().repository_id, entry.payload_root())
-                .await?;
-        delivery::validate_payload_positions(&state.forge, &batch)?;
-        scanned_events = scanned_events
-            .checked_add(batch.events.len())
-            .filter(|count| *count <= MAX_SCAN_EVENTS)
-            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        for event in batch.events {
-            super::checkpoint(cancelled)?;
-            scanned_bytes = scanned_bytes
-                .checked_add(super::event_size(&event)?)
-                .filter(|count| *count <= MAX_SCAN_BYTES)
-                .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-            if event.aggregate != latest.aggregate {
-                continue;
-            }
-            if event.version > latest.version {
-                return Err(unavailable(RefusalCode::EvidenceInvalid));
-            }
-            let digest = storage::root(&event)?;
-            if let Some(previous) = seen.insert(event.version, digest) {
-                if previous != digest {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
-                }
-                continue;
-            }
-            let ForgeEventPayload::PullRequestCommentedNative(comment) = event.payload else {
+    let mut hidden = false;
+    let position = state
+        .forge
+        .entry(storage::aggregate_label(latest.aggregate)?)
+        .copied()
+        .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+    super::super::event_history::visit_selected_at(
+        store,
+        cx,
+        basis,
+        &state.forge,
+        &state.outbox,
+        &BTreeMap::from([(latest.aggregate, position)]),
+        super::super::event_history::HistoryReadLimits {
+            events: MAX_SCAN_EVENTS,
+            scan_bytes: MAX_SCAN_BYTES,
+        },
+        &mut |event: &ForgeEvent, _: usize| {
+            seen.insert(event.version, storage::root(event)?);
+            let ForgeEventPayload::PullRequestCommentedNative(comment) = &event.payload else {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             };
-            // The PR may since have changed references. Its current refs do
-            // not authorize disclosure of historical anchors on hidden refs.
-            // Preserve contiguous page/count semantics by hiding the complete
-            // discussion when any retained source anchor is undisclosed.
-            if comment
+            // Current refs do not authorize disclosure of a historical anchor.
+            // Hide the complete discussion if any selected anchor is private,
+            // while retaining only this page's bounded comment window.
+            hidden |= comment
                 .anchor
                 .as_ref()
-                .is_some_and(|anchor| !visible(&anchor.source_ref, &anchor.target_ref))
-            {
-                return Ok(None);
-            }
-            if event.version.get() > after && event.version.get() <= end {
+                .is_some_and(|anchor| !visible(&anchor.source_ref, &anchor.target_ref));
+            if !hidden && event.version.get() > after && event.version.get() <= end {
                 let anchor_status = comment
                     .anchor
                     .as_ref()
@@ -335,17 +315,20 @@ where
                     PullRequestCommentView {
                         version: event.version,
                         actor: comment.actor,
-                        body: comment.body,
-                        anchor: comment.anchor,
+                        body: comment.body.clone(),
+                        anchor: comment.anchor.clone(),
                         anchor_status,
                     },
                 );
             }
-        }
+            Ok(())
+        },
+        cancelled,
+    )
+    .await?;
+    if hidden {
+        return Ok(None);
     }
-    // Every unique positive version is <= latest, so the exact cardinality
-    // proves no predecessor was silently omitted. The frontier body must also
-    // occur byte-identically in the authority-selected history.
     if seen.len() as u64 != latest.version.get()
         || seen.get(&latest.version) != Some(&latest_digest)
     {

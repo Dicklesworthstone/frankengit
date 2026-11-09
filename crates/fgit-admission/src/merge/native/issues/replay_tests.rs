@@ -10,7 +10,7 @@ use fgit_codec::harness::{genesis_head, tx_id};
 use fgit_codec::{CanonicalBody, CanonicalOutboxEffectState, CanonicalOutboxStateEntry};
 use fgit_forge::ExpectedVersion;
 use fgit_forge::event::issue::{IssueAction, IssueEdit};
-use fgit_types::PrincipalId;
+use fgit_types::{PrincipalId, RepositoryId};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
@@ -140,6 +140,24 @@ impl Fixture {
             forge,
             outbox,
         }
+    }
+    /// Select an explicit incomplete genesis, not a simulated delivery.
+    /// An old complete basis would legitimately recover retired predecessors.
+    fn select_outbox(&mut self, entries: Vec<CanonicalOutboxStateEntry>) {
+        let repository = self.basis.body().repository_id;
+        self.outbox = CanonicalOutboxState::try_new(repository, entries).unwrap();
+        let mut head = self.basis.body().clone();
+        head.outbox_root = stage(
+            &self.store,
+            repository,
+            delivery::OUTBOX_NAMESPACE,
+            &self.outbox,
+        );
+        let key = HeadKey::new(b"issues-replay/incomplete-genesis".to_vec()).unwrap();
+        fgit_authority::initialize_repository(&self.store.0, &key, &head).unwrap();
+        self.basis = run(crate::read_basis_async(&self.store, &(), &key))
+            .unwrap()
+            .0;
     }
     fn page(&self, after: u64, limit: u16) -> IssuePage {
         run(read_page_at(
@@ -290,7 +308,7 @@ fn numeric_page_selection_happens_before_replay_and_never_uses_lexical_order() {
     let timelines = run(replay_selected(
         &fixture.store,
         &(),
-        fixture.basis.body().repository_id,
+        &fixture.basis,
         &fixture.forge,
         &fixture.outbox,
         &selected,
@@ -312,7 +330,7 @@ fn issue_validation_reuses_the_long_history_without_retaining_it() {
     let timelines = run(replay_selected(
         &fixture.store,
         &(),
-        fixture.basis.body().repository_id,
+        &fixture.basis,
         &fixture.forge,
         &fixture.outbox,
         &selected,
@@ -345,7 +363,7 @@ fn history_retention_is_the_requested_window_plus_one_lookahead() {
     let timelines = run(replay_selected(
         &fixture.store,
         &(),
-        fixture.basis.body().repository_id,
+        &fixture.basis,
         &fixture.forge,
         &fixture.outbox,
         &selected,
@@ -429,13 +447,12 @@ fn missing_selected_history_is_not_an_empty_or_partially_replayed_issue() {
         })
         .copied()
         .unwrap();
-    fixture.outbox =
-        CanonicalOutboxState::try_new(fixture.basis.body().repository_id, vec![last]).unwrap();
+    fixture.select_outbox(vec![last]);
     assert!(
         run(replay_selected(
             &fixture.store,
             &(),
-            fixture.basis.body().repository_id,
+            &fixture.basis,
             &fixture.forge,
             &fixture.outbox,
             &BTreeSet::from([number(1)]),
@@ -560,7 +577,7 @@ fn conflicting_selected_versions_and_missing_frontier_bodies_refuse() {
         run(replay_selected(
             &fixture.store,
             &(),
-            repository,
+            &fixture.basis,
             &fixture.forge,
             &conflicting,
             &wanted,
@@ -586,7 +603,7 @@ fn conflicting_selected_versions_and_missing_frontier_bodies_refuse() {
         run(replay_selected(
             &fixture.store,
             &(),
-            repository,
+            &fixture.basis,
             &missing,
             &fixture.outbox,
             &wanted,

@@ -15,7 +15,7 @@ use fgit_chronicle::PublicationBasis;
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState};
 use fgit_forge::event::issue::{IssueCommand, IssueSnapshot, apply_event};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, IssueNumber};
-use fgit_types::{AsciiSlug, RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
+use fgit_types::{AsciiSlug, RefusalCode, RepositoryAuthorityHeadId};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod append;
@@ -119,7 +119,7 @@ where
         let timelines = replay_selected(
             store,
             cx,
-            basis.body().repository_id,
+            basis,
             &resolved.forge,
             &resolved.outbox,
             &BTreeSet::from([number]),
@@ -141,7 +141,7 @@ where
             let selected = super::milestones::read_snapshot_from_roots(
                 store,
                 cx,
-                basis.body().repository_id,
+                basis,
                 &resolved.forge,
                 &resolved.outbox,
                 *milestone,
@@ -226,7 +226,7 @@ where
     let all = replay_selected(
         store,
         cx,
-        basis.body().repository_id,
+        basis,
         &state.forge,
         &state.outbox,
         &wanted,
@@ -268,7 +268,7 @@ where
     let mut timelines = replay_selected(
         store,
         cx,
-        basis.body().repository_id,
+        basis,
         &state.forge,
         &state.outbox,
         &BTreeSet::from([number]),
@@ -314,7 +314,7 @@ where
 async fn replay_selected<S, C>(
     store: &S,
     cx: &S::Context,
-    repository: RepositoryId,
+    basis: &PublicationBasis,
     forge: &CanonicalForgePositionState,
     outbox: &CanonicalOutboxState,
     wanted: &BTreeSet<IssueNumber>,
@@ -326,72 +326,46 @@ where
     C: Fn() -> bool + Sync,
 {
     checkpoint(cancelled)?;
-    if forge.repository_id() != repository || outbox.repository_id() != repository {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    }
+    let repository = basis.body().repository_id;
     let frontiers = issue_frontiers(forge, cancelled)?;
-    if wanted.iter().all(|number| !frontiers.contains_key(number)) {
-        // Callers already authenticated the delivery state. A new or missing
-        // aggregate has no prior timeline to replay; object presence alone is
-        // never used to invent one.
-        checkpoint(cancelled)?;
-        return Ok(BTreeMap::new());
-    }
+    let selected = frontiers
+        .iter()
+        .filter(|(number, _)| wanted.contains(*number))
+        .map(|(number, position)| (AggregateId::Issue(*number), *position))
+        .collect();
     let mut events = BTreeMap::<(IssueNumber, AggregateVersion), ForgeEvent>::new();
-    let mut batches = BTreeSet::new();
-    let (mut count, mut scanned_bytes, mut retained_bytes) = (0usize, 0usize, 0usize);
-    for entry in outbox.entries() {
-        checkpoint(cancelled)?;
-        if !batches.insert(entry.payload_root()) {
-            continue;
-        }
-        let batch = storage::read_events(store, cx, repository, entry.payload_root()).await?;
-        checkpoint(cancelled)?;
-        delivery::validate_payload_positions(forge, &batch)?;
-        count = count
-            .checked_add(batch.events.len())
-            .filter(|n| *n <= MAX_SCAN_EVENTS)
-            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        for event in batch.events {
-            checkpoint(cancelled)?;
-            let size = fgit_codec::encode_body(&event)
-                .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
-                .len();
-            scanned_bytes = scanned_bytes
-                .checked_add(size)
-                .filter(|n| *n <= MAX_SCAN_BYTES)
-                .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+    let mut retained_bytes = 0usize;
+    super::event_history::visit_selected_at(
+        store,
+        cx,
+        basis,
+        forge,
+        outbox,
+        &selected,
+        super::event_history::HistoryReadLimits {
+            events: MAX_SCAN_EVENTS,
+            scan_bytes: MAX_SCAN_BYTES,
+        },
+        &mut |event: &ForgeEvent, size: usize| {
             let AggregateId::Issue(number) = event.aggregate else {
-                continue;
-            };
-            let frontier = frontiers
-                .get(&number)
-                .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-            if event.version.get() > frontier.successor_position() {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
+            };
+            // The collector authenticates and deduplicates complete selected
+            // history, including events whose delivery has already retired.
+            // Keep the existing payload-memory bound and version-sorted fold.
+            if events.len() >= MAX_EVENTS {
+                return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
             }
-            if !wanted.contains(&number) {
-                continue;
-            }
-            let key = (number, event.version);
-            if let Some(previous) = events.get(&key) {
-                if *previous != event {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
-                }
-            } else {
-                // Duplicate references do not consume memory twice, but a
-                // conflicting event at the same version still fails closed.
-                if events.len() >= MAX_EVENTS {
-                    return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-                }
-                retained_bytes = retained_bytes
-                    .checked_add(size)
-                    .filter(|total| *total <= MAX_BYTES)
-                    .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-                events.insert(key, event);
-            }
-        }
-    }
+            retained_bytes = retained_bytes
+                .checked_add(size)
+                .filter(|total| *total <= MAX_BYTES)
+                .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+            events.insert((number, event.version), event.clone());
+            Ok(())
+        },
+        cancelled,
+    )
+    .await?;
     let mut timelines = BTreeMap::<IssueNumber, Timeline>::new();
     for ((number, _), event) in events {
         checkpoint(cancelled)?;
@@ -494,7 +468,7 @@ fn page_numbers<C: Fn() -> bool + Sync>(
 pub(super) async fn milestone_counts_at_roots<S, C>(
     store: &S,
     cx: &S::Context,
-    repository: RepositoryId,
+    basis: &PublicationBasis,
     forge: &CanonicalForgePositionState,
     outbox: &CanonicalOutboxState,
     wanted: &BTreeSet<fgit_forge::MilestoneNumber>,
@@ -509,10 +483,8 @@ where
         return Ok(BTreeMap::new());
     }
     let numbers = issue_frontiers(forge, cancelled)?.into_keys().collect();
-    let timelines = replay_selected(
-        store, cx, repository, forge, outbox, &numbers, None, cancelled,
-    )
-    .await?;
+    let timelines =
+        replay_selected(store, cx, basis, forge, outbox, &numbers, None, cancelled).await?;
     let mut counts = BTreeMap::<_, (u64, u64)>::new();
     for timeline in timelines.into_values() {
         checkpoint(cancelled)?;

@@ -1,7 +1,7 @@
 use super::*;
 use fgit_authority::{HeadKey, IdempotencyKey};
 use fgit_forge::event::discussion::{DiscussionAction, DiscussionEdit};
-use fgit_types::{GitHashAlgorithm, PrincipalId, TenantId};
+use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 
 fn context() -> AdmissionContext {
     AdmissionContext {

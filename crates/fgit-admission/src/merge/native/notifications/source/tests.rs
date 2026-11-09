@@ -14,7 +14,7 @@ use fgit_forge::event::issue::{IssueAction, IssueCommand};
 use fgit_forge::event::notification::{NotificationAction, NotificationCommand, NotificationMode};
 use fgit_forge::{ForgeEventBatch, ForgeEventPayload};
 use fgit_types::AsciiSlug;
-use fgit_types::PrincipalId;
+use fgit_types::{PrincipalId, RepositoryId};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
@@ -95,6 +95,7 @@ struct Fixture {
     basis: PublicationBasis,
     forge: CanonicalForgePositionState,
     outbox: CanonicalOutboxState,
+    reselections: u64,
 }
 impl Fixture {
     fn new(batches: Vec<ForgeEventBatch>) -> Self {
@@ -143,6 +144,7 @@ impl Fixture {
             basis,
             forge,
             outbox,
+            reselections: 0,
         }
     }
     fn source(&self, principal: u8) -> Result<NotificationSourceSnapshot, AdmissionError> {
@@ -179,7 +181,7 @@ impl Fixture {
         run(super::replay(
             &self.store,
             &(),
-            self.basis.body().repository_id,
+            &self.basis,
             &self.forge,
             &self.outbox,
             actor(principal),
@@ -213,7 +215,35 @@ impl Fixture {
             effect_root,
             None,
         ));
+        self.select_outbox(entries);
+    }
+    /// Select a fresh, authenticated genesis fixture with these exact maps.
+    /// Staged but unselected prior bodies are not canonical replay evidence.
+    fn select_outbox(&mut self, entries: Vec<CanonicalOutboxStateEntry>) {
+        let repository = self.basis.body().repository_id;
         self.outbox = CanonicalOutboxState::try_new(repository, entries).unwrap();
+        let mut head = self.basis.body().clone();
+        head.forge_position_root = stage(
+            &self.store,
+            repository,
+            storage::POSITION_NAMESPACE,
+            &self.forge,
+        );
+        head.outbox_root = stage(
+            &self.store,
+            repository,
+            delivery::OUTBOX_NAMESPACE,
+            &self.outbox,
+        );
+        self.reselections += 1;
+        let key = HeadKey::new(
+            format!("notification-replay/reselected-{}", self.reselections).into_bytes(),
+        )
+        .unwrap();
+        fgit_authority::initialize_repository(&self.store.0, &key, &head).unwrap();
+        self.basis = run(crate::read_basis_async(&self.store, &(), &key))
+            .unwrap()
+            .0;
     }
 }
 fn stage<B: CanonicalBody + Sync>(
@@ -385,25 +415,95 @@ fn duplicate_events_collapse_and_conflicts_missing_history_or_selected_batches_r
     *title = "Different bytes at same canonical version".into();
     fixture.extra_payload(ForgeEventBatch::of_one(conflict));
     assert!(fixture.replay(1).is_err());
-    for remove in [first.clone(), second.clone()] {
+    for (remove, recoverable) in [(first.clone(), false), (second.clone(), true)] {
         let mut fixture = Fixture::new(vec![
             ForgeEventBatch::of_one(first.clone()),
             ForgeEventBatch::of_one(second.clone()),
         ]);
         let remove_root = storage::root(&ForgeEventBatch::of_one(remove)).unwrap();
-        fixture.outbox = CanonicalOutboxState::try_new(
-            fixture.basis.body().repository_id,
-            fixture
-                .outbox
-                .entries()
-                .iter()
-                .copied()
-                .filter(|entry| entry.payload_root() != remove_root)
-                .collect(),
-        )
-        .unwrap();
-        assert!(fixture.replay(1).is_err());
+        let entries = fixture
+            .outbox
+            .entries()
+            .iter()
+            .copied()
+            .filter(|entry| entry.payload_root() != remove_root)
+            .collect();
+        fixture.select_outbox(entries);
+        if recoverable {
+            // Delivery retirement cannot remove the authenticated frontier.
+            assert_eq!(fixture.source(1).unwrap().threads, original);
+        } else {
+            // The opening body exists but has no selected source in this
+            // explicit genesis; no other head or immutable scan may supply it.
+            assert!(matches!(
+                fixture.source(1),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceMissing
+                ))
+            ));
+        }
     }
+}
+
+#[test]
+fn retired_subject_and_preference_frontiers_preserve_self_scoped_notification_state() {
+    let events = vec![
+        opened(1, 2),
+        issue(
+            1,
+            1,
+            3,
+            IssueAction::Comment {
+                body: "Latest activity".into(),
+            },
+        ),
+        preference(
+            1,
+            0,
+            1,
+            NotificationAction::SetMode(NotificationMode::Subscribed),
+        ),
+        preference(
+            1,
+            1,
+            1,
+            NotificationAction::SetReadThrough(Some(AggregateVersion::try_new(2).unwrap())),
+        ),
+        preference(
+            1,
+            0,
+            3,
+            NotificationAction::SetMode(NotificationMode::Muted),
+        ),
+    ];
+    let retired: Vec<_> = [1, 3, 4]
+        .into_iter()
+        .map(|index| storage::root(&ForgeEventBatch::of_one(events[index].clone())).unwrap())
+        .collect();
+    let mut fixture = Fixture::new(events.into_iter().map(ForgeEventBatch::of_one).collect());
+    let original = fixture.source(1).unwrap();
+    let entries = fixture
+        .outbox
+        .entries()
+        .iter()
+        .copied()
+        .filter(|entry| !retired.contains(&entry.payload_root()))
+        .collect();
+    fixture.select_outbox(entries);
+    let recovered = fixture.source(1).unwrap();
+    assert_ne!(recovered.source_head, original.source_head);
+    assert_eq!(recovered.source_head, fixture.basis.id());
+    assert_eq!(recovered.outbox_root, fixture.basis.body().outbox_root);
+    assert_eq!(recovered.threads, original.threads);
+    let own = recovered.threads[0].preference.as_ref().unwrap();
+    assert_eq!(own.principal, actor(1));
+    assert_eq!(own.mode, NotificationMode::Subscribed);
+    assert_eq!(own.read_through.unwrap().get(), 2);
+    let other = fixture.source(3).unwrap();
+    assert_eq!(
+        other.threads[0].preference.as_ref().unwrap().mode,
+        NotificationMode::Muted
+    );
 }
 
 #[test]

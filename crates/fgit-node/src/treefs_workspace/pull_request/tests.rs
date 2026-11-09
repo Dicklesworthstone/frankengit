@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod append_comments;
 mod notifications;
+mod outbox_history;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
