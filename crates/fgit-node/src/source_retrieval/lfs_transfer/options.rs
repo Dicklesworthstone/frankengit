@@ -3,6 +3,7 @@ use super::*;
 use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
 
 pub(super) const USAGE: &str = "usage: fg lfs inventory <storage-root> <tenant-id> <repository-id>
+       fg lfs verify <storage-root> <lfs-root> <tenant-id> <repository-id>
        fg lfs export <storage-root> <lfs-root> <new-archive-file> <tenant-id> <repository-id>
        fg lfs import <storage-root> <lfs-root> <archive-file> <tenant-id> <repository-id>
          --expected-sha256 <archive-sha256> --expected-incarnation <id>
@@ -15,10 +16,13 @@ verifies the entire archive and independent checksum, then copies only payloads
 referenced by the exact target native inventory. Every target pointer must be
 covered; valid extra archive objects are skipped. Source and target namespaces
 may differ. No refs, aliases, authority heads, or retention roots are published.
+Verify authenticates the native pointer inventory and checks every referenced
+payload's complete SHA-256, length, and custody identity without an archive or
+payload spool. Missing or corrupt custody refuses without a success receipt.
 
 Options: --object-format sha1|sha256 (default sha1)
-         --expected-incarnation <id> (optional for inventory/export)
-         --expected-head-sha256 <head-body-sha256> (optional for inventory/export)
+         --expected-incarnation <id> (optional for inventory/verify/export)
+         --expected-head-sha256 <head-body-sha256> (optional for inventory/verify/export)
          --max-objects <1..1000000> (LFS records; default 100000)
          --max-source-objects <1..1000000> (native inventory; default 100000)
          --max-source-bytes <1..1099511627776> (default 1073741824)
@@ -29,7 +33,7 @@ Options: --object-format sha1|sha256 (default sha1)
 Only canonical extension-free v1 LFS pointers and SHA-256 LFS payloads up to
 512 MiB each are supported. Every selected native object is verified, including
 retained history, under the source scan budget. Missing/corrupt/unsupported
-pointer custody refuses export. Physical orphan payloads are never enumerated.
+pointer custody refuses verification/export. Physical orphan payloads are never enumerated.
 Import is idempotent immutable custody, not an atomic multi-object transaction.
 On interruption or a moved head, earlier valid puts remain and identical retry
 can recover them. Keep the archive, checksum and explicit destination pins.
@@ -39,6 +43,7 @@ cooperative between filesystem operations, which can themselves block.";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
     Inventory,
+    Verify,
     Export,
     Import,
 }
@@ -98,6 +103,7 @@ impl Options {
         }
         let action = match args.first().map(String::as_str) {
             Some("inventory") => Action::Inventory,
+            Some("verify") => Action::Verify,
             Some("export") => Action::Export,
             Some("import") => Action::Import,
             _ => return Err(USAGE.into()),
@@ -107,6 +113,11 @@ impl Options {
                 return Err(USAGE.into());
             }
             (4, None, None, &args[2], &args[3])
+        } else if action == Action::Verify {
+            if args.len() < 6 {
+                return Err(USAGE.into());
+            }
+            (5, Some(PathBuf::from(&args[2])), None, &args[3], &args[4])
         } else {
             if args.len() < 7 {
                 return Err(USAGE.into());
@@ -173,7 +184,7 @@ impl Options {
                 "--max-payload-bytes" => {
                     options.limits.max_payload_bytes = positive(value, 1 << 40)?
                 }
-                "--max-archive-bytes" => {
+                "--max-archive-bytes" if action != Action::Verify => {
                     options.limits.max_archive_bytes = positive(value, 1 << 40)?
                 }
                 "--timeout-secs" => options.timeout = Duration::from_secs(positive(value, 3600)?),

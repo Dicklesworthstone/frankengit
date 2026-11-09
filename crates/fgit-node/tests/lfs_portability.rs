@@ -28,6 +28,8 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 
 #[path = "lfs_portability/streaming.rs"]
 mod streaming;
+#[path = "lfs_portability/verification.rs"]
+mod verification;
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -167,6 +169,11 @@ fn transfer_args(
     out.splice(2..2, [text(custody), text(archive)]);
     out
 }
+fn verify_args(root: &Path, custody: &Path, format: GitHashAlgorithm) -> Vec<String> {
+    let mut out = args("verify", root, format);
+    out.insert(2, text(custody));
+    out
+}
 fn invoke(args: &[String]) -> Result<String, String> {
     let mut output = Vec::new();
     match lfs_transfer::run_with_timeout(args, &mut output, Some(Duration::from_secs(30))) {
@@ -282,6 +289,15 @@ fn exact_native_inventory_transfers_across_incarnations_and_keeps_history_withou
         assert!(inventory.contains(&object(current).oid.to_string()));
         assert!(inventory.contains(&object(historical).oid.to_string()));
         assert!(!inventory.contains(&object(orphan).oid.to_string()));
+        let verified = invoke(&verify_args(&root, &source_custody, format)).unwrap();
+        assert!(verified.contains("\"type\":\"lfs_verify\""), "{verified}");
+        assert!(verified.contains("\"custody_verified\":true"), "{verified}");
+        assert!(verified.contains("\"objects\":2"), "{verified}");
+        assert!(verified.contains("\"physical_orphans_included\":false"));
+        assert_eq!(
+            field(&verified, "head_sha256"),
+            field(&inventory, "head_sha256")
+        );
         let archive = archives.join("payloads.fglfs");
         let exported = invoke(&transfer_args(
             "export",
@@ -347,6 +363,9 @@ fn exact_native_inventory_transfers_across_incarnations_and_keeps_history_withou
             invoke(&args("inventory", &target, target_format)).unwrap(),
             pins
         );
+        let verified = invoke(&verify_args(&target, &target_custody, target_format)).unwrap();
+        assert!(verified.contains("\"objects\":1"), "{verified}");
+        assert!(verified.contains("\"custody_verified\":true"), "{verified}");
     }
 }
 

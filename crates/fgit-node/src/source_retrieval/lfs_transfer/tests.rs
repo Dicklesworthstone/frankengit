@@ -14,6 +14,15 @@ fn args(operation: &str) -> Vec<String> {
             "22222222222222222222222222222222",
             "--trusted-local",
         ]
+    } else if operation == "verify" {
+        vec![
+            operation,
+            "/unused",
+            "/custody",
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+            "--trusted-local",
+        ]
     } else {
         vec![
             operation,
@@ -50,7 +59,7 @@ fn command_requires_authorization_exact_import_pins_and_independent_finite_budge
         Options::parse(&import_args(), None).unwrap().action,
         Action::Import
     );
-    for operation in ["inventory", "export", "import"] {
+    for operation in ["inventory", "verify", "export", "import"] {
         let mut untrusted = if operation == "import" {
             import_args()
         } else {
@@ -97,16 +106,51 @@ fn command_requires_authorization_exact_import_pins_and_independent_finite_budge
 
 #[test]
 fn all_help_paths_are_read_only_and_do_not_need_a_repository() {
-    for operation in [None, Some("inventory"), Some("export"), Some("import")] {
+    for operation in [
+        None,
+        Some("inventory"),
+        Some("verify"),
+        Some("export"),
+        Some("import"),
+    ] {
         let mut args: Vec<String> = operation.into_iter().map(str::to_owned).collect();
         args.push("--help".into());
         let mut output = Vec::new();
         run(&args, &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("fg lfs inventory"));
+        assert!(output.contains("fg lfs verify"));
         assert!(output.contains("--expected-head-sha256"));
         assert!(output.contains("earlier valid puts remain"));
     }
+}
+
+#[test]
+fn verification_selects_custody_without_an_archive_and_rejects_archive_controls() {
+    let options = Options::parse(&args("verify"), None).unwrap();
+    assert_eq!(options.action, Action::Verify);
+    assert_eq!(options.custody.as_deref(), Some(Path::new("/custody")));
+    assert!(options.archive.is_none());
+    assert!(options.archive_sha256.is_none());
+    for (flag, value) in [
+        ("--expected-sha256", "00".repeat(32)),
+        ("--max-archive-bytes", "1024".into()),
+    ] {
+        let mut invalid = args("verify");
+        invalid.extend([flag.into(), value]);
+        assert!(Options::parse(&invalid, None).is_err());
+    }
+    let mut pinned = args("verify");
+    pinned.extend([
+        "--expected-incarnation".into(),
+        "33".repeat(16),
+        "--expected-head-sha256".into(),
+        "44".repeat(32),
+    ]);
+    let options = Options::parse(&pinned, Some(Duration::from_millis(10))).unwrap();
+    assert!(options.incarnation.is_some());
+    assert_eq!(options.head_sha256, Some([0x44; 32]));
+    assert_eq!(options.timeout, Duration::from_millis(10));
 }
 
 #[test]

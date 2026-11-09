@@ -1,6 +1,7 @@
 # Portable Git LFS custody
 
-`fg lfs inventory`, `fg lfs export`, and `fg lfs import` move verified LFS bytes
+`fg lfs inventory`, `fg lfs verify`, `fg lfs export`, and `fg lfs import` inspect,
+verify, and move LFS bytes
 with an explicit native source selection and an independently trusted archive
 checksum. They let an operator restore the LFS payloads needed by a restored
 repository or copy them into a fresh repository incarnation.
@@ -56,6 +57,52 @@ beginning with the LFS specification version prefix but carrying an unsupported
 version, extension, malformed fields, or excess bytes refuses the operation.
 Conflicting lengths for one OID also refuse. Such input is never silently
 reported as a complete supported inventory.
+
+## Verify referenced payloads without an archive
+
+After restoring native repository state and its LFS companion, or when checking
+an existing node's stored data, run:
+
+```sh
+fg lfs verify /srv/restored-node /srv/restored-lfs \
+  "$TENANT_ID" "$REPOSITORY_ID" --trusted-local --object-format sha256 \
+  --expected-incarnation "$INCARNATION_ID" \
+  --expected-head-sha256 "$HEAD_BODY_SHA256"
+```
+
+The optional pins come from the inventory command above. If they are omitted,
+verification selects the current authenticated repository snapshot. It derives
+the complete supported pointer inventory and then checks each unique payload
+in that repository's actual custody namespace. A file with the expected name is
+insufficient: its full SHA-256, exact length, container framing, and tenant,
+repository and incarnation binding must all verify. Identical bytes in another
+incarnation's custody do not satisfy this check.
+
+Verification reads payloads in bounded chunks into a sink. It creates neither
+an archive nor a temporary payload copy, and never modifies or repairs payloads.
+It checks retained admitted history as well as current refs; physical orphan
+files remain outside its selection. Source and aggregate payload budgets apply
+before custody verification, and all scans share one operation deadline. Use
+the same `--max-source-objects`, `--max-source-bytes`, `--max-objects`,
+`--max-payload-bytes` and `--timeout-secs` controls described below.
+Archive checksum and archive-byte controls do not apply to `verify`.
+
+On success, the `lfs_verify` JSON receipt includes the exact source identity,
+native objects/bytes scanned, unique LFS objects/bytes checked,
+`custody_verified:true`, `head_revalidated:true`, and `complete:true`.
+The command revalidates the full authority-head receipt and shuts down the node
+before emitting this result. A changed head, missing or corrupt selected
+payload, unsupported pointer, unsafe custody path, or exhausted budget refuses
+with a nonzero exit and no complete verification receipt. Missing and corrupt
+payload diagnostics name the affected OID. After restoring valid custody, the
+same pinned command can be retried.
+
+This is a snapshot integrity observation, not a retention promise: subsequent
+external corruption or repository changes require another check. It does not
+scrub unreferenced physical files, repair corruption, validate backup coverage
+outside the selected native pointers, or replace the native repository's own
+integrity checks. A lost or partial output receipt should be resolved by rerunning
+the read-only command.
 
 ## Export the source's referenced payloads
 
