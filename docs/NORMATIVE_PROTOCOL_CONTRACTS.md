@@ -636,6 +636,81 @@ verified source and an independently selected default branch. This repair
 does not provide an in-place migration or authenticate a past target that was
 never committed.
 
+### 16.6 Canonical default-branch changes
+
+An explicit default-branch change is a repository-administration intent in the
+ordinary sealed decision stream. It MUST publish through the exact predecessor
+authority-head CAS and one RCR. The command contains the exact expected optional
+old symbolic target, a new full `refs/heads/*` target and that branch's exact
+expected nonzero native commit OID. An absent target and a named unborn target
+are distinct preconditions. The selected new branch MUST already exist, be
+visible under canonical policy and point to an admitted, independently verified
+native Commit in the repository's object-format domain. No conventional branch
+name, refreshed expectation, fake direct-ref OID or mutable configuration default
+may substitute for these inputs.
+
+The semantic-request schema is `default-branch-admission` version `1.0` in the
+existing semantic-request identity domain. The atomic request contains no direct
+ref commands or push options and exactly one scoped metadata entry: namespace
+`ref-state`, key `default-branch.v1`. Its value uses the canonical codec to write,
+in order, the optional old RefName, the new RefName and the expected GitOid. The
+ordinary tenant/repository/authenticated-principal/idempotency-key derivation
+defines TxId. A preparation basis and policy witness MUST NOT enter the sealed
+request identity; a losing CAS revalidates the same command against a new basis.
+Key reuse with different command semantics MUST fail closed.
+
+The trusted-local operation requires operator-asserted authentication and no
+narrowed ref-write credential scope. Canonically declared agent principals MUST
+be refused even when presented with operator provenance. With no installed
+review-protection policy, the explicitly authorized local operator may establish
+the default. With an installed policy, the actor MUST be one of its current
+canonical administrators. Proposed or historical administrators cannot authorize
+a new request. This authority does not follow from remote Git push permission,
+source publication grants, agent sponsorship, branch review approval or a model
+recommendation. Each CAS preparation checks the currently selected policy before
+reading target objects. Canonical visibility of HEAD, its old target and the new
+target applies independently of administrator status.
+
+The canonical symbolic-ref delta has domain
+`frankengit/admission-head-delta/v1`, schema family `admission-head-delta`, version
+`1.0` (DUR-024). Its canonical payload order is tenant ID, repository ID,
+authenticated principal ID, TxId, canonical request digest, exact basis head ID,
+root-layout code point, previous ref root, resulting ref root, the three command
+fields above, and an optional protection-witness digest. When present, that last
+digest identifies a canonical single-event ForgeEventBatch containing the exact
+selected ReviewProtection event. The authenticated basis and forge reader, not
+the existence of that staged witness, establish the event's authority. An absent
+witness records that no protection policy was installed at that basis.
+
+The RCR's `ref_delta_root` and `invariant_evidence_root` both identify this genuine
+HEAD-transition body. It is staged in the repository-scoped
+`frankengit/admission/head-delta/v1/` and existing invariant-evidence namespaces.
+Verifiers MUST independently authenticate the named basis, the selected layout
+from its configuration root and the selected administrator policy; then recompute
+the exact request binding, old/new HEAD and both ref roots. Merely decoding the
+body does not establish publication. Existing direct-ref delta encodings and
+domain IDs retain their meanings.
+
+Only layouts that authenticate HEAD (§16.5) may publish this operation. Direct
+refs MUST be identical before and after it. Forge-position, policy-epoch,
+configuration, outbox and retention state remain selected from the predecessor;
+the RCR admits an empty incremental object closure while retaining the existing
+reachable closure. A same-target command is an authorized, separately audited
+terminal no-op with equal ref roots. It still checks the exact target tip and
+current administrator policy. Deletion/rename protection thereafter follows the
+new canonical HEAD, and advertisements and historical reads select that same
+authenticated state.
+
+Exact historical terminal recovery MUST precede current administrator, quota,
+readiness and target-existence checks once original operator provenance and
+request identity are established. Later policy rotation, branch deletion or
+default selection cannot rewrite an earlier decision. A cancellation, failed
+receipt write or disconnect cannot establish non-commit. The caller recovers the
+original scoped TxId or retries the exact command and key, without refreshing
+either expectation. Reads report absent, unborn and resolved states distinctly,
+bound to one authenticated head, and authorize disclosure of both HEAD and its
+target.
+
 ## 17. Object fabric and segmentation
 
 Canonical Git objects preserve native OIDs and exact logical bytes. Internal envelopes may add strong digest/type/length. Object-aware segments provide:

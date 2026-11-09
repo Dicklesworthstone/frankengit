@@ -53,3 +53,4 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 51	frankengit/token-grant/v1	sha256	-	-	active
 52	frankengit/session/v1	sha256	-	-	active
 53	frankengit/policy-snapshot/v1	sha256	-	-	active
+54	frankengit/admission-head-delta/v1	sha256	DUR-024	-	active

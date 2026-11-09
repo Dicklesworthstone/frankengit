@@ -127,7 +127,7 @@ impl NativeMergeProjection<Model> for AuthenticationProjection {
     }
 }
 
-fn sponsored(fixture: &Fixture) -> AdmissionAuthentication {
+pub(super) fn sponsored(fixture: &Fixture) -> AdmissionAuthentication {
     use fgit_admission::evidence::AgentAuthentication;
     use fgit_forge::event::agent_credential::{AgentCredentialId, SponsorKind};
     AdmissionAuthentication::AgentCredential(
@@ -145,7 +145,7 @@ fn sponsored(fixture: &Fixture) -> AdmissionAuthentication {
     )
 }
 
-fn declared_agent_fixture(revoked: bool) -> Fixture {
+pub(super) fn declared_agent_fixture(revoked: bool) -> Fixture {
     use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositionStateEntry};
     use fgit_forge::event::agent_credential::{
         AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,

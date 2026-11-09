@@ -40,6 +40,14 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Every authority attempt binds an authenticated principal snapshot and effective capability root.
 - Capabilities are scoped by tenant/repository/ref/path/object/effect/secret/network/time/budget and revocable handle.
 - Delegation can only narrow authority.
+- Changing the canonical default branch requires a trusted-local operator and,
+  when review protection is installed, membership in its current administrator
+  set. A Git push grant, narrowed ref-write credential or canonically declared
+  agent principal cannot acquire this authority. Every CAS rechecks policy and
+  the exact old HEAD and new branch tip before publishing the HEAD-only RCR.
+  Hidden HEAD/branch names remain unavailable to administrators through this
+  operation. An exact historical terminal retry retains its earlier decision
+  after administrator rotation without reexecuting the change.
 - Canonical policy uses one exact input root and does not consult mutable projections, wall clock, network calls, or unversioned model output.
 - Stale/replayed/confused-deputy/cross-tenant capabilities fail deterministically.
 - Native issue assignments are bounded metadata links to opaque principal IDs.

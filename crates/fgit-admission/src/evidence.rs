@@ -33,6 +33,9 @@ pub use principal_snapshot::{
     AuthenticatedPrincipalSnapshot, PrincipalSnapshotIdentity, PrincipalSnapshotRecord,
 };
 
+#[path = "default_branch/evidence.rs"]
+pub(crate) mod head_change;
+
 /// Stable refusal-record detail for a refusal supported by
 /// [`RefusalEvidence`].
 ///

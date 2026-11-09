@@ -64,6 +64,7 @@ use fgit_wire::receive::{
 use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{AnyGitOid, GitObjectFormat, Packet};
 
+pub mod default_branch;
 pub mod evidence;
 /// Admitting a sealed merge; see the module for what it does and does not
 /// re-check.

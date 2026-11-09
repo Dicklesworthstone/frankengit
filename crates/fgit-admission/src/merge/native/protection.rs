@@ -61,7 +61,7 @@ fn infrastructure(error: AdmissionError) -> ProjectionFailure {
 /// The initial sponsored credential profile permits only its explicit forge
 /// metadata operations. A single-factor policy result cannot expand it into
 /// code publication, a review, or a merge, even without installed protection.
-pub(super) async fn require_non_agent_publication_at<S, C>(
+pub(crate) async fn require_non_agent_publication_at<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,
