@@ -51,7 +51,7 @@ def run_composition_case(c, oracle_run, fmt, build_tree, before, edits, author):
         require(result.returncode == 0, "pinned Git rejected composition fixture/candidate")
 
     oracle("base", "fsck", "--full", "--strict", "--no-reflogs")
-    c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
+    c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v2")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "composition-fixture", source)
     initial_index = json.loads(c.run("index", repository, TENANT, REPOSITORY, fmt, MAIN, "build", "genesis"))
     credentials, incarnation = c.credentials(repository, home)

@@ -85,7 +85,7 @@ async function native(t, format) {
   assert.equal(await loose('commit', f.commit), f.commitId);
   await writeFile(join(source, 'refs/heads/main'), `${f.commitId}\n`);
   const ids = [f.envelope.tenant_id, f.envelope.repository_id], principal = '4'.repeat(32);
-  await run(dir, 'init', FG, ['init', storage, ...ids, format, '--root-layout', 'ref-merkle-v1']);
+  await run(dir, 'init', FG, ['init', storage, ...ids, format, '--root-layout', 'ref-merkle-v2']);
   await run(dir, 'import', FG, ['import', storage, ...ids, principal, 'source-package-fixture', source]);
   const show = JSON.parse((await run(dir, 'pin', FG, ['show', storage, ...ids, '--trusted-local',
     '--ref', 'refs/heads/main', '--object-format', format, '--path', 'empty', '--max-bytes', '1'])).stdout);

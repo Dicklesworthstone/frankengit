@@ -24,8 +24,11 @@ fg-mcp "$STORAGE" "$TENANT" "$REPOSITORY" \
 ```
 
 The native authenticated configuration must select a Merkle ref layout.
-`RefStateMerkleV1` and `RefStateAndObjectClosureMerkleV1` support the proof. For
-a new repository, `fg init ... --root-layout ref-merkle-v1` deliberately selects
+`RefStateMerkleV2` and `RefStateAndObjectClosureMerkleV2` support the proof while
+authenticating HEAD. Historical V1 proof verification remains available; live
+V1 repositories require explicit recovery as described in
+[Authenticated HEAD ref layouts](AUTHENTICATED_HEAD_REF_LAYOUT.md). For
+a new repository, `fg init ... --root-layout ref-merkle-v2` deliberately selects
 the first layout. Existing legacy repositories refuse this tool with
 `verified_blob_layout_unavailable`; opening an existing repository never
 migrates or reinterprets its stored layout. See the

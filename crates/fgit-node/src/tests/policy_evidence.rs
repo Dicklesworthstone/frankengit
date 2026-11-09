@@ -79,7 +79,7 @@ fn published_policy_evidence_reopens_replays_microbatch_overlays_and_rejects_orp
     for algorithm in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for layout in [
             RootLayoutVersion::LegacyWholeBody,
-            RootLayoutVersion::RefStateMerkleV1,
+            RootLayoutVersion::RefStateMerkleV2,
         ] {
             let scratch = ScratchDirectory::new();
             let config = test_config(scratch.path().to_path_buf())

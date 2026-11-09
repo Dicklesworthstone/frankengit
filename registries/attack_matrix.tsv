@@ -19,3 +19,5 @@ ATK-016	7.14	Operator break-glass override abuse, signing key compromise, and re
 ATK-017	7.5	SSH transport host key forgery, unauthorized deploy key injection, and unauthenticated channel command execution	scripts/e2e/ssh_transport_security.sh	active
 ATK-018	7.1	Resource ceiling violations on untrusted pack/frame input triggering unbounded memory or recursion	scripts/e2e/suites/security/resource_ceilings.sh	active
 ATK-019	7.5	Review-policy scope widening, remote ownership bootstrap, self-authorized administrator rotation, stale predecessor and revoked credential replay	crates/fgit-node/tests/protection_http.rs	active
+ATK-020	7.2	Substituting or removing symbolic HEAD beneath unchanged direct refs and authority roots, replaying old-layout ref proofs, or disclosing hidden absence witnesses	crates/fgit-node/src/tests/canonical_genesis/head_binding.rs	active
+ATK-021	7.2	Relabelling odd-width V2 proof indices and leaf counts to forge first-ref or adjacent-ref absence	crates/fgit-crypto/tests/ref_state_head_v2.rs	active

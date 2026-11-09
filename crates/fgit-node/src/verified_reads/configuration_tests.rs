@@ -58,7 +58,7 @@ use crate::{
 const CONTENT: &[u8] = b"\0\xfforiginal verified source\r\n";
 const OWNER: PrincipalId = PrincipalId::from_bytes([0x41; 16]);
 const AGENT: PrincipalId = PrincipalId::from_bytes([0x42; 16]);
-const LAYOUT: RootLayoutVersion = RootLayoutVersion::RefStateAndObjectClosureMerkleV1;
+const LAYOUT: RootLayoutVersion = RootLayoutVersion::RefStateAndObjectClosureMerkleV2;
 
 struct Scratch(PathBuf);
 

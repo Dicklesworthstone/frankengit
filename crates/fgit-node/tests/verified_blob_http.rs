@@ -82,7 +82,7 @@ fn actual_http_blob_proofs_bind_independent_head_ref_path_bytes_and_source_grant
         let root = Scratch::new();
         let config = root
             .config(format)
-            .with_root_layout(RootLayoutVersion::RefStateMerkleV1);
+            .with_root_layout(RootLayoutVersion::RefStateMerkleV2);
         let (node, commit) = fixture_with_config(&root, format, config.clone());
         let trusted = pin(&node);
         let before = generation(&node);

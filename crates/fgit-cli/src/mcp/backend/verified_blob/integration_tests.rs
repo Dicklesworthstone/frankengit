@@ -12,8 +12,8 @@ use support::*;
 fn persisted_native_proofs_roundtrip_raw_binary_empty_executable_and_symlink_bytes() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for layout in [
-            RootLayoutVersion::RefStateMerkleV1,
-            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            RootLayoutVersion::RefStateMerkleV2,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
         ] {
             let mut fixture = Fixture::new(format, layout);
             let before = fixture.state();
@@ -142,7 +142,7 @@ fn persisted_native_proofs_roundtrip_raw_binary_empty_executable_and_symlink_byt
 #[test]
 fn stale_head_missing_paths_and_legacy_layout_refuse_without_an_unproven_fallback() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let mut fixture = Fixture::new(format, RootLayoutVersion::RefStateMerkleV1);
+        let mut fixture = Fixture::new(format, RootLayoutVersion::RefStateMerkleV2);
         let before = fixture.state();
         for path in [
             b"missing".as_slice(),
@@ -200,7 +200,7 @@ fn stale_head_missing_paths_and_legacy_layout_refuse_without_an_unproven_fallbac
 #[test]
 fn launch_grant_and_direct_sponsored_guard_precede_caller_parsing() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let mut fixture = Fixture::new(format, RootLayoutVersion::RefStateMerkleV1);
+        let mut fixture = Fixture::new(format, RootLayoutVersion::RefStateMerkleV2);
         let before = fixture.state();
         let invalid = object([("principal", text("must never be read"))])
             .object()
@@ -242,7 +242,7 @@ fn complete_byte_and_proof_limits_refuse_before_hex_expansion() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let bytes: Vec<u8> = (0..MAX_BLOB_BYTES).map(|n| n as u8).collect();
         let mut fixture =
-            Fixture::with_text(format, RootLayoutVersion::RefStateMerkleV1, &bytes, 0);
+            Fixture::with_text(format, RootLayoutVersion::RefStateMerkleV2, &bytes, 0);
         let before = fixture.state();
         let mut args = fixture.args(b"alpha.txt");
         assert_eq!(
@@ -271,7 +271,7 @@ fn complete_byte_and_proof_limits_refuse_before_hex_expansion() {
     }
     let mut oversize = Fixture::with_text(
         GitHashAlgorithm::Sha256,
-        RootLayoutVersion::RefStateMerkleV1,
+        RootLayoutVersion::RefStateMerkleV2,
         &vec![0xff; MAX_BLOB_BYTES + 1],
         0,
     );
@@ -288,7 +288,7 @@ fn complete_byte_and_proof_limits_refuse_before_hex_expansion() {
     // cannot make an oversized witness fit the complete-only MCP profile.
     let mut metadata = Fixture::with_text(
         GitHashAlgorithm::Sha1,
-        RootLayoutVersion::RefStateMerkleV1,
+        RootLayoutVersion::RefStateMerkleV2,
         TEXT,
         MAX_PROOF_BYTES,
     );
@@ -304,7 +304,7 @@ fn complete_byte_and_proof_limits_refuse_before_hex_expansion() {
 #[test]
 fn tampered_objects_wrong_pins_namespace_and_cancellation_never_render_content() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let mut fixture = Fixture::new(format, RootLayoutVersion::RefStateMerkleV1);
+        let mut fixture = Fixture::new(format, RootLayoutVersion::RefStateMerkleV2);
         let args = fixture.args(RAW_PATH);
         let query = input::parse(&args).unwrap();
         let envelope = fixture.envelope(&args);

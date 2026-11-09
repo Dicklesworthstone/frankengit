@@ -298,7 +298,7 @@ fn the_permitted_twin_a_visible_ref_with_a_foreign_format_still_refuses() {
 /// the codec so this cannot pass on a list that would not survive storage.
 fn hiding_from_stored_configuration(rules: &[&[u8]]) -> RefVisibility {
     let configuration = fgit_codec::RepositoryConfigurationBody {
-        root_layout: fgit_types::layout::RootLayoutVersion::RefStateMerkleV1,
+        root_layout: fgit_types::layout::RootLayoutVersion::RefStateMerkleV2,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: rules.iter().map(|rule| rule.to_vec()).collect(),
     };

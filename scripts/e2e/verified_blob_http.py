@@ -116,7 +116,7 @@ def campaign(binary: Path, root: Path, fmt: str, entries: int):
                                                 for number in range(entries)]))
     commit = loose(source, fmt, "commit", f"tree {root_tree}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nproof fixture\n".encode())
     (source / "refs/heads/main").write_text(commit + "\n")
-    commands.run(["init", node, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1"])
+    commands.run(["init", node, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v2"])
     commands.run(["import", node, TENANT, REPOSITORY, PRINCIPAL, "proof-source", source])
     common = [node, TENANT, REPOSITORY, "--trusted-local", "--ref", "refs/heads/main", "--object-format", fmt]
     # A selected-file grant avoids the distinct local root-listing scope limit

@@ -409,12 +409,20 @@ impl OneNode {
                         .verified_read_configuration_in(request, &head.configuration_root)
                         .await?;
                     ensure_ref_proof_layout(&configuration)?;
-                    let (bound_oid, proof) =
-                        ref_state_membership_proof(&entries, &name).map_err(|refusal| {
-                            VerifiedReadServingRefusal::VerifiedRead(Box::new(
-                                VerifiedReadRefusal::RefLayout(Box::new(refusal)),
-                            ))
-                        })?;
+                    let generated = if materialized.root_layout().uses_head_aware_ref_merkle() {
+                        fgit_crypto::ref_state_membership_proof_v2(
+                            &entries,
+                            materialized.snapshot().head_target.as_ref(),
+                            &name,
+                        )
+                    } else {
+                        ref_state_membership_proof(&entries, &name)
+                    };
+                    let (bound_oid, proof) = generated.map_err(|refusal| {
+                        VerifiedReadServingRefusal::VerifiedRead(Box::new(
+                            VerifiedReadRefusal::RefLayout(Box::new(refusal)),
+                        ))
+                    })?;
                     if bound_oid != oid {
                         return Err(VerifiedReadServingRefusal::VerifiedRead(Box::new(
                             VerifiedReadRefusal::ProofRejected,
@@ -450,12 +458,23 @@ impl OneNode {
                             .verified_read_configuration_in(request, &head.configuration_root)
                             .await?;
                         ensure_ref_proof_layout(&configuration)?;
-                        let proof = ref_state_non_membership_proof(&entries, absence.name())
-                            .map_err(|refusal| {
-                                VerifiedReadServingRefusal::VerifiedRead(Box::new(
-                                    VerifiedReadRefusal::RefLayout(Box::new(refusal)),
-                                ))
-                            })?;
+                        let generated = if materialized.root_layout().uses_head_aware_ref_merkle() {
+                            fgit_crypto::ref_state_non_membership_proof_v2(
+                                &entries,
+                                materialized.snapshot().head_target.as_ref(),
+                                absence.name(),
+                            )
+                        } else {
+                            ref_state_non_membership_proof(&entries, absence.name())
+                        };
+                        let proof = generated.map_err(|refusal| {
+                            VerifiedReadServingRefusal::VerifiedRead(Box::new(
+                                VerifiedReadRefusal::RefLayout(Box::new(refusal)),
+                            ))
+                        })?;
+                        fgit_verified_read::authorize_ref_absence_witness(scope, &proof).map_err(
+                            |refusal| VerifiedReadServingRefusal::VerifiedRead(Box::new(refusal)),
+                        )?;
                         Ok(ReadResponse::Verified(Box::new(
                             VerifiedReadEnvelope::new_with_exact_configuration(
                                 head,
@@ -855,7 +874,7 @@ mod tests {
             .expect("components open before authoritative genesis");
         let request = node.request_context();
         let configuration = RepositoryIncarnationConfigurationBody {
-            root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
             object_format: GitHashAlgorithm::Sha1,
             repository_incarnation_id: RepositoryIncarnationId::from_bytes(
                 *node.repository_incarnation_id.as_bytes(),
@@ -875,7 +894,7 @@ mod tests {
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
-                RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+                RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
                 CanonicalRefState::default(),
             ))
             .expect("the empty canonical ref state stages");
@@ -916,7 +935,7 @@ mod tests {
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
-                RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+                RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
                 refs.clone(),
             ))
             .expect("the successor ref state stages before publication");

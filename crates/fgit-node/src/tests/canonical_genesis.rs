@@ -229,8 +229,8 @@ fn ref_only_genesis_and_cold_reopen_resolve_delivery_without_history() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for layout in [
             RootLayoutVersion::LegacyWholeBody,
-            RootLayoutVersion::RefStateMerkleV1,
-            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            RootLayoutVersion::RefStateMerkleV2,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
         ] {
             let scratch = ScratchDirectory::new();
             let config = test_config(scratch.path().to_path_buf())
@@ -486,7 +486,7 @@ fn exact_legacy_genesis_retries_without_migration_or_custom_head_changes() {
     let initial_branch = RefName::try_new(b"refs/heads/trunk").unwrap();
     let config = test_config(scratch.path().to_path_buf())
         .with_object_format(GitHashAlgorithm::Sha256)
-        .with_root_layout(RootLayoutVersion::RefStateMerkleV1)
+        .with_root_layout(RootLayoutVersion::RefStateMerkleV2)
         .with_initial_branch(initial_branch.clone());
     let node = initialize_legacy(config.clone());
     let before = selected(&node);
@@ -502,7 +502,7 @@ fn exact_legacy_genesis_retries_without_migration_or_custom_head_changes() {
     let retried = selected(&node);
     assert_eq!(retried.basis(), before.basis());
     assert_eq!(retried.snapshot().head_target, Some(initial_branch));
-    assert_eq!(retried.root_layout(), RootLayoutVersion::RefStateMerkleV1);
+    assert_eq!(retried.root_layout(), RootLayoutVersion::RefStateMerkleV2);
     node.shutdown().unwrap();
 
     assert!(matches!(
@@ -524,8 +524,8 @@ fn reinitializing_with_another_initial_branch_is_an_initialization_conflict_in_e
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for layout in [
             RootLayoutVersion::LegacyWholeBody,
-            RootLayoutVersion::RefStateMerkleV1,
-            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            RootLayoutVersion::RefStateMerkleV2,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
         ] {
             for legacy in [false, true] {
                 let case = format!("{format:?} {layout:?} legacy genesis {legacy}");
@@ -578,7 +578,7 @@ fn reinitializing_with_another_initial_branch_is_an_initialization_conflict_in_e
 fn reinitializing_an_advanced_repository_is_an_initialization_conflict() {
     for layout in [
         RootLayoutVersion::LegacyWholeBody,
-        RootLayoutVersion::RefStateMerkleV1,
+        RootLayoutVersion::RefStateMerkleV2,
     ] {
         let scratch = ScratchDirectory::new();
         let config = test_config(scratch.path().to_path_buf()).with_root_layout(layout);
@@ -609,3 +609,6 @@ fn reinitializing_an_advanced_repository_is_an_initialization_conflict() {
         node.shutdown().unwrap();
     }
 }
+
+#[path = "canonical_genesis/head_binding.rs"]
+mod head_binding;

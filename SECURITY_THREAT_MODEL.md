@@ -15,6 +15,14 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - A repository state is canonical only if reachable from the verified `RepositoryAuthorityHead` selected by an exact predecessor conditional replacement.
 - One sealed logical transaction has at most one terminal decision.
 - Ref and forge transitions belonging to one operation publish atomically in one RCR.
+- Symbolic HEAD, including its absence or unborn target, is authenticated by
+  whole-body ref roots or the explicit V2 ref Merkle layout. Historical V1
+  Merkle roots authenticate only direct refs and are refused for live node
+  state. Changing or removing an unbound HEAD must not redirect clones or
+  remove default-branch deletion protection under an unchanged authority head.
+- V2 ref roots authenticate total leaf count as well as the tree apex. Proof
+  indices and counts cannot be relabelled across odd-width tree shapes to
+  turn a later ref into the first direct ref and forge an absence claim.
 - No unpublished object, candidate batch, local row, cache, gossip message, or materialization may be reported as committed.
 - Head predecessor/generation, decision sequence, repository sequence, and authenticated roots cannot roll back or fork silently.
 - A higher acknowledged unresolved root fails closed rather than falling back quietly.

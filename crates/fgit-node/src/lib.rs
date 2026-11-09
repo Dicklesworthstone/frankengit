@@ -1386,6 +1386,9 @@ pub enum AdmissionMaterializationRefusal {
     CanonicalFrame(CodecRefusal),
     /// A canonical frame did not reproduce the root named by authority.
     CanonicalRoot(RefusalCode),
+    /// Historical V1 Merkle roots authenticate direct refs but not HEAD.
+    /// Neither a decoded target nor its absence can govern serving or writes.
+    UnboundHeadLayout { layout: RootLayoutVersion },
     /// No immutable canonical frame existed for the authority-selected root.
     ImmutableAbsent(Digest),
     /// A deterministic immutable key was already occupied by different bytes.
@@ -1446,6 +1449,10 @@ impl Display for AdmissionMaterializationRefusal {
                 formatter,
                 "canonical admission body did not reproduce its authority root: {code:?}"
             ),
+            Self::UnboundHeadLayout { layout } => write!(
+                formatter,
+                "{layout:?} does not authenticate HEAD; live use requires an explicitly established legacy whole-body or ref-merkle-v2 repository, not an inferred default branch"
+            ),
             Self::ImmutableAbsent(root) => {
                 write!(formatter, "canonical admission body {root} is absent")
             }
@@ -1489,6 +1496,7 @@ impl Error for AdmissionMaterializationRefusal {
             | Self::SelectedCommitStateMismatch { .. }
             | Self::NonEmptyGenesisWithoutClosure
             | Self::CanonicalRoot(_)
+            | Self::UnboundHeadLayout { .. }
             | Self::ImmutableAbsent(_)
             | Self::ImmutableConflict
             | Self::CacheContainment
@@ -1879,6 +1887,7 @@ impl DurableAdmissionMaterializer {
     where
         Authority: AsyncAuthorityStore + ?Sized,
     {
+        require_authenticated_head_layout(root_layout)?;
         let root = ref_state_root(root_layout, &state)
             .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
         let frame = encode_body(&state).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
@@ -2140,6 +2149,7 @@ impl DurableAdmissionMaterializer {
                         )));
                     }
                 };
+            require_authenticated_head_layout(root_layout)?;
             if ref_state_root(root_layout, &ref_state)
                 .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
                 != body.ref_root
@@ -2948,6 +2958,7 @@ fn async_projection_unavailable(
         AdmissionMaterializationRefusal::Cancelled => RefusalCode::CancellationInProgress,
         AdmissionMaterializationRefusal::CheckpointTransition(_) => RefusalCode::EvidenceInvalid,
         AdmissionMaterializationRefusal::CanonicalRoot(code) => code,
+        AdmissionMaterializationRefusal::UnboundHeadLayout { .. } => RefusalCode::EvidenceInvalid,
         AdmissionMaterializationRefusal::CanonicalFrame(_) => RefusalCode::CanonicalFramingInvalid,
         AdmissionMaterializationRefusal::Resource(_)
         | AdmissionMaterializationRefusal::CacheGrant(_)
@@ -3361,6 +3372,20 @@ fn ensure_materializer_catch_up_live(
     }
 }
 
+/// V1 Merkle roots prove direct refs only. Treating even `None` as an
+/// authenticated HEAD would permit removing an existing target and its deletion
+/// protection without moving authority. Historical cryptographic verification
+/// retains V1 semantics; live repository state requires a complete commitment.
+fn require_authenticated_head_layout(
+    layout: RootLayoutVersion,
+) -> Result<(), AdmissionMaterializationRefusal> {
+    if layout.commits_head_target() {
+        Ok(())
+    } else {
+        Err(AdmissionMaterializationRefusal::UnboundHeadLayout { layout })
+    }
+}
+
 fn authority_head_id(
     body: &RepositoryAuthorityHeadBody,
 ) -> Result<RepositoryAuthorityHeadId, AdmissionMaterializationRefusal> {
@@ -3428,6 +3453,7 @@ where
             )));
         }
     };
+    require_authenticated_head_layout(root_layout)?;
     if ref_state_root(root_layout, &state)
         .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
         != head.ref_root
@@ -7877,7 +7903,8 @@ impl NodeConfig {
     /// record and the repository-incarnation configuration selected by its
     /// genesis head. [`OneNode::open_existing`] instead reads the stored,
     /// authenticated configuration and never migrates a repository from this
-    /// caller input.
+    /// caller input. Live repositories require the whole-body or a V2 layout;
+    /// initialization and reopening refuse historical V1 Merkle layouts.
     #[must_use]
     pub const fn with_root_layout(mut self, root_layout: RootLayoutVersion) -> Self {
         self.root_layout = root_layout;
@@ -8517,6 +8544,7 @@ impl OneNode {
         config: NodeConfig,
         agent_revocations: bool,
     ) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        require_authenticated_head_layout(config.root_layout)?;
         if agent_revocations && config.creation_idempotency_key.is_some() {
             return Err(NodeRefusal::CreationKeyWithAgentRevocations);
         }
@@ -8680,10 +8708,8 @@ impl OneNode {
         genesis.forge_position_root = forge_position_root;
         genesis.outbox_root = outbox_root;
         // Compare an existing repository before staging its ref-state frame.
-        // Under a Merkle ref layout the root commits only to the ref entries,
-        // so another initial branch over the same empty refs names the stored
-        // frame's key with different bytes. Staging first would report that
-        // immutable conflict instead of the initialization conflict.
+        // A retry must match the complete genesis and intended HEAD target;
+        // provisional immutable bytes do not establish an identical creation.
         let staged = match node
             .runtime
             .block_on(node.existing_head_differs_from_genesis(
@@ -8835,6 +8861,7 @@ impl OneNode {
                 &head.configuration_root,
             )
             .await?;
+            require_authenticated_head_layout(configuration.root_layout)?;
             if let Some(supplied) = supplied_object_format
                 && supplied != configuration.object_format
             {

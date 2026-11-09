@@ -20,7 +20,7 @@ creating a **new** repository:
 
 ```sh
 fg init "$STORAGE" "$TENANT" "$REPOSITORY" sha256 \
-  --root-layout ref-merkle-v1
+  --root-layout ref-merkle-v2
 
 fg import "$STORAGE" "$TENANT" "$REPOSITORY" "$PRINCIPAL" \
   initial-source "$SOURCE_GIT_DIRECTORY"
@@ -273,3 +273,6 @@ read. It records proof size and client process timing for SHA-1, SHA-256, and a
 10,000-entry SHA-256 tree, refuses tampered proofs and stale pins, exercises
 file verification, and requires server drain. Test presence and syntax checks
 do not establish an executed pass; attach actual revision-specific results.
+
+The V2 ref tree also authenticates symbolic HEAD. Historical V1 Merkle nodes
+refuse live use; see [authenticated HEAD and recovery limits](AUTHENTICATED_HEAD_REF_LAYOUT.md).
