@@ -7,6 +7,7 @@ mod retained_resume;
 
 use super::*;
 
+mod recovered_abort;
 mod recovery;
 
 use std::cell::RefCell;

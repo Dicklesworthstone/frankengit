@@ -34,9 +34,12 @@ use crate::{
 
 mod recovery;
 pub use recovery::{
-    PreparedRefTransactionAcknowledgement, RecoveredRefTransactionAcknowledgement,
+    PreparedRefTransactionAbort, PreparedRefTransactionAcknowledgement,
+    RecoveredRefTransactionAbort, RecoveredRefTransactionAcknowledgement,
+    RefTransactionAbortPersistenceRefused, RefTransactionAbortRefusal, RefTransactionAbortSink,
     RefTransactionAcknowledgementSink, RefTransactionRecoveryPersistenceRefused,
-    RefTransactionRecoveryRefusal, prepare_recovered_ref_transaction_acknowledgement,
+    RefTransactionRecoveryRefusal, prepare_recovered_ref_transaction_abort,
+    prepare_recovered_ref_transaction_acknowledgement,
 };
 
 /// Exact ordinary seal and checked publication identity retained in the journal.

@@ -21,6 +21,13 @@ use crate::{
     },
 };
 
+mod abort;
+pub use abort::{
+    PreparedRefTransactionAbort, RecoveredRefTransactionAbort,
+    RefTransactionAbortPersistenceRefused, RefTransactionAbortRefusal, RefTransactionAbortSink,
+    prepare_recovered_ref_transaction_abort,
+};
+
 /// Why an authenticated terminal cannot acknowledge this recovered inventory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RefTransactionRecoveryRefusal {
