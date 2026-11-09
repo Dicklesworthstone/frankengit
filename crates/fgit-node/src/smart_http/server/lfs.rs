@@ -5,6 +5,7 @@
 
 mod body;
 mod protocol;
+mod range;
 #[cfg(test)]
 mod tests;
 
@@ -367,7 +368,15 @@ fn batch_reply(
 
 enum Response<'operation, 'live> {
     Bytes(&'static str, Vec<u8>),
-    Download(VerifiedArtifactReader<'operation, 'live>),
+    Download {
+        payload: VerifiedArtifactReader<'operation, 'live>,
+        range: Option<(u64, u64)>,
+        etag: String,
+    },
+    RangeUnsatisfiable {
+        size: u64,
+        etag: String,
+    },
 }
 
 fn execute<'operation, 'live>(
@@ -421,11 +430,31 @@ fn execute<'operation, 'live>(
                 .map_err(Failure::storage)?;
             Ok(Response::Bytes(JSON_MEDIA, Vec::new()))
         }
-        Endpoint::Object(object) => service
-            .store
-            .open_verified(object, op)
-            .map(Response::Download)
-            .map_err(Failure::stored),
+        Endpoint::Object(object) => {
+            let selection = range::select(envelope, object)?;
+            // Even an unsatisfiable range must observe authenticated, complete
+            // verified custody. A missing/corrupt object is never a 206 or 416.
+            let payload = service
+                .store
+                .open_verified(object, op)
+                .map_err(Failure::stored)?;
+            let etag = range::etag(object);
+            let range = match selection {
+                range::Selection::Full => None,
+                range::Selection::Partial { start, end } => Some((start, end)),
+                range::Selection::Unsatisfiable => {
+                    return Ok(Response::RangeUnsatisfiable {
+                        size: object.size,
+                        etag,
+                    });
+                }
+            };
+            Ok(Response::Download {
+                payload,
+                range,
+                etag,
+            })
+        }
         Endpoint::Verify(object) => {
             let input = body::json(envelope.body, profile.http, prefix, reader, live)?;
             if protocol::verify(&input).map_err(Failure::bad)? != object {
@@ -480,8 +509,22 @@ pub(super) fn serve(
         // Complete verification already succeeded. Once headers start, any
         // read/write/flush failure terminates the response; no error document
         // may be appended to a partial binary payload.
-        Ok(Response::Download(mut payload)) => {
-            send_download(writer, envelope.version, &mut payload, &live).map_err(Status::from)
+        Ok(Response::Download {
+            mut payload,
+            range,
+            etag,
+        }) => send_download(writer, envelope.version, &mut payload, range, &etag, &live)
+            .map_err(Status::from),
+        Ok(Response::RangeUnsatisfiable { size, etag }) => {
+            if !live() {
+                return refuse(
+                    writer,
+                    envelope.version,
+                    Failure::new(Status::Timeout, "lfs_request_expired"),
+                );
+            }
+            send_unsatisfiable(writer, envelope.version, size, &etag).map_err(Status::from)?;
+            Err(Status::RangeNotSatisfiable)
         }
         Err(error) => refuse(writer, envelope.version, error),
     }
@@ -497,6 +540,8 @@ fn send_download(
     writer: &mut impl Write,
     version: HttpVersion,
     payload: &mut VerifiedArtifactReader<'_, '_>,
+    range: Option<(u64, u64)>,
+    etag: &str,
     live: &dyn Fn() -> bool,
 ) -> io::Result<()> {
     let checkpoint = || {
@@ -510,27 +555,85 @@ fn send_download(
         }
     };
     checkpoint()?;
-    send_head(
+    let size = payload.identity().payload_len();
+    let (start, length, status, content_range) = match range {
+        Some((start, end)) if start <= end && end < size => (
+            start,
+            end - start + 1,
+            Status::PartialContent,
+            format!("Content-Range: bytes {start}-{end}/{size}\r\n"),
+        ),
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid verified LFS range",
+            ));
+        }
+        None => (0, size, Status::Success, String::new()),
+    };
+    let mut chunk = [0_u8; DOWNLOAD_CHUNK_BYTES];
+    // The verified reader deliberately exposes no writable descriptor or
+    // unchecked seek. Skip under the original operation budget, in bounded
+    // chunks, before sending success headers; resume saves network bytes.
+    let mut skip = start;
+    while skip != 0 {
+        checkpoint()?;
+        let count = payload.read(&mut chunk[..skip.min(DOWNLOAD_CHUNK_BYTES as u64) as usize])?;
+        if count == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        skip -= count as u64;
+    }
+    checkpoint()?;
+    send_head_extra(
         writer,
         version,
-        Status::Success,
+        status,
         BINARY_MEDIA,
-        payload.identity().payload_len(),
+        length,
+        &format!("Accept-Ranges: bytes\r\nETag: {etag}\r\n{content_range}"),
     )?;
-    let mut chunk = [0_u8; DOWNLOAD_CHUNK_BYTES];
-    loop {
+    let mut remaining = length;
+    while remaining != 0 {
         checkpoint()?;
-        let count = payload.read(&mut chunk)?;
+        let count =
+            payload.read(&mut chunk[..remaining.min(DOWNLOAD_CHUNK_BYTES as u64) as usize])?;
         if count == 0 {
-            break;
+            return Err(io::ErrorKind::UnexpectedEof.into());
         }
         checkpoint()?;
         writer.write_all(&chunk[..count])?;
+        remaining -= count as u64;
         checkpoint()?;
+    }
+    if range.is_none() && payload.read(&mut chunk[..1])? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "verified LFS payload has trailing bytes",
+        ));
     }
     checkpoint()?;
     writer.flush()?;
     checkpoint()
+}
+
+fn send_unsatisfiable(
+    writer: &mut impl Write,
+    version: HttpVersion,
+    size: u64,
+    etag: &str,
+) -> io::Result<()> {
+    let body = b"{\"message\":\"lfs_range_not_satisfiable\"}";
+    send_head_extra(
+        writer,
+        version,
+        Status::RangeNotSatisfiable,
+        JSON_MEDIA,
+        body.len() as u64,
+        &format!("Accept-Ranges: bytes\r\nETag: {etag}\r\nContent-Range: bytes */{size}\r\n"),
+    )?;
+    writer.write_all(body)?;
+    writer.flush()
 }
 
 fn send(
@@ -552,6 +655,17 @@ fn send_head(
     media: &str,
     length: u64,
 ) -> io::Result<()> {
+    send_head_extra(writer, version, status, media, length, "")
+}
+
+fn send_head_extra(
+    writer: &mut impl Write,
+    version: HttpVersion,
+    status: Status,
+    media: &str,
+    length: u64,
+    representation_headers: &str,
+) -> io::Result<()> {
     let version = match version {
         HttpVersion::Http10 => "HTTP/1.0",
         HttpVersion::Http11 => "HTTP/1.1",
@@ -564,7 +678,7 @@ fn send_head(
     };
     write!(
         writer,
-        "{version} {}\r\nContent-Type: {media}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nVary: Authorization\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n{extra}\r\n",
+        "{version} {}\r\nContent-Type: {media}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nVary: Authorization\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n{extra}{representation_headers}\r\n",
         status.line(),
         length,
     )

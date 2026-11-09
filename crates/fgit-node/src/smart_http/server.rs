@@ -899,6 +899,7 @@ const fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRe
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
     Success,
+    PartialContent,
     BadRequest,
     Unauthorized,
     Forbidden,
@@ -907,6 +908,7 @@ enum Status {
     TooLarge,
     HeaderTooLarge,
     MediaType,
+    RangeNotSatisfiable,
     Method,
     Expectation,
     Timeout,
@@ -919,6 +921,7 @@ impl Status {
     const fn line(self) -> &'static str {
         match self {
             Self::Success => "200 OK",
+            Self::PartialContent => "206 Partial Content",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
@@ -927,6 +930,7 @@ impl Status {
             Self::TooLarge => "413 Content Too Large",
             Self::HeaderTooLarge => "431 Request Header Fields Too Large",
             Self::MediaType => "415 Unsupported Media Type",
+            Self::RangeNotSatisfiable => "416 Range Not Satisfiable",
             Self::Method => "405 Method Not Allowed",
             Self::Expectation => "417 Expectation Failed",
             Self::Timeout => "408 Request Timeout",

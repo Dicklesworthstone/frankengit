@@ -247,7 +247,12 @@ fn cancellation_at_headers_or_flush_ends_the_original_verified_operation() {
         Ok(())
     );
     let store = &fixture.profile.lfs.as_ref().unwrap().store;
-    for during_flush in [false, true] {
+    for (during_flush, range) in [
+        (false, None),
+        (true, None),
+        (false, Some((3, 12))),
+        (true, Some((3, 12))),
+    ] {
         let running = Cell::new(true);
         let live = || running.get();
         let op = ArtifactOperation::new(MAX_OBJECT_BYTES, Duration::from_secs(60), &live).unwrap();
@@ -258,17 +263,91 @@ fn cancellation_at_headers_or_flush_ends_the_original_verified_operation() {
             received: Received::new(),
         };
         assert_eq!(
-            send_download(&mut stop, HttpVersion::Http11, &mut payload, &live)
-                .unwrap_err()
-                .kind(),
+            send_download(
+                &mut stop,
+                HttpVersion::Http11,
+                &mut payload,
+                range,
+                &super::super::range::etag(object),
+                &live
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::TimedOut,
         );
         assert_eq!(
             stop.received.bytes,
-            if during_flush { object.size } else { 0 }
+            if during_flush {
+                range.map_or(object.size, |(start, end)| end - start + 1)
+            } else {
+                0
+            }
         );
         assert_eq!(stop.received.flushed, during_flush);
     }
+}
+
+#[test]
+fn ranged_download_skips_and_streams_in_bounded_chunks_and_cancellation_prevents_headers() {
+    let fixture = Fixture::new();
+    let object = generated_object(DOWNLOAD_CHUNK_BYTES as u64 * 4 + 19);
+    let store = &fixture.profile.lfs.as_ref().unwrap().store;
+    let live = || true;
+    let op = ArtifactOperation::new(MAX_OBJECT_BYTES, Duration::from_secs(60), &live).unwrap();
+    store.put(object, &mut Generated(object.size), &op).unwrap();
+    let start = DOWNLOAD_CHUNK_BYTES as u64 + 17;
+    let end = DOWNLOAD_CHUNK_BYTES as u64 * 3 + 7;
+    let mut payload = store.open_verified(object, &op).unwrap();
+    let mut received = Received::new();
+    send_download(
+        &mut received,
+        HttpVersion::Http11,
+        &mut payload,
+        Some((start, end)),
+        &super::super::range::etag(object),
+        &live,
+    )
+    .unwrap();
+    let header = std::str::from_utf8(&received.head).unwrap();
+    assert!(header.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+    assert!(header.contains(&format!(
+        "Content-Range: bytes {start}-{end}/{}\r\n",
+        object.size
+    )));
+    assert!(header.contains(&format!("Content-Length: {}\r\n", end - start + 1)));
+    assert_eq!(received.bytes, end - start + 1);
+    assert_eq!(
+        hex(&received.hash.finish()),
+        generated_object(end - start + 1).oid.to_string()
+    );
+    assert!(received.flushed);
+
+    let calls = Cell::new(0_usize);
+    let stop_at = Cell::new(usize::MAX);
+    let live = || {
+        calls.set(calls.get() + 1);
+        calls.get() < stop_at.get()
+    };
+    let op = ArtifactOperation::new(MAX_OBJECT_BYTES, Duration::from_secs(60), &live).unwrap();
+    let mut payload = store.open_verified(object, &op).unwrap();
+    // Cancellation arrives while skipping the original verified prefix, not
+    // at opening or after already emitting a success response.
+    stop_at.set(calls.get() + 5);
+    let mut output = Vec::new();
+    assert_eq!(
+        send_download(
+            &mut output,
+            HttpVersion::Http11,
+            &mut payload,
+            Some((start, end)),
+            &super::super::range::etag(object),
+            &live
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::TimedOut
+    );
+    assert!(output.is_empty());
 }
 
 #[test]

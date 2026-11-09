@@ -21,6 +21,7 @@ use crate::{
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, NodeConfig, PushQuota, WriterGate,
 };
 
+mod range;
 mod streaming;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
