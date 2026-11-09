@@ -497,11 +497,34 @@ impl SourceCandidateRequest<'_> {
         &self,
         node: &OneNode,
     ) -> Result<NodeRequestContext, crate::NodeWorkspaceRefusal> {
+        self.check_node(node)?;
+        Ok(self.0.context(node))
+    }
+
+    fn check_node(&self, node: &OneNode) -> Result<(), crate::NodeWorkspaceRefusal> {
         if !self.0.matches_namespace(node) {
             return Err(crate::NodeWorkspaceRefusal::RepositoryMismatch);
         }
-        self.check()?;
-        Ok(self.0.context(node))
+        self.check()
+    }
+
+    /// An existing transport phase must keep its actual database context.
+    /// Checking a sibling context with the same deadline would lose cancellation
+    /// and renew the original context's poll/cost budget.
+    pub(crate) fn check_context(
+        &self,
+        node: &OneNode,
+        context: &NodeRequestContext,
+    ) -> Result<(), crate::NodeWorkspaceRefusal> {
+        self.check_node(node)?;
+        match crate::checkpoint_pack_context(context.authority()) {
+            crate::PackContextCheckpoint::Live => Ok(()),
+            crate::PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                Err(crate::NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: budget_exhaustion,
+                })
+            }
+        }
     }
 
     pub(crate) fn check(&self) -> Result<(), crate::NodeWorkspaceRefusal> {

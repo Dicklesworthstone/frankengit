@@ -23,12 +23,44 @@ impl OneNode {
         let request = candidate_request
             .context(self)
             .map_err(|error| BundleInspectionRefusal::Envelope(Box::new(error)))?;
+        self.inspect_agent_source_bundle_with_context_in(
+            &request,
+            candidate_request,
+            reference,
+            expected_base,
+            expected_candidate,
+            input,
+            visibility,
+            expected_head,
+            options,
+        )
+        .await
+    }
+
+    /// Retain the HTTP driver's exact, already deadline-bound database context.
+    /// Its cancellation and accumulated poll/cost use must stop the actual
+    /// inspection, not a separate sibling context checked only by the driver.
+    pub(crate) async fn inspect_agent_source_bundle_with_context_in(
+        &self,
+        request: &NodeRequestContext,
+        candidate_request: &SourceCandidateRequest<'_>,
+        reference: &RefName,
+        expected_base: GitOid,
+        expected_candidate: GitOid,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        options: &ReviewOptions,
+    ) -> Result<BundleInspection, BundleInspectionRefusal> {
+        candidate_request
+            .check_context(self, request)
+            .map_err(|error| BundleInspectionRefusal::Envelope(Box::new(error)))?;
         candidate_request
             .check_input(input.len())
             .map_err(|error| BundleInspectionRefusal::Envelope(Box::new(error)))?;
         let inspected = self
             .inspect_workspace_bundle_in(
-                &request,
+                request,
                 reference,
                 expected_base,
                 expected_candidate,
@@ -39,7 +71,7 @@ impl OneNode {
             )
             .await?;
         candidate_request
-            .check()
+            .check_context(self, request)
             .map_err(|error| BundleInspectionRefusal::Envelope(Box::new(error)))?;
         Ok(inspected)
     }

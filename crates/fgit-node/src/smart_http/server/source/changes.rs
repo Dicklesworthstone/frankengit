@@ -88,7 +88,8 @@ pub(super) fn execute(
             let preparation = async {
                 if let Some(candidate_request) = candidate_request.as_ref() {
                     return node
-                        .prepare_agent_source_patch_in(
+                        .prepare_agent_source_patch_with_context_in(
+                            &context,
                             candidate_request,
                             &reference,
                             base,
@@ -150,7 +151,8 @@ pub(super) fn execute(
             let inspection = async {
                 if let Some(candidate_request) = candidate_request.as_ref() {
                     return node
-                        .inspect_agent_source_bundle_in(
+                        .inspect_agent_source_bundle_with_context_in(
+                            &context,
                             candidate_request,
                             &reference,
                             base,

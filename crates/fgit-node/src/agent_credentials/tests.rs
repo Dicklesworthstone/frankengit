@@ -20,6 +20,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod candidate_context;
 #[path = "../tests/authority_read_fault.rs"]
 mod read_fault;
 
