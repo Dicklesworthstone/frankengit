@@ -64,6 +64,18 @@ numeric loopback; remote endpoints require certificate-verified HTTPS. A private
 `--ca-file` may name the explicit trust root. There are no redirects, ambient
 cookies, proxy discovery, automatic retries or credential files in the output.
 
+The private token file may contain an ordinary 64-hexadecimal read token or a
+canonical `fgagent_` token with the independently issued
+[`source-candidates`](SPONSORED_AGENT_CREDENTIALS.md#independently-grant-candidate-preparation-and-inspection)
+scope. Both `prepare` and `prepare-verified` retain every token byte and accept
+an optional final LF or CRLF. The server authenticates the canonical grant on
+each call; source-read or history permission alone does not authorize candidate
+work. The client refuses sponsored `apply` and `recover` before reading a journal
+or opening a socket. A prepared artifact can be handed to a separately authorized
+ordinary publisher through the existing staging flow; the artifact stores no
+bearer or publication grant. The browser source editor and sponsored MCP profile
+retain their existing scope boundaries.
+
 The shared source transport identifies the project as
 `frankengit-agent (+https://github.com/Dicklesworthstone/frankengit)`. Error records
 from `fg_source_edit.mjs` and `fg_source_changes.mjs` preserve the bounded native

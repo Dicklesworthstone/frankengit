@@ -251,6 +251,7 @@ fn sponsored_http_history_output_limits_and_original_request_deadlines_are_retai
                 &selected,
                 session,
                 None,
+                None,
                 BodyFraming::ContentLength(body.len() as u64),
                 &mut body.as_bytes(),
                 HttpLimits::default(),

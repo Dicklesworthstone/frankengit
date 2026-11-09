@@ -29,6 +29,7 @@ pub(super) fn execute(
     node: &OneNode,
     request: &Request<'_>,
     session: &LoopbackReceiveSession,
+    agent_request: Option<&crate::agent_credentials::AgentRequest>,
     framing: BodyFraming,
     reader: &mut impl Read,
     limits: HttpLimits,
@@ -37,6 +38,25 @@ pub(super) fn execute(
     let authenticated = session
         .authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    let candidate_request = match authenticated.authentication() {
+        fgit_admission::evidence::AdmissionAuthentication::AgentCredential(authentication) => {
+            if request.is_mutation() {
+                return Err(ApiError::new(Status::Forbidden, "forbidden"));
+            }
+            let agent = agent_request
+                .filter(|agent| {
+                    agent.authentication == authentication
+                        && Some(agent.deadline()) == authenticated.agent_deadline
+                })
+                .ok_or_else(|| ApiError::new(Status::Forbidden, "candidate_grant_required"))?;
+            Some(
+                agent
+                    .source_candidates(node)
+                    .map_err(|_| ApiError::new(Status::Forbidden, "candidate_grant_unavailable"))?,
+            )
+        }
+        _ => None,
+    };
     // Finish HTTP framing before parsing provisional MIME parts or entering an
     // engine. Socket ingress has its own deadline; this is the server-work phase.
     let bytes = read_source_upload(reader, framing, limits, request.kind())?;
@@ -44,8 +64,14 @@ pub(super) fn execute(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
-    let mut live = || !deadline.expired();
+    let context = node.authenticated_session_request_context(&deadline, session);
+    let mut live = || {
+        !deadline.expired()
+            && context.is_live()
+            && candidate_request
+                .as_ref()
+                .is_none_or(|request| request.check().is_ok())
+    };
     let (form, payload) = source_upload(&bytes, request.boundary, request.kind(), &mut live)?;
     let command = request.command(form, node.object_format)?;
     let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX);
@@ -60,6 +86,18 @@ pub(super) fn execute(
             // Selection is closed and explicit. An absent field keeps the
             // legacy grammar, including its edited-binary-rename refusal.
             let preparation = async {
+                if let Some(candidate_request) = candidate_request.as_ref() {
+                    return node
+                        .prepare_agent_source_patch_in(
+                            candidate_request,
+                            &reference,
+                            base,
+                            payload,
+                            &metadata,
+                            matches!(profile, Some(PatchProfile::BinaryTree)),
+                        )
+                        .await;
+                }
                 match profile {
                     Some(PatchProfile::BinaryTree) => {
                         node.prepare_trusted_binary_refactor_in(

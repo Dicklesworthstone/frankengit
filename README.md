@@ -342,6 +342,9 @@ and run under finite operation scopes, byte envelopes and expiry. An independent
 and authority-bound context with the actual agent and sponsor retained. The
 separate `source-history-read` grant enables bounded log, blame, historical
 tree/blob reads and comparisons of visible references through HTTP and MCP.
+The independent `source-candidates` scope enables HTTP exact-patch preparation
+and bundle inspection, including the shipped source authoring operators, while
+keeping candidate objects unstaged and publication separately authorized.
 Existing metadata and current-source credentials gain no history permission;
 history APIs can include current-tip content but do not grant search, indexes
 or agent context. Issue, PR metadata/conversation, discussion and individual

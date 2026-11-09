@@ -29,6 +29,17 @@ header and token hashes. Scopes are independent:
 | Apply an exact source candidate | `receive` | `--allow-source` AND `--allow-receive` |
 | Recover the original transaction outcome | `outcomes-read` | `--allow-outcomes` |
 
+Canonical [sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md) may prepare
+and inspect with the independent `source-candidates` scope and `--allow-source`.
+Neither `source-read` nor `source-history-read` implies this scope. The agent
+uses the same multipart command, exact expected commit, patch profiles and
+response artifacts documented below. Candidate work retains the original
+bounded request and produces no staged objects or transaction. Its total wire
+input and output each remain within 64 MiB, including framing and the operator's
+possibly smaller limits. Sponsored candidates cannot use `apply`, ref writes,
+PR source publication, review or merge; publication requires a separately
+authorized caller through the existing admission path.
+
 A read token cannot publish. A receive-only token can publish an independently
 supplied bundle but cannot use source inspection or preparation to read code.
 PR/issue/review/merge permissions imply neither grant. Existing static-token and

@@ -134,7 +134,7 @@ impl<'a> Request<'a> {
     /// The current-commit reader belongs to the same ref-selected source surface
     /// as tree/blob; it cannot traverse parents or select an arbitrary object.
     pub(super) fn agent_operation(&self) -> Option<u16> {
-        use fgit_identity::agent::{SOURCE_HISTORY_READ, SOURCE_READ};
+        use fgit_identity::agent::{SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ};
         match &self.0 {
             RequestKind::Read(_)
             | RequestKind::Regex(_)
@@ -146,8 +146,8 @@ impl<'a> Request<'a> {
             RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_) => {
                 Some(SOURCE_HISTORY_READ)
             }
-            RequestKind::Change(_)
-            | RequestKind::Initial(_)
+            RequestKind::Change(request) => (!request.is_mutation()).then_some(SOURCE_CANDIDATES),
+            RequestKind::Initial(_)
             | RequestKind::Replay(_)
             | RequestKind::Rebase(_)
             | RequestKind::Bundle(_)
@@ -159,6 +159,16 @@ impl<'a> Request<'a> {
             &self.0,
             RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_)
         )
+    }
+    /// Only exact-patch preparation and supplied-bundle inspection belong to
+    /// the candidate scope; other nonpublishing source routes stay excluded.
+    pub(super) fn candidate_upload_maximum(&self) -> Option<u64> {
+        match &self.0 {
+            RequestKind::Change(request) if !request.is_mutation() => {
+                Some(request.kind().maximum() as u64)
+            }
+            _ => None,
+        }
     }
     const fn route(&self) -> &str {
         match &self.0 {
@@ -262,6 +272,8 @@ pub(super) fn authenticate(
         profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else if request.requires_history_read() {
         grant.permits_source_history_read()
+    } else if request.candidate_upload_maximum().is_some() {
+        grant.permits_source_candidates()
     } else {
         grant.permits_source_read()
     };
@@ -290,6 +302,7 @@ pub(super) fn authenticate(
                 request.agent_operation(),
                 Some(fgit_identity::agent::SOURCE_READ)
                     | Some(fgit_identity::agent::SOURCE_HISTORY_READ)
+                    | Some(fgit_identity::agent::SOURCE_CANDIDATES)
             ) {
                 return Err(ApiError::new(Status::Forbidden, "forbidden"));
             }
@@ -304,13 +317,16 @@ pub(super) fn authenticate(
         }
         _ => None,
     };
-    // Historical reads use only their authenticated session and its deadline.
-    // They cannot mint the current-source context used by retrieval adapters.
-    let read =
-        (!request.is_mutation() && !request.requires_history_read()).then_some(HttpReadGrant {
-            principal: grant.principal,
-            agent,
-        });
+    // History and candidate requests cannot mint the current-source context
+    // used by retrieval adapters. Candidate work also requires the original
+    // authenticated reservation at execution, not just session provenance.
+    let read = (!request.is_mutation()
+        && !request.requires_history_read()
+        && request.candidate_upload_maximum().is_none())
+    .then_some(HttpReadGrant {
+        principal: grant.principal,
+        agent,
+    });
     Ok((session, read))
 }
 
@@ -319,6 +335,7 @@ pub(super) fn execute(
     request: &Request<'_>,
     session: &LoopbackReceiveSession,
     read_grant: Option<&HttpReadGrant>,
+    agent_request: Option<&crate::agent_credentials::AgentRequest>,
     framing: BodyFraming,
     reader: &mut impl Read,
     http: HttpLimits,
@@ -491,6 +508,7 @@ pub(super) fn execute(
                 node,
                 request,
                 session,
+                agent_request,
                 framing,
                 reader,
                 http,

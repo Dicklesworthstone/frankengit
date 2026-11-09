@@ -8,6 +8,7 @@ import { buildSourceChanges, canonical, sha256, fail, SOURCE_PACKAGE_BYTES, CHAN
 import { prepareSourceChanges, verifySourceChangeCandidate, stageVerifiedSourceChanges } from './operator/source_changes_prepare.mjs';
 import { saveSourceEdit, loadSourceEdit } from './operator/source_edit_publish.mjs';
 import { clock, parse } from './operator/source_edit_wire.mjs';
+import { isCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from './operator/credential_token.mjs';
 
 const USAGE = `node scripts/fg_source_changes.mjs draft --package PRIVATE_PACKAGE --expect PRIVATE_EXPECTATION
   --changes PRIVATE_CHANGES --output ABSENT_PRIVATE_DIRECTORY
@@ -37,6 +38,8 @@ both files and retain the returned manifest hash before preparation. Preparation
 regenerates the exact draft before I/O, invokes native prepare/inspect, and checks
 all reported old/new blob identities, modes and the candidate's entire root
 commitment against locally intended effects. Untouched subtree IDs are preserved.
+Preparation accepts ordinary read tokens or canonical source-candidates tokens;
+the latter grant candidate work only, never publication or source recovery.
 Native selection uses the existing source-edit schema, with only EFFECT paths;
 explicit no-op paths remain in the draft but are not native change targets.
 Inspect-candidate regenerates and checks offline; it accepts no credential.
@@ -178,10 +181,10 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
         ...(packed ? { pack_verification: checked.pack_verification } : {}) };
     } else {
       const selection = parse(await privateFile(f.get('--selection'), 512 * 1024, time.check), 512 * 1024);
-      const tokenBytes = await privateFile(f.get('--token-file'), 66, time.check); let token;
+      const tokenBytes = await privateFile(f.get('--token-file'), MAX_CREDENTIAL_TOKEN_BYTES + 2, time.check); let token;
       try {
-        if (!/^[0-9a-f]{64}(?:\r?\n)?$/.test(tokenBytes.toString('utf8'))) fail('source_changes_credential');
-        token = tokenBytes.subarray(0, 64).toString('ascii');
+        token = tokenBytes.toString('utf8').replace(/\r?\n$/, '');
+        if (!isCredentialToken(token)) fail('source_changes_credential');
       } finally { tokenBytes.fill(0); }
       const ca = f.has('--ca-file') ? await privateFile(f.get('--ca-file'), 131072, time.check) : undefined;
       const checked = await (packed ? packFlow.preparePackedSourceChanges : prepareSourceChanges)(bytes, expected, changes, selection, token,

@@ -9,6 +9,7 @@ import { clock, fields } from './source_edit_wire.mjs';
 import { loadSourceEdit, stageSourceApply } from './source_edit_publish.mjs';
 import { absolute, contains } from './workflow_watch_io.mjs';
 import { parentTreeBasisFromPackage } from './source_edit_parent_trees.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 // Explicit profile consent is supplied by the caller. Only the existing
 // independently selected package supplies its bounded, retained parent bytes.
@@ -79,7 +80,7 @@ function matches(draft, candidate, pin) {
 export async function prepareSourceChanges(packageBytes, expected, changes, selection, credential, options) {
   const { pin, time } = lifetime(options), owned = ownSourceChangeInputs(packageBytes, expected, changes);
   time.check(); const request = sourceChangeRequest(selection, owned.packageBytes);
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('source_changes_credential');
+  if (!isCredentialToken(credential)) fail('source_changes_credential');
   const draft = await buildSourceChanges(owned.packageBytes, owned.expected, owned.changes, { signal: time.signal, check: time.check });
   time.check(); confirm(draft, pin); requestMatches(request, draft);
   const candidate = await captureSourceEdit(request, draft.bytes, credential, {

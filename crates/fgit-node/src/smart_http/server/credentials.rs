@@ -82,6 +82,7 @@ enum Scope {
     DiscussionsWrite,
     SourceRead,
     SourceHistoryRead,
+    SourceCandidates,
 }
 
 impl Scope {
@@ -146,7 +147,7 @@ impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-            PULLS_READ, PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
+            PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -159,6 +160,7 @@ impl Grant {
             OUTCOMES_READ => Scope::OutcomesRead,
             SOURCE_READ => Scope::SourceRead,
             SOURCE_HISTORY_READ => Scope::SourceHistoryRead,
+            SOURCE_CANDIDATES => Scope::SourceCandidates,
             _ => unreachable!("node authenticated a closed operation"),
         };
         scopes.insert(scope);
@@ -187,6 +189,11 @@ impl Grant {
     /// neither grants a Git transport. Existing operator reads retain both.
     pub const fn permits_source_history_read(&self) -> bool {
         self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceHistoryRead)
+    }
+    /// Candidate preparation and inspection disclose source through a separate
+    /// sponsored scope. They confer neither current-source APIs nor publication.
+    pub const fn permits_source_candidates(&self) -> bool {
+        self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceCandidates)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -657,11 +664,13 @@ mod tests {
         let mut value = grant(principal, "read").unwrap();
         assert!(value.permits_source_read());
         assert!(value.permits_source_history_read());
+        assert!(value.permits_source_candidates());
         assert!(value.permits(Service::UploadPack));
 
         value.scopes = Scopes(Scope::SourceRead.mask());
         assert!(value.permits_source_read());
         assert!(!value.permits_source_history_read());
+        assert!(!value.permits_source_candidates());
         assert!(!value.permits(Service::UploadPack));
         assert!(!value.permits(Service::ReceivePack));
         for mutation in [false, true] {
@@ -695,6 +704,7 @@ mod tests {
         value.scopes = Scopes(Scope::SourceHistoryRead.mask());
         assert!(value.permits_source_history_read());
         assert!(!value.permits_source_read());
+        assert!(!value.permits_source_candidates());
         assert!(!value.permits(Service::UploadPack));
         assert!(!value.permits(Service::ReceivePack));
         for mutation in [false, true] {
@@ -710,6 +720,27 @@ mod tests {
         assert!(!value.permits_reviewed_merge());
         assert!(!value.permits_queue_landing());
         assert!(!value.permits_artifact_read());
+    }
+
+    #[test]
+    fn source_candidate_permission_never_grants_source_tools_or_publication() {
+        let mut value = grant(PrincipalId::from_bytes([7; 16]), "read").unwrap();
+        value.scopes = Scopes(Scope::SourceCandidates.mask());
+        assert!(value.permits_source_candidates());
+        assert!(!value.permits_source_read());
+        assert!(!value.permits_source_history_read());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_queues(mutation));
+        }
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        assert!(Scope::parse("source-candidates").is_err());
     }
 
     #[test]

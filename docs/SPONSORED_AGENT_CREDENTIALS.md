@@ -1,9 +1,9 @@
-# Sponsored agent credentials for source reads and forge metadata
+# Sponsored agent credentials for source work and forge metadata
 
 This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP current-source browsing and context, separately granted source history and
-reference comparison, issue, pull-request metadata and
+reference comparison, separately granted ephemeral source candidates, issue, pull-request metadata and
 conversation, standalone discussion, and single-transaction outcome endpoints,
 plus the explicit MCP source and metadata profile. Each request creates a real bounded
 `IntentRun`; the bearer alone is not an execution or publication capability.
@@ -88,19 +88,22 @@ observation schema. This grants no agent source-import capability.
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 | `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
+| `source-candidates` | HTTP exact-patch candidate preparation and supplied single-parent bundle inspection against an explicit current branch |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
 Current-source reads require an explicit `source-read` grant; history and
-comparison reads require `source-history-read`. Both require the HTTP server's
-source-read feature switch or the MCP launch ceilings described below.
+comparison reads require `source-history-read`. Candidate preparation and
+inspection require `source-candidates` and the HTTP server's `--allow-source`
+switch. Current-source and history reads require that switch or the MCP launch
+ceilings described below.
 Metadata scopes, including all seven previously
 available flags, grant no source access. The HTTP adapter admits a closed set of
-current-source and history routes; it does not interpret arbitrary GET requests or the
+current-source, history and candidate routes; it does not interpret arbitrary GET requests or the
 ordinary token's broader `read` scope as agent permission. Source selection and
 disclosure retain the existing canonical hidden-ref and visibility checks.
 
-Git upload-pack/receive-pack, verified-blob streaming, bundles,
-candidate preparation or inspection, PR-specific diffs,
+Git upload-pack/receive-pack, verified-blob streaming, general bundle export/import,
+candidate application, initial-commit/replay/rebase preparation, PR-specific diffs,
 reviews, checks, merges, queue operations, milestones, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
 external effects are outside this profile. MCP offers the closed sponsored
@@ -180,7 +183,7 @@ A source grant covers the repository's visible current source. Path selectors
 and query limits narrow an individual request; they are not a stored sparse-path
 capability. Read-only route classification alone does not grant access: history
 requires its separate scope, while bundle export and candidate preparation
-remain excluded even where their native HTTP operation does not publish a
+are outside `source-read` even where their native HTTP operation does not publish a
 transaction. Read queries reject an
 `Idempotency-Key`; the transport's internal request key never seals a write.
 
@@ -199,6 +202,57 @@ absolute wall-clock expiry and monotonic deadline. Parsing, index lookup and
 source hydration cannot renew that lifetime. Retrieved text remains explicitly
 untrusted source data, including any embedded instruction. Ordinary operator HTTP
 credentials retain the existing `agent-context-http-credential-v1` profile.
+
+### Independently grant candidate preparation and inspection
+
+Use `--operations source-candidates` for an agent that receives source context
+separately and needs to produce a concrete patch artifact. Use
+`--operations source-read,source-candidates` when it also needs the current-source
+tools. A previously issued grant, including the original all-operation masks
+`0x007f`, `0x00ff` and `0x01ff`, acquires no candidate permission after an upgrade.
+Changing an immutable grant requires a new issuance.
+
+The supported operations use the existing
+[source-change API](HTTP_SOURCE_CHANGE_API.md) multipart grammar:
+
+| POST route suffix under `/api/v1/source/` | Granted work |
+| --- | --- |
+| `prepare` | Apply an exact patch to an explicitly named current visible branch and expected commit; return an unstaged native Git bundle and exact result identities |
+| `inspect` | Verify a supplied single-parent bundle against the explicitly named current visible branch and expected commit; return its actual native diff and commit body |
+
+These are independent API permissions, not a secrecy boundary between source
+bytes. Preparation and inspection disclose repository source through the selected
+candidate operations. The grant covers visible repository source; it does not
+store a sparse path or branch ceiling. Canonical hidden refs remain inaccessible,
+and the caller cannot replace the exact expected commit with an implicit refresh.
+Current-source browsing, search, history and agent-context APIs still require
+their own scopes. Candidates do not mint a source-retrieval context.
+
+Preparation requires an opaque capability borrowed from the original verified
+request. The finite `IntentRun` permits only canonical object reads, TreeFS
+workspace work and candidate object creation. The native adapter derives TreeFS
+write rights solely for the explicitly patched paths, including both sides of a
+rename. Root discovery preserves untouched siblings under the existing shared
+256 MiB/100,000-object fetch ceilings; generated bundles retain the 64 MiB native
+export ceiling. No host checkout or subprocess is used, and the node stages no
+objects or transaction. Author and committer fields remain untrusted Git content,
+not the authenticated agent or sponsor identity.
+
+The original request retains its credential expiry, monotonic transport deadline,
+input/output budgets and source quota through parsing, construction, inspection
+and delivery. Candidate uploads may exceed the metadata form ceiling, subject to
+the native patch/bundle grammar, configured HTTP limits and a 64 MiB total
+request-wire ceiling including headers and framing. Responses retain the 64 MiB
+sponsored output ceiling including framing. Limits can only narrow; a new phase
+cannot refresh the request lifetime. Preparation and inspection reject transaction
+keys and leave canonical authority unchanged, including on refusals.
+
+`apply`, ref mutation, PR source publication, review, checks, merge and queue
+landing remain unavailable. A sponsor or independently authorized operator must
+review and publish the returned artifact through ordinary admission. MCP's
+sponsored profile does not expose candidate tools, even when the token includes
+`source-candidates`. This bounded HTTP capability does not create a durable agent
+run or grant process, network, secret or external-integration access.
 
 ## Use the credential with MCP
 
@@ -371,7 +425,10 @@ requests permit one operation class. A `source-history-read` request permits
 only `ReadCanonicalObject`. A `source-read` request permits exactly
 `ReadCanonicalObject` and `ReadDerivedGeneration` so the same bounded run can
 read native source and its authenticated search generations.
-It grants no write, process or publication class. Every request lasts at most
+Those read requests grant no write, process or publication class. A
+`source-candidates` request permits `ReadCanonicalObject`, `TreeFsWorkspace` and
+`CreateCandidateObject`, with no publication, process or review class.
+Every request lasts at most
 300 seconds and never past the grant's expiry. The response writer measures
 emitted bytes; source work and metadata publication retain the original
 monotonic deadline and wall-clock validity ceiling. These are
@@ -397,12 +454,14 @@ timeout proves non-commit.
 | Authentication policy evidence | Schema 1.5: full witness binding |
 
 The required operation mask remains a canonical `u16`. `source-read` occupies
-bit 7 (`0x0080`) and `source-history-read` occupies bit 8 (`0x0100`); the original
+bit 7 (`0x0080`), `source-history-read` occupies bit 8 (`0x0100`), and
+`source-candidates` occupies bit 9 (`0x0200`); the original
 seven flags retain bits 0 through 6 and their exact encodings. A stored `0x007f`
 grant still grants only the original metadata and outcome operations. A stored
-`0x00ff` grant adds current-source access but grants no history operation. Issuing
-either source capability requires an explicit new grant, and revocation must
-retain the exact original operation mask. Bits 9 through 15 remain unknown and
+`0x00ff` grant adds current-source access but grants no history operation, and
+`0x01ff` adds history without candidate authority. Issuing any new source
+capability requires an explicit new grant, and revocation must
+retain the exact original operation mask. Bits 10 through 15 remain unknown and
 refuse decoding or authentication. Upgrade every repository reader before
 issuing a grant with a newly supported bit: an older reader fails closed on its
 unknown flag; it must not strip the flag or fall back to another credential

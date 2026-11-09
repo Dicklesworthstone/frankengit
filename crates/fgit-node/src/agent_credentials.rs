@@ -1,8 +1,8 @@
 //! Canonical sponsored agent credentials and bounded request authentication.
 //!
 //! Issuance is an explicit trusted-local administration operation. Credential
-//! holders receive finite metadata and explicit source/history-read scopes, never source
-//! publication, review, merge, process execution, or administration authority.
+//! holders receive finite metadata, source reads and explicit candidate scopes,
+//! never source publication, review, merge, process execution or administration.
 
 use crate::source_retrieval::authorization::SourceReadContext;
 use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
@@ -194,8 +194,8 @@ impl OneNode {
         output_limit: u64,
     ) -> Result<AgentRequest, NodeReceiveTransportRefusal> {
         use fgit_identity::agent::{
-            DISCUSSIONS_WRITE, ISSUES_WRITE, PULLS_WRITE, SOURCE_READ, agent_credential_id,
-            authenticate_agent_credential,
+            DISCUSSIONS_WRITE, ISSUES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_READ,
+            agent_credential_id, authenticate_agent_credential,
         };
         if !valid_agent_credential_token(bearer)
             || operation.count_ones() != 1
@@ -259,6 +259,12 @@ impl OneNode {
             ClassSet::from_classes(&[
                 OperationClass::ReadCanonicalObject,
                 OperationClass::ReadDerivedGeneration,
+            ])
+        } else if operation == SOURCE_CANDIDATES {
+            ClassSet::from_classes(&[
+                OperationClass::ReadCanonicalObject,
+                OperationClass::TreeFsWorkspace,
+                OperationClass::CreateCandidateObject,
             ])
         } else {
             ClassSet::from_classes(&[class])
@@ -361,6 +367,33 @@ impl AgentRequest {
         self.deadline = self.deadline.min(deadline);
     }
 
+    /// Retain independently granted candidate authority for this request only.
+    /// A public provenance record, source-read grant or metadata grant cannot
+    /// construct this boundary. Native adapters still enforce the exact source
+    /// selection, canonical visibility, path limits and original deadline.
+    pub(crate) fn source_candidates(
+        &self,
+        node: &OneNode,
+    ) -> Result<SourceCandidateRequest<'_>, NodeReceiveTransportRefusal> {
+        if self.operation != fgit_identity::agent::SOURCE_CANDIDATES
+            || !self.matches_namespace(node)
+        {
+            return Err(refused(RefusalCode::CapabilityScopeViolation));
+        }
+        self.check(0, 0)?;
+        Ok(SourceCandidateRequest(self))
+    }
+
+    fn matches_namespace(&self, node: &OneNode) -> bool {
+        self.namespace
+            == (LexicalNamespace {
+                tenant: node.tenant_id,
+                repository: node.repository_id,
+                incarnation: node.repository_incarnation_id,
+                object_format: node.object_format,
+            })
+    }
+
     /// Retain this request's verified source-read authority for one MCP tool
     /// invocation. The host must independently enable the tool, enforce this
     /// reservation's byte ceilings, check it before disclosure, and discard both
@@ -448,6 +481,41 @@ impl AgentRequest {
             return Err(refused(RefusalCode::ResourceBudgetExceeded));
         }
         Ok(())
+    }
+}
+
+/// Unforgeable, request-borrowed authority for ephemeral source candidates.
+/// It has no session, publication, credential-refresh or current-source API.
+pub(crate) struct SourceCandidateRequest<'a>(&'a AgentRequest);
+
+impl SourceCandidateRequest<'_> {
+    pub(crate) fn context(
+        &self,
+        node: &OneNode,
+    ) -> Result<NodeRequestContext, crate::NodeWorkspaceRefusal> {
+        if !self.0.matches_namespace(node) {
+            return Err(crate::NodeWorkspaceRefusal::RepositoryMismatch);
+        }
+        self.check()?;
+        Ok(self.0.context(node))
+    }
+
+    pub(crate) fn check(&self) -> Result<(), crate::NodeWorkspaceRefusal> {
+        self.0
+            .check(0, 0)
+            .map_err(|_| crate::NodeWorkspaceRefusal::Cancelled { exhaustion: None })
+    }
+
+    pub(crate) fn workspace_id(&self) -> [u8; 16] {
+        *self.0.authentication.agent().as_bytes()
+    }
+
+    pub(crate) fn authenticated_at(&self) -> u64 {
+        self.0.authentication.authenticated_at()
+    }
+
+    pub(crate) fn expires_at(&self) -> u64 {
+        self.0.authentication.expires_at()
     }
 }
 

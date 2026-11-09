@@ -24,6 +24,7 @@ use fgit_types::{
 use fgit_wire::visibility::RefVisibility;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod agent;
 mod binary;
 
 const FETCH_BYTES: u64 = 256 * 1024 * 1024;
@@ -310,7 +311,7 @@ impl OneNode {
     /// It discovers complete root names solely to preserve unedited siblings;
     /// its write scope is limited to declared patch targets. All access retains
     /// hard shared read-byte/object limits, including root discovery. Agents
-    /// must use `prepare_workspace_patch_in` with their existing capability.
+    /// must use their existing capability or the authenticated candidate adapter.
     pub async fn prepare_trusted_patch_in(
         &self,
         request: &NodeRequestContext,
@@ -321,7 +322,7 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
-        self.prepare_trusted_patch_profile_in(
+        self.prepare_repository_patch_profile_in(
             request,
             reference,
             expected_commit,
@@ -330,6 +331,8 @@ impl OneNode {
             metadata,
             limits,
             PatchProfile::Regular,
+            0,
+            None,
         )
         .await
     }
@@ -346,7 +349,7 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
-        self.prepare_trusted_patch_profile_in(
+        self.prepare_repository_patch_profile_in(
             request,
             reference,
             expected_commit,
@@ -355,6 +358,8 @@ impl OneNode {
             metadata,
             limits,
             PatchProfile::BinaryRefactor,
+            0,
+            None,
         )
         .await
     }
@@ -372,7 +377,7 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
-        self.prepare_trusted_patch_profile_in(
+        self.prepare_repository_patch_profile_in(
             request,
             reference,
             expected_commit,
@@ -381,11 +386,16 @@ impl OneNode {
             metadata,
             limits,
             PatchProfile::Symlinks,
+            0,
+            None,
         )
         .await
     }
 
-    async fn prepare_trusted_patch_profile_in(
+    // Callers must independently establish repository source disclosure rights.
+    // The operator adapter and verified sponsored-candidate adapter share only
+    // bounded native construction, never credential verification or publication.
+    async fn prepare_repository_patch_profile_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
@@ -395,10 +405,12 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
         profile: PatchProfile,
+        now: u64,
+        expires_at: Option<u64>,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         match self.object_format {
             ObjectFormat::Sha1 => {
-                self.prepare_trusted_patch_format::<Sha1>(
+                self.prepare_repository_patch_format::<Sha1>(
                     request,
                     reference,
                     expected_commit,
@@ -407,11 +419,13 @@ impl OneNode {
                     metadata,
                     limits,
                     profile,
+                    now,
+                    expires_at,
                 )
                 .await
             }
             ObjectFormat::Sha256 => {
-                self.prepare_trusted_patch_format::<Sha256>(
+                self.prepare_repository_patch_format::<Sha256>(
                     request,
                     reference,
                     expected_commit,
@@ -420,13 +434,15 @@ impl OneNode {
                     metadata,
                     limits,
                     profile,
+                    now,
+                    expires_at,
                 )
                 .await
             }
         }
     }
 
-    async fn prepare_trusted_patch_format<A: GitHashAlgorithm>(
+    async fn prepare_repository_patch_format<A: GitHashAlgorithm>(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
@@ -436,6 +452,8 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PatchLimits,
         profile: PatchProfile,
+        now: u64,
+        expires_at: Option<u64>,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
         let cancelled = || !workspace_request_live(request);
@@ -464,18 +482,21 @@ impl OneNode {
             FETCH_BYTES,
             FETCH_OBJECTS,
         )?;
+        if let Some(expiry) = expires_at {
+            seed = seed.with_expiry(expiry);
+        }
         self.with_workspace_base_in::<A, _>(
             request,
             reference,
             &RefVisibility::new(),
             &mut seed,
-            0,
+            now,
             |base, source, seed| {
                 if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
                     return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
                 }
                 live(request)?;
-                let grant = seed.authorize_root(0).map_err(capability_error)?;
+                let grant = seed.authorize_root(now).map_err(capability_error)?;
                 let root = base
                     .read_object(source, base.base_tree_oid(), GitObjectKind::Tree, &grant)
                     .map_err(NodeWorkspaceRefusal::Object)?;
@@ -503,6 +524,9 @@ impl OneNode {
                     FETCH_BYTES.saturating_sub(seed.fetched_bytes()),
                     FETCH_OBJECTS.saturating_sub(seed.fetched_files()),
                 )?;
+                if let Some(expiry) = expires_at {
+                    owner = owner.with_expiry(expiry);
+                }
                 prepare_at_base(
                     base,
                     source,
@@ -513,7 +537,7 @@ impl OneNode {
                     &patch,
                     &paths,
                     patch_bytes,
-                    0,
+                    now,
                     metadata,
                 )
             },

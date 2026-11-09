@@ -1393,7 +1393,12 @@ fn serve_connection(
                 .next()
                 .is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST" && !source_api;
-        let agent_profile = agent::authenticate(profile, &envelope, &bytes[..envelope.consumed])?;
+        let agent_profile = agent::authenticate(
+            profile,
+            &envelope,
+            &bytes[..envelope.consumed],
+            &admission_deadline,
+        )?;
         let agent_profile = agent_profile.map(|(profile, request)| {
             reader.cap_deadline(request.deadline());
             writer.inner.cap_deadline(request.deadline());
@@ -1723,6 +1728,7 @@ fn serve_connection(
                     request,
                     &session,
                     source_read_grant.as_ref(),
+                    writer.agent.as_ref(),
                     envelope.body,
                     &mut body,
                     profile.http,
