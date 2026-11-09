@@ -2,14 +2,21 @@ use super::{MIN_OUTPUT_BYTES, USAGE};
 use crate::agent_recover::options::{self as original, Options as OriginalOptions};
 use fgit_agent::LogicalTime;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Action {
+    Acknowledge,
+    AbortReserved,
+}
+
 pub(super) struct Options {
     pub original: OriginalOptions,
     pub observed_at: LogicalTime,
+    pub action: Action,
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 25
+        || args.len() > 27
         || args.iter().any(|arg| arg.len() > 4096)
         || args.iter().map(String::len).sum::<usize>() > 32 * 1024
     {
@@ -17,6 +24,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     }
     let mut common = args[..4].to_vec();
     let mut observed_at = None;
+    let mut action = None;
     let mut at = 4;
     while let Some(flag) = args.get(at) {
         at += 1;
@@ -28,7 +36,16 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             .get(at)
             .ok_or_else(|| format!("missing value for {flag}"))?;
         at += 1;
-        if flag == "--observed-at" {
+        if flag == "--action" {
+            if action.is_some() {
+                return Err("duplicate --action".into());
+            }
+            action = Some(match value.as_str() {
+                "acknowledge" => Action::Acknowledge,
+                "abort-reserved" => Action::AbortReserved,
+                _ => return Err("--action must be acknowledge or abort-reserved".into()),
+            });
+        } else if flag == "--observed-at" {
             if observed_at.is_some() {
                 return Err("duplicate --observed-at".into());
             }
@@ -52,6 +69,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     Ok(Options {
         original,
         observed_at,
+        action: action.unwrap_or(Action::Acknowledge),
     })
 }
 
@@ -93,6 +111,7 @@ pub(super) mod tests {
         let input = arguments();
         let options = parse(&input).unwrap();
         assert_eq!(options.observed_at.value(), 10001);
+        assert_eq!(options.action, Action::Acknowledge);
         assert_eq!(options.original.expected_tail.entries, 3);
         for flag in [
             "--principal",
@@ -118,6 +137,37 @@ pub(super) mod tests {
         let mut repeated = input;
         repeated.extend(["--observed-at".into(), "10001".into()]);
         assert!(parse(&repeated).is_err());
+    }
+
+    #[test]
+    fn abort_is_an_explicit_closed_action_and_keeps_every_original_pin() {
+        for (name, expected) in [
+            ("acknowledge", Action::Acknowledge),
+            ("abort-reserved", Action::AbortReserved),
+        ] {
+            let mut input = arguments();
+            input.extend(["--action".into(), name.into()]);
+            let options = parse(&input).unwrap();
+            assert_eq!(options.action, expected);
+            assert_eq!(options.original.expected_tail.entries, 3);
+            assert_eq!(options.observed_at.value(), 10001);
+            for flag in ["--principal", "--expected-run", "--expected-tail-digest"] {
+                let mut missing = input.clone();
+                let at = missing
+                    .iter()
+                    .position(|argument| argument == flag)
+                    .unwrap();
+                missing.drain(at..at + 2);
+                assert!(parse(&missing).is_err(), "{name}: missing {flag}");
+            }
+            input.extend(["--action".into(), name.into()]);
+            assert!(parse(&input).is_err());
+        }
+        for name in ["", "abort", "cancel", "resume", "auto", "Abort-Reserved"] {
+            let mut input = arguments();
+            input.extend(["--action".into(), name.into()]);
+            assert!(parse(&input).is_err(), "action {name:?}");
+        }
     }
 
     #[test]

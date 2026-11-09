@@ -4,6 +4,8 @@
 
 #[path = "agent_settle_cli/fixture.rs"]
 mod fixture;
+#[path = "agent_settle_cli/reserved_abort.rs"]
+mod reserved_abort;
 
 use fgit_agent::LogicalTime;
 use fgit_agent::effect_journal::EffectJournalPosition;

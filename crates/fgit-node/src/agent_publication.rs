@@ -38,8 +38,10 @@ use crate::{
     receive_staging::ReceiveStaging,
 };
 
+mod abort;
 mod observation;
 mod recovery;
+pub use abort::{NativeRecoveredRefTransactionAbort, NativeRecoveredRefTransactionAbortRefusal};
 pub use recovery::{NativeRecoveredRefTransactionRefusal, NativeRecoveredRefTransactionSettlement};
 
 /// Native profile limits, additionally narrowed by node quarantine policy.

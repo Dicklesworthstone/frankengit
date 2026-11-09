@@ -5,6 +5,9 @@ use fgit_resource::{Grade, ObligationState, ResourceVector};
 use fgit_schema::json::{Value, number, object, text};
 use fgit_types::DecisionOutcome;
 
+mod abort;
+pub(super) use abort::render as render_abort;
+
 pub(super) fn canonical_status(observed: Option<&ObservedRefTransaction>) -> &'static str {
     match observed.map(|observed| observed.terminal().outcome) {
         Some(DecisionOutcome::Committed { .. }) => "committed",
@@ -72,6 +75,9 @@ pub(super) fn render(
     result: &NativeRecoveredRefTransactionSettlement,
     cleanup_error: Option<&str>,
 ) -> Result<(String, u8), String> {
+    if options.action != super::options::Action::Acknowledge {
+        return Err("acknowledgement result does not match the requested cleanup action".into());
+    }
     let original = &options.original;
     let (tx, observed, current_tail, already_acknowledged, responsibility, run, status) =
         match result {
@@ -162,6 +168,7 @@ pub(super) fn render(
         ("type", text("agent_settlement")),
         ("schema_version", number(1)),
         ("profile", text(PROFILE)),
+        ("action", text("acknowledge")),
         ("complete", Value::Bool(cleanup_error.is_none())),
         ("scope", text("one_publication_effect")),
         ("read_only", Value::Bool(false)),

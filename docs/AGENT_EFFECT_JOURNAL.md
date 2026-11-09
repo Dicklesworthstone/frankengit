@@ -234,7 +234,8 @@ directory and drained-sync requirements described above.
 `fg agent settle` is the explicit trusted-local host for this cleanup operation.
 `fg agent recover` retains its read-only inspection contract. Supply the same
 independent original-run and journal pins, the original principal, and a cleanup
-observation in the original host's logical-time domain:
+observation in the original host's logical-time domain. Omission of `--action`
+or explicit `--action acknowledge` selects canonical acknowledgement:
 
 ```bash
 fg agent settle ./node TENANT_ID REPOSITORY_ID /absolute/journal-directory \
@@ -298,6 +299,68 @@ may return `input_already_acknowledged=false` even when a previous attempt wrote
 all bytes; repeating with the confirmed successor tail returns true. Other
 suffixes still refuse unchanged. No issuing broker, replacement bundle, new
 capability, task claim or source-write grant is accepted by this command.
+
+### Abort a recovered pre-start reservation
+
+The explicit `--action abort-reserved` action durably releases one recovered
+native publication reservation that never reached the write-ahead start
+boundary. It addresses process death after reservation but before submission.
+Acknowledgement remains the default action; an undecided transaction never
+automatically selects abort.
+
+```bash
+fg agent settle ./node TENANT_ID REPOSITORY_ID /absolute/journal-directory \
+  --trusted-local --principal ORIGINAL_PRINCIPAL_ID \
+  --run-id ORIGINAL_RUN_ID --effect-id ORIGINAL_EFFECT_ID \
+  --expected-run ORIGINAL_RUN_COMMITMENT \
+  --expected-tail-entries ORIGINAL_ENTRIES \
+  --expected-tail-bytes ORIGINAL_BYTES \
+  --expected-tail-digest ORIGINAL_TAIL_DIGEST \
+  --observed-at CLEANUP_LOGICAL_TIME \
+  --action abort-reserved --object-format sha256
+```
+
+The node's `abort_recovered_agent_ref_transaction_for_principal_in` restores
+the authenticated original run and takes exclusive custody of its journal.
+Before any write, it checks the original principal, repository, tenant and
+native custody commitment. The core `prepare_recovered_ref_transaction_abort`
+requires the exact journal-bound `PublishRefTransaction` request and a
+`RefTransactionSubmission` obligation in `Reserved` state, with no consumed
+resources or external/terminal evidence. An already aborted prefix is a
+durability-confirmed no-op. A started, deferred, escalated, acknowledged,
+failed or leaked obligation refuses. The complete before/after inventories
+must pass the existing reconciliation engine; other effects and original
+budget accounting remain unchanged.
+
+The only admitted mutation is the existing deterministic lifecycle Abort
+frame. The native host shares the acknowledgement path's bounded append/sync
+implementation, while the core exposes a separate sealed preparation and
+`RefTransactionAbortSink`. The successor inventory stays private until that
+sink confirms its exact durable position. A stale Reserved anchor cannot hide
+a later complete Commit or Defer: a suffix must be an exact prefix of this
+particular Abort frame. An unknown, different or duplicate suffix refuses
+unchanged. This does not relax the general journal reader or permit truncation.
+Retries use the same action and independent original pins. A changed cleanup
+observation time does not change the persisted Abort bytes.
+
+The receipt uses profile `native-agent-reservation-abort-v1`, action
+`abort-reserved` and scope `one_publication_reservation`. Exit 0 confirms only
+that reservation's durable Abort; exit 2 retains uncertainty or refusal.
+`journal.current_tail` is the new independently retainable anchor,
+`abort_confirmed` is true and `input_already_aborted` describes the supplied
+prefix. As with ACK, a complete earlier uncertain append after that old prefix
+can return false without being appended again.
+
+Reservation cleanup **does not observe, cancel or establish the absence of a
+canonical transaction**. An independent attempt may already have published the
+same ordinary TxId. Accordingly `publication.canonical_status` is
+`not_observed`, `canonical_terminal` is null and
+`canonical_cancellation_established` is false. Use read-only recovery separately
+to inspect canonical status. No fresh broker, capability, task claim, resource
+budget or permission to resubmit is produced. Cleanup works after expiry or
+revocation and retains `run_quiescence_established=false`. An output or shutdown
+failure preserves the synchronized-tail fact; retry the same cleanup rather
+than treating a missing receipt as rollback.
 
 ## Concrete validation surfaces
 

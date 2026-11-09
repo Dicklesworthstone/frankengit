@@ -9,7 +9,9 @@ pub use original::{Fixture, Mode, OWNER, fixture, fixture_with_acknowledgement, 
 
 use fgit_agent::LogicalTime;
 use fgit_agent::effect_journal::EffectJournalPosition;
-use fgit_agent::ref_publication::prepare_recovered_ref_transaction_acknowledgement;
+use fgit_agent::ref_publication::{
+    prepare_recovered_ref_transaction_abort, prepare_recovered_ref_transaction_acknowledgement,
+};
 use fgit_node::OneNode;
 use std::path::PathBuf;
 
@@ -26,6 +28,46 @@ impl Fixture {
         args[1] = "settle".into();
         args.extend(["--observed-at".into(), OBSERVED_AT.to_string()]);
         args
+    }
+
+    pub fn abort_arguments(&self) -> Vec<String> {
+        let mut args = self.settlement_arguments();
+        args.extend(["--action".into(), "abort-reserved".into()]);
+        args
+    }
+
+    /// Derive the production Abort frame from a real anchored, pre-start
+    /// reservation. This never truncates a started or settled history.
+    pub fn expected_abort(&self) -> (EffectJournalPosition, Vec<u8>) {
+        let node = OneNode::open_existing(self.config()).unwrap();
+        let request = node.command_request_context(None);
+        let recovered = node
+            .runtime()
+            .block_on(node.recover_agent_journal_in(
+                &request,
+                &self.directory(),
+                self.run,
+                &self.run_commitment,
+                self.tail,
+            ))
+            .unwrap();
+        assert!(
+            !recovered
+                .original_run()
+                .is_open_at(LogicalTime::new(OBSERVED_AT))
+        );
+        let prepared = prepare_recovered_ref_transaction_abort(
+            recovered.original_run(),
+            recovered.journal(),
+            self.effect,
+            LogicalTime::new(OBSERVED_AT),
+        )
+        .unwrap();
+        assert!(!prepared.already_aborted());
+        assert_eq!(prepared.before_position(), self.tail);
+        let result = (prepared.after_position(), prepared.frame().to_vec());
+        node.shutdown().unwrap();
+        result
     }
 
     /// Obtain the production-derived exact candidate ACK before planting a

@@ -278,6 +278,15 @@ For an external effect, request acceptance and outbox reservation are not the ir
 
 Revocation prevents new consequential work; it does not prevent cleanup. Abort-before-dispatch, stable-key reconciliation after commit, acknowledgement, terminal failure, escalation resolution, cancellation, and containment remain available after later revocation or expiry.
 
+The native recovered-ref profile implements pre-start cleanup through
+`fg agent settle --action abort-reserved`: an authenticated original run,
+independently retained tail and exclusive journal custody can append only the
+existing Abort event for an exact still-Reserved publication obligation. Started
+work and unrelated suffixes refuse. This releases the original reservation;
+it does not establish canonical transaction absence, cancel another attempt,
+renew authority or authorize resubmission. See the
+[durability and retry contract](AGENT_EFFECT_JOURNAL.md#abort-a-recovered-pre-start-reservation).
+
 ---
 
 ## 7. Context Packet

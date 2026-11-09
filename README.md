@@ -1079,6 +1079,15 @@ unchanged. This closes one publication's cleanup debt, without resubmitting a
 transaction, renewing a capability or establishing whole-run quiescence. See
 [agent publication settlement](docs/AGENT_EFFECT_JOURNAL.md#cli-publication-settlement).
 
+`fg agent settle --action abort-reserved` also clears a recovered publication
+reservation that never reached its durable start boundary. It requires the same
+original principal and independently retained run/tail pins, appends only the
+checked deterministic Abort frame, and refuses started work or any unrelated
+suffix. Its receipt reports `canonical_status: not_observed`: another attempt
+may have published the same transaction, and reservation cleanup neither
+cancels that transaction nor permits a retry. See
+[reservation recovery](docs/AGENT_EFFECT_JOURNAL.md#abort-a-recovered-pre-start-reservation).
+
 ---
 
 ## Deployment profiles
