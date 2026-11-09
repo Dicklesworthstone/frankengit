@@ -1,4 +1,5 @@
 //! Trusted local branch commands; the node owns validation and publication.
+mod default_branch;
 mod inventory;
 mod options;
 mod transaction;
@@ -41,16 +42,27 @@ usage: fg branch list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--object-format sha1|sha256] [--limit <1..100>]
   [(--after <full-reference> | --after-hex <bytes>) --expected-head <snapshot-token>]
 
+usage: fg branch default <storage-root> <tenant-id> <repository-id> --trusted-local
+  [--object-format sha1|sha256]
+usage: fg branch set-default --help
+
 Full branch references and exact native object IDs are required. New tips must
 already be verified commits reachable from visible repository refs. Rename is
 one atomic expected-tip deletion and absent-destination creation, not two writes.
-The canonical default branch cannot be deleted/renamed; PR metadata is not rewritten.
+The canonical default branch cannot be deleted/renamed; first select another
+existing branch with set-default. PR metadata is not rewritten.
 There is no implicit force, latest-tip lookup, automatic conflict retry, or remote auth.
 Retry with identical inputs and key, or recover read-only with fg outcome. Stdin
 keys are bounded and byte-exact, including any newline; keys are never printed.
 Exit 0: committed/read; 3: canonical refusal; 2: input, infrastructure or cleanup error.";
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args
+        .first()
+        .is_some_and(|action| matches!(action.as_str(), "default" | "set-default"))
+    {
+        return default_branch::run(args);
+    }
     if args == ["--help"]
         || (args.len() == 2
             && args[1] == "--help"

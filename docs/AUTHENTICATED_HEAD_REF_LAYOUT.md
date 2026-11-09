@@ -6,6 +6,12 @@ reopening, verified ref reads and ref-anchored blob proofs in both Git hash
 formats. The default `legacy` whole-body layout already binds HEAD and remains
 supported.
 
+An existing repository can select another existing branch with
+[`fg branch set-default`](NATIVE_DEFAULT_BRANCH.md). The command publishes the
+HEAD transition through the same authenticated root and decision stream, with
+exact old-target/new-tip preconditions and current administrator authorization.
+It supports whole-body and both V2 profiles; it does not migrate V1 data.
+
 ```sh
 fg init ./fgit-data 11111111111111111111111111111111 \
   22222222222222222222222222222222 --root-layout ref-merkle-v2 \

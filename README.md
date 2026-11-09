@@ -51,6 +51,16 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
 ```
 
 `init` creates or re-authenticates the empty canonical authority head.
+`fg branch default` reads its exact symbolic HEAD and current tip, distinguishing
+absent and unborn targets. `fg branch set-default` changes it through the ordinary
+sealed admission/RCR/head-CAS path with explicit old-target and new-tip
+expectations. The existing target must be a verified native commit; direct
+branch tips remain unchanged. Current canonical administrators authorize changes
+once review protection is installed, and exact retries recover their original
+outcome after later branch or policy changes. See the
+[default-branch guide](docs/NATIVE_DEFAULT_BRANCH.md) for the trusted-local CLI,
+raw-byte names, recovery and supported authenticated layouts.
+
 `import` verifies a bounded local object source composed of loose objects and
 checksum-bound idx-v2/pack-v2 pairs, then publishes its source refs through the
 sealed admission/RCR/head-CAS path. Sources include bare repositories, ordinary

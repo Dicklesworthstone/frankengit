@@ -3,6 +3,7 @@
 mod branches;
 mod candidate;
 pub mod candidate_inspection;
+mod default_branch;
 mod full_bundle;
 pub use full_bundle::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,

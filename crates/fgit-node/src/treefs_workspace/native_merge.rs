@@ -637,6 +637,26 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         crate::agent_credentials::epoch_seconds()
     }
 
+    fn validate_default_branch_target_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        target: &'a fgit_types::RefName,
+        expected_tip: GitOid,
+    ) -> impl Future<Output = Result<(), ProjectionFailure>> + Send + 'a {
+        super::default_branch::validate_target_at(
+            self,
+            authority,
+            cx,
+            basis,
+            authenticated,
+            target,
+            expected_tip,
+        )
+    }
+
     fn validate_comment_anchor_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,

@@ -53,7 +53,10 @@ fn assert_abort(document: &Value, fixture: &Fixture, tail: EffectJournalPosition
 }
 
 fn abort_reserved<A: GitHashAlgorithm>(partial: bool) {
-    let fixture = fixture_with_acknowledgement::<A>(Mode::Reserved, false);
+    // The ordinary Reserved fixture reaches the native pre-start deadline
+    // refusal. The no-acknowledgement fixture intentionally starts submission
+    // for ACK recovery tests and is not an abortable reservation.
+    let fixture = fixture::<A>(Mode::Reserved);
     let head = fixture.head_bytes();
     let before = fixture.files();
     let original = fs::read(fixture.journal_path()).unwrap();
@@ -136,7 +139,7 @@ fn prestart_reservations_abort_in_fresh_processes_and_retry_exactly_for_both_for
 #[test]
 fn aborted_reservation_does_not_cancel_or_deny_an_independent_canonical_publication() {
     fn check<A: GitHashAlgorithm>() {
-        let fixture = fixture_with_acknowledgement::<A>(Mode::Reserved, false);
+        let fixture = fixture::<A>(Mode::Reserved);
         let published = fixture.publish_original_as_operator();
         let head = fixture.head_bytes();
         let (tail, _) = fixture.expected_abort();
@@ -194,7 +197,7 @@ fn started_and_acknowledged_publications_never_fall_back_to_abort() {
 
 #[test]
 fn wrong_operator_anchor_unknown_suffix_and_small_output_cannot_abort() {
-    let fixture = fixture_with_acknowledgement::<Sha1>(Mode::Reserved, false);
+    let fixture = fixture::<Sha1>(Mode::Reserved);
     let args = fixture.abort_arguments();
     let before = fixture.files();
     let head = fixture.head_bytes();
@@ -235,7 +238,7 @@ fn wrong_operator_anchor_unknown_suffix_and_small_output_cannot_abort() {
 #[cfg(target_os = "linux")]
 #[test]
 fn lost_abort_stdout_retains_the_exact_durable_tail_and_safe_retry() {
-    let fixture = fixture_with_acknowledgement::<Sha256>(Mode::Reserved, false);
+    let fixture = fixture::<Sha256>(Mode::Reserved);
     let head = fixture.head_bytes();
     let (tail, frame) = fixture.expected_abort();
     let mut expected = fs::read(fixture.journal_path()).unwrap();
