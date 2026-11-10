@@ -376,7 +376,10 @@ preparation and single-parent inspection under that same independent scope.
 Candidate objects stay unstaged and publication remains separately authorized.
 Existing metadata and current-source credentials gain no history permission;
 history APIs can include current-tip content but do not grant search, indexes
-or agent context. Issue, PR metadata/conversation, discussion and individual
+or agent context. Independent `milestones-read` and `milestones-write` scopes
+enable HTTP and MCP milestone lifecycle planning and snapshot-bound issue counts;
+existing issue grants gain no milestone rights, and issue membership changes
+still require `issues-write`. Issue, PR metadata/conversation, discussion and individual
 outcome operations are supported;
 Git publication, reviews, merges and administration remain outside this profile.
 `fg mcp --agent-token-file ... --expected-incarnation ...` uses the same canonical

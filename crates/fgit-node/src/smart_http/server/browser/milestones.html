@@ -14,10 +14,10 @@
     <section aria-labelledby="connection-title">
       <h2 id="connection-title">Connect</h2>
       <form id="milestone-connect">
-        <label>Repository token<input id="milestone-token" type="password" maxlength="64" autocomplete="off" spellcheck="false" required></label>
+        <label>Repository or sponsored token<input id="milestone-token" type="password" maxlength="72" autocomplete="off" spellcheck="false" required></label>
         <button type="submit">Connect</button><button id="milestone-disconnect" type="button">Disconnect</button>
       </form>
-      <p class="hint">Use issues-read to browse, issues-write to change milestones and memberships, and outcomes-read to recover. Tokens stay in this tab and never enter links or saved receipts.</p>
+      <p class="hint">Repository tokens use issues-read and issues-write. Sponsored tokens use milestones-read and milestones-write for milestone planning; issue memberships require issues-write. Recovery requires outcomes-read. Tokens stay in this tab and never enter links or saved receipts.</p>
     </section>
     <p id="milestone-status" role="status" aria-live="polite">Connect an explicitly scoped repository token.</p>
     <section aria-labelledby="browse-title">

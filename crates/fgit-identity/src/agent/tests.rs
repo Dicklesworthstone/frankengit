@@ -54,12 +54,72 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         SOURCE_READ,
         SOURCE_HISTORY_READ,
         SOURCE_CANDIDATES,
+        MILESTONES_READ,
+        MILESTONES_WRITE,
         1 << 15,
     ] {
         assert_eq!(
             authenticated.authorize(operation),
             Err(AgentCredentialRefusal::OperationNotGranted)
         );
+    }
+}
+
+#[test]
+fn milestone_authentication_requires_explicit_independent_scopes_and_live_evidence() {
+    let old = AgentCredentialGrant {
+        operations: 0x03ff,
+        ..grant()
+    };
+    for scope in [MILESTONES_READ, MILESTONES_WRITE] {
+        let milestone = AgentCredentialGrant {
+            operations: scope,
+            ..grant()
+        };
+        let authenticated =
+            authenticate(&milestone, BEARER, 100, RevocationEvidence::Live).unwrap();
+        assert_eq!(authenticated.authorize(scope), Ok(()));
+        assert_eq!(authenticated.principal(), milestone.agent);
+        assert_eq!(authenticated.sponsor(), milestone.sponsor);
+        for other in (0..16).map(|bit| 1u16 << bit).filter(|bit| *bit != scope) {
+            assert_eq!(
+                authenticated.authorize(other),
+                Err(AgentCredentialRefusal::OperationNotGranted)
+            );
+        }
+        assert_eq!(
+            authenticate(&old, BEARER, 100, RevocationEvidence::Live)
+                .unwrap()
+                .authorize(scope),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+        for (now, revocation, expected) in [
+            (
+                99,
+                RevocationEvidence::Live,
+                AgentCredentialRefusal::NotYetValid,
+            ),
+            (
+                200,
+                RevocationEvidence::Live,
+                AgentCredentialRefusal::Expired,
+            ),
+            (
+                100,
+                RevocationEvidence::Revoked,
+                AgentCredentialRefusal::Revoked,
+            ),
+            (
+                100,
+                RevocationEvidence::NotChecked,
+                AgentCredentialRefusal::RevocationEvidenceRequired,
+            ),
+        ] {
+            assert_eq!(
+                authenticate(&milestone, BEARER, now, revocation),
+                Err(expected)
+            );
+        }
     }
 }
 

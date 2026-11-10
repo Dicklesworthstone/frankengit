@@ -2,6 +2,7 @@
 //! Real bearer requests cross the canonical grant registry, request run,
 //! metadata publication and immutable terminal-provenance boundaries.
 
+mod milestones;
 mod source_read;
 
 use super::{profile, *};

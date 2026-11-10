@@ -32,10 +32,12 @@ pub(super) use request::{Page, Request};
 
 impl Request<'_> {
     pub(super) fn agent_operation(&self) -> Option<u16> {
-        use fgit_identity::agent::{ISSUES_READ, ISSUES_WRITE};
+        use fgit_identity::agent::{ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE};
         match self.operation {
             Operation::List(_) | Operation::Show { .. } | Operation::Search => Some(ISSUES_READ),
             Operation::Mutate { .. } => Some(ISSUES_WRITE),
+            Operation::MilestoneList(_) | Operation::MilestoneShow { .. } => Some(MILESTONES_READ),
+            Operation::MilestoneMutate { .. } => Some(MILESTONES_WRITE),
             _ => None,
         }
     }

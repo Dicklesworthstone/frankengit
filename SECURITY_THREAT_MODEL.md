@@ -522,6 +522,14 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+Sponsored milestone planning similarly uses independent `MILESTONES_READ` and
+`MILESTONES_WRITE` operations. Existing issue/source credential masks acquire no
+milestone access; milestone scopes expose metadata and aggregate issue counts,
+not issue text or issue mutation. HTTP and MCP intersect these scopes with their
+issue-service launch ceilings. The original request lifetime survives reads,
+publication and response output; admission revalidates the current credential at
+the publication basis, and retries retain original agent/sponsor evidence across
+rotation. An absent or completed MCP request cannot become trusted-local authority.
 Historical source analysis uses a separate `SOURCE_HISTORY_READ` credential bit.
 The HTTP and MCP hosts admit only bounded log, blame, historical tree/blob and
 reference-comparison queries under it; old metadata and current-source masks do

@@ -194,8 +194,8 @@ impl OneNode {
         output_limit: u64,
     ) -> Result<AgentRequest, NodeReceiveTransportRefusal> {
         use fgit_identity::agent::{
-            DISCUSSIONS_WRITE, ISSUES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_READ,
-            agent_credential_id, authenticate_agent_credential,
+            DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
+            SOURCE_READ, agent_credential_id, authenticate_agent_credential,
         };
         if !valid_agent_credential_token(bearer)
             || operation.count_ones() != 1
@@ -250,11 +250,13 @@ impl OneNode {
         let expiry = now
             .saturating_add(MAX_REQUEST_SECONDS)
             .min(state.grant.expires_at);
-        let class = if operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE) != 0 {
-            OperationClass::MutateForgeEntity
-        } else {
-            OperationClass::ReadCanonicalObject
-        };
+        let class =
+            if operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE) != 0
+            {
+                OperationClass::MutateForgeEntity
+            } else {
+                OperationClass::ReadCanonicalObject
+            };
         let classes = if operation == SOURCE_READ {
             ClassSet::from_classes(&[
                 OperationClass::ReadCanonicalObject,

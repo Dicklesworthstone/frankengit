@@ -283,7 +283,7 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
         assert!(explicit.validate().is_ok());
         assert!(explicit.permits(SOURCE_READ | metadata));
     }
-    for unknown in (10..16).map(|bit| 1u16 << bit) {
+    for unknown in (12..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_READ | unknown,
             ..grant()
@@ -297,17 +297,23 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
 }
 
 #[test]
-fn source_grant_issue_and_revocation_round_trip_without_widening_legacy_grants() {
+fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants() {
     for operations in [
         0x007f,
         0x00ff,
         0x01ff,
+        0x03ff,
         SOURCE_READ,
         SOURCE_READ | PULLS_READ,
         SOURCE_HISTORY_READ,
         SOURCE_HISTORY_READ | SOURCE_READ | PULLS_READ,
         SOURCE_CANDIDATES,
         SOURCE_CANDIDATES | SOURCE_READ | PULLS_READ,
+        MILESTONES_READ,
+        MILESTONES_WRITE,
+        MILESTONES_READ | MILESTONES_WRITE,
+        MILESTONES_WRITE | ISSUES_WRITE,
+        ALL_OPERATIONS,
     ] {
         let grant = AgentCredentialGrant {
             operations,
@@ -327,7 +333,7 @@ fn source_grant_issue_and_revocation_round_trip_without_widening_legacy_grants()
         assert_eq!(payload.as_bytes().len(), 178);
         assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
         let mut unknown = payload.into_bytes();
-        unknown[176..178].copy_from_slice(&(operations | (1 << 10)).to_be_bytes());
+        unknown[176..178].copy_from_slice(&(operations | (1 << 12)).to_be_bytes());
         assert!(
             ForgeEvent::read_payload(&mut Decoder::new(&unknown, DecodeLimits::DEFAULT)).is_err()
         );
@@ -354,6 +360,14 @@ fn source_grant_issue_and_revocation_round_trip_without_widening_legacy_grants()
         assert_eq!(
             original.grant.permits(SOURCE_CANDIDATES),
             operations & SOURCE_CANDIDATES != 0
+        );
+        assert_eq!(
+            original.grant.permits(MILESTONES_READ),
+            operations & MILESTONES_READ != 0
+        );
+        assert_eq!(
+            original.grant.permits(MILESTONES_WRITE),
+            operations & MILESTONES_WRITE != 0
         );
         let mut substituted = revoked;
         let ForgeEventPayload::AgentCredentialChangedNative(change) = &mut substituted.payload
@@ -399,7 +413,7 @@ fn history_access_is_independent_of_every_preexisting_operation() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_HISTORY_READ | other));
     }
-    for unknown in (10..16).map(|bit| 1u16 << bit) {
+    for unknown in (12..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_HISTORY_READ | unknown,
             ..history
@@ -435,13 +449,51 @@ fn candidate_work_requires_a_new_explicit_grant_without_widening_old_masks() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_CANDIDATES | other));
     }
-    for unknown in (10..16).map(|bit| 1u16 << bit) {
+    for unknown in (12..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_CANDIDATES | unknown,
             ..candidate
         };
         assert!(invalid.validate().is_err());
         assert!(!invalid.permits(SOURCE_CANDIDATES));
+    }
+}
+
+#[test]
+fn milestone_scopes_are_independent_and_do_not_expand_any_retained_grant() {
+    let old = AgentCredentialGrant {
+        operations: 0x03ff,
+        ..grant()
+    };
+    assert!(old.validate().is_ok());
+    for scope in [MILESTONES_READ, MILESTONES_WRITE] {
+        assert!(!old.permits(scope));
+        let milestone = AgentCredentialGrant {
+            operations: scope,
+            ..grant()
+        };
+        assert!(milestone.validate().is_ok());
+        assert!(milestone.permits(scope));
+        assert!(!milestone.permits(0));
+        for other in (0..12).map(|bit| 1u16 << bit).filter(|bit| *bit != scope) {
+            assert!(!milestone.permits(other));
+            assert!(!milestone.permits(scope | other));
+            let combined = AgentCredentialGrant {
+                operations: scope | other,
+                ..milestone
+            };
+            assert!(combined.validate().is_ok());
+            assert!(combined.permits(scope | other));
+        }
+        for unknown in (12..16).map(|bit| 1u16 << bit) {
+            let invalid = AgentCredentialGrant {
+                operations: scope | unknown,
+                ..milestone
+            };
+            assert!(invalid.validate().is_err());
+            assert!(!invalid.permits(scope));
+            assert!(!milestone.permits(unknown));
+        }
     }
 }
 

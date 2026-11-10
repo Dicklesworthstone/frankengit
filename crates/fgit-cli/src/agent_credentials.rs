@@ -31,10 +31,13 @@ usage: fg agent-credential show <storage-root> <tenant-id> <repository-id>
 
 Scopes: issues-read, issues-write, pulls-read, pulls-write,
         discussions-read, discussions-write, outcomes-read, source-read,
-        source-history-read, source-candidates.
+        source-history-read, source-candidates, milestones-read, milestones-write.
 source-read permits current source browsing, ref/tag discovery, search and context.
 source-history-read permits bounded history, blame, historical files and reference diffs.
 source-candidates permits bounded HTTP exact-patch preparation and bundle inspection.
+milestones-read permits milestone metadata, history and same-snapshot issue counts.
+milestones-write permits opening, editing, closing and reopening milestones.
+Issue milestone assignments still require issues-write.
 Every scope is independent. This initial profile cannot grant source/Git writes,
 reviews, merges, policy administration, secrets or external effects.
 Canonical credentials authenticate an agent and its explicitly attested sponsor;

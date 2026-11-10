@@ -1,6 +1,7 @@
 // Production native metadata operator against a response-schema HTTP peer.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -19,6 +20,49 @@ async function fixture(t, peerOptions) {
 }
 const opening = options => ({ ...options, operation: 'open', number: 7, expectedVersion: 0,
   fields: { title: 'Mapped release', body: 'Literal & <script> 雪', due_at: 0 } });
+
+for (const [family, run] of [['milestone', runMilestoneOperation], ['issue', runIssueOperation]]) {
+  for (const suffix of ['', '\n']) test(`sponsored ${family} operator accepts exact token files and recovers a lost reply (${suffix ? 'LF' : 'no LF'})`, async t => {
+    const token = `fgagent_${'c'.repeat(64)}`;
+    let lose = true;
+    const f = await fixture(t, { token, afterMutation({ res }) {
+      if (lose) { lose = false; res.destroy(); return true; }
+    } });
+    await writeFile(f.options.tokenFile, token + suffix);
+    const options = { ...opening(f.options), timeoutMs: 5000,
+      fields: { title: 'Sponsored planning', body: 'Original private draft' } };
+    await assert.rejects(run(options), error => error.operator_state === 'submitted_unknown');
+    const bytes = await readFile(f.options.record), request = JSON.parse(bytes).receipt.request;
+    assert.equal(request.credential_fingerprint, createHash('sha256').update(token).digest('hex'));
+    assert.equal(bytes.includes(token), false); assert.equal(bytes.includes(token.slice(8)), false);
+    for (const operation of ['status', 'retry']) {
+      const result = await run({ ...f.options, operation, timeoutMs: 5000 });
+      assert.equal(result.state, 'terminal_observed'); assert.equal(result.mutation_submitted, false);
+      assert.equal(result.result.tx, f.dest.decisions.get(request.key).tx_id);
+    }
+    assert.equal(mutations(f.dest).length, 1);
+    assert.ok(mutations(f.dest)[0].path.endsWith(`/${family}s/7/open`));
+    assert.ok(f.dest.calls.every(call => call.authorization === `Bearer ${token}`));
+    assert.ok(f.dest.calls.filter(call => call.method === 'POST').every(call => call.key === request.key));
+    const count = f.dest.calls.length;
+    await writeFile(f.options.tokenFile, token.slice(8));
+    await assert.rejects(run({ ...f.options, operation: 'retry' }), /does not belong/);
+    assert.equal(f.dest.calls.length, count); assert.deepEqual(await readFile(f.options.record), bytes);
+  });
+}
+
+test('malformed sponsored token files refuse before any issue or milestone request', async t => {
+  const token = `fgagent_${'c'.repeat(64)}`, f = await fixture(t, { token });
+  for (const malformed of [token + '\n\n', token + '\r\n', token + ' ', token + '\0',
+    token + 'a', 'fgagent_' + 'c'.repeat(63), 'fgagent_' + 'C'.repeat(64),
+    'FGAGENT_' + 'c'.repeat(64), 'fgagent_' + '雪'.repeat(64)]) {
+    await writeFile(f.options.tokenFile, malformed);
+    for (const run of [runIssueOperation, runMilestoneOperation]) {
+      await assert.rejects(run({ ...opening(f.options), fields: { title: 'No request', body: '' } }));
+    }
+  }
+  assert.equal(f.dest.calls.length, 0); assert.deepEqual(await readdir(f.root), ['token']);
+});
 
 test('native milestone operator creates, edits, closes and reopens with ordinary exact-version commands', async t => {
   const f = await fixture(t);

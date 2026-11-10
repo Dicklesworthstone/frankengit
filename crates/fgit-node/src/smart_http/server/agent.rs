@@ -7,8 +7,8 @@ use crate::smart_http::drive_request_while;
 use crate::{GitDaemonSessionDeadline, GitDaemonSessionTimeout, GitDaemonSessionWorkScaling};
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
-    DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_WRITE, OUTCOMES_READ, PULLS_WRITE,
-    SOURCE_CANDIDATES,
+    DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, OUTCOMES_READ,
+    PULLS_WRITE, SOURCE_CANDIDATES,
 };
 use fgit_wire::smart_http::head::Envelope;
 use std::time::Duration;
@@ -61,7 +61,8 @@ pub(super) fn authenticate(
         return Err(Status::Unauthorized);
     }
     let operation = operation(envelope)?;
-    let mutation = operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE) != 0;
+    let mutation =
+        operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE) != 0;
     let retry = retry_key(raw_head).map_err(|_| Status::BadRequest)?;
     let key = if mutation || operation == OUTCOMES_READ {
         retry.ok_or(Status::BadRequest)?
@@ -168,7 +169,7 @@ mod tests {
             ("POST", "/repo/git-receive-pack", false),
             ("GET", "/repo/api/v1/source", false),
             ("GET", "/repo/api/v1/protection", false),
-            ("GET", "/repo/api/v1/milestones", false),
+            ("GET", "/repo/api/v1/milestones", true),
         ] {
             let raw =
                 format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
@@ -176,6 +177,34 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(operation(&envelope).is_ok(), allowed, "{path}");
+        }
+    }
+
+    #[test]
+    fn sponsored_milestone_routes_require_their_own_read_or_write_operation() {
+        use fgit_identity::agent::MILESTONES_READ;
+        for (method, path, expected) in [
+            ("GET", "/repo/api/v1/milestones", MILESTONES_READ),
+            ("GET", "/repo/api/v1/milestones/7", MILESTONES_READ),
+            ("POST", "/repo/api/v1/milestones/7/open", MILESTONES_WRITE),
+            ("POST", "/repo/api/v1/milestones/7/edit", MILESTONES_WRITE),
+            ("POST", "/repo/api/v1/milestones/7/close", MILESTONES_WRITE),
+            ("POST", "/repo/api/v1/milestones/7/reopen", MILESTONES_WRITE),
+            ("POST", "/repo/api/v1/issues/7/set-milestone", ISSUES_WRITE),
+            (
+                "POST",
+                "/repo/api/v1/issues/7/clear-milestone",
+                ISSUES_WRITE,
+            ),
+        ] {
+            let length = if method == "GET" { 0 } else { 1 };
+            let raw = format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {length}\r\n\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(operation(&envelope).unwrap(), expected, "{path}");
         }
     }
 

@@ -1120,8 +1120,15 @@ continuations preserve both lifecycle and membership history; incomplete replay,
 missing evidence, cancellation or exhausted bounds refuse the read. Issue search
 can conjunctively select a milestone number or explicitly unassigned issues.
 
-Native HTTP and MCP adapters require their existing independent issue-read or
-issue-write grants for milestone metadata; Git read/write never implies either.
+Native HTTP and MCP adapters retain their issue-service launch ceilings. Ordinary
+operator credentials require the existing independent issue-read or issue-write
+grants for milestone metadata. Canonical sponsored credentials instead require
+the independent `MILESTONES_READ` or `MILESTONES_WRITE` operation; issue membership
+still requires `ISSUES_WRITE`. Legacy masks MUST NOT acquire milestone authority.
+Git read/write never implies either milestone scope. Reads include same-snapshot
+issue counts, not issue text. Every sponsored mutation MUST revalidate its exact
+credential at the publication basis and retain the original agent/sponsor evidence
+and request expiry.
 The milestone's selected number, title, body and date cannot select the actor or
 widen capabilities. The frozen issue archive/import v1/v2 profiles do not define
 cross-repository milestone mappings: they MUST explicitly refuse milestone-bearing

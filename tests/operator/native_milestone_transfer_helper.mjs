@@ -59,8 +59,8 @@ export function fixtureMilestoneIssues() {
   ];
 }
 export async function milestonePeer({ rows = [], milestones = [], tenantId = tenant, repositoryId = repository,
-  fault, afterMutation } = {}) {
-  const token = randomBytes(32).toString('hex'), calls = [], decisions = new Map();
+  token = randomBytes(32).toString('hex'), fault, afterMutation } = {}) {
+  const calls = [], decisions = new Map();
   const source = new Map(rows.map(row => [row.number, structuredClone(row)]));
   const milestoneSource = new Map(milestones.map(row => [row.number, structuredClone(row)]));
   const common = { schema_version: 1, tenant_id: tenantId, repository_id: repositoryId };
@@ -70,7 +70,8 @@ export async function milestonePeer({ rows = [], milestones = [], tenantId = ten
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
       const body = Buffer.concat(chunks).toString(), url = new URL(req.url, 'http://127.0.0.1');
       const key = req.headers['idempotency-key'];
-      const call = { method: req.method, path: url.pathname, query: url.searchParams, body, key }; calls.push(call);
+      const call = { method: req.method, path: url.pathname, query: url.searchParams, body, key,
+        authorization: req.headers.authorization }; calls.push(call);
       const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(encode(value)); };
       if (req.headers.authorization !== `Bearer ${token}`) return send({}, 401);
       if (fault && await fault({ req, res, call, decisions, send, source, milestoneSource })) return;

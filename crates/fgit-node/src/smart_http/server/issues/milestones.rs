@@ -1,4 +1,5 @@
-//! Milestones share the explicit repository issues-read/issues-write grants.
+//! Milestones share the issue-service ceiling; sponsored credentials additionally
+//! require independent milestones-read/milestones-write operations.
 //! Membership is planning metadata; it grants no principal or ref authority.
 
 use super::{

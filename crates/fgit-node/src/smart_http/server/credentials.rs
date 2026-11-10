@@ -146,13 +146,18 @@ pub(super) struct Grant {
 impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
-            DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-            PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ,
+            DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
+            MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
+            SOURCE_HISTORY_READ, SOURCE_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
-            ISSUES_READ => Scope::IssuesRead,
-            ISSUES_WRITE => Scope::IssuesWrite,
+            // The closed route classifier has already authenticated exactly
+            // one operation. These adapter scopes only select the existing
+            // issue-service ceiling for this request; they cannot grant its
+            // other routes to the sponsored credential.
+            ISSUES_READ | MILESTONES_READ => Scope::IssuesRead,
+            ISSUES_WRITE | MILESTONES_WRITE => Scope::IssuesWrite,
             PULLS_READ => Scope::PullsRead,
             PULLS_WRITE => Scope::PullsWrite,
             DISCUSSIONS_READ => Scope::DiscussionsRead,

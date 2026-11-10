@@ -1,8 +1,10 @@
 // Response-schema contract doubles, not Rust authority/interoperability evidence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { webcrypto } from 'node:crypto';
+import { createHash, webcrypto } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { IssueClient } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
+import { NotificationClient } from '../../crates/fgit-node/src/smart_http/server/browser/notifications.mjs';
 import { MilestoneClient, milestoneAction, milestoneMutationRequest, milestoneState, milestonePage, milestoneHistory }
   from '../../crates/fgit-node/src/smart_http/server/browser/milestones.mjs';
 
@@ -27,6 +29,74 @@ const recovery = terminal => ({ ...ids, type: 'transaction_outcome', selector: '
   repository_incarnation: 'incarnation', principal_id: 'actor', terminal, state: terminal ? 'committed' : 'key_not_observed',
   transaction: terminal ? { tx_id: 'original-tx' } : null,
   decision: terminal ? { kind: 'committed', decision_sequence: 2, repository_commit_id: 'original-rcr' } : null });
+
+test('sponsored issue and milestone clients retain full credential custody through a lost reply', async () => {
+  const agent = `fgagent_${token}`, fingerprint = value => createHash('sha256').update(value).digest('hex');
+  const cryptoImpl = { subtle: webcrypto.subtle, getRandomValues(value) { value.fill(5); return value; } };
+  for (const [Client, family] of [[IssueClient, 'issues'], [MilestoneClient, 'milestones']]) {
+    const calls = [];
+    const first = new Client({ href, cryptoImpl, fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), ...init }); throw new Error('lost reply');
+    } });
+    await first.connect(agent); await first.stage(7, 1, 'edit', { body: 'sponsored work' }, binding);
+    const saved = first.exportReceipt(), request = JSON.parse(saved).request;
+    assert.equal(request.credential_fingerprint, fingerprint(agent));
+    assert.notEqual(request.credential_fingerprint, fingerprint(token));
+    assert.equal(saved.includes(agent), false); assert.equal(saved.includes(token), false);
+    assert.equal(calls.length, 0);
+    await assert.rejects(first.send(), error => error.outcomeUnknown === true);
+    assert.ok(first.pending); first.disconnect();
+
+    const wrong = new Client({ href, cryptoImpl, fetchImpl: () => assert.fail('credential fallback') });
+    await wrong.connect(token);
+    await assert.rejects(wrong.restoreReceipt(saved), /does not belong/);
+    wrong.disconnect();
+
+    const restored = new Client({ href, cryptoImpl, fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), ...init }); return json(recovery(true));
+    } });
+    await restored.connect(agent); await restored.restoreReceipt(saved);
+    assert.equal(restored.pending.key, request.key);
+    assert.equal((await restored.recover()).tx, 'original-tx');
+    assert.equal(restored.pending, null); assert.equal(calls.length, 2);
+    assert.ok(calls[0].url.endsWith(`/${family}/7/edit`));
+    assert.ok(calls[1].url.endsWith('/outcomes')); assert.equal(calls[1].body, undefined);
+    for (const call of calls) {
+      assert.equal(call.headers.Authorization, `Bearer ${agent}`);
+      assert.equal(call.headers['Idempotency-Key'], request.key);
+    }
+    restored.disconnect();
+  }
+});
+
+test('sponsored browser tokens keep closed syntax and cannot bypass server scopes', async () => {
+  const agent = `fgagent_${token}`;
+  for (const Client of [IssueClient, MilestoneClient]) {
+    const calls = [], client = new Client({ href, cryptoImpl: webcrypto, fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), ...init }); return json({}, 403);
+    } });
+    for (const malformed of [null, {}, '', token + '\n', agent + '\n', agent + '\r\n', agent + ' ',
+      agent + '\0', agent + 'a', 'fgagent_' + token.slice(1), 'FGAGENT_' + token,
+      'fgagent_' + token.toUpperCase(), 'fgagent_' + '雪'.repeat(64)]) {
+      await assert.rejects(client.connect(malformed));
+    }
+    assert.equal(calls.length, 0); assert.equal(client.connected, false);
+    await client.connect(agent);
+    await assert.rejects(client.read(), error => error.status === 403);
+    assert.equal(calls.length, 1); assert.equal(calls[0].headers.Authorization, `Bearer ${agent}`);
+    client.disconnect();
+  }
+  const inbox = new NotificationClient({ href: href.replace('/ui/issues/', '/ui/notifications/'),
+    cryptoImpl: webcrypto, fetchImpl: () => assert.fail('unsupported agent route') });
+  await assert.rejects(inbox.connect(agent)); assert.equal(inbox.connected, false);
+  for (const family of ['issue', 'milestone']) {
+    const html = readFileSync(new URL(`../../crates/fgit-node/src/smart_http/server/browser/${family}s.html`, import.meta.url), 'utf8');
+    const input = html.match(new RegExp(`<input[^>]*id="${family}-token"[^>]*>`))?.[0];
+    assert.ok(input, 'rendered credential input exists');
+    assert.equal(Number(input.match(/maxlength="(\d+)"/)?.[1]), agent.length);
+    assert.ok(input.includes('type="password"')); assert.ok(input.includes('autocomplete="off"'));
+  }
+});
 
 test('milestone forms distinguish absent, cleared and epoch dates without accepting authority fields', () => {
   const open = milestoneMutationRequest(7, 0, 'open', { title: row.title, body: row.body });
