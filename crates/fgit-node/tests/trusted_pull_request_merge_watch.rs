@@ -19,6 +19,8 @@ use fgit_pack::{
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, RefName};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
+mod collection;
+
 struct Objects(BTreeMap<GitOid, (GitObjectKind, Vec<u8>)>);
 impl Objects {
     fn put(&mut self, format: GitHashAlgorithm, kind: GitObjectKind, body: Vec<u8>) -> GitOid {

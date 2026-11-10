@@ -1,10 +1,12 @@
 //! One native controller owns a bounded, durable collection of native PR
 //! watchers. Discovery can add responsibility; closure/visibility never erases
 //! it. Each child still selects canonical work and publishes through admission.
-use super::super::{cancellation, commitment, prestart, pull_request, reporting};
+use super::super::{
+    cancellation, commitment, prestart, pull_request, pull_request_merge, reporting,
+};
 use super::{
-    Custody, WorkflowWatchConfig, WorkflowWatchControl, WorkflowWatchError, WorkflowWatchReceipt,
-    attempt, controlled_operation, publish,
+    Custody, PullRequestMergeWatchConfig, WorkflowWatchConfig, WorkflowWatchControl,
+    WorkflowWatchError, WorkflowWatchReceipt, attempt, controlled_operation, publish,
 };
 use crate::treefs_workspace::pull_request::PullRequestReadRefusal;
 use crate::{NodeRequestContext, OneNode};
@@ -14,6 +16,7 @@ use fgit_types::{RefName, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 
 mod inventory;
@@ -163,7 +166,7 @@ impl Controller {
         for entry in &mut entries {
             checkpoint(&live)?;
             if !self.members.contains_key(&entry.number) {
-                let child = member_config(config, entry);
+                let child = member_config(config, entry)?;
                 if entry.initialized {
                     require_original_custody(node, &child)?;
                 }
@@ -238,6 +241,13 @@ impl Controller {
                 "PR collection retained member limit exceeded; no new member admitted",
             ));
         }
+        // Derive every prospective member before publishing membership. An
+        // unrepresentable CI ref or a PR inside the operator's CI namespace
+        // cannot poison durable custody or authorize a partial selected set.
+        for entry in &entries {
+            checkpoint(&live)?;
+            member_config(config, entry)?;
+        }
         checkpoint(&live)?;
         if entries == self.inventory.entries() {
             return Ok(true);
@@ -276,12 +286,60 @@ impl Controller {
     }
 }
 
-fn member_config(config: &WorkflowWatchConfig, entry: &Entry) -> WorkflowWatchConfig {
+fn member_config(
+    config: &WorkflowWatchConfig,
+    entry: &Entry,
+) -> Result<WorkflowWatchConfig, WorkflowWatchError> {
     let mut child = config.clone();
     child.pull_requests = None;
     child.pull_request = Some(entry.number);
     child.reference = entry.reference.clone();
-    child
+    if let Some(template) = &config.merge_candidate {
+        validate_candidate_namespace(template, &config.reference).map_err(custody)?;
+        validate_candidate_namespace(template, &entry.reference).map_err(custody)?;
+        child.merge_candidate = Some(member_candidate(template, entry.number).map_err(custody)?);
+    }
+    child.validate().map_err(custody)?;
+    Ok(child)
+}
+
+/// Keep the entire configured CI namespace disjoint from a source/target ref,
+/// including Git's directory/file conflicts. Validate the largest PR number
+/// now so later discovery cannot exhaust the existing 1024-byte native-ref bound.
+pub(super) fn validate_candidate_namespace(
+    template: &PullRequestMergeWatchConfig,
+    reference: &RefName,
+) -> io::Result<()> {
+    let stem = template.reference().as_bytes();
+    let other = reference.as_bytes();
+    let nested = |parent: &[u8], child: &[u8]| {
+        child.starts_with(parent) && child.get(parent.len()) == Some(&b'/')
+    };
+    if stem == other || nested(stem, other) || nested(other, stem) {
+        return Err(super::invalid(
+            "collection CI namespace must be disjoint from every PR source and target branch",
+        ));
+    }
+    member_candidate(template, u64::MAX).map(|_| ())
+}
+
+fn member_candidate(
+    template: &PullRequestMergeWatchConfig,
+    number: u64,
+) -> io::Result<PullRequestMergeWatchConfig> {
+    if number == 0 {
+        return Err(super::invalid("collection PR number must be positive"));
+    }
+    let mut bytes = template.reference().as_bytes().to_vec();
+    bytes.extend_from_slice(format!("/pr-{number}").as_bytes());
+    let reference = RefName::try_new(&bytes).map_err(|error| super::invalid(error.to_string()))?;
+    PullRequestMergeWatchConfig::try_new(
+        reference,
+        template.principal(),
+        template.metadata().clone(),
+        template.profile(),
+        template.style(),
+    )
 }
 fn scope(node: &OneNode, config: &WorkflowWatchConfig) -> [u8; 32] {
     commitment(&[
@@ -292,7 +350,7 @@ fn scope(node: &OneNode, config: &WorkflowWatchConfig) -> [u8; 32] {
 }
 fn binding(config: &WorkflowWatchConfig, scope: &[u8; 32]) -> [u8; 32] {
     let publisher = config.publisher.map(|value| *value.as_bytes());
-    commitment(&[
+    let original = commitment(&[
         b"frankengit/pull-request-workflow-collection-config/v1",
         scope,
         &prestart::execution_identity(
@@ -303,18 +361,25 @@ fn binding(config: &WorkflowWatchConfig, scope: &[u8; 32]) -> [u8; 32] {
         ),
         &[u8::from(publisher.is_some())],
         publisher.as_ref().map_or(&[][..], |value| &value[..]),
-    ])
+    ]);
+    config.merge_candidate.as_ref().map_or(original, |merge| {
+        commitment(&[
+            b"frankengit/pull-request-workflow-collection-merge-config/v1",
+            &original,
+            &merge.identity(),
+        ])
+    })
 }
 fn require_original_custody(
     node: &OneNode,
     config: &WorkflowWatchConfig,
 ) -> Result<(), WorkflowWatchError> {
-    let scope = pull_request::scope(
-        node,
-        &config.reference,
-        &config.directory,
-        config.pull_request.expect("member PR"),
-    );
+    let number = config.pull_request.expect("member PR");
+    let scope = if config.merge_candidate.is_some() {
+        pull_request_merge::scope(node, &config.reference, &config.directory, number)
+    } else {
+        pull_request::scope(node, &config.reference, &config.directory, number)
+    };
     for prefix in ["service", "watch"] {
         let root = config
             .run_parent
@@ -375,6 +440,24 @@ fn discover(
                 return Err(selection("invalid PR order or aggregate"));
             }
             previous = row.number.get();
+            if let Some(template) = &config.merge_candidate {
+                // Discovery sees all visible PR rows, not just this target's
+                // open members. A CI rewrite must not overwrite a source or
+                // target belonging to another visible PR, even a closed one.
+                let references = match &row.event.payload {
+                    ForgeEventPayload::PullRequestChangedNative(change) => {
+                        Some((&change.data.source_ref, &change.data.target_ref))
+                    }
+                    ForgeEventPayload::MergeCommittedNative(merge) => {
+                        Some((&merge.source_ref, &merge.target_ref))
+                    }
+                    _ => None,
+                };
+                if let Some((source, target)) = references {
+                    validate_candidate_namespace(template, source).map_err(selection)?;
+                    validate_candidate_namespace(template, target).map_err(selection)?;
+                }
+            }
             let ForgeEventPayload::PullRequestChangedNative(change) = &row.event.payload else {
                 continue;
             };

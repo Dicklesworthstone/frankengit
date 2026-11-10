@@ -160,16 +160,16 @@ impl WorkflowWatchConfig {
     /// Discover visible open native PRs targeting the fixed `reference`.
     /// Every retained PR, including closed or hidden members, counts toward
     /// this lifetime custody bound and is reconciled before new execution.
-    /// This is source-head-only trusted host execution, never a merge profile.
+    /// Source-head execution is the default. Explicit collection candidate
+    /// configuration selects a distinct CI branch for each canonical PR.
     pub fn with_pull_requests(mut self, max_members: usize) -> io::Result<Self> {
         if !self.reference.as_bytes().starts_with(b"refs/heads/")
             || !(1..=64).contains(&max_members)
             || self.pull_request.is_some()
             || self.merge_queue.is_some()
-            || self.merge_candidate.is_some()
         {
             return Err(invalid(
-                "PR collection requires a branch and 1..64 retained members and excludes fixed PR, queue and merge-candidate selectors",
+                "PR collection requires a branch and 1..64 retained members and excludes fixed PR and queue selectors",
             ));
         }
         self.pull_requests = Some(max_members);
@@ -225,10 +225,37 @@ impl WorkflowWatchConfig {
         Ok(self)
     }
 
+    /// Test each discovered PR's actual combined tree on a distinct CI ref.
+    /// The configuration's reference is an operator-owned namespace stem:
+    /// PR `n` uses `<stem>/pr-<n>`, never the stem itself. This separately
+    /// authorizes ordinary exact-old creation/replacement of those CI refs.
+    /// The namespace, writer and deterministic commit inputs bind permanently
+    /// to the collection's existing custody scope; changing modes cannot
+    /// abandon source-head executions already owned by that collection.
+    pub fn with_pull_request_merge_candidates(
+        mut self,
+        config: PullRequestMergeWatchConfig,
+    ) -> io::Result<Self> {
+        if self.pull_requests.is_none() || self.pull_request.is_some() || self.merge_queue.is_some()
+        {
+            return Err(invalid(
+                "collection merge candidates require a PR collection selector",
+            ));
+        }
+        pull_requests::validate_candidate_namespace(&config, &self.reference)?;
+        self.merge_candidate = Some(config);
+        Ok(self)
+    }
+
     /// Validate the complete operator configuration without opening storage,
     /// acquiring custody or admitting execution. Call after composing operator
     /// options; this final check also guards infallible publisher selection.
     pub fn validate(&self) -> io::Result<()> {
+        if self.pull_requests.is_some()
+            && let Some(merge) = &self.merge_candidate
+        {
+            pull_requests::validate_candidate_namespace(merge, &self.reference)?;
+        }
         if self.reference.as_bytes().starts_with(b"refs/tags/")
             && (self.publisher.is_some()
                 || self.landing_principal.is_some()
