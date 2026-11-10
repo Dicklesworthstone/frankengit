@@ -20,6 +20,7 @@ mod pull_request;
 mod pull_request_merge;
 mod queue_landing;
 mod queue_refresh;
+mod ref_selection;
 mod reporting;
 pub mod service;
 
@@ -662,8 +663,18 @@ impl OneNode {
             return Ok(Selection::Absent);
         };
         let head = state.basis().id();
-        let history = match self.snapshot_history_in(request).await {
-            Ok(history) => history,
+        let event = match ref_selection::latest_change_at(
+            &self.authority,
+            request.authority(),
+            state.basis(),
+            reference,
+            tip,
+            fgit_authority::MAX_REPLAY_BATCHES,
+            &|| !workspace_request_live(request),
+        )
+        .await
+        {
+            Ok(event) => event,
             Err(error) if cancellation::materialization(&error) => {
                 return Ok(Selection::StoppedBeforeReservation);
             }
@@ -686,26 +697,10 @@ impl OneNode {
         {
             return Ok(Selection::ChangedBeforeReservation);
         }
-        // snapshot_history_in authenticates the COMPLETE bounded history to
-        // empty genesis, oldest first; it never returns a truncated prefix.
-        // The first matching row is this event, the next is its exact old
-        // ref value. Preserve a deletion as None: skipping it would reuse a
-        // previous branch incarnation. This is neither a Git first parent nor
-        // the last tip this particular polling process happened to observe.
-        let mut changes = history.iter().rev().filter_map(|batch| {
-            batch
-                .ref_updates
-                .iter()
-                .find(|(name, _)| name == reference.as_bytes())
-                .map(|(_, value)| (batch, *value))
-        });
-        let (event, value) = changes
-            .next()
-            .ok_or_else(|| invalid("current ref has no authenticated change event"))?;
-        if value != Some(tip) {
-            return Err(invalid("ref event does not match the current reference"));
-        }
-        let previous_tip = changes.next().and_then(|(_, value)| value);
+        // The verified suffix ends at the latest net change of this ref.
+        // Its exact predecessor map carries deletion/recreation as None; no
+        // earlier event or forge payload is needed to establish the old tip.
+        let previous_tip = event.previous_tip;
         let (commit, previous_commit, tag_update) =
             if reference.as_bytes().starts_with(b"refs/tags/") {
                 let tag = match self.workflow_tag_in(request, reference, Some(head)).await {
