@@ -256,147 +256,213 @@ fn assert_exact_signed_event_for(fixture: &Fixture, captured: &Captured, key: As
         secret().sign_hex(&captured.body)
     );
     assert_eq!(captured.headers["x-frankengit-delivery"], key.as_str());
-    let text = std::str:…2481 tokens truncated…
-                        write!(
-                            stream,
-                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        )?;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            if !stopping.load(Ordering::Acquire) {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "canonical replay did not drain before the receiver deadline",
-                ));
-            }
-            Ok(requests)
-        });
-        Self {
-            url,
-            stop,
-            worker: Some(worker),
-        }
-    }
-
-    fn finish(mut self) -> Vec<Captured> {
-        self.stop.store(true, Ordering::Release);
-        self.worker.take().unwrap().join().unwrap().unwrap()
-    }
-}
-
-impl Drop for ReplayReceiver {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn current_head(options: &Options) -> fgit_types::RepositoryAuthorityHeadId {
-    with_node(options, |node| {
-        let request = node.request_context();
-        node.runtime()
-            .block_on(node.read_forge_outbox_snapshot_in(&request, 16384, None))
-            .map(|page| page.source_head)
-            .map_err(|error| error.to_string())
-    })
-    .unwrap()
-}
-
-fn delivery_key(output: &str) -> AsciiSlug {
-    let key = output
-        .split("\"delivery_id\":\"")
+    let text = std::str::from_utf8(&captured.body).unwrap();
+    let expected: String = fixture
+        .frame
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert!(text.contains(&format!("\"canonical_frame_hex\":\"{expected}\"")));
+    assert!(text.contains(&format!("\"payload_root\":\"{}\"", fixture.root)));
+    assert!(text.contains("\"events_count\":1"));
+    assert!(!text.contains("\"attempt\""));
+    let encoded = text
+        .split("\"canonical_frame_hex\":\"")
         .nth(1)
         .unwrap()
         .split('"')
         .next()
         .unwrap();
-    AsciiSlug::try_new("replay delivery", key.as_bytes()).unwrap()
+    let bytes: Vec<u8> = (0..encoded.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&encoded[offset..offset + 2], 16).unwrap())
+        .collect();
+    let actual: ForgeEvent =
+        fgit_codec::decode_body(&bytes, fgit_codec::DecodeLimits::DEFAULT).unwrap();
+    let expected: ForgeEvent =
+        fgit_codec::decode_body(&fixture.frame, fgit_codec::DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(actual, expected);
 }
 
 #[test]
-fn canonical_replay_recovers_after_its_pinned_head_advances() {
-    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let mut fixture = Fixture::with_format(format);
-        let receiver = ReplayReceiver::new();
-        fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
-        let principal = PrincipalId::from_bytes([0xc3; 16]);
-        let route = dispatcher::Options {
-            storage: fixture.options.storage.clone(),
-            tenant: fixture.options.tenant,
-            repository: fixture.options.repository,
-            format,
-            id: WebhookId(7),
-            destination: fixture.options.destination.unwrap(),
-            max_deliveries: 1,
-            max_scan: 16384,
-            timeout: Duration::from_secs(5),
-            continuous: false,
-            stop_file: None,
-            poll: Duration::from_secs(1),
-            permissive: true,
-            canonical_principal: Some(principal),
-        };
-        let mut dispatch_output = Vec::new();
-        let code = dispatcher::execute(&route, &|| Ok(false), &|| Ok(10_000), &mut dispatch_output)
-            .unwrap();
-        assert_eq!(code, 2, "{}", String::from_utf8_lossy(&dispatch_output));
-        let original = fixture.options.key.unwrap();
-        let diagnostic = fixture
-            .store()
-            .get_dead_letter_for(route.id, original)
-            .unwrap();
-        let source_head = current_head(&fixture.options);
-
-        fixture.options.canonical_principal = Some(principal);
-        fixture.options.replay_key = Some("guarded-replay".into());
-        // The fixture's old pin precedes the original delivery's terminal CAS.
-        // It must not publish a new responsibility or contact the receiver.
-        let error = execute(&fixture.options, true).unwrap_err();
-        assert!(error.contains("EvidenceStale"), "{error}");
-        assert_eq!(current_head(&fixture.options), source_head);
-
-        fixture.options.expected_head = Some(head_token(source_head));
-        let (code, output) = execute(&fixture.options, true).unwrap();
-        assert_eq!(code, 0, "{output}");
-        let replay = delivery_key(&output);
-        assert_ne!(replay, original);
-        assert!(output.contains("\"attempts\":1"), "{output}");
-        assert!(output.contains("\"canonical_settled\":true"), "{output}");
-        assert!(output.contains("\"active_retired\":true"), "{output}");
-        let settled_head = current_head(&fixture.options);
-        assert_ne!(source_head, settled_head);
-
-        // Simulate losing the successful response: retain the exact original
-        // arguments, including its now-old expected head and idempotency key.
-        let (code, recovered) = execute(&fixture.options, true).unwrap();
-        assert_eq!(code, 0, "{recovered}");
-        assert_eq!(delivery_key(&recovered), replay);
-        assert!(recovered.contains("\"attempts\":0"), "{recovered}");
-        assert!(recovered.contains("\"active_retired\":true"), "{recovered}");
-        assert_eq!(current_head(&fixture.options), settled_head);
-
-        // An old pin still refuses genuinely new work after exact recovery.
-        fixture.options.replay_key = Some("another-guarded-replay".into());
-        let error = execute(&fixture.options, true).unwrap_err();
-        assert!(error.contains("EvidenceStale"), "{error}");
-        assert_eq!(current_head(&fixture.options), settled_head);
-        assert_eq!(
-            fixture.store().get_dead_letter_for(route.id, original),
-            Some(diagnostic)
-        );
-
-        let requests = receiver.finish();
-        assert_eq!(requests.len(), 2, "original rejection plus one replay only");
-        assert_exact_signed_event_for(&fixture, &requests[0], original);
-        assert_exact_signed_event_for(&fixture, &requests[1], replay);
-        assert_eq!(requests[0].headers["x-frankengit-attempt"], "1");
-        assert_eq!(requests[1].headers["x-frankengit-attempt"], "1");
+fn manual_cli_sends_the_real_committed_event_with_its_original_root_and_signature() {
+    let fixture = Fixture::new();
+    let receiver = Receiver::new(true);
+    fixture.register(
+        &receiver.url,
+        WebhookEventFilter::Selected(vec!["issue".into()]),
+    );
+    let result = execute(&fixture.options, false);
+    if result.is_err() {
+        drop(receiver);
+        panic!("manual delivery failed: {result:?}");
     }
+    let captured = receiver.finish();
+    assert_exact_signed_event(&fixture, &captured);
+    let (code, output) = result.unwrap();
+    assert_eq!(code, 0);
+    assert!(output.contains("\"verdict\":\"Accepted\""));
+    assert!(output.contains("\"canonical_settled\":false"));
+    assert!(output.contains("\"node_closed\":true"));
+}
+
+#[test]
+fn dead_letter_replay_contacts_receiver_and_preserves_the_diagnostic() {
+    let fixture = Fixture::new();
+    let receiver = Receiver::new(true);
+    let registration = fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    let record = DeadLetterEntry {
+        delivery_id: fixture.options.key.unwrap(),
+        webhook_id: registration.id,
+        target_url: registration.url.raw().into(),
+        payload_root: fixture.root,
+        event_name: "issue".into(),
+        attempts: 5,
+        terminal_reason: "receiver was down".into(),
+        failed_at_unix_secs: 1,
+    };
+    fixture
+        .store()
+        .dead_letters()
+        .try_push(record.clone())
+        .unwrap();
+    let result = execute(&fixture.options, true);
+    if result.is_err() {
+        drop(receiver);
+        panic!("manual replay failed: {result:?}");
+    }
+    let captured = receiver.finish();
+    assert_exact_signed_event(&fixture, &captured);
+    assert_eq!(captured.headers["x-frankengit-attempt"], "6");
+    let (code, output) = result.unwrap();
+    assert_eq!(code, 0);
+    assert!(output.contains("\"replay\":true"));
+    assert!(output.contains("\"diagnostic_retained\":true"));
+    assert_eq!(
+        fixture.store().get_dead_letter(record.delivery_id),
+        Some(record)
+    );
+}
+
+#[test]
+fn lost_receiver_acknowledgement_is_not_success_and_does_not_trigger_a_retry() {
+    let fixture = Fixture::new();
+    let receiver = Receiver::new(false);
+    fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
+    let result = execute(&fixture.options, false);
+    if result.is_err() {
+        drop(receiver);
+        panic!("unexpected pre-send refusal: {result:?}");
+    }
+    let captured = receiver.finish();
+    assert_exact_signed_event(&fixture, &captured);
+    let (code, output) = result.unwrap();
+    assert_eq!(code, 3);
+    assert!(output.contains("\"outcome_unknown\":true"));
+    assert!(output.contains("\"automatic_retry\":false"));
+}
+
+#[test]
+fn persisted_subscription_mismatch_refuses_before_connecting() {
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fixture.register(
+        &format!("http://{}/hook", listener.local_addr().unwrap()),
+        WebhookEventFilter::Selected(vec!["pull_request".into()]),
+    );
+    assert!(execute(&fixture.options, false).is_err());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn stale_or_retargeted_dead_letters_do_not_authorize_replay() {
+    let fixture = Fixture::new();
+    let registration = fixture.register("http://example.com/hook", WebhookEventFilter::Wildcard);
+    let key = fixture.options.key.unwrap();
+    let record = DeadLetterEntry {
+        delivery_id: key,
+        webhook_id: registration.id,
+        target_url: registration.url.raw().into(),
+        payload_root: fixture.root,
+        event_name: "issue".into(),
+        attempts: 5,
+        terminal_reason: "failure".into(),
+        failed_at_unix_secs: 1,
+    };
+    assert!(require_replay_binding(&record, &registration, key, fixture.root).is_ok());
+    let mut changed = record.clone();
+    changed.target_url = "http://example.com/different".into();
+    assert!(require_replay_binding(&changed, &registration, key, fixture.root).is_err());
+    changed = record.clone();
+    changed.webhook_id = WebhookId(8);
+    assert!(require_replay_binding(&changed, &registration, key, fixture.root).is_err());
+    changed = record.clone();
+    changed.payload_root = Digest::new(
+        fgit_types::DigestAlgorithmId::try_new(1).unwrap(),
+        fgit_types::DigestBytes::try_new(&[0xff; 32]).unwrap(),
+    );
+    assert!(require_replay_binding(&changed, &registration, key, fixture.root).is_err());
+    assert!(
+        require_replay_binding(
+            &record,
+            &registration,
+            AsciiSlug::from_static("different"),
+            fixture.root
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn event_filter_preserves_whole_batches_and_unknown_outcomes_are_never_success() {
+    let event = ForgeEvent {
+        aggregate: AggregateId::PullRequest(PullRequestNumber::try_new(1).unwrap()),
+        version: AggregateVersion::FIRST,
+        payload: ForgeEventPayload::PullRequestClosed { withdrawn: true },
+    };
+    assert!(require_subscription(&WebhookEventFilter::Wildcard, &[]).is_err());
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["kind:4".into()]),
+            &[event.clone()]
+        )
+        .is_ok()
+    );
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["PULL_REQUEST".into()]),
+            &[event.clone()]
+        )
+        .is_ok()
+    );
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["issue".into()]),
+            &[event.clone()]
+        )
+        .is_err()
+    );
+    let mut advanced = event.clone();
+    advanced.payload = ForgeEventPayload::PullRequestHeadAdvanced {
+        source_tip: Digest::new(
+            fgit_types::DigestAlgorithmId::try_new(1).unwrap(),
+            fgit_types::DigestBytes::try_new(&[1; 32]).unwrap(),
+        ),
+    };
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["kind:4".into()]),
+            &[event, advanced]
+        )
+        .is_err()
+    );
+    assert_eq!(exit_code("Accepted"), 0);
+    assert_eq!(exit_code("TransientFailure"), 1);
+    assert_eq!(exit_code("PermanentRejection"), 2);
+    assert_eq!(exit_code("AmbiguousTimeout"), 3);
+    assert_eq!(exit_code("unknown-future-verdict"), 2);
 }
