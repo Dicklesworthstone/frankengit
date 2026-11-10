@@ -45,8 +45,11 @@ bounded retry allowance across both observations for rate limits and transient
 retry delays are never shortened to fit that deadline. Native writes do not
 inherit this policy and still require their original explicit retry custody.
 Inspect prints the complete exact native command proposal without sending it.
-Source authors, times, assignees, milestones, label metadata and locked status
-are attributed source data, NOT native permissions, historical events or roles.
+New captures use v2 and preserve final discussion locks after all comments and
+any close, under the existing native issue-write grant. Locked open issues remain
+open. Saved v1 captures/plans keep their exact commands and keys; their locks stay
+attribution only. Source authors, times, assignees, milestones and label metadata
+remain attributed data, not native permissions, historical events or roles.
 The GitHub credential is used only with api.github.com and is never saved.
 This Unix operator requires private files and a private existing output parent.
 

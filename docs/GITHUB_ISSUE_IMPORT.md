@@ -10,16 +10,31 @@ and every canonical terminal decision.
 
 The imported native state includes issue titles, literal source bodies, label
 names, every captured current comment in source-ID order, and final open/closed
-state. A provenance block precedes each imported body. It retains original URLs,
+and locked/unlocked state for new captures. A provenance block precedes each
+imported body. It retains original URLs,
 repository/issue/comment numeric aliases, author IDs and logins, creation/update
 times, label details, assignees, milestone summary, state reason and locked flag.
 The original body is an unchanged suffix, including its line endings.
 
-**Source metadata is attribution only.** All new native events belong to the
+**Source identities and history remain attribution only.** All new native events belong to the
 principal authenticated by the destination token. Source authors are not enrolled
 as native accounts; assignees do not become native assignments, source timestamps
-do not become audit timestamps, and a source lock does not install access policy.
+do not become audit timestamps, and a source lock grants no access or permission.
+The destination's existing issue-write grant authorizes a separate ordinary lock
+command after the imported discussion and final close. Locked open issues remain
+open; locked closed issues remain closed. Unlocked sources require no unlock
+because every new destination issue starts unlocked.
 GitHub IDs remain source aliases, separate from native authority identities.
+
+New `capture` and `capture-batch` operations use
+`frankengit-github-issue-capture-v2`. V2 retains the same exact source field set
+and provenance, and its compiler preserves the final lock. Capture v1 stays
+frozen: its source lock is attribution only, and its compiled commands, saved
+request bodies, plan hashes and retry keys remain unchanged. Readers accept both
+dialects and reject malformed lock values or unknown versions. Never rewrite a
+saved capture or plan to upgrade it after native requests have been prepared.
+The source capture digest already binds the dialect in every import manifest;
+there is no additional destination publication format or permission bypass.
 
 This is an issue/comment snapshot migration, **not a full GitHub repository
 import**. Pull requests are explicitly refused. Git commits, reviews, reactions,
@@ -84,7 +99,10 @@ Source IDs retain exact full-width unsigned-64-bit decimal values; destination
 issue numbers and versions must fit the shipped client's exact safe-integer
 profile. Native title, body, label and encoded-form limits also apply **after**
 adding provenance. Nothing is silently truncated. The native step proposal itself
-must fit 1 MiB. Large migrations require explicitly selected disjoint batches.
+must fit 1 MiB and 2,200 commands, including final closes and locks. A source
+package can fit its input limits and still exceed this compiled-command envelope;
+it refuses before becoming a usable capture. Large migrations require explicitly
+selected disjoint batches.
 
 ## Prepare a destination plan
 
@@ -137,6 +155,11 @@ or a grant; the shipped client uses it only to tighten later response checks.
 
 For each issue, the plan opens version zero, appends comments against exact
 successive predecessor versions, then closes it if the captured source is closed.
+For capture v2, a source-locked issue is locked last using its next exact
+predecessor version. Locking earlier would block the imported comments. A
+mutation-budget stop before this command leaves the existing request for the
+next invocation. A lost lock response is resolved through its original key;
+neither a new key nor a second moderation command is generated.
 It neither overwrites occupied issues nor adapts to another writer's version.
 All original request records are already sealed by preparation. Run verifies the
 complete set against the manifest before network access, then uses the shipped
@@ -217,7 +240,10 @@ separately carries `completed_result`; the exit status does not undo publication
 node --test \
   tests/operator/issue-native-absence.test.mjs \
   tests/operator/github-issue-source.test.mjs \
-  tests/operator/github-issue-import.test.mjs
+  tests/operator/github-issue-import.test.mjs \
+  tests/operator/github_issue_capture_compatibility.test.mjs \
+  tests/operator/github_issue_lock_capture.test.mjs \
+  tests/operator/github_issue_lock_migration.test.mjs
 ```
 
 These tests execute the shipped JavaScript capture/compiler, IssueClient,
@@ -226,6 +252,14 @@ responses are controlled GitHub fixtures; the loopback receiver is explicitly a
 native-schema contract peer, **not `fg`**. They do not establish native
 policy/CAS correctness, live GitHub compatibility, production TLS behavior,
 hardware crash durability or full FG-049 acceptance.
+
+The lock regressions cover all open/closed and locked/unlocked combinations,
+source changes between observations, exact command limits, complete migration
+preflight, interruption before the final lock, lost replies, explicit original-key
+retry and changed later requests. Frozen v1 data from `5ddaab7c` checks every
+capture, compiled-plan, request and retry-key commitment, including already locked
+sources. A pre-upgrade acquisition-session regression resumes only its missing
+batch in the original v1 dialect.
 
 The native destination campaign is
 `scripts/e2e/suites/operator/github_issue_migration.sh`, discovered by

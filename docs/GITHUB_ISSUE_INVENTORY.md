@@ -102,8 +102,10 @@ never rediscovers membership, follows an alternate repository, changes its size,
 or silently includes issues created after the inventory. Captured bodies and
 comments are fresh two-observation source reads, not bodies frozen at discovery.
 
-The saved output is the unchanged `frankengit-github-issue-capture-v1` format,
-including complete captured comments and attributed source metadata. The
+New saved output uses `frankengit-github-issue-capture-v2`, including complete
+captured comments, attributed source metadata and final discussion lock
+preservation. Previously saved v1 captures keep their original interpretation
+and remain inspectable and importable; they gain no extra lock command. The
 existing `captureBytes`, `parseCapture`, `issueImportSteps`, and native command
 form constraints remain the validators; this feature does not invent another
 publication format. The command summary separately carries `selection`, binding
