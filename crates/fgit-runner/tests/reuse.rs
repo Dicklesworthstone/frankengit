@@ -455,9 +455,14 @@ fn observations<'a>(
     receipts: &'a [CheckReceipt; 2],
 ) -> [ReuseReverification<'a>; 2] {
     std::array::from_fn(|index| {
+        // Fresh fixture executions advance both their evidence-bound order
+        // and their identity; replaying a receipt retains the same identity.
         ReuseReverification::new(
             &inputs[index],
-            run_id(&format!("recovery-{index}")),
+            run_id(&format!(
+                "recovery-{index}-{}",
+                receipts[index].logical_order()
+            )),
             &receipts[index],
         )
     })
@@ -660,8 +665,11 @@ fn renamed_original_receipts_and_nonadvancing_orders_are_never_fresh_reexecution
         assert_eq!(fixture.quarantine(), witness);
     }
     let mut duplicate_runs = observations(&fixture.inputs, &matching);
-    duplicate_runs[1] =
-        ReuseReverification::new(&fixture.inputs[1], run_id("recovery-0"), &matching[1]);
+    duplicate_runs[1] = ReuseReverification::new(
+        &fixture.inputs[1],
+        run_id(&format!("recovery-0-{}", matching[0].logical_order())),
+        &matching[1],
+    );
     assert_eq!(
         fixture
             .store

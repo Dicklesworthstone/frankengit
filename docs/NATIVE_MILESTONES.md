@@ -159,7 +159,9 @@ date, supply its decimal string to replace it, or supply `null` to clear it.
 Milestone webhook selection uses the explicit `milestone` family or `kind:22`.
 An issue-only subscription does not silently gain milestone lifecycle events.
 The existing scoped `issues-pulls-v1` event API retains its declared families;
-milestone history is available through the milestone read surface.
+milestone history is available through the milestone read surface. Integrations
+can also select the explicit [`collaboration-v2` event profile](SCOPED_FORGE_EVENT_FEED.md)
+to include milestone lifecycle events under the existing issue-read grant.
 
 ## Browser planning
 

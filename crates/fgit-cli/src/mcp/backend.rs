@@ -283,7 +283,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.outcomes {
         tools.extend(outcomes::tools());
     }
-    if options.issues || options.pulls {
+    if options.issues || options.pulls || options.discussions {
         tools.push(events::tool());
     }
     tools.extend(review::tools(options.source, options.pulls));
@@ -415,7 +415,9 @@ impl NodeTools {
         if queues::permitted(self.options.queues, self.options.writes.pulls, name) {
             return queues::call(self, name, args);
         }
-        if name == events::NAME && (self.options.issues || self.options.pulls) {
+        if name == events::NAME
+            && (self.options.issues || self.options.pulls || self.options.discussions)
+        {
             return events::call(self, args);
         }
         if self.options.writes.issues && issue_writes::is_tool(name) {

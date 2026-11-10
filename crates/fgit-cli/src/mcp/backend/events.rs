@@ -1,18 +1,39 @@
-//! Canonical issue/PR event retrieval through independent launch-time read
+//! Canonical collaboration event retrieval through independent launch-time read
 //! grants. The node owns filtering, source selection and cursor advancement.
 use super::*;
+use fgit_node::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 
 pub(super) const NAME: &str = "frankengit_events";
 
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Read canonical issue and PR events under the existing independent read grants. Cursor-paged and read-only. limit bounds scanned events, so an empty page may have next_after. Save resume_after for polling at a later head. Optional expected_head refuses snapshot movement. Cursors reveal repository activity and position gaps; no ungranted event payload is disclosed. No webhook acknowledgement, event append, long-poll or indexed-read claim.",
+        description: "Read canonical events under independent read grants. The default issues-pulls-v1 profile preserves issue/PR lifecycle and merge events. Opt into collaboration-v2 for milestones under issues, PR conversations and review votes under pulls, and discussions under discussions. Cursor-paged and read-only. limit bounds scanned events, so an empty page may have next_after. Save resume_after with the repository, profile and grants for polling. Optional expected_head refuses snapshot movement. Cursors reveal repository activity and position gaps; no ungranted event payload is disclosed. No webhook acknowledgement, event append, long-poll or indexed-read claim.",
         schema: object([
             ("type", text("object")),
             (
                 "properties",
                 object([
+                    (
+                        "profile",
+                        object([
+                            ("type", text("string")),
+                            (
+                                "enum",
+                                Value::Array(vec![
+                                    text("issues-pulls-v1"),
+                                    text("collaboration-v2"),
+                                ]),
+                            ),
+                            ("default", text("issues-pulls-v1")),
+                            (
+                                "description",
+                                text(
+                                    "Select event families; this never widens the process's read grants.",
+                                ),
+                            ),
+                        ]),
+                    ),
                     (
                         "after",
                         object([
@@ -63,9 +84,15 @@ struct Query {
     after: Option<(u64, u32)>,
     limit: u16,
     expected_head: Option<RepositoryAuthorityHeadId>,
+    disclosure_profile: ForgeEventDisclosureProfile,
 }
 fn parse(args: &Object) -> Result<Query, ToolError> {
-    require_fields(args, &["after", "limit", "expected_head"])?;
+    require_fields(args, &["after", "limit", "expected_head", "profile"])?;
+    let disclosure_profile = match string(args, "profile")? {
+        None | Some("issues-pulls-v1") => ForgeEventDisclosureProfile::IssuesPullsV1,
+        Some("collaboration-v2") => ForgeEventDisclosureProfile::CollaborationV2,
+        Some(_) => return Err(ToolError::invalid("invalid_event_profile")),
+    };
     let after = OneNode::parse_forge_event_feed_cursor(string(args, "after")?.unwrap_or("0"))
         .map_err(|_| ToolError::invalid("invalid_event_cursor"))?;
     let limit = args
@@ -84,6 +111,7 @@ fn parse(args: &Object) -> Result<Query, ToolError> {
         after,
         limit: limit as u16,
         expected_head,
+        disclosure_profile,
     })
 }
 fn cursor(cursor: Option<(u64, u32)>) -> Value {
@@ -94,7 +122,7 @@ fn cursor(cursor: Option<(u64, u32)>) -> Value {
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     // Direct handler calls have the same guard as registry/dispatch, before
     // parsing or authority I/O. Write or source grants cannot disclose events.
-    if !backend.options.issues && !backend.options.pulls {
+    if !backend.options.issues && !backend.options.pulls && !backend.options.discussions {
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let query = parse(args)?;
@@ -102,16 +130,22 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let page = backend
         .node
         .runtime()
-        .block_on(backend.node.read_scoped_forge_events_in(
+        .block_on(backend.node.read_profiled_forge_events_in(
             &request,
             query.after,
             query.limit,
             query.expected_head,
-            backend.options.issues,
-            backend.options.pulls,
+            query.disclosure_profile,
+            ForgeEventReadGrants {
+                issues: backend.options.issues,
+                pulls: backend.options.pulls,
+                discussions: backend.options.discussions,
+                // MCP review reads already share the trusted-local pulls grant.
+                reviews: backend.options.pulls,
+            },
         ))
         .map_err(|error| match error.public_code() {
-            "invalid_event_limit" | "invalid_event_cursor" => {
+            "invalid_event_limit" | "invalid_event_cursor" | "events_not_granted" => {
                 ToolError::invalid(error.public_code())
             }
             _ => ToolError::failed(error.public_code()),
@@ -121,7 +155,10 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         ("type".into(), text("forge_event_page")),
         ("schema_version".into(), json::number(1)),
         ("source_head".into(), text(page.source_head().to_string())),
-        ("disclosure_profile".into(), text("issues-pulls-v1")),
+        (
+            "disclosure_profile".into(),
+            text(page.disclosure_profile().as_str()),
+        ),
         ("issues_read".into(), Value::Bool(page.issues_read())),
         ("pulls_read".into(), Value::Bool(page.pulls_read())),
         ("omits_other_event_families".into(), Value::Bool(true)),
@@ -155,6 +192,15 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         ("has_more".into(), Value::Bool(page.next_after().is_some())),
         ("complete".into(), Value::Bool(page.next_after().is_none())),
     ]);
+    if page.disclosure_profile() == ForgeEventDisclosureProfile::CollaborationV2 {
+        result.extend([
+            (
+                "discussions_read".into(),
+                Value::Bool(page.discussions_read()),
+            ),
+            ("reviews_read".into(), Value::Bool(page.reviews_read())),
+        ]);
+    }
     let result = Value::Object(result);
     result
         .encode(super::super::protocol::MAX_TOOL_RESULT)

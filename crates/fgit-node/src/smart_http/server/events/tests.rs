@@ -26,6 +26,8 @@ fn strict_get_route_query_and_exact_cursor_have_permitted_twins() {
         "/repo.git/api/v1/events",
         "/repo.git/api/v1/events?after=0",
         "/repo.git/api/v1/events?after=1%3A0&limit=1",
+        "/repo.git/api/v1/events?profile=issues-pulls-v1",
+        "/repo.git/api/v1/events?profile=collaboration-v2&after=0&limit=100",
     ] {
         assert!(is_route(target));
         let bytes = raw("GET", target, "");
@@ -43,6 +45,10 @@ fn strict_get_route_query_and_exact_cursor_have_permitted_twins() {
     assert_eq!(query.after, Some((u64::MAX, u32::MAX)));
     assert_eq!(query.limit, 100);
     assert!(query.expected_head.is_none());
+    assert_eq!(
+        query.disclosure_profile,
+        ForgeEventDisclosureProfile::IssuesPullsV1
+    );
     for target in [
         "/repo.git/api/v1/events/1",
         "/repo.git/api/v1/events-evil",
@@ -58,6 +64,12 @@ fn strict_get_route_query_and_exact_cursor_have_permitted_twins() {
         "/repo.git/api/v1/events?issues_read=true",
         "/repo.git/api/v1/events?expected_head=garbage",
         "/repo.git/api/v1/events?after=%ff",
+        "/repo.git/api/v1/events?profile=collaboration-v3",
+        "/repo.git/api/v1/events?profile=COLLABORATION-v2",
+        "/repo.git/api/v1/events?profile=",
+        "/repo.git/api/v1/events?profile=issues-pulls-v1&%70rofile=collaboration-v2",
+        "/repo.git/api/v1/events?profile=collaboration-v2&reviews_read=true",
+        "/repo.git/api/v1/events?profile=collaboration-v2&discussions_read=true",
     ] {
         let bytes = raw("GET", target, "");
         let envelope = head::parse(&bytes, HttpLimits::default()).unwrap().unwrap();
@@ -256,6 +268,94 @@ fn credentials_and_endpoint_ceilings_cannot_be_widened_by_other_grants_or_reques
 }
 
 #[test]
+fn collaboration_profile_intersects_each_read_scope_with_its_endpoint_ceiling() {
+    let scratch = Scratch::new();
+    let incarnation = RepositoryIncarnationId::from_bytes([0xc4; 16]);
+    let binding = Binding {
+        tenant: TenantId::from_bytes([0xc1; 16]),
+        repository: RepositoryId::from_bytes([0xc2; 16]),
+        incarnation,
+    };
+    let mut profile = scratch.profile(scratch.config(GitHashAlgorithm::Sha1), incarnation, "read");
+    let bytes = raw(
+        "GET",
+        "/repo.git/api/v1/events?profile=collaboration-v2",
+        &bearer(),
+    );
+    let envelope = head::parse(&bytes, profile.http).unwrap().unwrap();
+    let query = Request::parse(&envelope).unwrap();
+    let legacy_bytes = raw(
+        "GET",
+        "/repo.git/api/v1/events?profile=issues-pulls-v1",
+        &bearer(),
+    );
+    let legacy_envelope = head::parse(&legacy_bytes, profile.http).unwrap().unwrap();
+    let legacy = Request::parse(&legacy_envelope).unwrap();
+    for permissions in 0_u8..16 {
+        let mut scopes = vec![
+            "read",
+            "issues-write",
+            "pulls-write",
+            "discussions-write",
+            "reviews-write",
+        ];
+        for (bit, scope) in [
+            "issues-read",
+            "pulls-read",
+            "discussions-read",
+            "reviews-read",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if permissions & (1 << bit) != 0 {
+                scopes.push(scope);
+            }
+        }
+        scratch.credentials(binding, &scopes.join(","));
+        for ceilings in 0_u8..8 {
+            profile.services = RepositoryHttpServices::NONE
+                .with(RepositoryHttpService::Issues, ceilings & 1 != 0)
+                .with(RepositoryHttpService::Pulls, ceilings & 2 != 0);
+            profile.config = if ceilings & 4 != 0 {
+                scratch
+                    .config(GitHashAlgorithm::Sha1)
+                    .with_http_discussions()
+            } else {
+                scratch.config(GitHashAlgorithm::Sha1)
+            };
+            let expected = (
+                permissions & 1 != 0 && ceilings & 1 != 0,
+                permissions & 2 != 0 && ceilings & 2 != 0,
+                permissions & 4 != 0 && ceilings & 4 != 0,
+                permissions & 8 != 0 && ceilings & 2 != 0,
+            );
+            let actual = authenticate(&profile, &envelope, &query);
+            if expected.0 || expected.1 || expected.2 || expected.3 {
+                let grant = actual.unwrap();
+                assert_eq!(
+                    (grant.issues, grant.pulls, grant.discussions, grant.reviews),
+                    expected
+                );
+            } else {
+                assert_eq!(actual.unwrap_err().status, Status::Forbidden);
+            }
+            let actual = authenticate(&profile, &legacy_envelope, &legacy);
+            if expected.0 || expected.1 {
+                let grant = actual.unwrap();
+                assert_eq!(
+                    (grant.issues, grant.pulls, grant.discussions, grant.reviews),
+                    (expected.0, expected.1, false, false)
+                );
+            } else {
+                assert_eq!(actual.unwrap_err().status, Status::Forbidden);
+            }
+        }
+    }
+    assert!(!scratch.0.join("node").exists());
+}
+
+#[test]
 fn refused_http_responses_are_typed_bearer_only_and_never_open_a_missing_repository() {
     let scratch = Scratch::new();
     let profile = scratch.profile(
@@ -428,6 +528,152 @@ fn real_node_http_reads_exact_frames_and_closes_failed_output_before_retry() {
         let mut twin = Vec::new();
         assert_eq!(serve(&profile, &envelope, &[], &mut twin), Ok(()));
         assert_eq!(String::from_utf8(twin).unwrap(), response);
+        profile.nodes.close().unwrap();
+    }
+}
+
+#[test]
+fn persisted_collaboration_http_feed_keeps_legacy_bytes_and_rotates_family_grants() {
+    use crate::LoopbackReceiveSession;
+    use fgit_authority::IdempotencyKey;
+    use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand};
+    use fgit_forge::event::milestone::{MilestoneAction, MilestoneCommand};
+    use fgit_forge::{DiscussionNumber, ExpectedVersion, MilestoneNumber};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let config = scratch.config(format).with_http_discussions();
+        let (mut node, _) = OneNode::init(config.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let incarnation = node.repository_incarnation_id();
+        let request = node.request_context();
+        let session = |key: &[u8]| {
+            LoopbackReceiveSession::authenticated(
+                PrincipalId::from_bytes([0xc3; 16]),
+                IdempotencyKey::new(key.to_vec()).unwrap(),
+            )
+        };
+        let (_, milestone) = node
+            .runtime()
+            .block_on(node.admit_milestone_durable_in(
+                &request,
+                &session(b"event-milestone"),
+                &MilestoneCommand {
+                    number: MilestoneNumber::try_new(1).unwrap(),
+                    expected_version: ExpectedVersion::NewStream,
+                    action: MilestoneAction::Open {
+                        title: "Release".into(),
+                        body: "Milestone event".into(),
+                        due_at: None,
+                    },
+                },
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            milestone.outcome,
+            fgit_types::DecisionOutcome::Committed { .. }
+        ));
+        let (_, discussion) = node
+            .runtime()
+            .block_on(node.admit_discussion_durable_in(
+                &request,
+                &session(b"event-discussion"),
+                &DiscussionCommand {
+                    number: DiscussionNumber::try_new(1).unwrap(),
+                    expected_version: ExpectedVersion::NewStream,
+                    action: DiscussionAction::Open {
+                        title: "Design".into(),
+                        body: "Discussion event".into(),
+                    },
+                },
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            discussion.outcome,
+            fgit_types::DecisionOutcome::Committed { .. }
+        ));
+        let legacy = node
+            .runtime()
+            .block_on(node.read_scoped_forge_events_in(&request, None, 20, None, true, false))
+            .unwrap()
+            .to_json()
+            .unwrap();
+        let page = node
+            .runtime()
+            .block_on(node.read_profiled_forge_events_in(
+                &request,
+                None,
+                20,
+                None,
+                ForgeEventDisclosureProfile::CollaborationV2,
+                ForgeEventReadGrants {
+                    issues: true,
+                    discussions: true,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(page.events().len(), 2);
+        let expected = page.to_json().unwrap();
+        let discussion_only = node
+            .runtime()
+            .block_on(node.read_profiled_forge_events_in(
+                &request,
+                None,
+                20,
+                None,
+                ForgeEventDisclosureProfile::CollaborationV2,
+                ForgeEventReadGrants {
+                    discussions: true,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(discussion_only.events().len(), 1);
+        let discussion_only = discussion_only.to_json().unwrap();
+        node.shutdown().unwrap();
+
+        let profile = scratch.profile(config, incarnation, "issues-read,discussions-read");
+        let read = |target: &str| {
+            let bytes = raw("GET", target, &bearer());
+            let envelope = head::parse(&bytes, profile.http).unwrap().unwrap();
+            let mut response = Vec::new();
+            let outcome = serve(&profile, &envelope, &[], &mut response);
+            let body = String::from_utf8(response)
+                .unwrap()
+                .split_once("\r\n\r\n")
+                .unwrap()
+                .1
+                .to_owned();
+            (outcome, body)
+        };
+        assert_eq!(read("/repo.git/api/v1/events"), (Ok(()), legacy.clone()));
+        assert_eq!(
+            read("/repo.git/api/v1/events?profile=issues-pulls-v1"),
+            (Ok(()), legacy)
+        );
+        assert_eq!(
+            read("/repo.git/api/v1/events?profile=collaboration-v2"),
+            (Ok(()), expected)
+        );
+        let binding = Binding {
+            tenant: TenantId::from_bytes([0xc1; 16]),
+            repository: RepositoryId::from_bytes([0xc2; 16]),
+            incarnation,
+        };
+        scratch.credentials(binding, "discussions-read");
+        assert_eq!(
+            read("/repo.git/api/v1/events?profile=collaboration-v2"),
+            (Ok(()), discussion_only)
+        );
+        assert_eq!(read("/repo.git/api/v1/events").0, Err(Status::Forbidden));
+        scratch.credentials(binding, "discussions-write,reviews-write,issues-write");
+        assert_eq!(
+            read("/repo.git/api/v1/events?profile=collaboration-v2").0,
+            Err(Status::Forbidden)
+        );
         profile.nodes.close().unwrap();
     }
 }

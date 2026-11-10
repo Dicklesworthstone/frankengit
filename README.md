@@ -323,6 +323,18 @@ browser supports safe Markdown, prepared changes and saved recovery receipts.
 See [native discussions](docs/NATIVE_DISCUSSIONS.md) for commands, scopes,
 recovery, pagination and the initial lifecycle profile's limits.
 
+### Collaboration event integrations
+
+The authenticated HTTP event endpoint and `frankengit_events` MCP tool accept
+an explicit `collaboration-v2` profile. It adds milestones, standalone
+discussions, PR conversations and review votes to the existing issue/PR event
+feed under their independent read grants. Returned frames retain the exact
+canonical bytes, and resumable cursors survive restart. PR conversations and
+reviews use the same selected authority and hidden-ref rules as their native
+readers. Existing clients retain the default `issues-pulls-v1` response. See
+[scoped collaboration events](docs/SCOPED_FORGE_EVENT_FEED.md) for profile
+selection, permission mapping, polling and work bounds.
+
 ### Native issue, discussion and pull request notifications
 
 Each principal can subscribe to, mute, or follow issue, discussion and pull request

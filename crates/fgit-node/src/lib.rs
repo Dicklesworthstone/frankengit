@@ -93,6 +93,7 @@ pub use treefs_workspace::{
     TrustedWorkflowRetainedArtifactInput, TrustedWorkflowRetainedArtifactProvenance,
     TrustedWorkflowRun, TrustedWorkflowStepLog,
 };
+pub use treefs_workspace::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };

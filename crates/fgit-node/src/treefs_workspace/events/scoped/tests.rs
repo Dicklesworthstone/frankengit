@@ -10,14 +10,14 @@ use std::cell::Cell;
 fn digest(byte: u8) -> DigestBytes {
     DigestBytes::try_new(&[byte; 32]).unwrap()
 }
-fn head() -> RepositoryAuthorityHeadId {
+pub(super) fn head() -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
         DigestAlgorithmId::try_new(1).unwrap(),
         CANONICAL_CODEC_VERSION,
         digest(1),
     )
 }
-fn issue(body: &str) -> ForgeEvent {
+pub(super) fn issue(body: &str) -> ForgeEvent {
     ForgeEvent {
         aggregate: AggregateId::Issue(IssueNumber::try_new(1).unwrap()),
         version: AggregateVersion::FIRST,
@@ -31,7 +31,7 @@ fn issue(body: &str) -> ForgeEvent {
         }),
     }
 }
-fn pull() -> ForgeEvent {
+pub(super) fn pull() -> ForgeEvent {
     ForgeEvent {
         aggregate: AggregateId::PullRequest(PullRequestNumber::FIRST),
         version: AggregateVersion::try_new(2).unwrap(),
@@ -49,7 +49,7 @@ fn pull() -> ForgeEvent {
         }),
     }
 }
-fn envelope(sequence: u64, event: ForgeEvent) -> ForgeEventEnvelope {
+pub(super) fn envelope(sequence: u64, event: ForgeEvent) -> ForgeEventEnvelope {
     ForgeEventEnvelope {
         cursor: ForgeEventCursor::new(sequence, 0).unwrap(),
         tx_id: TxId::from_digest(
@@ -61,7 +61,7 @@ fn envelope(sequence: u64, event: ForgeEvent) -> ForgeEventEnvelope {
         event,
     }
 }
-fn page(events: Vec<ForgeEventEnvelope>, more: bool) -> ForgeEventPage {
+pub(super) fn page(events: Vec<ForgeEventEnvelope>, more: bool) -> ForgeEventPage {
     ForgeEventPage {
         source_head: head(),
         next_after: if more {
@@ -72,15 +72,18 @@ fn page(events: Vec<ForgeEventEnvelope>, more: bool) -> ForgeEventPage {
         events,
     }
 }
-fn empty(issues: bool, pulls: bool, after: Option<(u64, u32)>) -> ScopedForgeEventPage {
+pub(super) fn empty(issues: bool, pulls: bool, after: Option<(u64, u32)>) -> ScopedForgeEventPage {
     ScopedForgeEventPage {
         tenant: TenantId::from_bytes([1; 16]),
         repository: RepositoryId::from_bytes([2; 16]),
         incarnation: RepositoryIncarnationId::from_bytes([3; 16]),
         format: GitHashAlgorithm::Sha1,
         source_head: head(),
+        profile: ForgeEventDisclosureProfile::IssuesPullsV1,
         issues_read: issues,
         pulls_read: pulls,
+        discussions_read: false,
+        reviews_read: false,
         events: Vec::new(),
         next_after: None,
         resume_after: after,

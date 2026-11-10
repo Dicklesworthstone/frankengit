@@ -13,9 +13,60 @@ use fgit_types::{
     RepositoryIncarnationId, TenantId, TxId,
 };
 
+mod collaboration;
+
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PAGE_FRAME_BYTES: usize = 512 * 1024;
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
+
+/// Explicit disclosure contract, independent of the caller's credentials.
+/// Selecting a wider profile never grants access to another event family.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ForgeEventDisclosureProfile {
+    /// Historical issue and PR lifecycle/merge feed; its wire shape is stable.
+    #[default]
+    IssuesPullsV1,
+    /// Adds milestones, discussions, PR conversations and reviewer decisions.
+    CollaborationV2,
+}
+
+impl ForgeEventDisclosureProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IssuesPullsV1 => "issues-pulls-v1",
+            Self::CollaborationV2 => "collaboration-v2",
+        }
+    }
+}
+
+/// Grants supplied by an independently authenticated host, never request text.
+/// Milestones use the issue grant, and PR conversations use the pull grant.
+/// Each transport retains its existing policy for grouping review reads.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ForgeEventReadGrants {
+    pub issues: bool,
+    pub pulls: bool,
+    pub discussions: bool,
+    pub reviews: bool,
+}
+
+impl ForgeEventReadGrants {
+    const fn for_profile(self, profile: ForgeEventDisclosureProfile) -> Self {
+        match profile {
+            ForgeEventDisclosureProfile::IssuesPullsV1 => Self {
+                discussions: false,
+                reviews: false,
+                ..self
+            },
+            ForgeEventDisclosureProfile::CollaborationV2 => self,
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.issues || self.pulls || self.discussions || self.reviews
+    }
+}
 
 /// One already-authorized canonical event. Private fields prevent fabrication
 /// of a decoded event or unvalidated JSON fragment through this read surface.
@@ -70,13 +121,20 @@ pub struct ScopedForgeEventPage {
     incarnation: RepositoryIncarnationId,
     format: GitHashAlgorithm,
     source_head: RepositoryAuthorityHeadId,
+    profile: ForgeEventDisclosureProfile,
     issues_read: bool,
     pulls_read: bool,
+    discussions_read: bool,
+    reviews_read: bool,
     events: Vec<ScopedForgeEvent>,
     next_after: Option<(u64, u32)>,
     resume_after: Option<(u64, u32)>,
 }
 impl ScopedForgeEventPage {
+    #[must_use]
+    pub const fn disclosure_profile(&self) -> ForgeEventDisclosureProfile {
+        self.profile
+    }
     #[must_use]
     pub const fn source_head(&self) -> RepositoryAuthorityHeadId {
         self.source_head
@@ -101,6 +159,14 @@ impl ScopedForgeEventPage {
     pub const fn pulls_read(&self) -> bool {
         self.pulls_read
     }
+    #[must_use]
+    pub const fn discussions_read(&self) -> bool {
+        self.discussions_read
+    }
+    #[must_use]
+    pub const fn reviews_read(&self) -> bool {
+        self.reviews_read
+    }
 
     /// Bounded HTTP representation. MCP constructs its own Value tree directly
     /// from these same authorized fields; its hostile-input parser is not used
@@ -112,16 +178,27 @@ impl ScopedForgeEventPage {
             id.algorithm().code_point(),
             hex(id.digest().as_bytes())?
         );
+        // Keep the legacy representation byte-identical, including its fields
+        // and ordering. Only an explicit v2 selection adds the new read grants.
+        let collaboration_grants = match self.profile {
+            ForgeEventDisclosureProfile::IssuesPullsV1 => String::new(),
+            ForgeEventDisclosureProfile::CollaborationV2 => format!(
+                ",\"discussions_read\":{},\"reviews_read\":{}",
+                self.discussions_read, self.reviews_read,
+            ),
+        };
         let mut out = format!(
-            "{{\"type\":\"forge_event_page\",\"schema_version\":1,\"tenant_id\":\"{}\",\"repository_id\":\"{}\",\"repository_incarnation\":\"{}\",\"object_format\":\"{}\",\"source_head\":\"{}\",\"snapshot_token\":\"{}\",\"read_only\":true,\"disclosure_profile\":\"issues-pulls-v1\",\"issues_read\":{},\"pulls_read\":{},\"omits_other_event_families\":true,\"cursor_discloses_repository_activity\":true,\"events\":[",
+            "{{\"type\":\"forge_event_page\",\"schema_version\":1,\"tenant_id\":\"{}\",\"repository_id\":\"{}\",\"repository_incarnation\":\"{}\",\"object_format\":\"{}\",\"source_head\":\"{}\",\"snapshot_token\":\"{}\",\"read_only\":true,\"disclosure_profile\":\"{}\",\"issues_read\":{},\"pulls_read\":{}{},\"omits_other_event_families\":true,\"cursor_discloses_repository_activity\":true,\"events\":[",
             self.tenant,
             self.repository,
             self.incarnation,
             self.format.as_str(),
             self.source_head,
             token,
+            self.profile.as_str(),
             self.issues_read,
             self.pulls_read,
+            collaboration_grants,
         );
         for (index, event) in self.events.iter().enumerate() {
             let row = format!(
@@ -228,7 +305,41 @@ impl OneNode {
         issues_read: bool,
         pulls_read: bool,
     ) -> Result<ScopedForgeEventPage, ForgeEventReadRefusal> {
-        if !issues_read && !pulls_read {
+        self.read_profiled_forge_events_in(
+            request,
+            after,
+            limit,
+            expected_head,
+            ForgeEventDisclosureProfile::IssuesPullsV1,
+            ForgeEventReadGrants {
+                issues: issues_read,
+                pulls: pulls_read,
+                ..ForgeEventReadGrants::default()
+            },
+        )
+        .await
+    }
+
+    /// Read an explicitly selected event profile at one authenticated head.
+    /// Each event family needs its own existing host grant. V2 comments require
+    /// visibility of the entire canonical conversation, including historical
+    /// anchors outside this event page; reviews also require the current PR.
+    /// All such metadata reads use this SAME selected basis and its hidden-ref
+    /// policy. At most `limit` selected event subjects require additional
+    /// canonical metadata reader calls; each reader retains its existing
+    /// replay, byte, deadline and cancellation limits.
+    /// This does not provide indexed O(limit) access or a complete forge export.
+    pub async fn read_profiled_forge_events_in(
+        &self,
+        request: &NodeRequestContext,
+        after: Option<(u64, u32)>,
+        limit: u16,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        profile: ForgeEventDisclosureProfile,
+        grants: ForgeEventReadGrants,
+    ) -> Result<ScopedForgeEventPage, ForgeEventReadRefusal> {
+        let grants = grants.for_profile(profile);
+        if !grants.any() {
             return Err(ForgeEventReadRefusal::NoReadScope);
         }
         if !(1..=100).contains(&limit) {
@@ -260,20 +371,43 @@ impl OneNode {
             incarnation: self.repository_incarnation_id(),
             format: self.object_format,
             source_head: page.source_head,
-            issues_read,
-            pulls_read,
+            profile,
+            issues_read: grants.issues,
+            pulls_read: grants.pulls,
+            discussions_read: grants.discussions,
+            reviews_read: grants.reviews,
             events: Vec::new(),
             next_after: None,
             resume_after: after,
         };
-        project(
-            &mut result,
-            page,
-            after,
-            limit,
-            &|reference| selected.hidden_refs.hides(reference),
-            &|| !workspace_request_live(request),
-        )?;
+        let hidden = |reference: &[u8]| selected.hidden_refs.hides(reference);
+        let cancelled = || !workspace_request_live(request);
+        match profile {
+            ForgeEventDisclosureProfile::IssuesPullsV1 => {
+                project(&mut result, page, after, limit, &hidden, &cancelled)?;
+            }
+            ForgeEventDisclosureProfile::CollaborationV2 => {
+                validate_page(&result, &page, after, limit)?;
+                let visibility = collaboration::read_visibility_at(
+                    &self.authority,
+                    request.authority(),
+                    &selected.basis,
+                    &page,
+                    grants,
+                    &hidden,
+                    &cancelled,
+                )
+                .await?;
+                project_authorized(
+                    &mut result,
+                    page,
+                    after,
+                    limit,
+                    &|event| collaboration::permitted(event, grants, &visibility, &hidden),
+                    &cancelled,
+                )?;
+            }
+        }
         Ok(result)
     }
 }
@@ -319,7 +453,24 @@ fn project(
     hidden: &dyn Fn(&[u8]) -> bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), ForgeEventReadRefusal> {
-    stopped(cancelled)?;
+    let issues = result.issues_read;
+    let pulls = result.pulls_read;
+    project_authorized(
+        result,
+        page,
+        after,
+        limit,
+        &|event| permitted(event, issues, pulls, hidden),
+        cancelled,
+    )
+}
+
+fn validate_page(
+    result: &ScopedForgeEventPage,
+    page: &ForgeEventPage,
+    after: Option<(u64, u32)>,
+    limit: u16,
+) -> Result<(), ForgeEventReadRefusal> {
     if !(1..=100).contains(&limit)
         || page.events.len() > usize::from(limit)
         || page.source_head != result.source_head
@@ -333,16 +484,24 @@ fn project(
     {
         return Err(ForgeEventReadRefusal::InvalidPage);
     }
+    Ok(())
+}
+
+fn project_authorized(
+    result: &mut ScopedForgeEventPage,
+    page: ForgeEventPage,
+    after: Option<(u64, u32)>,
+    limit: u16,
+    permitted: &dyn Fn(&ForgeEvent) -> bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ForgeEventReadRefusal> {
+    stopped(cancelled)?;
+    validate_page(result, &page, after, limit)?;
     let mut more = page.next_after.is_some();
     let mut bytes = 0usize;
     for envelope in page.events {
         stopped(cancelled)?;
-        if permitted(
-            &envelope.event,
-            result.issues_read,
-            result.pulls_read,
-            hidden,
-        ) {
+        if permitted(&envelope.event) {
             // Never encode, identify, format or return an unauthorized event.
             let frame =
                 encode_body(&envelope.event).map_err(|_| ForgeEventReadRefusal::InvalidPage)?;
@@ -424,3 +583,6 @@ fn append(out: &mut String, bytes: &str) -> Result<(), ForgeEventReadRefusal> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod collaboration_tests;

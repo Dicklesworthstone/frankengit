@@ -29,6 +29,7 @@ mod publication;
 mod pull_request;
 mod queue;
 pub use discussions::DiscussionReadRefusal;
+pub use events::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 pub use issues::IssueReadRefusal;
 pub use milestones::MilestoneReadRefusal;
 pub use notifications::{
