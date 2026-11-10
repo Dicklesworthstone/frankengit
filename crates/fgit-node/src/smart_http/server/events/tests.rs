@@ -292,26 +292,22 @@ fn collaboration_profile_intersects_each_read_scope_with_its_endpoint_ceiling() 
     let legacy_envelope = head::parse(&legacy_bytes, profile.http).unwrap().unwrap();
     let legacy = Request::parse(&legacy_envelope).unwrap();
     for permissions in 0_u8..16 {
-        let mut scopes = vec![
-            "read",
-            "issues-write",
-            "pulls-write",
-            "discussions-write",
-            "reviews-write",
-        ];
-        for (bit, scope) in [
-            "issues-read",
-            "pulls-read",
-            "discussions-read",
-            "reviews-read",
+        // Credential files require canonical scope order. Keep unrelated Git
+        // and write grants present while independently varying each read grant.
+        let scopes: Vec<_> = [
+            ("read", true),
+            ("issues-read", permissions & 1 != 0),
+            ("issues-write", true),
+            ("pulls-read", permissions & 2 != 0),
+            ("pulls-write", true),
+            ("reviews-read", permissions & 8 != 0),
+            ("reviews-write", true),
+            ("discussions-read", permissions & 4 != 0),
+            ("discussions-write", true),
         ]
         .into_iter()
-        .enumerate()
-        {
-            if permissions & (1 << bit) != 0 {
-                scopes.push(scope);
-            }
-        }
+        .filter_map(|(scope, enabled)| enabled.then_some(scope))
+        .collect();
         scratch.credentials(binding, &scopes.join(","));
         for ceilings in 0_u8..8 {
             profile.services = RepositoryHttpServices::NONE
@@ -669,7 +665,7 @@ fn persisted_collaboration_http_feed_keeps_legacy_bytes_and_rotates_family_grant
             (Ok(()), discussion_only)
         );
         assert_eq!(read("/repo.git/api/v1/events").0, Err(Status::Forbidden));
-        scratch.credentials(binding, "discussions-write,reviews-write,issues-write");
+        scratch.credentials(binding, "issues-write,reviews-write,discussions-write");
         assert_eq!(
             read("/repo.git/api/v1/events?profile=collaboration-v2").0,
             Err(Status::Forbidden)
