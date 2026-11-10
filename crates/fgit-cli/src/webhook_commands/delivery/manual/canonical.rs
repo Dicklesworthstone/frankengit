@@ -102,6 +102,11 @@ pub(super) fn execute(
     let replay_key = options.replay_key.as_ref().ok_or("missing --replay-key")?;
     let source_key = options.key.ok_or("missing --delivery-id")?;
     let destination = options.destination.ok_or("missing --destination")?;
+    let expected_head = options
+        .expected_head
+        .as_deref()
+        .map(crate::commit_replay::parse_head)
+        .transpose()?;
     let route = dispatcher::Options {
         storage: options.storage.clone(),
         tenant: options.tenant,
@@ -140,7 +145,6 @@ pub(super) fn execute(
             .runtime()
             .block_on(node.read_forge_replay_source_in(&request, source_key, destination, None))
             .map_err(|e| e.to_string())?;
-        check_head(options, source_head)?;
         require_subscription(&registration.filter, &events.events)?;
         let binding = Digest::new(
             DigestAlgorithm::Sha256.id(),
@@ -202,7 +206,13 @@ pub(super) fn execute(
         }
         let key = node
             .runtime()
-            .block_on(node.enqueue_forge_replay_in(&request, &session, &intent, Default::default()))
+            .block_on(node.enqueue_forge_replay_at_head_in(
+                &request,
+                &session,
+                &intent,
+                expected_head,
+                Default::default(),
+            ))
             .map_err(|e| e.to_string())?;
         // A new logical responsibility has budget one. The original automatic
         // schedule, cumulative diagnostic and terminal outcome are untouched.

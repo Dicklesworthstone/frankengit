@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -267,10 +267,9 @@ impl WebhookDeliveryDestination {
         };
 
         let http_header = format!(
-            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: FrankenGit-Webhook/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-FrankenGit-Delivery: {}\r\nX-FrankenGit-Signature-256: {}\r\nX-FrankenGit-Timestamp: {}\r\nX-FrankenGit-Attempt: {}\r\nConnection: close\r\n\r\n",
+            "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: FrankenGit-Webhook/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-FrankenGit-Delivery: {}\r\nX-FrankenGit-Signature-256: {}\r\nX-FrankenGit-Timestamp: {}\r\nX-FrankenGit-Attempt: {}\r\nConnection: close\r\n\r\n",
             validated.path_and_query(),
-            validated.host(),
-            validated.port(),
+            http_authority(&validated),
             payload_bytes.len(),
             request.key.as_str(),
             sig_hex,
@@ -530,6 +529,17 @@ impl WebhookDeliveryDestination {
                 failed_at_unix_secs: now_secs,
             })
             .map_err(|_| RefusalCode::EvidenceMissing)
+    }
+}
+
+fn http_authority(url: &ValidatedWebhookUrl) -> String {
+    // URL validation stores bare IPv6 text for resolution. HTTP Host uses URI
+    // authority syntax, whose IPv6 literals require brackets (RFC 9110 §7.2,
+    // RFC 3986 §3.2.2). Preserve the registered host, not a resolved DNS address.
+    if matches!(url.ip_literal(), Some(IpAddr::V6(_))) {
+        format!("[{}]:{}", url.host(), url.port())
+    } else {
+        format!("{}:{}", url.host(), url.port())
     }
 }
 

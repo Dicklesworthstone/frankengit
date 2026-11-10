@@ -35,15 +35,73 @@ fn test_registration(url_str: &str, ssrf_policy: SsrfPolicy) -> WebhookRegistrat
 
 #[test]
 fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
+    assert_webhook_acknowledgement_and_signature("127.0.0.1:0");
+}
+
+#[test]
+fn webhook_ipv6_delivery_has_bracketed_host_and_verifiable_signature() {
+    assert_webhook_acknowledgement_and_signature("[::1]:0");
+}
+
+#[test]
+fn webhook_http_authority_preserves_host_identity_and_ports() {
+    for (url, expected) in [
+        ("http://example.com/hook", "example.com:80"),
+        ("http://EXAMPLE.COM:8080/hook", "example.com:8080"),
+        ("http://8.8.8.8/hook", "8.8.8.8:80"),
+        ("http://8.8.8.8:8080/hook", "8.8.8.8:8080"),
+        (
+            "http://[2001:4860:4860::8888]/hook",
+            "[2001:4860:4860::8888]:80",
+        ),
+        (
+            "https://[2001:4860:4860::8888]/hook",
+            "[2001:4860:4860::8888]:443",
+        ),
+        ("http://[::1]:8080/hook", "[::1]:8080"),
+        ("http://[::ffff:8.8.8.8]:8080/hook", "[::ffff:8.8.8.8]:8080"),
+        (
+            "http://[2001:4860:4860:0000:0000:0000:0000:8888]:8080/hook",
+            "[2001:4860:4860:0000:0000:0000:0000:8888]:8080",
+        ),
+    ] {
+        let validated = SsrfPolicy::PERMISSIVE_FOR_TESTS.validate_url(url).unwrap();
+        assert_eq!(http_authority(&validated), expected, "{url}");
+    }
+}
+
+fn assert_webhook_acknowledgement_and_signature(bind_address: &str) {
     // 1. Start a local loopback server to act as the webhook receiver
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = TcpListener::bind(bind_address).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let server_addr = listener.local_addr().unwrap();
+    let expected_host = format!("Host: {server_addr}");
 
     let secret = test_secret();
     let secret_clone = secret;
 
     let server_handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "webhook receiver timed out"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("webhook receiver failed: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut reader = BufReader::new(&mut stream);
         let mut headers = Vec::new();
         let mut content_length = 0usize;
@@ -52,7 +110,7 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
 
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 break;
@@ -73,6 +131,11 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
             headers.first().map(String::as_str),
             Some("POST /hook HTTP/1.1")
         );
+        let host_headers: Vec<_> = headers
+            .iter()
+            .filter(|line| line.starts_with("Host:"))
+            .collect();
+        assert_eq!(host_headers, vec![&expected_host]);
 
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body).unwrap();
@@ -93,7 +156,7 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
     });
 
     // 2. Dispatch webhook delivery
-    let url_str = format!("http://127.0.0.1:{}/hook", server_addr.port());
+    let url_str = format!("http://{server_addr}/hook");
     let reg = test_registration(&url_str, SsrfPolicy::PERMISSIVE_FOR_TESTS);
     let dead_letters = DeadLetterQueue::new();
     let dest = WebhookDeliveryDestination::new(
@@ -111,11 +174,12 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
         events: &empty_events,
     };
 
-    let result = dest.dispatch_http(&request, 1).unwrap();
+    let result = dest.dispatch_http(&request, 1);
+    // Drain the bounded receiver even when dispatch returns an error.
+    server_handle.join().unwrap();
+    let result = result.unwrap();
     assert_eq!(result.0, DeliveryVerdict::Accepted);
     assert_eq!(dead_letters.list().len(), 0);
-
-    server_handle.join().unwrap();
 }
 
 #[test]
