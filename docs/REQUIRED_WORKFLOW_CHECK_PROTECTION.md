@@ -183,26 +183,55 @@ request bodies and retry keys therefore remain valid. Nonempty check selectors
 are fully committed to new intents; changing a selector cannot reuse an old
 command identity.
 
-The admission scan is bounded to 4,096 authenticated history steps, 65,536
-event batches, 65,536 events and 128 MiB of aggregate frame bytes. Empty event
-batches consume the batch budget too. Missing or corrupt required history,
-exhausted scan budgets and cancellation produce unavailable errors, not an
-implicit allow or a fabricated policy refusal. A complete scan proving that a
-required result is absent or nonpassing produces the existing canonical
-`ProtectedRefTransitionDenied` refusal. A long-lived deployment whose retained
-history exceeds this bounded profile needs an explicitly retained newer result
-or future authenticated indexing; an unchecked cache cannot grant permission.
+The ordered admission scan is bounded to 4,096 authenticated history steps,
+65,536 event batches, 65,536 events and 128 MiB of aggregate frame bytes.
+Empty event batches consume the batch budget too. Missing or corrupt required
+history, exhausted byte/event/batch budgets and cancellation produce unavailable
+errors, not an implicit allow or a fabricated policy refusal. A complete ordered
+scan proving that a required result is absent or nonpassing produces the
+existing canonical `ProtectedRefTransitionDenied` refusal.
+
+If the ordered scan reaches its history-step ceiling, admission may complete
+the unresolved requirements from the same head's authenticated forge frontier.
+Each workflow-check stream is immutable. The frontier commits to its exact
+event body and version; it supplies membership, not publication order.
+Consequently this fallback permits only when **every selected observation
+matching each still-unresolved requirement is successful**, with at least one
+match for every such requirement. It validates the complete selected check
+population before allowing publication, regardless of stream-label order.
+Already-resolved newer successes retain the ordered scan's result.
+
+A mixture of successful and nonpassing observations cannot establish which
+result is latest from that frontier alone. Mixed or incomplete evidence retains
+the original resource-budget refusal; no older success is chosen over a newer
+failure. Missing, corrupt or cancelled frontier reads retain their typed errors.
+The ordered scan and fallback share one cumulative event/batch/byte budget.
+Both ordinary branch checks and unpublished-candidate checks use this rule;
+their subject, publisher and policy selectors remain independently mandatory.
+
+This permits unchanged successful checks beyond unrelated history without
+raising the history ceiling or accepting a mutable index. It does not establish
+arbitrary-depth latest-result ordering, eliminate the initial bounded history
+scan, or qualify sustained-operation performance.
 
 ## Verification entrypoints
 
 ```sh
 cargo test --locked -p fgit-forge event::protection
+cargo test --locked -p fgit-admission --lib merge::native::protection::checks::frontier::tests
 cargo test --locked -p fgit-node --lib configured_checks_bind_exact_candidates_and_latest_publisher_results_on_every_path -- --test-threads=1
 cargo test --locked -p fgit-cli --bin fg protection::tests
 cargo test --locked -p fgit-cli --bin fg mcp::backend::protection
 cargo test --locked -p fgit-node --lib smart_http::server::protection
 node --test tests/browser/protection.test.mjs tests/browser/protection-standalone.test.mjs tests/operator/review_protection.test.mjs
 ```
+
+The frontier regression definitions separately use an in-memory reference
+authority and synthetic check records. They exercise the production history
+ceiling through authenticated checkpoint publications, selected-frontier
+integrity, staged-only exclusion, combined mandatory profiles, mixed results,
+cancellation and cumulative budgets. They do not provide runner-execution or
+durable-node evidence.
 
 The new native test definitions exercise actual retained workflow execution
 and publication with persisted authority in both Git hash formats, each with

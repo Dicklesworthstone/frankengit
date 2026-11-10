@@ -7,7 +7,7 @@ use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::protection::{RequiredCandidateWorkflowCheck, RequiredWorkflowCheck};
 use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
-use fgit_forge::{AggregateId, ExpectedVersion};
+use fgit_forge::{AggregateId, ExpectedVersion, ForgeEventPayload};
 use fgit_types::{GitOid, RefName, RefusalCode};
 
 use super::{NativeMergeIntent, checks, infrastructure, live};
@@ -75,13 +75,24 @@ where
     {
         return Err(denied());
     }
-    let mut matching = matching::ExactChecks::new(subject, candidate, ordinary, required);
     checks::verify_observations_at(
         store,
         cx,
         basis,
-        |payload| matching.observe(payload).map_err(ProjectionFailure::Refuse),
+        observation_matcher(subject, candidate, ordinary, required),
         cancelled,
     )
     .await
+}
+
+/// One matcher is shared by ordered history and the bounded frontier proof.
+/// Cloning owns its pending selectors; it never shares mutable resolution state.
+pub(super) fn observation_matcher<'a>(
+    subject: ReviewSubject,
+    candidate: CandidateBinding,
+    ordinary: &'a [RequiredWorkflowCheck],
+    required: &'a [RequiredCandidateWorkflowCheck],
+) -> impl FnMut(&ForgeEventPayload) -> Result<bool, ProjectionFailure> + Clone + Send + 'a {
+    let mut matching = matching::ExactChecks::new(subject, candidate, ordinary, required);
+    move |payload| matching.observe(payload).map_err(ProjectionFailure::Refuse)
 }
