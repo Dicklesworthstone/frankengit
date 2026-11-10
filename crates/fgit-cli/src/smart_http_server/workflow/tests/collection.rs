@@ -154,13 +154,120 @@ fn collection_refuses_even_a_partial_merge_candidate_contract() {
     ] {
         let mut arguments = collection_arguments();
         arguments.extend([name.into(), value.into()]);
-        assert!(
-            parse_server(&arguments)
-                .err()
-                .unwrap()
-                .contains("selects source heads"),
-            "{name}"
+        assert!(parse_server(&arguments).is_err(), "{name}");
+    }
+}
+
+fn candidate_arguments() -> Vec<String> {
+    let mut arguments = collection_arguments();
+    arguments.extend(
+        [
+            "--workflow-merge-candidate-ref-prefix",
+            "refs/heads/ci/collection",
+            "--workflow-merge-principal",
+            "33333333333333333333333333333333",
+            "--workflow-merge-author",
+            "CI <ci@example.test>",
+            "--workflow-merge-committer",
+            "CI <ci@example.test>",
+            "--workflow-merge-timestamp",
+            "1700000000",
+            "--workflow-merge-message",
+            "Check discovered PRs",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    arguments
+}
+
+#[test]
+fn collection_merge_candidates_require_their_own_explicit_namespace_authority() {
+    for method in ["merge-commit", "squash"] {
+        let mut arguments = candidate_arguments();
+        arguments.extend(["--workflow-merge-method".into(), method.into()]);
+        let options = parse_server(&arguments).unwrap();
+        assert!(!options.allow_receive);
+        assert!(!options.allow_pulls);
+        assert!(!options.allow_protection);
+        assert!(!options.allow_queue_landings);
+        let config = options.workflow_service.unwrap();
+        assert_eq!(config.pull_requests(), Some(64));
+        assert_eq!(config.reference().as_bytes(), b"refs/heads/main");
+        assert!(config.publisher().is_none());
+        let template = config.merge_candidate().unwrap();
+        assert_eq!(template.reference().as_bytes(), b"refs/heads/ci/collection");
+        assert_eq!(template.principal(), PrincipalId::from_bytes([0x33; 16]));
+        assert_eq!(template.metadata().message, b"Check discovered PRs");
+        assert_eq!(
+            template.style(),
+            if method == "squash" {
+                fgit_forge::preparation::MergeCommitStyle::Squash
+            } else {
+                fgit_forge::preparation::MergeCommitStyle::TwoParent
+            }
         );
+    }
+    for missing in [
+        "--workflow-pull-requests",
+        "--expected-incarnation",
+        "--workflow-merge-principal",
+        "--workflow-merge-message",
+    ] {
+        let mut arguments = candidate_arguments();
+        let at = arguments.iter().position(|value| value == missing).unwrap();
+        arguments.drain(
+            at..at
+                + if missing == "--workflow-pull-requests" {
+                    1
+                } else {
+                    2
+                },
+        );
+        assert!(parse_server(&arguments).is_err(), "{missing}");
+    }
+    for extra in [
+        vec!["--workflow-merge-candidate-ref", "refs/heads/exact"],
+        vec![
+            "--workflow-merge-candidate-ref-hex",
+            "726566732f68656164732f6369",
+        ],
+        vec![
+            "--workflow-merge-candidate-ref-prefix-hex",
+            "726566732f68656164732f6369",
+        ],
+        vec!["--workflow-pull-request", "7"],
+        vec!["--workflow-merge-queue", "7"],
+    ] {
+        let mut arguments = candidate_arguments();
+        arguments.extend(extra.into_iter().map(str::to_owned));
+        assert!(parse_server(&arguments).is_err());
+    }
+}
+
+#[test]
+fn collection_candidate_prefix_preserves_raw_bytes_and_refuses_target_namespace_collisions() {
+    let mut arguments = candidate_arguments();
+    let at = arguments
+        .iter()
+        .position(|value| value == "--workflow-merge-candidate-ref-prefix")
+        .unwrap();
+    arguments[at] = "--workflow-merge-candidate-ref-prefix-hex".into();
+    arguments[at + 1] = "726566732f68656164732f63692fff".into();
+    let config = parse_server(&arguments).unwrap().workflow_service.unwrap();
+    assert_eq!(
+        config.merge_candidate().unwrap().reference().as_bytes(),
+        b"refs/heads/ci/\xff"
+    );
+    for prefix in [
+        "refs/heads/main",
+        "refs/heads/main/ci",
+        "refs/heads/ci/",
+        "refs/tags/ci",
+    ] {
+        let mut arguments = candidate_arguments();
+        arguments[at + 1] = prefix.into();
+        assert!(parse_server(&arguments).is_err(), "{prefix}");
     }
 }
 

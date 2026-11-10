@@ -136,15 +136,38 @@ pub(super) fn parse(
             .with_merge_queue(number(flags, "--workflow-merge-queue", 1, u64::MAX)?)
             .map_err(|error| error.to_string())?;
     }
+    let exact_reference = [
+        "--workflow-merge-candidate-ref",
+        "--workflow-merge-candidate-ref-hex",
+    ]
+    .iter()
+    .any(|name| flags.contains_key(name));
+    let collection_reference = [
+        "--workflow-merge-candidate-ref-prefix",
+        "--workflow-merge-candidate-ref-prefix-hex",
+    ]
+    .iter()
+    .any(|name| flags.contains_key(name));
+    // Check aliases before normalization: a prefix must never silently replace
+    // an exact ref, and an explicit collection namespace grants no fixed-PR or
+    // queue publication authority.
+    if exact_reference && collection_reference {
+        return Err(
+            "exact workflow CI refs and collection CI ref prefixes are mutually exclusive".into(),
+        );
+    }
+    if config.pull_requests().is_some() && exact_reference {
+        return Err("PR collection merge candidates require --workflow-merge-candidate-ref-prefix or --workflow-merge-candidate-ref-prefix-hex".into());
+    }
+    if collection_reference && config.pull_requests().is_none() {
+        return Err("workflow CI ref prefixes require --workflow-pull-requests".into());
+    }
     let merge_fields: BTreeMap<_, _> = flags
         .iter()
         .filter_map(|(name, value)| {
             crate::workflow_merge_watch::server_option(name).map(|name| (name, *value))
         })
         .collect();
-    if config.pull_requests().is_some() && !merge_fields.is_empty() {
-        return Err("--workflow-pull-requests selects source heads and cannot be combined with workflow merge-candidate options".into());
-    }
     let merge = crate::workflow_merge_watch::parse(&merge_fields)?;
     if config.merge_queue().is_some() && merge.is_none() {
         return Err(
@@ -152,7 +175,18 @@ pub(super) fn parse(
         );
     }
     if let Some(merge) = merge {
-        if config.merge_queue().is_some() {
+        if config.pull_requests().is_some() {
+            required("--expected-incarnation")?;
+            if !collection_reference {
+                return Err(
+                    "PR collection merge candidates require an explicit workflow CI ref prefix"
+                        .into(),
+                );
+            }
+            config = config
+                .with_pull_request_merge_candidates(merge.node_config()?)
+                .map_err(|error| error.to_string())?;
+        } else if config.merge_queue().is_some() {
             merge.validate_queue_selection(
                 config.reference(),
                 flags.contains_key("--expected-incarnation"),
@@ -164,9 +198,11 @@ pub(super) fn parse(
                 flags.contains_key("--expected-incarnation"),
             )?;
         }
-        config = config
-            .with_merge_candidate(merge.node_config()?)
-            .map_err(|error| error.to_string())?;
+        if config.pull_requests().is_none() {
+            config = config
+                .with_merge_candidate(merge.node_config()?)
+                .map_err(|error| error.to_string())?;
+        }
     }
     if let Some(artifacts) = artifact_config(flags, artifact_selections, artifact_inputs)? {
         config = config.with_artifacts(artifacts);

@@ -101,7 +101,10 @@ class Server:
     def request(self, method, route, *, fields=None, authenticated=True):
         assert self.endpoint is not None
         connection = http.client.HTTPConnection(self.endpoint.hostname, self.endpoint.port, timeout=15)
-        headers = {"Connection": "close"}
+        headers = {
+            "Connection": "close",
+            "User-Agent": "frankengit-e2e (+https://github.com/Dicklesworthstone/frankengit)",
+        }
         if authenticated:
             headers["Authorization"] = "Bearer " + self.fixture.token
         body = None

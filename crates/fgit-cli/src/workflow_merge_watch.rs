@@ -33,8 +33,12 @@ pub(crate) fn is_option(name: &str) -> bool {
 
 pub(crate) fn server_option(name: &str) -> Option<&'static str> {
     Some(match name {
-        "--workflow-merge-candidate-ref" => "--merge-candidate-ref",
-        "--workflow-merge-candidate-ref-hex" => "--merge-candidate-ref-hex",
+        "--workflow-merge-candidate-ref" | "--workflow-merge-candidate-ref-prefix" => {
+            "--merge-candidate-ref"
+        }
+        "--workflow-merge-candidate-ref-hex" | "--workflow-merge-candidate-ref-prefix-hex" => {
+            "--merge-candidate-ref-hex"
+        }
         "--workflow-merge-principal" => "--merge-principal",
         "--workflow-merge-author" => "--merge-author",
         "--workflow-merge-committer" => "--merge-committer",

@@ -258,6 +258,65 @@ fn discovered_prs_test_real_combined_trees_on_distinct_refs_and_restart_without_
 }
 
 #[test]
+fn closed_member_reporting_recovers_inside_readiness_before_any_new_execution() {
+    let mut f = Fixture::new(GitHashAlgorithm::Sha256, WORKFLOW);
+    install_workflows(&mut f, false, false);
+    pull(
+        &f,
+        PullRequestAction::Open,
+        ExpectedVersion::NewStream,
+        f.source,
+        b"collection-recovery-open",
+    );
+    let config = watch_config(&f, MergeCommitStyle::TwoParent);
+    let running = Running::start(&f, config.clone());
+    running.wait_for_reports(&f, 1);
+    assert_eq!(running.stop().dispatched, 1);
+    let event = event_directories(&f).pop().unwrap();
+    let acknowledgement = event.join("reported");
+    let original_acknowledgement = fs::read(&acknowledgement).unwrap();
+    fs::remove_file(&acknowledgement).unwrap();
+    pull(
+        &f,
+        PullRequestAction::Close,
+        ExpectedVersion::Exactly(AggregateVersion::FIRST),
+        f.source,
+        b"collection-recovery-close",
+    );
+    open_member(&f, 9, source_ref(), target_ref());
+    f.reopen();
+    let before = generation(f.node());
+    let ready = Cell::new(false);
+    let control = WorkflowWatchControl::default();
+    let recovered = run_service_with_ready(f.config.clone(), config, control.clone(), || {
+        assert_eq!(
+            fs::read(&acknowledgement).unwrap(),
+            original_acknowledgement
+        );
+        assert_eq!(executed(&f), "x");
+        assert_eq!(event_directories(&f).len(), 1);
+        ready.set(true);
+        control.request_stop();
+        Ok(())
+    })
+    .unwrap();
+    assert!(ready.get());
+    assert_eq!(recovered.polls, 0);
+    assert_eq!(recovered.dispatched, 0);
+    assert_eq!(recovered.checks_committed, 1);
+    assert_eq!(recovered.checks_refused, 0);
+    assert!(!recovered.requires_reconciliation);
+    assert!(!recovered.publication_pending);
+    assert_eq!(generation(f.node()), before);
+    let state = f
+        .node()
+        .runtime()
+        .block_on(f.node().materialize_admission())
+        .unwrap();
+    assert!(!state.snapshot().refs.contains_key(&candidate_ref(9)));
+}
+
+#[test]
 fn readiness_failure_cannot_publish_a_member_candidate_or_start_scripts() {
     let mut f = Fixture::new(GitHashAlgorithm::Sha256, WORKFLOW);
     install_workflows(&mut f, false, false);

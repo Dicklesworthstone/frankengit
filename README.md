@@ -235,15 +235,20 @@ incremental pushes, retry behavior, and clone-back identity.
 
 On Linux, `fg serve-http --workflow-pull-requests` discovers visible open
 same-repository PRs targeting the fixed `--workflow-ref` and services their
-source-head workflows in rotating order. The operator supplies the execution
+workflows in rotating order. Source-head execution is the default. Adding
+`--workflow-merge-candidate-ref-prefix` and the complete merge writer/metadata
+group executes each PR's actual merge or squash tree on its own stable CI ref,
+with checks bound to the candidate that ran. The operator supplies the execution
 inputs, trusted host acknowledgement, repository incarnation, retained-member
 limit and optional canonical check publisher. Durable membership keeps each
 PR's original execution and reporting responsibility across closure, visibility
 changes and restart. A member with unknown execution blocks the controller;
 discovery never admits a partial scan or silently drops an old member. See the
 [native PR collection guide](docs/NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md)
-for setup, trust scope, capacity and recovery. Exact merge-candidate execution
-continues through the explicit fixed-PR and queue profiles.
+for setup, trust scope, capacity and recovery. The collection retains original
+candidate custody across restarts and refuses configuration changes or observed
+PR branches that overlap its operator-exclusive CI namespace. Fixed-PR and queue
+profiles remain available for explicit selection and queue landing.
 
 ### Reuse verified packs in bundle exports
 
