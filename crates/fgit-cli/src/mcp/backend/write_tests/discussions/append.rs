@@ -84,7 +84,8 @@ fn discussion_append_preserves_intervening_edits_and_recovers_original_results_a
                 &[("body", text("Must remain strict"))],
             ),
         );
-        assert!(!failed(&strict));
+        assert!(failed(&strict));
+        assert_eq!(structured(&strict)["outcome"], text("refused"));
         assert_eq!(structured(&strict)["refusal_code"], text("EvidenceStale"));
         committed(&call(
             &mut server,
@@ -101,7 +102,8 @@ fn discussion_append_preserves_intervening_edits_and_recovers_original_results_a
             APPEND,
             refused_args.clone(),
         );
-        assert!(!failed(&refused));
+        assert!(failed(&refused));
+        assert_eq!(structured(&refused)["outcome"], text("refused"));
         assert_eq!(
             structured(&refused)["refusal_code"],
             text("ProtectedRefTransitionDenied")

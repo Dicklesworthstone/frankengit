@@ -352,7 +352,6 @@ fn first_parent_history_keeps_operator_source_and_sponsored_grants_separate() {
             .iter()
             .any(|tool| tool.name == LOG)
     );
-    options.source = true;
     options.agent_token_file = Some(fixture.0.join("not-opened-agent.token"));
     assert!(
         !super::super::super::tools_for_options(&options)
@@ -360,4 +359,18 @@ fn first_parent_history_keeps_operator_source_and_sponsored_grants_separate() {
             .any(|tool| tool.name == LOG)
     );
     assert_eq!(super::super::super::agent::operation(&options, LOG), None);
+    options.source = true;
+    assert!(
+        super::super::super::tools_for_options(&options)
+            .iter()
+            .any(|tool| tool.name == LOG)
+    );
+    assert_eq!(
+        super::super::super::agent::operation(&options, LOG),
+        Some(fgit_identity::agent::SOURCE_HISTORY_READ)
+    );
+    assert_ne!(
+        super::super::super::agent::operation(&options, LOG),
+        Some(fgit_identity::agent::SOURCE_READ)
+    );
 }

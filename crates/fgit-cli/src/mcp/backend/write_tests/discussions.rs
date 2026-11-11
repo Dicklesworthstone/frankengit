@@ -309,13 +309,10 @@ fn discussion_read_write_and_issue_grants_are_independent_in_native_dispatch() {
     backend.close().unwrap();
 
     let mut backend = NodeTools::open(options(&fixture, true, false, false)).unwrap();
-    assert_eq!(backend.tools().len(), 2);
-    assert!(
-        backend
-            .tools()
-            .iter()
-            .all(|tool| super::super::discussions::is_read(tool.name))
-    );
+    assert_eq!(backend.tools().len(), 3);
+    assert!(backend.tools().iter().all(|tool| {
+        super::super::discussions::is_read(tool.name) || tool.name == super::super::events::NAME
+    }));
     let mut server = initialized(&mut backend);
     let empty = invoke(
         &mut server,

@@ -204,7 +204,7 @@ impl Options {
             || self.queues.mutation()
             || self.outcomes
             || self.agent_context
-            || ((self.issues || self.discussions) && self.principal.is_some());
+            || ((self.issues || self.discussions || self.pulls) && self.principal.is_some());
         if principal_scoped && (self.principal.is_none() || self.incarnation.is_none()) {
             return Err(
                 "writes, recovery, agent context and personal inbox reads require --principal and --expected-incarnation"
@@ -213,7 +213,7 @@ impl Options {
         }
         if !principal_scoped && self.principal.is_some() {
             return Err(
-                "--principal requires an explicit write, outcome, issue/discussion-read or agent-context grant".into(),
+                "--principal requires an explicit write, outcome, issue/discussion/pull-read or agent-context grant".into(),
             );
         }
         Ok(())

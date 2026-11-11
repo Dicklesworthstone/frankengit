@@ -359,7 +359,7 @@ fn startup_checks_exact_incarnation_existing_private_root_and_independent_grant(
         .unwrap_err();
     assert_eq!(
         refusal,
-        "writes, recovery and agent context require --principal and --expected-incarnation"
+        "writes, recovery, agent context and personal inbox reads require --principal and --expected-incarnation"
     );
     let mut sponsored_context = fixture.options.clone();
     sponsored_context.agent_context = true;

@@ -69,7 +69,7 @@ fn sponsored_milestone_lifecycle_keeps_snapshot_counts_retries_and_original_prov
         committed(&backend.call(EDIT, &edit).unwrap());
 
         let mut first_page_args = show();
-        first_page_args.insert("limit".into(), text("1"));
+        first_page_args.insert("limit".into(), super::super::super::json::number(1));
         let first_page = backend.call(SHOW, &first_page_args).unwrap();
         assert_eq!(row(&first_page)["open_issues"], text("1"));
         assert_eq!(row(&first_page)["closed_issues"], text("0"));

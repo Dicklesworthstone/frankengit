@@ -539,6 +539,7 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
             DELETE,
             RENAME,
             PUBLISH,
+            PUBLISH_REBASE,
             TRANSACTION,
             super::super::tags::CREATE,
             super::super::tags::ANNOTATE,
@@ -547,7 +548,7 @@ fn source_write_grant_never_implies_other_tools_and_denial_precedes_body_intake(
         .into_iter()
         .collect()
     );
-    assert_eq!(writer.tools().len(), 9);
+    assert_eq!(writer.tools().len(), 10);
     for tool in writer.tools() {
         assert!(is_tool(tool.name) || super::super::tags::is_write(tool.name));
         assert!(writer.is_mutation(tool.name));

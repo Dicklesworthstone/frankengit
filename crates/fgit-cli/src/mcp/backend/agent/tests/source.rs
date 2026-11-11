@@ -278,10 +278,31 @@ fn sponsored_source_tools_read_real_objects_and_indexes_in_both_formats() {
             .unwrap();
         let names: std::collections::BTreeSet<_> =
             backend.tools().into_iter().map(|tool| tool.name).collect();
-        assert_eq!(names, SOURCE_TOOLS.into_iter().chain([CONTEXT]).collect());
+        assert_eq!(
+            names,
+            SOURCE_TOOLS
+                .into_iter()
+                .chain([
+                    CONTEXT,
+                    "frankengit_source_candidate",
+                    "frankengit_source_log",
+                    "frankengit_source_blame",
+                    "frankengit_source_historical_tree",
+                    "frankengit_source_historical_blob",
+                    "frankengit_source_compare",
+                ])
+                .collect()
+        );
         for name in names {
             assert!(!backend.is_mutation(name), "{name}");
         }
+        assert_eq!(
+            backend
+                .call("frankengit_source_log", &Object::new())
+                .unwrap_err()
+                .code,
+            "agent_operation_not_granted"
+        );
         let tree = backend
             .call(SOURCE_TOOLS[0], &query(SOURCE_TOOLS[0]))
             .unwrap();

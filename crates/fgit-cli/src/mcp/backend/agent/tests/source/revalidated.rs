@@ -297,7 +297,7 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
             );
             assert_eq!(
                 backend.call(name, &args).unwrap_err().code,
-                "source_snapshot_moved"
+                indexed::snapshot_moved(name)
             );
         }
         let mut ranked = current_query(INDEXED[1]);
@@ -404,7 +404,7 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
         for (name, args) in indexed::queries() {
             assert_eq!(
                 backend.call(name, &args).unwrap_err().code,
-                "not_found",
+                indexed::missing_ref(name),
                 "{name}"
             );
         }
