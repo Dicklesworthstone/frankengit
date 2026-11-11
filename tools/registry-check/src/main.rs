@@ -245,6 +245,7 @@ fn main() -> ExitCode {
             || invocation.check_set.includes_constitution()
         {
             check_status_vocabulary_pin(&root, &mut report);
+            check_dependency_policy_rationale_versions(&root, &mut report);
         }
         if invocation.check_set.includes_registries() {
             check_registries(&root, &mut report);
@@ -790,6 +791,7 @@ fn check_registries(root: &Path, report: &mut Report) {
     check_attack_matrix(root, report);
     check_compatibility_tiers(root, report);
     check_artifact_inventory(root, report);
+    check_negative_evidence_ledger_parity(root, report);
     claims::check(root, report);
 }
 
@@ -3235,7 +3237,7 @@ const fn admission_ledger_config(command: CheckSet) -> Option<AdmissionLedgerCon
         }),
         CheckSet::LedgerTuiPolicy => Some(AdmissionLedgerConfig {
             root_package: "ftui-runtime",
-            root_version: "0.6.0",
+            root_version: "0.10.0",
             decision: "allow_transitive_admitted_tui",
             owner: "tui",
         }),
@@ -6063,6 +6065,209 @@ fn check_toolchain(root: &Path, report: &mut Report) {
     }
 }
 
+fn parse_semver_prefix(value: &str) -> Option<&str> {
+    let end = value.find('_').unwrap_or(value.len());
+    let candidate = &value[..end];
+    let core = candidate
+        .split_once(['-', '+'])
+        .map_or(candidate, |(prefix, _)| prefix);
+    let mut parts = core.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if [major, minor, patch]
+        .iter()
+        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    if !candidate
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn is_valid_crate_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && token.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+fn extract_rationale_crate_versions(
+    rationale: &str,
+    lock_crates: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let tokens: Vec<&str> = rationale
+        .split(|character: char| matches!(character, ';' | ',') || character.is_ascii_whitespace())
+        .map(|token| {
+            token.trim_matches(|character: char| {
+                matches!(character, '(' | ')' | ':' | '\'' | '"' | '`')
+            })
+        })
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    for (index, raw_token) in tokens.iter().enumerate() {
+        let token = raw_token.trim_start_matches('_').trim_end_matches('.');
+        for (offset, character) in token.char_indices() {
+            if character != '_' {
+                continue;
+            }
+            let crate_name = &token[..offset];
+            let rest = &token[offset + 1..];
+            if is_valid_crate_token(crate_name)
+                && let Some(semver) = parse_semver_prefix(rest)
+            {
+                pairs.push((crate_name.to_owned(), semver.to_owned()));
+                break;
+            }
+        }
+        if index > 0 {
+            let prev = tokens[index - 1].trim_matches('_');
+            let curr = token;
+            if is_valid_crate_token(prev)
+                && lock_crates.contains_key(prev)
+                && parse_semver_prefix(curr) == Some(curr)
+            {
+                pairs.push((prev.to_owned(), curr.to_owned()));
+            }
+        }
+    }
+    pairs
+}
+
+fn check_dependency_policy_rationale_versions(root: &Path, report: &mut Report) {
+    let lock_path = root.join("Cargo.lock");
+    let policy_path = root.join("registries/dependency_policy.tsv");
+    let Ok(lock_text) = fs::read_to_string(&lock_path) else {
+        return;
+    };
+    let Ok(packages) = parse_lock_packages(&lock_text) else {
+        return;
+    };
+    let Ok(policy_text) = fs::read_to_string(&policy_path) else {
+        return;
+    };
+
+    let mut lock_versions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in &packages {
+        lock_versions
+            .entry(package.name.clone())
+            .or_default()
+            .insert(package.version.clone());
+    }
+
+    for (line_index, line) in policy_text.lines().enumerate() {
+        let Some(fields) = dependency_policy_fields(line) else {
+            continue;
+        };
+        let id = fields[0];
+        let pattern = fields[1];
+        let scope = fields[2];
+        let decision = fields[3];
+        let rationale = fields[5];
+        let status = fields[9];
+        if status != "active" {
+            continue;
+        }
+        if scope == "production"
+            && decision.starts_with("allow_")
+            && decision != "allow_by_audit"
+            && pattern != "std"
+        {
+            let matches_lock = packages
+                .iter()
+                .any(|package| dependency_pattern_matches(pattern, &package.name));
+            if !matches_lock {
+                report.error(format!(
+                    "registries/dependency_policy.tsv:{}: active production allow row `{id}` (`{pattern}`) matches zero packages in Cargo.lock; mark unlinked rows `specified` or `rejected`",
+                    line_index + 1
+                ));
+            }
+        }
+        for (crate_name, semver) in extract_rationale_crate_versions(rationale, &lock_versions) {
+            let resolved = lock_versions.get(&crate_name);
+            if !resolved.is_some_and(|versions| versions.contains(&semver)) {
+                let actual = resolved.map_or_else(
+                    || "absent".to_owned(),
+                    |versions| versions.iter().cloned().collect::<Vec<_>>().join(", "),
+                );
+                report.error(format!(
+                    "registries/dependency_policy.tsv:{}: active row `{id}` (`{pattern}`) rationale cites `{crate_name}_{semver}`, which is absent from Cargo.lock (resolved: {actual})",
+                    line_index + 1
+                ));
+            }
+        }
+    }
+}
+
+fn check_negative_evidence_ledger_parity(root: &Path, report: &mut Report) {
+    let tsv_path = root.join("registries/negative_evidence.tsv");
+    let md_path = root.join("docs/NEGATIVE_EVIDENCE_LEDGER.md");
+    let Ok(tsv_text) = fs::read_to_string(&tsv_path) else {
+        return;
+    };
+    let Ok(md_text) = fs::read_to_string(&md_path) else {
+        return;
+    };
+
+    let mut tsv_ids = BTreeSet::new();
+    for line in tsv_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("id\t") {
+            continue;
+        }
+        if let Some(id) = line.split('\t').next()
+            && id.starts_with("NEG-")
+        {
+            tsv_ids.insert(id.to_owned());
+        }
+    }
+
+    let mut md_entry_ids = BTreeSet::new();
+    for line in md_text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("### NEG-") {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                md_entry_ids.insert(format!("NEG-{digits}"));
+            }
+        }
+        let mut cursor = trimmed;
+        while let Some(index) = cursor.find("(`NEG-") {
+            let after = &cursor[index + "(`NEG-".len()..];
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() && after[digits.len()..].starts_with("`)") {
+                md_entry_ids.insert(format!("NEG-{digits}"));
+            }
+            cursor = &after[digits.len()..];
+        }
+    }
+
+    for missing in tsv_ids.difference(&md_entry_ids) {
+        report.error(format!(
+            "registries/negative_evidence.tsv declares `{missing}`, which lacks a dedicated entry in docs/NEGATIVE_EVIDENCE_LEDGER.md"
+        ));
+    }
+    for extra in md_entry_ids.difference(&tsv_ids) {
+        report.error(format!(
+            "docs/NEGATIVE_EVIDENCE_LEDGER.md documents `{extra}`, which is absent from registries/negative_evidence.tsv"
+        ));
+    }
+}
+
 fn check_artifact_inventory(root: &Path, report: &mut Report) {
     let path = root.join("registries/artifact_inventory.tsv");
     let display = relative(root, &path);
@@ -8264,7 +8469,7 @@ impl CanonicalBody for EvidenceRecordBody {
         let config = admission_ledger_config(CheckSet::LedgerTuiPolicy)
             .expect("tui policy generator must have a configuration");
         assert_eq!(config.root_package, "ftui-runtime");
-        assert_eq!(config.root_version, "0.6.0");
+        assert_eq!(config.root_version, "0.10.0");
         assert_eq!(config.decision, "allow_transitive_admitted_tui");
         assert_eq!(config.owner, "tui");
         assert_ne!(
@@ -8633,6 +8838,104 @@ impl CanonicalBody for EvidenceRecordBody {
         assert_error(
             &reintroduced,
             "prohibited artifact row `ART-002` (`.visibility-payload/**`) still matches file(s) on disk",
+        );
+    }
+
+    #[test]
+    fn active_dependency_rationale_citing_version_absent_from_lockfile_is_refused() {
+        let workspace = fixture_workspace("admitted");
+        let registries_dir = workspace.root.join("registries");
+        fs::create_dir_all(&registries_dir).expect("create registries dir");
+
+        // Fixture Cargo.lock resolves asupersync 0.4.9. An active row citing
+        // asupersync_0.4.8 (or an unlinked active crate) must fail closed.
+        fs::write(
+            registries_dir.join("dependency_policy.tsv"),
+            concat!(
+                "# franken-registry-v2\n",
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
+                "DEP-001\tasupersync\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.8_transitive_direct_parent_asupersync\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-002\tftui-runtime\tproduction\tallow_transitive_admitted_tui\ttui\tftui-runtime_0.10.0_transitive_direct_parent_ftui-runtime\tresolved_none\tledgered\tno_ffi\tactive\tnot_applicable\tnot_applicable\n",
+            ),
+        )
+        .expect("write mismatched dependency_policy.tsv");
+
+        let mut refused = Report::new();
+        check_dependency_policy_rationale_versions(&workspace.root, &mut refused);
+        assert_error(
+            &refused,
+            "active row `DEP-001` (`asupersync`) rationale cites `asupersync_0.4.8`, which is absent from Cargo.lock (resolved: 0.4.9)",
+        );
+        assert_error(
+            &refused,
+            "active production allow row `DEP-002` (`ftui-runtime`) matches zero packages in Cargo.lock",
+        );
+
+        // Near-identical permitted twin: DEP-001 cites the resolved 0.4.9 version
+        // and the unlinked ftui-runtime row is marked `specified`.
+        fs::write(
+            registries_dir.join("dependency_policy.tsv"),
+            concat!(
+                "# franken-registry-v2\n",
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
+                "DEP-001\tasupersync\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_asupersync\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-002\tftui-runtime\tproduction\tallow_transitive_admitted_tui\ttui\tftui-runtime_0.10.0_transitive_direct_parent_ftui-runtime\tresolved_none\tledgered\tno_ffi\tspecified\tnot_applicable\tnot_applicable\n",
+            ),
+        )
+        .expect("write aligned dependency_policy.tsv");
+
+        let mut permitted = Report::new();
+        check_dependency_policy_rationale_versions(&workspace.root, &mut permitted);
+        assert!(
+            permitted.errors.is_empty(),
+            "aligned rationale versions and specified unlinked rows must pass: {:?}",
+            permitted.errors
+        );
+    }
+
+    #[test]
+    fn negative_evidence_ledger_and_tsv_must_maintain_one_to_one_id_parity() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let registries_dir = workspace.root.join("registries");
+        let docs_dir = workspace.root.join("docs");
+        fs::create_dir_all(&registries_dir).expect("create registries dir");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+
+        fs::write(
+            registries_dir.join("negative_evidence.tsv"),
+            concat!(
+                "# franken-registry-v1\n",
+                "id\tclass\thypothesis\tdisposition\tevidence\trevisit_condition\tstatus\n",
+                "NEG-001\tperformance\th1\trefuted\te1\tr1\tactive\n",
+                "NEG-002\tverification\th2\trefuted\te2\tr2\tactive\n",
+            ),
+        )
+        .expect("write negative_evidence.tsv");
+        fs::write(
+            docs_dir.join("NEGATIVE_EVIDENCE_LEDGER.md"),
+            "1. First entry (`NEG-001`) — refuted.\n",
+        )
+        .expect("write incomplete NEGATIVE_EVIDENCE_LEDGER.md");
+
+        let mut refused = Report::new();
+        check_negative_evidence_ledger_parity(&workspace.root, &mut refused);
+        assert_error(
+            &refused,
+            "registries/negative_evidence.tsv declares `NEG-002`, which lacks a dedicated entry in docs/NEGATIVE_EVIDENCE_LEDGER.md",
+        );
+
+        fs::write(
+            docs_dir.join("NEGATIVE_EVIDENCE_LEDGER.md"),
+            "1. First entry (`NEG-001`) — refuted.\n\n### NEG-002 — Second entry\n\nRefuted.\n",
+        )
+        .expect("write complete NEGATIVE_EVIDENCE_LEDGER.md");
+
+        let mut permitted = Report::new();
+        check_negative_evidence_ledger_parity(&workspace.root, &mut permitted);
+        assert!(
+            permitted.errors.is_empty(),
+            "1:1 negative-evidence parity must pass: {:?}",
+            permitted.errors
         );
     }
 }

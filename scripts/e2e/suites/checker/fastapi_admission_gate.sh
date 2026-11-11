@@ -35,6 +35,13 @@ fge_context subcommand constellation
 fge_phase setup
 
 FA_WORK=$(fge_tempdir fastapi-admission)
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$FA_WORK/target}"
+if [[ -n "${FGIT_REGISTRY_CHECK_BIN:-}" && -x "${FGIT_REGISTRY_CHECK_BIN}" ]]; then
+  FA_CHECKER="${FGIT_REGISTRY_CHECK_BIN}"
+else
+  cargo build --quiet --locked --manifest-path "$FA_REPO/tools/registry-check/Cargo.toml" --bin fgit-registry-check
+  FA_CHECKER="$CARGO_TARGET_DIR/debug/fgit-registry-check"
+fi
 
 # The fixture retains exact workspace membership on purpose: reducing it lets
 # Cargo legitimately request a lock rewrite before the constellation checks run.
@@ -47,6 +54,7 @@ fa_fixture() {
   cp "$FA_REPO/LICENSE" "$root/LICENSE"
   cp "$FA_REPO/Cargo.toml" "$root/Cargo.toml"
   cp -a "$FA_REPO/crates" "$root/crates"
+  cp -a "$FA_REPO/registries" "$root/registries"
   cp -a "$FA_REPO/tools/registry-check" "$root/tools/registry-check"
   printf '%s' "$root"
 }
@@ -70,9 +78,7 @@ fa_gate() {
   fge_field cargo_lock_digest "$(fge_digest_file "$fixture/Cargo.lock")"
   fge_field constellation_digest "$(fge_digest_file "$fixture/constellation.lock")"
   fge_capture "fastapi-$case_name" \
-    env RCH_CARGO_WRAPPER_BYPASS=1 cargo run --quiet \
-    --manifest-path "$FA_REPO/tools/registry-check/Cargo.toml" \
-    -- constellation --root "$fixture" || true
+    "$FA_CHECKER" constellation --root "$fixture" || true
   FA_EXIT=$FGE_LAST_EXIT
   FA_DIAGNOSTIC="$FGE_LAST_STDERR"$'\n'"$FGE_LAST_STDOUT"
 }
@@ -133,13 +139,12 @@ fa_gate "$demo" demo 'forbidden fastapi demo/example package `fastapi-demo`'
 demo_exit=$FA_EXIT
 demo_diagnostic=$FA_DIAGNOSTIC
 
-# --- why fastapi_rust 0.4.x is not admissible today ---------------------------
-# This is not a hypothetical. Every published fastapi-core 0.4.x (0.4.0, 0.4.1,
-# 0.4.2, 0.4.3 -- each inspected separately) declares a NON-optional dependency
-# on futures-executor, and fastapi-rust depends non-optionally on fastapi-core.
-# The three packages below are therefore the closure a real admission would
-# produce. When upstream drops futures-executor this case stops reflecting
-# reality and must be revisited rather than deleted.
+# --- historical fastapi_rust 0.4.x bundled-executor guard --------------------
+# Published fastapi-core 0.5.0 dropped futures-executor and converged on
+# asupersync 0.5.0, whereas historical fastapi-core 0.4.x (0.4.0..0.4.3)
+# declared a non-optional dependency on futures-executor. Retain this planted
+# 0.4.3 + futures-executor closure so the alternate-runtime gate remains tested
+# against the exact historical defect class.
 executor=$(fa_fixture bundled-executor)
 fa_plant_packages "$executor/Cargo.lock" \
   'fastapi-rust@0.4.3' 'fastapi-core@0.4.3' 'futures-executor@0.3.31'

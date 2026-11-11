@@ -69,7 +69,7 @@ fg() {
   if [ -n "${FG_BIN:-}" ]; then
     "$FG_BIN" "$@"
   else
-    RCH_CARGO_WRAPPER_BYPASS=1 cargo run -q -p fgit-cli -- "$@"
+    cargo run -q --locked -p fgit-cli --bin fg -- "$@"
   fi
 }
 

@@ -8,15 +8,15 @@
 #                       green -- a rule that refused everything would satisfy
 #                       every planted case for the wrong reason;
 #   admitted shape      one real member crate depending on published
-#                       ftui-runtime 0.6.0 (features: asupersync-executor,
+#                       ftui-runtime 0.10.0 (features: asupersync-executor,
 #                       native-backend; default-features = false), ftui-a11y
-#                       0.6.0, asupersync 0.4.9 resolves offline and passes the
-#                       gate once this bead's dependency_policy rows are
-#                       applied, with `cargo tree -i asupersync` proving ONE
-#                       0.4.9 across fgit-runtime + ftui-runtime + member;
-#   second major        pinning ftui-runtime 0.5.0 (executor gated on
-#                       asupersync ^0.3.4) drags a second Asupersync major into
-#                       resolution and is refused;
+#                       0.10.0, asupersync 0.5.0 resolves offline and passes the
+#                       gate once DEP-236..256 are promoted from `specified` to
+#                       `active`, with `cargo tree -i asupersync` proving ONE
+#                       0.5.0 across fgit-runtime + ftui-runtime + member;
+#   second major        pinning ftui-runtime 0.6.0 (executor gated on
+#                       asupersync 0.4.9) drags a second Asupersync major into
+#                       resolution alongside 0.5.0 and is refused;
 #   alternate runtime   a planted tokio dependency is refused by name;
 #   forbidden surface   ftui-runtime's telemetry feature (the OpenTelemetry
 #                       exporter family) is refused per the FG-094a closure.
@@ -47,6 +47,13 @@ fge_context probe_workspace /data/projects/fgit-ftui-probe-staging
 fge_phase setup
 
 FT_WORK=$(fge_tempdir ftui-admission)
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$FT_WORK/target}"
+if [[ -n "${FGIT_REGISTRY_CHECK_BIN:-}" && -x "${FGIT_REGISTRY_CHECK_BIN}" ]]; then
+  FT_CHECKER="${FGIT_REGISTRY_CHECK_BIN}"
+else
+  cargo build --quiet --locked --manifest-path "$FT_REPO/tools/registry-check/Cargo.toml" --bin fgit-registry-check
+  FT_CHECKER="$CARGO_TARGET_DIR/debug/fgit-registry-check"
+fi
 
 ft_fixture() {
   local name=$1 dep_lines=$2
@@ -82,7 +89,7 @@ EOF
 ft_resolve() {
   local root=$1 label=$2
   fge_capture "resolve-$label" \
-    env RCH_CARGO_WRAPPER_BYPASS=1 cargo metadata \
+    cargo metadata \
     --manifest-path "$root/Cargo.toml" --offline --format-version=1 >/dev/null || true
   FT_RESOLVE_EXIT=$FGE_LAST_EXIT
 }
@@ -92,9 +99,7 @@ ft_gate() {
   fge_field fixture "$case_name"
   fge_field expected_diagnostic "$expected"
   fge_capture "ftui-$case_name" \
-    env RCH_CARGO_WRAPPER_BYPASS=1 cargo run --quiet \
-    --manifest-path "$FT_REPO/tools/registry-check/Cargo.toml" \
-    -- constellation --root "$fixture" || true
+    "$FT_CHECKER" constellation --root "$fixture" || true
   FT_EXIT=$FGE_LAST_EXIT
   FT_DIAGNOSTIC="$(cat "$FGE_LAST_STDERR_FILE" 2>/dev/null)"$'\n'"$(cat "$FGE_LAST_STDOUT_FILE" 2>/dev/null)"
 }
@@ -111,10 +116,13 @@ live_diagnostic=$FT_DIAGNOSTIC
 # --- the admitted shape ------------------------------------------------------
 # The exact dependency lines a first consumer (FG-094b) will write. Resolution
 # must succeed OFFLINE from the pinned lock plus local registry cache, and the
-# gate must admit it once this bead's rows are applied.
-admitted=$(ft_fixture admitted-shape 'asupersync = { version = "0.4.9", default-features = false }
-ftui-a11y = { version = "0.6.0", default-features = false }
-ftui-runtime = { version = "0.6.0", features = ["asupersync-executor", "native-backend"], default-features = false }')
+# gate must admit it once DEP-236..256 are promoted from `specified` to `active`.
+admitted=$(ft_fixture admitted-shape 'asupersync = { version = "0.5.0", default-features = false }
+ftui-a11y = { version = "0.10.0", default-features = false }
+ftui-runtime = { version = "0.10.0", features = ["asupersync-executor", "native-backend"], default-features = false }')
+awk -F'\t' 'BEGIN{OFS="\t"} /^DEP-(23[6-9]|24[0-9]|25[0-6])\t/{$10="active"} {print}' \
+  "$admitted/registries/dependency_policy.tsv" > "$admitted/registries/dependency_policy.tsv.active"
+mv "$admitted/registries/dependency_policy.tsv.active" "$admitted/registries/dependency_policy.tsv"
 ft_resolve "$admitted" admitted-shape
 admitted_resolve_exit=$FT_RESOLVE_EXIT
 
@@ -122,15 +130,13 @@ admitted_resolve_exit=$FT_RESOLVE_EXIT
 # gate parity reflects a workspace that wired the kernel exactly as FG-094b
 # will. The generator prints rows only; the file header is preserved verbatim.
 fge_capture "constellation-regen-admitted" \
-  env RCH_CARGO_WRAPPER_BYPASS=1 cargo run --quiet \
-  --manifest-path "$FT_REPO/tools/registry-check/Cargo.toml" \
-  -- ledger-constellation --root "$admitted" || true
+  "$FT_CHECKER" ledger-constellation --root "$admitted" || true
 admitted_regen_exit=$FGE_LAST_EXIT
 awk '/^(#|state)/{print; next} /^package\t/{print; exit}' "$FT_REPO/constellation.lock" \
   > "$admitted/constellation.lock"
 cat "$FGE_LAST_STDOUT_FILE" >> "$admitted/constellation.lock"
 fge_capture "single-asupersync-universe" \
-  env RCH_CARGO_WRAPPER_BYPASS=1 cargo tree --manifest-path "$admitted/crates/ftui-link-fixture/Cargo.toml" -i asupersync || true
+  cargo tree --manifest-path "$admitted/crates/ftui-link-fixture/Cargo.toml" -i asupersync || true
 tree_exit=$FGE_LAST_EXIT
 tree_output="$(cat "$FGE_LAST_STDERR_FILE" 2>/dev/null)"$'\n'"$(cat "$FGE_LAST_STDOUT_FILE" 2>/dev/null)"
 universe_version_count=$(printf '%s\n' "$tree_output" | grep -cE '^asupersync v[0-9]' || true)
@@ -140,11 +146,14 @@ admitted_exit=$FT_EXIT
 admitted_diagnostic=$FT_DIAGNOSTIC
 
 # --- second Asupersync major -------------------------------------------------
-# ftui-runtime 0.5.0 gates its executor on asupersync ^0.3.4. Resolving it next
-# to this workspace's 0.4.9 either fails or splits the universe; both are
+# ftui-runtime 0.6.0 gates its executor on asupersync 0.4.9. Resolving it next
+# to this workspace's 0.5.0 either fails or splits the universe; both are
 # refusals and the diagnostic must say why.
-second_major=$(ft_fixture second-major 'asupersync = { version = "0.4.9", default-features = false }
-ftui-runtime = { version = "=0.5.0", features = ["asupersync-executor"], default-features = false }')
+second_major=$(ft_fixture second-major 'asupersync = { version = "0.5.0", default-features = false }
+ftui-runtime = { version = "=0.6.0", features = ["asupersync-executor"], default-features = false }')
+awk -F'\t' 'BEGIN{OFS="\t"} /^DEP-(23[6-9]|24[0-9]|25[0-6])\t/{$10="active"} {print}' \
+  "$second_major/registries/dependency_policy.tsv" > "$second_major/registries/dependency_policy.tsv.active"
+mv "$second_major/registries/dependency_policy.tsv.active" "$second_major/registries/dependency_policy.tsv"
 ft_resolve "$second_major" second-major
 second_resolve_exit=$FT_RESOLVE_EXIT
 ft_gate "$second_major" second-major 'asupersync'
@@ -162,7 +171,7 @@ tokio_diagnostic=$FT_DIAGNOSTIC
 # --- forbidden telemetry surface ---------------------------------------------
 # The exporter family is excluded from the FG-094a kernel closure; enabling the
 # feature that pulls opentelemetry must be refused at the manifest level.
-telemetry=$(ft_fixture telemetry-feature 'ftui-runtime = { version = "0.6.0", features = ["telemetry"], default-features = false }')
+telemetry=$(ft_fixture telemetry-feature 'ftui-runtime = { version = "0.10.0", features = ["telemetry"], default-features = false }')
 ft_gate "$telemetry" telemetry-feature 'telemetry'
 telemetry_exit=$FT_EXIT
 telemetry_diagnostic=$FT_DIAGNOSTIC
@@ -182,7 +191,7 @@ fge_assert_eq FG-094A-FTUI-011 0 "$tree_exit" \
   'cargo tree resolved the single-asupersync inventory'
 fge_assert_eq FG-094A-FTUI-016 0 "$admitted_regen_exit" \
   'the fixture constellation ledger regenerated from its own resolution'
-fge_assert_contains FG-094A-FTUI-012 "$tree_output" 'asupersync v0.4.9' \
+fge_assert_contains FG-094A-FTUI-012 "$tree_output" 'asupersync v0.5.0' \
   'the inverted tree names exactly our resolved asupersync version'
 fge_assert_eq FG-094A-FTUI-013 1 "$universe_version_count" \
   'exactly one asupersync version appears in the inverted tree: no second major'
@@ -193,7 +202,7 @@ fge_assert_not_contains FG-094A-FTUI-015 "$admitted_diagnostic" 'missing from th
 fge_assert_contains FG-094A-FTUI-021 "$second_diagnostic" 'multiple Asupersync' \
   'the refusal names the split Asupersync type universes'
 fge_assert_ne FG-094A-FTUI-020 0 "$second_exit" \
-  'resolving the 0.5.0 executor beside asupersync 0.4.9 is refused'
+  'resolving the 0.6.0 executor beside asupersync 0.5.0 is refused'
 
 # alternate runtime
 fge_assert_ne FG-094A-FTUI-030 0 "$tokio_exit" \

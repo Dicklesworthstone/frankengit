@@ -108,6 +108,7 @@ run_docs() {
 
 run_constitution() {
   echo_step "Checking dependency and memory-safety constitution"
+  cargo metadata --locked --format-version 1 >/dev/null
   run_native_tool fgit-registry-check fgit-registry-check constitution --root "$ROOT"
   cargo metadata --locked --no-deps --format-version 1 >/dev/null
 }
