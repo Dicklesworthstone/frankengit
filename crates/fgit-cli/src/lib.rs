@@ -3098,22 +3098,59 @@ mod command_time_policy_tests {
     /// acceptance 3). Test modules may still mint class contexts for fixtures.
     #[test]
     fn no_command_path_mints_the_class_default_context() {
+        fn is_cfg_test_attr(trimmed: &str) -> bool {
+            trimmed == "#[cfg(test)]"
+                || (trimmed.starts_with("#[cfg(all(")
+                    && trimmed.ends_with("))]")
+                    && trimmed["#[cfg(all(".len()..trimmed.len() - "))]".len()]
+                        .split(',')
+                        .any(|part| part.trim() == "test"))
+        }
+
+        fn parent_gates_test_mod(parent_dir: &Path, mod_name: &str) -> bool {
+            let sibling_rs = parent_dir.with_extension("rs");
+            let parent_file = if sibling_rs.is_file() {
+                sibling_rs
+            } else {
+                parent_dir.join("mod.rs")
+            };
+            let Ok(parent) = std::fs::read_to_string(parent_file) else {
+                return false;
+            };
+            let target_decl = format!("mod {mod_name};");
+            let mut gated = false;
+            for line in parent.lines() {
+                let trimmed = line.split("//").next().unwrap().trim();
+                if is_cfg_test_attr(trimmed) {
+                    gated = true;
+                    continue;
+                }
+                if gated {
+                    if trimmed.starts_with("#[") || trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == target_decl {
+                        return true;
+                    }
+                    gated = false;
+                }
+            }
+            false
+        }
+
         fn visit(dir: &Path, offenders: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
-                    // A `tests/` directory is skipped only when its parent
-                    // module declares it `#[cfg(test)] mod tests;`.
-                    let gated_tests_dir = path.file_name().is_some_and(|name| name == "tests")
-                        && std::fs::read_to_string(path.parent().unwrap().with_extension("rs"))
-                            .is_ok_and(|parent| {
-                                parent
-                                    .lines()
-                                    .map(str::trim)
-                                    .collect::<Vec<_>>()
-                                    .windows(2)
-                                    .any(|pair| pair == ["#[cfg(test)]", "mod tests;"])
-                            });
+                    // A `tests/` or `*_tests/` directory is skipped only when
+                    // its parent module explicitly gates `mod <name>;` under `cfg(test)`.
+                    let gated_tests_dir = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            (name == "tests" || name.ends_with("_tests"))
+                                && parent_gates_test_mod(path.parent().unwrap(), name)
+                        });
                     if !gated_tests_dir {
                         visit(&path, offenders);
                     }
@@ -3141,7 +3178,7 @@ mod command_time_policy_tests {
                         continue;
                     }
                     let trimmed = code.trim();
-                    if trimmed == "#[cfg(test)]" {
+                    if is_cfg_test_attr(trimmed) {
                         gated = true;
                         continue;
                     }

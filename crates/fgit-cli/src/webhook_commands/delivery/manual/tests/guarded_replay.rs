@@ -104,6 +104,16 @@ fn delivery_key(output: &str) -> AsciiSlug {
 
 #[test]
 fn canonical_replay_recovers_after_its_pinned_head_advances() {
+    thread::Builder::new()
+        .name("guarded-replay-canonical".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_canonical_replay_recovers_after_its_pinned_head_advances)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn run_canonical_replay_recovers_after_its_pinned_head_advances() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut fixture = Fixture::with_format(format);
         let receiver = ReplayReceiver::new();

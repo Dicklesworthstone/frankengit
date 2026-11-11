@@ -115,7 +115,7 @@ fn verify_blob<A: fgit_crypto::GitHashAlgorithm, E>(
     let mut remaining = length;
     // Large inventories often contain many tiny blobs. Allocate only their
     // bounded body size while preserving a nonempty buffer for the EOF probe.
-    let buffer_bytes = length.min(CHUNK_BYTES).max(1);
+    let buffer_bytes = length.clamp(1, CHUNK_BYTES);
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(buffer_bytes)
