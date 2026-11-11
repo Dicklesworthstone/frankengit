@@ -1,0 +1,47 @@
+# franken-registry-v1
+id	path	classification	disposition	rationale	status
+ART-001	.github/workflows/*.yml	product_input	keep	portable local dispatch-only workflow adapters for DSR and act per AGENTS.md §12	active
+ART-002	.github/ISSUE_TEMPLATE/*	product_input	keep	structured repository issue and slice templates	active
+ART-003	tools/registry-check/**	product_input	keep	canonical constitutional and registry verifier workspace crate	active
+ART-004	tests/operator/fixtures/workflow-cli-output-probe.py	product_input	keep	operator CLI output-probe Python fixture outside scripts/ and crates/	active
+ART-005	.github/fragments/**	transport_debris	remove	patch-transport bv changelog fragment removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-006	.github/patches/**	transport_debris	remove	patch-transport bv diff files removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (3 files)	rejected
+ART-007	.github/snapshot-request-20260904-2.txt	transport_debris	remove	patch-transport snapshot request scratch file removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-008	.github/workflows/gpt56pro-apply-format-20260904.yml	transport_debris	remove	hosted write-to-main workflow prohibited by AGENTS.md §12 and DSR-only standing policy	rejected
+ART-009	.visibility-payload/**	transport_debris	remove	root patch-staging payload scripts and Rust snippets removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (6 files)	rejected
+ART-010	tools/core-fetch-cli/**	transport_debris	remove	patch-transport base64 parts and apply helper removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (7 files)	rejected
+ART-011	tools/core-fetch-work/**	transport_debris	remove	patch-transport base64 parts and apply helper removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (8 files)	rejected
+ART-012	tools/event-feed-session/**	transport_debris	remove	patch-transport session helper removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-013	tools/fetch-continuation/**	transport_debris	remove	patch-transport session helpers and payloads removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (7 files)	rejected
+ART-014	tools/fetch-cutoffs/**	transport_debris	remove	patch-transport session helpers and payloads removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (11 files)	rejected
+ART-015	tools/http-transfer/**	transport_debris	remove	patch-transport HTTP session scripts and snippets removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (14 files)	rejected
+ART-016	tools/incremental-bundle-session/**	transport_debris	remove	patch-transport bundle session helpers removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (6 files)	rejected
+ART-017	tools/incremental-transfer-check/**	transport_debris	remove	patch-transport check scratch scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (2 files)	rejected
+ART-018	tools/issue-integration/**	transport_debris	remove	patch-transport issue session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (9 files)	rejected
+ART-019	tools/native-integration/**	transport_debris	remove	patch-transport native integration scratch scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (5 files)	rejected
+ART-020	tools/native-integration-recovery/**	transport_debris	remove	patch-transport recovery scratch scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (9 files)	rejected
+ART-021	tools/native-merge-recovery/**	transport_debris	remove	patch-transport merge recovery scratch scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (2 files)	rejected
+ART-022	tools/native-patch-publication/**	transport_debris	remove	patch-transport publication scratch scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (7 files)	rejected
+ART-023	tools/native-tag-work/**	transport_debris	remove	patch-transport tag session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (12 files)	rejected
+ART-024	tools/native-tags/**	transport_debris	remove	patch-transport tag scratch scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (2 files)	rejected
+ART-025	tools/partial-clone-work.py	transport_debris	remove	patch-transport partial-clone scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-026	tools/partial-payload/**	transport_debris	remove	patch-transport partial-clone payload scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (10 files)	rejected
+ART-027	tools/policy-integration-inspect.py	transport_debris	remove	patch-transport inspection scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-028	tools/rebase-session/**	transport_debris	remove	patch-transport rebase session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (7 files)	rejected
+ART-029	tools/ref-inventory/**	transport_debris	remove	patch-transport ref-inventory session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (6 files)	rejected
+ART-030	tools/ref-kind-session/**	transport_debris	remove	patch-transport ref-kind session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (4 files)	rejected
+ART-031	tools/repository-protection-work/**	transport_debris	remove	patch-transport repository-protection session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (14 files)	rejected
+ART-032	tools/review-protection-session/**	transport_debris	remove	patch-transport review-protection session scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (7 files)	rejected
+ART-033	tools/shallow-apply.py	transport_debris	remove	patch-transport shallow apply scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-034	tools/shallow-capability-reset-test.rs	transport_debris	remove	patch-transport unowned Rust snippet removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-035	tools/shallow-diagnostic-readonly.py	transport_debris	remove	patch-transport shallow diagnostic scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-036	tools/shallow-finish.py	transport_debris	remove	patch-transport shallow finish scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-037	tools/shallow-oracle-payload/**	transport_debris	remove	patch-transport shallow oracle payload scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (2 files)	rejected
+ART-038	tools/shallow-payload/**	transport_debris	remove	patch-transport shallow payload scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (5 files)	rejected
+ART-039	tools/shallow-publish-prepare.py	transport_debris	remove	patch-transport shallow prepare scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-040	tools/shallow-publish-verify.py	transport_debris	remove	patch-transport shallow verify scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-041	tools/shallow-v2-ref-prefixes.rs	transport_debris	remove	patch-transport unowned Rust snippet removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-042	tools/shallow-work.py	transport_debris	remove	patch-transport shallow scratch script removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-043	tools/source-browse-work/**	transport_debris	remove	patch-transport base64 parts and apply scripts removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (6 files)	rejected
+ART-044	tools/workflow-core.patch.b64	transport_debris	remove	patch-transport base64 patch bundle removed with owner approval under frankengit-root-doctrine-x2mv.4.16 (1 file)	rejected
+ART-045	work/stage-fgit-ssh/**	transport_debris	remove	patch-transport SSH staging scratch directory prohibited in repository source	rejected

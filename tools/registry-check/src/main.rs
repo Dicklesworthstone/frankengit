@@ -356,6 +356,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "docs/RAPTORQ_PERMEATION_MAP.md",
         "docs/RESEARCH_PROVENANCE.md",
         "registries/README.md",
+        "registries/artifact_inventory.tsv",
         "registries/attack_matrix.tsv",
         "registries/calm_operations.tsv",
         "registries/claim_classes.tsv",
@@ -389,6 +390,17 @@ const CALM_CLASS_COUNT: usize = 7;
 
 fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
     BTreeMap::from([
+        (
+            "artifact_inventory.tsv",
+            &[
+                "id",
+                "path",
+                "classification",
+                "disposition",
+                "rationale",
+                "status",
+            ][..],
+        ),
         (
             "attack_matrix.tsv",
             &[
@@ -777,6 +789,7 @@ fn check_registries(root: &Path, report: &mut Report) {
     check_evidence_packs(root, report);
     check_attack_matrix(root, report);
     check_compatibility_tiers(root, report);
+    check_artifact_inventory(root, report);
     claims::check(root, report);
 }
 
@@ -6050,9 +6063,143 @@ fn check_toolchain(root: &Path, report: &mut Report) {
     }
 }
 
+fn check_artifact_inventory(root: &Path, report: &mut Report) {
+    let path = root.join("registries/artifact_inventory.tsv");
+    let display = relative(root, &path);
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!("cannot read {display}: {error}"));
+            return;
+        }
+    };
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    let relative_files: Vec<String> = files.iter().map(|file| relative(root, file)).collect();
+
+    for (line_index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("id\t") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 6 {
+            continue;
+        }
+        let id = fields[0];
+        let pattern = fields[1];
+        let classification = fields[2];
+        let disposition = fields[3];
+        let status = fields[5];
+        if !matches!(
+            classification,
+            "product_input" | "historical_evidence" | "transport_debris"
+        ) {
+            report.error(format!(
+                "unknown artifact classification `{classification}` for `{id}` at {display}:{}",
+                line_index + 1
+            ));
+        }
+        if !matches!(disposition, "keep" | "relocate" | "archive" | "remove") {
+            report.error(format!(
+                "unknown artifact disposition `{disposition}` for `{id}` at {display}:{}",
+                line_index + 1
+            ));
+        }
+        let matches_any = relative_files
+            .iter()
+            .any(|candidate| artifact_pattern_matches(pattern, candidate));
+        if disposition == "keep" && status == "active" && !matches_any {
+            report.error(format!(
+                "{display}: active keep row `{id}` (`{pattern}`) matches zero files on disk"
+            ));
+        }
+        if disposition == "remove" {
+            if status != "rejected" {
+                report.error(format!(
+                    "{display}: remove row `{id}` (`{pattern}`) must have status `rejected`, found `{status}`"
+                ));
+            }
+            if matches_any {
+                report.error(format!(
+                    "{display}: prohibited artifact row `{id}` (`{pattern}`) still matches file(s) on disk"
+                ));
+            }
+        }
+    }
+}
+
+fn load_registered_keep_patterns(root: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root.join("registries/artifact_inventory.tsv")) else {
+        return Vec::new();
+    };
+    let mut patterns = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("id\t") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() == 6 && fields[3] == "keep" && fields[5] == "active" {
+            patterns.push(fields[1].to_owned());
+        }
+    }
+    patterns
+}
+
+fn artifact_pattern_matches(pattern: &str, candidate: &str) -> bool {
+    if pattern == candidate {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return candidate
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty());
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*.yml") {
+        return candidate
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/') && tail.ends_with(".yml"));
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return candidate
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'));
+    }
+    false
+}
+
+fn is_patch_transport_debris_name(name: &str) -> bool {
+    if name.ends_with(".b64") {
+        return true;
+    }
+    for prefix in ["part", "chunk"] {
+        if let Some(rest) = name.strip_prefix(prefix)
+            && rest.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        {
+            return true;
+        }
+    }
+    if let Some(index) = name.find(".part") {
+        let rest = &name[index + ".part".len()..];
+        if rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return true;
+        }
+    }
+    false
+}
+
 fn check_forbidden_artifacts(root: &Path, report: &mut Report) {
     let mut files = Vec::new();
     collect_files(root, &mut files);
+    let registered_keeps = load_registered_keep_patterns(root);
+    let workspace_members = fs::read_to_string(root.join("Cargo.toml"))
+        .map(|manifest| extract_workspace_string_list(&manifest, "members"))
+        .unwrap_or_else(|_| vec!["tools/registry-check".to_owned()]);
+
     for path in files {
         let display = relative(root, &path);
         let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
@@ -6068,6 +6215,57 @@ fn check_forbidden_artifacts(root: &Path, report: &mut Report) {
         if name == "Cargo.lock" && display != "Cargo.lock" {
             report.error(format!(
                 "nested lockfile {display}: the workspace has exactly one root Cargo.lock"
+            ));
+        }
+
+        let is_registered = registered_keeps
+            .iter()
+            .any(|pattern| artifact_pattern_matches(pattern, &display));
+        if is_registered {
+            continue;
+        }
+
+        if display.starts_with(".visibility-payload/") {
+            report.error(format!("forbidden staging payload artifact: {display}"));
+        }
+        if let Some(tail) = display.strip_prefix(".github/") {
+            let valid_workflow = tail.strip_prefix("workflows/").is_some_and(|file| {
+                !file.is_empty() && !file.contains('/') && file.ends_with(".yml")
+            });
+            let valid_template = tail
+                .strip_prefix("ISSUE_TEMPLATE/")
+                .is_some_and(|file| !file.is_empty() && !file.contains('/'));
+            if !valid_workflow && !valid_template {
+                report.error(format!(
+                    "unregistered .github artifact {display}; register product inputs in registries/artifact_inventory.tsv"
+                ));
+            }
+        }
+        if let Some(tail) = display.strip_prefix("tools/") {
+            let member_dir = tail
+                .split('/')
+                .next()
+                .map(|segment| format!("tools/{segment}"))
+                .unwrap_or_else(|| "tools".to_owned());
+            if !tail.contains('/')
+                || !workspace_member_path_is_declared(&workspace_members, &member_dir)
+            {
+                report.error(format!(
+                    "unregistered tools artifact {display}; only declared workspace members or registered product inputs in registries/artifact_inventory.tsv are permitted under tools/"
+                ));
+            }
+        }
+        if is_patch_transport_debris_name(name) {
+            report.error(format!(
+                "patch-transport debris artifact {display}; register legitimate inputs in registries/artifact_inventory.tsv"
+            ));
+        }
+        if name.ends_with(".py")
+            && !display.starts_with("scripts/")
+            && !display.starts_with("crates/")
+        {
+            report.error(format!(
+                "unregistered Python script outside scripts/ or crates/: {display}; relocate or register in registries/artifact_inventory.tsv"
             ));
         }
     }
@@ -8375,6 +8573,66 @@ impl CanonicalBody for EvidenceRecordBody {
             }),
             "mismatched DSR job mapping must be refused: {:?}",
             invalid_report.errors
+        );
+    }
+
+    #[test]
+    fn planted_patch_transport_debris_under_tools_is_refused_while_registered_twin_passes() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let planted = workspace.root.join("tools/foo/part01.b64");
+        fs::create_dir_all(planted.parent().expect("tools/foo parent")).expect("create tools/foo");
+        fs::write(&planted, b"cGF0Y2g=\n").expect("write planted b64 shard");
+
+        // Unregistered case: both the unregistered tools/ directory check and
+        // the patch-transport debris filename check refuse `tools/foo/part01.b64`.
+        let mut refused = Report::new();
+        check_forbidden_artifacts(&workspace.root, &mut refused);
+        assert_error(&refused, "unregistered tools artifact tools/foo/part01.b64");
+        assert_error(
+            &refused,
+            "patch-transport debris artifact tools/foo/part01.b64",
+        );
+
+        // Near-identical permitted twin: registering `tools/foo/part01.b64` in
+        // `registries/artifact_inventory.tsv` satisfies both the forbidden-artifact
+        // gate and the artifact-inventory registry gate.
+        let registries_dir = workspace.root.join("registries");
+        fs::create_dir_all(&registries_dir).expect("create registries dir");
+        fs::write(
+            registries_dir.join("artifact_inventory.tsv"),
+            concat!(
+                "# franken-registry-v1\n",
+                "id\tpath\tclassification\tdisposition\trationale\tstatus\n",
+                "ART-001\ttools/foo/part01.b64\tproduct_input\tkeep\texplicitly registered fixture twin\tactive\n",
+                "ART-002\t.visibility-payload/**\ttransport_debris\tremove\tprohibited root payload debris\trejected\n",
+            ),
+        )
+        .expect("write artifact_inventory.tsv");
+
+        let mut permitted = Report::new();
+        check_forbidden_artifacts(&workspace.root, &mut permitted);
+        check_artifact_inventory(&workspace.root, &mut permitted);
+        assert!(
+            permitted.errors.is_empty(),
+            "registered twin must pass without errors: {:?}",
+            permitted.errors
+        );
+
+        // Reintroducing a rejected `remove` path on disk must also be refused.
+        let visibility_file = workspace.root.join(".visibility-payload/apply.py");
+        fs::create_dir_all(visibility_file.parent().expect("visibility parent"))
+            .expect("create .visibility-payload");
+        fs::write(&visibility_file, b"print('debris')\n").expect("write visibility debris");
+        let mut reintroduced = Report::new();
+        check_forbidden_artifacts(&workspace.root, &mut reintroduced);
+        check_artifact_inventory(&workspace.root, &mut reintroduced);
+        assert_error(
+            &reintroduced,
+            "forbidden staging payload artifact: .visibility-payload/apply.py",
+        );
+        assert_error(
+            &reintroduced,
+            "prohibited artifact row `ART-002` (`.visibility-payload/**`) still matches file(s) on disk",
         );
     }
 }
