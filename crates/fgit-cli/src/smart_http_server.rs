@@ -604,8 +604,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         if !matches!(&credentials, CredentialInput::Reloadable(_)) {
             return Err("Git LFS requires explicit scopes in --credentials-file".into());
         }
-        #[cfg(not(target_os = "linux"))]
-        return Err("the Git LFS artifact-fabric backend requires Linux".into());
+        #[cfg(not(unix))]
+        return Err("the Git LFS artifact-fabric backend requires Unix".into());
     }
     if let Some(root) = flags.get("--artifact-root") {
         if !matches!(&credentials, CredentialInput::Reloadable(_)) {
@@ -616,8 +616,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         if root.len() > 4096 || !Path::new(root).is_absolute() {
             return Err("artifact root must be an absolute bounded private directory".into());
         }
-        #[cfg(not(target_os = "linux"))]
-        return Err("workflow artifact custody requires Linux".into());
+        #[cfg(not(unix))]
+        return Err("workflow artifact custody requires Unix".into());
     }
     if (allow_issues
         || allow_discussions
@@ -914,7 +914,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         }
         node.validate_smart_http_lfs_storage()
             .map_err(|e| e.to_string())?;
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if artifacts_enabled {
             node.validate_workflow_artifact_storage()
                 .map_err(|error| error.to_string())?;
@@ -1230,7 +1230,7 @@ mod tests {
                 .into_iter()
                 .map(str::to_owned),
         );
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let options = parse(&scoped).unwrap();
             assert_eq!(
@@ -1239,7 +1239,7 @@ mod tests {
             );
             assert!(!options.allow_receive && !options.allow_source && !options.allow_pulls);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         assert!(parse(&scoped).is_err());
         scoped.extend(["--lfs-root".into(), "other".into()]);
         assert!(parse(&scoped).is_err());
@@ -1268,7 +1268,7 @@ mod tests {
             .into_iter()
             .map(str::to_owned),
         );
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let options = parse(&scoped).unwrap();
             assert_eq!(
@@ -1284,7 +1284,7 @@ mod tests {
             );
             assert!(options.config.http_lfs_root().is_none());
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         assert!(parse(&scoped).is_err());
         let mut relative = scoped.clone();
         *relative.last_mut().unwrap() = "relative-artifacts".into();

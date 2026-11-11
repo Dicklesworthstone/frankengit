@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 //! Public native listener, real TCP, and a generated payload above the buffered
 //! ceiling. The client retains only bounded chunks and the small HTTP headers.
 
@@ -32,7 +32,8 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let path = base.join(format!(
             "fg-lfs-streaming-http-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

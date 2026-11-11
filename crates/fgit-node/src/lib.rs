@@ -71,8 +71,9 @@ mod outcome_collection;
 pub mod source_retrieval;
 mod treefs_workspace;
 mod upload_refusal;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod workflow_artifacts;
+pub const TRUSTED_WORKFLOW_ARTIFACT_TRUST: &str = "trusted-workflow-local-owner";
 pub use treefs_workspace::DiscussionReadRefusal;
 pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::MilestoneReadRefusal;
@@ -86,7 +87,7 @@ pub use treefs_workspace::workflow_watch;
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::{
     DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES,
-    TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
+    TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
     TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,

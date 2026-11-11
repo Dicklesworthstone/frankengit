@@ -87,7 +87,7 @@ impl NodeTools {
                 .runtime()
                 .block_on(node.authenticate_authority_head())
                 .map_err(|_| "MCP repository authority could not be authenticated")?;
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             if options.artifacts {
                 node.validate_workflow_artifact_storage().map_err(|error| {
                     format!("MCP workflow artifact storage refused: {}", error.code())

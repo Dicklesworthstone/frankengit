@@ -17,7 +17,7 @@ fn launch() -> Vec<String> {
 #[test]
 fn artifacts_require_the_independent_root_grant_and_incarnation_binding() {
     let complete = launch();
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let options = parse_options(&complete).unwrap();
         assert!(options.artifacts);
@@ -33,11 +33,11 @@ fn artifacts_require_the_independent_root_grant_and_incarnation_binding() {
         assert!(options.source && options.artifacts);
         assert!(!options.issues && !options.pulls && !options.writes.any());
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     assert!(
         parse_options(&complete)
             .unwrap_err()
-            .contains("only on Linux")
+            .contains("only on Unix")
     );
 
     for (flag, takes_value) in [

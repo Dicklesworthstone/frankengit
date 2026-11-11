@@ -135,5 +135,5 @@ fn artifact_output_failure_keeps_completed_receipt() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod storage;

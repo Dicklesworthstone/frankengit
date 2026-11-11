@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_object_fabric::artifact::storage::{
     ArtifactOperation, ArtifactPut, ArtifactScope, ArtifactStorageError as Error,
@@ -20,7 +20,8 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let p = base.join(format!(
             "fg-artifact-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

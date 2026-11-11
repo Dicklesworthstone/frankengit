@@ -61,7 +61,7 @@ fn main() -> ExitCode {
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
     if arguments.first().is_some_and(|argument| argument == "lfs") {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             use fgit_node::source_retrieval::lfs_transfer;
             return match lfs_transfer::run_with_timeout(
@@ -76,9 +76,9 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
                 }
             };
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
-            eprintln!("LFS custody portability requires the Linux artifact storage profile");
+            eprintln!("LFS custody portability requires the Unix artifact storage profile");
             return ExitCode::from(2);
         }
     }

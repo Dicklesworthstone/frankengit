@@ -23,7 +23,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new(format: GitHashAlgorithm) -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let root = base.join(format!(
             "fg-mcp-artifacts-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

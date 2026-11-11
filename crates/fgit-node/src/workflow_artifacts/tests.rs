@@ -15,7 +15,8 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let path = base.join(format!(
             "fg-workflow-artifact-read-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),

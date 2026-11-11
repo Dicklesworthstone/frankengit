@@ -178,8 +178,8 @@ impl Options {
             return Err("--allow-artifacts and --artifact-root must be supplied together".into());
         }
         if let Some(root) = &self.artifact_root {
-            if !cfg!(target_os = "linux") {
-                return Err("workflow artifact reads are supported only on Linux".into());
+            if !cfg!(unix) {
+                return Err("workflow artifact reads are supported only on Unix".into());
             }
             if self.incarnation.is_none() {
                 return Err("artifact reads require --expected-incarnation".into());

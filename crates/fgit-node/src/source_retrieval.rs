@@ -551,7 +551,7 @@ pub mod integrity;
 pub mod backup;
 
 /// Trusted-local, pinned native-pointer LFS inventory and portable byte custody.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod lfs_transfer;
 
 /// Read-only lexical reuse with separately retained current-source evidence.

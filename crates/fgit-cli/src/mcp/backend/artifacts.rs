@@ -54,7 +54,7 @@ fn schema(read: bool) -> Value {
     ])
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Debug)]
 struct Query {
     id: fgit_types::Digest,
@@ -62,7 +62,7 @@ struct Query {
     limit: usize,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn parse(args: &Object, read: bool) -> Result<Query, ToolError> {
     require_fields(
         args,
@@ -99,7 +99,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     if !backend.options.artifacts || !is_tool(name) {
         return Err(ToolError::invalid("tool_not_granted"));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let query = parse(args, name == READ)?;
         let request = backend.node.command_request_context(None);
@@ -147,7 +147,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             ("transaction_created", Value::Bool(false)),
         ]))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = args;
         Err(ToolError::failed("artifact_platform_unsupported"))

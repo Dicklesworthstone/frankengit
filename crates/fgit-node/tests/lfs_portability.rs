@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 //! Real native source, immutable LFS custody, and the public host command.
 //! No external Git, mutable source checkout, or forged inventory is involved.
 
@@ -34,7 +34,8 @@ mod verification;
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let path = base.join(format!(
             "fg-lfs-portability-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

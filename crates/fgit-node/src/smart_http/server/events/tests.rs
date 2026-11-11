@@ -149,7 +149,7 @@ impl Scratch {
                 .with(RepositoryHttpService::Outcomes, false)
                 .with(RepositoryHttpService::Pulls, true)
                 .with(RepositoryHttpService::Source, false),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             lfs: None,
             http: HttpLimits::default(),
             maximum_response_bytes: 2 * 1024 * 1024,

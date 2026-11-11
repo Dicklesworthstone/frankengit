@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 //! Exact workflow custody downloads through a real authenticated TCP listener.
 use fgit_crypto::sha256_digest;
 use fgit_node::{
@@ -28,7 +28,8 @@ const PAYLOAD: &[u8] = b"<html>retained-build\0\xffpayload</html>";
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let root = base.join(format!(
             "fg-artifact-http-tcp-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
