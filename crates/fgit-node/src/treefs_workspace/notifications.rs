@@ -1,21 +1,26 @@
-//! Self-owned thread preferences and a disposable, exact-source sqlmodel inbox.
+//! Self-owned thread preferences and a durable, watermarked exact-source sqlmodel inbox.
 use super::{issues::snapshots, native_merge::NodeNativeMergeProjection};
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
+use asupersync::sync::{LockError, Mutex as AsyncMutex, OwnedMutexGuard};
 use fgit_admission::merge::native::{notifications, objects::MergeObjectLimits};
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
+use fgit_crypto::{DigestHasher, Sha256Hasher, lowercase_hex};
 use fgit_forge::event::notification::{
     NotificationCommand, NotificationMode, NotificationTarget, NotificationTargetKind,
 };
 use fgit_forge::{AggregateVersion, IssueNumber};
+pub use fgit_projection::inbox::InboxSyncOutcome;
 use fgit_projection::inbox::{
-    InboxError, InboxKind, InboxQuery, InboxReason, InboxRow, InboxSession, InboxSnapshot,
-    InboxSnapshotBinding,
+    InboxError, InboxKind, InboxPage, InboxQuery, InboxReason, InboxRefusal, InboxRow,
+    InboxSession, InboxSnapshot, InboxSnapshotBinding,
 };
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{PrincipalId, RefusalCode, RepositoryAuthorityHeadId, TxId};
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationThreadState {
@@ -94,6 +99,141 @@ pub struct NotificationInboxPage {
     pub binding: InboxSnapshotBinding,
     pub threads: Vec<NotificationThreadView>,
     pub next_after: Option<u64>,
+    pub sync_outcome: Option<InboxSyncOutcome>,
+}
+
+const fn inbox_kind_for(kind: NotificationTargetKind) -> InboxKind {
+    match kind {
+        NotificationTargetKind::Issue => InboxKind::Issue,
+        NotificationTargetKind::Discussion => InboxKind::Discussion,
+        NotificationTargetKind::PullRequest => InboxKind::PullRequest,
+    }
+}
+
+fn projection_file_gate(path: &Path) -> Arc<AsyncMutex<()>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    let gates = GATES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut guard = gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        guard
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+}
+
+fn has_valid_sqlite_header_or_empty(path: &Path) -> bool {
+    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return !path.exists();
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    if metadata.len() == 0 {
+        return true;
+    }
+    if metadata.len() < SQLITE_HEADER.len() as u64 {
+        return false;
+    }
+    let mut header = [0_u8; SQLITE_HEADER.len()];
+    std::io::Read::read_exact(&mut file, &mut header).is_ok() && &header == SQLITE_HEADER
+}
+
+fn remove_projection_files(path: &Path) {
+    let base = path.as_os_str();
+    let _ = std::fs::remove_file(path);
+    for suffix in [
+        "-wal", "-shm", "-journal", ".wal", ".shm", ".journal", ".lock",
+    ] {
+        let mut sidecar = base.to_os_string();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(sidecar));
+    }
+    if let (Some(parent), Some(stem)) = (path.parent(), path.file_name())
+        && let Ok(entries) = std::fs::read_dir(parent)
+    {
+        let prefix = stem.as_encoded_bytes();
+        for entry in entries.flatten() {
+            if entry.file_name().as_encoded_bytes().starts_with(prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+fn is_recoverable_projection_error(error: &InboxError) -> bool {
+    match error {
+        InboxError::Storage(
+            fgit_projection::ProjectionError::Cancelled { .. }
+            | fgit_projection::ProjectionError::Panicked { .. }
+            | fgit_projection::ProjectionError::Interrupted(_)
+            | fgit_projection::ProjectionError::OutOfRange { .. },
+        )
+        | InboxError::Refusal(
+            InboxRefusal::InvalidField(_)
+            | InboxRefusal::RowLimit { .. }
+            | InboxRefusal::PageLimit { .. }
+            | InboxRefusal::DuplicateThread(_),
+        ) => false,
+        InboxError::Storage(_)
+        | InboxError::Refusal(_)
+        | InboxError::CommitUncertain { .. }
+        | InboxError::RollbackFailed { .. } => true,
+    }
+}
+
+fn is_recoverable_projection_refusal(refusal: &NotificationReadRefusal) -> bool {
+    match refusal {
+        NotificationReadRefusal::Projection(error) => is_recoverable_projection_error(error),
+        NotificationReadRefusal::ProjectionCleanup { cause, cleanup } => {
+            is_recoverable_projection_refusal(cause) || is_recoverable_projection_error(cleanup)
+        }
+        _ => false,
+    }
+}
+
+async fn run_inbox_projection_once(
+    cx: &asupersync::Cx,
+    projection_path: &Path,
+    snapshot: InboxSnapshot,
+    query: InboxQuery,
+) -> Result<(InboxSyncOutcome, InboxPage), NotificationReadRefusal> {
+    if let Some(parent) = projection_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| NotificationReadRefusal::InvalidProjection)?;
+    }
+    if !has_valid_sqlite_header_or_empty(projection_path) {
+        remove_projection_files(projection_path);
+    }
+    let expected = snapshot.binding;
+    let mut projection =
+        InboxSession::open_file(projection_path).map_err(NotificationReadRefusal::projection)?;
+    let result = async {
+        let outcome = projection
+            .sync_snapshot(cx, snapshot)
+            .await
+            .map_err(NotificationReadRefusal::projection)?;
+        let page = projection
+            .read_page(cx, &expected, query)
+            .await
+            .map_err(NotificationReadRefusal::projection)?;
+        Ok((outcome, page))
+    }
+    .await;
+    let close = projection.close(cx).await;
+    match (result, close) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(NotificationReadRefusal::projection(error)),
+        (Err(cause), Err(cleanup)) => Err(NotificationReadRefusal::ProjectionCleanup {
+            cause: Box::new(cause),
+            cleanup: Box::new(cleanup),
+        }),
+    }
 }
 impl OneNode {
     /// Publish only the authenticated principal's own preferences, using the
@@ -203,11 +343,7 @@ impl OneNode {
             return Err(NotificationReadRefusal::InvalidProjection);
         }
         let binding = InboxSnapshotBinding {
-            kind: match kind {
-                NotificationTargetKind::Issue => InboxKind::Issue,
-                NotificationTargetKind::Discussion => InboxKind::Discussion,
-                NotificationTargetKind::PullRequest => InboxKind::PullRequest,
-            },
+            kind: inbox_kind_for(kind),
             tenant: self.tenant_id,
             repository: self.repository_id,
             incarnation: self.repository_incarnation_id,
@@ -263,6 +399,28 @@ impl OneNode {
         )
         .await
     }
+    /// Deterministic filesystem path for the disposable, watermarked per-recipient
+    /// inbox projection under `<storage-root>/projections/inbox/`.
+    #[must_use]
+    pub fn notification_inbox_projection_path(
+        &self,
+        principal: PrincipalId,
+        kind: NotificationTargetKind,
+    ) -> PathBuf {
+        let inbox_kind = inbox_kind_for(kind);
+        let mut hasher = Sha256Hasher::new();
+        hasher.update(b"frankengit/node/notification-inbox-projection-file/v1\0");
+        hasher.update(self.tenant_id.as_bytes());
+        hasher.update(self.repository_id.as_bytes());
+        hasher.update(self.repository_incarnation_id.as_bytes());
+        hasher.update(principal.as_bytes());
+        hasher.update(inbox_kind.name().as_bytes());
+        let key_hex = lowercase_hex(&hasher.finish());
+        self.storage_root
+            .join("projections")
+            .join("inbox")
+            .join(format!("inbox-{key_hex}.sqlite"))
+    }
     /// Remote adapters first check the selected kind's disclosure and service grants.
     /// The session supplies the recipient; page tokens only request retained
     /// ancestors in the current configuration, policy and retention epoch.
@@ -286,7 +444,7 @@ impl OneNode {
         let (binding, mut threads) = self
             .notification_source_in(request, session, kind, expected_head)
             .await?;
-        let rows = threads
+        let rows: Vec<InboxRow> = threads
             .values()
             .filter(|t| !t.reasons.is_empty() || t.mode == NotificationMode::Muted)
             .map(NotificationThreadView::row)
@@ -295,56 +453,57 @@ impl OneNode {
             .authority()
             .attached_native_cx()
             .ok_or(NotificationReadRefusal::MissingRuntime)?;
-        let mut projection =
-            InboxSession::open_memory().map_err(NotificationReadRefusal::projection)?;
-        let result = async {
-            projection
-                .install_snapshot(&cx, InboxSnapshot { binding, rows })
+        let query = InboxQuery {
+            after_thread: (after != 0).then_some(after),
+            limit: NonZeroU16::new(limit).ok_or(NotificationReadRefusal::InvalidLimit)?,
+            unread_only,
+            include_muted,
+        };
+        let projection_path = self.notification_inbox_projection_path(binding.principal, kind);
+        let file_gate = projection_file_gate(&projection_path);
+        let _file_lease =
+            OwnedMutexGuard::lock(file_gate, &cx)
                 .await
-                .map_err(NotificationReadRefusal::projection)?;
-            let page = projection
-                .read_page(
-                    &cx,
-                    &binding,
-                    InboxQuery {
-                        after_thread: (after != 0).then_some(after),
-                        limit: NonZeroU16::new(limit)
-                            .ok_or(NotificationReadRefusal::InvalidLimit)?,
-                        unread_only,
-                        include_muted,
-                    },
-                )
-                .await
-                .map_err(NotificationReadRefusal::projection)?;
-            let mut result = Vec::with_capacity(page.rows.len());
-            for row in page.rows {
-                let view = threads
-                    .remove(&row.thread_number)
-                    .ok_or(NotificationReadRefusal::InvalidProjection)?;
-                // Display fields come only from this exact verified source.
-                if view.row() != row {
-                    return Err(NotificationReadRefusal::InvalidProjection);
+                .map_err(|error| match error {
+                    LockError::Cancelled => NotificationReadRefusal::projection(
+                        InboxError::Storage(fgit_projection::ProjectionError::Interrupted(
+                            "inbox_acquire_projection_gate",
+                        )),
+                    ),
+                    _ => NotificationReadRefusal::InvalidProjection,
+                })?;
+        let snapshot = InboxSnapshot { binding, rows };
+        let (sync_outcome, page) =
+            match run_inbox_projection_once(&cx, &projection_path, snapshot.clone(), query).await {
+                Ok(ok) => ok,
+                Err(first_error)
+                    if super::workspace_request_live(request)
+                        && !cx.is_cancel_requested()
+                        && is_recoverable_projection_refusal(&first_error) =>
+                {
+                    remove_projection_files(&projection_path);
+                    run_inbox_projection_once(&cx, &projection_path, snapshot, query).await?
                 }
-                result.push(view);
+                Err(error) => return Err(error),
+            };
+        let mut result = Vec::with_capacity(page.rows.len());
+        for row in page.rows {
+            let view = threads
+                .remove(&row.thread_number)
+                .ok_or(NotificationReadRefusal::InvalidProjection)?;
+            // Display fields come only from this exact verified source.
+            if view.row() != row {
+                return Err(NotificationReadRefusal::InvalidProjection);
             }
-            Ok(NotificationInboxPage {
-                kind,
-                binding: page.binding,
-                threads: result,
-                next_after: page.next_thread,
-            })
+            result.push(view);
         }
-        .await;
-        let close = projection.close(&cx).await;
-        match (result, close) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(NotificationReadRefusal::projection(error)),
-            (Err(cause), Err(cleanup)) => Err(NotificationReadRefusal::ProjectionCleanup {
-                cause: Box::new(cause),
-                cleanup: Box::new(cleanup),
-            }),
-        }
+        Ok(NotificationInboxPage {
+            kind,
+            binding: page.binding,
+            threads: result,
+            next_after: page.next_thread,
+            sync_outcome: Some(sync_outcome),
+        })
     }
     /// Exact issue lookup, retained for existing callers.
     pub async fn read_notification_thread_in(
@@ -380,6 +539,7 @@ impl OneNode {
             binding,
             threads: threads.remove(&target.number()).into_iter().collect(),
             next_after: None,
+            sync_outcome: None,
         })
     }
 }

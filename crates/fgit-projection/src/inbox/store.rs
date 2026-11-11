@@ -70,6 +70,10 @@ pub(super) fn delete<M: Model>() -> String {
     format!("DELETE FROM {}", quoted(M::TABLE_NAME))
 }
 
+pub(super) fn drop_table<M: Model>() -> String {
+    format!("DROP TABLE IF EXISTS {}", quoted(M::TABLE_NAME))
+}
+
 fn select<M: Model>() -> String {
     let columns = M::fields()
         .iter()

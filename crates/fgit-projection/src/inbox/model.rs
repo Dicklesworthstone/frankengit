@@ -2,6 +2,7 @@
 //! Manual implementations keep the admitted sqlmodel-core/driver closure;
 //! schema and statements consume this metadata rather than a parallel schema.
 
+use fgit_crypto::{DigestHasher, Sha256Hasher, lowercase_hex};
 use sqlmodel_core::field::FieldInfo;
 use sqlmodel_core::{Model, Row, SqlType, Value};
 
@@ -10,7 +11,9 @@ use super::{
     checked_counter,
 };
 
-const PROFILE: &str = "frankengit/thread-notification-inbox/v2";
+const PROFILE: &str = "frankengit/thread-notification-inbox/v3";
+const SCHEMA_GENERATION: i64 = 3;
+const CONTENT_DIGEST_DOMAIN: &[u8] = b"frankengit/thread-notification-inbox/content-digest/v3\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StoredInbox {
@@ -28,15 +31,29 @@ pub(super) struct StoredInbox {
     target_kind: String,
     pub complete: i64,
     pub row_count: i64,
+    pub content_digest: String,
 }
 
 impl StoredInbox {
+    #[cfg(test)]
     pub fn from_snapshot(snapshot: &InboxSnapshot) -> Result<Self, InboxError> {
+        let threads = snapshot
+            .rows
+            .iter()
+            .map(StoredThread::from_input)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_snapshot_with_threads(snapshot, &threads)
+    }
+
+    pub fn from_snapshot_with_threads(
+        snapshot: &InboxSnapshot,
+        threads: &[StoredThread],
+    ) -> Result<Self, InboxError> {
         let binding = &snapshot.binding;
         Ok(Self {
             singleton: 1,
             profile: PROFILE.to_owned(),
-            schema_generation: 2,
+            schema_generation: SCHEMA_GENERATION,
             tenant: binding.tenant.to_string(),
             repository: binding.repository.to_string(),
             incarnation: binding.incarnation.to_string(),
@@ -50,15 +67,16 @@ impl StoredInbox {
             principal: binding.principal.to_string(),
             target_kind: binding.kind.name().to_owned(),
             complete: 1,
-            row_count: i64::try_from(snapshot.rows.len())
+            row_count: i64::try_from(threads.len())
                 .map_err(|_| InboxRefusal::IncompleteSnapshot)?,
+            content_digest: snapshot_content_digest(binding, threads),
         })
     }
 
     pub fn matches(&self, binding: &InboxSnapshotBinding) -> bool {
         self.singleton == 1
             && self.profile == PROFILE
-            && self.schema_generation == 2
+            && self.schema_generation == SCHEMA_GENERATION
             && self.tenant == binding.tenant.to_string()
             && self.repository == binding.repository.to_string()
             && self.incarnation == binding.incarnation.to_string()
@@ -69,7 +87,54 @@ impl StoredInbox {
             && self.outbox_root == binding.outbox_root.to_string()
             && self.principal == binding.principal.to_string()
             && self.target_kind == binding.kind.name()
+            && self.content_digest.len() == 64
     }
+}
+
+fn feed_framed(hasher: &mut Sha256Hasher, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).expect("in-memory slice fits in u64");
+    hasher.update(&len.to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn feed_optional_i64(hasher: &mut Sha256Hasher, value: Option<i64>) {
+    match value {
+        None => hasher.update(&[0]),
+        Some(number) => {
+            hasher.update(&[1]);
+            hasher.update(&number.to_be_bytes());
+        }
+    }
+}
+
+fn snapshot_content_digest(binding: &InboxSnapshotBinding, threads: &[StoredThread]) -> String {
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(CONTENT_DIGEST_DOMAIN);
+    feed_framed(&mut hasher, binding.tenant.as_bytes());
+    feed_framed(&mut hasher, binding.repository.as_bytes());
+    feed_framed(&mut hasher, binding.incarnation.as_bytes());
+    feed_framed(&mut hasher, binding.authority_head.to_string().as_bytes());
+    hasher.update(&binding.authority_head_generation.to_be_bytes());
+    feed_framed(
+        &mut hasher,
+        binding.forge_position_root.to_string().as_bytes(),
+    );
+    feed_framed(&mut hasher, binding.outbox_root.to_string().as_bytes());
+    feed_framed(&mut hasher, binding.principal.as_bytes());
+    feed_framed(&mut hasher, binding.kind.name().as_bytes());
+    let count = u64::try_from(threads.len()).expect("thread count fits in u64");
+    hasher.update(&count.to_be_bytes());
+    for thread in threads {
+        hasher.update(&thread.thread_number.to_be_bytes());
+        hasher.update(&thread.thread_version.to_be_bytes());
+        feed_optional_i64(&mut hasher, thread.preference_version);
+        feed_optional_i64(&mut hasher, thread.read_through);
+        feed_optional_i64(&mut hasher, thread.latest_other_version);
+        hasher.update(&thread.reason_mask.to_be_bytes());
+        hasher.update(&thread.muted.to_be_bytes());
+        hasher.update(&thread.unread.to_be_bytes());
+    }
+    lowercase_hex(&hasher.finish())
 }
 
 const fn singleton_field() -> FieldInfo {
@@ -102,6 +167,7 @@ impl Model for StoredInbox {
             FieldInfo::new("target_kind", "target_kind", SqlType::Text),
             FieldInfo::new("complete", "complete", SqlType::BigInt),
             FieldInfo::new("row_count", "row_count", SqlType::BigInt),
+            FieldInfo::new("content_digest", "content_digest", SqlType::Text),
         ];
         FIELDS
     }
@@ -128,6 +194,7 @@ impl Model for StoredInbox {
             ("target_kind", Value::Text(self.target_kind.clone())),
             ("complete", Value::BigInt(self.complete)),
             ("row_count", Value::BigInt(self.row_count)),
+            ("content_digest", Value::Text(self.content_digest.clone())),
         ]
     }
 
@@ -147,6 +214,7 @@ impl Model for StoredInbox {
             target_kind: row.get_named("target_kind")?,
             complete: row.get_named("complete")?,
             row_count: row.get_named("row_count")?,
+            content_digest: row.get_named("content_digest")?,
         })
     }
 

@@ -47,6 +47,7 @@ pub enum InboxKind {
     PullRequest,
 }
 impl InboxKind {
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Issue => "issue",
@@ -187,6 +188,18 @@ pub struct InboxPage {
     pub next_thread: Option<u64>,
 }
 
+/// Outcome of [`InboxSession::sync_snapshot`] against a persisted projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboxSyncOutcome {
+    /// Stored marker, source coordinates, row count, content digest, and rows
+    /// already matched the canonical snapshot; zero rows were rewritten.
+    ReusedWatermark,
+    /// Snapshot was atomically installed (initial population, advanced
+    /// authority/forge/outbox watermark, changed hidden-ref visibility, legacy
+    /// schema upgrade, or repaired row tamper).
+    InstalledGeneration,
+}
+
 /// Refusals carry field names and bounds, never another recipient's rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InboxRefusal {
@@ -295,6 +308,16 @@ impl InboxSession<FrankenConnection> {
             .map(Self::new)
             .map_err(|error| ProjectionError::Sql(error).into())
     }
+
+    pub fn open_file(path: impl AsRef<std::path::Path>) -> Result<Self, InboxError> {
+        let path = path
+            .as_ref()
+            .to_str()
+            .ok_or(InboxRefusal::InvalidField("projection_path"))?;
+        FrankenConnection::open_file(path)
+            .map(Self::new)
+            .map_err(|error| ProjectionError::Sql(error).into())
+    }
 }
 
 impl<C: Connection> InboxSession<C> {
@@ -313,35 +336,13 @@ impl<C: Connection> InboxSession<C> {
         cx: &Cx,
         mut snapshot: InboxSnapshot,
     ) -> Result<(), InboxError> {
-        if snapshot.rows.len() > MAX_INBOX_ROWS {
-            return Err(InboxRefusal::RowLimit {
-                observed: snapshot.rows.len(),
-                maximum: MAX_INBOX_ROWS,
-            }
-            .into());
-        }
         if self
             .installed
             .is_some_and(|binding| binding != snapshot.binding)
         {
             return Err(InboxRefusal::SourceMismatch.into());
         }
-        checked_counter(
-            "authority_head_generation",
-            snapshot.binding.authority_head_generation,
-        )?;
-        for row in &mut snapshot.rows {
-            row.normalize()?;
-        }
-        snapshot.rows.sort_unstable_by_key(|row| row.thread_number);
-        if let Some(pair) = snapshot
-            .rows
-            .windows(2)
-            .find(|pair| pair[0].thread_number == pair[1].thread_number)
-        {
-            return Err(InboxRefusal::DuplicateThread(pair[0].thread_number).into());
-        }
-        let marker = StoredInbox::from_snapshot(&snapshot)?;
+        let (offered, marker) = prepare_snapshot(&mut snapshot)?;
         let tx = flatten(self.connection.begin(cx).await, "inbox_begin_install")?;
         macro_rules! checked {
             ($result:expr) => {{
@@ -380,13 +381,6 @@ impl<C: Connection> InboxSession<C> {
                     .collect::<sqlmodel_core::Result<Vec<_>>>()
                     .map_err(ProjectionError::Sql)
             );
-            let offered = checked!(
-                snapshot
-                    .rows
-                    .iter()
-                    .map(StoredThread::from_input)
-                    .collect::<Result<Vec<_>, _>>()
-            );
             if held != marker || observed != offered {
                 return Err(rollback(tx, cx, Some(InboxRefusal::SnapshotConflict.into())).await);
             }
@@ -408,9 +402,8 @@ impl<C: Connection> InboxSession<C> {
                 "inbox_replace_generation"
             ));
         }
-        for row in &snapshot.rows {
-            let row = checked!(StoredThread::from_input(row));
-            let (statement, parameters) = store::insert(&row);
+        for row in &offered {
+            let (statement, parameters) = store::insert(row);
             checked!(flatten(
                 tx.execute(cx, &statement, &parameters).await,
                 "inbox_insert_thread"
@@ -425,6 +418,131 @@ impl<C: Connection> InboxSession<C> {
             Ok(()) => {
                 self.installed = Some(snapshot.binding);
                 Ok(())
+            }
+            Err(failure) => Err(InboxError::CommitUncertain {
+                failure: Box::new(failure),
+            }),
+        }
+    }
+
+    /// Synchronize durable projection rows against a verified canonical
+    /// snapshot, reusing the persisted watermark without rewriting rows when
+    /// the stored marker, binding, content digest, and rows already match, and
+    /// atomically replacing the stored generation when the basis or visible row
+    /// set changed (or when stored rows/schema were tampered with).
+    pub async fn sync_snapshot(
+        &mut self,
+        cx: &Cx,
+        mut snapshot: InboxSnapshot,
+    ) -> Result<InboxSyncOutcome, InboxError> {
+        let (offered, marker) = prepare_snapshot(&mut snapshot)?;
+        let tx = flatten(self.connection.begin(cx).await, "inbox_begin_sync")?;
+        macro_rules! checked {
+            ($result:expr) => {{
+                match $result {
+                    Ok(value) => value,
+                    Err(error) => return Err(rollback(tx, cx, Some(error.into())).await),
+                }
+            }};
+        }
+        for statement in [
+            store::create::<StoredInbox>(),
+            store::create::<StoredThread>(),
+        ] {
+            checked!(flatten(
+                tx.execute(cx, &statement, &[]).await,
+                "inbox_sync_ensure_model"
+            ));
+        }
+        let mut drop_legacy_tables = false;
+        let held = match flatten(
+            tx.query_one(cx, &store::select_marker(), &[]).await,
+            "inbox_sync_read_marker",
+        ) {
+            Ok(Some(row)) => match StoredInbox::from_row(&row) {
+                Ok(marker_row) => Some(marker_row),
+                Err(_) => {
+                    drop_legacy_tables = true;
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(ProjectionError::Sql(_)) => {
+                drop_legacy_tables = true;
+                None
+            }
+            Err(error) => return Err(rollback(tx, cx, Some(error.into())).await),
+        };
+        if let Some(held) = held
+            && held == marker
+            && held.complete == 1
+        {
+            match flatten(
+                tx.query(cx, &store::all_threads(), &[]).await,
+                "inbox_sync_verify_threads",
+            ) {
+                Ok(stored) => {
+                    if let Ok(observed) = stored
+                        .iter()
+                        .map(StoredThread::from_row)
+                        .collect::<sqlmodel_core::Result<Vec<_>>>()
+                        && observed == offered
+                    {
+                        if let Err(failure) = flatten(tx.rollback(cx).await, "inbox_finish_reuse") {
+                            return Err(InboxError::RollbackFailed {
+                                cause: None,
+                                failure: Box::new(failure),
+                            });
+                        }
+                        self.installed = Some(snapshot.binding);
+                        return Ok(InboxSyncOutcome::ReusedWatermark);
+                    }
+                }
+                Err(ProjectionError::Sql(_)) => {
+                    drop_legacy_tables = true;
+                }
+                Err(error) => return Err(rollback(tx, cx, Some(error.into())).await),
+            }
+        }
+        if drop_legacy_tables {
+            for statement in [
+                store::drop_table::<StoredThread>(),
+                store::drop_table::<StoredInbox>(),
+                store::create::<StoredInbox>(),
+                store::create::<StoredThread>(),
+            ] {
+                checked!(flatten(
+                    tx.execute(cx, &statement, &[]).await,
+                    "inbox_sync_upgrade_schema"
+                ));
+            }
+        } else {
+            for statement in [
+                store::delete::<StoredThread>(),
+                store::delete::<StoredInbox>(),
+            ] {
+                checked!(flatten(
+                    tx.execute(cx, &statement, &[]).await,
+                    "inbox_sync_replace_generation"
+                ));
+            }
+        }
+        for row in &offered {
+            let (statement, parameters) = store::insert(row);
+            checked!(flatten(
+                tx.execute(cx, &statement, &parameters).await,
+                "inbox_sync_insert_thread"
+            ));
+        }
+        let (statement, parameters) = store::insert(&marker);
+        checked!(flatten(
+            tx.execute(cx, &statement, &parameters).await,
+            "inbox_sync_install_complete"
+        ));
+        match flatten(tx.commit(cx).await, "inbox_sync_commit") {
+            Ok(()) => {
+                self.installed = Some(snapshot.binding);
+                Ok(InboxSyncOutcome::InstalledGeneration)
             }
             Err(failure) => Err(InboxError::CommitUncertain {
                 failure: Box::new(failure),
@@ -550,6 +668,40 @@ async fn rollback<T: TransactionOps>(tx: T, cx: &Cx, cause: Option<InboxError>) 
             failure: Box::new(failure),
         },
     }
+}
+
+fn prepare_snapshot(
+    snapshot: &mut InboxSnapshot,
+) -> Result<(Vec<StoredThread>, StoredInbox), InboxError> {
+    if snapshot.rows.len() > MAX_INBOX_ROWS {
+        return Err(InboxRefusal::RowLimit {
+            observed: snapshot.rows.len(),
+            maximum: MAX_INBOX_ROWS,
+        }
+        .into());
+    }
+    checked_counter(
+        "authority_head_generation",
+        snapshot.binding.authority_head_generation,
+    )?;
+    for row in &mut snapshot.rows {
+        row.normalize()?;
+    }
+    snapshot.rows.sort_unstable_by_key(|row| row.thread_number);
+    if let Some(pair) = snapshot
+        .rows
+        .windows(2)
+        .find(|pair| pair[0].thread_number == pair[1].thread_number)
+    {
+        return Err(InboxRefusal::DuplicateThread(pair[0].thread_number).into());
+    }
+    let offered = snapshot
+        .rows
+        .iter()
+        .map(StoredThread::from_input)
+        .collect::<Result<Vec<_>, _>>()?;
+    let marker = StoredInbox::from_snapshot_with_threads(snapshot, &offered)?;
+    Ok((offered, marker))
 }
 
 fn checked_counter(field: &'static str, value: u64) -> Result<i64, InboxError> {

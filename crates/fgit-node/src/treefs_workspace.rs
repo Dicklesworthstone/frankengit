@@ -33,7 +33,8 @@ pub use events::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 pub use issues::IssueReadRefusal;
 pub use milestones::MilestoneReadRefusal;
 pub use notifications::{
-    NotificationInboxPage, NotificationReadRefusal, NotificationThreadState, NotificationThreadView,
+    InboxSyncOutcome, NotificationInboxPage, NotificationReadRefusal, NotificationThreadState,
+    NotificationThreadView,
 };
 pub use pull_request::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
