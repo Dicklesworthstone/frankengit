@@ -10,11 +10,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use fgit_admission::ProjectionFailure;
+use fgit_admission::merge::native::objects::FrontierCommitMetadata;
+#[cfg(test)]
 use fgit_crypto::git_object_id;
 use fgit_forge::preparation::{CommitInput, MergeSourceError};
-use fgit_git_object::{
-    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
-};
+#[cfg(test)]
+use fgit_git_object::ObjectType;
+use fgit_git_object::{ParseLimits, ParsedObject};
 use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
 use crate::OneNode;
@@ -73,13 +76,9 @@ impl OwnedScope {
 /// parsed adjacency cannot be substituted by an unverified caller.
 #[derive(Debug)]
 pub struct VerifiedCommitMetadata {
-    id: GitOid,
+    native: FrontierCommitMetadata,
     tree: GitOid,
-    parents: Vec<GitOid>,
     date: Option<i64>,
-    body_bytes: usize,
-    header_lines: usize,
-    maximum_header_line_bytes: usize,
 }
 
 impl VerifiedCommitMetadata {
@@ -88,21 +87,16 @@ impl VerifiedCommitMetadata {
         body: &[u8],
         limits: &ParseLimits,
     ) -> Result<Self, MergeSourceError> {
-        if id.is_zero() || git_object_id(id.algorithm(), ObjectType::Commit, body) != id {
-            return Err(MergeSourceError::InvalidObject(id));
-        }
-        let parsed = parse_object_body(
-            ObjectType::Commit,
-            body,
-            AcceptanceProfile::GitCompatibleImport,
-            limits,
-        )
-        .map_err(|error| parse_error(id, error))?;
+        let (native, commit) = FrontierCommitMetadata::verify(id, body, limits)
+            .map_err(|error| metadata_error(id, error))?;
+        let parsed = ParsedObject::Commit(commit);
         // The date orders exploration only; it never proves ancestry.
         let date = committer_time(&parsed);
         let ParsedObject::Commit(commit) = parsed else {
             return Err(MergeSourceError::InvalidObject(id));
         };
+        // The native certificate keeps admission's historical seconds hint;
+        // this owner's additional date retains the stricter fetch profile.
         if commit
             .headers()
             .iter()
@@ -125,86 +119,61 @@ impl VerifiedCommitMetadata {
         let tree = oid(commit
             .tree_reference()
             .ok_or(MergeSourceError::InvalidObject(id))?)?;
-        let mut parents = Vec::new();
-        parents
-            .try_reserve_exact(commit.parent_references().count())
-            .map_err(|_| MergeSourceError::BudgetExceeded)?;
-        for parent in commit.parent_references() {
-            parents.push(oid(parent)?);
-        }
-        let mut header_lines = 0usize;
-        let mut maximum_header_line_bytes = 0usize;
-        for header in commit.headers() {
-            header_lines += 1 + header.continuations.len();
-            maximum_header_line_bytes =
-                maximum_header_line_bytes.max(header.name.len() + 1 + header.value.len());
-            for continuation in &header.continuations {
-                maximum_header_line_bytes = maximum_header_line_bytes.max(1 + continuation.len());
-            }
-        }
-        Ok(Self {
-            id,
-            tree,
-            parents,
-            date,
-            body_bytes: body.len(),
-            header_lines,
-            maximum_header_line_bytes,
-        })
+        Ok(Self { native, tree, date })
+    }
+
+    const fn id(&self) -> GitOid {
+        self.native.id()
     }
 
     pub(crate) const fn body_bytes(&self) -> usize {
-        self.body_bytes
+        self.native.body_bytes()
     }
 
     pub(crate) fn into_commit(self) -> (CommitInput, Option<i64>) {
         (
             CommitInput {
                 tree: self.tree,
-                parents: self.parents,
+                parents: self.native.into_parents(),
             },
             self.date,
         )
     }
 
+    pub(crate) fn into_frontier_metadata(self) -> FrontierCommitMetadata {
+        self.native
+    }
+
     const fn fits(&self, limits: &ParseLimits, object_limit: usize) -> bool {
-        self.body_bytes <= object_limit
-            && self.body_bytes <= limits.max_object_bytes
-            && self.header_lines <= limits.max_header_lines
-            && self.maximum_header_line_bytes <= limits.max_header_line_bytes
+        self.native.body_bytes() <= object_limit
+            && self.native.body_bytes() <= limits.max_object_bytes
+            && self.native.header_lines() <= limits.max_header_lines
+            && self.native.maximum_header_line_bytes() <= limits.max_header_line_bytes
     }
 
     fn try_copy(&self) -> Result<Self, MergeSourceError> {
-        let mut parents = Vec::new();
-        parents
-            .try_reserve_exact(self.parents.len())
-            .map_err(|_| MergeSourceError::BudgetExceeded)?;
-        parents.extend_from_slice(&self.parents);
         Ok(Self {
-            id: self.id,
+            native: self
+                .native
+                .try_copy()
+                .map_err(|error| metadata_error(self.id(), error))?,
             tree: self.tree,
-            parents,
             date: self.date,
-            body_bytes: self.body_bytes,
-            header_lines: self.header_lines,
-            maximum_header_line_bytes: self.maximum_header_line_bytes,
         })
     }
 
     fn retained_bytes(&self) -> Option<usize> {
-        self.parents
-            .capacity()
-            .checked_mul(std::mem::size_of::<GitOid>())
+        self.native
+            .retained_bytes()
             .and_then(|bytes| bytes.checked_add(ENTRY_OVERHEAD))
     }
 }
 
-const fn parse_error(id: GitOid, error: ObjectError) -> MergeSourceError {
+const fn metadata_error(id: GitOid, error: ProjectionFailure) -> MergeSourceError {
     match error {
-        ObjectError::ObjectTooLarge { .. }
-        | ObjectError::TooManyTreeEntries { .. }
-        | ObjectError::HeaderLimitExceeded { .. }
-        | ObjectError::AllocationFailure => MergeSourceError::BudgetExceeded,
+        ProjectionFailure::Unavailable(fgit_types::RefusalCode::ResourceBudgetExceeded) => {
+            MergeSourceError::BudgetExceeded
+        }
         _ => MergeSourceError::InvalidObject(id),
     }
 }
@@ -274,7 +243,7 @@ impl AncestryMetadataCache {
     }
 
     fn insert(&self, scope: Scope<'_>, entry: &VerifiedCommitMetadata) {
-        if self.max_bytes == 0 || entry.id.algorithm() != scope.format {
+        if self.max_bytes == 0 || entry.id().algorithm() != scope.format {
             return;
         }
         let Some(minimum) = entry
@@ -294,7 +263,7 @@ impl AncestryMetadataCache {
             .scope
             .as_ref()
             .is_some_and(|stored| stored.matches(scope));
-        if matches && state.entries.contains_key(&entry.id) {
+        if matches && state.entries.contains_key(&entry.id()) {
             return;
         }
         let Ok(copy) = entry.try_copy() else {
@@ -336,8 +305,8 @@ impl AncestryMetadataCache {
         let sequence = state.sequence;
         state.sequence += 1;
         state.retained_bytes += charge;
-        state.order.insert(sequence, copy.id);
-        state.entries.insert(copy.id, (sequence, copy));
+        state.order.insert(sequence, copy.id());
+        state.entries.insert(copy.id(), (sequence, copy));
     }
 
     #[cfg(test)]
@@ -378,6 +347,10 @@ impl<'a> AncestryMetadataAccess<'a> {
         object_limit: usize,
     ) -> Option<Result<VerifiedCommitMetadata, MergeSourceError>> {
         self.cache.lookup(self.scope, id, limits, object_limit)
+    }
+
+    pub(crate) const fn is_enabled(&self) -> bool {
+        self.cache.max_bytes() != 0
     }
 
     pub(crate) fn insert(&self, entry: &VerifiedCommitMetadata) {

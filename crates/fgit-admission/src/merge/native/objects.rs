@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fgit_crypto::git_object_id;
 use fgit_diff::{
     AncestryQueryScratch, AncestryQueryWork, CommitAncestryIndex, CommitGraph, MergeBaseError,
     MergeBaseLimits, MergeBaseResult, ParentSet, frontier_merge_bases_all,
@@ -28,12 +29,169 @@ pub struct CanonicalObjectHeader {
     pub body_bytes: usize,
 }
 
+/// Immutable metadata derived only from independently verified native bytes.
+/// This is reusable parsing work, not an ancestry result, selection or authority.
+/// Original header counts and body size retain the current parser bounds.
+///
+/// A provider cannot substitute its own adjacency for the verified bytes:
+///
+/// ```compile_fail
+/// use fgit_admission::merge::native::objects::FrontierCommitMetadata;
+/// fn change_parents(metadata: &mut FrontierCommitMetadata) {
+///     metadata.parents.clear();
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontierCommitMetadata {
+    id: GitOid,
+    parents: Vec<GitOid>,
+    order_hint: Option<i64>,
+    body_bytes: usize,
+    header_lines: usize,
+    maximum_header_line_bytes: usize,
+}
+
+impl FrontierCommitMetadata {
+    /// Authenticate a commit's native identity and parse its original parent
+    /// headers under the historical ancestry profile. The returned parse lets
+    /// a source owner derive additional fields without parsing the bytes again.
+    /// This constructor does not establish repository selection or disclosure.
+    pub fn verify(
+        id: GitOid,
+        body: &[u8],
+        limits: &ParseLimits,
+    ) -> Result<(Self, fgit_git_object::Commit), ProjectionFailure> {
+        if id.is_zero() || git_object_id(id.algorithm(), ObjectType::Commit, body) != id {
+            return Err(invalid());
+        }
+        let ParsedObject::Commit(commit) = parse_object_body(
+            ObjectType::Commit,
+            body,
+            AcceptanceProfile::GitCompatibleImport,
+            limits,
+        )
+        .map_err(object_parse_failure)?
+        else {
+            return Err(invalid());
+        };
+        let mut parents = Vec::new();
+        parents
+            .try_reserve_exact(commit.parent_references().count())
+            .map_err(|_| budget())?;
+        for value in commit.parent_references() {
+            parents.push(parse_oid(id.algorithm(), value)?);
+        }
+        let mut header_lines = 0usize;
+        let mut maximum_header_line_bytes = 0usize;
+        for header in commit.headers() {
+            header_lines += 1 + header.continuations.len();
+            maximum_header_line_bytes =
+                maximum_header_line_bytes.max(header.name.len() + 1 + header.value.len());
+            for continuation in &header.continuations {
+                maximum_header_line_bytes = maximum_header_line_bytes.max(1 + continuation.len());
+            }
+        }
+        let metadata = Self {
+            id,
+            parents,
+            order_hint: frontier_commit_order_hint(&commit),
+            body_bytes: body.len(),
+            header_lines,
+            maximum_header_line_bytes,
+        };
+        Ok((metadata, commit))
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> GitOid {
+        self.id
+    }
+
+    /// Original native parent order, including historical duplicate headers.
+    #[must_use]
+    pub fn parents(&self) -> &[GitOid] {
+        &self.parents
+    }
+
+    /// Consume this certificate when the caller needs its verified adjacency.
+    #[must_use]
+    pub fn into_parents(self) -> Vec<GitOid> {
+        self.parents
+    }
+
+    /// The historical seconds hint, never a generation or an ancestry proof.
+    #[must_use]
+    pub const fn order_hint(&self) -> Option<i64> {
+        self.order_hint
+    }
+
+    #[must_use]
+    pub const fn body_bytes(&self) -> usize {
+        self.body_bytes
+    }
+
+    #[must_use]
+    pub const fn header_lines(&self) -> usize {
+        self.header_lines
+    }
+
+    #[must_use]
+    pub const fn maximum_header_line_bytes(&self) -> usize {
+        self.maximum_header_line_bytes
+    }
+
+    /// Copy retained metadata without turning allocation failure into a partial
+    /// ancestry result. No body or parsed message is retained by the certificate.
+    pub fn try_copy(&self) -> Result<Self, ProjectionFailure> {
+        let mut parents = Vec::new();
+        parents
+            .try_reserve_exact(self.parents.len())
+            .map_err(|_| budget())?;
+        parents.extend_from_slice(&self.parents);
+        Ok(Self {
+            id: self.id,
+            parents,
+            order_hint: self.order_hint,
+            body_bytes: self.body_bytes,
+            header_lines: self.header_lines,
+            maximum_header_line_bytes: self.maximum_header_line_bytes,
+        })
+    }
+
+    /// Struct and parent allocation bytes, excluding owner/container overhead.
+    #[must_use]
+    pub fn retained_bytes(&self) -> Option<usize> {
+        self.parents
+            .capacity()
+            .checked_mul(std::mem::size_of::<GitOid>())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+    }
+}
+
 /// Optional metadata lookup for reused objects only. Implementations must
 /// retain exact-key, disclosure, size and cancellation checks. `None` keeps
 /// ordinary full-body loading and accounting. New/candidate objects are never
 /// validated through this interface; pack emission never uses it either.
 pub trait FrontierObjectHeaders {
     fn load_header(&self, id: &GitOid) -> Result<Option<CanonicalObjectHeader>, PackWriteError>;
+
+    /// Reuse only an independently native-verified commit parse from the same
+    /// source scope. The caller checks selected membership before this lookup;
+    /// implementations also retain their own disclosure, staged-byte and live
+    /// request checks. The default preserves ordinary body loading.
+    fn load_commit_metadata(
+        &self,
+        _id: &GitOid,
+        _limits: &ParseLimits,
+    ) -> Result<Option<FrontierCommitMetadata>, ProjectionFailure> {
+        Ok(None)
+    }
+
+    /// Best-effort retention after the ordinary selected-commit parse succeeds.
+    /// The provider must independently verify bytes before retaining them.
+    /// Declining retention, including a stricter cache parser, cannot change
+    /// the original validation result or turn a permitted import into refusal.
+    fn remember_commit_metadata(&self, _id: &GitOid, _body: &[u8], _limits: &ParseLimits) {}
 }
 
 /// An authenticated selected set with an optional bounded metadata provider.
@@ -653,7 +811,7 @@ fn validate_candidate_objects(
             candidate,
             expected_parents,
             &parents,
-            selected.objects,
+            selected,
             limits,
             deadline,
         )?;
@@ -862,15 +1020,15 @@ fn validate_ancestry(
 }
 
 /// Commit parents above the selected closure: commits this request walked come
-/// from its own verified parent map, selected commits are read and parsed from
-/// the source. A commit that is in neither refuses: ancestry never reaches
+/// from its own verified parent map, selected commits reuse a verified parse or
+/// are read and parsed from the source. A commit that is in neither refuses: ancestry never reaches
 /// outside the authority-selected closure. Committer dates only order the
 /// frontier traversal; they never decide ancestry.
 struct FrontierCommitGraph<'a, S> {
     source: &'a S,
     format: GitHashAlgorithm,
     walked: &'a BTreeMap<GitOid, Vec<GitOid>>,
-    selected: &'a BTreeSet<GitOid>,
+    selected: ObjectFrontier<'a>,
     parse_limits: &'a ParseLimits,
 }
 
@@ -879,7 +1037,46 @@ impl<S: CanonicalObjectSource> FrontierCommitGraph<'_, S> {
         let (mut parents, hint) = if let Some(parents) = self.walked.get(commit) {
             // Commits this request created are the newest in the walk.
             (parents.clone(), i64::MAX)
-        } else if self.selected.contains(commit) {
+        } else if self.selected.objects.contains(commit) {
+            self.read_selected(commit)?
+        } else {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete,
+            ));
+        };
+        // As for VerifiedCommitGraph: repeated historical parent headers keep
+        // their bytes, but reachability uses the simple graph.
+        parents.sort_unstable();
+        parents.dedup();
+        Ok((ParentSet::Complete(parents), hint))
+    }
+
+    fn read_selected(&self, commit: &GitOid) -> Result<(Vec<GitOid>, i64), ProjectionFailure> {
+        if let Some(metadata) = self
+            .selected
+            .headers
+            .map(|headers| headers.load_commit_metadata(commit, self.parse_limits))
+            .transpose()?
+            .flatten()
+        {
+            if metadata.id != *commit
+                || metadata.id.algorithm() != self.format
+                || metadata
+                    .parents
+                    .iter()
+                    .any(|id| id.algorithm() != self.format)
+            {
+                return Err(invalid());
+            }
+            if metadata.body_bytes > self.parse_limits.max_object_bytes
+                || metadata.header_lines > self.parse_limits.max_header_lines
+                || metadata.maximum_header_line_bytes > self.parse_limits.max_header_line_bytes
+                || metadata.parents.len() > metadata.header_lines
+            {
+                return Err(budget());
+            }
+            Ok((metadata.parents, metadata.order_hint.unwrap_or(i64::MIN)))
+        } else {
             let object = self.source.load(commit).map_err(source_failure)?;
             if object.id() != *commit || object.object_type() != ObjectType::Commit {
                 return Err(invalid());
@@ -898,17 +1095,14 @@ impl<S: CanonicalObjectSource> FrontierCommitGraph<'_, S> {
                 .parent_references()
                 .map(|value| parse_oid(self.format, value))
                 .collect::<Result<Vec<_>, _>>()?;
-            (parents, committer_seconds(&parsed).unwrap_or(i64::MIN))
-        } else {
-            return Err(ProjectionFailure::Refuse(
-                RefusalCode::ObjectClosureIncomplete,
-            ));
-        };
-        // As for VerifiedCommitGraph: repeated historical parent headers keep
-        // their bytes, but reachability uses the simple graph.
-        parents.sort_unstable();
-        parents.dedup();
-        Ok((ParentSet::Complete(parents), hint))
+            if let Some(headers) = self.selected.headers {
+                headers.remember_commit_metadata(commit, object.body(), self.parse_limits);
+            }
+            Ok((
+                parents,
+                frontier_commit_order_hint(&parsed).unwrap_or(i64::MIN),
+            ))
+        }
     }
 }
 
@@ -929,8 +1123,9 @@ impl<S: CanonicalObjectSource> CommitGraph for FrontierCommitGraph<'_, S> {
 }
 
 /// The single, uncontinued committer header's seconds field, as an untrusted
-/// order hint only.
-fn committer_seconds(commit: &fgit_git_object::Commit) -> Option<i64> {
+/// ancestry order hint only. Historical imports need not have a valid timezone
+/// or identity; caches must preserve this reader's exact hint semantics.
+pub fn frontier_commit_order_hint(commit: &fgit_git_object::Commit) -> Option<i64> {
     let mut fields = commit
         .headers()
         .iter()
@@ -972,7 +1167,7 @@ fn validate_ancestry_above<S: CanonicalObjectSource>(
     candidate: GitOid,
     expected_parents: Option<&[GitOid]>,
     walked: &BTreeMap<GitOid, Vec<GitOid>>,
-    selected: &BTreeSet<GitOid>,
+    selected: ObjectFrontier<'_>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<(), ProjectionFailure> {
@@ -1014,7 +1209,7 @@ fn validate_ancestry_above<S: CanonicalObjectSource>(
     };
     // The base itself must be selected or walked: an unknown base is invalid,
     // exactly as an absent generation is in the full-closure validator.
-    if !selected.contains(&base) && !walked.contains_key(&base) {
+    if !selected.objects.contains(&base) && !walked.contains_key(&base) {
         return Err(invalid());
     }
     for tip in tips {
