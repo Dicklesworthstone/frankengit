@@ -1,6 +1,6 @@
 // DELIBERATELY FAKE fg backup contract process. Opaque JSON archive fixtures,
 // not the native FGSRC001 decoder, authority backend, graph or durable restore.
-import { readFile, writeFile, appendFile, mkdir, rm, stat } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { authenticateRepositoryBackupFile } from '../../../scripts/lib/repository-backup-approval.mjs';
@@ -65,7 +65,9 @@ export async function fakeRepositoryBackup(configPath) {
       } else { await mkdir(output, { mode: 0o700 }); await writeFile(join(output, 'authority-visible'), sha256); }
       if (config.mode === 'restore-lost-reply') throw Error('lost native receipt');
       if (config.mode === 'restore-wait') {
-        process.on('SIGTERM', () => {}); await writeFile(join(output, 'started'), String(process.pid));
+        process.on('SIGTERM', () => {});
+        await writeFile(join(output, 'started.tmp'), String(process.pid));
+        await rename(join(output, 'started.tmp'), join(output, 'started'));
         await new Promise(() => { setInterval(() => {}, 1000); });
       }
       result = { type: 'repository_source_backup_restore', ...base, destination_instance: BigInt(instance), source_tokens_preserved: false,

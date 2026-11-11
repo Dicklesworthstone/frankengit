@@ -140,7 +140,7 @@ EOF
 chmod 700 "${TEST_ROOT}/oracle-root/installs/testgit/bin/git"
 
 FAKE_GIT="${TEST_ROOT}/oracle-root/installs/testgit/bin/git"
-cp --preserve=mode -- "${FAKE_GIT}" "${TEST_ROOT}/valid-git"
+cp -p -- "${FAKE_GIT}" "${TEST_ROOT}/valid-git"
 read -r FAKE_HASH _ < <(sha256sum "${FAKE_GIT}")
 write_fake_receipt "${FAKE_HASH}"
 
@@ -227,6 +227,10 @@ export FGIT_ORACLE_BWRAP_LOG="${TEST_ROOT}/bwrap.log"
 export FGIT_ORACLE_FAKE_GIT="${FAKE_GIT}"
 export HOME="${TEST_ROOT}/user-home"
 export GIT_CONFIG_GLOBAL="${TEST_ROOT}/user-home/.gitconfig"
+ln -s "${BASH}" "${TEST_ROOT}/bin/bash"
+if command -v sha256sum >/dev/null 2>&1; then
+    ln -s "$(command -v sha256sum)" "${TEST_ROOT}/bin/sha256sum"
+fi
 export PATH="${TEST_ROOT}/bin:/usr/bin:/bin"
 
 fge_phase action
@@ -238,8 +242,12 @@ expect_exit FG-000B-ORACLE-047 64 "invalid root refuses before selecting an arch
     env FGIT_ORACLE_ROOT=/ "${ORACLE}" build testgit
 expect_file_contains FG-000B-ORACLE-049 FGIT_ORACLE_CONFIG \
     "${TEST_ROOT}/FG-000B-ORACLE-046.stderr" "invalid root retains its configuration diagnostic"
+NORMALIZED_FS_ROOT=/tmp/..
+if [[ -L /tmp ]]; then
+    NORMALIZED_FS_ROOT=/usr/..
+fi
 expect_exit FG-000B-ORACLE-050 64 "normalized filesystem root is refused" \
-    env FGIT_ORACLE_ROOT=/tmp/.. "${ORACLE}" verify testgit
+    env FGIT_ORACLE_ROOT="${NORMALIZED_FS_ROOT}" "${ORACLE}" verify testgit
 ln -s / "${TEST_ROOT}/filesystem-root"
 expect_exit FG-000B-ORACLE-051 64 "aliased filesystem root is refused" \
     env FGIT_ORACLE_ROOT="${TEST_ROOT}/filesystem-root" "${ORACLE}" verify testgit
@@ -280,7 +288,7 @@ chmod 700 "${FAKE_GIT}"
 read -r WRONG_HASH _ < <(sha256sum "${FAKE_GIT}")
 write_fake_receipt "${WRONG_HASH}"
 expect_exit FG-000B-ORACLE-003 64 "wrong installed Git version is refused" "${ORACLE}" verify testgit
-cp --preserve=mode -- "${TEST_ROOT}/valid-git" "${FAKE_GIT}"
+cp -p -- "${TEST_ROOT}/valid-git" "${FAKE_GIT}"
 read -r FAKE_HASH _ < <(sha256sum "${FAKE_GIT}")
 write_fake_receipt "${FAKE_HASH}"
 

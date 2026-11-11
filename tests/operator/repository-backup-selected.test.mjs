@@ -191,7 +191,10 @@ test('cancellation reaps native child and preserves unknown publication and exac
   let pid, polling = false;
   const poll = setInterval(async () => {
     if (polling || controller.signal.aborted) return; polling = true;
-    try { pid = Number(await readFile(join(f.restore.destination, 'started'), 'utf8')); controller.abort(); } catch {} finally { polling = false; }
+    try {
+      const text = (await readFile(join(f.restore.destination, 'started'), 'utf8')).trim();
+      if (/^[1-9][0-9]*$/.test(text)) { pid = Number(text); controller.abort(); }
+    } catch {} finally { polling = false; }
   }, 10);
   const safety = setTimeout(() => controller.abort(), 3000);
   try { await assert.rejects(f.run([a], { ...f.restore, signal: controller.signal }), e => e.state === 'restore_attempted_unknown'); }

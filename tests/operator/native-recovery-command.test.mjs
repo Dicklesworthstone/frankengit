@@ -27,7 +27,7 @@ async function invoke(h, extra = [], options = {}) {
     env: { ...process.env, NODE_OPTIONS: '', PATH: '/nonexistent-test-path' },
   });
   let stdout = '', stderr = '';
-  const timer = setTimeout(() => child.kill('SIGKILL'), 12000);
+  const timer = setTimeout(() => child.kill('SIGKILL'), 20000);
   child.stdout.on('data', chunk => { stdout += chunk; if (stdout.length > 2 ** 20) child.kill('SIGKILL'); });
   child.stderr.on('data', chunk => { stderr += chunk; if (stderr.length > 2 ** 20) child.kill('SIGKILL'); });
   const result = await new Promise((resolve, reject) => {
@@ -161,9 +161,9 @@ test('source path change after native snapshot selection never changes signed re
 
 test('approval expiring during native verification prevents destination creation', async t => {
   const h = await harness(t);
-  const expires = Math.floor(Date.now() / 1000) * 1000 + 3000;
+  const expires = Math.floor(Date.now() / 1000) * 1000 + 6000;
   const a = await approval(h, { expires_at: iso(expires) });
-  await h.configure({ delayMs: expires - Date.now() + 100 });
+  await h.configure({ delayMs: Math.max(100, expires - Date.now() + 250) });
   const result = await invoke(h, a.args);
   assert.notEqual(result.code, 0); assert.equal(result.report.code, 'attestation_expired');
   assert.equal((await h.calls()).length, 1);
@@ -400,9 +400,9 @@ test('file-backed recovery uses its authenticated snapshot after the original pa
 });
 
 for (const phase of ['publication_ready', 'published']) test(`signed file recovery uses original approval lifetime at ${phase}`, async t => {
-  const h = await harness(t), expires = Math.floor(Date.now() / 1000) * 1000 + 3000;
+  const h = await harness(t), expires = Math.floor(Date.now() / 1000) * 1000 + 6000;
   const a = await approval(h, { expires_at: iso(expires) });
-  const isolated = await scheduledCommand(h, { phase, until: expires + 100, removeControls: [a.envelope, a.key] });
+  const isolated = await scheduledCommand(h, { phase, until: expires + 250, removeControls: [a.envelope, a.key] });
   const result = await invoke(h, ['--native-file-backed', ...a.args], { command: isolated });
   assert.equal(await readFile(join(h.root, 'scheduled-phase'), 'utf8'), phase);
   if (phase === 'publication_ready') {

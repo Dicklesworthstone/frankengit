@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { configuration, dispatchReport, once, reconcile, serve, status } from '../../scripts/operator/workflow_watch.mjs';
 import { configuration as publisherConfiguration } from '../../scripts/operator/workflow_check_publish.mjs';
 import { createController } from '../../scripts/operator/workflow_supervisor.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const hex = value => Buffer.from(value).toString('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
@@ -55,7 +56,7 @@ async function fixture(t, format = 'sha1', controlPatch = {}, artifactPatch = {}
   return { root, config, lines, saved, set };
 }
 
-test('legacy configurations keep their exact serialized field order and no artifact defaults', () => {
+test('legacy configurations keep their exact serialized field order and no artifact defaults', LINUX_WORKFLOW, () => {
   const value = base('/fixture');
   assert.equal(JSON.stringify(configuration(value)), JSON.stringify(value));
   assert.equal(Object.hasOwn(configuration(value), 'artifacts'), false);
@@ -70,7 +71,7 @@ test('legacy configurations keep their exact serialized field order and no artif
   assert.equal(Object.hasOwn(captureOnly.artifacts, 'total_delivery_mib'), false);
 });
 
-test('artifact selectors canonicalize raw bytes and order without command or path interpolation', () => {
+test('artifact selectors canonicalize raw bytes and order without command or path interpolation', LINUX_WORKFLOW, () => {
   const raw = { ...captures()[0], output_path_hex: `${hex('dist/')}ff3a` };
   const input = { ...delivery()[0], output_path_hex: raw.output_path_hex, destination_hex: `${hex('incoming/')}fe3a` };
   const value = configured('/fixture', 'sha1', { selections: [raw, ...captures()], inputs: [input, ...delivery()] });
@@ -79,7 +80,7 @@ test('artifact selectors canonicalize raw bytes and order without command or pat
   assert.equal(value.artifacts.inputs.some(row => row.destination_hex === input.destination_hex), true);
 });
 
-test('invalid, duplicate, uncaptured and overlapping artifact contracts refuse with permitted twins', () => {
+test('invalid, duplicate, uncaptured and overlapping artifact contracts refuse with permitted twins', LINUX_WORKFLOW, () => {
   const permitted = () => configured('/fixture');
   for (const mutate of [
     a => { a.root = 'relative'; }, a => { a.root = '/fixture/state/outputs'; }, a => { a.root = '/fixture/fg'; },
@@ -107,7 +108,7 @@ test('invalid, duplicate, uncaptured and overlapping artifact contracts refuse w
   assert.throws(() => configured('/fixture', 'sha1', { selections: paths, inputs: [] }), /64 KiB/);
 });
 
-test('artifact paths obey native component and metadata rules while retaining raw repository bytes', () => {
+test('artifact paths obey native component and metadata rules while retaining raw repository bytes', LINUX_WORKFLOW, () => {
   const capture = path => configured('/fixture', 'sha1', { selections: [{ ...captures()[0], output_path_hex: hex(path) }], inputs: [] });
   assert.ok(capture('a'.repeat(255)));
   assert.throws(() => capture('a'.repeat(256)), /native component/);
@@ -125,7 +126,7 @@ test('artifact paths obey native component and metadata rules while retaining ra
 });
 
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: watched artifact pipeline forwards the canonical contract and deduplicates the commit`, async t => {
+  test(`${format}: watched artifact pipeline forwards the canonical contract and deduplicates the commit`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, {}, { maximum_file_mib: 2, total_payload_mib: 3, total_delivery_mib: 4 });
     const result = await once(f.config), saved = await f.saved();
     assert.equal(result.outcome, 'observed_succeeded');
@@ -154,7 +155,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(result.authoritative_check, false);
   });
 
-  test(`${format}: lost reply reconciles artifact custody offline without a second dispatch`, async t => {
+  test(`${format}: lost reply reconciles artifact custody offline without a second dispatch`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, { drop_stdout: true });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     const saved = await f.saved(), marker = await readFile(join(saved.row.native_directory, 'dispatch.json'));
@@ -172,7 +173,7 @@ for (const format of ['sha1', 'sha256']) {
   });
 }
 
-test('capture-only watchers forward output flags without granting an input delivery contract', async t => {
+test('capture-only watchers forward output flags without granting an input delivery contract', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', {}, { inputs: [] }); await once(f.config);
   const args = (await f.lines('calls.ndjson'))[1], saved = await f.saved();
   assert.equal(args.includes('--artifact-input-hex'), false);
@@ -180,7 +181,7 @@ test('capture-only watchers forward output flags without granting an input deliv
   assert.equal(Object.hasOwn(saved.report.plan.artifact_contract, 'input_delivery'), false);
 });
 
-test('changed native output and input contracts remain unresolved, with exact permitted twins', async t => {
+test('changed native output and input contracts remain unresolved, with exact permitted twins', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await once(f.config); const saved = await f.saved();
   for (const mutate of [
     r => { delete r.plan.artifact_contract; }, r => { r.plan.artifact_contract.root_hex = hex('/other'); },
@@ -202,7 +203,7 @@ test('changed native output and input contracts remain unresolved, with exact pe
   assert.throws(() => dispatchReport(noArtifacts, saved.intent, saved.report), /unrequested artifact/);
 });
 
-test('native contract omission blocks replay and reconciliation instead of recording a successful run', async t => {
+test('native contract omission blocks replay and reconciliation instead of recording a successful run', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { plan_patch: { artifact_contract: null } });
   await assert.rejects(once(f.config), /artifact contract differs/);
   assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -211,7 +212,7 @@ test('native contract omission blocks replay and reconciliation instead of recor
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('artifact roots are validated before custody or native effects and offline status stays available', async t => {
+test('artifact roots are validated before custody or native effects and offline status stays available', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   await chmod(f.config.artifacts.root, 0o755);
   await assert.rejects(once(f.config), /private/);
@@ -226,7 +227,7 @@ test('artifact roots are validated before custody or native effects and offline 
   assert.equal((await once(f.config)).outcome, 'observed_succeeded');
 });
 
-test('combined native argument bounds refuse before recording a started dispatch', async t => {
+test('combined native argument bounds refuse before recording a started dispatch', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), prefixes = [hex('.github'), ...Array.from({ length: 1023 }, (_, i) => hex(`input-${i}`))];
   const inputs = Array.from({ length: 64 }, (_, i) => ({ ...delivery()[0], destination_hex: hex(`copy-${i}`) }));
   const config = configuration({ ...f.config, input_prefixes_hex: prefixes, artifacts: { ...f.config.artifacts, inputs } });
@@ -236,7 +237,7 @@ test('combined native argument bounds refuse before recording a started dispatch
   assert.equal((await status(config)).records[0].state, 'queued');
 });
 
-test('continuous artifact watchers drain a stopped dispatch and retain its original contract', async t => {
+test('continuous artifact watchers drain a stopped dispatch and retain its original contract', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { dispatch_delay: 100 }), stop = new AbortController();
   const running = serve(f.config, { signal: stop.signal, pollMs: 100, maxPolls: 2, onObservation: () => stop.abort() });
   const result = await running;
@@ -245,7 +246,7 @@ test('continuous artifact watchers drain a stopped dispatch and retain its origi
   assert.equal((await status(f.config)).records[0].state, 'observed_succeeded');
 });
 
-test('publisher and supervisor custody stay disjoint while exact shared artifact roots remain valid', () => {
+test('publisher and supervisor custody stay disjoint while exact shared artifact roots remain valid', LINUX_WORKFLOW, () => {
   const watch = configured('/fixture');
   const publisher = { schema: 'frankengit-workflow-check-publisher-v1', watch, state_directory: '/fixture/publication', principal_id: '5'.repeat(32) };
   assert.ok(publisherConfiguration(publisher));

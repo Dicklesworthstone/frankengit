@@ -291,7 +291,7 @@ test('denied stop signals bound controller retirement and report unproved contai
     try{process.kill(-group,'SIGKILL');}catch(e){if(e.code!=='ESRCH')throw e;}
     await r.closed;
     const end=performance.now()+3000;
-    while(true){try{process.kill(-group,0);}catch(e){if(e.code==='ESRCH')break;throw e;}assert(performance.now()<end,'fixture group did not drain');await sleep(10);}
+    while(true){try{process.kill(-group,0);}catch(e){if(e.code==='ESRCH')break;if(!(process.platform==='darwin'&&e.code==='EPERM'))throw e;}assert(performance.now()<end,'fixture group did not drain');await sleep(10);}
     r.ownedPids.delete(group);
   }
   f.complete();

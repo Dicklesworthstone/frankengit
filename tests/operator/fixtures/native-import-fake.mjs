@@ -1,7 +1,7 @@
 // DELIBERATELY FAKE fg. Tests process/filesystem/recovery composition ONLY.
 // It does not parse Git, authenticate authority heads, or prove native atomicity.
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, linkSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = dirname(fileURLToPath(import.meta.url));
@@ -54,7 +54,12 @@ if (args[0] === 'bundle' && args[1] === 'verify') {
   }
   const storage = args[importing ? 2 : 1], tenant = args[importing ? 3 : 2], repository = args[importing ? 4 : 3];
   const principal = value('--principal'), key = readFileSync(0, 'utf8');
-  if (importing) writeFileSync(join(root, 'import-child.pid'), String(process.pid));
+  if (importing && ['hang-before', 'hang-after'].includes(mode.import)) process.on('SIGTERM', () => {});
+  if (importing) {
+    const pidTmp = join(root, `import-child.pid.${process.pid}.tmp`);
+    writeFileSync(pidTmp, String(process.pid));
+    renameSync(pidTmp, join(root, 'import-child.pid'));
+  }
   if (!/^fg-source-import-[0-9a-f]{64}$/.test(key)) throw new Error('fake_requires_exact_key_stdin');
   const transaction = `tx:${hash([tenant, repository, principal, key].join(':'))}`;
   const keyDigest = { algorithm: 1, hex: hash(key) }; // FAKE digest, not native derivation.
@@ -63,11 +68,14 @@ if (args[0] === 'bundle' && args[1] === 'verify') {
   if (importing) appendFileSync(join(root, 'attempts.jsonl'), JSON.stringify({ key, path: args[5] }) + '\n');
   if (decision === null && importing && !['pending', 'hang-before', 'fail-before'].includes(mode.import)) {
     const bytes = readFileSync(args[5]);
-    appendFileSync(join(root, 'submissions.jsonl'), JSON.stringify({ key, digest: hash(bytes), storage, transaction }) + '\n');
     decision = { outcome: mode.import === 'refuse' ? 'refused' : 'committed', transaction,
       rcr: `rcr:${hash(bytes)}`, sequence: mode.sequence ?? '1', count: mode.referenceCount ?? 1 };
-    try { writeFileSync(saved, JSON.stringify(decision), { flag: 'wx', mode: 0o600 }); }
+    const savedTmp = `${saved}.${process.pid}.tmp`;
+    writeFileSync(savedTmp, JSON.stringify(decision), { mode: 0o600 });
+    try { linkSync(savedTmp, saved); }
     catch (error) { if (error.code !== 'EEXIST') throw error; decision = JSON.parse(readFileSync(saved)); }
+    finally { try { unlinkSync(savedTmp); } catch {} }
+    appendFileSync(join(root, 'submissions.jsonl'), JSON.stringify({ key, digest: hash(bytes), storage, transaction }) + '\n');
   }
   if (importing && ['hang-before', 'hang-after'].includes(mode.import)) wait();
   else if (importing && ['lose-commit', 'fail-before', 'pending'].includes(mode.import)) process.exitCode = 2;

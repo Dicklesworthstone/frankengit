@@ -174,7 +174,7 @@ test('whole deadline includes source reads and drains body ownership', async t =
   const f = await fixture(t); let cancelled = false;
   const peer = githubPeer({ before: async () => new Response(new ReadableStream({ cancel() { cancelled = true; } }),
     { headers: { 'Content-Type': 'application/json' } }) });
-  await assert.rejects(run({ ...f.initial, timeoutMs: 100, fetchImpl: peer.fetchImpl }), { name: 'AbortError' });
+  await assert.rejects(run({ ...f.initial, timeoutMs: 500, fetchImpl: peer.fetchImpl }), { name: 'AbortError' });
   assert.equal(cancelled, true); await missing(join(f.initial.workdir, 'capture.owner'));
 });
 

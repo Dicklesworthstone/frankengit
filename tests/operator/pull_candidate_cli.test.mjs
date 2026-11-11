@@ -13,6 +13,7 @@ import { candidateCanonical, candidateHash } from '../../scripts/operator/pull_c
 import { preparePull, pullEnvelope } from '../../scripts/operator/pull_command.mjs';
 import { candidatePeer, TOKEN, REVIEWER } from './pull_candidate_fixture.mjs';
 const CLI = resolve('scripts/fg_pull_candidate.mjs'), ACTOR = 'e'.repeat(32);
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 async function files(t, input) {
   const root = await mkdtemp(join(tmpdir(), 'fg-candidate-cli-')); await chmod(root, 0o700);
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -45,7 +46,7 @@ async function captured(t, p) {
   return { ...f, receipt: JSON.parse(r.out) };
 }
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) {
-  test(`${algorithm} ${method}: native acquisition to offline inspection and preparer-compatible drafts`, async t => {
+  test(`${algorithm} ${method}: native acquisition to offline inspection and preparer-compatible drafts`, LINUX_ORACLE, async t => {
     const p = await candidatePeer(t, { algorithm, method, reviewCount: 51 }), f = await captured(t, p);
     assert.equal(f.receipt.published, false); assert.equal(f.receipt.usage.requests, 5);
     assert.equal(f.receipt.state, 'clean'); const before = p.requests.length;
@@ -71,7 +72,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     assert.equal(p.requests.length, before, 'inspection/drafting and preparation are offline');
   });
 }
-for (const state of ['conflicted', 'already_up_to_date']) test(`${state}: saved typed report, inspectable but never draftable`, async t => {
+for (const state of ['conflicted', 'already_up_to_date']) test(`${state}: saved typed report, inspectable but never draftable`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t, { state }), f = await files(t, p.input), result = await cli(t, captureArgs(f));
   assert.equal(result.code, 1, result.err); const receipt = JSON.parse(result.out);
   assert.equal(receipt.bundle_path, null); assert.equal(receipt.state, state); assert.equal(receipt.published, false);
@@ -79,24 +80,24 @@ for (const state of ['conflicted', 'already_up_to_date']) test(`${state}: saved 
   await choices(f, p); const draft = await cli(t, draftArgs(f, receipt.sha256)); assert.equal(draft.code, 2, draft.err);
   await assert.rejects(lstat(f.output), { code: 'ENOENT' }); assert.equal(p.requests.length, 3);
 });
-for (const field of ['input', 'token']) test(`private ${field} rejected before network`, async t => {
+for (const field of ['input', 'token']) test(`private ${field} rejected before network`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await files(t, p.input); await chmod(f[field], 0o644);
   const result = await cli(t, captureArgs(f)); assert.equal(result.code, 2); assert.equal(p.requests.length, 0);
   assert.equal(result.err.includes(TOKEN), false);
 });
 for (const raw of ['{"number":1,"number":2}', '{"number":9007199254740993}', '{broken', 'x'.repeat(512 * 1024 + 1)]) {
-  test(`invalid capture input ${raw.slice(0, 60)} stops before networking`, async t => {
+  test(`invalid capture input ${raw.slice(0, 60)} stops before networking`, LINUX_ORACLE, async t => {
     const p = await candidatePeer(t), f = await files(t, p.input); await writeFile(f.input, raw);
     const result = await cli(t, captureArgs(f)); assert.equal(result.code, 2); assert.equal(p.requests.length, 0);
   });
 }
-test('capture refuses an existing or interrupted output before requesting credentials or network work', async t => {
+test('capture refuses an existing or interrupted output before requesting credentials or network work', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await files(t, p.input);
   await mkdir(f.package, { mode: 0o700 }); await writeFile(join(f.package, 'capture.json'), '{partial', { mode: 0o600 });
   const result = await cli(t, captureArgs(f)); assert.equal(result.code, 2); assert.equal(p.requests.length, 0);
   assert.equal(await readFile(join(f.package, 'capture.json'), 'utf8'), '{partial');
 });
-test('concurrent capture commands have one new-slot winner without replacing its bytes', async t => {
+test('concurrent capture commands have one new-slot winner without replacing its bytes', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await files(t, p.input);
   const results = await Promise.all([cli(t, captureArgs(f)), cli(t, captureArgs(f))]);
   assert.equal(results.filter(r => r.code === 0).length, 1);
@@ -104,32 +105,32 @@ test('concurrent capture commands have one new-slot winner without replacing its
   const loaded = await loadCandidatePackage(f.package, winner.sha256); assert.deepEqual(loaded.bundle, p.fixture.bundle);
   assert.ok([2, 3].includes(results.find(r => r.code !== 0).code));
 });
-test('review page limit refuses the entire read; explicitly larger bound succeeds', async t => {
+test('review page limit refuses the entire read; explicitly larger bound succeeds', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t, { reviewCount: 51 }), f = await files(t, p.input);
   const bad = await cli(t, [...captureArgs(f), '--max-review-pages', '1']); assert.equal(bad.code, 3);
   assert.equal(p.requests.length, 2); await assert.rejects(lstat(f.package), { code: 'ENOENT' });
   const good = await cli(t, [...captureArgs(f), '--max-review-pages', '2']); assert.equal(good.code, 0, good.err);
 });
-test('one operation deadline refuses a stalled inspection, without a successful package prefix', async t => {
+test('one operation deadline refuses a stalled inspection, without a successful package prefix', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t, { handle(r) { return r.url.endsWith('/inspect'); } }), f = await files(t, p.input);
   const result = await cli(t, [...captureArgs(f), '--timeout-ms', '400']);
   assert.equal(result.code, 3); assert.equal(JSON.parse(result.err).code, 'candidate_timeout');
   assert.equal(p.requests.length, 4); await assert.rejects(lstat(f.package), { code: 'ENOENT' });
 });
-for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during capture cannot publish a completed package`, async t => {
+for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during capture cannot publish a completed package`, LINUX_ORACLE, async t => {
   let ready; const reached = new Promise(resolve => ready = resolve);
   const p = await candidatePeer(t, { handle(r) { if (r.url.endsWith('/inspect')) { ready(); return true; } } }), f = await files(t, p.input);
   const operation = launch(t, captureArgs(f)); await reached; operation.child.kill(signal); const result = await operation.result;
   if (signal === 'SIGKILL') assert.equal(result.signal, signal); else assert.equal(result.code, 3);
   await assert.rejects(lstat(f.package), { code: 'ENOENT' }); assert.equal(p.requests.length, 4);
 });
-test('closed stdout after capture preserves a complete package and its identity in the error receipt', async t => {
+test('closed stdout after capture preserves a complete package and its identity in the error receipt', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await files(t, p.input), result = await cli(t, captureArgs(f), { brokenOutput: true });
   assert.equal(result.code, 3); const error = JSON.parse(result.err); assert.equal(error.completed.path, f.package);
   assert.equal(error.completed.state, 'clean'); assert.deepEqual((await loadCandidatePackage(f.package, error.completed.sha256)).bundle, p.fixture.bundle);
   assert.equal(result.err.includes(TOKEN), false);
 });
-test('wrong pins, changed candidate choice, and missing bundles refuse draft before output', async t => {
+test('wrong pins, changed candidate choice, and missing bundles refuse draft before output', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await captured(t, p); await choices(f, p); const count = p.requests.length;
   assert.equal((await cli(t, draftArgs(f, '0'.repeat(64)))).code, 2);
   const bad = await choices(f, p); bad.candidate_commit = '0'.repeat(40); await writeFile(f.choices, candidateCanonical(bad));
@@ -138,7 +139,7 @@ test('wrong pins, changed candidate choice, and missing bundles refuse draft bef
   assert.equal((await cli(t, draftArgs(f, f.receipt.sha256))).code, 2);
   assert.equal(p.requests.length, count); await assert.rejects(lstat(f.output), { code: 'ENOENT' });
 });
-test('existing draft is never overwritten, including a concurrent creator', async t => {
+test('existing draft is never overwritten, including a concurrent creator', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await captured(t, p); await choices(f, p);
   await writeFile(f.output, 'existing', { mode: 0o600 });
   assert.equal((await cli(t, draftArgs(f, f.receipt.sha256))).code, 2);
@@ -148,7 +149,7 @@ test('existing draft is never overwritten, including a concurrent creator', asyn
   assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
   const result = JSON.parse(await readFile(destination, 'utf8')); assert.ok([1, 2].includes(result.writer));
 });
-test('closed stdout after drafting preserves the complete sender input', async t => {
+test('closed stdout after drafting preserves the complete sender input', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await captured(t, p); await choices(f, p);
   const result = await cli(t, draftArgs(f, f.receipt.sha256), { brokenOutput: true }); assert.equal(result.code, 3);
   const error = JSON.parse(result.err), bytes = await readFile(f.output);
@@ -156,25 +157,25 @@ test('closed stdout after drafting preserves the complete sender input', async t
   assert.equal(preparePull(JSON.parse(bytes), TOKEN, p.fixture.bundle).fields.expected_version, '2');
 });
 for (const extras of [['--force', 'true'], ['--method', 'squash'], ['--timeout-ms', '0'], ['--timeout-ms', '300001'],
-  ['--max-review-pages', '9'], ['--max-wire-bytes', '67108865'], ['--input', 'duplicate']]) test(`closed capture grammar ${extras.join(' ')}`, async t => {
+  ['--max-review-pages', '9'], ['--max-wire-bytes', '67108865'], ['--input', 'duplicate']]) test(`closed capture grammar ${extras.join(' ')}`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await files(t, p.input), result = await cli(t, [...captureArgs(f), ...extras]);
   assert.equal(result.code, 2); assert.equal(p.requests.length, 0);
 });
-test('offline commands reject credentials and endpoint/CA overrides', async t => {
+test('offline commands reject credentials and endpoint/CA overrides', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await captured(t, p); await choices(f, p); const count = p.requests.length;
   for (const args of [inspectArgs(f, f.receipt.sha256), draftArgs(f, f.receipt.sha256)]) for (const flag of ['token-file', 'ca-file', 'endpoint']) {
     assert.equal((await cli(t, [...args, `--${flag}`, f.token])).code, 2);
   }
   assert.equal(p.requests.length, count);
 });
-test('in-process output failure carries completed receipt without printing arbitrary exceptions', async t => {
+test('in-process output failure carries completed receipt without printing arbitrary exceptions', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t), f = await files(t, p.input); let error = '';
   const code = await run(captureArgs(f), { output: async () => { throw new Error(TOKEN); }, errorOutput: async text => { error += text; } });
   assert.equal(code, 3); assert.equal(error.includes(TOKEN), false);
   const receipt = JSON.parse(error).completed; assert.deepEqual((await loadCandidatePackage(receipt.path, receipt.sha256)).bundle, p.fixture.bundle);
 });
 
-for (const name of ['loopback', 'wrong-host']) test(`CLI private CA: ${name}`, async t => {
+for (const name of ['loopback', 'wrong-host']) test(`CLI private CA: ${name}`, LINUX_ORACLE, async t => {
   const f = await files(t, {}), certPath = join(f.root, 'ca.pem'), keyPath = join(f.root, 'key.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
     '-out', certPath, '-days', '1', '-subj', '/CN=fixture.invalid', '-addext',

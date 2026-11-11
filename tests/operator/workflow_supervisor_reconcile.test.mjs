@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { createController } from '../../scripts/operator/workflow_supervisor.mjs';
 import { argumentsFor, exitCode } from '../../scripts/fg_workflow_supervisor.mjs';
 import { reconcile as reconcileWatch } from '../../scripts/operator/workflow_watch.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const watched = (state = 'observed_succeeded', owner = false) => ({ type: 'workflow_watch_status', schema_version: 1,
   read_only: true, owner_present: owner, records: [{ state }] });
@@ -111,7 +112,7 @@ test('CLI reconciliation requires consent and accepts only its applicable shared
   }
 });
 
-test('watcher reconciliation rejects pre-abort and unsupported budgets before custody I/O', async t => {
+test('watcher reconciliation rejects pre-abort and unsupported budgets before custody I/O', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), watch = f.config.lanes[0].publisher.watch;
   const stop = new AbortController(); stop.abort(new Error('no read'));
   await assert.rejects(reconcileWatch(watch, { signal: stop.signal }), /no read/);

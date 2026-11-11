@@ -2,7 +2,7 @@
 // Test-only profile shared by browser/operator checks. This does not admit Node
 // into the production dependency universe or establish live-fg coverage.
 import { readFile, readdir, mkdtemp, realpath, chmod, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -104,8 +104,9 @@ async function initialize() {
   await chmod(temporary, 0o700);
   initialization.signal.throwIfAborted();
   const runtimeFlags = scope === 'scripts' ? ['--experimental-vm-modules'] : [];
-  console.error(`JS profile: revision=${revision} dirty=${dirty} node=${expected} host=${process.platform}/${process.arch} scope=${scope} files=${files.length} vm_modules=${runtimeFlags.length > 0} concurrency=2 test_timeout_ms=300000 campaign_timeout_ms=600000 temporary=${temporary}`);
-  return { files, runtimeFlags };
+  const concurrency = Math.max(2, Math.min(8, availableParallelism()));
+  console.error(`JS profile: revision=${revision} dirty=${dirty} node=${expected} host=${process.platform}/${process.arch} scope=${scope} files=${files.length} vm_modules=${runtimeFlags.length > 0} concurrency=${concurrency} test_timeout_ms=300000 campaign_timeout_ms=600000 temporary=${temporary}`);
+  return { files, runtimeFlags, concurrency };
 }
 let code = 1;
 try {
@@ -116,12 +117,12 @@ try {
       node: process.versions.node, corpus_started: false }));
     code = 0;
   } else {
-    const { files, runtimeFlags } = profile;
+    const { files, runtimeFlags, concurrency } = profile;
     const testEnvironment = { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary };
     // This is a new isolated runner, even when invoked by another node:test
     // process. Inheriting its internal context makes Node skip a recursive run.
     delete testEnvironment.NODE_TEST_CONTEXT;
-    child = spawn(process.execPath, [...runtimeFlags, '--test', '--test-reporter=tap', '--test-concurrency=2', '--test-timeout=300000', ...files], {
+    child = spawn(process.execPath, [...runtimeFlags, '--test', '--test-reporter=tap', `--test-concurrency=${concurrency}`, '--test-timeout=300000', ...files], {
       cwd: root, detached: true, stdio: 'inherit',
       env: testEnvironment,
     });

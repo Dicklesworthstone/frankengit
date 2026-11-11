@@ -4,13 +4,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, readdir, rename, symlink, link, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, chmod, rm, readdir, rename, symlink, link, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { importNativeSource, readNativeImportOutcome, retryNativeSourceImport } from '../../scripts/lib/native-source-import.mjs';
+import { parseImportArguments } from '../../scripts/import_git_bundle_native.mjs';
 import { signSourceBackup } from '../../scripts/lib/source-attestation.mjs';
 import { pinnedNativeGitOracle } from './fixtures/pinned-native-git-oracle.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -18,7 +19,7 @@ const CLI = resolve(HERE, '../../scripts/import_git_bundle_native.mjs');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const TENANT = '1'.repeat(32), REPO = '2'.repeat(32), PRINCIPAL = '3'.repeat(32);
 async function fixture(t, mode = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'fgit-import-test-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fgit-import-test-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const fg = join(root, 'fake-fg.mjs'), storage = join(root, 'node'), source = join(root, 'backup.bundle');
   const fake = await readFile(join(HERE, 'fixtures/native-import-fake.mjs'), 'utf8');
@@ -157,10 +158,15 @@ test('4096 long pins retain the independent one-MiB CLI argument ceiling', async
   const pins = referencePins(4096).map(pin => ({ ...pin, ref_hex: pin.ref_hex + '78'.repeat(256) }));
   const args = importArguments(f, pins);
   assert.ok(args.slice(1).reduce((bytes, arg) => bytes + Buffer.byteLength(arg), 0) > 1024 * 1024);
+  assert.throws(() => parseImportArguments(args.slice(1)), { message: 'invalid_import_arguments' });
   const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 10000 });
-  assert.ifError(result.error);
-  assert.equal(result.status, 2);
-  assert.equal(JSON.parse(result.stderr).error, 'invalid_import_arguments');
+  if (process.platform === 'darwin' && result.error?.code === 'E2BIG') {
+    assert.equal(result.status, null);
+  } else {
+    assert.ifError(result.error);
+    assert.equal(result.status, 2);
+    assert.equal(JSON.parse(result.stderr).error, 'invalid_import_arguments');
+  }
   assert.equal((await readdir(f.root)).includes('calls.jsonl'), false);
   await assert.rejects(stat(f.config.recovery), { code: 'ENOENT' });
 });
@@ -312,7 +318,7 @@ test('cancellation drains a child that ignores TERM, preserving a committed unkn
   const controller = new AbortController();
   const operation = importNativeSource(f.source, { ...f.config, signal: controller.signal });
   let count = 0;
-  while (!(await readdir(f.root)).includes('submissions.jsonl')) {
+  while (!((await stat(join(f.root, 'submissions.jsonl')).catch(() => null))?.size > 0)) {
     assert.ok(++count < 500, 'fake import started'); await new Promise(resolve => setTimeout(resolve, 10));
   }
   controller.abort();
@@ -609,7 +615,7 @@ for (const phase of ['hang-before', 'hang-after']) test(`SIGKILL of the operator
   const closed = new Promise(resolve => child.on('close', resolve));
   let tries = 0;
   const ready = phase === 'hang-after' ? 'submissions.jsonl' : 'attempts.jsonl';
-  while (!(await readdir(f.root)).includes(ready)) {
+  while (!((await stat(join(f.root, ready)).catch(() => null))?.size > 0)) {
     assert.ok(++tries < 500); await new Promise(resolve => setTimeout(resolve, 5));
   }
   const pid = Number(await readFile(join(f.root, 'import-child.pid'), 'utf8'));

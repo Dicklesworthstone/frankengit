@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { inflateSync } from 'node:zlib';
 import { join, dirname } from 'node:path';
@@ -11,7 +11,7 @@ export async function readFixture(format, extension = 'bundle') {
   return compressed ? inflateSync(bytes) : bytes;
 }
 export async function harness(t, format = 'sha1', extra = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'fg-native-recovery-test-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fg-native-recovery-test-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await chmod(root, 0o700);
   const fg = join(root, 'fg');

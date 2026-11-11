@@ -12,6 +12,7 @@ import { capturePullCandidate, candidateCanonical, candidateHash, RESOLUTION_CHO
 import { saveCandidatePackage, loadCandidatePackage } from '../../scripts/operator/pull_candidate_files.mjs';
 import { preparePull, pullEnvelope } from '../../scripts/operator/pull_command.mjs';
 import { resolutionPeer, TOKEN } from './pull_resolution_fixture.mjs';
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 
 const CLI = resolve('scripts/fg_pull_candidate.mjs');
 async function local(t, p, { ca } = {}) {
@@ -50,7 +51,7 @@ async function reached(promise) {
 
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) {
   for (const choice of ['base', 'ours', 'theirs', 'delete', 'file']) {
-    test(`${algorithm} ${method} ${choice}: executable resolve -> private inspection -> unchanged preparer`, async t => {
+    test(`${algorithm} ${method} ${choice}: executable resolve -> private inspection -> unchanged preparer`, LINUX_ORACLE, async t => {
       const p = await resolutionPeer(t, { algorithm, method, choice }), f = await local(t, p);
       const sent = await cli(t, resolveArgs(f)); assert.equal(sent.code, 0, sent.err);
       const receipt = JSON.parse(sent.out); assert.equal(receipt.state, 'resolved'); assert.equal(receipt.published, false);
@@ -81,7 +82,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     });
   }
 }
-test('resolved squash package drafts exact merge requirements, not retained review authority', async t => {
+test('resolved squash package drafts exact merge requirements, not retained review authority', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t, { algorithm: 'sha256', method: 'squash', choice: 'file', bytes: Buffer.from([0, 255, 10]), mode: '100755' });
   const f = await local(t, p), result = await cli(t, resolveArgs(f)); assert.equal(result.code, 0, result.err);
   const receipt = JSON.parse(result.out), pkg = await loadCandidatePackage(f.output, receipt.sha256);
@@ -95,7 +96,7 @@ test('resolved squash package drafts exact merge requirements, not retained revi
   assert.equal(pkg.capture.review_pages[0].reviews[0].decision, 'request-changes');
   assert.equal(pkg.capture.preparation.merge_authorized, false); assert.equal(p.requests.length, 5);
 });
-test('a 1 MiB replacement survives the larger bounded choices envelope and offline revalidation', async t => {
+test('a 1 MiB replacement survives the larger bounded choices envelope and offline revalidation', LINUX_ORACLE, async t => {
   const bytes = Buffer.alloc(1024 * 1024, 0xff), p = await resolutionPeer(t, { choice: 'file', bytes, mode: '100755' }), f = await local(t, p);
   assert.ok((await lstat(f.choices)).size > 2 * 1024 * 1024);
   const result = await cli(t, resolveArgs(f)); assert.equal(result.code, 0, result.err);
@@ -104,7 +105,7 @@ test('a 1 MiB replacement survives the larger bounded choices envelope and offli
   assert.ok(p.requests[3].body.includes(bytes)); await unchanged(f);
 });
 for (const kind of ['wrong-pin', 'corrupt-original', 'public-token', 'symlink-token', 'hardlink-choices', 'public-choices', 'duplicate-json', 'malformed-choices', 'oversized-choices', 'existing-output']) {
-  test(`${kind} refuses before resolution I/O or output publication`, async t => {
+  test(`${kind} refuses before resolution I/O or output publication`, LINUX_ORACLE, async t => {
     const p = await resolutionPeer(t), f = await local(t, p);
     if (kind === 'wrong-pin') f.saved.sha256 = 'f'.repeat(64);
     if (kind === 'corrupt-original') await writeFile(join(f.source, 'capture.json'), '{partial');
@@ -124,17 +125,17 @@ for (const kind of ['wrong-pin', 'corrupt-original', 'public-token', 'symlink-to
 }
 for (const extra of [['--force', 'true'], ['--method', 'squash'], ['--endpoint', 'https://elsewhere.invalid/repo.git'],
   ['--max-review-pages', '2'], ['--max-wire-bytes', '0'], ['--token-file', 'duplicate']]) {
-  test(`resolve has no broadened option: ${extra.join(' ')}`, async t => {
+  test(`resolve has no broadened option: ${extra.join(' ')}`, LINUX_ORACLE, async t => {
     const p = await resolutionPeer(t), f = await local(t, p);
     assert.equal((await cli(t, [...resolveArgs(f), ...extra])).code, 2); assert.equal(p.requests.length, 3); await noOutput(f);
   });
 }
-for (const phase of ['resolve', 'inspect']) test(`lost ${phase} response yields no resolved package or automatic retry`, async t => {
+for (const phase of ['resolve', 'inspect']) test(`lost ${phase} response yields no resolved package or automatic retry`, LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t, { handle(r, res) { if (r.url.endsWith('/' + phase)) { res.destroy(); return true; } } });
   const f = await local(t, p), result = await cli(t, resolveArgs(f)); assert.equal(result.code, 3, result.err);
   assert.equal(p.requests.length, phase === 'resolve' ? 4 : 5); await noOutput(f);
 });
-for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during resolution leaves the original package intact`, async t => {
+for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during resolution leaves the original package intact`, LINUX_ORACLE, async t => {
   let admitted; const observed = new Promise(resolve => admitted = resolve);
   const p = await resolutionPeer(t, { handle(r) { if (r.url.endsWith('/resolve')) { admitted(); return true; } } });
   const f = await local(t, p), child = launch(t, resolveArgs(f)); await reached(observed); child.child.kill(signal);
@@ -144,12 +145,12 @@ for (const signal of ['SIGTERM', 'SIGKILL']) test(`${signal} during resolution l
   const inspected = await cli(t, ['inspect', '--package', f.source, '--sha256', f.saved.sha256]);
   assert.equal(inspected.code, 0, inspected.err); assert.equal(p.requests.length, 4);
 });
-test('a stalled final inspection spends one deadline and does not save a prefix', async t => {
+test('a stalled final inspection spends one deadline and does not save a prefix', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t, { handle(r) { return r.url.endsWith('/inspect'); } }), f = await local(t, p);
   const result = await cli(t, [...resolveArgs(f), '--timeout-ms', '300']); assert.equal(result.code, 3, result.err);
   assert.equal(JSON.parse(result.err).code, 'candidate_timeout'); assert.equal(p.requests.length, 5); await noOutput(f);
 });
-test('competing output creators never replace the winning resolved package', async t => {
+test('competing output creators never replace the winning resolved package', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), f = await local(t, p);
   const results = await Promise.all([cli(t, resolveArgs(f)), cli(t, resolveArgs(f))]);
   assert.equal(results.filter(r => r.code === 0).length, 1);
@@ -157,21 +158,21 @@ test('competing output creators never replace the winning resolved package', asy
   const winner = JSON.parse(results.find(r => r.code === 0).out), pkg = await loadCandidatePackage(f.output, winner.sha256);
   assert.deepEqual(pkg.bundle, p.f.bundle); await unchanged(f);
 });
-test('broken executable stdout preserves the fully synchronized resolved package and its hash', async t => {
+test('broken executable stdout preserves the fully synchronized resolved package and its hash', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), f = await local(t, p), result = await cli(t, resolveArgs(f), { brokenOutput: true });
   assert.equal(result.code, 3, result.err);
   const error = JSON.parse(result.err); assert.equal(error.completed.state, 'resolved'); assert.equal(error.published, false);
   assert.equal(result.err.includes(TOKEN), false);
   const pkg = await loadCandidatePackage(f.output, error.completed.sha256); assert.deepEqual(pkg.bundle, p.f.bundle); await unchanged(f);
 });
-test('an awaited output failure retains the completed package in the diagnostic', async t => {
+test('an awaited output failure retains the completed package in the diagnostic', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), f = await local(t, p); let diagnostic = '';
   const code = await run(resolveArgs(f), { output: async () => { throw new Error('closed'); }, errorOutput: async text => { diagnostic = text; } });
   assert.equal(code, 3); const receipt = JSON.parse(diagnostic).completed;
   assert.equal(receipt.sha256, candidateHash(await readFile(join(f.output, 'manifest.json'))));
   await loadCandidatePackage(f.output, receipt.sha256); await unchanged(f);
 });
-test('TLS resolution requires a trusted certificate with matching hostname', async t => {
+test('TLS resolution requires a trusted certificate with matching hostname', LINUX_ORACLE, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'fg-resolution-tls-')); await chmod(dir, 0o700);
   t.after(() => rm(dir, { recursive: true, force: true }));
   for (const [name, alt] of [['local', 'IP:127.0.0.1'], ['wrong', 'DNS:elsewhere.invalid']]) {
