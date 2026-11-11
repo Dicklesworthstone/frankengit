@@ -94,6 +94,33 @@ fn prepare<A: GitHashAlgorithm, C: Fn() -> LogicalTime + Sync>(
         ))
 }
 
+fn prepare_new_branch<A: GitHashAlgorithm>(
+    node: &OneNode,
+    run: &IntentRun,
+    base: fgit_types::GitOid,
+    capability: &mut TreeCapability,
+    destination: &RefName,
+    visibility: &RefVisibility,
+) -> Result<PreparedAgentPatchCandidate<A>, AgentWorkspacePatchRefusal> {
+    node.runtime().block_on(
+        node.prepare_agent_workspace_patch_for_new_branch_in::<A, _>(
+            &node.request_context(),
+            AgentWorkspacePatchInput {
+                run,
+                reference: &reference(),
+                expected_commit: base,
+                visibility,
+                capability,
+                patch_bytes: PATCH,
+                metadata: &metadata(),
+                limits: PatchLimits::default(),
+            },
+            destination,
+            &|| LogicalTime::new(11),
+        ),
+    )
+}
+
 fn current(node: &OneNode) -> (fgit_types::GitOid, fgit_types::RepositoryAuthorityHeadId) {
     let selected = node
         .runtime()
@@ -129,15 +156,31 @@ fn context(run: &IntentRun) -> ContextPacket {
     .unwrap()
 }
 
-fn native_candidate_reaches_publication<A: GitHashAlgorithm>() {
+fn native_candidate_reaches_publication<A: GitHashAlgorithm>(new_branch: bool) {
     let scratch = Scratch::new();
     let (node, source) = node(&scratch, A::OBJECT_FORMAT, true);
     let (run, original_read) = authenticated_run(&node, scope());
     let before = current(&node);
     let mut cap = capability(&node);
-    let prepared = prepare::<A, _>(&node, &run, source.commit, &mut cap, PATCH, &|| {
-        LogicalTime::new(11)
-    })
+    let destination = if new_branch {
+        RefName::try_new(b"refs/heads/agent/checked-change").unwrap()
+    } else {
+        reference()
+    };
+    let prepared = if new_branch {
+        prepare_new_branch::<A>(
+            &node,
+            &run,
+            source.commit,
+            &mut cap,
+            &destination,
+            &RefVisibility::new(),
+        )
+    } else {
+        prepare::<A, _>(&node, &run, source.commit, &mut cap, PATCH, &|| {
+            LogicalTime::new(11)
+        })
+    }
     .unwrap();
     assert!(cap.fetched_bytes() > 0);
     assert_eq!(
@@ -167,9 +210,17 @@ fn native_candidate_reaches_publication<A: GitHashAlgorithm>() {
     );
     assert_eq!(
         prepared.proposal().ref_intents()[0].expected,
-        ExpectedRef::Exactly {
-            oid: A::parse_hex(&source.commit.to_string()).unwrap(),
+        if new_branch {
+            ExpectedRef::Absent
+        } else {
+            ExpectedRef::Exactly {
+                oid: A::parse_hex(&source.commit.to_string()).unwrap(),
+            }
         },
+    );
+    assert_eq!(
+        prepared.proposal().ref_intents()[0].name,
+        destination.as_bytes()
     );
     assert!(prepared.export().verify_all());
     let changed_blob = GitOid::<A>::of_object(GitObjectKind::Blob, b"fn checked_change() {}\n");
@@ -200,8 +251,23 @@ fn native_candidate_reaches_publication<A: GitHashAlgorithm>() {
             PatchLimits::default(),
         ))
         .unwrap();
-    assert_eq!(ordinary.bundle_bytes(), prepared.candidate().bundle_bytes());
+    if !new_branch {
+        assert_eq!(ordinary.bundle_bytes(), prepared.candidate().bundle_bytes());
+    }
     assert_eq!(ordinary.commit_body(), prepared.commit_body());
+    let bundle = prepared.candidate().bundle_bytes();
+    let header_end = bundle
+        .windows(2)
+        .position(|bytes| bytes == b"\n\n")
+        .unwrap()
+        + 2;
+    let header = std::str::from_utf8(&bundle[..header_end]).unwrap();
+    assert!(header.ends_with(&format!(
+        "{} {}\n\n",
+        prepared.candidate().candidate_commit,
+        std::str::from_utf8(destination.as_bytes()).unwrap(),
+    )));
+    assert!(header.contains(&format!("-{} patch base\n", source.commit)));
 
     let contexts = [context(&run)];
     let fixture_evidence = evidence::Evidence::new(
@@ -271,7 +337,30 @@ fn native_candidate_reaches_publication<A: GitHashAlgorithm>() {
         &admission.commands[0].terminal
     );
     let after = current(&node);
-    assert_eq!(after.0, prepared.candidate().candidate_commit);
+    assert_eq!(
+        after.0,
+        if new_branch {
+            source.commit
+        } else {
+            prepared.candidate().candidate_commit
+        },
+    );
+    let selected = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&node.request_context()))
+        .unwrap();
+    assert_eq!(
+        selected.snapshot().refs[&destination],
+        prepared.candidate().candidate_commit
+    );
+    assert_eq!(
+        change.transaction.semantic_request().ref_commands()[0].expected_old,
+        if new_branch {
+            ExpectedOld::Absent
+        } else {
+            ExpectedOld::Exactly(source.commit)
+        },
+    );
     assert_ne!(after.1, before.1);
     assert_eq!(broker.dispatch_authorizations().len(), 1);
     assert!(broker.close().is_quiescent());
@@ -281,8 +370,93 @@ fn native_candidate_reaches_publication<A: GitHashAlgorithm>() {
 
 #[test]
 fn native_prepared_patch_reaches_checked_publication_in_both_formats() {
-    native_candidate_reaches_publication::<Sha1>();
-    native_candidate_reaches_publication::<Sha256>();
+    native_candidate_reaches_publication::<Sha1>(false);
+    native_candidate_reaches_publication::<Sha256>(false);
+}
+
+#[test]
+fn native_prepared_patch_creates_a_new_branch_and_preserves_source_in_both_formats() {
+    native_candidate_reaches_publication::<Sha1>(true);
+    native_candidate_reaches_publication::<Sha256>(true);
+}
+
+#[test]
+fn new_branch_destination_is_valid_visible_and_absent_before_source_fetch() {
+    let scratch = Scratch::new();
+    let (node, source) = node(&scratch, Format::Sha1, false);
+    let destination = RefName::try_new(b"refs/heads/agent/proposal").unwrap();
+    let (run, _) = authenticated_run(&node, scope());
+    let before = current(&node);
+    let mut cap = capability(&node);
+    assert!(matches!(
+        prepare_new_branch::<Sha1>(&node, &run, source.commit, &mut cap, &reference(), &RefVisibility::new()),
+        Err(AgentWorkspacePatchRefusal::Workspace(error))
+            if matches!(error.as_ref(), NodeWorkspaceRefusal::BranchOperation("new branch destination already exists"))
+    ));
+    assert_eq!(cap.fetched_files(), 0);
+    for invalid in [
+        RefName::try_new(b"refs/tags/not-a-branch").unwrap(),
+        RefName::try_new_one_level(b"HEAD").unwrap(),
+    ] {
+        assert!(matches!(
+            prepare_new_branch::<Sha1>(&node, &run, source.commit, &mut cap, &invalid, &RefVisibility::new()),
+            Err(AgentWorkspacePatchRefusal::Workspace(error))
+                if matches!(error.as_ref(), NodeWorkspaceRefusal::InvalidWorkspaceCandidate(_))
+        ));
+        assert_eq!(cap.fetched_files(), 0);
+    }
+    let mut hidden = RefVisibility::new();
+    hidden
+        .push_rule(b"refs/heads/agent", &Default::default())
+        .unwrap();
+    assert!(matches!(
+        prepare_new_branch::<Sha1>(&node, &run, source.commit, &mut cap, &destination, &hidden),
+        Err(AgentWorkspacePatchRefusal::Workspace(error))
+            if matches!(error.as_ref(), NodeWorkspaceRefusal::RefUnavailable)
+    ));
+    assert_eq!(cap.fetched_files(), 0);
+    assert_eq!(current(&node), before);
+    assert!(
+        prepare_new_branch::<Sha1>(
+            &node,
+            &run,
+            source.commit,
+            &mut cap,
+            &destination,
+            &RefVisibility::new()
+        )
+        .is_ok()
+    );
+    assert_eq!(current(&node), before);
+    // Occupation advances authority, so the original run must refuse rather
+    // than silently switch to an update of the newly created destination.
+    source_on_branch(
+        &node,
+        &destination,
+        b"occupy-prepared-destination",
+        b"diff --git a/other b/other\nnew file mode 100644\n--- /dev/null\n+++ b/other\n@@ -0,0 +1 @@\n+other\n",
+    );
+    let mut cap = capability(&node);
+    assert!(matches!(
+        prepare_new_branch::<Sha1>(&node, &run, source.commit, &mut cap, &destination, &RefVisibility::new()),
+        Err(AgentWorkspacePatchRefusal::Workspace(error))
+            if matches!(error.as_ref(), NodeWorkspaceRefusal::SourceBrowse(inner) if matches!(inner.as_ref(), SourceBrowseError::SnapshotMoved))
+    ));
+    assert_eq!(cap.fetched_files(), 0);
+    let (current_run, _) = authenticated_run(&node, scope());
+    assert!(matches!(
+        prepare_new_branch::<Sha1>(&node, &current_run, source.commit, &mut cap, &destination, &RefVisibility::new()),
+        Err(AgentWorkspacePatchRefusal::Workspace(error))
+            if matches!(error.as_ref(), NodeWorkspaceRefusal::BranchOperation("new branch destination already exists"))
+    ));
+    assert_eq!(cap.fetched_files(), 0);
+    assert!(matches!(
+        prepare_new_branch::<Sha1>(&node, &current_run, source.commit, &mut cap, &destination, &hidden),
+        Err(AgentWorkspacePatchRefusal::Workspace(error))
+            if matches!(error.as_ref(), NodeWorkspaceRefusal::RefUnavailable)
+    ));
+    assert_eq!(cap.fetched_files(), 0);
+    node.shutdown().unwrap();
 }
 
 #[test]

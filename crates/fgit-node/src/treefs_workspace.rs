@@ -299,6 +299,46 @@ impl OneNode {
         ) -> Result<T, NodeWorkspaceRefusal>
         + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
+        self.with_workspace_snapshot_for_destination_in(
+            request,
+            reference,
+            visibility,
+            capability,
+            now,
+            expected_head,
+            expected_commit,
+            tag_binding,
+            None,
+            maximum_object_bytes,
+            consume,
+        )
+        .await
+    }
+
+    /// The creation profile checks source and absent destination in one
+    /// authenticated selection, before reading any source commit/tree/blob.
+    /// All other workspace consumers preserve their existing selection path.
+    async fn with_workspace_snapshot_for_destination_in<A: GitHashAlgorithm, T>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        now: u64,
+        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
+        expected_commit: Option<AnyOid>,
+        tag_binding: Option<(AnyOid, AnyOid)>,
+        absent_destination: Option<&RefName>,
+        maximum_object_bytes: usize,
+        consume: impl FnOnce(
+            &BaseView<A>,
+            &NodeTreeSource<'_>,
+            &mut TreeCapability,
+            fgit_types::RepositoryAuthorityHeadId,
+            u64,
+        ) -> Result<T, NodeWorkspaceRefusal>
+        + Send,
+    ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {
             return Err(NodeWorkspaceRefusal::RepositoryMismatch);
@@ -310,7 +350,9 @@ impl OneNode {
         if A::DIGEST_LEN != width {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
-        if visibility.hides(reference.as_bytes()) {
+        if visibility.hides(reference.as_bytes())
+            || absent_destination.is_some_and(|name| visibility.hides(name.as_bytes()))
+        {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
         capability
@@ -347,6 +389,20 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
                 SourceBrowseError::CommitMoved,
             )));
+        }
+        if let Some(destination) = absent_destination {
+            if selected
+                .snapshot()
+                .hidden_refs
+                .hides(destination.as_bytes())
+            {
+                return Err(NodeWorkspaceRefusal::RefUnavailable);
+            }
+            if selected.snapshot().refs.contains_key(destination) {
+                return Err(NodeWorkspaceRefusal::BranchOperation(
+                    "new branch destination already exists",
+                ));
+            }
         }
         let rcr = match selected.selected_closure().source() {
             ClosureSelectionSource::RepositoryCommit(rcr)

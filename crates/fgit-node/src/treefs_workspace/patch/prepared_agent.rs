@@ -32,6 +32,7 @@ use fgit_wire::visibility::RefVisibility;
 /// whole-run allowance. Sponsored HTTP credentials cannot mint these inputs.
 pub struct AgentWorkspacePatchInput<'a> {
     pub run: &'a IntentRun,
+    /// The visible source branch whose exact commit supplies the patch base.
     pub reference: &'a RefName,
     pub expected_commit: GitOid,
     pub visibility: &'a RefVisibility,
@@ -228,6 +229,55 @@ impl OneNode {
         A: GitHashAlgorithm,
         C: Fn() -> LogicalTime + ?Sized,
     {
+        self.prepare_agent_workspace_patch_profile_in::<A, C>(request, input, None, now)
+            .await
+    }
+
+    /// Prepare a child of the exact source commit for a separately named new
+    /// branch, preserving the source branch. The destination must be a bounded
+    /// full `refs/heads/` name, visible and absent in the run's original
+    /// authenticated authority selection. Hidden and occupied destinations
+    /// refuse before any source commit/tree/blob fetch.
+    ///
+    /// The proposal explicitly requires `ExpectedRef::Absent`; the bundle
+    /// advertises only the destination and retains the source as its sole
+    /// parent/prerequisite. No destination authority is granted by preparation.
+    /// The host must independently approve that exact ref transaction, and the
+    /// native publication consumer still enforces current ref policy and the
+    /// original head CAS. Movement never changes this into an update or replan.
+    /// All run, capability, clock and resource boundaries of the update profile
+    /// apply unchanged.
+    pub async fn prepare_agent_workspace_patch_for_new_branch_in<A, C>(
+        &self,
+        request: &NodeRequestContext,
+        input: AgentWorkspacePatchInput<'_>,
+        destination: &RefName,
+        now: &C,
+    ) -> Result<PreparedAgentPatchCandidate<A>, AgentWorkspacePatchRefusal>
+    where
+        A: GitHashAlgorithm,
+        C: Fn() -> LogicalTime + ?Sized,
+    {
+        self.prepare_agent_workspace_patch_profile_in::<A, C>(
+            request,
+            input,
+            Some(destination),
+            now,
+        )
+        .await
+    }
+
+    async fn prepare_agent_workspace_patch_profile_in<A, C>(
+        &self,
+        request: &NodeRequestContext,
+        input: AgentWorkspacePatchInput<'_>,
+        destination: Option<&RefName>,
+        now: &C,
+    ) -> Result<PreparedAgentPatchCandidate<A>, AgentWorkspacePatchRefusal>
+    where
+        A: GitHashAlgorithm,
+        C: Fn() -> LogicalTime + ?Sized,
+    {
         live(request)?;
         let receipt = input
             .run
@@ -263,6 +313,15 @@ impl OneNode {
             self.object_format,
             input.metadata,
         )?;
+        let target = destination.unwrap_or(input.reference);
+        if destination.is_some() {
+            preflight(
+                target,
+                input.expected_commit,
+                self.object_format,
+                input.metadata,
+            )?;
+        }
         let patch = PatchProfile::Regular
             .parse(input.patch_bytes, input.limits, &|| {
                 !workspace_request_live(request)
@@ -273,7 +332,7 @@ impl OneNode {
         let tick = clock.check(request)?;
         let workspace_id = input.capability.workspace_id();
         let prepared = self
-            .with_workspace_snapshot_in::<A, _>(
+            .with_workspace_snapshot_for_destination_in::<A, _>(
                 request,
                 input.reference,
                 input.visibility,
@@ -281,6 +340,8 @@ impl OneNode {
                 tick.value(),
                 Some(receipt.authority_head_id()),
                 Some(input.expected_commit),
+                None,
+                destination,
                 EXPORT_BYTES,
                 |base, source, capability, _head, _metadata_bytes| {
                     prepare_owned_at_base(
@@ -288,7 +349,7 @@ impl OneNode {
                         source,
                         capability,
                         request,
-                        input.reference,
+                        target,
                         input.expected_commit,
                         &patch,
                         &paths,
@@ -337,9 +398,13 @@ impl OneNode {
                 touched_paths: prepared.overlay.touched_paths(),
             },
             vec![ProposedRefIntent {
-                name: input.reference.as_bytes().to_vec(),
-                expected: ExpectedRef::Exactly {
-                    oid: prepared.export.source_commit,
+                name: target.as_bytes().to_vec(),
+                expected: if destination.is_some() {
+                    ExpectedRef::Absent
+                } else {
+                    ExpectedRef::Exactly {
+                        oid: prepared.export.source_commit,
+                    }
                 },
                 new: candidate_commit,
             }],

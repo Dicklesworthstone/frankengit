@@ -662,6 +662,16 @@ exact bytes and pass the retained export and bundle directly to the native
 publication consumer; it does not have to reconstruct a workspace or export
 from a patch receipt.
 
+`prepare_agent_workspace_patch_for_new_branch_in` is the explicit creation
+profile. It takes the same source inputs plus a destination branch. The source
+head/commit and destination absence are checked in one authenticated selection;
+an occupied or hidden destination refuses before source object reads. The
+candidate's sole parent remains the original source commit, its bundle
+advertises the destination, and its proposal requires `ExpectedRef::Absent`.
+Publication therefore creates the new branch while preserving the source.
+Preparation grants no ref authority, and neither stale authority nor a newly
+occupied destination can silently turn creation into an update or a replan.
+
 `AgentWorkspacePatchInput` takes an authenticated Intent Run, original branch
 and commit, explicit disclosure and TreeFS capabilities, patch, deterministic
 commit metadata and limits. Preparation requires the run's read, TreeFS,
