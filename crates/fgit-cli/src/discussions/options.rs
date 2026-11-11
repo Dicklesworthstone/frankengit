@@ -1,7 +1,9 @@
 //! Parse the complete bounded command before opening a node or body file.
 use crate::issues::options::{decimal, parse_head};
 use fgit_authority::IdempotencyKey;
-use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand, DiscussionEdit};
+use fgit_forge::event::discussion::{
+    DiscussionAction, DiscussionCommand, DiscussionCommentIntent, DiscussionEdit,
+};
 use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion};
 use fgit_types::{
     GitHashAlgorithm, PrincipalId, RepositoryAuthorityHeadId, RepositoryId, TenantId,
@@ -25,8 +27,32 @@ pub(super) enum Operation {
 pub(super) struct Mutation {
     pub principal: PrincipalId,
     pub key: Vec<u8>,
-    pub command: DiscussionCommand,
+    pub command: MutationCommand,
     pub body_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum MutationCommand {
+    Exact(DiscussionCommand),
+    Append(DiscussionCommentIntent),
+}
+
+impl MutationCommand {
+    pub const fn number(&self) -> DiscussionNumber {
+        match self {
+            Self::Exact(command) => command.number,
+            Self::Append(intent) => intent.number,
+        }
+    }
+
+    pub fn validate(&self, principal: PrincipalId) -> Result<(), String> {
+        match self {
+            Self::Exact(command) => command.proposed_event(principal),
+            Self::Append(intent) => intent.commitment_event(principal),
+        }
+        .map(|_| ())
+        .map_err(|_| "invalid discussion metadata or action/version combination".into())
+    }
 }
 
 pub(super) struct ReadOptions {
@@ -52,7 +78,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let action = args[0].as_str();
     let mutate = matches!(
         action,
-        "open" | "edit" | "comment" | "close" | "reopen" | "lock" | "unlock"
+        "open" | "edit" | "comment" | "append-comment" | "close" | "reopen" | "lock" | "unlock"
     );
     if !mutate && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
@@ -86,14 +112,12 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             continue;
         }
         let allowed = flag == "--object-format"
-            || (mutate
-                && matches!(
-                    flag,
-                    "--principal" | "--idempotency-key" | "--expected-version"
-                ))
+            || (mutate && matches!(flag, "--principal" | "--idempotency-key"))
+            || (mutate && action != "append-comment" && flag == "--expected-version")
             || (matches!(action, "open" | "edit")
                 && matches!(flag, "--title" | "--body" | "--body-file"))
-            || (action == "comment" && matches!(flag, "--body" | "--body-file"))
+            || (matches!(action, "comment" | "append-comment")
+                && matches!(flag, "--body" | "--body-file"))
             || (!mutate && matches!(flag, "--limit" | "--expected-head"))
             || (action == "list" && flag == "--after")
             || (action == "show" && flag == "--after-version");
@@ -123,15 +147,19 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             .map_err(|_| "invalid principal ID")?;
         let key = required(&flags, "--idempotency-key")?.as_bytes().to_vec();
         IdempotencyKey::new(key.clone()).map_err(|_| "invalid bounded idempotency key")?;
-        let version = decimal(required(&flags, "--expected-version")?)?;
-        let expected_version = if version == 0 {
-            ExpectedVersion::NewStream
+        let expected_version = if action == "append-comment" {
+            None
         } else {
-            let version = AggregateVersion::try_new(version).ok_or("invalid version")?;
-            version
-                .next()
-                .map_err(|_| "discussion version is exhausted")?;
-            ExpectedVersion::Exactly(version)
+            let version = decimal(required(&flags, "--expected-version")?)?;
+            Some(if version == 0 {
+                ExpectedVersion::NewStream
+            } else {
+                let version = AggregateVersion::try_new(version).ok_or("invalid version")?;
+                version
+                    .next()
+                    .map_err(|_| "discussion version is exhausted")?;
+                ExpectedVersion::Exactly(version)
+            })
         };
         let body_file = flags
             .get("--body-file")
@@ -148,7 +176,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         }
         let body = flags.get("--body").map(|body| (*body).to_owned());
         let supplied_body = body.is_some() || body_file.is_some();
-        if matches!(action, "open" | "comment") && !supplied_body {
+        if matches!(action, "open" | "comment" | "append-comment") && !supplied_body {
             return Err(
                 "--body or --body-file is required; an empty description is explicit".into(),
             );
@@ -163,7 +191,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 title,
                 body: supplied_body.then(|| body.unwrap_or_default()),
             }),
-            "comment" => DiscussionAction::Comment {
+            "comment" | "append-comment" => DiscussionAction::Comment {
                 body: body.unwrap_or_default(),
             },
             "lock" => DiscussionAction::Lock,
@@ -172,19 +200,26 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             "reopen" => DiscussionAction::Reopen,
             _ => unreachable!("mutation whitelist"),
         };
-        let command = DiscussionCommand {
-            number: number.ok_or("missing discussion number")?,
-            expected_version,
-            action,
+        let number = number.ok_or("missing discussion number")?;
+        let command = match expected_version {
+            Some(expected_version) => MutationCommand::Exact(DiscussionCommand {
+                number,
+                expected_version,
+                action,
+            }),
+            None => {
+                let DiscussionAction::Comment { body } = action else {
+                    return Err("append intent must contain a discussion comment".into());
+                };
+                MutationCommand::Append(DiscussionCommentIntent { number, body })
+            }
         };
         // The actual file bytes replace this syntax-only probe before node IO.
         let mut probe = command.clone();
         if body_file.is_some() {
             *body_slot(&mut probe)? = "file body".into();
         }
-        probe
-            .proposed_event(principal)
-            .map_err(|_| "invalid discussion metadata or action/version combination")?;
+        probe.validate(principal)?;
         Operation::Mutate(Mutation {
             principal,
             key,
@@ -234,7 +269,11 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 
-pub(super) fn body_slot(command: &mut DiscussionCommand) -> Result<&mut String, String> {
+pub(super) fn body_slot(command: &mut MutationCommand) -> Result<&mut String, String> {
+    let command = match command {
+        MutationCommand::Append(intent) => return Ok(&mut intent.body),
+        MutationCommand::Exact(command) => command,
+    };
     match &mut command.action {
         DiscussionAction::Open { body, .. } | DiscussionAction::Comment { body } => Ok(body),
         DiscussionAction::Edit(DiscussionEdit {
@@ -251,9 +290,12 @@ fn required<'a>(flags: &BTreeMap<&str, &'a str>, flag: &str) -> Result<&'a str, 
         .ok_or_else(|| format!("{flag} is required"))
 }
 
-pub(super) const fn expected_version(command: &DiscussionCommand) -> u64 {
-    match command.expected_version {
-        ExpectedVersion::NewStream => 0,
-        ExpectedVersion::Exactly(version) => version.get(),
+pub(super) const fn expected_version(command: &MutationCommand) -> Option<u64> {
+    match command {
+        MutationCommand::Exact(command) => Some(match command.expected_version {
+            ExpectedVersion::NewStream => 0,
+            ExpectedVersion::Exactly(version) => version.get(),
+        }),
+        MutationCommand::Append(_) => None,
     }
 }

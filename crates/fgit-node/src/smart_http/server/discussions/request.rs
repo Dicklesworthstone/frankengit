@@ -1,6 +1,9 @@
-//! Exact discussion routes and bounded form commands. No actor comes from text.
+//! Bounded discussion routes preserve strict commands and explicit append intents.
+//! No actor comes from text, and an append form cannot discard a supplied version.
 use super::super::issues::{self, ApiError, Page};
-use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand, DiscussionEdit};
+use fgit_forge::event::discussion::{
+    DiscussionAction, DiscussionCommand, DiscussionCommentIntent, DiscussionEdit,
+};
 use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
@@ -16,6 +19,13 @@ pub(super) enum Operation<'a> {
         action: &'a str,
     },
 }
+
+#[derive(Debug)]
+pub(super) enum Command {
+    Versioned(DiscussionCommand),
+    AppendComment(DiscussionCommentIntent),
+}
+
 #[derive(Debug)]
 pub(in crate::smart_http::server) struct Request<'a> {
     pub(super) repository_route: &'a str,
@@ -79,7 +89,14 @@ impl<'a> Request<'a> {
                 .ok_or_else(ApiError::not_found)?;
             if !matches!(
                 action,
-                "open" | "edit" | "comment" | "close" | "reopen" | "lock" | "unlock"
+                "open"
+                    | "edit"
+                    | "comment"
+                    | "append-comment"
+                    | "close"
+                    | "reopen"
+                    | "lock"
+                    | "unlock"
             ) {
                 return Err(ApiError::not_found());
             }
@@ -101,11 +118,15 @@ impl<'a> Request<'a> {
     pub(in crate::smart_http::server) const fn accepts_body(&self) -> bool {
         self.is_mutation()
     }
-    pub(super) fn command(&self, body: &[u8]) -> Result<DiscussionCommand, ApiError> {
+    pub(super) fn command(&self, body: &[u8]) -> Result<Command, ApiError> {
         let Operation::Mutate { number, action } = self.operation else {
             return Err(ApiError::bad("not_a_mutation"));
         };
-        command(number, action, body)
+        if action == "append-comment" {
+            append_comment(number, body).map(Command::AppendComment)
+        } else {
+            command(number, action, body).map(Command::Versioned)
+        }
     }
 }
 fn number(value: &str) -> Result<DiscussionNumber, ApiError> {
@@ -119,6 +140,28 @@ fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), ApiError> {
         Ok(())
     }
 }
+
+fn append_comment(
+    number: DiscussionNumber,
+    body: &[u8],
+) -> Result<DiscussionCommentIntent, ApiError> {
+    let mut text = None;
+    for (key, value) in issues::parse_form(body, 1)? {
+        match key.as_str() {
+            "body" => once(&mut text, value)?,
+            _ => return Err(ApiError::bad("unknown_or_inapplicable_field")),
+        }
+    }
+    let intent = DiscussionCommentIntent {
+        number,
+        body: text.ok_or_else(|| ApiError::bad("body_required"))?,
+    };
+    intent
+        .validate()
+        .map_err(|_| ApiError::bad("invalid_discussion_content"))?;
+    Ok(intent)
+}
+
 pub(super) fn command(
     number: DiscussionNumber,
     name: &str,

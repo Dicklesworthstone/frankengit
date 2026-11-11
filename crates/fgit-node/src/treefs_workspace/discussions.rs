@@ -6,11 +6,40 @@ use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestCont
 use fgit_admission::merge::native::{discussions, objects::MergeObjectLimits};
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
-use fgit_forge::{DiscussionNumber, event::discussion::DiscussionCommand};
+use fgit_forge::{
+    DiscussionNumber,
+    event::discussion::{DiscussionCommand, DiscussionCommentIntent},
+};
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, TxId};
 
+#[derive(Clone, Copy)]
+enum DiscussionSubmission<'a> {
+    Exact(&'a DiscussionCommand),
+    AppendComment(&'a DiscussionCommentIntent),
+}
+
 impl OneNode {
+    /// Publish the exact comment body without selecting a mutable discussion
+    /// predecessor. Every attempt revalidates the current discussion and lock
+    /// before assigning its next version. The actor, text and retry identity
+    /// stay fixed; a known terminal is recovered before new intake or quota.
+    pub async fn admit_discussion_comment_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        intent: &DiscussionCommentIntent,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_discussion_submission_in(
+            request,
+            session,
+            DiscussionSubmission::AppendComment(intent),
+            limits,
+        )
+        .await
+    }
+
     /// Publish a discussion command through the sealed metadata owner. The
     /// authenticated session supplies actor and idempotency identity; discussion
     /// text cannot supply authorization or change any Git reference.
@@ -19,6 +48,22 @@ impl OneNode {
         request: &NodeRequestContext,
         session: &LoopbackReceiveSession,
         command: &DiscussionCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_discussion_submission_in(
+            request,
+            session,
+            DiscussionSubmission::Exact(command),
+            limits,
+        )
+        .await
+    }
+
+    async fn admit_discussion_submission_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        submission: DiscussionSubmission<'_>,
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session
@@ -33,7 +78,13 @@ impl OneNode {
             object_format: self.object_format,
         };
         let error = |source| NodeReceiveTransportRefusal::Admission(Box::new(source));
-        let (_, attempt) = discussions::proposal(&context, command).map_err(error)?;
+        let (_, attempt) = match submission {
+            DiscussionSubmission::Exact(command) => discussions::proposal(&context, command),
+            DiscussionSubmission::AppendComment(intent) => {
+                discussions::append_proposal(&context, intent)
+            }
+        }
+        .map_err(error)?;
         let tx = attempt
             .derive()
             .map_err(|_| {
@@ -69,15 +120,30 @@ impl OneNode {
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
-        let terminal = Box::pin(discussions::admit_discussion_async(
-            &self.authority,
-            request.authority(),
-            &context,
-            command,
-            limits,
-            &projection,
-        ))
-        .await
+        let terminal = match submission {
+            DiscussionSubmission::Exact(command) => {
+                Box::pin(discussions::admit_discussion_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+            DiscussionSubmission::AppendComment(intent) => {
+                Box::pin(discussions::admit_discussion_comment_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    intent,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+        }
         .map_err(error)?;
         Ok((tx, terminal))
     }

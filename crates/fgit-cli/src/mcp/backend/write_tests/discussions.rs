@@ -1,6 +1,8 @@
 //! Actual MCP dispatch, native publication, retained reads and cold recovery.
 use super::*;
 
+mod append;
+
 const NUMBER: &str = "9007199254740993";
 
 fn options(fixture: &Fixture, reads: bool, writes: bool, outcomes: bool) -> Options {
@@ -335,7 +337,7 @@ fn discussion_read_write_and_issue_grants_are_independent_in_native_dispatch() {
     backend.close().unwrap();
 
     let mut backend = NodeTools::open(options(&fixture, false, true, false)).unwrap();
-    assert_eq!(backend.tools().len(), 7);
+    assert_eq!(backend.tools().len(), 8);
     assert!(
         backend
             .tools()

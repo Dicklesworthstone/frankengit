@@ -121,11 +121,12 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 100);
+    assert_eq!(REGISTRY.len(), 101);
     // Milestone edits expose an explicit null date clear as a real JSON Schema
     // union; a literal "string|null" type would not describe callable input.
     assert!(fgit_schema::emit::mcp_schema().contains("\"type\": [\"string\", \"null\"]"));
     assert!(find_tool("frankengit_pull_append_comment").is_some());
+    assert!(find_tool("frankengit_discussion_append_comment").is_some());
     for name in [
         "frankengit_pull_reopen",
         "frankengit_source_historical_blob",
@@ -452,8 +453,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 100"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 96"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 101"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 97"));
     assert!(
         mcp_tools
             .contents
@@ -465,13 +466,18 @@ fn test_generated_artifacts_byte_stability() {
             .contents
             .contains("frankengit_pull_append_comment")
     );
+    assert!(
+        mcp_tools
+            .contents
+            .contains("frankengit_discussion_append_comment")
+    );
     assert!(mcp_tools.contents.contains("\"unsupported_count\": 4"));
 
     let mcp_parity = artifacts
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 100"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 101"));
 }
 
 #[test]
@@ -481,10 +487,11 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 96);
+    assert_eq!(active_names.len(), 97);
     assert!(active_names.contains(&"frankengit_issue_add_assignees"));
     assert!(active_names.contains(&"frankengit_issue_add_labels"));
     assert!(active_names.contains(&"frankengit_pull_append_comment"));
+    assert!(active_names.contains(&"frankengit_discussion_append_comment"));
 
     // 1. Consistent twin passes.
     assert_eq!(validate_server_parity(&active_names, REGISTRY), Ok(()));
@@ -898,19 +905,37 @@ fn queue_refresh_keeps_both_grants_and_the_complete_immutable_original_command()
         "object_format",
         "idempotency_key",
     ] {
-        let field = tool.input_fields.iter().find(|field| field.name == name).unwrap();
+        let field = tool
+            .input_fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap();
         assert!(field.required, "{name}");
         assert_eq!(field.classification, FieldClassification::SelectorPosition);
     }
     for (name, limit) in [("title", 256), ("body", 16_384)] {
-        let field = tool.input_fields.iter().find(|field| field.name == name).unwrap();
+        let field = tool
+            .input_fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap();
         assert!(field.required);
         assert_eq!(field.classification, FieldClassification::UntrustedContent);
         assert_eq!(field.max_bytes, Some(limit));
     }
-    for name in ["principal", "force", "approved", "priority", "order", "bundle_hex_chunks"] {
+    for name in [
+        "principal",
+        "force",
+        "approved",
+        "priority",
+        "order",
+        "bundle_hex_chunks",
+    ] {
         assert!(!tool.input_fields.iter().any(|field| field.name == name));
     }
     assert!(tool.description.contains("moves no Git ref"));
-    assert!(tool.description.contains("agent-token MCP profile remains ineligible"));
+    assert!(
+        tool.description
+            .contains("agent-token MCP profile remains ineligible")
+    );
 }

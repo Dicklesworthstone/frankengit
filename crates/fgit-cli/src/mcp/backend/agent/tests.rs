@@ -32,7 +32,12 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 57);
+    assert_eq!(tools.len(), 58);
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == "frankengit_discussion_append_comment")
+    );
     for tool in &tools {
         assert!(operation(&options, tool.name).is_some());
     }
@@ -117,6 +122,21 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_nine_metadata_operati
             }
             assert!(backend.agent.as_ref().unwrap().request.is_none());
         }
+        // Append uses the same independent canonical discussion write grant;
+        // it must not disappear from the sponsored-agent operation map or be
+        // authorized by read-only, issue or PR access.
+        let mut append = recovery(&format!("scope-{index}-discussion-append"));
+        append.insert("number".into(), text((index as u64 + 100).to_string()));
+        append.insert("body".into(), text("Independent authored reply"));
+        let result = backend.call("frankengit_discussion_append_comment", &append);
+        if *scope == DISCUSSIONS_WRITE {
+            let result = result.unwrap();
+            committed(&result);
+            assert_eq!(result.object().unwrap()["expected_version"], Value::Null);
+        } else {
+            assert_eq!(result.unwrap_err().code, "agent_operation_not_granted");
+        }
+        assert!(backend.agent.as_ref().unwrap().request.is_none());
         backend.close().unwrap();
     }
 
@@ -143,6 +163,7 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_nine_metadata_operati
         "frankengit_transaction_outcome",
         "frankengit_pull_open",
         "frankengit_discussion_open",
+        "frankengit_discussion_append_comment",
     ] {
         assert_eq!(
             backend

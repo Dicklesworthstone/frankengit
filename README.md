@@ -310,6 +310,13 @@ subsequently locked or unlocked.
 
 ### Native standalone discussions
 
+Discussion replies now also have an explicit `append-comment` operation across
+the CLI, HTTP, MCP and browser. Independent replies can replan after competing
+publication with the same sealed content and retry identity. Current discussion
+locks and permissions are rechecked; strict `comment`, edits and moderation keep
+their exact predecessor requirements. See the
+[discussion guide](docs/NATIVE_DISCUSSIONS.md) for both profiles and recovery.
+
 `fg discussion` opens and edits repository discussions, records immutable
 authored comments, and closes/reopens or locks/unlocks a conversation. Exact
 predecessor versions prevent overwriting another writer, and original-key

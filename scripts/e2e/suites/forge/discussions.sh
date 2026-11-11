@@ -23,7 +23,8 @@ if [[ -f "$WORK/results.json" ]]; then
 fi
 for format in sha1 sha256; do
     for criterion in LIFECYCLE LOCK-REFUSAL STALE-REFUSAL KEY-REUSE RESTART-RECOVERY \
-        PINNED-PAGES PIN-REQUIRED ISSUE-ISOLATION LITERAL-TEXT PARSER-BEFORE-IO BODY-REFUSAL MISSING; do
+        PINNED-PAGES PIN-REQUIRED ISSUE-ISOLATION LITERAL-TEXT PARSER-BEFORE-IO BODY-REFUSAL MISSING \
+        APPEND-PRESERVES-CHANGES APPEND-LOCK-STRICT-TWINS APPEND-ORIGINAL-RECOVERY; do
         fge_assert_cmd "DISCUSSION-$format-$criterion" "native $format $criterion" \
             python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); row=next(r for r in rows if r["format"] == sys.argv[2]); assert row["result"] == "passed" and sys.argv[3] in row["checks"]' \
             "$WORK/results.json" "$format" "$criterion"

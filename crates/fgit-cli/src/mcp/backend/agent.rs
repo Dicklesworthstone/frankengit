@@ -105,6 +105,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         "frankengit_discussion_open"
         | "frankengit_discussion_edit"
         | "frankengit_discussion_comment"
+        | "frankengit_discussion_append_comment"
         | "frankengit_discussion_lock"
         | "frankengit_discussion_unlock"
         | "frankengit_discussion_close"

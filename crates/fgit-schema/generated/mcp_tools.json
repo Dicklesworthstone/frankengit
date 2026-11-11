@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 100,
-  "active_count": 96,
+  "total_count": 101,
+  "active_count": 97,
   "unsupported_count": 4,
   "tools": [
     {
@@ -286,6 +286,34 @@
       "refusal_codes": ["predecessor_tip_mismatch", "non_fast_forward", "protected_branch", "idempotency_key_reused"],
       "cli_command": "fg branch update",
       "rest_api_path": "PATCH /repos/{id}/branches/{ref}"
+    },
+    {
+      "name": "frankengit_discussion_append_comment",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Append literal comment text to an existing standalone discussion without expected_version under discussions-write. Admission selects the exact predecessor at each head-CAS attempt and rechecks the current discussion lock. Closed unlocked discussions permit replies. Retry the identical number, body and original durable key for the original terminal outcome.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "server_selected_head",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_discussion_number_required", "body_required", "invalid_bounded_text", "invalid_discussion_comment", "invalid_idempotency_key", "mutation_outcome_unknown"],
+      "cli_command": "fg discussion append-comment",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/append-comment"
     },
     {
       "name": "frankengit_discussion_close",

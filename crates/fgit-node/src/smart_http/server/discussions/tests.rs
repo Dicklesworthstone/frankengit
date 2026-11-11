@@ -66,6 +66,46 @@ fn exact_commands_validate_before_publication_and_preserve_empty_edits() {
 }
 
 #[test]
+fn append_comment_accepts_only_exact_body_bytes_and_never_discards_preconditions() {
+    let body = b"body=Hello+%F0%9F%A6%80%0D%0A%252f";
+    let head = wire("POST", "/7/append-comment", body.len());
+    let request = parse(&head).unwrap();
+    assert!(request.is_mutation());
+    assert!(request.accepts_body());
+    let Command::AppendComment(intent) = request.command(body).unwrap() else {
+        panic!("append profile must stay distinct from strict comments");
+    };
+    assert_eq!(intent.number.get(), 7);
+    assert_eq!(intent.body, "Hello 🦀\r\n%2f");
+    for body in [
+        "",
+        "body=",
+        "body=+",
+        "body=%00",
+        "body=%ff",
+        "body=%",
+        "body=one&body=two",
+        "body=one&expected_version=1",
+        "body=one&expected_version=0",
+        "body=one&title=changed",
+        "body=one&principal=attacker",
+        "body=one&number=8",
+    ] {
+        assert!(request.command(body.as_bytes()).is_err(), "{body}");
+    }
+    let strict_head = wire("POST", "/7/comment", body.len());
+    let strict = parse(&strict_head).unwrap();
+    assert!(
+        strict.command(body).is_err(),
+        "strict comments still require a version"
+    );
+    assert!(matches!(
+        strict.command(b"expected_version=1&body=one").unwrap(),
+        Command::Versioned(_)
+    ));
+}
+
+#[test]
 fn route_scope_pagination_body_and_media_are_closed() {
     let list = wire("GET", "?limit=1", 0);
     assert!(matches!(parse(&list).unwrap().operation, Operation::List(page) if page.limit == 1));
@@ -80,6 +120,7 @@ fn route_scope_pagination_body_and_media_are_closed() {
         ("GET", "/0"),
         ("GET", "/01"),
         ("GET", "/7/close"),
+        ("GET", "/7/append-comment"),
         ("GET", "?after=1"),
         ("GET", "/7?after_version=1"),
         ("GET", "?limit=0"),

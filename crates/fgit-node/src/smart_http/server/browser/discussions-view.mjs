@@ -12,7 +12,8 @@ export function mountDiscussions(document, location, options = {}) {
   const button = (label, action) => { const element = node('button', label); element.type = 'button'; element.addEventListener('click', () => run(action)); return element; };
   const status = value => { get('discussion-status').textContent = visible(value); };
   let epoch = 0, session = 0, selected = null;
-  const locked = () => get('change-action').value === 'comment' && selected?.locked === true && String(selected.number) === get('change-number').value;
+  const isComment = action => ['comment', 'append-comment'].includes(action);
+  const locked = () => isComment(get('change-action').value) && selected?.locked === true && String(selected.number) === get('change-number').value;
   function pending() {
     const request = client.pending;
     get('prepared-change').hidden = !request;
@@ -24,7 +25,7 @@ export function mountDiscussions(document, location, options = {}) {
     get('discard-change').disabled = !request || request.sent || request.exported || client.busy;
     get('send-change').textContent = request?.sent ? 'Retry identical change' : 'Send prepared change';
     get('prepared-summary').textContent = request ? visible([
-      `Discussion #${request.number} · ${request.action} · expected version ${request.expected_version}`,
+      `Discussion #${request.number} · ${request.action} · ${request.expected_version === null ? 'accept concurrent replies' : `expected version ${request.expected_version}`}`,
       `Idempotency-Key: ${request.key}`,
       request.sent ? 'Possibly sent. Resolve the original outcome.' : request.exported ? 'Receipt saved. Keep this original request.' : 'Prepared locally. Nothing sent.',
       client.connected ? JSON.stringify(request.fields, null, 2) : 'Reconnect the original credential to inspect the draft.',
@@ -42,20 +43,27 @@ export function mountDiscussions(document, location, options = {}) {
   }
   function configure() {
     const action = get('change-action').value;
+    const append = action === 'append-comment';
+    get('version-field').hidden = append;
+    get('change-version').disabled = append;
+    get('change-version').required = !append;
+    get('append-comment-hint').hidden = !append;
     get('title-field').hidden = !['open', 'edit'].includes(action);
-    get('body-field').hidden = !['open', 'edit', 'comment'].includes(action);
+    get('body-field').hidden = !['open', 'edit', 'comment', 'append-comment'].includes(action);
     get('replace-title-label').hidden = action !== 'edit';
     get('replace-body-label').hidden = action !== 'edit';
     pending();
   }
   function choose(row, action) {
     selected = row;
-    get('change-number').value = String(row.number); get('change-version').value = String(row.version);
+    get('change-number').value = String(row.number); get('change-version').value = action === 'append-comment' ? '' : String(row.version);
     get('change-action').value = action; get('change-title-text').value = row.title;
-    get('change-body').value = action === 'comment' ? '' : row.body;
+    get('change-body').value = isComment(action) ? '' : row.body;
     get('replace-title').checked = true; get('replace-body').checked = true;
     configure();
-    status(locked() ? 'This discussion is locked. Unlock comments before replying.' : `Preparing ${action} for discussion #${row.number} at version ${row.version}.`);
+    status(locked() ? 'This discussion is locked. Unlock comments before replying.'
+      : action === 'append-comment' ? `Preparing a comment on discussion #${row.number}; concurrent replies are accepted.`
+      : `Preparing ${action} for discussion #${row.number} at version ${row.version}.`);
   }
   function clear() {
     selected = null;
@@ -96,11 +104,11 @@ export function mountDiscussions(document, location, options = {}) {
       content.append(node('h2', `#${row.number} ${row.title}`),
         node('p', `${row.state} · ${row.locked ? 'locked' : 'unlocked'} · version ${row.version} · opened by ${row.opened_by}`), body(row));
       const actions = node('div'); actions.className = 'issue-actions';
-      for (const [action, label] of [['comment', 'Comment'], ['edit', 'Edit'],
+      for (const [action, label] of [['comment', 'Comment'], ['append-comment', 'Append comment'], ['edit', 'Edit'],
           [row.state === 'open' ? 'close' : 'reopen', row.state === 'open' ? 'Close' : 'Reopen'],
           [row.locked ? 'unlock' : 'lock', row.locked ? 'Unlock comments' : 'Lock comments']]) {
         const control = button(label, () => choose(row, action));
-        control.disabled = action === 'comment' && row.locked; actions.append(control);
+        control.disabled = isComment(action) && row.locked; actions.append(control);
       }
       content.append(actions, node('h3', 'History'));
       for (const event of reply.events) {
@@ -134,8 +142,9 @@ export function mountDiscussions(document, location, options = {}) {
     if (locked()) throw new Error('This discussion is locked. Unlock comments before replying.');
     const action = get('change-action').value, fields = {};
     if (action === 'open' || (action === 'edit' && get('replace-title').checked)) fields.title = get('change-title-text').value;
-    if (['open', 'comment'].includes(action) || (action === 'edit' && get('replace-body').checked)) fields.body = get('change-body').value;
-    await client.stage(decimal(get('change-number').value, 'discussion number', 1), decimal(get('change-version').value, 'expected version'), action, fields);
+    if (['open', 'comment', 'append-comment'].includes(action) || (action === 'edit' && get('replace-body').checked)) fields.body = get('change-body').value;
+    await client.stage(decimal(get('change-number').value, 'discussion number', 1),
+      action === 'append-comment' ? null : decimal(get('change-version').value, 'expected version'), action, fields);
     status('Change prepared. Review it before sending.');
   }); });
   get('send-change').addEventListener('click', () => run(async () => terminal(await client.send())));

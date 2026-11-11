@@ -94,7 +94,7 @@ fn every_active_native_tool_fits_one_bounded_protocol_discovery() {
     let Value::Array(tools) = &reply.object().unwrap()["result"].object().unwrap()["tools"] else {
         panic!("missing discovery")
     };
-    assert_eq!(tools.len(), 95);
+    assert_eq!(tools.len(), 97);
     let names: std::collections::BTreeSet<_> = tools
         .iter()
         .map(|tool| tool.object().unwrap()["name"].text().unwrap())
@@ -189,7 +189,14 @@ fn discussion_catalog_requires_its_own_grants_and_matches_registered_fields() {
                 assert_eq!(tools.iter().any(|tool| tool.name == name), read);
             }
             for action in [
-                "open", "edit", "comment", "close", "reopen", "lock", "unlock",
+                "open",
+                "edit",
+                "comment",
+                "append_comment",
+                "close",
+                "reopen",
+                "lock",
+                "unlock",
             ] {
                 let name = format!("frankengit_discussion_{action}");
                 assert_eq!(tools.iter().any(|tool| tool.name == name), write);

@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 100,
+  "total_tools": 101,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -104,6 +104,16 @@
       "capability": "prepare_publication",
       "cli_command": "fg branch update",
       "rest_api_path": "PATCH /repos/{id}/branches/{ref}"
+    },
+    {
+      "tool": "frankengit_discussion_append_comment",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg discussion append-comment",
+      "rest_api_path": "POST /{repository}/api/v1/discussions/{number}/append-comment"
     },
     {
       "tool": "frankengit_discussion_close",

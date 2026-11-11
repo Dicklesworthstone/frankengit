@@ -4,7 +4,8 @@ use super::issues::rendered;
 use super::mutations as common;
 use super::*;
 use fgit_forge::event::discussion::{
-    DiscussionAction, DiscussionCommand, DiscussionEdit, DiscussionSnapshot, DiscussionState,
+    DiscussionAction, DiscussionCommand, DiscussionCommentIntent, DiscussionEdit,
+    DiscussionSnapshot, DiscussionState,
 };
 use fgit_forge::{AggregateId, DiscussionNumber, ForgeEventPayload};
 
@@ -20,6 +21,7 @@ pub(super) fn is_write(name: &str) -> bool {
         "frankengit_discussion_open"
             | "frankengit_discussion_edit"
             | "frankengit_discussion_comment"
+            | "frankengit_discussion_append_comment"
             | "frankengit_discussion_lock"
             | "frankengit_discussion_unlock"
             | "frankengit_discussion_close"
@@ -45,6 +47,7 @@ pub(super) fn write_tools() -> Vec<Tool> {
         ("frankengit_discussion_open", "Open a standalone discussion at explicit version zero under the independent discussion-write grant and launch-bound principal. Retry only the identical command and original durable key."),
         ("frankengit_discussion_edit", "Edit supplied discussion title/body at the exact positive version. Omitted metadata, comments, lock and state survive. Uses only the explicit discussion-write grant."),
         ("frankengit_discussion_comment", "Append an immutable authored comment at the exact positive discussion version. Locked discussions refuse; closed unlocked discussions accept replies. Retain the original key and payload."),
+        ("frankengit_discussion_append_comment", "Append an immutable authored comment across concurrent discussion changes without an expected version. Current locks, permissions and budgets still apply. Retry only the same body, number and original durable key; never use a new key to recover an uncertain result."),
         ("frankengit_discussion_close", "Close an open discussion at the exact positive version under the independent discussion-write grant. Comments, metadata and lock are preserved."),
         ("frankengit_discussion_reopen", "Reopen a closed discussion at the exact positive version under the independent discussion-write grant. Text cannot select another actor or expand access."),
         ("frankengit_discussion_lock", "Lock discussion replies at the exact positive version under the independent discussion-write grant. Metadata edits and lifecycle remain independent; retry the original durable key."),
@@ -54,6 +57,10 @@ pub(super) fn write_tools() -> Vec<Tool> {
 fn write_schema(name: &str) -> Value {
     let mut fields = common::base_properties();
     let mut required = vec!["number", "expected_version", "idempotency_key"];
+    if name == "frankengit_discussion_append_comment" {
+        fields.remove("expected_version");
+        required = vec!["number", "idempotency_key"];
+    }
     if matches!(
         name,
         "frankengit_discussion_open" | "frankengit_discussion_edit"
@@ -65,6 +72,7 @@ fn write_schema(name: &str) -> Value {
         "frankengit_discussion_open"
             | "frankengit_discussion_edit"
             | "frankengit_discussion_comment"
+            | "frankengit_discussion_append_comment"
     ) {
         fields.insert(
             "body".into(),
@@ -74,7 +82,10 @@ fn write_schema(name: &str) -> Value {
     if name == "frankengit_discussion_open" {
         required.extend(["title", "body"]);
     }
-    if name == "frankengit_discussion_comment" {
+    if matches!(
+        name,
+        "frankengit_discussion_comment" | "frankengit_discussion_append_comment"
+    ) {
         required.push("body");
     }
     common::input_schema(fields, &required)
@@ -136,6 +147,9 @@ pub(super) fn write(backend: &NodeTools, name: &str, args: &Object) -> Result<Va
     if !backend.options.writes.discussions {
         return Err(ToolError::invalid("tool_not_granted"));
     }
+    if name == "frankengit_discussion_append_comment" {
+        return write_append(backend, args);
+    }
     let command = parse(name, args)?;
     let session = common::session(backend, common::key(args)?)?;
     let principal = session
@@ -165,6 +179,50 @@ pub(super) fn write(backend: &NodeTools, name: &str, args: &Object) -> Result<Va
         "expected_version".into(),
         text(common::number(args, "expected_version")?.to_string()),
     );
+    result.insert("complete".into(), Value::Bool(true));
+    result.insert("refs_changed".into(), Value::Bool(false));
+    result.insert("delivery_acknowledged".into(), Value::Null);
+    result.insert("historical_outcome".into(), Value::Bool(true));
+    Ok(Value::Object(result))
+}
+
+fn parse_append(args: &Object) -> Result<DiscussionCommentIntent, ToolError> {
+    require_fields(args, &["number", "idempotency_key", "body"])?;
+    let intent = DiscussionCommentIntent {
+        number: DiscussionNumber::try_new(common::number(args, "number")?)
+            .ok_or(ToolError::invalid("positive_discussion_number_required"))?,
+        body: common::body(args, "body")?.ok_or(ToolError::invalid("body_required"))?,
+    };
+    intent
+        .validate()
+        .map_err(|_| ToolError::invalid("invalid_discussion_comment"))?;
+    Ok(intent)
+}
+
+fn write_append(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    let intent = parse_append(args)?;
+    let session = common::session(backend, common::key(args)?)?;
+    let principal = session
+        .authenticated_session()
+        .ok_or(ToolError::invalid("principal_not_bound"))?
+        .principal_id();
+    let request = backend.command_context();
+    let (tx, outcome) = backend
+        .node
+        .runtime()
+        .block_on(backend.node.admit_discussion_comment_durable_in(
+            &request,
+            &session,
+            &intent,
+            Default::default(),
+        ))
+        .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
+    let mut result = common::binding(backend, principal, false);
+    result.extend(common::terminal(tx, &outcome));
+    result.insert("type".into(), text("discussion_publication"));
+    result.insert("number".into(), text(intent.number.get().to_string()));
+    result.insert("action".into(), text("append-comment"));
+    result.insert("expected_version".into(), Value::Null);
     result.insert("complete".into(), Value::Bool(true));
     result.insert("refs_changed".into(), Value::Bool(false));
     result.insert("delivery_acknowledged".into(), Value::Null);
@@ -444,5 +502,44 @@ mod tests {
                 Value::Bool(false)
             );
         }
+    }
+
+    #[test]
+    fn append_grammar_has_no_predecessor_or_caller_selected_actor() {
+        let mut args = base("1");
+        args.remove("expected_version");
+        args.insert("body".into(), text("Exact é\r\n<script>data</script>"));
+        let intent = parse_append(&args).unwrap();
+        assert_eq!(intent.number.get(), 9007199254740993);
+        assert_eq!(intent.body, "Exact é\r\n<script>data</script>");
+        for field in [
+            "expected_version",
+            "principal",
+            "repository",
+            "source_head",
+            "title",
+        ] {
+            let mut changed = args.clone();
+            changed.insert(field.into(), text("1"));
+            assert!(parse_append(&changed).is_err(), "{field}");
+        }
+        for body in [
+            "".to_owned(),
+            " \r\n".into(),
+            "x".repeat(common::MAX_TEXT_BYTES + 1),
+        ] {
+            let mut changed = args.clone();
+            changed.insert("body".into(), text(body));
+            assert!(parse_append(&changed).is_err());
+        }
+        let schema = write_schema("frankengit_discussion_append_comment");
+        let schema = schema.object().unwrap();
+        assert!(
+            !schema["properties"]
+                .object()
+                .unwrap()
+                .contains_key("expected_version")
+        );
+        assert_eq!(schema["additionalProperties"], Value::Bool(false));
     }
 }

@@ -12,8 +12,8 @@ pub const MAX_TOOL_RESULT: usize = 2 * 1024 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 // The complete native tool registry includes independent conversation reads
 // and appends. Discovery remains finite and subject to MAX_RESPONSE.
-// Independent discussion lifecycle brings the complete surface to 84 active tools.
-const MAX_TOOLS: usize = 96;
+// The registered tools must fit in one bounded discovery response.
+const MAX_TOOLS: usize = 128;
 
 pub struct Tool {
     pub name: &'static str,
