@@ -7,14 +7,23 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use fgit_claim::{
+    BoundedModel, Claim, ClaimRank, ClaimText, Evidence, JustifiedClaim, validate_justification,
+};
+use fgit_codec::DecodeLimits;
+use fgit_crypto::{DigestAlgorithm, sha256_digest};
+use fgit_evidence::{
+    EvidenceArtifact, EvidenceContext, EvidenceRecord, EvidenceRecordBody, EvidenceText,
+    ReplayCompleteness,
+};
 use fgit_node::source_retrieval::integrity::{
     GraphAuditQuery, GraphAuditRefusal, GraphLimits, GraphRefusal, GraphReport,
 };
 use fgit_node::{NodeConfig, OneNode};
-use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, HeadGeneration, RepositoryAuthorityHeadId,
-    RepositoryId, TenantId,
+    CANONICAL_CODEC_VERSION, EvidenceRecordId, GitHashAlgorithm, GitOid, HeadGeneration,
+    RepositoryAuthorityHeadId, RepositoryId, TenantId,
 };
 
 use super::publication_support::{quote, set_once};
@@ -453,6 +462,95 @@ fn graph_receipt(options: &Options, report: &Report) -> Result<String, String> {
     }
 }
 
+pub(super) struct AuditEvidenceInput<'a> {
+    pub(super) claim_id: &'static str,
+    pub(super) claim_scope: &'static str,
+    pub(super) tenant: TenantId,
+    pub(super) repository: RepositoryId,
+    pub(super) format: GitHashAlgorithm,
+    pub(super) head: RepositoryAuthorityHeadId,
+    pub(super) closure_root: &'a str,
+    pub(super) selection_strata: &'static str,
+    pub(super) exact_window: &'a str,
+}
+
+pub(super) fn audit_evidence_receipt(
+    input: &AuditEvidenceInput<'_>,
+) -> Result<(ClaimRank, EvidenceRecordId), String> {
+    let claim_id =
+        ClaimText::parse("claim_id", input.claim_id).map_err(|error| error.to_string())?;
+    let claim_scope =
+        ClaimText::parse("claim_scope", input.claim_scope).map_err(|error| error.to_string())?;
+    let evidence_ref =
+        ClaimText::parse("evidence_ref", input.exact_window).map_err(|error| error.to_string())?;
+    let justified = JustifiedClaim::new(
+        Claim::<BoundedModel>::new(claim_id, claim_scope),
+        Evidence::<BoundedModel>::new(evidence_ref),
+    );
+    validate_justification(justified.claim().rank(), justified.evidence().rank())
+        .map_err(|error| error.to_string())?;
+
+    let text = |field: &'static str, value: &str| {
+        EvidenceText::parse(field, value).map_err(|error| error.to_string())
+    };
+    let head_internal = input.head.as_internal_object_id();
+    let head_digest = Digest::new(head_internal.algorithm(), head_internal.digest().clone());
+    let mut closure_preimage = b"frankengit/audit-closure-root/v1\0".to_vec();
+    closure_preimage.extend_from_slice(input.closure_root.as_bytes());
+    let closure_digest = Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(&sha256_digest(&closure_preimage))
+            .map_err(|error| error.to_string())?,
+    );
+
+    let context = EvidenceContext::new(
+        vec![
+            text("source_input", &format!("tenant:{}", input.tenant))?,
+            text("source_input", &format!("repository:{}", input.repository))?,
+            text("source_input", &format!("head:{}", head_token(input.head)))?,
+            text("source_input", &format!("format:{}", input.format.as_str()))?,
+        ],
+        text(
+            "implementation",
+            concat!("fgit-cli/", env!("CARGO_PKG_VERSION")),
+        )?,
+        text("toolchain", "nightly-2026-08-31")?,
+        text("selection_strata", input.selection_strata)?,
+        text("exact_window", input.exact_window)?,
+        text("policy_regime", "trusted-local-v1")?,
+        vec![
+            text("assumption", "trusted-local-operator")?,
+            text("assumption", "head-revalidated")?,
+        ],
+        text("verifier_class", "local-deterministic-v1")?,
+        vec![
+            EvidenceArtifact::new(text("artifact_location", "authority_head")?, head_digest),
+            EvidenceArtifact::new(
+                text("artifact_location", "selected_closure_root")?,
+                closure_digest,
+            ),
+        ],
+        text("deterministic_fallback", "refuse-incomplete-audit")?,
+        ReplayCompleteness::VerifiableIfSupplied,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let body = EvidenceRecordBody::new(
+        text("claim_id", input.claim_id)?,
+        text("claim_scope", input.claim_scope)?,
+        justified.claim().rank(),
+        justified.evidence().rank(),
+        context,
+    )
+    .map_err(|error| error.to_string())?;
+    let record = EvidenceRecord::new(body).map_err(|error| error.to_string())?;
+    record
+        .verify(DecodeLimits::DEFAULT)
+        .map_err(|error| error.to_string())?;
+    Ok((justified.claim().rank(), record.id()))
+}
+
 fn finish(
     output: &mut impl Write,
     options: &Options,
@@ -462,6 +560,29 @@ fn finish(
     match (result, cleanup) {
         (Ok(report), None) => {
             let graph = graph_receipt(options, &report)?;
+            let exact_window = format!(
+                "generation:{}:refs:{}:objects:{}:bytes:{}",
+                report.generation, report.references, report.objects, report.payload_bytes
+            );
+            let (claim_rank, evidence_record_id) = audit_evidence_receipt(&AuditEvidenceInput {
+                claim_id: if options.objects_only {
+                    "CLM-FSCK-OBJECTS-ONLY-V1"
+                } else {
+                    "CLM-FSCK-OBJECT-GRAPH-V1"
+                },
+                claim_scope: "authority_selected_objects",
+                tenant: options.tenant,
+                repository: options.repository,
+                format: options.format,
+                head: report.head,
+                closure_root: &report.closure_root,
+                selection_strata: if options.objects_only {
+                    "scope:authority_selected_objects:objects_only"
+                } else {
+                    "scope:authority_selected_objects:native_closure_v1"
+                },
+                exact_window: &exact_window,
+            })?;
             emit(
                 output,
                 &format!(
@@ -471,6 +592,7 @@ fn finish(
                         "\"authority_generation\":{},\"references_checked\":{},\"objects_verified\":{},",
                         "\"payload_bytes_verified\":{},\"authority_head\":{},\"snapshot_token\":{},",
                         "\"selected_closure_root\":{},\"scope\":\"authority_selected_objects\",",
+                        "\"claim_rank\":{},\"evidence_record_id\":{},",
                         "\"complete\":true,{},\"head_revalidated\":true,",
                         "\"physical_orphans_scanned\":false,\"repository_changed\":false,\"node_closed\":true}}"
                     ),
@@ -484,6 +606,8 @@ fn finish(
                     quote(&report.head.to_string()),
                     quote(&head_token(report.head)),
                     quote(&report.closure_root),
+                    quote(claim_rank.token()),
+                    quote(&evidence_record_id.to_string()),
                     graph
                 ),
             )?;

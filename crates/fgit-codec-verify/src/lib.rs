@@ -116,11 +116,15 @@ fn overflow(what: &str) -> VerifyError {
 }
 
 /// Reads a `u32`-length-prefixed byte string and advances the cursor.
-fn take_bytes<'a>(bytes: &'a [u8], at: &mut usize) -> Result<&'a [u8], VerifyError> {
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    at: &mut usize,
+    max_frame: usize,
+) -> Result<&'a [u8], VerifyError> {
     let declared = take_u32(bytes, at)?;
     let length = usize::try_from(declared)
         .map_err(|_| VerifyError::Frame(format!("length {declared} exceeds this platform")))?;
-    if length > MAX_FRAME {
+    if length > max_frame {
         return Err(VerifyError::Frame(format!(
             "length {length} over the bound"
         )));
@@ -137,19 +141,31 @@ fn take_bytes<'a>(bytes: &'a [u8], at: &mut usize) -> Result<&'a [u8], VerifyErr
 }
 
 /// Reads a length-prefixed label as text.
-fn take_label(bytes: &[u8], at: &mut usize) -> Result<String, VerifyError> {
-    let raw = take_bytes(bytes, at)?;
+fn take_label(bytes: &[u8], at: &mut usize, max_frame: usize) -> Result<String, VerifyError> {
+    let raw = take_bytes(bytes, at, max_frame)?;
     std::str::from_utf8(raw)
         .map(str::to_owned)
         .map_err(|_| VerifyError::Frame("label is not text".to_owned()))
 }
 
-/// Parses a frame straight from the written format specification.
+/// Parses a frame straight from the written format specification using the
+/// default golden-corpus frame ceiling (`1 MiB`).
 ///
 /// Written to be obvious rather than shared: a bug present in both this and
 /// `fgit-codec` would be invisible, which is the whole reason this exists.
 pub fn parse_frame(bytes: &[u8]) -> Result<Frame, VerifyError> {
-    if bytes.len() > MAX_FRAME {
+    parse_frame_bounded(bytes, MAX_FRAME)
+}
+
+/// Parses a frame straight from the written format specification under an
+/// explicit caller-selected `max_frame` byte ceiling.
+///
+/// Production verifiers (`fgit-verified-read`) pass their exact wire
+/// `DecodeLimits::frame_bytes` bound here so frames larger than 1 MiB (such as
+/// verified blob envelopes up to `MAX_VERIFIED_BLOB_FRAME_BYTES`) receive the
+/// same independent structural cross-check without unbounded allocation.
+pub fn parse_frame_bounded(bytes: &[u8], max_frame: usize) -> Result<Frame, VerifyError> {
+    if bytes.len() > max_frame {
         return Err(VerifyError::Frame(format!(
             "frame of {} bytes",
             bytes.len()
@@ -171,11 +187,11 @@ pub fn parse_frame(bytes: &[u8]) -> Result<Frame, VerifyError> {
             "codec major {codec_major} is not 1"
         )));
     }
-    let domain = take_label(bytes, &mut at)?;
-    let family = take_label(bytes, &mut at)?;
+    let domain = take_label(bytes, &mut at, max_frame)?;
+    let family = take_label(bytes, &mut at, max_frame)?;
     let schema_major = take_u16(bytes, &mut at)?;
     let schema_minor = take_u16(bytes, &mut at)?;
-    let payload = take_bytes(bytes, &mut at)?.to_vec();
+    let payload = take_bytes(bytes, &mut at, max_frame)?.to_vec();
 
     if at != bytes.len() {
         return Err(VerifyError::Frame(format!(
@@ -482,4 +498,47 @@ pub fn default_corpus_directory() -> PathBuf {
         .join("fgit-codec")
         .join("tests")
         .join("goldens")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FRAME_MAGIC, VerifyError, parse_frame_bounded};
+
+    fn sample_frame(payload: &[u8]) -> Vec<u8> {
+        let domain = b"frankengit/test-domain/v1";
+        let family = b"test-family";
+        let mut out = Vec::new();
+        out.extend_from_slice(&FRAME_MAGIC);
+        out.extend_from_slice(&1_u16.to_be_bytes());
+        out.extend_from_slice(&0_u16.to_be_bytes());
+        out.extend_from_slice(&(u32::try_from(domain.len()).unwrap()).to_be_bytes());
+        out.extend_from_slice(domain);
+        out.extend_from_slice(&(u32::try_from(family.len()).unwrap()).to_be_bytes());
+        out.extend_from_slice(family);
+        out.extend_from_slice(&1_u16.to_be_bytes());
+        out.extend_from_slice(&0_u16.to_be_bytes());
+        out.extend_from_slice(&(u32::try_from(payload.len()).unwrap()).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn parse_frame_bounded_enforces_exact_ceiling_with_permitted_twin() {
+        let bytes = sample_frame(b"hello");
+        let parsed = parse_frame_bounded(&bytes, bytes.len())
+            .expect("exact ceiling must admit canonical frame");
+        assert_eq!(parsed.domain, "frankengit/test-domain/v1");
+        assert_eq!(parsed.family, "test-family");
+        assert_eq!(parsed.payload, b"hello");
+
+        let refused = parse_frame_bounded(&bytes, bytes.len() - 1)
+            .expect_err("one-byte smaller ceiling must refuse before payload copy");
+        assert!(matches!(refused, VerifyError::Frame(_)));
+
+        let mut trailing = bytes;
+        trailing.push(0);
+        let refused_trailing =
+            parse_frame_bounded(&trailing, trailing.len()).expect_err("trailing byte must refuse");
+        assert!(matches!(refused_trailing, VerifyError::Frame(_)));
+    }
 }

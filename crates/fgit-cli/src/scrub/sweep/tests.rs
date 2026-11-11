@@ -93,6 +93,7 @@ fn progress_is_provisional_and_shutdown_failure_suppresses_terminal_certificate(
     assert!(progress.contains("\"type\":\"repository_scrub_sweep_page\""));
     assert!(progress.contains("\"complete\":false"));
     assert!(progress.contains("\"page_complete\":false"));
+    assert!(progress.contains("\"claim_rank\":null,\"evidence_record_id\":null"));
     assert!(progress.contains("\"node_closed\":false"));
     assert!(
         finish(
@@ -137,6 +138,30 @@ fn cancelled_request_and_output_failure_produce_no_terminal_success() {
     });
     assert!(cancelled.is_err());
     assert!(bytes.is_empty());
+    node.shutdown().unwrap();
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn clean_terminal_sweep_emits_bounded_model_evidence_while_finding_sweep_withholds_it() {
+    let (path, node) = empty_node();
+    let options = options(&[]);
+    let request = node.request_context();
+    let mut progress = Vec::new();
+    let mut summary = drive(&options, &mut progress, Instant::now(), |query| {
+        node.runtime()
+            .block_on(node.scrub_selected_objects_local_in(&request, query))
+            .map_err(|error| error.to_string())
+    })
+    .unwrap();
+    let clean_receipt = summary.receipt(&options).unwrap();
+    assert!(clean_receipt.contains("\"claim_rank\":\"bounded_model\""));
+    assert!(clean_receipt.contains("\"evidence_record_id\":\"frankengit/evidence-record/"));
+
+    summary.findings = 1;
+    let finding_receipt = summary.receipt(&options).unwrap();
+    assert!(finding_receipt.contains("\"claim_rank\":null,\"evidence_record_id\":null"));
+
     node.shutdown().unwrap();
     fs::remove_dir_all(path).unwrap();
 }

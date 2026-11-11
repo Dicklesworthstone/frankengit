@@ -32,8 +32,8 @@ pub mod freshness;
 
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{
-    CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder,
-    RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
+    CODEC_MAJOR, CODEC_MINOR, CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits,
+    Decoder, Encoder, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
     RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1,
     RepositoryIncarnationConfigurationBodyV2_2, body_id, decode_body, encode_body,
 };
@@ -192,6 +192,53 @@ impl CanonicalBody for ObjectClosureNonMembershipProofBody {
     }
 }
 
+/// Cross-checks a decoded canonical body's wire header, payload boundary, and
+/// canonical round-trip byte equivalence with the independent
+/// `fgit_codec_verify` frame parser.
+pub(crate) fn verify_canonical_frame<B: CanonicalBody>(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    body: &B,
+) -> Result<(), CodecRefusal> {
+    let max_frame = usize::try_from(limits.frame_bytes).unwrap_or(usize::MAX);
+    let mismatch = || CodecRefusal::TrailingBytes {
+        offset: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        remaining: 0,
+    };
+    let frame = fgit_codec_verify::parse_frame_bounded(bytes, max_frame).map_err(|_| mismatch())?;
+    if frame.codec_major != CODEC_MAJOR
+        || frame.codec_minor != CODEC_MINOR
+        || frame.domain != B::DOMAIN.as_str()
+        || frame.family != B::SCHEMA_FAMILY.as_str()
+        || frame.schema_major != B::SCHEMA_MAJOR
+        || frame.schema_minor != B::SCHEMA_MINOR
+    {
+        return Err(mismatch());
+    }
+    let canonical = encode_body(body)?;
+    if canonical != bytes {
+        return Err(mismatch());
+    }
+    let rechecked =
+        fgit_codec_verify::parse_frame_bounded(&canonical, max_frame).map_err(|_| mismatch())?;
+    if rechecked != frame {
+        return Err(mismatch());
+    }
+    Ok(())
+}
+
+/// Decodes a canonical frame through `fgit_codec` and cross-checks its wire
+/// header, payload boundary, and canonical round-trip byte equivalence with
+/// the independent `fgit_codec_verify` frame parser.
+pub(crate) fn decode_verified_canonical_frame<B: CanonicalBody>(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<B, CodecRefusal> {
+    let body = decode_body::<B>(bytes, limits)?;
+    verify_canonical_frame(bytes, limits, &body)?;
+    Ok(body)
+}
+
 /// Encodes a native Merkle proof as its canonical transport frame.
 ///
 /// # Errors
@@ -213,7 +260,7 @@ pub fn decode_merkle_proof(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<MerkleProof, VerifiedReadRefusal> {
-    decode_body::<MerkleProofBody>(bytes, limits)
+    decode_verified_canonical_frame::<MerkleProofBody>(bytes, limits)
         .map(MerkleProofBody::into_proof)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
@@ -241,7 +288,7 @@ pub fn decode_ref_state_non_membership_proof(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<RefStateNonMembershipProof, VerifiedReadRefusal> {
-    decode_body::<RefStateNonMembershipProofBody>(bytes, limits)
+    decode_verified_canonical_frame::<RefStateNonMembershipProofBody>(bytes, limits)
         .map(RefStateNonMembershipProofBody::into_proof)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
@@ -269,7 +316,7 @@ pub fn decode_object_closure_non_membership_proof(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<ObjectClosureNonMembershipProof, VerifiedReadRefusal> {
-    decode_body::<ObjectClosureNonMembershipProofBody>(bytes, limits)
+    decode_verified_canonical_frame::<ObjectClosureNonMembershipProofBody>(bytes, limits)
         .map(ObjectClosureNonMembershipProofBody::into_proof)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
@@ -842,6 +889,8 @@ pub fn decode_verified_read_envelope(
             observed: envelope.version,
         });
     }
+    verify_canonical_frame(bytes, limits, &envelope)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
     Ok(envelope)
 }
 
@@ -1434,4 +1483,54 @@ fn selected_ref_layout(
         return Err(VerifiedReadRefusal::ConfigurationRootMismatch);
     }
     Ok(configuration.root_layout())
+}
+
+#[cfg(test)]
+mod codec_verify_tests {
+    use super::*;
+
+    #[test]
+    fn production_decoders_cross_check_frames_with_independent_codec_verifier() {
+        let proof = MerkleProof::new(0, 1, Vec::new());
+        let proof_bytes = encode_merkle_proof(&proof).expect("encode merkle proof");
+        let parsed = fgit_codec_verify::parse_frame(&proof_bytes).expect("independent parse");
+        assert_eq!(parsed.domain, MerkleProofBody::DOMAIN.as_str());
+        assert_eq!(parsed.family, MerkleProofBody::SCHEMA_FAMILY.as_str());
+        assert_eq!(
+            decode_merkle_proof(&proof_bytes, DecodeLimits::default()).expect("decode proof"),
+            proof
+        );
+
+        let mut trailing = proof_bytes.clone();
+        trailing.push(0xff);
+        assert!(matches!(
+            decode_merkle_proof(&trailing, DecodeLimits::default()),
+            Err(VerifiedReadRefusal::WireDecode(_))
+        ));
+
+        let mut bad_magic = proof_bytes;
+        bad_magic[0] ^= 0x01;
+        assert!(matches!(
+            decode_merkle_proof(&bad_magic, DecodeLimits::default()),
+            Err(VerifiedReadRefusal::WireDecode(_))
+        ));
+
+        let ref_absence = RefStateNonMembershipProof::EmptyState;
+        let ref_bytes =
+            encode_ref_state_non_membership_proof(&ref_absence).expect("encode ref absence");
+        assert_eq!(
+            decode_ref_state_non_membership_proof(&ref_bytes, DecodeLimits::default())
+                .expect("decode ref absence"),
+            ref_absence
+        );
+
+        let obj_absence = ObjectClosureNonMembershipProof::EmptyClosure;
+        let obj_bytes =
+            encode_object_closure_non_membership_proof(&obj_absence).expect("encode obj absence");
+        assert_eq!(
+            decode_object_closure_non_membership_proof(&obj_bytes, DecodeLimits::default())
+                .expect("decode obj absence"),
+            obj_absence
+        );
+    }
 }

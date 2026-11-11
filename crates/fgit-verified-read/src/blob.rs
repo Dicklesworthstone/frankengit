@@ -11,7 +11,7 @@ use crate::{
 use fgit_authority::authority_head_identity;
 use fgit_codec::{
     CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
-    decode_body, encode_body,
+    encode_body,
 };
 use fgit_crypto::{GitObjectHasher, GitObjectKind, NativeObjectIdentity, Sha1, Sha256};
 use fgit_git_object::{
@@ -355,7 +355,7 @@ pub fn decode_verified_blob_envelope(
     if bytes.len() > MAX_VERIFIED_BLOB_FRAME_BYTES {
         return Err(VerifiedBlobRefusal::BoundExceeded("frame bytes"));
     }
-    decode_body(
+    crate::decode_verified_canonical_frame(
         bytes,
         DecodeLimits {
             frame_bytes: MAX_VERIFIED_BLOB_FRAME_BYTES as u64,
