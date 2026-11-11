@@ -3,7 +3,7 @@
 #
 # FrankenGit's authoritative Beads tracker uses the repository-owned
 # `batch_pending` state for work awaiting independent batch verification.
-# `bv` v0.22.0 predates that state and otherwise drops every such record before
+# Upstream `bv` (v0.22+) predates that state and otherwise drops every such record before
 # computing graph metrics. This launcher presents `bv` with a private, ephemeral
 # projection in which only the exact status field `batch_pending` is represented
 # as `review`: still non-closed and dependency-blocking, but neither claimable
@@ -69,15 +69,24 @@ done
 # pinned one) otherwise fails mid-invocation with an argparse usage dump and
 # every pane burns a cycle decoding it. Refuse up front, naming the override.
 bv_bin="${BV_BIN:-bv}"
-if ! command -v "$bv_bin" >/dev/null 2>&1; then
-  die "bv binary '$bv_bin' not found; set BV_BIN to the pinned 0.22+ launcher"
+python_bin="${PYTHON_BIN:-python3}"
+if [[ "$bv_bin" == */* ]]; then
+  [ -x "$bv_bin" ] || die "BV_BIN '$bv_bin' is not executable"
+else
+  bv_bin="$(command -v "$bv_bin" 2>/dev/null)" || die "bv executable '${BV_BIN:-bv}' is not on PATH; set BV_BIN to a 0.22+ launcher"
 fi
+if [[ "$python_bin" == */* ]]; then
+  [ -x "$python_bin" ] || die "PYTHON_BIN '$python_bin' is not executable"
+else
+  python_bin="$(command -v "$python_bin" 2>/dev/null)" || die "Python executable '${PYTHON_BIN:-python3}' is not on PATH"
+fi
+
 bv_version="$("$bv_bin" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//')"
 bv_major="${bv_version%%.*}"
 bv_rest="${bv_version#*.}"
 bv_minor="${bv_rest%%.*}"
 if ! [[ "$bv_major" =~ ^[0-9]+$ && "$bv_minor" =~ ^[0-9]+$ ]]; then
-  die "bv binary '$bv_bin' did not report a parsable version (got '$bv_version'); set BV_BIN to the pinned 0.22+ launcher"
+  die "bv binary '$bv_bin' did not report a parsable version (got '$bv_version'); set BV_BIN to a 0.22+ launcher"
 fi
 if [ "$bv_major" -eq 0 ] && [ "$bv_minor" -lt 22 ]; then
   die "bv $bv_version predates the --db override (need 0.22+); PATH resolves a stale binary — set BV_BIN (for example BV_BIN=\"\$HOME/.local/bin/bv\")"
@@ -94,19 +103,6 @@ fi
 source_file="$repo_root/.beads/issues.jsonl"
 [ -f "$source_file" ] || die "authoritative tracker is missing at $source_file"
 [ ! -L "$source_file" ] || die 'authoritative tracker must not be a symbolic link'
-
-bv_bin="${BV_BIN:-bv}"
-python_bin="${PYTHON_BIN:-python3}"
-if [[ "$bv_bin" == */* ]]; then
-  [ -x "$bv_bin" ] || die "BV_BIN '$bv_bin' is not executable"
-else
-  bv_bin="$(command -v "$bv_bin" 2>/dev/null)" || die "bv executable '${BV_BIN:-bv}' is not on PATH"
-fi
-if [[ "$python_bin" == */* ]]; then
-  [ -x "$python_bin" ] || die "PYTHON_BIN '$python_bin' is not executable"
-else
-  python_bin="$(command -v "$python_bin" 2>/dev/null)" || die "Python executable '${PYTHON_BIN:-python3}' is not on PATH"
-fi
 
 umask 077
 tmp_parent="${TMPDIR:-/tmp}"
