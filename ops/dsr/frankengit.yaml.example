@@ -2,12 +2,12 @@ tool_name: frankengit
 repo: Dicklesworthstone/frankengit
 local_path: /path/to/frankengit  # set to your local clone of Dicklesworthstone/frankengit
 language: rust
-main_package: fgit-registry-check
+main_package: fgit-cli
 workflow: .github/workflows/docs-integrity.yml
 
-# Pre-implementation repository: only the docs lane is runnable through act.
+# Local dispatch manifest: act executes the docs-integrity job via DSR.
 act_job_map:
-  linux/amd64: verify-docs
+  linux/amd64: docs-integrity
 
 checks:
   - ./scripts/verify.sh docs
@@ -20,6 +20,9 @@ checks:
 
 targets:
   - linux/amd64
+  - linux/arm64
+  - darwin/amd64
+  - darwin/arm64
 
 include_files:
   - README.md

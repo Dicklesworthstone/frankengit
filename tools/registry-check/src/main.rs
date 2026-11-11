@@ -1605,6 +1605,141 @@ fn check_workflows(root: &Path, report: &mut Report) {
             }
         }
     }
+    check_dsr_workflow_mappings(root, report);
+}
+
+fn check_dsr_workflow_mappings(root: &Path, report: &mut Report) {
+    let dsr_dir = root.join("ops/dsr");
+    let mut files = Vec::new();
+    collect_files(&dsr_dir, &mut files);
+    files.sort();
+    for path in files {
+        let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+        if !file_name.contains(".yaml") && !file_name.contains(".yml") {
+            continue;
+        }
+        let display = relative(root, &path);
+        let Ok(text) = fs::read_to_string(&path) else {
+            report.error(format!("cannot read DSR manifest {display}"));
+            continue;
+        };
+        let Some(workflow_rel) = extract_top_level_yaml_scalar(&text, "workflow") else {
+            report.error(format!(
+                "DSR manifest {display} must declare a top-level `workflow:` path"
+            ));
+            continue;
+        };
+        if workflow_rel.starts_with('/') || workflow_rel.split('/').any(|part| part == "..") {
+            report.error(format!(
+                "DSR manifest {display} declares unsafe workflow path `{workflow_rel}`"
+            ));
+            continue;
+        }
+        let workflow_path = root.join(&workflow_rel);
+        let Ok(workflow_text) = fs::read_to_string(&workflow_path) else {
+            report.error(format!(
+                "DSR manifest {display} references missing workflow `{workflow_rel}`"
+            ));
+            continue;
+        };
+        let defined_jobs = extract_yaml_block_keys(&workflow_text, "jobs");
+        let mapped_jobs = extract_yaml_block_pairs(&text, "act_job_map");
+        if mapped_jobs.is_empty() {
+            report.error(format!(
+                "DSR manifest {display} must declare at least one `act_job_map` entry"
+            ));
+            continue;
+        }
+        for (target, job) in mapped_jobs {
+            if job.is_empty() || !defined_jobs.contains(&job) {
+                let available = defined_jobs.iter().cloned().collect::<Vec<_>>().join(", ");
+                report.error(format!(
+                    "DSR manifest {display} act_job_map maps `{target}` to `{job}`, which is absent from `{workflow_rel}` (defined jobs: [{available}])"
+                ));
+            }
+        }
+    }
+}
+
+fn strip_yaml_comment_and_quotes(value: &str) -> String {
+    let trimmed = value.split('#').next().unwrap_or("").trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed)
+        .trim()
+        .to_owned()
+}
+
+fn extract_top_level_yaml_scalar(text: &str, key: &str) -> Option<String> {
+    for raw_line in text.lines() {
+        let without_comment = raw_line.split('#').next().unwrap_or("");
+        if without_comment.trim().is_empty() {
+            continue;
+        }
+        let indent = without_comment.len() - without_comment.trim_start_matches(' ').len();
+        if indent != 0 {
+            continue;
+        }
+        if let Some((k, v)) = without_comment.split_once(':')
+            && k.trim() == key
+        {
+            let value = strip_yaml_comment_and_quotes(v);
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn extract_yaml_block_keys(text: &str, section: &str) -> BTreeSet<String> {
+    extract_yaml_block_pairs(text, section)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+fn extract_yaml_block_pairs(text: &str, section: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut in_section = false;
+    let mut child_indent: Option<usize> = None;
+    for raw_line in text.lines() {
+        let without_comment = raw_line.split('#').next().unwrap_or("");
+        if without_comment.trim().is_empty() {
+            continue;
+        }
+        let indent = without_comment.len() - without_comment.trim_start_matches(' ').len();
+        let trimmed = without_comment.trim();
+        if indent == 0 {
+            in_section = trimmed == format!("{section}:");
+            child_indent = None;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let expected_indent = *child_indent.get_or_insert(indent);
+        if indent < expected_indent {
+            in_section = false;
+            continue;
+        }
+        if indent == expected_indent
+            && let Some((key, value)) = trimmed.split_once(':')
+        {
+            let clean_key = strip_yaml_comment_and_quotes(key);
+            let clean_val = strip_yaml_comment_and_quotes(value);
+            if !clean_key.is_empty() {
+                pairs.push((clean_key, clean_val));
+            }
+        }
+    }
+    pairs
 }
 
 /// Detects hosted automatic triggers in block form (`push:`), bare-scalar and
@@ -1773,6 +1908,16 @@ fn check_contract_phrases(root: &Path, report: &mut Report) {
     let dsr = fs::read_to_string(root.join("ops/dsr/frankengit.yaml.example")).unwrap_or_default();
     if !dsr.contains("workflow: .github/workflows/docs-integrity.yml") {
         report.error("DSR example must point to the checked-in local workflow manifest");
+    }
+    if !dsr.contains("main_package: fgit-cli") {
+        report.error("DSR example must declare main_package: fgit-cli");
+    }
+    for target in ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"] {
+        if !dsr.contains(&format!("- {target}")) {
+            report.error(format!(
+                "DSR example must declare release target `{target}`"
+            ));
+        }
     }
 }
 
@@ -8153,6 +8298,83 @@ impl CanonicalBody for EvidenceRecordBody {
         assert_eq!(
             parse_invocation(vec!["--root".to_owned()]),
             Err("--root requires a directory path".to_owned())
+        );
+    }
+
+    fn empty_fixture_workspace(label: &str) -> FixtureWorkspace {
+        let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock precedes epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("fgit-registry-check-{label}-{nanos}-{nonce}"));
+        fs::create_dir_all(&root).expect("create empty fixture workspace");
+        FixtureWorkspace { root }
+    }
+
+    #[test]
+    fn dsr_act_job_map_cross_checks_referenced_workflow_jobs() {
+        let workspace = empty_fixture_workspace("dsr-job-map");
+        let workflows = workspace.root.join(".github/workflows");
+        let dsr_dir = workspace.root.join("ops/dsr");
+        fs::create_dir_all(&workflows).expect("create workflows dir");
+        fs::create_dir_all(&dsr_dir).expect("create dsr dir");
+        fs::write(
+            workflows.join("docs-integrity.yml"),
+            concat!(
+                "name: Documentation and Registry Integrity\n",
+                "on:\n",
+                "  workflow_dispatch:\n",
+                "jobs:\n",
+                "  docs-integrity:\n",
+                "    runs-on: ubuntu-latest\n",
+                "    steps:\n",
+                "      - run: ./scripts/verify.sh docs\n",
+            ),
+        )
+        .expect("write workflow fixture");
+
+        // Permitted twin: act_job_map names docs-integrity matching the workflow.
+        fs::write(
+            dsr_dir.join("frankengit.yaml.example"),
+            concat!(
+                "tool_name: frankengit\n",
+                "main_package: fgit-cli\n",
+                "workflow: .github/workflows/docs-integrity.yml\n",
+                "act_job_map:\n",
+                "  linux/amd64: docs-integrity\n",
+            ),
+        )
+        .expect("write valid dsr fixture");
+        let mut valid_report = Report::new();
+        check_workflows(&workspace.root, &mut valid_report);
+        assert!(
+            valid_report.errors.is_empty(),
+            "permitted DSR workflow mapping must pass: {:?}",
+            valid_report.errors
+        );
+
+        // Near-identical forbidden twin: act_job_map names verify-docs (absent from workflow).
+        fs::write(
+            dsr_dir.join("frankengit.yaml.example"),
+            concat!(
+                "tool_name: frankengit\n",
+                "main_package: fgit-cli\n",
+                "workflow: .github/workflows/docs-integrity.yml\n",
+                "act_job_map:\n",
+                "  linux/amd64: verify-docs\n",
+            ),
+        )
+        .expect("write mismatched dsr fixture");
+        let mut invalid_report = Report::new();
+        check_workflows(&workspace.root, &mut invalid_report);
+        assert!(
+            invalid_report.errors.iter().any(|err| {
+                err.contains("act_job_map maps `linux/amd64` to `verify-docs`")
+                    && err.contains(".github/workflows/docs-integrity.yml")
+            }),
+            "mismatched DSR job mapping must be refused: {:?}",
+            invalid_report.errors
         );
     }
 }
