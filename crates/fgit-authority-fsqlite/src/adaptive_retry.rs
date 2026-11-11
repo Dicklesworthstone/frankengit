@@ -58,7 +58,7 @@ pub const POPULATION_SLUG: &str = "authority-store-whole-txn-attempts";
 pub const SELECTION_SLUG: &str = "all-admitted-store-operations";
 /// Toolchain and integer-arithmetic profile preimage (binding 7).
 pub const TOOLCHAIN_FINGERPRINT_PREIMAGE: &[u8] =
-    b"frankengit/authority-cas-retry-toolchain/v1:rustc-1.100.0-nightly-2026-08-30:integer-ppm-v1";
+    b"frankengit/authority-cas-retry-toolchain/v1:nightly-2026-08-31:rustc-1.100.0-nightly-908501772-2026-08-30:integer-ppm-v1";
 
 /// Maximum number of decision-epoch evidence records retained in memory.
 pub const MAX_EPOCH_HISTORY: usize = 64;

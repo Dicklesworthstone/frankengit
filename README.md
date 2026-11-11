@@ -20,11 +20,17 @@ FrankenGit is not “GitHub rewritten in Rust.” It is a forge designed around 
 
 The project is a synthesis of concrete machinery from Asupersync, FrankenSQLite, FrankenFS, FrankenSearch, franken_markdown, FrankenGraphDB, FrankenNetworkX, and Doodlestein Self-Releaser — with the gateway/API on fastapi_rust, projection read-models on sqlmodel_rust's FrankenSQLite backend, a familiar GitHub-like web UI (DOM-oriented pure-Rust/WASM, Leptos or Dioxus with SSR and Tailwind, native source-spanned rendering and trustless verified reads; a generated TypeScript client and React reference are the supported alternative), plus a terminal TUI (and an optional parallel terminal-style web surface) on the frankentui (ftui) kernel — combined with the object-store-native insight in Cursor’s “Git at Any Scale.” The detailed source-to-design map is in [`docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md`](docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md); the concrete defects found in the first-cut architecture and their dispositions are in [`docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md`](docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md).
 
-Those product-stack choices remain the accepted architecture. The integration
-profile still names Asupersync 0.4.x, while the current admitted
-`constellation.lock` selects 0.5.0; this documented mismatch remains owned by
-`frankengit-root-doctrine-x2mv.4.15`. The exact runtime, cancellation, connection,
-retry, shutdown and verification obligations are in
+Those product-stack choices remain the accepted architecture. Under the
+2026-11-11 constitutional alignment (`frankengit-root-doctrine-x2mv.4.15`,
+independently verified at `cb36aafb`), `constellation.lock`,
+[`docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md`](docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md),
+and [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md)
+are synchronized on Asupersync `0.5.0`, FrankenSQLite `0.4.10`,
+`sqlmodel-frankensqlite 0.5.0`, and `ftui 0.10.0` (`specified`), with pure-Rust
+HTTP + embedded vanilla UI ratified as the primary web surface (Owner Decision
+D1) and the `stacker 0.1.25` / `psm 0.1.32` stack-probe assembly recorded as a
+narrow ledgered carve-out (Owner Decision D4). The exact runtime, cancellation,
+connection, retry, shutdown and verification obligations are in
 [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
 
 ## Current one-node integration boundary

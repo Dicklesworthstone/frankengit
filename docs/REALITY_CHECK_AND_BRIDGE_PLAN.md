@@ -383,6 +383,38 @@ separate branch. The original full operator, same-source current native,
 default fast/full/release, independent review and old custody conditions remain
 open. No Bead closure, gate relaxation or new production dependency is implied.
 
+### Wave 0–1 remediation snapshot — 2026-11-11
+
+Following the 2026-11-11 reality check against baseline `dabc375df279d8ccced553b0f88c3f1684852072`,
+Wave 0 and Wave 1 landed directly on `main` (per explicit owner authorization under
+[AGENTS.md](../AGENTS.md) §13) and were independently verified and gate-closed
+through `1222893751c398bce06ee4980fd40dc770fa7519`:
+
+- **Verification debt drained & workspace compilation restored (`e48202fd`, `12228937`):**
+  40 previously pending Beads were independently verified and closed (with 4 defective
+  slices returned to `rework` with exact diagnostics), cutting `verification_debt`
+  from `52/52` to `10/52`. `fg-mcp` double-compilation was deduplicated via
+  `fgit_cli::mcp` (`e970c06c`, `8e6c8f3b`; `fgit-cli --lib` 523/523 and `--bins`
+  835/835 passing), and `cargo fmt --all -- --check` exits `0`.
+- **macOS (`darwin/arm64`) verification parity (`a7c9eac3`, `818c0771`, `436a547d`, `eaff7251`):**
+  `scripts/tests/verify_test.sh` (67/67), `scripts/tests/bv_compat.sh` (8/8),
+  `scripts/e2e/suites/oracle/oracle_selftest.sh` (68/68), and all three local JS
+  profiles (`scripts` 1,583/1,583, `browser` 4,278/4,278, `operator` 5,169/5,169)
+  pass with zero failures on Darwin.
+- **DSR manifest, artifact hygiene, and constitutional sync (`1a326b70`, `34a74caa`, `489a8582`):**
+  `ops/dsr/frankengit.yaml.example` aligns `act_job_map` with `docs-integrity` and
+  enumerates the 4-target matrix; 185 patch-transport debris files were inventoried
+  in `registries/artifact_inventory.tsv` and removed under owner approval; and
+  [`docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md`](DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md),
+  [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md),
+  `registries/dependency_policy.tsv`, and [`docs/NEGATIVE_EVIDENCE_LEDGER.md`](NEGATIVE_EVIDENCE_LEDGER.md)
+  (`NEG-001`..`NEG-046`) are reconciled on Asupersync `0.5.0`, FrankenSQLite `0.4.10`,
+  `sqlmodel-frankensqlite 0.5.0`, `ftui 0.10.0`, Owner Decision D1 (pure-Rust stack),
+  and Owner Decision D4 (`psm 0.1.32` stack-probe carve-out). Both
+  `./scripts/verify.sh --no-artifact docs` and `./scripts/verify.sh --no-artifact constitution`
+  exit `0` at `cb36aafb`, while `full` and `release` continue to return dormant
+  exit `3` until their remaining implementation and native-asset gates close.
+
 ## 3. What has improved since October 21
 
 **Moving-head workspace evidence at `01c89ae7cd9ff454f803cefd00cbca21cd558034`:**

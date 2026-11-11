@@ -175,11 +175,15 @@ Module tests using DOM/fetch doubles or HTTP schema peers remain module/peer
 tests, even when all pass. A browser suite pass does not prove real-browser or
 live-node operation; full/release gates and D10 remain separate obligations.
 
-At the 2026-10-20 qualification snapshot, `x2mv.4.71` remains in progress: the
+At the 2026-10-20 qualification snapshot, `x2mv.4.71` remained in progress: the
 whole macOS operator campaign exceeded its ten-minute bound, and the broader
-scripts corpus retained failures. A browser lane pass does not complete those
-obligations. The authoritative bead records the exact tested revisions and
-remaining work; later peer source additions require their own qualification.
+scripts corpus retained failures. At the 2026-11-11 remediation (`eaff7251`,
+independently verified under `frankengit-root-doctrine-x2mv.4.75` at `cb36aafb`),
+all three local macOS (`darwin/arm64`) JS profiles pass with zero failures
+(`scripts`: 1,583 pass / 0 fail; `browser`: 4,278 pass / 0 fail; `operator`:
+5,169 pass / 0 fail / 0 cancelled). Remaining native-binary and host-path
+representability obligations on `x2mv.4.71` stay tracked on their owning bead,
+and later peer source additions require their own qualification.
 
 The macOS sparse-directory workspace profile refuses invalid UTF-8 repository
 path bytes with `source_workspace_host_path_unrepresentable` before acquiring
