@@ -90,7 +90,15 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let action = args[0].as_str();
     if !matches!(
         action,
-        "show" | "list" | "enqueue" | "dequeue" | "reorder" | "refresh" | "land" | "prepare" | "land-candidate"
+        "show"
+            | "list"
+            | "enqueue"
+            | "dequeue"
+            | "reorder"
+            | "refresh"
+            | "land"
+            | "prepare"
+            | "land-candidate"
     ) {
         return Err(super::USAGE.to_owned());
     }
@@ -170,11 +178,12 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                                         | "--title"
                                         | "--body"
                                         | "--body-file"
-                                )) || (action == "land-candidate"
-                                && matches!(
-                                    flag,
-                                    "--merge-base" | "--expected-commit" | "--bundle"
                                 ))
+                                || (action == "land-candidate"
+                                    && matches!(
+                                        flag,
+                                        "--merge-base" | "--expected-commit" | "--bundle"
+                                    ))
                         }
                         "dequeue" => matches!(flag, "--pull-request" | "--reason"),
                         "reorder" => flag == "--entry",
@@ -435,10 +444,11 @@ fn refresh(
     }
     let (body, body_file) = match (flags.get("--body"), flags.get("--body-file")) {
         (Some(body), None) => ((*body).to_owned(), None),
-        (None, Some(path)) if !path.is_empty() => {
-            (String::new(), Some(PathBuf::from(*path)))
-        }
-        _ => return Err("supply exactly one of --body or a nonempty --body-file (empty --body is permitted)".into()),
+        (None, Some(path)) if !path.is_empty() => (String::new(), Some(PathBuf::from(*path))),
+        _ => return Err(
+            "supply exactly one of --body or a nonempty --body-file (empty --body is permitted)"
+                .into(),
+        ),
     };
     let pull_request = PullRequestCommand {
         number: pull_number(required(flags, "--pull-request")?)?,

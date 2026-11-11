@@ -13,7 +13,6 @@ mod fsck;
 mod guarded_git_server;
 mod import_command;
 mod issues;
-mod mcp;
 mod merge_apply;
 mod milestones;
 mod notification_commands;
@@ -117,7 +116,10 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         .first()
         .is_some_and(|argument| argument == "agent")
     {
-        if arguments.get(1).is_some_and(|argument| argument == "settle") {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == "settle")
+        {
             return match fgit_cli::agent_settle::run(&arguments[2..]) {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
@@ -126,7 +128,10 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
                 }
             };
         }
-        if arguments.get(1).is_some_and(|argument| argument == "recover") {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == "recover")
+        {
             return match fgit_cli::agent_recover::run(&arguments[2..]) {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
@@ -421,7 +426,7 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         };
     }
     if arguments.first().is_some_and(|argument| argument == "mcp") {
-        return match mcp::run(&arguments[1..]) {
+        return match fgit_cli::mcp::run(&arguments[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("fg: {error}");

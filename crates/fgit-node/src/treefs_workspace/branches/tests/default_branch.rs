@@ -401,7 +401,7 @@ fn local_operator_scope_and_original_context_are_required_before_any_publication
                 IdempotencyKey::new(b"narrowed-admin".to_vec()).unwrap(),
             )
             .with_ref_write_scope(
-                fgit_types::RefWriteScope::parse("none")
+                fgit_types::ref_write_scope::RefWriteScope::parse("none")
                     .unwrap()
                     .map(std::sync::Arc::new),
             ),

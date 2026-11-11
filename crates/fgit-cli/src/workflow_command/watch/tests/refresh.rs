@@ -36,15 +36,21 @@ fn automatic_refresh_requires_its_own_grant_and_retains_four_explicit_identities
     // An operator can deliberately select the same principal for two roles;
     // merely configuring one role never grants the other.
     let mut same = refresh_args();
-    let at = same.iter().position(|value| value == "--refresh-principal").unwrap();
+    let at = same
+        .iter()
+        .position(|value| value == "--refresh-principal")
+        .unwrap();
     same[at + 1] = "66".repeat(16);
     let parsed = options(&same).unwrap();
     assert_eq!(parsed.queue_refresh_principal, parsed.landing_principal);
 
     let mut continuous = refresh_args();
     continuous.extend([
-        "--continuous".into(), "--stop-file".into(), "/private/queue.stop".into(),
-        "--attempt-timeout-secs".into(), "120".into(),
+        "--continuous".into(),
+        "--stop-file".into(),
+        "/private/queue.stop".into(),
+        "--attempt-timeout-secs".into(),
+        "120".into(),
     ]);
     let parsed = options(&continuous).unwrap();
     assert!(parsed.queue_refresh_principal.is_some());
@@ -54,13 +60,20 @@ fn automatic_refresh_requires_its_own_grant_and_retains_four_explicit_identities
 #[test]
 fn automatic_refresh_refuses_incomplete_authority_and_selection_before_repository_io() {
     for (flag, width) in [
-        ("--refresh-queue-head", 1), ("--refresh-principal", 2),
-        ("--land-queue-head", 1), ("--landing-principal", 2),
-        ("--publish-checks", 1), ("--principal-id", 2),
-        ("--expected-incarnation", 2), ("--merge-queue", 2),
-        ("--merge-candidate-ref", 2), ("--merge-principal", 2),
-        ("--merge-author", 2), ("--merge-committer", 2),
-        ("--merge-timestamp", 2), ("--merge-message", 2),
+        ("--refresh-queue-head", 1),
+        ("--refresh-principal", 2),
+        ("--land-queue-head", 1),
+        ("--landing-principal", 2),
+        ("--publish-checks", 1),
+        ("--principal-id", 2),
+        ("--expected-incarnation", 2),
+        ("--merge-queue", 2),
+        ("--merge-candidate-ref", 2),
+        ("--merge-principal", 2),
+        ("--merge-author", 2),
+        ("--merge-committer", 2),
+        ("--merge-timestamp", 2),
+        ("--merge-message", 2),
         ("--trusted-local", 1),
     ] {
         let mut input = refresh_args();
@@ -74,7 +87,11 @@ fn automatic_refresh_refuses_incomplete_authority_and_selection_before_repositor
         let at = no_landing.iter().position(|value| value == flag).unwrap();
         no_landing.drain(at..at + width);
     }
-    assert!(options(&no_landing).unwrap_err().contains("requires --land-queue-head"));
+    assert!(
+        options(&no_landing)
+            .unwrap_err()
+            .contains("requires --land-queue-head")
+    );
     for extra in [
         vec!["--refresh-queue-head"],
         vec!["--refresh-principal", "77777777777777777777777777777777"],
@@ -86,14 +103,26 @@ fn automatic_refresh_refuses_incomplete_authority_and_selection_before_repositor
         input.extend(extra.into_iter().map(str::to_owned));
         assert!(options(&input).is_err(), "{input:?}");
     }
-    for invalid in ["", "77", "not-a-principal", "--publish-checks", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"] {
+    for invalid in [
+        "",
+        "77",
+        "not-a-principal",
+        "--publish-checks",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
         let mut input = refresh_args();
-        let at = input.iter().position(|value| value == "--refresh-principal").unwrap();
+        let at = input
+            .iter()
+            .position(|value| value == "--refresh-principal")
+            .unwrap();
         input[at + 1] = invalid.into();
         assert!(options(&input).is_err(), "{invalid:?}");
     }
     let mut pr = refresh_args();
-    let at = pr.iter().position(|value| value == "--merge-queue").unwrap();
+    let at = pr
+        .iter()
+        .position(|value| value == "--merge-queue")
+        .unwrap();
     pr[at] = "--pull-request".into();
     assert!(options(&pr).is_err());
     let mut tag = refresh_args();
@@ -105,11 +134,17 @@ fn automatic_refresh_refuses_incomplete_authority_and_selection_before_repositor
 fn refresh_flags_in_literal_workflow_metadata_never_authorize_a_pr_update() {
     for literal in ["--refresh-queue-head", "--refresh-principal"] {
         let mut input = landing_args();
-        let at = input.iter().position(|value| value == "--merge-message").unwrap();
+        let at = input
+            .iter()
+            .position(|value| value == "--merge-message")
+            .unwrap();
         input[at + 1] = literal.into();
         let parsed = options(&input).unwrap();
         assert!(parsed.queue_refresh_principal.is_none());
-        assert_eq!(parsed.merge_candidate.unwrap().metadata.message, literal.as_bytes());
+        assert_eq!(
+            parsed.merge_candidate.unwrap().metadata.message,
+            literal.as_bytes()
+        );
     }
     let mut input = refresh_args();
     input[4] = "726566732f68656164732fff".into();
@@ -152,7 +187,13 @@ fn refresh_receipts_keep_waiting_original_recovery_and_refused_counts_explicit()
     assert_eq!(finish(&mut Vec::new(), &summary, None, None).unwrap(), 1);
     summary.reconcile = true;
     assert_eq!(
-        finish(&mut Vec::new(), &summary, Some("refresh outcome unknown"), None).unwrap(),
+        finish(
+            &mut Vec::new(),
+            &summary,
+            Some("refresh outcome unknown"),
+            None
+        )
+        .unwrap(),
         2,
     );
 }

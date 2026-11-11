@@ -452,11 +452,23 @@ pub(super) fn refresh(
     terminal: TerminalOutcome,
 ) -> String {
     let (outcome, committed, record, refusal, code) = match terminal.outcome {
-        DecisionOutcome::Committed { repository_commit_id } => (
-            "committed", true, quote(&repository_commit_id.to_string()), "null".into(), "null".into(),
+        DecisionOutcome::Committed {
+            repository_commit_id,
+        } => (
+            "committed",
+            true,
+            quote(&repository_commit_id.to_string()),
+            "null".into(),
+            "null".into(),
         ),
-        DecisionOutcome::Refused { code, refusal_record_id } => (
-            "refused", false, "null".into(), quote(&refusal_record_id.to_string()),
+        DecisionOutcome::Refused {
+            code,
+            refusal_record_id,
+        } => (
+            "refused",
+            false,
+            "null".into(),
+            quote(&refusal_record_id.to_string()),
             quote(&format!("{code:?}")),
         ),
     };
@@ -475,14 +487,25 @@ pub(super) fn refresh(
             "\"refs_changed\":false,\"queue_changed\":false,\"pull_request_changed\":{},",
             "\"delivery_acknowledged\":null,\"historical_outcome\":true,\"complete\":true}}"
         ),
-        scope(node), quote(&principal.to_string()), command.number.get(),
-        ref_fields("target_ref", &pull.data.target_ref), command.expected_queue_version.get(),
-        pull.number.get(), version, command.expected_policy_epoch.get(),
+        scope(node),
+        quote(&principal.to_string()),
+        command.number.get(),
+        ref_fields("target_ref", &pull.data.target_ref),
+        command.expected_queue_version.get(),
+        pull.number.get(),
+        version,
+        command.expected_policy_epoch.get(),
         ref_fields("source_ref", &pull.data.source_ref),
         quote(&pull.data.source_tip.to_string()),
         quote(&command.expected_recorded_target_tip.to_string()),
         quote(&pull.data.target_tip.to_string()),
-        quote(&tx.to_string()), terminal.decision_sequence.get(), quote(outcome), committed,
-        record, refusal, code, committed,
+        quote(&tx.to_string()),
+        terminal.decision_sequence.get(),
+        quote(outcome),
+        committed,
+        record,
+        refusal,
+        code,
+        committed,
     )
 }

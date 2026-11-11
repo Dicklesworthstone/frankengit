@@ -13,7 +13,11 @@ fn observation(format: GitHashAlgorithm, bytes: &[u8]) -> PullRequestCheckEviden
     let oid = |byte: &str| {
         GitOid::from_hex(
             format,
-            &byte.repeat(if format == GitHashAlgorithm::Sha1 { 20 } else { 32 }),
+            &byte.repeat(if format == GitHashAlgorithm::Sha1 {
+                20
+            } else {
+                32
+            }),
         )
         .unwrap()
     };
@@ -65,8 +69,15 @@ fn evidence_catalog_and_served_schema_agree_on_exact_required_selection() {
     let schema = served.schema.object().unwrap();
     let properties = schema["properties"].object().unwrap();
     assert_eq!(
-        properties.keys().map(String::as_str).collect::<BTreeSet<_>>(),
-        contract.input_fields.iter().map(|field| field.name).collect::<BTreeSet<_>>()
+        properties
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        contract
+            .input_fields
+            .iter()
+            .map(|field| field.name)
+            .collect::<BTreeSet<_>>()
     );
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
     assert_eq!(
@@ -74,8 +85,12 @@ fn evidence_catalog_and_served_schema_agree_on_exact_required_selection() {
         Value::Array(REQUIRED.iter().map(|name| text(*name)).collect())
     );
     assert_eq!(
-        contract.input_fields.iter().filter(|field| field.required)
-            .map(|field| field.name).collect::<BTreeSet<_>>(),
+        contract
+            .input_fields
+            .iter()
+            .filter(|field| field.required)
+            .map(|field| field.name)
+            .collect::<BTreeSet<_>>(),
         REQUIRED.iter().copied().collect::<BTreeSet<_>>()
     );
     for field in contract.input_fields {
@@ -106,8 +121,16 @@ fn evidence_arguments_refuse_ambient_identity_unbounded_ranges_and_aliases() {
         assert!(parse(&absent).is_err(), "{required}");
     }
     for extra in [
-        "artifact_id", "path", "artifact_root", "tenant_id", "repository_id",
-        "incarnation", "principal", "idempotency_key", "source_ref", "evidence",
+        "artifact_id",
+        "path",
+        "artifact_root",
+        "tenant_id",
+        "repository_id",
+        "incarnation",
+        "principal",
+        "idempotency_key",
+        "source_ref",
+        "evidence",
     ] {
         let mut invalid = valid.clone();
         invalid.insert(extra.into(), text("caller-controlled"));
@@ -115,8 +138,12 @@ fn evidence_arguments_refuse_ambient_identity_unbounded_ranges_and_aliases() {
     }
     for name in ["number", "offset"] {
         for value in [
-            text("01"), text("-1"), text(" 1"), text("18446744073709551616"),
-            json::number(1), Value::Null,
+            text("01"),
+            text("-1"),
+            text(" 1"),
+            text("18446744073709551616"),
+            json::number(1),
+            Value::Null,
         ] {
             let mut invalid = valid.clone();
             invalid.insert(name.into(), value);
@@ -124,7 +151,8 @@ fn evidence_arguments_refuse_ambient_identity_unbounded_ranges_and_aliases() {
         }
     }
     for label in [
-        "check/".into(), result.page.checks[0].id.to_string().to_uppercase(),
+        "check/".into(),
+        result.page.checks[0].id.to_string().to_uppercase(),
         format!("{}x", result.page.checks[0].id),
         format!("check/{}1", "0".repeat(51)),
         "latest".into(),
@@ -134,8 +162,10 @@ fn evidence_arguments_refuse_ambient_identity_unbounded_ranges_and_aliases() {
         assert_eq!(parse(&invalid).unwrap_err().code, "invalid_check_id");
     }
     for token in [
-        "latest".into(), format!("alg:02:{}", "31".repeat(32)),
-        format!("alg:2:{}", "AB".repeat(32)), "alg:2:".into(),
+        "latest".into(),
+        format!("alg:02:{}", "31".repeat(32)),
+        format!("alg:2:{}", "AB".repeat(32)),
+        "alg:2:".into(),
         format!("alg:2:{}", "31".repeat(65)),
     ] {
         let mut invalid = valid.clone();
@@ -143,8 +173,10 @@ fn evidence_arguments_refuse_ambient_identity_unbounded_ranges_and_aliases() {
         assert_eq!(parse(&invalid).unwrap_err().code, "invalid_snapshot_token");
     }
     for digest in [
-        "ab".repeat(31), "AB".repeat(32),
-        format!("sha256:{}", "ab".repeat(32)), "../evidence".into(),
+        "ab".repeat(31),
+        "AB".repeat(32),
+        format!("sha256:{}", "ab".repeat(32)),
+        "../evidence".into(),
     ] {
         let mut invalid = valid.clone();
         invalid.insert("expected_evidence_sha256".into(), text(digest));
@@ -153,7 +185,10 @@ fn evidence_arguments_refuse_ambient_identity_unbounded_ranges_and_aliases() {
     for value in [json::number(0), json::number(65537), text("1"), Value::Null] {
         let mut invalid = valid.clone();
         invalid.insert("limit".into(), value);
-        assert_eq!(parse(&invalid).unwrap_err().code, "invalid_check_evidence_limit");
+        assert_eq!(
+            parse(&invalid).unwrap_err().code,
+            "invalid_check_evidence_limit"
+        );
     }
     let mut boundary = valid;
     boundary.insert("offset".into(), text(u64::MAX.to_string()));
@@ -172,7 +207,9 @@ fn canonical_selection_checks_the_complete_body_before_any_prefix_can_be_disclos
         let mut invalid = result.clone();
         *invalid.evidence.last_mut().unwrap() ^= 1;
         assert_eq!(
-            output::Selected::new(&query, &invalid, format).unwrap_err().code,
+            output::Selected::new(&query, &invalid, format)
+                .unwrap_err()
+                .code,
             "check_evidence_invalid"
         );
         let mut invalid = result.clone();
@@ -181,7 +218,9 @@ fn canonical_selection_checks_the_complete_body_before_any_prefix_can_be_disclos
         let mut wrong_digest = query.clone();
         wrong_digest.expected_evidence[0] ^= 1;
         assert_eq!(
-            output::Selected::new(&wrong_digest, &result, format).unwrap_err().code,
+            output::Selected::new(&wrong_digest, &result, format)
+                .unwrap_err()
+                .code,
             "check_evidence_identity_mismatch"
         );
         let wrong_format = if format == GitHashAlgorithm::Sha1 {
@@ -190,7 +229,9 @@ fn canonical_selection_checks_the_complete_body_before_any_prefix_can_be_disclos
             GitHashAlgorithm::Sha1
         };
         assert_eq!(
-            output::Selected::new(&query, &result, wrong_format).unwrap_err().code,
+            output::Selected::new(&query, &result, wrong_format)
+                .unwrap_err()
+                .code,
             "check_evidence_identity_mismatch"
         );
     }
@@ -228,7 +269,9 @@ fn wrong_or_stale_page_coordinates_never_become_empty_success() {
     cases.push(changed);
     for invalid in cases {
         assert_eq!(
-            output::Selected::new(&query, &invalid, format).unwrap_err().code,
+            output::Selected::new(&query, &invalid, format)
+                .unwrap_err()
+                .code,
             "check_evidence_invalid"
         );
     }
@@ -240,7 +283,9 @@ fn empty_native_evidence_refuses_and_exact_eof_is_distinct_from_beyond_eof() {
     let empty = observation(format, b"");
     let query = parse(&selection(&empty)).unwrap();
     assert_eq!(
-        output::Selected::new(&query, &empty, format).unwrap_err().code,
+        output::Selected::new(&query, &empty, format)
+            .unwrap_err()
+            .code,
         "check_evidence_invalid"
     );
     let oversize = observation(
@@ -256,7 +301,9 @@ fn empty_native_evidence_refuses_and_exact_eof_is_distinct_from_beyond_eof() {
     for offset in [query.offset + 1, u64::MAX] {
         query.offset = offset;
         assert_eq!(
-            output::Selected::new(&query, &result, format).unwrap_err().code,
+            output::Selected::new(&query, &result, format)
+                .unwrap_err()
+                .code,
             "check_evidence_offset_out_of_bounds"
         );
     }

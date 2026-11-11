@@ -1,12 +1,12 @@
 //! Reference-store qualification of canonical frontier proofs. These fixtures
 //! authenticate their heads and publish real checkpoint edges through head CAS;
 //! their check payloads are synthetic, not native runner execution evidence.
-use super::*;
 use super::super::{
     MAX_HISTORY_STEPS, MAX_SCAN_BATCHES, MAX_SCAN_BYTES, MAX_SCAN_EVENTS, verify_at,
 };
-use crate::merge::native::storage::checkpoint_test_support::stage_checkpoint;
+use super::*;
 use crate::merge::native::protection::candidate_checks::observation_matcher;
+use crate::merge::native::storage::checkpoint_test_support::stage_checkpoint;
 use fgit_authority::{
     AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore, AuthorityVersionToken,
     CasOutcome, HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead,
@@ -363,7 +363,9 @@ impl Fixture {
                     .unwrap(),
                 CasOutcome::Committed(_),
             ));
-            self.basis = run(crate::read_basis_async(&self.store, &(), &self.key)).unwrap().0;
+            self.basis = run(crate::read_basis_async(&self.store, &(), &self.key))
+                .unwrap()
+                .0;
             assert_eq!(self.basis.id(), next.id());
             self.last_capsule_key = Some(capsule_key);
         }
@@ -376,10 +378,7 @@ impl Fixture {
             &self.store,
             &(),
             &self.basis,
-            &BTreeMap::from([(
-                check.record.source_ref.clone(),
-                check.record.source_commit,
-            )]),
+            &BTreeMap::from([(check.record.source_ref.clone(), check.record.source_commit)]),
             check.record.source_commit,
             &[requirement(check)],
             &|| false,
@@ -454,7 +453,10 @@ fn mixed_old_results_keep_the_original_bound_refusal_in_both_native_domains() {
         // The later event is success while order remains available.
         fixture.ordered(&success).unwrap();
         fixture.checkpoints(MAX_HISTORY_STEPS + 1);
-        unavailable(fixture.ordered(&success), RefusalCode::ResourceBudgetExceeded);
+        unavailable(
+            fixture.ordered(&success),
+            RefusalCode::ResourceBudgetExceeded,
+        );
     }
 }
 
@@ -546,14 +548,17 @@ fn unmatched_or_incomplete_selected_checks_do_not_prove_success() {
             "selector field {field}",
         );
     }
-    assert!(!run(verify_unanimous_at(
-        &fixture.store,
-        &(),
-        &fixture.basis,
-        matcher(&success, &["build", "missing"]),
-        &mut ScanBudget::default(),
-        &|| false,
-    )).unwrap());
+    assert!(
+        !run(verify_unanimous_at(
+            &fixture.store,
+            &(),
+            &fixture.basis,
+            matcher(&success, &["build", "missing"]),
+            &mut ScanBudget::default(),
+            &|| false,
+        ))
+        .unwrap()
+    );
 }
 
 #[test]
@@ -565,22 +570,28 @@ fn resolved_newer_suffix_results_are_not_overridden_by_old_failures() {
     let fixture = Fixture::new(vec![event(&old_build), event(&old_lint)], true);
     let mut pending = matcher(&latest_build, &["build", "lint"]);
     assert!(!pending(&event(&latest_build).payload).unwrap());
-    assert!(run(verify_unanimous_at(
-        &fixture.store,
-        &(),
-        &fixture.basis,
-        pending,
-        &mut ScanBudget::default(),
-        &|| false,
-    )).unwrap());
-    assert!(!run(verify_unanimous_at(
-        &fixture.store,
-        &(),
-        &fixture.basis,
-        matcher(&latest_build, &["build", "lint"]),
-        &mut ScanBudget::default(),
-        &|| false,
-    )).unwrap());
+    assert!(
+        run(verify_unanimous_at(
+            &fixture.store,
+            &(),
+            &fixture.basis,
+            pending,
+            &mut ScanBudget::default(),
+            &|| false,
+        ))
+        .unwrap()
+    );
+    assert!(
+        !run(verify_unanimous_at(
+            &fixture.store,
+            &(),
+            &fixture.basis,
+            matcher(&latest_build, &["build", "lint"]),
+            &mut ScanBudget::default(),
+            &|| false,
+        ))
+        .unwrap()
+    );
 }
 
 #[test]
@@ -631,9 +642,13 @@ fn selected_ranges_labels_and_duplicate_events_are_validated() {
                     1,
                 ),
             };
-            entries[0] =
-                ForgePositionStateEntry::try_new(stream, predecessor, count, old.event_batch_root())
-                    .unwrap();
+            entries[0] = ForgePositionStateEntry::try_new(
+                stream,
+                predecessor,
+                count,
+                old.event_batch_root(),
+            )
+            .unwrap();
         });
         unavailable(fixture.unordered(&success), RefusalCode::EvidenceInvalid);
     }
@@ -663,14 +678,17 @@ fn interrupted_partial_frontier_never_becomes_a_success() {
     let fixture = Fixture::new(vec![event(&success), event(&other)], false);
     for stop_after in 0..=2 {
         fixture.store.reads.store(0, Ordering::Relaxed);
-        unavailable(run(verify_unanimous_at(
-            &fixture.store,
-            &(),
-            &fixture.basis,
-            matcher(&success, &["build"]),
-            &mut ScanBudget::default(),
-            &|| fixture.store.reads.load(Ordering::Relaxed) >= stop_after,
-        )), RefusalCode::CancellationInProgress);
+        unavailable(
+            run(verify_unanimous_at(
+                &fixture.store,
+                &(),
+                &fixture.basis,
+                matcher(&success, &["build"]),
+                &mut ScanBudget::default(),
+                &|| fixture.store.reads.load(Ordering::Relaxed) >= stop_after,
+            )),
+            RefusalCode::CancellationInProgress,
+        );
     }
     assert!(fixture.unordered(&success).unwrap());
 }
@@ -691,28 +709,34 @@ fn fallback_shares_prior_work_budgets_and_exact_limits_remain_permitted() {
             1 => scan.events = MAX_SCAN_EVENTS,
             _ => scan.bytes = MAX_SCAN_BYTES,
         }
-        unavailable(run(verify_unanimous_at(
-            &fixture.store,
-            &(),
-            &fixture.basis,
-            matcher(&success, &["build"]),
-            &mut scan,
-            &|| false,
-        )), RefusalCode::ResourceBudgetExceeded);
+        unavailable(
+            run(verify_unanimous_at(
+                &fixture.store,
+                &(),
+                &fixture.basis,
+                matcher(&success, &["build"]),
+                &mut scan,
+                &|| false,
+            )),
+            RefusalCode::ResourceBudgetExceeded,
+        );
     }
     let mut exact = ScanBudget {
         batches: MAX_SCAN_BATCHES - fixture.event_keys.len(),
         events: MAX_SCAN_EVENTS - fixture.event_count,
         bytes: MAX_SCAN_BYTES - fixture.frame_bytes,
     };
-    assert!(run(verify_unanimous_at(
-        &fixture.store,
-        &(),
-        &fixture.basis,
-        matcher(&success, &["build"]),
-        &mut exact,
-        &|| false,
-    )).unwrap());
+    assert!(
+        run(verify_unanimous_at(
+            &fixture.store,
+            &(),
+            &fixture.basis,
+            matcher(&success, &["build"]),
+            &mut exact,
+            &|| false,
+        ))
+        .unwrap()
+    );
     assert_eq!(exact.batches, MAX_SCAN_BATCHES);
     assert_eq!(exact.events, MAX_SCAN_EVENTS);
     assert_eq!(exact.bytes, MAX_SCAN_BYTES);
@@ -739,7 +763,9 @@ fn moved_source_is_denied_before_history_or_frontier_reads() {
     ));
     assert!(matches!(
         result,
-        Err(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)),
+        Err(ProjectionFailure::Refuse(
+            RefusalCode::ProtectedRefTransitionDenied
+        )),
     ));
     assert_eq!(fixture.store.reads.load(Ordering::Relaxed), 0);
 }
@@ -750,10 +776,7 @@ fn staged_only_observations_cannot_grant_or_revoke_selected_success() {
     let success = check(format, 1, "build", WorkflowCheckConclusion::Success);
     let unrelated = check(format, 2, "lint", WorkflowCheckConclusion::Success);
     let failed = check(format, 3, "build", WorkflowCheckConclusion::Failure);
-    for (selected, staged, expected) in [
-        (&success, &failed, true),
-        (&unrelated, &success, false),
-    ] {
+    for (selected, staged, expected) in [(&success, &failed, true), (&unrelated, &success, false)] {
         let fixture = Fixture::new(vec![event(selected)], true);
         let root = run(storage::stage_body(
             &fixture.store,

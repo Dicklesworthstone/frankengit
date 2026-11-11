@@ -140,7 +140,9 @@ fn queue_refresh_requires_both_independent_metadata_grants() {
         let options = parse_options(&args).unwrap();
         let tools = backend::tools_for_options(&options);
         assert_eq!(
-            tools.iter().any(|tool| tool.name == "frankengit_queue_refresh"),
+            tools
+                .iter()
+                .any(|tool| tool.name == "frankengit_queue_refresh"),
             mask & 3 == 3,
             "grant mask {mask}"
         );
@@ -162,7 +164,11 @@ fn queue_refresh_does_not_open_the_agent_token_profile() {
         "--allow-pull-writes".into(),
     ];
     assert!(parse_options(&base).is_ok());
-    for flag in ["--allow-queues", "--allow-queue-writes", "--allow-queue-landings"] {
+    for flag in [
+        "--allow-queues",
+        "--allow-queue-writes",
+        "--allow-queue-landings",
+    ] {
         let mut args = base.clone();
         args.push(flag.into());
         assert!(parse_options(&args).is_err(), "{flag}");

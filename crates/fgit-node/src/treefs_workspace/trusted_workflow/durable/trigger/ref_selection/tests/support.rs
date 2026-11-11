@@ -6,14 +6,14 @@ use crate::{FsqliteCx, LoopbackReceiveSession, MaterializedAdmission, NodeConfig
 use fgit_admission::AdmissionLimits;
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
-    AuthorityVersionToken, CasOutcome, ExpectedOld, HeadInit, HeadKey, HeadRead,
-    HeadReadReceipt, IdempotencyKey, ImmutableKey, ImmutableRead, ProposedNew, PutOutcome,
-    RefCommand, StoreInstanceId,
+    AuthorityVersionToken, CasOutcome, ExpectedOld, HeadInit, HeadKey, HeadRead, HeadReadReceipt,
+    IdempotencyKey, ImmutableKey, ImmutableRead, ProposedNew, PutOutcome, RefCommand,
+    StoreInstanceId,
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName,
-    RepositoryId, TenantId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RepositoryId,
+    TenantId,
 };
 use std::{
     fs,

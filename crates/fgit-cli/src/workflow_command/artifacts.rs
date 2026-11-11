@@ -145,7 +145,6 @@ pub(crate) fn selection(value: &str, encoded: bool) -> Result<Selection, String>
     })
 }
 
-#[cfg(test)]
 pub(crate) fn options_with_inputs(
     flags: &BTreeMap<&str, &str>,
     selections: Vec<Selection>,

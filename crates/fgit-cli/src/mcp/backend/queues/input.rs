@@ -127,8 +127,7 @@ pub(super) fn parse(
                     source_tip: head_tip,
                     target_tip: expected_target_tip,
                     title: common::required(args, "title")?.to_owned(),
-                    body: common::body(args, "body")?
-                        .ok_or(ToolError::invalid("body_required"))?,
+                    body: common::body(args, "body")?.ok_or(ToolError::invalid("body_required"))?,
                 };
                 data.validate()
                     .map_err(|_| ToolError::invalid("invalid_pull_request_data"))?;

@@ -61,27 +61,22 @@ where
         if walked >= maximum_steps {
             return Err(bound(maximum_steps));
         }
-        let predecessor = match capsule_history::predecessor_in(
-            store,
-            cx,
-            &successor,
-            &mut walked,
-            cancelled,
-        )
-        .await?
-        {
-            capsule_history::HistoryStep::Genesis => {
-                // A preseeded or missing ref history is not a new push event.
-                return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
-            }
-            capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
-                // The verified checkpoint preserves refs and invents no event.
-                successor_id = predecessor.id();
-                successor = predecessor.body().clone();
-                continue;
-            }
-            capsule_history::HistoryStep::Decision { predecessor, .. } => predecessor,
-        };
+        let predecessor =
+            match capsule_history::predecessor_in(store, cx, &successor, &mut walked, cancelled)
+                .await?
+            {
+                capsule_history::HistoryStep::Genesis => {
+                    // A preseeded or missing ref history is not a new push event.
+                    return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
+                }
+                capsule_history::HistoryStep::Checkpoint { predecessor, .. } => {
+                    // The verified checkpoint preserves refs and invents no event.
+                    successor_id = predecessor.id();
+                    successor = predecessor.body().clone();
+                    continue;
+                }
+                capsule_history::HistoryStep::Decision { predecessor, .. } => predecessor,
+            };
         checkpoint(cancelled)?;
         if predecessor.body().ref_root != successor.ref_root {
             let previous =
@@ -107,7 +102,9 @@ where
     }
 }
 
-fn checkpoint(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), AdmissionMaterializationRefusal> {
+fn checkpoint(
+    cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<(), AdmissionMaterializationRefusal> {
     if cancelled() {
         Err(AdmissionMaterializationRefusal::Cancelled)
     } else {

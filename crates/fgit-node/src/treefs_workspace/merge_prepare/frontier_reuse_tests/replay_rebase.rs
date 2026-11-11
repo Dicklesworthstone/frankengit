@@ -1,8 +1,8 @@
 //! Actual cherry-pick and linear rebase preparation beside an admitted blob
 //! larger than both the body-read ceiling and the default frontier allowance.
-use super::*;
 use super::super::commit_replay::ReplayPreparationRefusal;
 use super::super::rebase::RebasePreparationRefusal;
+use super::*;
 use fgit_forge::preparation::rebase::{
     EmptyCommitPolicy, RebaseCommitter, RebasePreparation, RebaseRequest,
 };
@@ -20,8 +20,7 @@ fn only_parent(node: &OneNode, id: GitOid) -> GitOid {
             ..ParseLimits::default()
         },
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("fixture source must be a native commit");
     };
     let mut parents = commit.parent_references();
@@ -48,16 +47,17 @@ fn native_replay_and_rebase_prepare_with_configured_large_blob_frontiers() {
         let mut unpublished = Vec::new();
         let expected_text = b"A\nb\nc\nd\nE\n";
         let expected_blob = git_object_id(format, ObjectType::Blob, expected_text);
-        let assert_generated = |objects: &[PlannedMergeObject]| {
-            assert!(objects.iter().all(|object| {
-                object.body.len() < METADATA_BYTES && object.id != inherited
-            }));
-            assert!(objects.iter().any(|object| {
-                object.id == expected_blob
-                    && object.kind == ObjectType::Blob
-                    && object.body.as_slice() == expected_text
-            }));
-        };
+        let assert_generated =
+            |objects: &[PlannedMergeObject]| {
+                assert!(objects.iter().all(|object| {
+                    object.body.len() < METADATA_BYTES && object.id != inherited
+                }));
+                assert!(objects.iter().any(|object| {
+                    object.id == expected_blob
+                        && object.kind == ObjectType::Blob
+                        && object.body.as_slice() == expected_text
+                }));
+            };
         for maximum in [blob_bytes, blob_bytes - 1] {
             node = reopen(node, format, Some(maximum));
             let permitted = maximum == blob_bytes;
@@ -92,7 +92,9 @@ fn native_replay_and_rebase_prepare_with_configured_large_blob_frontiers() {
                     assert_eq!(plan.coordinates.request.target, target);
                     assert_eq!(plan.coordinates.request.selected_commit, incoming);
                     assert_generated(&plan.objects);
-                    let bundle = prepared.bundle.expect("clean replay must retain its bundle");
+                    let bundle = prepared
+                        .bundle
+                        .expect("clean replay must retain its bundle");
                     let inspected = node
                         .runtime()
                         .block_on(node.inspect_workspace_bundle_in(
@@ -152,7 +154,9 @@ fn native_replay_and_rebase_prepare_with_configured_large_blob_frontiers() {
                     assert_eq!(plan.steps[0].rewritten, plan.commit);
                     assert_eq!(Some(plan.tree), replay_tree);
                     assert_generated(&plan.objects);
-                    let bundle = prepared.bundle.expect("clean rebase must retain its bundle");
+                    let bundle = prepared
+                        .bundle
+                        .expect("clean rebase must retain its bundle");
                     let inspected = node
                         .runtime()
                         .block_on(node.inspect_rebase_bundle_in(

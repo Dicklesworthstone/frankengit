@@ -4,8 +4,8 @@ mod candidate;
 mod output;
 mod prefix;
 mod preparation;
-mod request;
 mod refresh;
+mod request;
 #[cfg(test)]
 mod tests;
 
@@ -137,8 +137,15 @@ pub(super) fn execute(
     }
     if let Operation::Refresh { number } = &request.operation {
         return refresh::execute(
-            node, *number, session, framing, reader, limits, maximum_response,
-        ).map(Reply::Json);
+            node,
+            *number,
+            session,
+            framing,
+            reader,
+            limits,
+            maximum_response,
+        )
+        .map(Reply::Json);
     }
     let principal = authenticated.principal_id();
     let deadline = GitDaemonSessionDeadline::new(
@@ -323,6 +330,8 @@ pub(super) fn execute(
                 terminal: Some((tx, terminal)),
             }))
         }
-        Operation::Prepare { .. } | Operation::PreparePrefix { .. } | Operation::Refresh { .. } => Err(ApiError::unavailable()),
+        Operation::Prepare { .. } | Operation::PreparePrefix { .. } | Operation::Refresh { .. } => {
+            Err(ApiError::unavailable())
+        }
     }
 }

@@ -91,16 +91,15 @@ fn continuing_fixture(format: GitHashAlgorithm) -> (Fixture, GitOid) {
         ))
         .unwrap();
     assert!(
-        imported.commands.iter().all(|row| matches!(
-            row.terminal.outcome,
-            DecisionOutcome::Committed { .. }
-        ))
+        imported
+            .commands
+            .iter()
+            .all(|row| matches!(row.terminal.outcome, DecisionOutcome::Committed { .. }))
     );
     f.source = first;
-    for (number, source, tip, priority) in [
-        (1, source_ref(), first, 7),
-        (2, second_ref(), second, 11),
-    ] {
+    for (number, source, tip, priority) in
+        [(1, source_ref(), first, 7), (2, second_ref(), second, 11)]
+    {
         open_with_body(&f, number, source.clone(), tip);
         change_queue(
             &f,
@@ -161,8 +160,9 @@ fn land(f: &Fixture, merge: &PullRequestMergeWatchConfig) -> TrustedQueueLanding
 
 fn checks(f: &Fixture, merge: &PullRequestMergeWatchConfig) -> usize {
     let node = f.node();
-    let report = node.runtime().block_on(
-        node.publish_trusted_queue_head_merge_workflow_checks_in(
+    let report = node
+        .runtime()
+        .block_on(node.publish_trusted_queue_head_merge_workflow_checks_in(
             &node.request_context(),
             &target_ref(),
             1,
@@ -171,8 +171,7 @@ fn checks(f: &Fixture, merge: &PullRequestMergeWatchConfig) -> usize {
             OWNER,
             merge,
             |_| Ok(()),
-        ),
-    );
+        ));
     assert!(report.error.is_none(), "{:?}", report.error);
     assert!(!report.request_stopped);
     assert_eq!(report.refused, 0);
@@ -237,13 +236,21 @@ fn candidate(format: GitHashAlgorithm, observed: &str) -> GitOid {
 fn attempts(f: &Fixture) -> Vec<PathBuf> {
     let mut records = Vec::new();
     for entry in fs::read_dir(f.parent()).unwrap().map(Result::unwrap) {
-        if !entry.file_name().to_str().is_some_and(|name| name.starts_with("watch-")) {
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("watch-"))
+        {
             continue;
         }
         let root = entry.path().join("queue-refresh");
         if root.exists() {
             for record in fs::read_dir(root).unwrap().map(Result::unwrap) {
-                if record.file_name().to_str().is_some_and(|name| name.starts_with("attempt-")) {
+                if record
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("attempt-"))
+                {
                     records.push(record.path());
                 }
             }
@@ -258,10 +265,7 @@ fn acknowledgment(attempt: &std::path::Path) -> PathBuf {
     attempt.with_file_name(name.replacen("attempt-", "outcome-", 1))
 }
 
-fn service_config(
-    f: &Fixture,
-    merge: &PullRequestMergeWatchConfig,
-) -> WorkflowWatchConfig {
+fn service_config(f: &Fixture, merge: &PullRequestMergeWatchConfig) -> WorkflowWatchConfig {
     WorkflowWatchConfig::try_new(
         f.source.algorithm(),
         target_ref(),
@@ -295,56 +299,62 @@ fn first_landing(f: &Fixture, merge: &PullRequestMergeWatchConfig) -> GitOid {
 
 fn require_check(f: &Fixture, observed: &str) {
     let node = f.node();
-    let (_, outcome) = node.runtime().block_on(node.admit_review_protection_durable_in(
-        &node.request_context(),
-        &session(b"automatic-refresh-required-check"),
-        &ProtectionCommand {
-            expected_version: ExpectedVersion::NewStream,
-            expected_epoch: PolicyEpoch::FIRST,
-            protection: ReviewProtection {
-                administrators: vec![OWNER],
-                ref_policy: None,
-                branches: vec![ProtectedBranch {
-                    path_reviews: Vec::new(),
-                    name: target_ref(),
-                    reviewers: Vec::new(),
-                    required_approvals: 0,
-                    required_candidate_checks: Vec::new(),
-                    require_merge_queue: true,
-                    required_checks: vec![RequiredWorkflowCheck {
-                        source_ref: ci_ref(),
-                        publisher: OWNER,
-                        graph_root: hex32(json_string(observed, "graph_sha256")),
-                        job: "check".into(),
+    let (_, outcome) = node
+        .runtime()
+        .block_on(node.admit_review_protection_durable_in(
+            &node.request_context(),
+            &session(b"automatic-refresh-required-check"),
+            &ProtectionCommand {
+                expected_version: ExpectedVersion::NewStream,
+                expected_epoch: PolicyEpoch::FIRST,
+                protection: ReviewProtection {
+                    administrators: vec![OWNER],
+                    ref_policy: None,
+                    branches: vec![ProtectedBranch {
+                        path_reviews: Vec::new(),
+                        name: target_ref(),
+                        reviewers: Vec::new(),
+                        required_approvals: 0,
+                        required_candidate_checks: Vec::new(),
+                        require_merge_queue: true,
+                        required_checks: vec![RequiredWorkflowCheck {
+                            source_ref: ci_ref(),
+                            publisher: OWNER,
+                            graph_root: hex32(json_string(observed, "graph_sha256")),
+                            job: "check".into(),
+                        }],
                     }],
-                }],
+                },
             },
-        },
-        Default::default(),
-    )).unwrap();
+            Default::default(),
+        ))
+        .unwrap();
     assert!(matches!(outcome.outcome, DecisionOutcome::Committed { .. }));
 }
 
 fn open_with_body(f: &Fixture, number: u64, source: RefName, tip: GitOid) {
     let node = f.node();
-    let (_, outcome) = node.runtime().block_on(node.admit_pull_request_durable_in(
-        &node.request_context(),
-        &session(format!("automatic-refresh-open-{number}").as_bytes()),
-        &PullRequestCommand {
-            number: pull_number(number),
-            expected_version: ExpectedVersion::NewStream,
-            action: PullRequestAction::Open,
-            data: PullRequestData {
-                source_ref: source,
-                target_ref: target_ref(),
-                source_tip: tip,
-                target_tip: f.target,
-                title: format!("Queue candidate {number}"),
-                body: "Original PR text é\nThis text grants no authority.\n".into(),
+    let (_, outcome) = node
+        .runtime()
+        .block_on(node.admit_pull_request_durable_in(
+            &node.request_context(),
+            &session(format!("automatic-refresh-open-{number}").as_bytes()),
+            &PullRequestCommand {
+                number: pull_number(number),
+                expected_version: ExpectedVersion::NewStream,
+                action: PullRequestAction::Open,
+                data: PullRequestData {
+                    source_ref: source,
+                    target_ref: target_ref(),
+                    source_tip: tip,
+                    target_tip: f.target,
+                    title: format!("Queue candidate {number}"),
+                    body: "Original PR text é\nThis text grants no authority.\n".into(),
+                },
             },
-        },
-        Default::default(),
-    )).unwrap();
+            Default::default(),
+        ))
+        .unwrap();
     assert!(matches!(outcome.outcome, DecisionOutcome::Committed { .. }));
 }
 
@@ -368,25 +378,37 @@ fn two_heads_execute_fresh_checks_and_land_with_one_target_only_refresh_between_
         assert_eq!(pull(&f, 2).event.version, version(2));
 
         // Existing execution/landing grants do not silently add refresh authority.
-        assert!(service_config(&f, &merge).queue_refresh_principal().is_none());
+        assert!(
+            service_config(&f, &merge)
+                .queue_refresh_principal()
+                .is_none()
+        );
         let before = position(&f);
         let before_queue = queue(&f);
         let before_pull = pull(&f, 1);
         let before_refs = refs(&f);
         assert!(
-            poll(&f, &merge).unwrap().contains("\"state\":\"queue_head_stale\"")
+            poll(&f, &merge)
+                .unwrap()
+                .contains("\"state\":\"queue_head_stale\"")
         );
         assert_eq!(position(&f), before);
         assert!(attempts(&f).is_empty());
         assert_eq!(fs::read(f.root.join("executed")).unwrap(), b"xx");
 
         let mut decisions = Vec::new();
-        let refreshed = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverAndSelect, |row| {
-            if row.contains("\"type\":\"workflow_queue_refresh_decision\"") {
-                decisions.push(row.to_owned());
-            }
-            Ok(())
-        });
+        let refreshed = refresh(
+            &f,
+            &merge,
+            OWNER,
+            QueueRefreshMode::RecoverAndSelect,
+            |row| {
+                if row.contains("\"type\":\"workflow_queue_refresh_decision\"") {
+                    decisions.push(row.to_owned());
+                }
+                Ok(())
+            },
+        );
         assert!(refreshed.error.is_none(), "{refreshed:?}");
         assert_eq!(refreshed.committed, 1);
         assert_eq!(refreshed.refused, 0);
@@ -407,10 +429,19 @@ fn two_heads_execute_fresh_checks_and_land_with_one_target_only_refresh_between_
         assert_eq!(attempts(&f).len(), 1);
 
         let second_run = poll(&f, &merge).unwrap();
-        assert!(second_run.contains("\"state\":\"dispatched\""), "{second_run}");
+        assert!(
+            second_run.contains("\"state\":\"dispatched\""),
+            "{second_run}"
+        );
         assert!(second_run.contains("\"succeeded\":true"), "{second_run}");
-        assert!(second_run.contains("\"pull_request\":\"1\""), "{second_run}");
-        assert!(second_run.contains("\"pull_request_version\":\"2\""), "{second_run}");
+        assert!(
+            second_run.contains("\"pull_request\":\"1\""),
+            "{second_run}"
+        );
+        assert!(
+            second_run.contains("\"pull_request_version\":\"2\""),
+            "{second_run}"
+        );
         let second_candidate = candidate(format, &second_run);
         assert_ne!(second_candidate, first_candidate);
         assert_eq!(fs::read(f.root.join("executed")).unwrap(), b"xxx");
@@ -470,7 +501,9 @@ fn service_readiness_and_controller_ready_output_precede_every_fresh_refresh() {
             WorkflowWatchControl::default(),
             || {
                 ready.set(true);
-                Err(std::io::Error::other("test refresh readiness output unavailable"))
+                Err(std::io::Error::other(
+                    "test refresh readiness output unavailable",
+                ))
             },
         )
         .unwrap_err();
@@ -489,14 +522,20 @@ fn service_readiness_and_controller_ready_output_precede_every_fresh_refresh() {
         assert!(attempts(&f).is_empty());
 
         let mut offered = false;
-        let rejected = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverAndSelect, |row| {
-            if row.contains("\"type\":\"workflow_queue_refresh_ready\"") {
-                offered = true;
-                Err("test refresh proposal observer failed".into())
-            } else {
-                Ok(())
-            }
-        });
+        let rejected = refresh(
+            &f,
+            &merge,
+            OWNER,
+            QueueRefreshMode::RecoverAndSelect,
+            |row| {
+                if row.contains("\"type\":\"workflow_queue_refresh_ready\"") {
+                    offered = true;
+                    Err("test refresh proposal observer failed".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert!(offered);
         assert!(rejected.error.is_some(), "{rejected:?}");
         assert_eq!(rejected.committed, 0);
@@ -504,7 +543,10 @@ fn service_readiness_and_controller_ready_output_precede_every_fresh_refresh() {
         assert_eq!(position(&f), before);
         assert_eq!(queue(&f), before_queue);
         assert_eq!(refs(&f), before_refs);
-        assert!(attempts(&f).is_empty(), "failed ready output must not retain an intent");
+        assert!(
+            attempts(&f).is_empty(),
+            "failed ready output must not retain an intent"
+        );
         assert_eq!(fs::read(f.root.join("executed")).unwrap(), b"x");
     }
 }
@@ -516,16 +558,27 @@ fn lost_refresh_observer_keeps_original_command_and_blocks_a_restart_without_its
         let merge = config();
         first_landing(&f, &merge);
         let mut lost_decision = None;
-        let lost = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverAndSelect, |row| {
-            if row.contains("\"type\":\"workflow_queue_refresh_decision\"") {
-                lost_decision = Some(row.to_owned());
-                Err("test consumer lost the refresh decision".into())
-            } else {
-                Ok(())
-            }
-        });
+        let lost = refresh(
+            &f,
+            &merge,
+            OWNER,
+            QueueRefreshMode::RecoverAndSelect,
+            |row| {
+                if row.contains("\"type\":\"workflow_queue_refresh_decision\"") {
+                    lost_decision = Some(row.to_owned());
+                    Err("test consumer lost the refresh decision".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert_eq!(lost.committed, 1);
-        assert!(lost.error.as_deref().unwrap().contains("lost the refresh decision"));
+        assert!(
+            lost.error
+                .as_deref()
+                .unwrap()
+                .contains("lost the refresh decision")
+        );
         let lost_decision = lost_decision.unwrap();
         let records = attempts(&f);
         assert_eq!(records.len(), 1);
@@ -554,7 +607,9 @@ fn lost_refresh_observer_keeps_original_command_and_blocks_a_restart_without_its
             WorkflowWatchControl::default(),
             || {
                 ready.set(true);
-                Err(std::io::Error::other("pending refresh readiness output unavailable"))
+                Err(std::io::Error::other(
+                    "pending refresh readiness output unavailable",
+                ))
             },
         )
         .unwrap_err();
@@ -580,11 +635,16 @@ fn lost_refresh_observer_keeps_original_command_and_blocks_a_restart_without_its
             WorkflowWatchControl::default(),
             || {
                 ready.set(true);
-                Err(std::io::Error::other("missing refresh grant reached readiness"))
+                Err(std::io::Error::other(
+                    "missing refresh grant reached readiness",
+                ))
             },
         )
         .unwrap_err();
-        assert!(!ready.get(), "unacknowledged refresh must fail before readiness");
+        assert!(
+            !ready.get(),
+            "unacknowledged refresh must fail before readiness"
+        );
         assert!(error.receipt().unwrap().node_closed);
         assert_eq!(error.receipt().unwrap().refreshes_committed, 0);
         assert_eq!(error.receipt().unwrap().landings_committed, 0);
@@ -606,17 +666,20 @@ fn lost_refresh_observer_keeps_original_command_and_blocks_a_restart_without_its
         later.title = "A later independent metadata edit".into();
         later.body = "Retain this later body verbatim.\n".into();
         let node = f.node();
-        let (_, outcome) = node.runtime().block_on(node.admit_pull_request_durable_in(
-            &node.request_context(),
-            &session(b"metadata-after-lost-refresh"),
-            &PullRequestCommand {
-                number: pull_number(1),
-                expected_version: ExpectedVersion::Exactly(version(2)),
-                action: PullRequestAction::Update,
-                data: later.clone(),
-            },
-            Default::default(),
-        )).unwrap();
+        let (_, outcome) = node
+            .runtime()
+            .block_on(node.admit_pull_request_durable_in(
+                &node.request_context(),
+                &session(b"metadata-after-lost-refresh"),
+                &PullRequestCommand {
+                    number: pull_number(1),
+                    expected_version: ExpectedVersion::Exactly(version(2)),
+                    action: PullRequestAction::Update,
+                    data: later.clone(),
+                },
+                Default::default(),
+            ))
+            .unwrap();
         assert!(matches!(outcome.outcome, DecisionOutcome::Committed { .. }));
         change_queue(
             &f,
@@ -653,15 +716,17 @@ fn lost_refresh_observer_keeps_original_command_and_blocks_a_restart_without_its
         // Once canonically checked and acknowledged, recovery without submission
         // authority is a read-only custody validation and changes nothing.
         let node = f.node();
-        node.runtime().block_on(node.validate_trusted_queue_head_refresh_custody_in(
-            &node.request_context(),
-            &target_ref(),
-            1,
-            b"ci",
-            &f.parent(),
-            &merge,
-            None,
-        )).unwrap();
+        node.runtime()
+            .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                &node.request_context(),
+                &target_ref(),
+                1,
+                b"ci",
+                &f.parent(),
+                &merge,
+                None,
+            ))
+            .unwrap();
         let again = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverOnly, |_| Ok(()));
         assert!(again.error.is_none(), "{again:?}");
         assert_eq!(again.previously_decided, 1);
@@ -677,7 +742,13 @@ fn corrupt_or_forged_refresh_acknowledgments_never_release_execution_or_landing(
         let (mut f, _) = continuing_fixture(format);
         let merge = config();
         first_landing(&f, &merge);
-        let accepted = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverAndSelect, |_| Ok(()));
+        let accepted = refresh(
+            &f,
+            &merge,
+            OWNER,
+            QueueRefreshMode::RecoverAndSelect,
+            |_| Ok(()),
+        );
         assert!(accepted.error.is_none(), "{accepted:?}");
         assert_eq!(accepted.committed, 1);
         let records = attempts(&f);
@@ -686,7 +757,10 @@ fn corrupt_or_forged_refresh_acknowledgments_never_release_execution_or_landing(
         let original = fs::read(&path).unwrap();
         assert_eq!(original.len(), 81);
         let mut wrong_outcome = original.clone();
-        assert_eq!(wrong_outcome[40], 1, "the actual canonical refresh committed");
+        assert_eq!(
+            wrong_outcome[40], 1,
+            "the actual canonical refresh committed"
+        );
         wrong_outcome[40] = 2;
         let checksum = sha256_digest(&wrong_outcome[..49]);
         wrong_outcome[49..].copy_from_slice(&checksum);
@@ -702,17 +776,19 @@ fn corrupt_or_forged_refresh_acknowledgments_never_release_execution_or_landing(
             f.reopen();
             for principal in [None, Some(OWNER)] {
                 let node = f.node();
-                assert!(node.runtime().block_on(
-                    node.validate_trusted_queue_head_refresh_custody_in(
-                        &node.request_context(),
-                        &target_ref(),
-                        1,
-                        b"ci",
-                        &f.parent(),
-                        &merge,
-                        principal,
-                    )
-                ).is_err());
+                assert!(
+                    node.runtime()
+                        .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                            &node.request_context(),
+                            &target_ref(),
+                            1,
+                            b"ci",
+                            &f.parent(),
+                            &merge,
+                            principal,
+                        ))
+                        .is_err()
+                );
             }
             let recovering = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverOnly, |_| Ok(()));
             assert!(recovering.error.is_some(), "{recovering:?}");
@@ -760,20 +836,31 @@ fn missing_first_refresh_marker_recovers_only_with_the_original_explicit_grant()
         let merge = config();
         first_landing(&f, &merge);
         let mut original_decision = None;
-        let lost = refresh(&f, &merge, OWNER, QueueRefreshMode::RecoverAndSelect, |row| {
-            if row.contains("\"type\":\"workflow_queue_refresh_decision\"") {
-                original_decision = Some(row.to_owned());
-                Err("test lost first refresh decision".into())
-            } else {
-                Ok(())
-            }
-        });
+        let lost = refresh(
+            &f,
+            &merge,
+            OWNER,
+            QueueRefreshMode::RecoverAndSelect,
+            |row| {
+                if row.contains("\"type\":\"workflow_queue_refresh_decision\"") {
+                    original_decision = Some(row.to_owned());
+                    Err("test lost first refresh decision".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert_eq!(lost.committed, 1);
         assert!(lost.error.is_some());
         let records = attempts(&f);
         assert_eq!(records.len(), 1);
         let retained = fs::read(&records[0]).unwrap();
-        let marker = records[0].parent().unwrap().parent().unwrap().join("refresh-principal");
+        let marker = records[0]
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("refresh-principal");
         let marker_bytes = fs::read(&marker).unwrap();
         fs::remove_file(&marker).unwrap();
         let held = position(&f);
@@ -782,20 +869,37 @@ fn missing_first_refresh_marker_recovers_only_with_the_original_explicit_grant()
 
         let node = f.node();
         for principal in [None, Some(PrincipalId::from_bytes([0x7e; 16]))] {
-            assert!(node.runtime().block_on(
-                node.validate_trusted_queue_head_refresh_custody_in(
-                    &node.request_context(), &target_ref(), 1, b"ci", &f.parent(),
-                    &merge, principal,
-                )
-            ).is_err());
+            assert!(
+                node.runtime()
+                    .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                        &node.request_context(),
+                        &target_ref(),
+                        1,
+                        b"ci",
+                        &f.parent(),
+                        &merge,
+                        principal,
+                    ))
+                    .is_err()
+            );
         }
-        assert!(node.runtime().block_on(
-            node.validate_trusted_queue_head_refresh_custody_in(
-                &node.request_context(), &target_ref(), 1, b"ci", &f.parent(),
-                &merge, Some(OWNER),
-            )
-        ).unwrap());
-        assert!(!marker.exists(), "startup validation must not repair custody");
+        assert!(
+            node.runtime()
+                .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                    &node.request_context(),
+                    &target_ref(),
+                    1,
+                    b"ci",
+                    &f.parent(),
+                    &merge,
+                    Some(OWNER),
+                ))
+                .unwrap()
+        );
+        assert!(
+            !marker.exists(),
+            "startup validation must not repair custody"
+        );
         assert!(!acknowledgment(&records[0]).exists());
         assert_eq!(position(&f), held);
 

@@ -81,13 +81,7 @@ fn net_ref_event_matches_history_through_noop_recreation_checkpoint_and_reopen()
         assert_eq!(advanced.previous_tip, Some(base));
         assert_ne!(advanced.batch_id, created.batch_id);
 
-        apply(
-            &node,
-            "other-create",
-            "refs/heads/other",
-            None,
-            Some(base),
-        );
+        apply(&node, "other-create", "refs/heads/other", None, Some(base));
         apply(&node, "topic-noop", TOPIC, Some(child), Some(child));
         assert_eq!(select(&node, TOPIC, child), advanced);
         assert_eq!(oracle(&node, TOPIC), advanced);
@@ -197,7 +191,11 @@ fn recent_event_does_not_read_earlier_batch_but_requires_its_own_proof_and_prede
         }
     }
 
-    assert_eq!(select(&node, TOPIC, base), expected, "the valid twin selects");
+    assert_eq!(
+        select(&node, TOPIC, base),
+        expected,
+        "the valid twin selects"
+    );
     assert!(matches!(
         node.runtime().block_on(latest_change_at(
             &node.authority,
@@ -233,13 +231,7 @@ fn suffix_bound_and_cancellation_refuse_without_an_unverified_event() {
     let scratch = Scratch::new();
     let (node, base, _) = fixture(&scratch, GitHashAlgorithm::Sha1);
     apply(&node, "bounded-topic", TOPIC, None, Some(base));
-    apply(
-        &node,
-        "bounded-other",
-        "refs/heads/other",
-        None,
-        Some(base),
-    );
+    apply(&node, "bounded-other", "refs/heads/other", None, Some(base));
     let state = selected(&node);
     let expected = oracle(&node, TOPIC);
     let request = node.request_context();

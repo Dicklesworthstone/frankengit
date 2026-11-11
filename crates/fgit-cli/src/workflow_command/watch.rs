@@ -325,7 +325,9 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
         .into());
     }
     if refresh != queue_refresh_principal.is_some() {
-        return Err("--refresh-queue-head and --refresh-principal must be supplied together".into());
+        return Err(
+            "--refresh-queue-head and --refresh-principal must be supplied together".into(),
+        );
     }
     if refresh && !land {
         return Err("automatic queue target refresh requires --land-queue-head and its complete queue, candidate and check-publication configuration".into());
@@ -524,9 +526,13 @@ fn poll_once(
         validate_refresh_custody(node, request, options, summary)?;
     }
     refresh_pending(
-        node, request, options, merge.as_ref(),
+        node,
+        request,
+        options,
+        merge.as_ref(),
         fgit_node::workflow_watch::QueueRefreshMode::RecoverOnly,
-        summary, output,
+        summary,
+        output,
     )?;
     if summary.stopped || summary.reconcile || !request.checkpoint_is_live() {
         summary.stopped |= !request.checkpoint_is_live();
@@ -555,9 +561,13 @@ fn poll_once(
         return Ok(());
     }
     refresh_pending(
-        node, request, options, merge.as_ref(),
+        node,
+        request,
+        options,
+        merge.as_ref(),
         fgit_node::workflow_watch::QueueRefreshMode::RecoverAndSelect,
-        summary, output,
+        summary,
+        output,
     )?;
     if summary.stopped || summary.reconcile || !request.checkpoint_is_live() {
         summary.stopped |= !request.checkpoint_is_live();
@@ -685,20 +695,28 @@ fn validate_refresh_custody(
         summary.stopped = true;
         return Ok(());
     }
-    let merge = options.merge_candidate.as_ref()
+    let merge = options
+        .merge_candidate
+        .as_ref()
         .ok_or("queue watch requires merge candidate configuration")?
         .node_config()?;
     let opt = &options.execution;
-    let pending = node.runtime().block_on(
-        node.validate_trusted_queue_head_refresh_custody_in(
-            request, &opt.reference, number, &opt.workflow, &opt.parent,
-            &merge, options.queue_refresh_principal,
-        ),
-    ).map_err(|error| {
-        summary.reconcile = true;
-        summary.stopped |= !request.checkpoint_is_live();
-        error.to_string()
-    })?;
+    let pending = node
+        .runtime()
+        .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+            request,
+            &opt.reference,
+            number,
+            &opt.workflow,
+            &opt.parent,
+            &merge,
+            options.queue_refresh_principal,
+        ))
+        .map_err(|error| {
+            summary.reconcile = true;
+            summary.stopped |= !request.checkpoint_is_live();
+            error.to_string()
+        })?;
     // Startup validation observes responsibility without submitting it. Only a
     // later complete recovery pass may clear this observation.
     summary.refresh_pending |= pending;
@@ -721,14 +739,18 @@ fn refresh_pending(
         summary.stopped |= !request.checkpoint_is_live();
         return Ok(());
     }
-    let (Some(number), Some(merge), Some(publisher), Some(lander)) =
-        (options.merge_queue, merge, options.publisher, options.landing_principal)
-    else {
+    let (Some(number), Some(merge), Some(publisher), Some(lander)) = (
+        options.merge_queue,
+        merge,
+        options.publisher,
+        options.landing_principal,
+    ) else {
         return Err("automatic queue refresh requires its complete operator configuration".into());
     };
     let opt = &options.execution;
-    let result = node.runtime().block_on(
-        node.refresh_trusted_queue_head_merge_workflows_in(
+    let result = node
+        .runtime()
+        .block_on(node.refresh_trusted_queue_head_merge_workflows_in(
             request,
             &opt.reference,
             number,
@@ -744,8 +766,7 @@ fn refresh_pending(
                     .and_then(|()| output.flush())
                     .map_err(|error| error.to_string())
             },
-        ),
-    );
+        ));
     summary.non_green |= result.refused != 0;
     if result.error.is_none() && !result.request_stopped {
         summary.refresh_pending = result.pending;
@@ -757,10 +778,14 @@ fn refresh_pending(
     for (counter, amount) in [
         (&mut summary.refreshes_committed, result.committed),
         (&mut summary.refreshes_refused, result.refused),
-        (&mut summary.refreshes_previously_decided, result.previously_decided),
+        (
+            &mut summary.refreshes_previously_decided,
+            result.previously_decided,
+        ),
         (&mut summary.refreshes_waiting, result.waiting),
     ] {
-        *counter = counter.checked_add(amount)
+        *counter = counter
+            .checked_add(amount)
             .ok_or("queue refresh observation counter exhausted")?;
     }
     writeln!(output, "{}", result.to_json())

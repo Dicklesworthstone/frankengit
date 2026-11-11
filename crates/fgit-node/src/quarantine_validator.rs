@@ -337,7 +337,7 @@ impl ProductionQuarantineValidator<'_> {
         self
     }
 
-/// Reuse already-admitted blob commitments only after the current visible
+    /// Reuse already-admitted blob commitments only after the current visible
     /// graph proves their typed native edges. This is not a payload scrub and
     /// does not bypass body verification for uploaded bytes or external deltas.
     /// Kept crate-private: untrusted commands cannot select this policy.

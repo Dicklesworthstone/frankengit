@@ -590,7 +590,7 @@ fn saturated_untrusted_neighbour_indices_are_refused_without_overflow() {
     let entries = [(main.clone(), oid(1, false))];
     let root = ref_state_merkle_root_v2(&entries, Some(&main)).unwrap();
     let forged = Box::new(RefStateNeighbour::new(
-        main.clone(),
+        main,
         entries[0].1,
         MerkleProof::new(usize::MAX, usize::MAX, Vec::new()),
     ));

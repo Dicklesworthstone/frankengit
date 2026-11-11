@@ -2,11 +2,14 @@
 
 //! Minimal command-line surface for the one-process node slice.
 
+extern crate self as fgit_cli;
+
 pub mod agent_context;
 pub mod agent_credential_token;
 pub mod agent_recover;
 pub mod agent_settle;
 pub mod agent_tasks;
+pub mod mcp;
 
 mod at;
 

@@ -2,9 +2,7 @@
 //! PR stream, preserves FIFO state and requires a newly prepared exact subject.
 use super::*;
 use crate::NodeWorkspaceRefusal;
-use fgit_admission::merge::native::queue::{
-    QueueCandidateLandingCommand, QueueHeadRefreshCommand,
-};
+use fgit_admission::merge::native::queue::{QueueCandidateLandingCommand, QueueHeadRefreshCommand};
 use fgit_forge::preparation::{
     MergeCommitStyle, MergeMetadata, MergePreparation, PreparationLimits,
 };
@@ -115,7 +113,10 @@ fn refreshed_second_head_lands_without_reenqueue_and_recovers_after_restart() {
         assert_eq!(read(&node, 1, None).queue, Some(queued.clone()));
         assert_eq!(after.snapshot().refs, before.snapshot().refs);
         assert_eq!(after.snapshot().head_target, before.snapshot().head_target);
-        assert_eq!(after.basis().body().ref_root, before.basis().body().ref_root);
+        assert_eq!(
+            after.basis().body().ref_root,
+            before.basis().body().ref_root
+        );
         assert_eq!(
             after.basis().body().retention_root,
             before.basis().body().retention_root
@@ -124,10 +125,24 @@ fn refreshed_second_head_lands_without_reenqueue_and_recovers_after_restart() {
             after.selected_closure().closure(),
             before.selected_closure().closure()
         );
-        assert_eq!(after.snapshot().outbox.len(), before.snapshot().outbox.len() + 1);
         assert_eq!(
-            after.basis().body().latest_repository_sequence.unwrap().get(),
-            before.basis().body().latest_repository_sequence.unwrap().get() + 1
+            after.snapshot().outbox.len(),
+            before.snapshot().outbox.len() + 1
+        );
+        assert_eq!(
+            after
+                .basis()
+                .body()
+                .latest_repository_sequence
+                .unwrap()
+                .get(),
+            before
+                .basis()
+                .body()
+                .latest_repository_sequence
+                .unwrap()
+                .get()
+                + 1
         );
         let history = node
             .runtime()
@@ -194,7 +209,10 @@ fn refreshed_second_head_lands_without_reenqueue_and_recovers_after_restart() {
                 AdmissionLimits::default(),
             ))
             .unwrap();
-        assert!(matches!(landed.1.outcome, DecisionOutcome::Committed { .. }));
+        assert!(matches!(
+            landed.1.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
         let queue = read(&node, 1, None).queue.unwrap();
         assert_eq!(queue.version, version(6));
         assert!(queue.entries.is_empty());
@@ -206,13 +224,19 @@ fn refreshed_second_head_lands_without_reenqueue_and_recovers_after_restart() {
         let final_head = snapshot(&node).basis().id();
         node.shutdown().unwrap();
         let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
-        assert_eq!(refresh(&reopened, &offered, "refresh-second").unwrap(), original);
+        assert_eq!(
+            refresh(&reopened, &offered, "refresh-second").unwrap(),
+            original
+        );
         reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
         let mut changed = offered.clone();
         changed.pull_request.data.title.push('!');
         assert!(refresh(&reopened, &changed, "refresh-second").is_err());
         reopened.push_quota.limit.max_events = 0;
-        assert_eq!(refresh(&reopened, &offered, "refresh-second").unwrap(), original);
+        assert_eq!(
+            refresh(&reopened, &offered, "refresh-second").unwrap(),
+            original
+        );
         assert_eq!(snapshot(&reopened).basis().id(), final_head);
         reopened.shutdown().unwrap();
     }
@@ -247,7 +271,12 @@ fn refresh_preserves_exact_queue_pr_policy_source_and_metadata_guards() {
     refuse_refresh(&node, &changed, "stale-pr", RefusalCode::EvidenceStale);
     let mut changed = offered.clone();
     changed.expected_recorded_target_tip = advanced;
-    refuse_refresh(&node, &changed, "wrong-recorded-target", RefusalCode::EvidenceStale);
+    refuse_refresh(
+        &node,
+        &changed,
+        "wrong-recorded-target",
+        RefusalCode::EvidenceStale,
+    );
     let mut changed = offered.clone();
     changed.pull_request.data.title.push('!');
     refuse_refresh(&node, &changed, "changed-title", RefusalCode::EvidenceStale);
@@ -256,7 +285,12 @@ fn refresh_preserves_exact_queue_pr_policy_source_and_metadata_guards() {
     refuse_refresh(&node, &changed, "changed-body", RefusalCode::EvidenceStale);
     let mut changed = offered.clone();
     changed.pull_request.data.source_tip = advanced;
-    refuse_refresh(&node, &changed, "changed-source", RefusalCode::EvidenceStale);
+    refuse_refresh(
+        &node,
+        &changed,
+        "changed-source",
+        RefusalCode::EvidenceStale,
+    );
     let mut changed = offered.clone();
     changed.pull_request.data.target_tip = advanced;
     refuse_refresh(&node, &changed, "target-moved", RefusalCode::TargetRefMoved);
@@ -270,7 +304,10 @@ fn refresh_preserves_exact_queue_pr_policy_source_and_metadata_guards() {
     accepted(refresh(&node, &offered, "valid-refresh"));
     assert_eq!(read(&node, 1, None).queue, queue);
     let settled = snapshot(&node).basis().id();
-    assert_eq!(refresh(&node, &stale_queue, "stale-queue").unwrap(), refused);
+    assert_eq!(
+        refresh(&node, &stale_queue, "stale-queue").unwrap(),
+        refused
+    );
     assert_eq!(snapshot(&node).basis().id(), settled);
     node.shutdown().unwrap();
 }
@@ -295,7 +332,10 @@ fn cancelled_anonymous_and_dequeued_refreshes_cannot_update_the_pr() {
             AdmissionLimits::default(),
         ))
         .unwrap();
-    assert!(matches!(moved.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+    assert!(matches!(
+        moved.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
     let offered = refresh_command(&pulls[0], 2, advanced);
     let before = snapshot(&node);
     let cancelled = node.request_context();
@@ -323,8 +363,17 @@ fn cancelled_anonymous_and_dequeued_refreshes_cannot_update_the_pr() {
     noop.expected_recorded_target_tip = noop.pull_request.data.target_tip;
     assert!(refresh(&node, &noop, "noop").is_err());
     assert_eq!(snapshot(&node).basis(), before.basis());
-    accepted(apply(&node, &dequeue(1, 2, pulls[0].number), "withdraw-head"));
-    refuse_refresh(&node, &offered, "captured-before-dequeue", RefusalCode::EvidenceStale);
+    accepted(apply(
+        &node,
+        &dequeue(1, 2, pulls[0].number),
+        "withdraw-head",
+    ));
+    refuse_refresh(
+        &node,
+        &offered,
+        "captured-before-dequeue",
+        RefusalCode::EvidenceStale,
+    );
     let mut current_queue = offered;
     current_queue.expected_queue_version = version(3);
     refuse_refresh(

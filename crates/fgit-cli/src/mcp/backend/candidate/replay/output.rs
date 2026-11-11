@@ -31,9 +31,10 @@ pub(super) fn coordinates(
             (actual.selected_parent, actual.selected_mainline),
             (None, None) | (Some(_), Some(1..=u16::MAX))
         )
-        || requested.mainline.is_some_and(|n| actual.selected_mainline != Some(n))
-        || (requested.mainline.is_none()
-            && actual.selected_mainline.is_some_and(|n| n != 1))
+        || requested
+            .mainline
+            .is_some_and(|n| actual.selected_mainline != Some(n))
+        || (requested.mainline.is_none() && actual.selected_mainline.is_some_and(|n| n != 1))
     {
         return Err(invalid_report());
     }
@@ -53,7 +54,10 @@ fn entry(
     };
     check_oid(value.oid, format)?;
     if path.rsplit(|byte| *byte == b'/').next() != Some(value.name.as_slice())
-        || !matches!(value.mode, 0o040000 | 0o100644 | 0o100755 | 0o120000 | 0o160000)
+        || !matches!(
+            value.mode,
+            0o040000 | 0o100644 | 0o100755 | 0o120000 | 0o160000
+        )
     {
         return Err(invalid_report());
     }
@@ -81,7 +85,9 @@ pub(in super::super) fn conflict(
     if value.path.is_empty()
         || value.path.len() > max_path
         || value.path.contains(&0)
-        || value.path.split(|byte| *byte == b'/')
+        || value
+            .path
+            .split(|byte| *byte == b'/')
             .any(|part| part.is_empty() || part == b"." || part == b"..")
     {
         return Err(invalid_report());
@@ -116,17 +122,23 @@ pub(in super::super) fn receipts(
     {
         return Err(invalid_report());
     }
-    let by_path: BTreeMap<_, _> = observed.iter()
-        .map(|row| (row.conflict.path.as_slice(), row)).collect();
+    let by_path: BTreeMap<_, _> = observed
+        .iter()
+        .map(|row| (row.conflict.path.as_slice(), row))
+        .collect();
     if by_path.len() != observed.len()
-        || requested.windows(2).any(|rows| rows[0].path >= rows[1].path)
+        || requested
+            .windows(2)
+            .any(|rows| rows[0].path >= rows[1].path)
     {
         return Err(invalid_report());
     }
     let mut result = Vec::with_capacity(requested.len());
     for request in requested {
         checkpoint(live)?;
-        let row = by_path.get(request.path.as_slice()).ok_or_else(invalid_report)?;
+        let row = by_path
+            .get(request.path.as_slice())
+            .ok_or_else(invalid_report)?;
         if row.choice != request.choice.kind() {
             return Err(invalid_report());
         }
@@ -157,7 +169,10 @@ pub(in super::super) fn receipts(
         }
         result.push(object([
             ("path_hex", text(hex(&request.path))),
-            ("conflict", conflict(&row.conflict, format, limits.max_path_bytes)?),
+            (
+                "conflict",
+                conflict(&row.conflict, format, limits.max_path_bytes)?,
+            ),
             ("choice", text(choice_name(row.choice))),
             ("result", entry(row.result.as_ref(), &request.path, format)?),
         ]));
@@ -184,7 +199,8 @@ pub(super) fn commit_body(
     for object in &plan.objects {
         checkpoint(live)?;
         check_oid(object.id, format)?;
-        total = total.checked_add(object.body.len())
+        total = total
+            .checked_add(object.body.len())
             .filter(|n| *n <= input.limits.max_output_bytes)
             .ok_or_else(invalid_report)?;
         if git_object_id(format, object.kind, &object.body) != object.id {
@@ -193,11 +209,19 @@ pub(super) fn commit_body(
     }
     let mut expected = format!(
         "tree {}\nparent {}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
-        plan.tree, input.request.target, input.metadata.author, input.metadata.timestamp,
-        input.metadata.committer, input.metadata.timestamp
-    ).into_bytes();
+        plan.tree,
+        input.request.target,
+        input.metadata.author,
+        input.metadata.timestamp,
+        input.metadata.committer,
+        input.metadata.timestamp
+    )
+    .into_bytes();
     expected.extend_from_slice(&input.metadata.message);
-    let actual = plan.objects.iter().find(|object| object.id == plan.commit)
+    let actual = plan
+        .objects
+        .iter()
+        .find(|object| object.id == plan.commit)
         .ok_or_else(invalid_report)?;
     if actual.kind != GitObjectKind::Commit
         || actual.body != expected
@@ -219,12 +243,16 @@ pub(super) fn handoffs(
     let mut inspection = publication.object().ok_or_else(invalid_report)?.clone();
     inspection.insert("operation".into(), text("inspect"));
     inspection.insert("expected_head".into(), text(head_token(head)));
-    inspection.insert("expected_bundle_sha256".into(), text(hex(&sha256_digest(bytes))));
+    inspection.insert(
+        "expected_bundle_sha256".into(),
+        text(hex(&sha256_digest(bytes))),
+    );
     let inspection = Value::Object(inspection);
     for arguments in [&publication, &inspection] {
         // Leave room for RPC framing and the caller's original publication key.
         // Raw ref bytes can consume more space than ordinary UTF-8 names.
-        arguments.encode(json::MAX_INPUT - 4096)
+        arguments
+            .encode(json::MAX_INPUT - 4096)
             .map_err(|_| ToolError::failed("candidate_arguments_limit"))?;
     }
     Ok((publication, inspection))
@@ -232,7 +260,8 @@ pub(super) fn handoffs(
 
 pub(super) fn bounded(value: Value, live: &mut impl FnMut() -> bool) -> Result<Value, ToolError> {
     checkpoint(live)?;
-    value.encode(MAX_RESULT_BYTES)
+    value
+        .encode(MAX_RESULT_BYTES)
         .map_err(|_| ToolError::failed("candidate_response_limit"))?;
     checkpoint(live)?;
     Ok(value)
@@ -258,7 +287,13 @@ pub(super) fn render(
         if matches!(report.outcome, ReplayPreparation::Conflicted { .. }) {
             return Err(invalid_report());
         }
-        receipts(choices, report.resolutions, backend.options.format, input.limits, live)?
+        receipts(
+            choices,
+            report.resolutions,
+            backend.options.format,
+            input.limits,
+            live,
+        )?
     } else {
         if !report.resolutions.is_empty() {
             return Err(invalid_report());
@@ -268,41 +303,81 @@ pub(super) fn render(
     let mut fields = backend.header(report.head);
     fields.extend(binding(backend));
     fields.extend([
-        ("type".into(), text(if input.resolutions.is_some() {
-            "source_replay_resolution"
-        } else {
-            "source_replay_candidate"
-        })),
+        (
+            "type".into(),
+            text(if input.resolutions.is_some() {
+                "source_replay_resolution"
+            } else {
+                "source_replay_candidate"
+            }),
+        ),
         ("schema_version".into(), json::number(1)),
         ("operation".into(), text(input.operation())),
         ("profile".into(), text("path-v1")),
-        ("direction".into(), text(match input.request.direction {
-            ReplayDirection::CherryPick => "cherry-pick",
-            ReplayDirection::Revert => "revert",
-        })),
+        (
+            "direction".into(),
+            text(match input.request.direction {
+                ReplayDirection::CherryPick => "cherry-pick",
+                ReplayDirection::Revert => "revert",
+            }),
+        ),
         ("source_head".into(), text(report.head.to_string())),
-        ("reference_hex".into(), text(hex(input.reference.as_bytes()))),
-        ("source_reference_hex".into(), text(hex(input.source.as_bytes()))),
+        (
+            "reference_hex".into(),
+            text(hex(input.reference.as_bytes())),
+        ),
+        (
+            "source_reference_hex".into(),
+            text(hex(input.source.as_bytes())),
+        ),
         ("expected_base".into(), text(raw_oid(input.request.target))),
-        ("expected_source".into(), text(raw_oid(input.request.source_tip))),
-        ("selected_commit".into(), text(raw_oid(input.request.selected_commit))),
-        ("requested_mainline".into(), input.request.mainline.map_or(Value::Null, |n| json::number(u64::from(n)))),
-        ("selected_parent".into(), point.selected_parent.map_or(Value::Null, |id| text(raw_oid(id)))),
-        ("selected_mainline".into(), point.selected_mainline.map_or(Value::Null, |n| json::number(u64::from(n)))),
+        (
+            "expected_source".into(),
+            text(raw_oid(input.request.source_tip)),
+        ),
+        (
+            "selected_commit".into(),
+            text(raw_oid(input.request.selected_commit)),
+        ),
+        (
+            "requested_mainline".into(),
+            input
+                .request
+                .mainline
+                .map_or(Value::Null, |n| json::number(u64::from(n))),
+        ),
+        (
+            "selected_parent".into(),
+            point
+                .selected_parent
+                .map_or(Value::Null, |id| text(raw_oid(id))),
+        ),
+        (
+            "selected_mainline".into(),
+            point
+                .selected_mainline
+                .map_or(Value::Null, |n| json::number(u64::from(n))),
+        ),
         ("author".into(), text(input.metadata.author.clone())),
         ("committer".into(), text(input.metadata.committer.clone())),
-        ("timestamp".into(), text(input.metadata.timestamp.to_string())),
+        (
+            "timestamp".into(),
+            text(input.metadata.timestamp.to_string()),
+        ),
         ("message_hex".into(), text(hex(&input.metadata.message))),
         ("author_identity_verified".into(), Value::Bool(false)),
         ("objects_staged".into(), Value::Bool(false)),
         ("transaction_created".into(), Value::Bool(false)),
         ("inspection_performed".into(), Value::Bool(false)),
         ("complete".into(), Value::Bool(true)),
-        ("resolution_profile".into(), if input.resolutions.is_some() {
-            text("exact-path-resolutions-v1")
-        } else {
-            Value::Null
-        }),
+        (
+            "resolution_profile".into(),
+            if input.resolutions.is_some() {
+                text("exact-path-resolutions-v1")
+            } else {
+                Value::Null
+            },
+        ),
         ("resolved_paths".into(), resolved),
         ("candidate_available".into(), Value::Bool(false)),
         ("candidate_commit".into(), Value::Null),
@@ -332,19 +407,42 @@ pub(super) fn render(
             }
             let body = commit_body(input, plan, live)?;
             let (publication, inspection) = handoffs(
-                &input.reference, input.request.target, plan.commit, report.head, bytes,
+                &input.reference,
+                input.request.target,
+                plan.commit,
+                report.head,
+                bytes,
             )?;
             fields.extend([
-                ("state".into(), text(if input.resolutions.is_some() { "resolved" } else { "prepared" })),
+                (
+                    "state".into(),
+                    text(if input.resolutions.is_some() {
+                        "resolved"
+                    } else {
+                        "prepared"
+                    }),
+                ),
                 ("candidate_available".into(), Value::Bool(true)),
                 ("candidate_commit".into(), text(raw_oid(plan.commit))),
                 ("candidate_commit_body_hex".into(), text(hex(&body))),
-                ("candidate_commit_text_utf8".into(), std::str::from_utf8(&body).map_or(Value::Null, text)),
+                (
+                    "candidate_commit_text_utf8".into(),
+                    std::str::from_utf8(&body).map_or(Value::Null, text),
+                ),
                 ("root_tree".into(), text(raw_oid(plan.tree))),
-                ("parents".into(), Value::Array(vec![text(raw_oid(input.request.target))])),
-                ("generated_objects".into(), text(plan.objects.len().to_string())),
+                (
+                    "parents".into(),
+                    Value::Array(vec![text(raw_oid(input.request.target))]),
+                ),
+                (
+                    "generated_objects".into(),
+                    text(plan.objects.len().to_string()),
+                ),
                 ("pack_objects".into(), text(report.pack_objects.to_string())),
-                ("borrowed_objects".into(), text(report.borrowed_objects.to_string())),
+                (
+                    "borrowed_objects".into(),
+                    text(report.borrowed_objects.to_string()),
+                ),
                 ("bundle_sha256".into(), text(hex(&sha256_digest(bytes)))),
                 ("bundle_bytes".into(), text(bytes.len().to_string())),
                 ("inspection_tool".into(), text(NAME)),
@@ -359,14 +457,20 @@ pub(super) fn render(
                 || report.borrowed_objects != 0
                 || conflicts.is_empty()
                 || conflicts.len() > input.limits.max_conflicts
-                || conflicts.windows(2).any(|rows| rows[0].path >= rows[1].path)
+                || conflicts
+                    .windows(2)
+                    .any(|rows| rows[0].path >= rows[1].path)
             {
                 return Err(invalid_report());
             }
             let mut rows = Vec::with_capacity(conflicts.len());
             for value in conflicts {
                 checkpoint(live)?;
-                rows.push(conflict(value, backend.options.format, input.limits.max_path_bytes)?);
+                rows.push(conflict(
+                    value,
+                    backend.options.format,
+                    input.limits.max_path_bytes,
+                )?);
             }
             fields.insert("state".into(), text("conflicted"));
             fields.insert("conflicts".into(), Value::Array(rows));

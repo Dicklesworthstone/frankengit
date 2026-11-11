@@ -6,8 +6,8 @@ use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_forge::preparation::MergeMetadata;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName,
-    RepositoryId, TenantId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RepositoryId,
+    TenantId,
 };
 use std::{
     fs,
@@ -23,7 +23,9 @@ impl Drop for Scratch {
     }
 }
 fn fields<const N: usize>(pairs: [(&str, Value); N]) -> Object {
-    let Value::Object(value) = object(pairs) else { unreachable!() };
+    let Value::Object(value) = object(pairs) else {
+        unreachable!()
+    };
     value
 }
 fn principal() -> PrincipalId {
@@ -34,15 +36,19 @@ fn session(key: &[u8]) -> LoopbackReceiveSession {
 }
 fn seeded(format: GitHashAlgorithm, build: bool) -> (Scratch, NodeTools, GitOid) {
     let scratch = Scratch(std::env::temp_dir().join(format!(
-        "fg-mcp-index-page-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+        "fg-mcp-index-page-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
     )));
     fs::create_dir(&scratch.0).unwrap();
     let tenant = TenantId::from_bytes([0xe1; 16]);
     let repository = RepositoryId::from_bytes([0xe2; 16]);
     let (mut node, _) = OneNode::init(
         NodeConfig::new(scratch.0.join("node"), tenant, repository)
-            .with_object_format(format).with_worker_threads(2),
-    ).unwrap();
+            .with_object_format(format)
+            .with_worker_threads(2),
+    )
+    .unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let reference = RefName::try_new(b"refs/heads/main").unwrap();
     let mut patch = String::new();
@@ -65,28 +71,69 @@ fn seeded(format: GitHashAlgorithm, build: bool) -> (Scratch, NodeTools, GitOid)
         message: b"persisted paginated search corpus\n".to_vec(),
     };
     let request = node.request_context();
-    let (_, plan, bundle) = node.runtime().block_on(node.prepare_trusted_initial_patch_in(
-        &request, &reference, patch.as_bytes(), &metadata, Default::default(), None,
-    )).unwrap();
+    let (_, plan, bundle) = node
+        .runtime()
+        .block_on(node.prepare_trusted_initial_patch_in(
+            &request,
+            &reference,
+            patch.as_bytes(),
+            &metadata,
+            Default::default(),
+            None,
+        ))
+        .unwrap();
     let commit = plan.commit;
-    let accepted = node.runtime().block_on(node.apply_initial_patch_bundle_durable_in(
-        &request, &session(b"indexed-corpus"), &reference, commit, bundle.bytes(), Default::default(),
-    )).unwrap();
-    assert!(matches!(accepted.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+    let accepted = node
+        .runtime()
+        .block_on(node.apply_initial_patch_bundle_durable_in(
+            &request,
+            &session(b"indexed-corpus"),
+            &reference,
+            commit,
+            bundle.bytes(),
+            Default::default(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        accepted.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
     if build {
-        node.runtime().block_on(node.build_source_index_local_in(
-            &node.outbox_delivery_context(), &reference, None, None, None, Default::default(),
-        )).unwrap();
+        node.runtime()
+            .block_on(node.build_source_index_local_in(
+                &node.outbox_delivery_context(),
+                &reference,
+                None,
+                None,
+                None,
+                Default::default(),
+            ))
+            .unwrap();
     }
     let incarnation = node.repository_incarnation_id();
     node.shutdown().unwrap();
     let backend = NodeTools::open(Options {
-        storage: scratch.0.join("node"), tenant, repository, format,
-        incarnation: Some(incarnation), issues: false, discussions: false, pulls: false,
-        source: true, writes: Default::default(), outcomes: false, principal: None,
-        queues: Default::default(), agent_context: false, artifacts: false,
-        artifact_root: None, agent_token_file: None, max_messages: 32, index_maintenance: None,
-    }).unwrap();
+        storage: scratch.0.join("node"),
+        tenant,
+        repository,
+        format,
+        incarnation: Some(incarnation),
+        issues: false,
+        discussions: false,
+        pulls: false,
+        source: true,
+        writes: Default::default(),
+        outcomes: false,
+        principal: None,
+        queues: Default::default(),
+        agent_context: false,
+        artifacts: false,
+        artifact_root: None,
+        agent_token_file: None,
+        max_messages: 32,
+        index_maintenance: None,
+    })
+    .unwrap();
     (scratch, backend, commit)
 }
 fn query(channel: &str) -> Object {
@@ -98,18 +145,28 @@ fn query(channel: &str) -> Object {
     ])
 }
 fn head_bytes(backend: &NodeTools) -> Vec<u8> {
-    backend.node.runtime().block_on(backend.node.authenticate_authority_head())
-        .unwrap().receipt().body().to_vec()
+    backend
+        .node
+        .runtime()
+        .block_on(backend.node.authenticate_authority_head())
+        .unwrap()
+        .receipt()
+        .body()
+        .to_vec()
 }
 fn rows(value: &Value) -> &[Value] {
-    let Value::Array(rows) = value else { panic!("expected array") };
+    let Value::Array(rows) = value else {
+        panic!("expected array")
+    };
     rows
 }
 fn continuation(original: &Object, page: &Object) -> Object {
     let mut next = original.clone();
     for (input, output) in [
-        ("expected_head", "snapshot_token"), ("expected_commit", "source_commit"),
-        ("index_token", "index_token"), ("index_number", "index_number"),
+        ("expected_head", "snapshot_token"),
+        ("expected_commit", "source_commit"),
+        ("index_token", "index_token"),
+        ("index_number", "index_number"),
         ("after", "next_after"),
     ] {
         next.insert(input.into(), page[output].clone());
@@ -119,11 +176,21 @@ fn continuation(original: &Object, page: &Object) -> Object {
 fn protocol_call(backend: &mut NodeTools, args: Object) -> Value {
     let mut server = Server::new(backend).unwrap();
     server.receive(backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"indexed-page-test","version":"1"}}}"#).unwrap();
-    server.receive(backend, br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    server.receive(
+        backend,
+        br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
     let wire = object([
-        ("jsonrpc", text("2.0")), ("id", json::number(2)), ("method", text("tools/call")),
-        ("params", object([("name", text(NAME)), ("arguments", Value::Object(args))])),
-    ]).encode(json::MAX_INPUT).unwrap();
+        ("jsonrpc", text("2.0")),
+        ("id", json::number(2)),
+        ("method", text("tools/call")),
+        (
+            "params",
+            object([("name", text(NAME)), ("arguments", Value::Object(args))]),
+        ),
+    ])
+    .encode(json::MAX_INPUT)
+    .unwrap();
     let response = server.receive(backend, wire.as_bytes()).unwrap();
     let result = response.object().unwrap()["result"].object().unwrap();
     assert_eq!(result["isError"], Value::Bool(false), "{response:?}");
@@ -143,7 +210,10 @@ fn persisted_content_and_path_pages_are_pinned_complete_and_lossless_in_both_nat
                 args.insert("source_mode".into(), text(mode));
                 let first = protocol_call(&mut backend, args.clone());
                 let first = first.object().unwrap();
-                assert_eq!(first["source_commit"].text(), Some(commit.to_string().as_str()));
+                assert_eq!(
+                    first["source_commit"].text(),
+                    Some(commit.to_string().as_str())
+                );
                 assert_eq!(first["source_mode"].text(), Some(mode));
                 assert_eq!(first["counter_encoding"].text(), Some("decimal-strings-v1"));
                 assert_eq!(first["terms_hex"], Value::Array(vec![text(hex(b"needle"))]));
@@ -154,33 +224,67 @@ fn persisted_content_and_path_pages_are_pinned_complete_and_lossless_in_both_nat
                 assert_eq!(first["read_only"], Value::Bool(true));
                 assert_eq!(first["transaction_created"], Value::Bool(false));
                 assert_eq!(first["published"], Value::Bool(false));
-                for name in ["index_number", "selected_index_number", "limit", "indexed_documents", "work_units"] {
+                for name in [
+                    "index_number",
+                    "selected_index_number",
+                    "limit",
+                    "indexed_documents",
+                    "work_units",
+                ] {
                     assert!(first[name].text().is_some(), "{mode} {name}");
                 }
                 let pinned = continuation(&args, first);
-                for missing in ["expected_head", "expected_commit", "index_token", "index_number"] {
+                for missing in [
+                    "expected_head",
+                    "expected_commit",
+                    "index_token",
+                    "index_number",
+                ] {
                     let mut bad = pinned.clone();
                     bad.remove(missing);
                     assert!(backend.call(NAME, &bad).is_err(), "missing {missing}");
                 }
                 let second = backend.call(NAME, &pinned).unwrap();
                 let second = second.object().unwrap();
-                for name in ["snapshot_token", "source_commit", "index_token", "index_number"] {
+                for name in [
+                    "snapshot_token",
+                    "source_commit",
+                    "index_token",
+                    "index_number",
+                ] {
                     assert_eq!(second[name], first[name], "{name}");
                 }
                 assert_eq!(second["after"], first["next_after"]);
                 assert_eq!(second["complete"], Value::Bool(true));
                 assert_eq!(second["next_after"], Value::Null);
                 assert_eq!(second["returned_hits"].text(), Some("2"));
-                let hits: Vec<_> = rows(&first["hits"]).iter().chain(rows(&second["hits"])).collect();
-                let paths: Vec<_> = hits.iter().map(|hit| hit.object().unwrap()["path_hex"].text().unwrap().to_owned()).collect();
-                assert_eq!(paths, vec![
-                    hex(b"src/Needle-a.rs"), hex(b"src/Needle-b.rs"),
-                    hex(b"src/Needle-c.rs"), hex(b"src2/Needle-d.rs"),
-                ]);
-                let ids: Vec<u64> = hits.iter().map(|hit| {
-                    hit.object().unwrap()["document_id"].text().unwrap().parse().unwrap()
-                }).collect();
+                let hits: Vec<_> = rows(&first["hits"])
+                    .iter()
+                    .chain(rows(&second["hits"]))
+                    .collect();
+                let paths: Vec<_> = hits
+                    .iter()
+                    .map(|hit| hit.object().unwrap()["path_hex"].text().unwrap().to_owned())
+                    .collect();
+                assert_eq!(
+                    paths,
+                    vec![
+                        hex(b"src/Needle-a.rs"),
+                        hex(b"src/Needle-b.rs"),
+                        hex(b"src/Needle-c.rs"),
+                        hex(b"src2/Needle-d.rs"),
+                    ]
+                );
+                let ids: Vec<u64> = hits
+                    .iter()
+                    .map(|hit| {
+                        hit.object().unwrap()["document_id"]
+                            .text()
+                            .unwrap()
+                            .parse()
+                            .unwrap()
+                    })
+                    .collect();
                 assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
                 for hit in hits {
                     let row = hit.object().unwrap();
@@ -188,18 +292,32 @@ fn persisted_content_and_path_pages_are_pinned_complete_and_lossless_in_both_nat
                     assert_eq!(spans.len(), 1);
                     assert_eq!(spans[0].object().unwrap()["query_index"].text(), Some("0"));
                     assert_eq!(spans[0].object().unwrap()["byte_length"].text(), Some("6"));
-                    let offset = spans[0].object().unwrap()["byte_offset"].text().unwrap().parse::<u64>().unwrap();
-                    if channel == "content" { assert_eq!(offset, 0); } else { assert!(offset >= 4); }
+                    let offset = spans[0].object().unwrap()["byte_offset"]
+                        .text()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap();
+                    if channel == "content" {
+                        assert_eq!(offset, 0);
+                    } else {
+                        assert!(offset >= 4);
+                    }
                 }
                 let mut scoped = args;
                 scoped.insert("limit".into(), json::number(10));
-                scoped.insert("path_prefixes_hex".into(), Value::Array(vec![text(hex(b"src"))]));
+                scoped.insert(
+                    "path_prefixes_hex".into(),
+                    Value::Array(vec![text(hex(b"src"))]),
+                );
                 let scoped = backend.call(NAME, &scoped).unwrap();
                 let scoped = scoped.object().unwrap();
                 assert_eq!(scoped["returned_hits"].text(), Some("3"));
                 assert_eq!(scoped["complete"], Value::Bool(true));
                 assert!(rows(&scoped["hits"]).iter().all(|hit| {
-                    hit.object().unwrap()["path_hex"].text().unwrap().starts_with(&hex(b"src/"))
+                    hit.object().unwrap()["path_hex"]
+                        .text()
+                        .unwrap()
+                        .starts_with(&hex(b"src/"))
                 }));
             }
         }
@@ -219,21 +337,36 @@ fn current_source_mode_keeps_original_index_provenance_after_an_unrelated_ref_up
         let original_continuation = continuation(&args, first);
         let reference = RefName::try_new(b"refs/heads/unrelated").unwrap();
         let request = backend.node.request_context();
-        let changed = backend.node.runtime().block_on(backend.node.admit_branch_updates_durable_in(
-            &request,
-            &session(b"advance-other-ref"),
-            &[RefCommand {
-                name: reference, expected_old: ExpectedOld::Absent,
-                proposed_new: ProposedNew::Update(commit), force: false,
-            }],
-            Default::default(),
-        )).unwrap();
-        assert!(matches!(changed.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+        let changed = backend
+            .node
+            .runtime()
+            .block_on(backend.node.admit_branch_updates_durable_in(
+                &request,
+                &session(b"advance-other-ref"),
+                &[RefCommand {
+                    name: reference,
+                    expected_old: ExpectedOld::Absent,
+                    proposed_new: ProposedNew::Update(commit),
+                    force: false,
+                }],
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            changed.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
         let changed_head = head_bytes(&backend);
-        assert!(backend.call(NAME, &original_continuation).is_err(), "an old source pin cannot continue after authority moves");
+        assert!(
+            backend.call(NAME, &original_continuation).is_err(),
+            "an old source pin cannot continue after authority moves"
+        );
         let mut strict = args.clone();
         strict.insert("source_mode".into(), text("exact"));
-        assert_eq!(backend.call(NAME, &strict).unwrap_err().code, "source_index_stale");
+        assert_eq!(
+            backend.call(NAME, &strict).unwrap_err().code,
+            "source_index_stale"
+        );
         let current = backend.call(NAME, &args).unwrap();
         let current = current.object().unwrap();
         assert_eq!(current["source_commit"], first["source_commit"]);
@@ -273,14 +406,20 @@ fn absent_index_and_work_or_payload_exhaustion_refuse_without_rebuilding_or_part
             let mut tiny = query("content");
             tiny.insert(name.into(), json::number(1));
             let error = backend.call(NAME, &tiny).unwrap_err();
-            assert!(!error.invalid, "valid narrow budget must refuse work, not reinterpret the query");
+            assert!(
+                !error.invalid,
+                "valid narrow budget must refuse work, not reinterpret the query"
+            );
             assert_eq!(head_bytes(&backend), before);
         }
         let mut missing = query("content");
         missing.insert("reference".into(), text("refs/heads/missing"));
         assert!(backend.call(NAME, &missing).is_err());
         let mut mismatched = query("content");
-        mismatched.insert("expected_commit".into(), text("ab".repeat(format.digest_len())));
+        mismatched.insert(
+            "expected_commit".into(),
+            text("ab".repeat(format.digest_len())),
+        );
         assert!(backend.call(NAME, &mismatched).is_err());
         assert!(backend.call(NAME, &query("content")).is_ok());
         assert_eq!(head_bytes(&backend), before);
@@ -297,11 +436,20 @@ fn source_write_or_unverified_agent_context_never_enables_the_indexed_read_handl
     backend.options.writes.source = true;
     backend.options.principal = Some(principal());
     assert!(backend.tools().iter().all(|tool| tool.name != NAME));
-    assert_eq!(backend.call(NAME, &hostile).unwrap_err().code, "tool_not_granted");
-    assert_eq!(super::call(&backend, &hostile).unwrap_err().code, "tool_not_granted");
+    assert_eq!(
+        backend.call(NAME, &hostile).unwrap_err().code,
+        "tool_not_granted"
+    );
+    assert_eq!(
+        super::call(&backend, &hostile).unwrap_err().code,
+        "tool_not_granted"
+    );
     backend.options.source = true;
     backend.options.agent_token_file = Some(PathBuf::from("must-not-open"));
-    assert_eq!(super::call(&backend, &hostile).unwrap_err().code, "agent_request_required");
+    assert_eq!(
+        super::call(&backend, &hostile).unwrap_err().code,
+        "agent_request_required"
+    );
     backend.options.agent_token_file = None;
     backend.options.writes.source = false;
     backend.options.principal = None;

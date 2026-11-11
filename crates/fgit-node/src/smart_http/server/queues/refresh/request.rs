@@ -23,11 +23,21 @@ pub(in super::super) fn parse(
     for (key, value) in parse_form(bytes, 15)? {
         if !matches!(
             key.as_str(),
-            "expected_incarnation" | "object_format" | "expected_version"
-                | "expected_policy_epoch" | "pull_request" | "expected_pull_request_version"
-                | "source_ref" | "source_ref_hex" | "target_ref" | "target_ref_hex"
-                | "expected_source_tip" | "expected_recorded_target_tip"
-                | "expected_target_tip" | "title" | "body"
+            "expected_incarnation"
+                | "object_format"
+                | "expected_version"
+                | "expected_policy_epoch"
+                | "pull_request"
+                | "expected_pull_request_version"
+                | "source_ref"
+                | "source_ref_hex"
+                | "target_ref"
+                | "target_ref_hex"
+                | "expected_source_tip"
+                | "expected_recorded_target_tip"
+                | "expected_target_tip"
+                | "title"
+                | "body"
         ) {
             return Err(ApiError::bad("unknown_or_inapplicable_field"));
         }
@@ -44,9 +54,13 @@ pub(in super::super) fn parse(
             .map_err(|_| ApiError::bad("invalid_policy_epoch"))?;
     let pull_number = pull_number(&take(&mut fields, "pull_request")?)?;
     let pull_version = AggregateVersion::try_new(parse_decimal(&take(
-        &mut fields, "expected_pull_request_version",
-    )?)?).ok_or_else(|| ApiError::bad("positive_pull_version_required"))?;
-    pull_version.next().map_err(|_| ApiError::bad("version_exhausted"))?;
+        &mut fields,
+        "expected_pull_request_version",
+    )?)?)
+    .ok_or_else(|| ApiError::bad("positive_pull_version_required"))?;
+    pull_version
+        .next()
+        .map_err(|_| ApiError::bad("version_exhausted"))?;
     let source_ref = branch(&mut fields, "source_ref", "source_ref_hex")?;
     let target_ref = branch(&mut fields, "target_ref", "target_ref_hex")?;
     let source_tip = oid(&take(&mut fields, "expected_source_tip")?, format)?;
@@ -57,11 +71,15 @@ pub(in super::super) fn parse(
         return Err(ApiError::bad("queue_refresh_requires_target_movement"));
     }
     let data = PullRequestData {
-        source_ref, target_ref, source_tip, target_tip,
+        source_ref,
+        target_ref,
+        source_tip,
+        target_tip,
         title: take(&mut fields, "title")?,
         body: take(&mut fields, "body")?,
     };
-    data.validate().map_err(|_| ApiError::bad("invalid_queue_refresh"))?;
+    data.validate()
+        .map_err(|_| ApiError::bad("invalid_queue_refresh"))?;
     Ok(QueueHeadRefreshCommand {
         number,
         expected_queue_version,

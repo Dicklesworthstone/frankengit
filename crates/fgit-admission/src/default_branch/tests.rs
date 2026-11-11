@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use fgit_authority::{HeadKey, IdempotencyKey};
-use fgit_codec::{CanonicalBody, DecodeLimits, Encoder, decode_body, encode_body};
+use fgit_codec::{DecodeLimits, Encoder, decode_body, encode_body};
 use fgit_types::{
     Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, InternalObjectId, PrincipalId,
     RefName, RootLayoutVersion, TenantId,

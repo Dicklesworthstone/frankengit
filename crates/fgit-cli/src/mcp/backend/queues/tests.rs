@@ -74,7 +74,8 @@ fn exact_guards_and_native_hash_domains_survive_typed_parsing() {
                     assert_eq!(command.expected_queue_version.get(), 2);
                     assert_eq!(command.expected_policy_epoch.get(), 4);
                     assert_eq!(command.expected_recorded_target_tip.algorithm(), format);
-                    let ExpectedVersion::Exactly(version) = command.pull_request.expected_version else {
+                    let ExpectedVersion::Exactly(version) = command.pull_request.expected_version
+                    else {
                         unreachable!()
                     };
                     assert_eq!(version.get(), 3);

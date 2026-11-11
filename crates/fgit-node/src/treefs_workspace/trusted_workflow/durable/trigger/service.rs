@@ -8,8 +8,7 @@ pub use super::queue_landing::TrustedQueueLanding;
 pub use super::queue_refresh::{QueueRefreshMode, TrustedQueueRefresh};
 use super::{
     Owner, check_directory, hex, lower_hash, merge_queue, pull_request, pull_request_merge,
-    queue_refresh,
-    reporting,
+    queue_refresh, reporting,
 };
 use crate::treefs_workspace::TrustedWorkflowArtifactConfig;
 use crate::{GitDaemonSessionTimeout, NodeConfig, NodeRequestContext, OneNode};
@@ -705,7 +704,15 @@ fn attempt(
     if control.is_stopped() {
         return Ok(());
     }
-    if execute && refresh(node, request, config, receipt, QueueRefreshMode::RecoverOnly)? {
+    if execute
+        && refresh(
+            node,
+            request,
+            config,
+            receipt,
+            QueueRefreshMode::RecoverOnly,
+        )?
+    {
         return stopped(control, "attempt budget stopped queue refresh recovery");
     }
     if publish(node, request, config, receipt)? {
@@ -728,7 +735,13 @@ fn attempt(
     if control.is_stopped() {
         return Ok(());
     }
-    if refresh(node, request, config, receipt, QueueRefreshMode::RecoverAndSelect)? {
+    if refresh(
+        node,
+        request,
+        config,
+        receipt,
+        QueueRefreshMode::RecoverAndSelect,
+    )? {
         return stopped(control, "attempt budget stopped queue target refresh");
     }
     if control.is_stopped() {
@@ -998,8 +1011,9 @@ fn refresh(
             "automatic queue refresh requires its complete operator configuration".into(),
         ));
     };
-    let result = node.runtime().block_on(
-        node.refresh_trusted_queue_head_merge_workflows_in(
+    let result = node
+        .runtime()
+        .block_on(node.refresh_trusted_queue_head_merge_workflows_in(
             request,
             &config.reference,
             number,
@@ -1011,8 +1025,7 @@ fn refresh(
             refresher,
             mode,
             |_| Ok(()),
-        ),
-    );
+        ));
     receipt.non_green |= result.refused != 0;
     receipt.interrupted |= result.request_stopped;
     receipt.requires_reconciliation |= result.error.is_some();
@@ -1024,7 +1037,10 @@ fn refresh(
     receipt.publication_pending |= receipt.refresh_pending;
     add(&mut receipt.refreshes_committed, result.committed)?;
     add(&mut receipt.refreshes_refused, result.refused)?;
-    add(&mut receipt.refreshes_previously_decided, result.previously_decided)?;
+    add(
+        &mut receipt.refreshes_previously_decided,
+        result.previously_decided,
+    )?;
     add(&mut receipt.refreshes_waiting, result.waiting)?;
     if let Some(error) = result.error {
         return Err(WorkflowWatchError::Attempt(error));
@@ -1208,25 +1224,32 @@ impl Custody {
         let watch_owner = fs::File::open(events.join("owner.lock"))
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
         let refresh_pending = match (config.merge_queue, config.merge_candidate.as_ref()) {
-            (Some(number), Some(merge)) => node.runtime().block_on(
-                queue_refresh::validated_pending_in(
-                    node, request, &config.reference, number, &events, &scope, merge,
+            (Some(number), Some(merge)) => node
+                .runtime()
+                .block_on(queue_refresh::validated_pending_in(
+                    node,
+                    request,
+                    &config.reference,
+                    number,
+                    &events,
+                    &scope,
+                    merge,
                     config.queue_refresh_principal,
-                ),
-            ).map_err(|error| {
-                if control.is_stopped()
-                    && matches!(
-                        &error,
-                        super::TrustedWorkflowFailure::InvalidInput(
-                            "queue refresh custody verification stopped"
+                ))
+                .map_err(|error| {
+                    if control.is_stopped()
+                        && matches!(
+                            &error,
+                            super::TrustedWorkflowFailure::InvalidInput(
+                                "queue refresh custody verification stopped"
+                            )
                         )
-                    )
-                {
-                    WorkflowWatchError::StoppedBeforeReadiness
-                } else {
-                    custody(error)
-                }
-            })?,
+                    {
+                        WorkflowWatchError::StoppedBeforeReadiness
+                    } else {
+                        custody(error)
+                    }
+                })?,
             _ => false,
         };
         let mut result = Self {

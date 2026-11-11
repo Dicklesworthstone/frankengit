@@ -34,7 +34,8 @@ fn refresh_form(candidate: &Candidate, incarnation: RepositoryIncarnationId) -> 
 }
 
 #[test]
-fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_changes_and_restart() {
+fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_changes_and_restart()
+{
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();
         let (node, candidate, config) = initialized(&root, format, true, true, false);
@@ -50,29 +51,42 @@ fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_c
             target_ref: candidate.data.target_ref.clone(),
             expected_target_tip: candidate.data.target_tip,
         };
-        let (_, landed) = node.runtime().block_on(node.land_queue_head_durable_in(
-            &node.request_context(),
-            &LoopbackReceiveSession::authenticated(
-                OWNER,
-                IdempotencyKey::new(b"refresh-http-land-first".to_vec()).unwrap(),
-            ),
-            &landing,
-            Default::default(),
-        )).unwrap();
+        let (_, landed) = node
+            .runtime()
+            .block_on(node.land_queue_head_durable_in(
+                &node.request_context(),
+                &LoopbackReceiveSession::authenticated(
+                    OWNER,
+                    IdempotencyKey::new(b"refresh-http-land-first".to_vec()).unwrap(),
+                ),
+                &landing,
+                Default::default(),
+            ))
+            .unwrap();
         assert!(matches!(landed.outcome, DecisionOutcome::Committed { .. }));
-        let before = node.runtime().block_on(node.materialize_admission()).unwrap();
-        let queued = node.runtime().block_on(node.read_queue_in(
-            &node.request_context(), &Default::default(), QueueNumber::FIRST, None,
-        )).unwrap().queue.unwrap();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap();
+        let queued = node
+            .runtime()
+            .block_on(node.read_queue_in(
+                &node.request_context(),
+                &Default::default(),
+                QueueNumber::FIRST,
+                None,
+            ))
+            .unwrap()
+            .queue
+            .unwrap();
         assert_eq!(queued.version.get(), 4);
         assert_eq!(
             queued.deterministic_order(),
             vec![PullRequestNumber::try_new(2).unwrap()],
         );
         let credentials = root.0.join("credentials");
-        let scoped = |token, services: &str| {
-            format!("{} none\n", row(token, OWNER, services).trim_end())
-        };
+        let scoped =
+            |token, services: &str| format!("{} none\n", row(token, OWNER, services).trim_end());
         replace(
             &credentials,
             &(header(&node).replace("credentials-v1", "credentials-v2")
@@ -99,8 +113,14 @@ fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_c
         assert!(stale.body.contains("\"pull_request_changed\":false"));
         let mut lost = connection(client);
         lost.write_all(&queue_wire(
-            client, "refresh", 'f', "lost-refresh", &body, false,
-        )).unwrap();
+            client,
+            "refresh",
+            'f',
+            "lost-refresh",
+            &body,
+            false,
+        ))
+        .unwrap();
         lost.shutdown(Shutdown::Write).unwrap();
         drop(lost);
         let original = queue_post(client, "refresh", 'f', "lost-refresh", &body, true);
@@ -114,23 +134,36 @@ fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_c
         assert_eq!(server.finish().accepted_sessions(), 5);
 
         let node = reopen(&config);
-        let after = node.runtime().block_on(node.materialize_admission()).unwrap();
+        let after = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap();
         assert_eq!(after.snapshot().refs, before.snapshot().refs);
         assert_eq!(after.snapshot().head_target, before.snapshot().head_target);
-        assert_eq!(after.basis().body().ref_root, before.basis().body().ref_root);
+        assert_eq!(
+            after.basis().body().ref_root,
+            before.basis().body().ref_root
+        );
         assert_eq!(
             after.selected_closure().closure(),
             before.selected_closure().closure(),
         );
         assert_eq!(
-            node.runtime().block_on(node.read_queue_in(
-                &node.request_context(), &Default::default(), QueueNumber::FIRST, None,
-            )).unwrap().queue,
+            node.runtime()
+                .block_on(node.read_queue_in(
+                    &node.request_context(),
+                    &Default::default(),
+                    QueueNumber::FIRST,
+                    None,
+                ))
+                .unwrap()
+                .queue,
             Some(queued.clone()),
         );
-        let history = node.runtime().block_on(
-            node.snapshot_history_in(&node.request_context()),
-        ).unwrap();
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&node.request_context()))
+            .unwrap();
         let last = history.last().unwrap();
         assert_eq!(last.batch.decisions.len(), 1);
         assert_eq!(last.batch.committed_rcrs.len(), 1);
@@ -141,11 +174,21 @@ fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_c
                 if change.action == PullRequestAction::Update
                     && change.data.target_tip == candidate.data.source_tip
         ));
-        let pulls = node.runtime().block_on(node.read_pull_requests_in(
-            &node.request_context(), &Default::default(), 0, 100, None,
-        )).unwrap();
-        let refreshed = pulls.pull_requests.iter()
-            .find(|pull| pull.number.get() == 2).unwrap();
+        let pulls = node
+            .runtime()
+            .block_on(node.read_pull_requests_in(
+                &node.request_context(),
+                &Default::default(),
+                0,
+                100,
+                None,
+            ))
+            .unwrap();
+        let refreshed = pulls
+            .pull_requests
+            .iter()
+            .find(|pull| pull.number.get() == 2)
+            .unwrap();
         assert_eq!(refreshed.event.version.get(), 2);
         let mut expected_data = candidate.data.clone();
         expected_data.target_tip = candidate.data.source_tip;
@@ -156,21 +199,22 @@ fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_c
         expected_data.title.push_str(" (edited after refresh)");
         let changed = PullRequestCommand {
             number: PullRequestNumber::try_new(2).unwrap(),
-            expected_version: ExpectedVersion::Exactly(
-                AggregateVersion::try_new(2).unwrap(),
-            ),
+            expected_version: ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap()),
             action: PullRequestAction::Update,
             data: expected_data.clone(),
         };
-        let (_, edited) = node.runtime().block_on(node.admit_pull_request_durable_in(
-            &node.request_context(),
-            &LoopbackReceiveSession::authenticated(
-                OWNER,
-                IdempotencyKey::new(b"edit-after-http-refresh".to_vec()).unwrap(),
-            ),
-            &changed,
-            Default::default(),
-        )).unwrap();
+        let (_, edited) = node
+            .runtime()
+            .block_on(node.admit_pull_request_durable_in(
+                &node.request_context(),
+                &LoopbackReceiveSession::authenticated(
+                    OWNER,
+                    IdempotencyKey::new(b"edit-after-http-refresh".to_vec()).unwrap(),
+                ),
+                &changed,
+                Default::default(),
+            ))
+            .unwrap();
         assert!(matches!(edited.outcome, DecisionOutcome::Committed { .. }));
         node.shutdown().unwrap();
         let node = reopen(&config);
@@ -186,31 +230,57 @@ fn http_refresh_preserves_fifo_and_recovers_its_original_result_after_metadata_c
             stale,
         );
         let reused = queue_post(
-            client, "refresh", 'f', "lost-refresh",
-            &body.replace("expected_version=4", "expected_version=5"), false,
+            client,
+            "refresh",
+            'f',
+            "lost-refresh",
+            &body.replace("expected_version=4", "expected_version=5"),
+            false,
         );
         status(&reused, 409);
         assert!(reused.body.contains("idempotency_key_reuse"));
         let recovered = lookup(client, 'd', "lost-refresh");
         status(&recovered, 200);
         assert!(recovered.body.contains("committed"));
-        let original_tx = original.body.split_once("\"tx_id\":\"").unwrap()
-            .1.split('"').next().unwrap();
+        let original_tx = original
+            .body
+            .split_once("\"tx_id\":\"")
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap();
         assert!(recovered.body.contains(original_tx));
         assert_eq!(server.finish().accepted_sessions(), 4);
         let node = reopen(&config);
         assert_eq!(generation(&node), settled_generation);
-        let pulls = node.runtime().block_on(node.read_pull_requests_in(
-            &node.request_context(), &Default::default(), 0, 100, None,
-        )).unwrap();
-        let current = pulls.pull_requests.iter()
-            .find(|pull| pull.number.get() == 2).unwrap();
+        let pulls = node
+            .runtime()
+            .block_on(node.read_pull_requests_in(
+                &node.request_context(),
+                &Default::default(),
+                0,
+                100,
+                None,
+            ))
+            .unwrap();
+        let current = pulls
+            .pull_requests
+            .iter()
+            .find(|pull| pull.number.get() == 2)
+            .unwrap();
         assert_eq!(current.event.version.get(), 3);
         assert_eq!(current.data.as_ref(), Some(&expected_data));
         assert_eq!(
-            node.runtime().block_on(node.read_queue_in(
-                &node.request_context(), &Default::default(), QueueNumber::FIRST, None,
-            )).unwrap().queue,
+            node.runtime()
+                .block_on(node.read_queue_in(
+                    &node.request_context(),
+                    &Default::default(),
+                    QueueNumber::FIRST,
+                    None,
+                ))
+                .unwrap()
+                .queue,
             Some(queued),
         );
         node.shutdown().unwrap();

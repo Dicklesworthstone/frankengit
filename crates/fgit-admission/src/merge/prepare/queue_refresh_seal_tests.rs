@@ -1,15 +1,16 @@
 //! Exact normal-form and profile separation checks at the shared fold boundary.
 use super::*;
-use crate::merge::native::queue::{
-    QueueHeadRefreshCommand, queue_head_refresh_proposal,
-};
+use crate::merge::native::queue::{QueueHeadRefreshCommand, queue_head_refresh_proposal};
 use fgit_authority::{HeadKey, IdempotencyKey, ScopedEntry, SemanticRequest};
 use fgit_forge::event::pull_request::{PullRequestCommand, PullRequestData};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
-use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId, RefName, RepositoryId, TenantId};
+use fgit_types::{
+    GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId, RefName, RepositoryId, TenantId,
+};
 
 fn inputs(format: GitHashAlgorithm) -> (AdmissionContext, QueueHeadRefreshCommand) {
-    let oid = |digit: &str| GitOid::from_hex(format, &digit.repeat(format.digest_len() * 2)).unwrap();
+    let oid =
+        |digit: &str| GitOid::from_hex(format, &digit.repeat(format.digest_len() * 2)).unwrap();
     let context = AdmissionContext {
         head_key: HeadKey::new(b"queue-refresh/head".to_vec()).unwrap(),
         tenant_id: TenantId::from_bytes([1; 16]),
@@ -74,7 +75,10 @@ fn queue_refresh_seal_preserves_ordinary_identity_and_binds_every_observation() 
         let (ordinary_event, ordinary) =
             crate::merge::native::pull_request::proposal(&context, &command.pull_request).unwrap();
         assert_eq!(ordinary_event, event);
-        assert_eq!(verify_pull_request_seal(&context, &event, &ordinary), Ok(None));
+        assert_eq!(
+            verify_pull_request_seal(&context, &event, &ordinary),
+            Ok(None)
+        );
         assert_ne!(sealed.derive().unwrap().0, ordinary.derive().unwrap().0);
         assert_eq!(
             queue_head_refresh_proposal(&context, &command).unwrap(),
@@ -146,7 +150,11 @@ fn queue_refresh_rejects_partial_extra_and_substituted_seals() {
     }
 }
 
-fn change_actor_and_refuse(context: &AdmissionContext, mut event: ForgeEvent, sealed: &SealAttempt) {
+fn change_actor_and_refuse(
+    context: &AdmissionContext,
+    mut event: ForgeEvent,
+    sealed: &SealAttempt,
+) {
     let ForgeEventPayload::PullRequestChangedNative(change) = &mut event.payload else {
         panic!("native PR event");
     };
@@ -170,7 +178,11 @@ fn queue_refresh_advances_only_the_pr_and_refuses_noop_or_other_lifecycles() {
     let mut changed = command.clone();
     changed.expected_recorded_target_tip = changed.pull_request.data.target_tip;
     assert!(queue_head_refresh_proposal(&context, &changed).is_err());
-    for action in [PullRequestAction::Open, PullRequestAction::Close, PullRequestAction::Reopen] {
+    for action in [
+        PullRequestAction::Open,
+        PullRequestAction::Close,
+        PullRequestAction::Reopen,
+    ] {
         let mut changed = command.clone();
         changed.pull_request.action = action;
         assert!(queue_head_refresh_proposal(&context, &changed).is_err());

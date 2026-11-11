@@ -5,9 +5,9 @@ mod candidate_tests;
 mod input;
 #[cfg(test)]
 mod integration_tests;
+mod output;
 #[cfg(test)]
 mod refresh_tests;
-mod output;
 mod schema;
 #[cfg(test)]
 mod tests;

@@ -102,7 +102,10 @@ fn fixture(format: GitHashAlgorithm, mode: Mode) -> Fixture {
 }
 fn fixture_with_exit(format: GitHashAlgorithm, mode: Mode, exit: u8) -> Fixture {
     fixture_with_command(format, mode, |root| {
-        format!("printf x >> '{}'; exit {exit}", root.join("executed").display())
+        format!(
+            "printf x >> '{}'; exit {exit}",
+            root.join("executed").display()
+        )
     })
 }
 fn fixture_with_command(

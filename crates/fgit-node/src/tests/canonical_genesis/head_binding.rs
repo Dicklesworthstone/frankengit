@@ -3,6 +3,10 @@
 //! and the persisted head are unchanged in every negative case.
 
 use super::*;
+use crate::{
+    ADMISSION_REF_STATE_KEY_PREFIX, read_historical_ref_state_in, ref_state_root,
+    stage_immutable_frame,
+};
 
 fn state(target: Option<&[u8]>) -> CanonicalRefState {
     state_with_refs(BTreeMap::new(), target)
