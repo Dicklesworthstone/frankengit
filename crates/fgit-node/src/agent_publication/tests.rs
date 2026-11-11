@@ -11,6 +11,8 @@ mod checkpoint;
 mod cleanup;
 #[path = "evidence_tests.rs"]
 mod evidence;
+#[path = "prepared_patch_tests.rs"]
+mod prepared_patch;
 #[path = "resumption_tests.rs"]
 mod resumption;
 

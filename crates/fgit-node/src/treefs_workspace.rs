@@ -18,7 +18,10 @@ mod outbox_delivery;
 pub use outbox_delivery::RetiredForgeDeliveryReceipt;
 mod patch;
 mod tags;
-pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
+pub use patch::{
+    AgentWorkspacePatchInput, AgentWorkspacePatchRefusal, PatchPathReceipt,
+    PreparedAgentPatchCandidate, WorkspacePatchCandidate,
+};
 mod discussions;
 mod events;
 mod issues;

@@ -651,6 +651,38 @@ exercise native admission or a successful authority-head CAS. Effect-time
 capability/revocation checks, artifact authentication, native closure admission,
 and final head publication remain with their existing owners.
 
+#### Native patch preparation
+
+`fgit-node::OneNode::prepare_agent_workspace_patch_in` applies a bounded patch
+through the existing native TreeFS reader, evaluator and exporter. It returns
+`PreparedAgentPatchCandidate<A>` with the actual `WorkspaceBinding`, overlay,
+`ExportPlan`, exact-predecessor proposal, candidate bundle and commit body held
+together behind immutable accessors. The host can collect checks against these
+exact bytes and pass the retained export and bundle directly to the native
+publication consumer; it does not have to reconstruct a workspace or export
+from a patch receipt.
+
+`AgentWorkspacePatchInput` takes an authenticated Intent Run, original branch
+and commit, explicit disclosure and TreeFS capabilities, patch, deterministic
+commit metadata and limits. Preparation requires the run's read, TreeFS,
+candidate-creation and publication-preparation classes. The selected head must
+equal the run's authenticated head, and the source RCR and branch predecessor
+must match. Hidden paths, incomplete directory disclosure, stale bases,
+expired or regressing logical time, cancellation and resource exhaustion
+refuse. The host supplies a monotone clock in the run/capability time domain
+and keeps the original request deadline within that run's lifetime.
+
+The prepared candidate's `publication_subject` binds the retained state to the
+host's actual plan and Context Packets before evidence collection.
+`prepare_ref_transaction` then uses the existing mandatory gate with that
+original subject, independently supplied evidence, reconciliation, policy and
+approval. It fills the overlay and export from its retained state. Preparation
+alone creates no evidence, verifier independence, publication approval or
+canonical ref update. This native host API retains state in memory; the host
+still owns sponsorship, current revocations, cumulative run-budget accounting
+and durable custody. It is not a source-write grant for sponsored HTTP/MCP
+credentials or a restartable agent executor.
+
 
 ### 12.2 Checked canonical submission responsibility
 

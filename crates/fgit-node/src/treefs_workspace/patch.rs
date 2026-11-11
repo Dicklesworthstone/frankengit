@@ -26,6 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod agent;
 mod binary;
+mod prepared_agent;
+pub use prepared_agent::{
+    AgentWorkspacePatchInput, AgentWorkspacePatchRefusal, PreparedAgentPatchCandidate,
+};
 
 const FETCH_BYTES: u64 = 256 * 1024 * 1024;
 const FETCH_OBJECTS: u64 = 100_000;
@@ -81,11 +85,19 @@ pub struct WorkspacePatchCandidate {
     pub paths: Vec<PatchPathReceipt>,
     pub object_count: usize,
     bundle: Vec<u8>,
+    commit_body: Vec<u8>,
 }
 impl WorkspacePatchCandidate {
     #[must_use]
     pub fn bundle_bytes(&self) -> &[u8] {
         &self.bundle
+    }
+
+    /// Exact native commit body packed into this candidate. A host can retain
+    /// or independently review these bytes without reconstructing metadata.
+    #[must_use]
+    pub fn commit_body(&self) -> &[u8] {
+        &self.commit_body
     }
 }
 
@@ -574,6 +586,50 @@ fn prepare_at_base<A: GitHashAlgorithm>(
     now: u64,
     metadata: &MergeMetadata,
 ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+    prepare_owned_at_base(
+        base,
+        source,
+        capability,
+        request,
+        reference,
+        expected_commit,
+        patch,
+        paths,
+        patch_bytes,
+        now,
+        metadata,
+        ExportLimits {
+            max_objects: EXPORT_OBJECTS,
+            max_total_bytes: EXPORT_BYTES,
+            max_tree_entries: EXPORT_OBJECTS,
+        },
+    )
+    .map(|prepared| prepared.candidate)
+}
+
+/// The same evaluated edits and packed bytes, retained for the agent protocol
+/// bridge instead of reconstructing an overlay from a transport receipt.
+struct OwnedPatchCandidate<A: GitHashAlgorithm> {
+    candidate: WorkspacePatchCandidate,
+    export: candidate::WorkspaceEditExport<A>,
+    overlay: fgit_treefs::Overlay,
+    base_tree: fgit_crypto::GitOid<A>,
+}
+
+fn prepare_owned_at_base<A: GitHashAlgorithm>(
+    base: &BaseView<A>,
+    source: &NodeTreeSource<'_>,
+    capability: &mut TreeCapability,
+    request: &NodeRequestContext,
+    reference: &RefName,
+    expected_commit: GitOid,
+    patch: &UnifiedPatch<'_>,
+    paths: &[TreePath],
+    patch_bytes: &[u8],
+    now: u64,
+    metadata: &MergeMetadata,
+    export_limits: ExportLimits,
+) -> Result<OwnedPatchCandidate<A>, NodeWorkspaceRefusal> {
     live(request)?;
     if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
         return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
@@ -746,18 +802,14 @@ fn prepare_at_base<A: GitHashAlgorithm>(
     }
     live(request)?;
     receipts.sort_by(|left, right| left.path.cmp(&right.path));
-    let export = candidate::export_from_base(
+    let (export, overlay) = candidate::export_owned_from_base(
         base,
         source,
         capability,
         &log,
         expected_commit,
         now,
-        ExportLimits {
-            max_objects: EXPORT_OBJECTS,
-            max_total_bytes: EXPORT_BYTES,
-            max_tree_entries: EXPORT_OBJECTS,
-        },
+        export_limits,
         &|| !workspace_request_live(request),
     )?;
     if export.plan.root_tree() == base.base_tree_oid() {
@@ -765,15 +817,21 @@ fn prepare_at_base<A: GitHashAlgorithm>(
             "patch has no net tree change; no candidate was created",
         ));
     }
-    pack(
+    let candidate = pack(
         source.inner.object_format,
         reference,
-        export,
+        &export,
         receipts,
         sha256_digest(patch_bytes),
         metadata,
         &|| workspace_request_live(request),
-    )
+    )?;
+    Ok(OwnedPatchCandidate {
+        candidate,
+        export,
+        overlay,
+        base_tree: *base.base_tree_oid(),
+    })
 }
 
 fn native_id(format: ObjectFormat, bytes: &[u8]) -> Result<GitOid, NodeWorkspaceRefusal> {
@@ -795,7 +853,7 @@ impl CanonicalObjectSource for CandidateObjects {
 fn pack<A: GitHashAlgorithm>(
     format: ObjectFormat,
     reference: &RefName,
-    export: candidate::WorkspaceEditExport<A>,
+    export: &candidate::WorkspaceEditExport<A>,
     paths: Vec<PatchPathReceipt>,
     patch_sha256: [u8; 32],
     metadata: &MergeMetadata,
@@ -862,7 +920,7 @@ fn pack<A: GitHashAlgorithm>(
         CanonicalPackObject::new(
             candidate_commit,
             ObjectType::Commit,
-            body,
+            body.clone(),
             vec![root_tree, source_commit],
             0,
             0,
@@ -900,5 +958,6 @@ fn pack<A: GitHashAlgorithm>(
         paths,
         object_count: selected.len(),
         bundle,
+        commit_body: body,
     })
 }

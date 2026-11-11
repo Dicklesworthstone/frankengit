@@ -102,7 +102,10 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
-pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
+pub use treefs_workspace::{
+    AgentWorkspacePatchInput, AgentWorkspacePatchRefusal, PatchPathReceipt,
+    PreparedAgentPatchCandidate, WorkspacePatchCandidate,
+};
 pub use treefs_workspace::{
     PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
     QueueReadRefusal,
