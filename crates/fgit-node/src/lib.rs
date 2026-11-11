@@ -84,6 +84,10 @@ pub use treefs_workspace::candidate_inspection::{
 /// Operator-owned native CI, with canonical event custody and explicit drain.
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::workflow_watch;
+pub use treefs_workspace::{
+    AgentWorkspacePatchInput, AgentWorkspacePatchRefusal, PatchPathReceipt,
+    PreparedAgentPatchCandidate, WorkspacePatchCandidate,
+};
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::{
     DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES,
@@ -103,7 +107,6 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
-pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{
     PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
     QueueReadRefusal,

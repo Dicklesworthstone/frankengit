@@ -8,9 +8,9 @@ use std::future::Future;
 
 use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::merge::native::objects::{
-    CanonicalObjectHeader, FrontierObjectHeaders, MAX_REUSED_BLOB_BYTES, MergeObjectLimits,
-    ObjectFrontier, validate_fast_forward_objects_above, validate_merge_objects_above,
-    validate_squash_objects_above,
+    CanonicalObjectHeader, FrontierCommitMetadata, FrontierObjectHeaders, MAX_REUSED_BLOB_BYTES,
+    MergeObjectLimits, ObjectFrontier, validate_fast_forward_objects_above,
+    validate_merge_objects_above, validate_squash_objects_above,
 };
 use fgit_admission::merge::native::queue::ValidatedQueueLanding;
 use fgit_admission::merge::native::{
@@ -27,6 +27,8 @@ use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::NativeMerge;
+use fgit_forge::preparation::MergeSourceError;
+use fgit_git_object::ParseLimits;
 use fgit_pack::{PackError, PackWriteError};
 use fgit_reference::intent::TransactionRequest;
 use fgit_txn::TransactionFoldReport;
@@ -35,6 +37,7 @@ use fsqlite_types::cx::Cx;
 
 use super::publication::receive_error;
 use super::{NodeWorkspaceRefusal, workspace_request_live};
+use crate::ancestry_metadata::{AncestryMetadataAccess, VerifiedCommitMetadata};
 use crate::receive_staging::ReceiveStaging;
 use crate::{
     DurableAsyncAdmissionProjection, LoopbackReceiveSession, NodeReceiveTransportRefusal,
@@ -90,6 +93,7 @@ pub(super) fn read_frontier_header(
 
 struct NativeFrontierHeaders<'source, 'selected, 'staging> {
     source: VerifiedFabricPackSource<'source>,
+    ancestry: AncestryMetadataAccess<'source>,
     selected: &'selected BTreeSet<GitOid>,
     staging: &'staging ReceiveStaging,
     maximum_blob_bytes: usize,
@@ -106,6 +110,80 @@ impl FrontierObjectHeaders for NativeFrontierHeaders<'_, '_, '_> {
             return Ok(None);
         }
         read_frontier_header(&self.source, id, self.maximum_blob_bytes).map(Some)
+    }
+
+    fn load_commit_metadata(
+        &self,
+        id: &GitOid,
+        limits: &ParseLimits,
+    ) -> Result<Option<FrontierCommitMetadata>, ProjectionFailure> {
+        self.ancestry_checkpoint()?;
+        if !self.selected.contains(id) {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ObjectClosureIncomplete,
+            ));
+        }
+        if self.staging.contains(*id) {
+            return Ok(None);
+        }
+        let found = self
+            .ancestry
+            .lookup(*id, limits, self.source.buffered_object_limit());
+        self.ancestry_checkpoint()?;
+        found
+            .map(|entry| {
+                entry
+                    .map(VerifiedCommitMetadata::into_frontier_metadata)
+                    .map_err(|error| match error {
+                        MergeSourceError::BudgetExceeded => {
+                            ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
+                        }
+                        _ => ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid),
+                    })
+            })
+            .transpose()
+    }
+
+    fn remember_commit_metadata(&self, id: &GitOid, body: &[u8], limits: &ParseLimits) {
+        if self.ancestry_checkpoint().is_err()
+            || !self.selected.contains(id)
+            || self.staging.contains(*id)
+        {
+            return;
+        }
+        #[cfg(test)]
+        self.ancestry.record_body_read();
+        if !self.ancestry.is_enabled() {
+            return;
+        }
+        // Retention is best effort. The cache's stricter tree-header profile
+        // must never narrow historical ancestry acceptance on a cold read.
+        let Ok(entry) = VerifiedCommitMetadata::parse(*id, body, limits) else {
+            return;
+        };
+        if self.ancestry_checkpoint().is_ok() {
+            self.ancestry.insert(&entry);
+        }
+    }
+}
+
+impl NativeFrontierHeaders<'_, '_, '_> {
+    fn ancestry_checkpoint(&self) -> Result<(), ProjectionFailure> {
+        if self.source.session_checkpoint().is_err() {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::CancellationInProgress,
+            ));
+        }
+        if !self.source.database_read_is_live() {
+            return Err(ProjectionFailure::Unavailable(
+                if self.source.database_exhaustion.get().is_some() {
+                    RefusalCode::ResourceBudgetExceeded
+                } else {
+                    RefusalCode::CancellationInProgress
+                },
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -896,6 +974,7 @@ impl NodeNativeMergeProjection<'_> {
             let objects = selected.selected_closure().closure().objects();
             let headers = NativeFrontierHeaders {
                 source: make_source(),
+                ancestry: AncestryMetadataAccess::for_node(self.node),
                 selected: objects,
                 staging,
                 maximum_blob_bytes: object_limits.max_reused_blob_bytes,

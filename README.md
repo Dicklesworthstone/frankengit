@@ -634,6 +634,15 @@ including legacy forge-position and outbox checks, can still replay history.
 This improves warm closure selection; the remaining history-scaling work in
 `frankengit-uxo2` stays open.
 
+Native merge, squash and fast-forward publication also reuse the node's bounded
+verified commit-metadata cache for ancestry above that selected closure. Each
+lookup still requires current selected membership and the original parser,
+object-size and live-request limits. Candidate and newly staged bytes take
+precedence over cached history. Cold reads use the original native parser and
+retain eligible metadata for later queries; cache eviction or restart restores
+that same path. This shares parsing work with merge preparation without
+persisting an ancestry index or making cached entries publication authority.
+
 Non-atomic receives now publish independent ref decisions in bounded groups:
 at most 64 decisions and 1 MiB of canonical decision-batch bytes share one
 exact-predecessor authority-head CAS. Every command retains its own seal,
