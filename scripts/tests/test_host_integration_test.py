@@ -134,7 +134,7 @@ if case == "partial_failure":
 class HostTestContract(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="fgit host test contract ")
-        self.base = Path(self.temporary.name)
+        self.base = Path(self.temporary.name).resolve()
         self.root = self.base / 'checkout with spaces "quotes"'
         self.bin = self.base / "fake tools"
         self.bin.mkdir()
@@ -194,6 +194,28 @@ class HostTestContract(unittest.TestCase):
         native = next(r for r in rows if r["kind"] == "native")
         self.assertEqual(native["args"], ["--ignored", "case with spaces"])
         self.assertEqual(native["corpus"], "caller corpus with spaces")
+        self.assertTrue(all(r["cwd"] == str(self.root) for r in rows))
+
+    def test_symlinked_caller_cwd_resolves_canonical_checkout_root(self):
+        real_caller = self.base / "real caller cwd"
+        real_caller.mkdir()
+        symlink_caller = self.base / "alias caller cwd"
+        symlink_caller.symlink_to(real_caller, target_is_directory=True)
+        symlink_helper = self.base / "alias checkout"
+        symlink_helper.symlink_to(self.root, target_is_directory=True)
+        env = {**self.env, "TEST_CASE": ""}
+        command = [
+            sys.executable,
+            str(symlink_helper / "scripts/run_host_integration_test.py"),
+            "fgit-diff",
+            TARGET,
+            "--",
+            "--ignored",
+            "case with spaces",
+        ]
+        result = subprocess.run(command, cwd=symlink_caller, env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = [json.loads(l) for l in self.log.read_text().splitlines()]
         self.assertTrue(all(r["cwd"] == str(self.root) for r in rows))
 
     def test_native_nonzero_exit_is_preserved(self):

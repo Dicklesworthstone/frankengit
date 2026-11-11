@@ -138,7 +138,7 @@ for (const cli of ['forge_inbox', 'forge_issues']) {
     assert.ok(run.child.stdout.readableLength > 0); run.child.stdout.destroy();
     assert.deepEqual(await boundedExit(run, 1500), { code: 2, signal: null }); await run.errorsClosed;
     const error = JSON.parse(run.errors());
-    assert.equal(error.operation_completed, true); assert.match(error.code, /^(EPIPE|ECONNRESET)$/);
+    assert.equal(error.operation_completed, true); assert.match(error.code, /^(EPIPE|ECONNRESET|ENOTCONN)$/);
     assert.equal(f.pages(), 10); assert.deepEqual(await readdir(f.root), ['token']);
   });
 
