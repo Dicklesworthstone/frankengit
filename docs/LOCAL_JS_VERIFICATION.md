@@ -118,7 +118,7 @@ forge or Git compatibility evidence.
 Each invocation discovers all `.test.mjs` files in the selected directory. The
 `scripts` scope includes both `scripts/tests/` and the root `scripts/` directory,
 where the workflow-supervisor entrypoint tests live. Each invocation
-runs TAP with two concurrent files, a five-minute per-test bound, and a ten-minute
+runs TAP with bounded file concurrency (`2..=4` concurrent files), a five-minute per-test bound, and a ten-minute
 campaign bound. The 101-publication bootstrap test performs hundreds of durable
 filesystem operations. An exploratory 30-second bound timed it out on macOS;
 the unchanged test subsequently passed all five lifecycle cases in 172 seconds

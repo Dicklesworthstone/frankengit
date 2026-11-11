@@ -104,7 +104,7 @@ async function initialize() {
   await chmod(temporary, 0o700);
   initialization.signal.throwIfAborted();
   const runtimeFlags = scope === 'scripts' ? ['--experimental-vm-modules'] : [];
-  const concurrency = Math.max(2, Math.min(8, availableParallelism()));
+  const concurrency = Math.max(2, Math.min(4, availableParallelism()));
   console.error(`JS profile: revision=${revision} dirty=${dirty} node=${expected} host=${process.platform}/${process.arch} scope=${scope} files=${files.length} vm_modules=${runtimeFlags.length > 0} concurrency=${concurrency} test_timeout_ms=300000 campaign_timeout_ms=600000 temporary=${temporary}`);
   return { files, runtimeFlags, concurrency };
 }
