@@ -6,6 +6,8 @@
 
 #[path = "native_merge_delivery_faults/default_branch.rs"]
 mod default_branch;
+#[path = "native_merge_delivery_faults/discussion_append.rs"]
+mod discussion_append;
 #[path = "native_merge_delivery_faults/issue_append.rs"]
 mod issue_append;
 #[path = "native_merge_delivery_faults/issue_labels.rs"]

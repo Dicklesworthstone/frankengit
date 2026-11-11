@@ -1,7 +1,7 @@
 //! Canonical forge publication and bounded revalidation policy.
 //!
 //! Adding content, assignees or labels keyed by a sealed transaction can preserve its
-//! meaning across a changed issue or PR conversation frontier. Canonical sequencing,
+//! meaning across a changed issue, discussion or PR conversation frontier. Canonical sequencing,
 //! current permissions, resource limits and terminal outcomes still require
 //! the repository head CAS.
 //! Retry eligibility never grants authority or turns the head into a CRDT.
@@ -36,6 +36,7 @@ pub enum ForgeOperation {
     IssueClearMilestone,
     MilestoneChange,
     DiscussionChange,
+    DiscussionAppendComment,
     AgentCredentialChange,
     NotificationPreferenceChange,
     ReviewProtection,
@@ -76,6 +77,7 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         ForgeOperation::IssueAppendComment
         | ForgeOperation::IssueAddAssignees
         | ForgeOperation::IssueAddLabels
+        | ForgeOperation::DiscussionAppendComment
         | ForgeOperation::PullRequestAppendComment => ForgeReplanPolicy::RevalidateAppend,
         ForgeOperation::PullRequestOpen
         | ForgeOperation::PullRequestHeadAdvance
@@ -164,6 +166,7 @@ mod tests {
             ForgeOperation::IssueAppendComment,
             ForgeOperation::IssueAddAssignees,
             ForgeOperation::IssueAddLabels,
+            ForgeOperation::DiscussionAppendComment,
             ForgeOperation::PullRequestAppendComment,
         ] {
             let rule = forge_admission_rule(operation);

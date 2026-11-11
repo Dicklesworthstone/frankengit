@@ -2,7 +2,7 @@
 //! Classification controls planning only; seal verification and the current
 //! lifecycle, authorization and resource predicates still decide admission.
 
-use super::{ForgeEvent, ForgeEventPayload, issue::IssueAction};
+use super::{ForgeEvent, ForgeEventPayload, discussion::DiscussionAction, issue::IssueAction};
 use fgit_calm::forge_admission_rule;
 pub use fgit_calm::{ForgeAdmissionRule, ForgeOperation, ForgeReplanPolicy};
 
@@ -13,6 +13,7 @@ pub enum ForgeCommandProfile {
     AddIssueAssigneesV1,
     AddIssueLabelsV1,
     AppendPullRequestCommentV1,
+    AppendDiscussionCommentV1,
     /// Unrecognized semantics never gain append eligibility.
     Unknown,
 }
@@ -53,6 +54,17 @@ pub const fn classify_event(
                     crate::AggregateId::PullRequestConversation(_),
                     ForgeEventPayload::PullRequestCommentedNative(_),
                 ) => ForgeOperation::PullRequestAppendComment,
+                _ => ForgeOperation::Unknown,
+            }
+        }
+        ForgeCommandProfile::AppendDiscussionCommentV1 => {
+            match (&event.aggregate, &event.payload) {
+                (
+                    crate::AggregateId::Discussion(_),
+                    ForgeEventPayload::DiscussionChangedNative(change),
+                ) if matches!(change.action, DiscussionAction::Comment { .. }) => {
+                    ForgeOperation::DiscussionAppendComment
+                }
                 _ => ForgeOperation::Unknown,
             }
         }
@@ -163,6 +175,7 @@ mod tests {
                 ForgeCommandProfile::ExactVersion,
                 ForgeCommandProfile::Unknown,
                 ForgeCommandProfile::AppendPullRequestCommentV1,
+                ForgeCommandProfile::AppendDiscussionCommentV1,
             ] {
                 assert_eq!(
                     classify_event(&event, profile).replan,
@@ -218,6 +231,7 @@ mod tests {
             ForgeCommandProfile::AppendIssueCommentV1,
             ForgeCommandProfile::AddIssueAssigneesV1,
             ForgeCommandProfile::AddIssueLabelsV1,
+            ForgeCommandProfile::AppendDiscussionCommentV1,
         ] {
             assert_eq!(
                 classify_event(&event, profile).replan,
@@ -279,6 +293,7 @@ mod tests {
             ForgeCommandProfile::AppendIssueCommentV1,
             ForgeCommandProfile::AddIssueAssigneesV1,
             ForgeCommandProfile::AppendPullRequestCommentV1,
+            ForgeCommandProfile::AppendDiscussionCommentV1,
         ] {
             assert_eq!(
                 classify_event(&event, profile).replan,
@@ -296,6 +311,80 @@ mod tests {
                 classify_event(&wrong, ForgeCommandProfile::AddIssueLabelsV1).replan,
                 ForgeReplanPolicy::PreservePreconditions
             );
+        }
+    }
+
+    #[test]
+    fn discussion_append_requires_its_own_profile_aggregate_and_comment_action() {
+        use crate::event::discussion::{DiscussionCommand, DiscussionEdit};
+        use crate::{AggregateId, DiscussionNumber, PullRequestNumber};
+        use fgit_calm::CoordinationClass;
+
+        for action in [
+            DiscussionAction::Open {
+                title: "Design discussion".into(),
+                body: String::new(),
+            },
+            DiscussionAction::Edit(DiscussionEdit {
+                title: Some("Revised title".into()),
+                body: None,
+            }),
+            DiscussionAction::Comment {
+                body: "An independent reply".into(),
+            },
+            DiscussionAction::Close,
+            DiscussionAction::Reopen,
+            DiscussionAction::Lock,
+            DiscussionAction::Unlock,
+        ] {
+            let is_comment = matches!(action, DiscussionAction::Comment { .. });
+            let expected_version = if matches!(action, DiscussionAction::Open { .. }) {
+                ExpectedVersion::NewStream
+            } else {
+                ExpectedVersion::Exactly(AggregateVersion::FIRST)
+            };
+            let event = DiscussionCommand {
+                number: DiscussionNumber::FIRST,
+                expected_version,
+                action,
+            }
+            .proposed_event(PrincipalId::from_bytes([3; 16]))
+            .unwrap();
+            let rule = classify_event(&event, ForgeCommandProfile::AppendDiscussionCommentV1);
+            assert_eq!(rule.coordination, CoordinationClass::HeadCasRequired);
+            assert_eq!(
+                rule.replan,
+                if is_comment {
+                    ForgeReplanPolicy::RevalidateAppend
+                } else {
+                    ForgeReplanPolicy::PreservePreconditions
+                }
+            );
+            for profile in [
+                ForgeCommandProfile::ExactVersion,
+                ForgeCommandProfile::Unknown,
+                ForgeCommandProfile::AppendIssueCommentV1,
+                ForgeCommandProfile::AddIssueAssigneesV1,
+                ForgeCommandProfile::AddIssueLabelsV1,
+                ForgeCommandProfile::AppendPullRequestCommentV1,
+            ] {
+                assert_eq!(
+                    classify_event(&event, profile).replan,
+                    ForgeReplanPolicy::PreservePreconditions
+                );
+            }
+            for aggregate in [
+                AggregateId::Issue(IssueNumber::FIRST),
+                AggregateId::PullRequestConversation(PullRequestNumber::FIRST),
+                AggregateId::ReviewProtection,
+            ] {
+                let mut wrong = event.clone();
+                wrong.aggregate = aggregate;
+                assert_eq!(
+                    classify_event(&wrong, ForgeCommandProfile::AppendDiscussionCommentV1).replan,
+                    ForgeReplanPolicy::PreservePreconditions
+                );
+            }
         }
     }
 }

@@ -5,6 +5,9 @@ use crate::aggregate::{AggregateId, AggregateVersion, DiscussionNumber, Expected
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode};
 
+mod append;
+pub use append::DiscussionCommentIntent;
+
 pub use super::issue::{MAX_BODY_BYTES, MAX_TITLE_BYTES};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,13 +52,7 @@ impl DiscussionAction {
                 }
                 Ok(())
             }
-            Self::Comment { body } => {
-                validate_body(body)?;
-                if body.trim().is_empty() {
-                    return Err(invalid_native("discussion.comment"));
-                }
-                Ok(())
-            }
+            Self::Comment { body } => validate_comment_body(body),
             Self::Close | Self::Reopen | Self::Lock | Self::Unlock => Ok(()),
         }
     }
@@ -158,6 +155,14 @@ fn validate_title(title: &str) -> Result<(), CodecRefusal> {
 fn validate_body(body: &str) -> Result<(), CodecRefusal> {
     if body.len() > MAX_BODY_BYTES || body.contains('\0') {
         return Err(invalid_native("discussion.body"));
+    }
+    Ok(())
+}
+
+fn validate_comment_body(body: &str) -> Result<(), CodecRefusal> {
+    validate_body(body)?;
+    if body.trim().is_empty() {
+        return Err(invalid_native("discussion.comment"));
     }
     Ok(())
 }

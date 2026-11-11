@@ -12,13 +12,18 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState};
-use fgit_forge::event::discussion::{DiscussionCommand, DiscussionSnapshot, apply_event};
+use fgit_forge::event::discussion::{
+    DiscussionAction, DiscussionCommand, DiscussionCommentIntent, DiscussionSnapshot, apply_event,
+};
 use fgit_forge::{
     AggregateId, AggregateVersion, DiscussionNumber, ExpectedVersion, ForgeEvent, ForgeEventBatch,
     ForgeEventPayload,
 };
 use fgit_types::{AsciiSlug, RefusalCode, RepositoryAuthorityHeadId};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod append;
+pub use append::{admit_discussion_comment_async, append_proposal};
 
 const MAX_PAGE: u16 = 100;
 const MAX_EVENTS: usize = 65_536;
@@ -59,7 +64,8 @@ pub fn proposal(
 }
 
 /// The preparation boundary independently checks the full original request,
-/// including actor, number, exact predecessor and complete action.
+/// including actor, number, complete action and strict/append request profile.
+/// Only a complete append seal allows the planned successor to change.
 pub(in crate::merge) fn verify_event_seal(
     context: &AdmissionContext,
     event: &ForgeEvent,
@@ -85,7 +91,24 @@ pub(in crate::merge) fn verify_event_seal(
     };
     let (expected_event, expected_attempt) =
         proposal(context, &command).map_err(|_| RefusalCode::EvidenceInvalid)?;
-    if expected_event != *event || expected_attempt != *attempt {
+    if expected_event != *event {
+        return Err(RefusalCode::EvidenceInvalid);
+    }
+    if expected_attempt == *attempt {
+        return Ok(());
+    }
+    let DiscussionAction::Comment { body } = &change.action else {
+        return Err(RefusalCode::EvidenceInvalid);
+    };
+    let (_, append) = append_proposal(
+        context,
+        &DiscussionCommentIntent {
+            number,
+            body: body.clone(),
+        },
+    )
+    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    if append != *attempt {
         return Err(RefusalCode::EvidenceInvalid);
     }
     Ok(())

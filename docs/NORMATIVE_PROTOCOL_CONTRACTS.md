@@ -1249,8 +1249,8 @@ An edit selects at least one field. Omission preserves a field; a selected empty
 body clears it. Text is untrusted data and never selects the actor, grants
 permissions, changes Git refs, or becomes a policy instruction.
 
-Creation requires `ExpectedVersion::NewStream`. Every subsequent action,
-including a comment, requires the exact positive predecessor version. Missing
+Creation requires `ExpectedVersion::NewStream`. Every subsequent exact-version
+`DiscussionCommand`, including a strict comment, requires the exact positive predecessor version. Missing
 or stale predecessors refuse with `EvidenceStale`. Closing requires an open
 discussion; reopening requires a closed one. Locking requires an unlocked
 discussion; unlocking requires a locked one. Repeating these transitions under
@@ -1265,11 +1265,43 @@ The canonical event batch root is sealed under the distinct `forge` scope
 expected version, action and exact text. Native admission replays authenticated
 current discussion history, enforces current policy, and publishes the event,
 forge position and one outbox obligation through the ordinary exact authority
-head CAS. Discussion commands use the strict CALM `HeadCasRequired` profile;
-they do not opt into predecessor-independent append replanning. The reference
+head CAS. Exact-version discussion commands preserve their strict CALM
+preconditions; a Comment payload alone never opts into append replanning. The reference
 and transaction codecs use new metadata-only trace tag **13**. Discussion
 effects cannot substitute for an issue or PR event even when numeric identifiers
 coincide, and cannot imply a reference effect.
+
+`DiscussionCommentIntent` is a separate, explicit predecessor-independent
+profile for one authored comment on an existing discussion. It binds the
+discussion number, authenticated actor and exact body together with the ordinary
+tenant, repository, object format and idempotency key. Adapters MUST reject an
+`expected_version` field for this profile. Its single-event batch root uses the
+existing Comment encoding at fixed **version 2** solely as a commitment template,
+under the distinct `forge` entry `discussion.append-comment.v1`. This template
+is neither a selected predecessor nor a publication position. The request stays
+atomic and has no ref updates or push options. The legacy strict seal and every
+stored event encoding remain unchanged.
+
+For each preparation attempt, admission authenticates the current authority
+head, selects the next checked discussion version, reconstructs and verifies
+the complete original append seal, and replays the same current canonical
+discussion history used by strict mutations. Only the event position may change.
+Missing discussions refuse with `EvidenceStale`; exhausted versions refuse with
+`ResourceBudgetExceeded`; current locks refuse with
+`ProtectedRefTransitionDenied`. Current permissions and resource/cancellation
+budgets remain mandatory. Intervening edits, state changes and other comments
+are preserved. Closed but unlocked discussions accept this profile too.
+
+The CALM table permits this explicit profile to revalidate after a head-CAS loss
+with the same TxId, actor, number, body and request digest. It remains
+`HeadCasRequired`; no second authority or commutative history root is introduced.
+One successful decision publishes exactly one Comment event and its outbox
+obligation. Two distinct original keys with equal text are two comments, whereas
+an exact retry recovers its original terminal decision. Unavailable evidence,
+cancellation, exhausted replans and ambiguous store replies preserve the ordinary
+undecided/recovery contract. Append publication receipts use action
+`append-comment` and `expected_version: null`; history records the ordinary
+Comment event at its actual canonical version.
 
 A retry MUST retain its original key and complete command. A known terminal
 outcome is recovered, with the original seal rechecked, before new native
