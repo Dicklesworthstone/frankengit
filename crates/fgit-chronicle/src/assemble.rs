@@ -142,7 +142,7 @@ impl PublicationPlan {
     {
         self.seal_with_configuration(
             identity,
-            roots,
+            &roots,
             cumulative_outcomes,
             expected_head_token,
             None,
@@ -232,7 +232,7 @@ impl PublicationPlan {
         }
         self.seal_with_configuration(
             identity,
-            roots,
+            &roots,
             cumulative_outcomes,
             expected_head_token,
             Some(transition.configuration_root()),
@@ -242,7 +242,7 @@ impl PublicationPlan {
     fn seal_with_configuration<I>(
         self,
         identity: &I,
-        roots: ResultingRoots,
+        roots: &ResultingRoots,
         cumulative_outcomes: &CumulativeOutcomes,
         expected_head_token: AuthorityVersionToken,
         configuration_root: Option<Digest>,

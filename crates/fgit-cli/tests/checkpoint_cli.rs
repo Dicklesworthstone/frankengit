@@ -371,3 +371,355 @@ fn checkpoint_preserves_terminal_retries_and_later_admission_in_both_formats() {
         );
     }
 }
+
+fn repository_checkpoint(root: &Path, extra: &[&str], code: i32) -> Output {
+    let mut args = vec![
+        "checkpoint",
+        "repository",
+        text(root),
+        TENANT,
+        REPOSITORY,
+        "--trusted-local",
+    ];
+    args.extend_from_slice(extra);
+    fg(&args, code)
+}
+
+fn repository_refused(output: Output) -> String {
+    assert!(
+        output.stdout.is_empty(),
+        "refused repository checkpoint emitted success"
+    );
+    let error = json::parse(&output.stderr).expect("structured repository checkpoint refusal");
+    assert_eq!(string(&error, "type"), "repository_checkpoint_error");
+    assert_eq!(field(&error, "complete"), &Value::Bool(false));
+    string(&error, "error").to_owned()
+}
+
+fn assert_repository_checkpoint(receipt: &Value, decisions: u64, objects: u64, published: bool) {
+    assert_eq!(string(receipt, "type"), "repository_checkpoint");
+    assert_eq!(field(receipt, "complete"), &Value::Bool(true));
+    assert_eq!(field(receipt, "published"), &Value::Bool(published));
+    assert_eq!(string(receipt, "backup_profile"), "full_closure");
+    assert_eq!(string(receipt, "scope"), "repository_full_closure");
+    assert_eq!(count(receipt, "decisions"), decisions);
+    assert_eq!(count(receipt, "objects"), objects);
+    assert!(string(receipt, "source_head").starts_with("alg:"));
+    assert!(string(receipt, "published_head").starts_with("alg:"));
+    assert!(string(receipt, "checkpoint_root").starts_with("alg:"));
+    assert!(string(receipt, "object_closure_root").starts_with("alg:"));
+}
+
+#[test]
+fn repository_checkpoint_verifies_full_closure_and_refuses_stale_head_and_tampered_capsule_twins() {
+    let help = String::from_utf8(fg(&["checkpoint", "repository", "--help"], 0).stdout).unwrap();
+    assert!(help.starts_with("usage: fg checkpoint repository"));
+    assert!(help.contains("FullClosure"));
+    assert!(help.contains("--expected-generation"));
+
+    for format in ["sha1", "sha256"] {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("node");
+        fg(&["init", text(&root), TENANT, REPOSITORY, format], 0);
+        // Commit a real Git tree/blob/commit via native patch prepare-initial + apply-initial + forge issue open.
+        let patch_path = scratch.0.join("initial.patch");
+        let bundle_path = scratch.0.join("initial.bundle");
+        fs::write(
+            &patch_path,
+            b"diff --git a/README.md b/README.md\nnew file mode 100644\n--- /dev/null\n+++ b/README.md\n@@ -0,0 +1 @@\n+hello full closure\n",
+        )
+        .unwrap();
+        let prepared = value(fg(
+            &[
+                "patch",
+                "prepare-initial",
+                text(&root),
+                TENANT,
+                REPOSITORY,
+                "refs/heads/main",
+                text(&patch_path),
+                text(&bundle_path),
+                "--trusted-local",
+                "--profile",
+                "exact-v1",
+                "--object-format",
+                format,
+                "--author",
+                "Test Author <author@example.com>",
+                "--timestamp",
+                "1700000000",
+                "--message",
+                "initial commit",
+            ],
+            0,
+        ));
+        let candidate_commit = string(&prepared, "candidate_commit");
+        fg(
+            &[
+                "patch",
+                "apply-initial",
+                text(&root),
+                TENANT,
+                REPOSITORY,
+                "refs/heads/main",
+                text(&bundle_path),
+                "--trusted-local",
+                "--principal",
+                PRINCIPAL,
+                "--idempotency-key",
+                "repo-ckpt-initial",
+                "--expected-commit",
+                candidate_commit,
+            ],
+            0,
+        );
+        mutation(
+            &root,
+            format,
+            "open",
+            "repo-ckpt-issue",
+            "0",
+            &["--title", "Checkpoint issue", "--body", "Body"],
+            0,
+        );
+        let before = read_issues(&root, format);
+        let source_head = string(&before, "snapshot_token");
+
+        // Stale generation and tight object-limit refusal twins leave head untouched.
+        assert!(
+            repository_refused(repository_checkpoint(
+                &root,
+                &["--expected-generation", "1"],
+                2
+            ))
+            .contains("HeadMoved")
+        );
+        assert!(
+            repository_refused(repository_checkpoint(&root, &["--max-objects", "2"], 2))
+                .contains("LimitExceeded")
+        );
+        assert_eq!(
+            string(&read_issues(&root, format), "snapshot_token"),
+            source_head
+        );
+
+        // Positive full-closure checkpoint activation with exact head + generation fences.
+        let first = value(repository_checkpoint(
+            &root,
+            &["--expected-head", source_head, "--expected-generation", "3"],
+            0,
+        ));
+        assert_repository_checkpoint(&first, 2, 3, true);
+        assert_eq!(count(&first, "references"), 1);
+        assert_eq!(count(&first, "local_edges"), 2);
+        assert!(count(&first, "payload_bytes") > 0);
+        let published_head = string(&first, "published_head");
+        assert_ne!(published_head, source_head);
+
+        // Stale head fence refuses after activation.
+        assert!(
+            repository_refused(repository_checkpoint(
+                &root,
+                &["--expected-head", source_head],
+                2
+            ))
+            .contains("HeadMoved")
+        );
+
+        // Idempotent repeat at the published head + generation verifies and emits published=false.
+        let again = value(repository_checkpoint(
+            &root,
+            &[
+                "--expected-head",
+                published_head,
+                "--expected-generation",
+                "4",
+            ],
+            0,
+        ));
+        assert_repository_checkpoint(&again, 2, 3, false);
+        assert_eq!(field(&first, "capsule_id"), field(&again, "capsule_id"));
+        assert_eq!(
+            field(&first, "object_closure_root"),
+            field(&again, "object_closure_root")
+        );
+
+        // 1. Corrupt Git object backing file refusal twin + near-identical restored twin.
+        fn find_payload_files(
+            dir: &Path,
+            suffix: &[u8],
+            out: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+        ) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    find_payload_files(&path, suffix, out);
+                } else if let Ok(bytes) = fs::read(&path)
+                    && bytes.ends_with(suffix)
+                {
+                    out.push((path, bytes));
+                }
+            }
+        }
+        let mut blob_files = Vec::new();
+        find_payload_files(
+            &root.join("objects"),
+            b"hello full closure\n",
+            &mut blob_files,
+        );
+        assert_eq!(
+            blob_files.len(),
+            1,
+            "expected one README.md blob backing file"
+        );
+        let (blob_path, original_blob) = blob_files.pop().unwrap();
+        let mut corrupt_blob = original_blob.clone();
+        *corrupt_blob.last_mut().unwrap() ^= 0x01;
+        fs::write(&blob_path, &corrupt_blob).unwrap();
+        let blob_err = repository_refused(repository_checkpoint(&root, &[], 2));
+        assert!(
+            blob_err.contains("GitBlobStream") && blob_err.contains("PayloadCommitmentMismatch"),
+            "unexpected corrupt git object refusal: {blob_err}"
+        );
+        fs::write(&blob_path, &original_blob).unwrap();
+        let after_blob_restore = value(repository_checkpoint(
+            &root,
+            &["--expected-head", published_head],
+            0,
+        ));
+        assert_repository_checkpoint(&after_blob_restore, 2, 3, false);
+
+        // 2. Persisted capsule tamper twin via FsqliteAuthorityStore (writing valid
+        // WAL frames so SQLite does not silently roll back the WAL tail):
+        // bind `last_checkpoint_id` to a capsule key holding corrupted frame bytes,
+        // verify `fg checkpoint repository` refuses cleanly with a structured capsule/
+        // checkpoint error, then restore the pre-tamper SQLite files and verify clean
+        // checkpoint verification resumes.
+        let saved_sqlite = [
+            "authority.fsqlite",
+            "authority.fsqlite-wal",
+            "authority.fsqlite-shm",
+        ]
+        .into_iter()
+        .map(|name| {
+            let path = root.join(name);
+            let bytes = fs::read(&path).ok();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+        {
+            use fgit_authority::{
+                AsyncAuthorityStore, CasOutcome, HeadRead, StoreInstanceId, body_key,
+                body_key_for_id,
+            };
+            use fgit_authority_fsqlite::FsqliteAuthorityStore;
+            use fgit_codec::{
+                CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, body_id,
+                decode_body, encode_body,
+            };
+            use fgit_crypto::IdentityDomain;
+            use fgit_node::{NodeConfig, OneNode};
+            use fgit_types::{
+                CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryAuthorityHeadId,
+                RepositoryCapsuleId, RepositoryId, TenantId,
+            };
+
+            let node = OneNode::open_existing(NodeConfig::new(
+                root.clone(),
+                TenantId::from_hex(TENANT).unwrap(),
+                RepositoryId::from_hex(REPOSITORY).unwrap(),
+            ))
+            .unwrap();
+            let cx = <FsqliteAuthorityStore as AsyncAuthorityStore>::Context::new();
+            cx.set_native_cx(node.runtime().request_cx_with_budget(Default::default()));
+            let mut authority = node
+                .runtime()
+                .block_on(FsqliteAuthorityStore::open(
+                    &cx,
+                    root.join("authority.fsqlite").to_str().unwrap(),
+                    StoreInstanceId::from_raw(0x8371),
+                    Default::default(),
+                ))
+                .unwrap();
+            let head_key = node.authority_head_key().clone();
+            let HeadRead::Present(receipt) = node
+                .runtime()
+                .block_on(AsyncAuthorityStore::read_head(&authority, &cx, &head_key))
+                .unwrap()
+            else {
+                panic!("expected published head in authority store");
+            };
+            let current_head: RepositoryAuthorityHeadBody =
+                decode_body(receipt.body(), DecodeLimits::default()).unwrap();
+            let current_head_id = RepositoryAuthorityHeadId::from_internal_object_id(
+                body_id(&CryptoBodyIdentity, &current_head).unwrap(),
+            )
+            .unwrap();
+            let fake_capsule_id = RepositoryCapsuleId::from_digest(
+                DigestAlgorithmId::try_new(2).unwrap(),
+                CANONICAL_CODEC_VERSION,
+                DigestBytes::try_new(&[0xee; 32]).unwrap(),
+            );
+            node.runtime()
+                .block_on(AsyncAuthorityStore::put_if_absent(
+                    &authority,
+                    &cx,
+                    &body_key_for_id(fake_capsule_id.as_internal_object_id()).unwrap(),
+                    b"corrupt-repository-capsule-frame",
+                ))
+                .unwrap();
+            let mut tampered_head = current_head;
+            tampered_head.predecessor_head_id = Some(current_head_id);
+            tampered_head.generation = tampered_head.generation.next().unwrap();
+            tampered_head.last_checkpoint_id = Some(fake_capsule_id);
+            let tampered_head_bytes = encode_body(&tampered_head).unwrap();
+            node.runtime()
+                .block_on(AsyncAuthorityStore::put_if_absent(
+                    &authority,
+                    &cx,
+                    &body_key(IdentityDomain::RepositoryAuthorityHead, &tampered_head).unwrap(),
+                    &tampered_head_bytes,
+                ))
+                .unwrap();
+            let CasOutcome::Committed(_) = node
+                .runtime()
+                .block_on(AsyncAuthorityStore::compare_exchange_head(
+                    &authority,
+                    &cx,
+                    &head_key,
+                    receipt.token(),
+                    tampered_head.generation,
+                    &tampered_head_bytes,
+                ))
+                .unwrap()
+            else {
+                panic!("expected CAS to install tampered capsule head fixture");
+            };
+            node.runtime().block_on(authority.close(&cx)).unwrap();
+            node.shutdown().unwrap();
+        }
+        let tamper_err = repository_refused(repository_checkpoint(&root, &[], 2));
+        assert!(
+            tamper_err.contains("Capsule")
+                || tamper_err.contains("Checkpoint")
+                || tamper_err.contains("Codec"),
+            "unexpected tamper refusal: {tamper_err}"
+        );
+        // Restoring the exact untampered SQLite files restores clean verification.
+        for (path, maybe_bytes) in saved_sqlite {
+            match maybe_bytes {
+                Some(bytes) => fs::write(&path, bytes).unwrap(),
+                None => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        let restored = value(repository_checkpoint(
+            &root,
+            &["--expected-head", published_head],
+            0,
+        ));
+        assert_repository_checkpoint(&restored, 2, 3, false);
+    }
+}

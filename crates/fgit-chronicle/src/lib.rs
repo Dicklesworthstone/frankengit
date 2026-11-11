@@ -56,6 +56,7 @@ const _: () = {
     const LIMIT: usize = 128;
     assert!(size_of::<refusal::ChronicleRefusal>() <= LIMIT);
     assert!(size_of::<fgit_authority::OutcomeFailure>() <= LIMIT);
+    assert!(size_of::<live::StagedCapsuleVerificationRefusal>() <= LIMIT);
 };
 
 pub mod archive;
@@ -87,12 +88,14 @@ pub use checkpoint::{
 pub use evidence::batch_evidence_root;
 pub use live::{
     ActivatedCapsule, AttestedBackupExport, BackupExportRefusal, CapsuleClosure, CapsuleInspection,
-    CapsuleInspectionRefusal, FrozenCapsule, LiveCapsuleRefusal, ReplayCompleteness,
-    RestoreExecutionRefusal, RestoredAuthorityBoundary, activate_frozen_capsule,
-    activate_frozen_capsule_async, export_frozen_capsule, freeze_capsule, freeze_capsule_async,
+    CapsuleInspectionRefusal, ExpectedCapsuleCommitments, FrozenCapsule, LiveCapsuleRefusal,
+    ReplayCompleteness, RestoreExecutionRefusal, RestoredAuthorityBoundary,
+    StagedCapsuleVerificationRefusal, activate_frozen_capsule, activate_frozen_capsule_async,
+    export_frozen_capsule, freeze_capsule, freeze_capsule_async,
     freeze_capsule_with_outcome_index_checkpoint,
     freeze_capsule_with_outcome_index_checkpoint_async,
     inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes, restore_attested_backup,
+    verify_staged_capsule_commitments, verify_staged_capsule_commitments_async,
 };
 pub use migration::{
     ActivatedMigrationTarget, FrozenMigrationSource, MigrationSourceRefusal,

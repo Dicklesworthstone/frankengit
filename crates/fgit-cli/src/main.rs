@@ -104,8 +104,16 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         return match checkpoint::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
+                let error_type = if arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "repository")
+                {
+                    "repository_checkpoint_error"
+                } else {
+                    "outcome_checkpoint_error"
+                };
                 eprintln!(
-                    "{{\"type\":\"outcome_checkpoint_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    "{{\"type\":\"{error_type}\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
                     publication_support::quote(&error)
                 );
                 ExitCode::from(2)
@@ -908,6 +916,7 @@ mod operator_subcommand_dispatch_tests {
         for items in [
             vec!["checkpoint", "--help"],
             vec!["checkpoint", "outcomes", "--help"],
+            vec!["checkpoint", "repository", "--help"],
         ] {
             assert_eq!(run_subcommand(&vec_args(&items)), ExitCode::SUCCESS);
         }
@@ -916,7 +925,7 @@ mod operator_subcommand_dispatch_tests {
             ExitCode::from(2)
         );
         assert_eq!(
-            run_subcommand(&vec_args(&["checkpoint", "repository", "--help"])),
+            run_subcommand(&vec_args(&["checkpoint", "unknown", "--help"])),
             ExitCode::from(2)
         );
     }

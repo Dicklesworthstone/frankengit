@@ -1,17 +1,23 @@
 //! Live capsule freezing reads an authenticated head twice around staging.
 
 use fgit_authority::{
-    AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId, initialize_repository,
+    AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId, body_key_for_id,
+    initialize_repository,
 };
 use fgit_chronicle::{
-    AttestedBackupExport, BackupProfile, CapsuleClosure, LiveCapsuleRefusal, ReplayCompleteness,
-    RestoreExecutionRefusal, RestoreOutcome, activate_frozen_capsule, export_frozen_capsule,
+    AttestedBackupExport, BackupProfile, CapsuleClosure, ExpectedCapsuleCommitments,
+    LiveCapsuleRefusal, ReplayCompleteness, RestoreExecutionRefusal, RestoreOutcome,
+    StagedCapsuleVerificationRefusal, activate_frozen_capsule, export_frozen_capsule,
     freeze_capsule, inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes,
-    restore_attested_backup,
+    outcome_index_leaf_archive_namespace, restore_attested_backup,
+    verify_staged_capsule_commitments,
 };
 use fgit_codec::{
     CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body, encode_body,
 };
+use fgit_object_fabric::fabric::ManifestLimits;
+use fgit_object_fabric::reference::{ReferenceMemoryConfig, ReferenceMemoryFabric};
+use fgit_resource::OpaqueHandle;
 use fgit_types::{
     Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch,
     RegistryEpoch, RepositoryId,
@@ -510,4 +516,142 @@ fn restore_refuses_a_byte_level_pair_that_disagrees_on_the_checkpoint_chain() {
         ),
         "a refused pair never initializes destination authority"
     );
+}
+
+#[test]
+fn staged_capsule_commitment_verification_accepts_valid_and_refuses_tampered_twins() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x63));
+    let key = HeadKey::new(b"chronicle/staged-capsule-verify".to_vec()).expect("bounded key");
+    initialize_repository(&store, &key, &head()).expect("head initializes");
+    let receipt = match store.read_head(&key).expect("head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized head is present"),
+    };
+    let fabric = ReferenceMemoryFabric::open(
+        ReferenceMemoryConfig::new(
+            outcome_index_leaf_archive_namespace(repository()),
+            OpaqueHandle::new(b"chronicle-verify-fail-domain").expect("valid handle"),
+            OpaqueHandle::new(b"chronicle-verify-encryption").expect("valid handle"),
+            1 << 20,
+            ManifestLimits::default(),
+        )
+        .expect("reference fabric config"),
+    )
+    .expect("reference fabric opens");
+
+    let frozen = freeze_capsule(&store, &CryptoBodyIdentity, &receipt, None, closure())
+        .expect("valid head freezes");
+    let expected = ExpectedCapsuleCommitments {
+        closure: closure(),
+        outcome_index_checkpoint_root: None,
+    };
+    let inspection = verify_staged_capsule_commitments(
+        &store,
+        &fabric,
+        &CryptoBodyIdentity,
+        frozen.capsule_id(),
+        receipt.body(),
+        None,
+        expected,
+    )
+    .expect("staged FullClosure capsule verifies cleanly");
+    assert_eq!(inspection.capsule(), frozen.capsule());
+    assert_eq!(
+        inspection.classification().outcome(),
+        RestoreOutcome::Restorable
+    );
+
+    // Near-identical refusal twins: mismatched closure root, manifest root, backup profile,
+    // predecessor pointer, or un-staged / tampered capsule slot must fail closed.
+    assert!(matches!(
+        verify_staged_capsule_commitments(
+            &store,
+            &fabric,
+            &CryptoBodyIdentity,
+            frozen.capsule_id(),
+            receipt.body(),
+            None,
+            ExpectedCapsuleCommitments {
+                closure: CapsuleClosure {
+                    object_closure_root: digest(0x99),
+                    ..closure()
+                },
+                ..expected
+            },
+        ),
+        Err(StagedCapsuleVerificationRefusal::ObjectClosureRootMismatch)
+    ));
+    assert!(matches!(
+        verify_staged_capsule_commitments(
+            &store,
+            &fabric,
+            &CryptoBodyIdentity,
+            frozen.capsule_id(),
+            receipt.body(),
+            None,
+            ExpectedCapsuleCommitments {
+                closure: CapsuleClosure {
+                    segment_manifest_root: digest(0x98),
+                    ..closure()
+                },
+                ..expected
+            },
+        ),
+        Err(StagedCapsuleVerificationRefusal::SegmentManifestRootMismatch)
+    ));
+    assert!(matches!(
+        verify_staged_capsule_commitments(
+            &store,
+            &fabric,
+            &CryptoBodyIdentity,
+            frozen.capsule_id(),
+            receipt.body(),
+            None,
+            ExpectedCapsuleCommitments {
+                closure: CapsuleClosure {
+                    backup_profile: BackupProfile::DecisionHistoryOnly,
+                    ..closure()
+                },
+                ..expected
+            },
+        ),
+        Err(StagedCapsuleVerificationRefusal::BackupProfileMismatch { .. })
+    ));
+    assert!(matches!(
+        verify_staged_capsule_commitments(
+            &store,
+            &fabric,
+            &CryptoBodyIdentity,
+            frozen.capsule_id(),
+            receipt.body(),
+            Some(frozen.capsule_id()),
+            expected,
+        ),
+        Err(StagedCapsuleVerificationRefusal::Defective { .. })
+    ));
+
+    // Tampered capsule bytes staged under another capsule's declared ID fail closed.
+    let mut altered = frozen.capsule().clone();
+    altered.object_closure_root = digest(0x77);
+    let altered_bytes = encode_body(&altered).expect("altered capsule encodes");
+    let bogus_store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x64));
+    let slot_key = body_key_for_id(frozen.capsule_id().as_internal_object_id()).expect("slot key");
+    bogus_store
+        .put_if_absent(&slot_key, &altered_bytes)
+        .expect("tampered slot staged");
+    assert!(matches!(
+        verify_staged_capsule_commitments(
+            &bogus_store,
+            &fabric,
+            &CryptoBodyIdentity,
+            frozen.capsule_id(),
+            receipt.body(),
+            None,
+            expected,
+        ),
+        Err(StagedCapsuleVerificationRefusal::Defective {
+            outcome: RestoreOutcome::FailClosed,
+            ..
+        })
+    ));
 }

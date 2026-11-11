@@ -11,8 +11,8 @@ use core::fmt;
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityFailure, AuthorityStore, CasOutcome, HeadInit, HeadKey, HeadRead,
     HeadReadReceipt, ImmutableRead, OutcomeFailure, PutOutcome, authority_head_identity, body_key,
-    collect_cumulative_outcomes_from_checkpoint, collect_cumulative_outcomes_from_checkpoint_async,
-    initialize_repository,
+    body_key_for_id, collect_cumulative_outcomes_from_checkpoint,
+    collect_cumulative_outcomes_from_checkpoint_async, initialize_repository,
 };
 use fgit_codec::attest::BodyIdentity;
 use fgit_codec::{
@@ -610,6 +610,246 @@ where
         .map_err(|error| CapsuleInspectionRefusal::HeadIdentity(Box::new(error)))?;
     collect_authority_head_defects(&capsule, head_id, &head, &mut defects);
     Ok(CapsuleInspection::from_defects(capsule, defects))
+}
+
+/// Independent closure and retained-checkpoint commitments expected on a staged
+/// [`RepositoryCapsuleBody`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExpectedCapsuleCommitments {
+    /// Expected object-closure root, segment-manifest root, and backup profile.
+    pub closure: CapsuleClosure,
+    /// Expected retained outcome-index checkpoint root, if any.
+    pub outcome_index_checkpoint_root: Option<Digest>,
+}
+
+/// Why independent verification of a staged repository capsule refused.
+#[derive(Debug)]
+pub enum StagedCapsuleVerificationRefusal {
+    /// Deriving the immutable capsule slot key failed.
+    CapsuleKey(Box<OutcomeFailure>),
+    /// Reading the staged capsule bytes failed or was ambiguous.
+    CapsuleRead(AuthorityFailure),
+    /// No capsule bytes were staged at the declared capsule identity slot.
+    CapsuleNotStaged,
+    /// Decoding or computing canonical identities failed.
+    Inspection(Box<CapsuleInspectionRefusal>),
+    /// Byte-derived capsule or authority-head commitments did not verify cleanly.
+    Defective {
+        /// Aggregate restore classification of the defective capsule.
+        outcome: RestoreOutcome,
+        /// Exact byte-derived defects observed on the capsule/head pair.
+        defects: Box<[CapsuleDefect]>,
+    },
+    /// The staged capsule's `object_closure_root` disagrees with expected closure.
+    ObjectClosureRootMismatch,
+    /// The staged capsule's `segment_manifest_root` disagrees with expected closure.
+    SegmentManifestRootMismatch,
+    /// The staged capsule's `backup_profile` disagrees with expected coverage.
+    BackupProfileMismatch {
+        /// Profile required by the caller.
+        expected: BackupProfile,
+        /// Profile encoded inside the staged capsule bytes.
+        actual: BackupProfile,
+    },
+    /// The staged capsule's `outcome_index_checkpoint_root` disagrees with expected.
+    OutcomeCheckpointRootMismatch,
+    /// Retained outcome-index checkpoint chain or leaf archive verification failed.
+    OutcomeCheckpoint(Box<OutcomeIndexCheckpointRefusal>),
+    /// Retained outcome-index checkpoint position disagrees with the capsule head.
+    OutcomeCheckpointPositionMismatch,
+}
+
+impl fmt::Display for StagedCapsuleVerificationRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapsuleKey(error) => {
+                write!(formatter, "capsule immutable key unavailable: {error}")
+            }
+            Self::CapsuleRead(error) => {
+                write!(formatter, "staged capsule read failed: {error}")
+            }
+            Self::CapsuleNotStaged => formatter.write_str("staged capsule bytes were absent"),
+            Self::Inspection(error) => {
+                write!(formatter, "staged capsule inspection refused: {error}")
+            }
+            Self::Defective { outcome, defects } => write!(
+                formatter,
+                "staged capsule failed commitment verification ({}, {} defects)",
+                outcome.as_str(),
+                defects.len()
+            ),
+            Self::ObjectClosureRootMismatch => formatter
+                .write_str("staged capsule object_closure_root disagrees with verified closure"),
+            Self::SegmentManifestRootMismatch => formatter
+                .write_str("staged capsule segment_manifest_root disagrees with verified manifest"),
+            Self::BackupProfileMismatch { expected, actual } => write!(
+                formatter,
+                "staged capsule backup_profile {} disagrees with expected {}",
+                actual.as_str(),
+                expected.as_str()
+            ),
+            Self::OutcomeCheckpointRootMismatch => formatter.write_str(
+                "staged capsule outcome_index_checkpoint_root disagrees with verified checkpoint",
+            ),
+            Self::OutcomeCheckpoint(error) => {
+                write!(
+                    formatter,
+                    "staged capsule outcome-index checkpoint failed verification: {error}"
+                )
+            }
+            Self::OutcomeCheckpointPositionMismatch => formatter.write_str(
+                "staged capsule outcome-index checkpoint position disagrees with capsule head",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StagedCapsuleVerificationRefusal {}
+
+fn check_expected_capsule_fields(
+    inspection: &CapsuleInspection,
+    expected: ExpectedCapsuleCommitments,
+) -> Result<(), StagedCapsuleVerificationRefusal> {
+    if inspection.classification().outcome() != RestoreOutcome::Restorable
+        || !inspection.classification().defects().is_empty()
+    {
+        return Err(StagedCapsuleVerificationRefusal::Defective {
+            outcome: inspection.classification().outcome(),
+            defects: inspection
+                .classification()
+                .defects()
+                .to_vec()
+                .into_boxed_slice(),
+        });
+    }
+    let capsule = inspection.capsule();
+    if capsule.object_closure_root != expected.closure.object_closure_root {
+        return Err(StagedCapsuleVerificationRefusal::ObjectClosureRootMismatch);
+    }
+    if capsule.segment_manifest_root != expected.closure.segment_manifest_root {
+        return Err(StagedCapsuleVerificationRefusal::SegmentManifestRootMismatch);
+    }
+    if capsule.backup_profile != expected.closure.backup_profile {
+        return Err(StagedCapsuleVerificationRefusal::BackupProfileMismatch {
+            expected: expected.closure.backup_profile,
+            actual: capsule.backup_profile,
+        });
+    }
+    if capsule.outcome_index_checkpoint_root != expected.outcome_index_checkpoint_root {
+        return Err(StagedCapsuleVerificationRefusal::OutcomeCheckpointRootMismatch);
+    }
+    Ok(())
+}
+
+/// Independently reread a staged [`RepositoryCapsuleBody`] from the authority
+/// store and verify its canonical identity, predecessor pointer, copied
+/// authority-head commitments, closure roots, backup profile, and retained
+/// outcome-index checkpoint chain before or after root-last activation.
+pub fn verify_staged_capsule_commitments<S, I, F>(
+    store: &S,
+    fabric: &F,
+    identity: &I,
+    capsule_id: RepositoryCapsuleId,
+    checkpointed_head_bytes: &[u8],
+    expected_predecessor: Option<RepositoryCapsuleId>,
+    expected: ExpectedCapsuleCommitments,
+) -> Result<CapsuleInspection, StagedCapsuleVerificationRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let key = body_key_for_id(capsule_id.as_internal_object_id()).map_err(|error| {
+        StagedCapsuleVerificationRefusal::CapsuleKey(Box::new(OutcomeFailure::from(error)))
+    })?;
+    let staged = match store
+        .read_immutable(&key)
+        .map_err(StagedCapsuleVerificationRefusal::CapsuleRead)?
+    {
+        ImmutableRead::Present(bytes) => bytes,
+        ImmutableRead::Absent => return Err(StagedCapsuleVerificationRefusal::CapsuleNotStaged),
+    };
+    let inspection = inspect_capsule_against_authority_head_bytes(
+        identity,
+        capsule_id,
+        &staged,
+        checkpointed_head_bytes,
+        expected_predecessor,
+    )
+    .map_err(|error| StagedCapsuleVerificationRefusal::Inspection(Box::new(error)))?;
+    check_expected_capsule_fields(&inspection, expected)?;
+    if let Some(checkpoint_root) = inspection.capsule().outcome_index_checkpoint_root {
+        let (verified, _) =
+            load_verified_outcome_index_checkpoint(store, identity, fabric, checkpoint_root)
+                .map_err(|error| {
+                    StagedCapsuleVerificationRefusal::OutcomeCheckpoint(Box::new(error))
+                })?;
+        let capsule = inspection.capsule();
+        if verified.repository_id != capsule.repository_id
+            || verified.decision_tail_id != capsule.decision_tail_id
+            || verified.latest_decision_sequence != capsule.latest_decision_sequence
+        {
+            return Err(StagedCapsuleVerificationRefusal::OutcomeCheckpointPositionMismatch);
+        }
+    }
+    Ok(inspection)
+}
+
+/// Asynchronous twin of [`verify_staged_capsule_commitments`].
+pub async fn verify_staged_capsule_commitments_async<S, I, F>(
+    store: &S,
+    cx: &S::Context,
+    fabric: &F,
+    identity: &I,
+    capsule_id: RepositoryCapsuleId,
+    checkpointed_head_bytes: &[u8],
+    expected_predecessor: Option<RepositoryCapsuleId>,
+    expected: ExpectedCapsuleCommitments,
+) -> Result<CapsuleInspection, StagedCapsuleVerificationRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let key = body_key_for_id(capsule_id.as_internal_object_id()).map_err(|error| {
+        StagedCapsuleVerificationRefusal::CapsuleKey(Box::new(OutcomeFailure::from(error)))
+    })?;
+    let staged = match store
+        .read_immutable(cx, &key)
+        .await
+        .map_err(StagedCapsuleVerificationRefusal::CapsuleRead)?
+    {
+        ImmutableRead::Present(bytes) => bytes,
+        ImmutableRead::Absent => return Err(StagedCapsuleVerificationRefusal::CapsuleNotStaged),
+    };
+    let inspection = inspect_capsule_against_authority_head_bytes(
+        identity,
+        capsule_id,
+        &staged,
+        checkpointed_head_bytes,
+        expected_predecessor,
+    )
+    .map_err(|error| StagedCapsuleVerificationRefusal::Inspection(Box::new(error)))?;
+    check_expected_capsule_fields(&inspection, expected)?;
+    if let Some(checkpoint_root) = inspection.capsule().outcome_index_checkpoint_root {
+        let (verified, _) = load_verified_outcome_index_checkpoint_async(
+            store,
+            cx,
+            identity,
+            fabric,
+            checkpoint_root,
+        )
+        .await
+        .map_err(|error| StagedCapsuleVerificationRefusal::OutcomeCheckpoint(Box::new(error)))?;
+        let capsule = inspection.capsule();
+        if verified.repository_id != capsule.repository_id
+            || verified.decision_tail_id != capsule.decision_tail_id
+            || verified.latest_decision_sequence != capsule.latest_decision_sequence
+        {
+            return Err(StagedCapsuleVerificationRefusal::OutcomeCheckpointPositionMismatch);
+        }
+    }
+    Ok(inspection)
 }
 
 impl CapsuleInspection {

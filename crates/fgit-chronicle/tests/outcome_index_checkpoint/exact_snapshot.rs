@@ -22,7 +22,7 @@ struct SnapshotStore<'a> {
 }
 
 impl<'a> SnapshotStore<'a> {
-    fn new(store: &'a MemoryAuthorityStore) -> Self {
+    const fn new(store: &'a MemoryAuthorityStore) -> Self {
         Self {
             store,
             replacements: Vec::new(),
@@ -36,6 +36,7 @@ impl<'a> SnapshotStore<'a> {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl AsyncAuthorityStore for SnapshotStore<'_> {
     type Context = ();
 
@@ -49,7 +50,7 @@ impl AsyncAuthorityStore for SnapshotStore<'_> {
 
     async fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         _: &ImmutableKey,
         _: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
@@ -58,7 +59,7 @@ impl AsyncAuthorityStore for SnapshotStore<'_> {
 
     async fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> Result<ImmutableRead, AuthorityFailure> {
         self.reads.lock().unwrap().push(key.clone());
@@ -77,7 +78,7 @@ impl AsyncAuthorityStore for SnapshotStore<'_> {
 
     async fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         _: &HeadKey,
         _: HeadGeneration,
         _: &[u8],
@@ -85,13 +86,13 @@ impl AsyncAuthorityStore for SnapshotStore<'_> {
         panic!("snapshot collection cannot initialize authority")
     }
 
-    async fn read_head(&self, _: &(), _: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
+    async fn read_head(&self, (): &(), _: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
         panic!("snapshot collection must never substitute the mutable head")
     }
 
     async fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         _: &HeadKey,
         _: AuthorityVersionToken,
         _: HeadGeneration,
@@ -102,7 +103,7 @@ impl AsyncAuthorityStore for SnapshotStore<'_> {
 
     async fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> Result<AuthenticatedHead, AuthorityFailure> {
         self.store.authenticate_head_receipt(receipt)
