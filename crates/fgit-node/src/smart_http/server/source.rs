@@ -300,9 +300,11 @@ pub(super) fn authenticate(
         fgit_admission::evidence::AdmissionAuthentication::AgentCredential(authentication) => {
             if !matches!(
                 request.agent_operation(),
-                Some(fgit_identity::agent::SOURCE_READ)
-                    | Some(fgit_identity::agent::SOURCE_HISTORY_READ)
-                    | Some(fgit_identity::agent::SOURCE_CANDIDATES)
+                Some(
+                    fgit_identity::agent::SOURCE_READ
+                        | fgit_identity::agent::SOURCE_HISTORY_READ
+                        | fgit_identity::agent::SOURCE_CANDIDATES
+                )
             ) {
                 return Err(ApiError::new(Status::Forbidden, "forbidden"));
             }

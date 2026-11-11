@@ -56,6 +56,11 @@ pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 #[cfg(target_os = "linux")]
 mod trusted_tool;
 #[cfg(target_os = "linux")]
+pub use trusted_tool::{
+    WorkspaceBatchJob, WorkspaceBatchResult, WorkspaceHostTelemetry, WorkspaceInputSharing,
+    WorkspaceToolFailure, WorkspaceToolResult,
+};
+#[cfg(target_os = "linux")]
 mod trusted_workflow;
 #[cfg(target_os = "linux")]
 pub use trusted_workflow::artifacts::{

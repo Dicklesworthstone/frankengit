@@ -98,7 +98,7 @@ impl<'a> RetargetedBundle<'a> {
     }
 
     #[must_use]
-    pub fn byte_len(&self) -> usize {
+    pub const fn byte_len(&self) -> usize {
         // parse bounds the sum by max_bundle_bytes before constructing Self.
         self.header.len() + self.pack.len()
     }
