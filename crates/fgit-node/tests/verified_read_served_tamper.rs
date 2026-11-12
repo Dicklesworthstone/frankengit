@@ -77,7 +77,7 @@ fn serving_node(scratch: &ScratchDirectory) -> OneNode {
             TenantId::from_bytes([0x11; 16]),
             RepositoryId::from_bytes([0x22; 16]),
         )
-        .with_root_layout(RootLayoutVersion::RefStateMerkleV1),
+        .with_root_layout(RootLayoutVersion::RefStateMerkleV2),
     )
     .expect("a proof-capable cell initializes")
     .0;
@@ -137,7 +137,7 @@ fn a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not()
         served
             .exact_configuration()
             .map(fgit_verified_read::VerifiedReadConfiguration::root_layout),
-        Some(RootLayoutVersion::RefStateMerkleV1),
+        Some(RootLayoutVersion::RefStateMerkleV2),
         "a served envelope must carry the proof-capable layout it was configured with"
     );
 

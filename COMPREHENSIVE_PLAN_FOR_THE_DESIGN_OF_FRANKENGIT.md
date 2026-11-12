@@ -2003,6 +2003,14 @@ permissions and every original source-anchor precondition remain required. Its
 distinct request identity and historical strict-command compatibility are defined
 in the normative protocol contracts, section 20.2.2.
 
+The explicit native discussion append-comment profile seals the discussion,
+actor and literal body without a caller-selected version. It uses the same
+bounded metadata admission and original-outcome recovery as strict discussion
+commands. A lost head CAS replans only the position after replaying the current
+discussion; locks, permissions and resource bounds remain decisive. Its distinct
+seal and exact-version compatibility are defined in the normative protocol
+contracts, section 20.2.7.
+
 The transactional outbox is separate. Canonical commits atomically record intents for **derived or external** work: search, graph, notifications, webhooks, CI scheduling, caches, and federation delivery. Consumers are at least once and idempotent; their acknowledgements are not repository truth.
 
 Outbox or projector lag never rolls back a RefTxn and never creates a second canonical event. A read requiring current forge state may replay commit records/event bytes or refuse on an insufficient watermark rather than silently trust a stale projection.

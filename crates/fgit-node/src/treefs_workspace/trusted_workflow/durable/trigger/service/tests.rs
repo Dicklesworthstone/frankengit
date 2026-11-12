@@ -261,7 +261,13 @@ fn queue_refresh_is_separate_explicit_metadata_authority_for_complete_landing_mo
     let refresher = PrincipalId::from_bytes([9; 16]);
     let ordinary = config(b"refs/heads/main").unwrap();
     assert!(ordinary.queue_refresh_principal().is_none());
-    assert!(ordinary.clone().with_queue_refresh_principal(refresher).validate().is_err());
+    assert!(
+        ordinary
+            .clone()
+            .with_queue_refresh_principal(refresher)
+            .validate()
+            .is_err()
+    );
     let queue = ordinary
         .with_merge_queue(1)
         .unwrap()
@@ -269,11 +275,25 @@ fn queue_refresh_is_separate_explicit_metadata_authority_for_complete_landing_mo
         .unwrap();
     assert!(queue.validate().is_ok());
     assert!(queue.queue_refresh_principal().is_none());
-    assert!(queue.clone().with_publisher(publisher)
-        .with_queue_refresh_principal(refresher).validate().is_err());
-    assert!(queue.clone().with_landing_principal(lander)
-        .with_queue_refresh_principal(refresher).validate().is_err());
-    let landing = queue.with_publisher(publisher).with_landing_principal(lander);
+    assert!(
+        queue
+            .clone()
+            .with_publisher(publisher)
+            .with_queue_refresh_principal(refresher)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        queue
+            .clone()
+            .with_landing_principal(lander)
+            .with_queue_refresh_principal(refresher)
+            .validate()
+            .is_err()
+    );
+    let landing = queue
+        .with_publisher(publisher)
+        .with_landing_principal(lander);
     assert!(landing.validate().is_ok());
     assert!(landing.queue_refresh_principal().is_none());
     let refreshing = landing.with_queue_refresh_principal(refresher);
@@ -292,10 +312,22 @@ fn refresh_configuration_cannot_enable_tag_or_fixed_pr_mutations() {
     let principal = PrincipalId::from_bytes([7; 16]);
     for selection in [
         config(b"refs/tags/v1").unwrap(),
-        config(b"refs/heads/topic").unwrap().with_pull_request(7).unwrap(),
-        config(b"refs/heads/main").unwrap().with_pull_requests(16).unwrap(),
+        config(b"refs/heads/topic")
+            .unwrap()
+            .with_pull_request(7)
+            .unwrap(),
+        config(b"refs/heads/main")
+            .unwrap()
+            .with_pull_requests(16)
+            .unwrap(),
     ] {
-        assert!(selection.with_publisher(principal).with_landing_principal(principal)
-            .with_queue_refresh_principal(principal).validate().is_err());
+        assert!(
+            selection
+                .with_publisher(principal)
+                .with_landing_principal(principal)
+                .with_queue_refresh_principal(principal)
+                .validate()
+                .is_err()
+        );
     }
 }

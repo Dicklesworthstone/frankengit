@@ -98,7 +98,7 @@ fn child_selection_retains_exact_source_pr_and_all_execution_contracts() {
         reference: RefName::try_new(b"refs/heads/topic").unwrap(),
         initialized: true,
     };
-    let child = member_config(&group, &row);
+    let child = member_config(&group, &row).unwrap();
     assert_eq!(child.pull_request(), Some(31));
     assert_eq!(child.pull_requests(), None);
     assert_eq!(child.reference(), &row.reference);
@@ -107,4 +107,136 @@ fn child_selection_retains_exact_source_pr_and_all_execution_contracts() {
     assert_eq!(child.run_parent(), group.run_parent());
     assert_eq!(child.directory(), group.directory());
     assert_eq!(child.attempt_timeout(), group.attempt_timeout());
+}
+
+fn candidate(stem: &[u8]) -> PullRequestMergeWatchConfig {
+    use fgit_forge::preparation::{MergeCommitStyle, MergeMetadata, MergeProfile};
+    PullRequestMergeWatchConfig::try_new(
+        RefName::try_new(stem).unwrap(),
+        PrincipalId::from_bytes([3; 16]),
+        MergeMetadata {
+            author: "CI <ci@example.test>".into(),
+            committer: "CI <ci@example.test>".into(),
+            timestamp: 1_700_000_000,
+            message: b"Test the actual combined tree".to_vec(),
+        },
+        MergeProfile::PathMergeV1,
+        MergeCommitStyle::TwoParent,
+    )
+    .unwrap()
+}
+
+#[test]
+fn collection_candidates_use_distinct_raw_byte_refs_and_ordinary_member_custody() {
+    let source_only = config().with_pull_requests(4).unwrap();
+    let template = candidate(b"refs/heads/ci/\xff");
+    let group = source_only
+        .clone()
+        .with_pull_request_merge_candidates(template.clone())
+        .unwrap();
+    assert!(group.validate().is_ok());
+    for number in [1, 23, u64::MAX] {
+        let row = Entry {
+            number,
+            reference: RefName::try_new(b"refs/heads/topic").unwrap(),
+            initialized: true,
+        };
+        let child = member_config(&group, &row).unwrap();
+        let expected = [
+            b"refs/heads/ci/\xff/pr-".as_slice(),
+            number.to_string().as_bytes(),
+        ]
+        .concat();
+        let merge = child.merge_candidate().unwrap();
+        assert_eq!(merge.reference().as_bytes(), expected);
+        assert_eq!(merge.principal(), template.principal());
+        assert_eq!(merge.metadata(), template.metadata());
+        assert_eq!(merge.profile(), template.profile());
+        assert_eq!(merge.style(), template.style());
+        assert_eq!(child.pull_request(), Some(number));
+        assert_eq!(child.pull_requests(), None);
+        assert_eq!(child.reference(), &row.reference);
+        assert!(child.validate().is_ok());
+    }
+    let scope = [9; 32];
+    assert_ne!(binding(&source_only, &scope), binding(&group, &scope));
+    let raised = group.clone().with_pull_requests(64).unwrap();
+    assert_eq!(binding(&raised, &scope), binding(&group, &scope));
+    let changed = source_only
+        .with_pull_request_merge_candidates(candidate(b"refs/heads/other-ci"))
+        .unwrap();
+    assert_ne!(binding(&changed, &scope), binding(&group, &scope));
+}
+
+#[test]
+fn collection_candidate_namespace_is_explicit_disjoint_and_bounded_before_custody() {
+    let template = candidate(b"refs/heads/ci");
+    assert!(
+        config()
+            .with_pull_request_merge_candidates(template.clone())
+            .is_err()
+    );
+    assert!(
+        config()
+            .with_pull_request(1)
+            .unwrap()
+            .with_pull_request_merge_candidates(template.clone())
+            .is_err()
+    );
+    assert!(
+        config()
+            .with_pull_requests(4)
+            .unwrap()
+            .with_merge_candidate(template)
+            .is_err()
+    );
+    for stem in [b"refs/heads/main".as_slice(), b"refs/heads/main/ci"] {
+        assert!(
+            config()
+                .with_pull_requests(4)
+                .unwrap()
+                .with_pull_request_merge_candidates(candidate(stem))
+                .is_err()
+        );
+    }
+    let group = config()
+        .with_pull_requests(4)
+        .unwrap()
+        .with_pull_request_merge_candidates(candidate(b"refs/heads/ci"))
+        .unwrap();
+    for source in [
+        b"refs/heads/ci".as_slice(),
+        b"refs/heads/ci/pr-2",
+        b"refs/heads/ci/other",
+    ] {
+        let entry = Entry {
+            number: 1,
+            reference: RefName::try_new(source).unwrap(),
+            initialized: false,
+        };
+        assert!(member_config(&group, &entry).is_err());
+    }
+    let nested = config()
+        .with_pull_requests(4)
+        .unwrap()
+        .with_pull_request_merge_candidates(candidate(b"refs/heads/topic/ci"))
+        .unwrap();
+    let ancestor = Entry {
+        number: 1,
+        reference: RefName::try_new(b"refs/heads/topic").unwrap(),
+        initialized: false,
+    };
+    assert!(member_config(&nested, &ancestor).is_err());
+    for (length, valid) in [(1000, true), (1001, false)] {
+        let mut stem = b"refs/heads/".to_vec();
+        stem.resize(length, b'x');
+        assert_eq!(
+            config()
+                .with_pull_requests(4)
+                .unwrap()
+                .with_pull_request_merge_candidates(candidate(&stem))
+                .is_ok(),
+            valid
+        );
+    }
 }

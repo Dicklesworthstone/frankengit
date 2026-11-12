@@ -1,0 +1,228 @@
+{
+  "provenance": "Frozen from unmodified 5ddaab7c2d1097659fc93abcb5b3f84a6f8b4f60, Node 24.22.1; deterministic test-only nonces; synthetic identities and credential; no network.",
+  "capture": {
+    "schema": "frankengit-github-issue-capture-v1",
+    "consistency": "two-equal-observations-not-atomic",
+    "source": {
+      "repository": "owner/project",
+      "repository_id": "42"
+    },
+    "issues": [
+      {
+        "number": 3,
+        "id": "30",
+        "html_url": "https://github.com/owner/project/issues/3",
+        "title": "Source 3",
+        "body": "Original source body\r\n",
+        "state": "closed",
+        "state_reason": "completed",
+        "user": {
+          "id": "11",
+          "login": "original-source-author"
+        },
+        "created_at": "2026-10-01T10:00:00Z",
+        "updated_at": "2026-10-01T10:00:00Z",
+        "closed_at": "2026-10-01T10:00:00Z",
+        "labels": [
+          {
+            "id": "1",
+            "name": "bug",
+            "color": "abcdef",
+            "description": null
+          }
+        ],
+        "assignees": [
+          {
+            "id": "11",
+            "login": "original-source-author"
+          }
+        ],
+        "milestone": null,
+        "locked": true,
+        "comment_count": 2,
+        "comments": [
+          {
+            "id": "301",
+            "html_url": "https://github.com/owner/project/issues/3#issuecomment-301",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/3",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 1\r\n%26=+"
+          },
+          {
+            "id": "302",
+            "html_url": "https://github.com/owner/project/issues/3#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/3",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 2\r\n%26=+"
+          }
+        ]
+      },
+      {
+        "number": 5,
+        "id": "50",
+        "html_url": "https://github.com/owner/project/issues/5",
+        "title": "Source 5",
+        "body": "Original source body\r\n",
+        "state": "open",
+        "state_reason": null,
+        "user": {
+          "id": "11",
+          "login": "original-source-author"
+        },
+        "created_at": "2026-10-01T10:00:00Z",
+        "updated_at": "2026-10-01T10:00:00Z",
+        "closed_at": null,
+        "labels": [
+          {
+            "id": "1",
+            "name": "bug",
+            "color": "abcdef",
+            "description": null
+          }
+        ],
+        "assignees": [
+          {
+            "id": "11",
+            "login": "original-source-author"
+          }
+        ],
+        "milestone": null,
+        "locked": true,
+        "comment_count": 2,
+        "comments": [
+          {
+            "id": "501",
+            "html_url": "https://github.com/owner/project/issues/5#issuecomment-501",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/5",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 1\r\n%26=+"
+          },
+          {
+            "id": "502",
+            "html_url": "https://github.com/owner/project/issues/5#issuecomment-502",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/5",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 2\r\n%26=+"
+          }
+        ]
+      }
+    ]
+  },
+  "golden": {
+    "capture_sha256": "96014fe16d4ec27dd058874ccfe9a907b46d0f3083cde2aaace0aa6f8ecd7682",
+    "capture_bytes": 2459,
+    "steps_sha256": "fea2533284b521476ff6621cdaeb7dda367a31a4c5354dc832d9bdc0adf4b9aa",
+    "steps_bytes": 4368,
+    "plan_sha256": "8285c6701947b0e67250a94083cf0781bc122e03fea2e9005d87082cc27261c5",
+    "hashes": {
+      "capture.json": "96014fe16d4ec27dd058874ccfe9a907b46d0f3083cde2aaace0aa6f8ecd7682",
+      "manifest.json": "8285c6701947b0e67250a94083cf0781bc122e03fea2e9005d87082cc27261c5",
+      "step-000000.request.json": "c71bbbe40cfc36434ae25b8a620808067cedaf428e40b2cf8d24d0bc13b62144",
+      "step-000001.request.json": "dcc8b86be30e62ab0cc5d2b9b8c9f6f069f0625e36abc91ab3bafb6971fa23a0",
+      "step-000002.request.json": "b79cbf8ce2d7c5170888294876de5f98f83b1e984aa9a3a5db2f79143e725e0e",
+      "step-000003.request.json": "7772fcd6872b33a94f2fe72a7fa4ad069c78a48f58f8b08322ade252243c9b01",
+      "step-000004.request.json": "f6d8dc9992557f6723dac06ca100b5b2a5e24bcba5e47fd6a315cc518931a72e",
+      "step-000005.request.json": "e046bac9c65da195afe1ae9bf728ac0a46d1f65450aba6dc3e86102ba5ee67ce",
+      "step-000006.request.json": "6f9229f89848056d674a0a1817c4dbdc031781da48b9ec4abef45a6c68622be6"
+    },
+    "requests": [
+      {
+        "name": "step-000000.request.json",
+        "number": 43,
+        "expected_version": 0,
+        "action": "open",
+        "key": "fgui-01010101010101010101010101010101-e51af62849d2236ca42ba163ea9e6d985461c3f3c0e722a975c1ce990b8214fe",
+        "body_sha256": "1b1052b48f856ff6701d983de77acf790d53f8f1a8f5f768f27a477644d7a4bb"
+      },
+      {
+        "name": "step-000001.request.json",
+        "number": 43,
+        "expected_version": 1,
+        "action": "comment",
+        "key": "fgui-02020202020202020202020202020202-72f967590e07748bb6c5b7f96bf5e8fbd248673badb2e7b674a0082210291f60",
+        "body_sha256": "98041c0b8a9a8989b40c4216eb3ca06cd74807ca196a7f60326362349380c722"
+      },
+      {
+        "name": "step-000002.request.json",
+        "number": 43,
+        "expected_version": 2,
+        "action": "comment",
+        "key": "fgui-03030303030303030303030303030303-a824c425f27a1236d506ec08621fd9f97966d37d876dc4b546f746eaa2550114",
+        "body_sha256": "edc6e7bc2994e3d1cc675ab05ddeb5607d5fd99b76b781d1fda068410dac681f"
+      },
+      {
+        "name": "step-000003.request.json",
+        "number": 43,
+        "expected_version": 3,
+        "action": "close",
+        "key": "fgui-04040404040404040404040404040404-5d3f81f36f9b39b30e6e110a5d8176afcd8d5e31daf133f9bcbe88cfa698f966",
+        "body_sha256": "7e99a22f773f4242335898e42bc2e1abe53a9d4cb57fb879e98686d75bbd8966"
+      },
+      {
+        "name": "step-000004.request.json",
+        "number": 45,
+        "expected_version": 0,
+        "action": "open",
+        "key": "fgui-05050505050505050505050505050505-4d12d916e1bbfbe78aca4cf64422a9199184217cbca7c854f34ecc3884fede30",
+        "body_sha256": "a451562d61392a8dd3a9c5ee8d4411e143cabb24c9b83fc94e52f47717a5d33b"
+      },
+      {
+        "name": "step-000005.request.json",
+        "number": 45,
+        "expected_version": 1,
+        "action": "comment",
+        "key": "fgui-06060606060606060606060606060606-06a65ec9acd2011080ed7b12e22ab029396a58e6b6b229b8a50ad780e856cd64",
+        "body_sha256": "b5feda74ff9254a37c339c1c1aa04720b3f425fd83e414a6ae5b8e065fd3c736"
+      },
+      {
+        "name": "step-000006.request.json",
+        "number": 45,
+        "expected_version": 2,
+        "action": "comment",
+        "key": "fgui-07070707070707070707070707070707-35e7f0c3a0c8b1b6479bc3d343a963ae1b2b1b3e1c61d2fabf2a4cab37693139",
+        "body_sha256": "043aa7b93497e0249e0ec3e2a814dfc599423b33566cf98e5122d1f8fc9130ea"
+      }
+    ],
+    "manifest": {
+      "schema": "frankengit-github-issue-import-v1",
+      "href": "https://fixture.invalid/destination/ui/issues/",
+      "tenant": "44444444444444444444444444444444",
+      "repository": "55555555555555555555555555555555",
+      "credential_fingerprint": "1ab1d389adb9a1d4becec6e18917ba02d0cbef5fa65716a0aca82d5cbfe254bd",
+      "source_sha256": "96014fe16d4ec27dd058874ccfe9a907b46d0f3083cde2aaace0aa6f8ecd7682",
+      "steps_sha256": "fea2533284b521476ff6621cdaeb7dda367a31a4c5354dc832d9bdc0adf4b9aa",
+      "offset": 40,
+      "step_count": 7,
+      "request_sha256": [
+        "c71bbbe40cfc36434ae25b8a620808067cedaf428e40b2cf8d24d0bc13b62144",
+        "dcc8b86be30e62ab0cc5d2b9b8c9f6f069f0625e36abc91ab3bafb6971fa23a0",
+        "b79cbf8ce2d7c5170888294876de5f98f83b1e984aa9a3a5db2f79143e725e0e",
+        "7772fcd6872b33a94f2fe72a7fa4ad069c78a48f58f8b08322ade252243c9b01",
+        "f6d8dc9992557f6723dac06ca100b5b2a5e24bcba5e47fd6a315cc518931a72e",
+        "e046bac9c65da195afe1ae9bf728ac0a46d1f65450aba6dc3e86102ba5ee67ce",
+        "6f9229f89848056d674a0a1817c4dbdc031781da48b9ec4abef45a6c68622be6"
+      ],
+      "request_bytes": 12975
+    }
+  }
+}

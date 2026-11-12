@@ -144,6 +144,15 @@ by the existing authenticated transaction identity; use one stable principal
 for retries. An acknowledged or changed original source does not authorize
 another admission; retained new receipts remain inspectable by their new IDs.
 
+`--expected-head` pins admission of a new replay to that exact authority head,
+including a retry of a failed compare-and-swap. If another publication wins,
+new work refuses with `EvidenceStale`; select the current head before requesting
+it again. Recovery of an already committed identical replay runs before this
+fresh-admission check. Keep the original pin when retrying after a lost reply:
+the replay's own publication and settlement advanced the head, but do not grant
+another send. The head pin is a publication precondition, not part of the replay
+key or the six-field sealed intent.
+
 The node stays open with one finite background context through HTTP drain and
 canonical settlement. The shared route fence lasts through awaited shutdown.
 SIGINT/SIGTERM request drain; a crash/lost reply cannot prove non-delivery.

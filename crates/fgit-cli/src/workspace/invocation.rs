@@ -96,6 +96,21 @@ pub(super) fn reserve(
     request: &NodeRequestContext,
     options: &Options,
 ) -> Result<(Invocation, RepositoryAuthorityHeadId, GitOid), String> {
+    let (mut reserved, head, commit) = reserve_batch(node, request, std::slice::from_ref(options))?;
+    let invocation = reserved
+        .pop()
+        .ok_or("missing reserved workspace invocation")?;
+    Ok((invocation, head, commit))
+}
+
+/// Select the authenticated repository base once and durably claim invocation
+/// custody for every job in a parallel shared-base batch before spawning tools.
+pub(super) fn reserve_batch(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    batch: &[Options],
+) -> Result<(Vec<Invocation>, RepositoryAuthorityHeadId, GitOid), String> {
+    let first = batch.first().ok_or("empty workspace batch")?;
     let selected = node
         .runtime()
         .block_on(node.materialize_admission_in(request))
@@ -103,34 +118,56 @@ pub(super) fn reserve(
     if selected
         .snapshot()
         .hidden_refs
-        .hides(options.reference.as_bytes())
+        .hides(first.reference.as_bytes())
     {
         return Err("workspace source RefUnavailable".into());
     }
     let commit = *selected
         .snapshot()
         .refs
-        .get(&options.reference)
+        .get(&first.reference)
         .ok_or("workspace source RefUnavailable")?;
     let head = selected.basis().id();
-    if options
-        .expected_head
-        .is_some_and(|expected| expected != head)
-    {
+    if first.expected_head.is_some_and(|expected| expected != head) {
         return Err("SnapshotMoved: workspace source head changed before execution".into());
     }
-    if options
+    if first
         .expected_commit
         .is_some_and(|expected| expected != commit)
     {
         return Err("CommitMoved: workspace source commit changed before execution".into());
     }
     let scope = scope(node);
-    let key = format!("{}-{}", super::hex(&scope), super::hex(&options.workspace));
+    let root = node.storage_root().join("workspace-invocations");
+    let mut reserved: Vec<Invocation> = Vec::with_capacity(batch.len());
+    for options in batch {
+        match reserve_one(&root, &scope, head, commit, options) {
+            Ok(invocation) => reserved.push(invocation),
+            Err(error) => {
+                for claimed in reserved {
+                    let _ = claimed.fail(&format!(
+                        "batch reservation aborted before tool spawn: {error}"
+                    ));
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok((reserved, head, commit))
+}
+
+fn reserve_one(
+    root: &Path,
+    scope: &[u8; 32],
+    head: RepositoryAuthorityHeadId,
+    commit: GitOid,
+    options: &Options,
+) -> Result<Invocation, String> {
+    let key = format!("{}-{}", super::hex(scope), super::hex(&options.workspace));
     let mut fields = Fields::default();
     for value in [
         b"trusted-workspace-execution-v1".as_slice(),
-        &scope,
+        scope,
         &options.workspace,
         options.reference.as_bytes(),
         head.to_string().as_bytes(),
@@ -177,22 +214,18 @@ pub(super) fn reserve(
         &fgit_cli::command_timeout_duration()
             .as_nanos()
             .to_be_bytes(),
+        options.sharing.as_str().as_bytes(),
         b"env-cleared;PATH=/usr/bin:/bin;trusted-host;candidate-only",
     ] {
         fields.push(value).map_err(|e| e.to_string())?;
     }
-    let invocation = Invocation::create(
-        &node.storage_root().join("workspace-invocations"),
-        &key,
-        &fields.0,
-    )
-    .map_err(|e| e.to_string())?;
+    let invocation = Invocation::create(root, &key, &fields.0).map_err(|e| e.to_string())?;
     eprintln!(
         "workspace invocation reserved: {}; request_sha256={}",
         invocation.directory.display(),
         super::hex(&invocation.request_id)
     );
-    Ok((invocation, head, commit))
+    Ok(invocation)
 }
 
 fn scope(node: &OneNode) -> [u8; 32] {

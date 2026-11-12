@@ -1,12 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
+import http from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import { captureSourcePackage, inspectSourcePackage, packageAcquisitionLimits, packageAcquisitionSelection } from '../operator/source_package.mjs';
 import { readSourcePackage } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
 import { fixture, peer, TOKEN, sha256 } from './source_package_fixture.mjs';
 const capture = (p, options = {}) => captureSourcePackage(p.context, p.contextHash, p.selected, p.expected, TOKEN, options);
 const inspect = (p, result, options = {}) => inspectSourcePackage(result.bytes, result.receipt.package_sha256, p.context, p.contextHash, p.selected, p.expected, options);
 const updateContext = (p, change) => { const value = JSON.parse(p.context); change(value.native_response); p.context = Buffer.from(JSON.stringify(value)); p.contextHash = sha256(p.context); };
+
+test('source package peer retires a forbidden allocation before capture and tamper checks', async t => {
+  // Fault only the allocator observation, retaining actual HTTP and Fetch.
+  // The shared allocator tests separately exercise real forbidden listeners.
+  const create = http.createServer;
+  let retired = 0;
+  http.createServer = (...args) => {
+    const server = create(...args), address = server.address.bind(server);
+    let first = true;
+    server.address = () => {
+      const bound = address();
+      if (bound && first) { first = false; return { ...bound, port: 6000 }; }
+      return bound;
+    };
+    server.on('close', () => retired++);
+    return server;
+  };
+  syncBuiltinESMExports();
+  try {
+    let tamper = false, altered = false;
+    const p = await peer(t, fixture(), value => {
+      if (tamper && value.type === 'source_commit') { altered = true; value.source_rcr = 'changed-rcr'; }
+    });
+    const acquired = await capture(p);
+    assert.equal((await inspect(p, acquired)).verified.commit, p.f.commitId);
+    assert(retired >= 1, 'forbidden allocation was not retired before requests');
+    assert.notEqual(new URL(p.selected.endpoint).port, '6000');
+    p.requests.length = 0; tamper = true;
+    await assert.rejects(capture(p));
+    assert.equal(altered, true);
+    assert.equal(p.requests.length, 1);
+  } finally {
+    http.createServer = create;
+    syncBuiltinESMExports();
+  }
+});
 
 test('package source reads identify the project on every actual HTTP page', async t => {
   const p = await peer(t, fixture('sha1', { paged: true }));

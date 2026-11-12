@@ -6,6 +6,37 @@ review read surfaces, named-reviewer gates and issue-command admission. This
 documents an implementation slice, not a persisted projection service or
 completion of the bridge bead.
 
+## Metadata survives delivery retirement
+
+An acknowledged or terminally failed delivery can leave the active outbox.
+That transition does not delete the accepted issue, discussion, milestone, PR,
+comment or notification-preference history. Their readers and mutation
+preconditions now use the same authenticated history collector as merge queues.
+
+For each selected aggregate, the collector verifies its frontier batch and
+reads each distinct active outbox payload once. If these sources cover every
+version through the frontier, it does not read older decision history. Otherwise
+it follows verified predecessor links from the exact selected authority head
+and recovers the missing event batches from accepted Repository Commit Records.
+It stops once all selected histories are complete. A staged event body, local
+index or directory listing cannot supply a missing canonical predecessor.
+
+Coverage uses bounded unique aggregate/version identities, with conflicting
+duplicates refused. Genesis-seeded fixtures are supported only through their
+authenticated genesis maps. Historical fallback retains the existing queue
+profile of 4,096 authority-history edges and 65,536 decisions; decision frames
+and event frames share the 128 MiB scan budget. Cancellation, missing/corrupt
+bodies and exhausted bounds refuse the complete operation. Callers buffer
+results until collection succeeds, then apply events in version order.
+
+Payload retention remains reader-specific: issue/discussion/milestone reducers
+keep their existing selected-event allowance, PR pages retain latest metadata
+and opener identity, and PR comments retain the requested page. Notification
+reconstruction retains only the selected subject kind and requesting principal's
+preferences. Retiring delivery cannot erase those preferences or make a later
+edit depend on a mutable delivery queue. This does not add a persistent read
+index, remove canonical capacity bounds or promise unlimited retained history.
+
 ## Issue pages, history and writes
 
 The issue reader selects numeric page keys from the authority-selected forge
@@ -31,7 +62,8 @@ authenticate the forge and outbox maps selected by the head, then validate the
 event commitments and complete frontier ranges they consume. They do not load
 delivery effects or receipts, or validate unrelated frontier batches. Full
 delivery and publication preflight retain those checks. Replay still scans
-retained payload roots to find selected events; it cannot trust a local index or
+selected frontier and active outbox roots, with authenticated historical fallback
+when necessary; it cannot trust a local index or
 object presence as authority. Missing or corrupt scanned payloads still refuse,
 even if the payload would have contained only unrelated events. A selected issue
 or page beyond its envelope refuses, and a missing stream is not invented from
@@ -141,6 +173,19 @@ cryptographically linked fixture bodies, not runtime delivery, outcome-index,
 filesystem durability, or latency evidence.
 
 ## Verification boundary
+
+`cargo test -p fgit-admission --lib event_history` covers the shared collector's
+root/event deduplication, selected frontier identity, genuine history gaps,
+conflicting events, exact work bounds, cancellation and visitor refusal/retry.
+These are reference-store tests, not durable-node evidence.
+
+`cargo test -p fgit-node --lib outbox_history` contains native SHA-1/SHA-256
+regressions for real issue/PR/comment publication, synced receiver acknowledgements,
+canonical outbox retirement, list/history/notification reads, retained snapshots,
+reopen, duplicate recovery and subsequent mutations. Its fault tests exercise
+missing, corrupt and cancelled reads of a genuinely retired event and preserve
+the complete-active-history fast path. Test definitions do not establish that
+these native commands have executed successfully on a particular revision.
 
 `cargo test -p fgit-admission merge::native::issues::replay_tests` exercises the
 production issue reader over the non-durable reference authority store. Cases

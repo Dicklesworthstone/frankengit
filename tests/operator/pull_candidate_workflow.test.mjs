@@ -14,6 +14,7 @@ import { draftCandidateReview } from '../../scripts/operator/pull_candidate_draf
 import { preparePull, submitPull, recoverPull } from '../../scripts/operator/remote_pull.mjs';
 import { candidatePeer, TOKEN, REVIEWER } from './pull_candidate_fixture.mjs';
 const ROTATED = 'b'.repeat(64), ACTOR = 'e'.repeat(32), SEQUENCE = '18446744073709551615';
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 
 function publication(intent, state) {
   const f = intent.fields, format = intent.scope.object_format, merge = intent.action === 'merge', committed = state === 'committed';
@@ -101,7 +102,7 @@ async function prepared(t, config, action) {
   return p;
 }
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) for (const action of ['approve', 'request-changes', 'merge']) {
-  test(`${algorithm} ${method} ${action}: actual candidate-to-sender-to-recovery workflow`, async t => {
+  test(`${algorithm} ${method} ${action}: actual candidate-to-sender-to-recovery workflow`, LINUX_ORACLE, async t => {
     const p = await prepared(t, { algorithm, method }, action);
     assert.equal(p.writes.length, 0, 'drafting and preparation are not publication');
     const result = await submitPull(p.intent, TOKEN, p.consent);
@@ -111,7 +112,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     assert.equal(recovered.outcome.state, 'committed'); assert.equal(recovered.dispatched, false); assert.equal(p.writes.length, 1);
   });
 }
-for (const method of ['merge-commit', 'squash']) test(`${method}: exact method consent remains required and refusal never falls back`, async t => {
+for (const method of ['merge-commit', 'squash']) test(`${method}: exact method consent remains required and refusal never falls back`, LINUX_ORACLE, async t => {
   const p = await prepared(t, { method, state: 'refused' }, 'merge');
   await assert.rejects(submitPull(p.intent, TOKEN, { ...p.consent, confirmMergeMethod: method === 'squash' ? 'merge-commit' : 'squash' }));
   assert.equal(p.lookups, 0); assert.equal(p.writes.length, 0);
@@ -120,7 +121,7 @@ for (const method of ['merge-commit', 'squash']) test(`${method}: exact method c
   const retry = await submitPull(p.intent, TOKEN, { ...p.consent, known: result.outcome });
   assert.equal(retry.dispatched, false); assert.equal(p.writes.length, 1);
 });
-test('a dropped publication reply recovers with the same principal and key without another bundle upload', async t => {
+test('a dropped publication reply recovers with the same principal and key without another bundle upload', LINUX_ORACLE, async t => {
   const p = await prepared(t, { algorithm: 'sha256', method: 'squash' }, 'merge'); p.drop = true;
   await assert.rejects(submitPull(p.intent, TOKEN, p.consent), e => e.dispatched && e.outcomeUnknown);
   assert.equal(p.writes.length, 1); const observed = await recoverPull(p.intent, ROTATED);

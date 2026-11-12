@@ -227,6 +227,15 @@ HTTPS verifies certificates; `--ca-file` may name explicit private PEM trust
 roots. Plain HTTP is restricted to canonical numeric loopback. There are no
 redirects, retries, ambient credentials, or TLS-verification bypasses.
 
+`prepare` and `prepare-packed` accept ordinary read tokens or canonical sponsored
+[`source-candidates`](SPONSORED_AGENT_CREDENTIALS.md#independently-grant-candidate-preparation-and-inspection)
+tokens in the private token file. A sponsored token is sent unchanged on only
+`source/prepare` and `source/inspect`; local publication and recovery transports
+remain unavailable to it. A saved candidate carries exact content and selection
+evidence, with no credential or publication authority. An independently
+authorized ordinary publisher can inspect and stage that artifact through the
+existing handoff.
+
 Both native reports must agree with all intended old/new blob IDs and modes;
 the reported before-tree must equal the independently verified root. The client
 also rebuilds the affected parent trees locally and requires the candidate

@@ -1,6 +1,7 @@
 //! Repository-wide canonical forge event feed for local integrations.
 mod scoped;
 mod selection;
+pub use scoped::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 
 use super::workspace_request_live;
 use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};

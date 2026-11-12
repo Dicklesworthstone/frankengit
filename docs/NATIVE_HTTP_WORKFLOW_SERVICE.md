@@ -82,10 +82,22 @@ See [native PR workflow selection](NATIVE_PULL_REQUEST_WORKFLOW_WATCH.md).
 
 Use `--workflow-pull-requests` to discover visible open same-repository PRs
 targeting `--workflow-ref`. This mode requires `--expected-incarnation` even
-without a check publisher. It executes current source heads, rotates through
+without a check publisher. By default it executes current source heads, rotates through
 retained PRs one member per poll, and reuses the ordinary PR execution and
-canonical check-publication paths. It cannot be combined with a fixed PR,
-merge queue or merge-candidate options.
+canonical check-publication paths. It cannot be combined with a fixed PR or
+merge queue.
+
+To test each discovered PR's actual combined tree, supply the complete merge
+writer/metadata option group below with
+`--workflow-merge-candidate-ref-prefix refs/heads/ci/collection` instead of an
+exact candidate ref. Each PR owns `<prefix>/pr-<number>`; the prefix is a stem
+without a trailing slash, and `--workflow-merge-candidate-ref-prefix-hex` supports
+raw bytes. Both merge and squash styles work. Reserve that entire namespace for
+the controller and keep PR source/target branches outside it. Candidate mode
+and template identity are durably bound to the original collection scope, so
+changing the mode or namespace cannot abandon earlier executions. See the
+[collection candidate guide](NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md#execute-every-discovered-prs-combined-tree)
+for exact checks, namespace restrictions and recovery.
 
 `--workflow-max-pull-requests` accepts 1–64 and defaults to 64. The limit applies
 to the durable retained inventory, including closed or hidden PRs. New members
@@ -121,8 +133,9 @@ fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
 ```
 
 The CI branch, writer, author, committer, timestamp and message are mandatory
-when any merge option is supplied. The group also requires an explicit native
-PR and repository incarnation. `--workflow-merge-method` accepts `merge-commit`
+when any merge option is supplied. This exact-ref group also requires an explicit native
+PR and repository incarnation. Collection mode uses its explicit prefix option
+as described above. `--workflow-merge-method` accepts `merge-commit`
 (default) or `squash`; `--workflow-merge-profile` accepts `path` (default) or
 `exact-renames`. Use `--workflow-merge-candidate-ref-hex` instead of the text
 reference flag for exact raw branch bytes. Literal merge messages beginning

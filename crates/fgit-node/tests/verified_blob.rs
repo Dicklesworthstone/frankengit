@@ -48,8 +48,8 @@ fn read(
 fn actual_imported_bytes_have_exact_ref_path_proofs_in_both_hash_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for layout in [
-            RootLayoutVersion::RefStateMerkleV1,
-            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            RootLayoutVersion::RefStateMerkleV2,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
         ] {
             let scratch = Scratch::new();
             let (node, commit) = fixture_with_config(
@@ -99,7 +99,7 @@ fn hidden_absent_invalid_paths_cancellation_and_legacy_layouts_refuse_without_a_
             format,
             scratch
                 .config(format)
-                .with_root_layout(RootLayoutVersion::RefStateMerkleV1),
+                .with_root_layout(RootLayoutVersion::RefStateMerkleV2),
         );
         let expected = head(&node);
         assert!(read(&node, b"alpha.txt", expected).is_ok());
@@ -180,7 +180,7 @@ fn source_proofs_survive_reopen_and_known_head_movement_never_selects_fresh_byte
         let scratch = Scratch::new();
         let config = scratch
             .config(format)
-            .with_root_layout(RootLayoutVersion::RefStateMerkleV1);
+            .with_root_layout(RootLayoutVersion::RefStateMerkleV2);
         let (node, commit) = fixture_with_config(&scratch, format, config.clone());
         let expected = head(&node);
         let original =
@@ -248,7 +248,7 @@ fn actual_served_wire_tampering_and_tighter_object_budget_cannot_return_unverifi
     let scratch = Scratch::new();
     let config = scratch
         .config(format)
-        .with_root_layout(RootLayoutVersion::RefStateMerkleV1);
+        .with_root_layout(RootLayoutVersion::RefStateMerkleV2);
     let (node, _) = fixture_with_config(&scratch, format, config.clone());
     let expected = head(&node);
     let frame =

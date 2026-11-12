@@ -127,8 +127,8 @@ fn parse(args: &Object) -> Result<Query, ToolError> {
     if selected_head.len() > 140 {
         return Err(ToolError::invalid("invalid_snapshot_token"));
     }
-    let expected_head = parse_head(selected_head)
-        .map_err(|_| ToolError::invalid("invalid_snapshot_token"))?;
+    let expected_head =
+        parse_head(selected_head).map_err(|_| ToolError::invalid("invalid_snapshot_token"))?;
     if head_token(expected_head) != selected_head {
         return Err(ToolError::invalid("invalid_snapshot_token"));
     }

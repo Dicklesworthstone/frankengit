@@ -2,11 +2,14 @@
 
 //! Minimal command-line surface for the one-process node slice.
 
+extern crate self as fgit_cli;
+
 pub mod agent_context;
 pub mod agent_credential_token;
 pub mod agent_recover;
 pub mod agent_settle;
 pub mod agent_tasks;
+pub mod mcp;
 
 mod at;
 
@@ -287,7 +290,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v1] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v1]; fg lfs --help; fg verify-read --help; fg queue --help; fg inbox --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v2] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v2]; fg lfs --help; fg verify-read --help; fg queue --help; fg inbox --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -295,7 +298,7 @@ impl Display for CliRefusal {
             ),
             Self::UnsupportedRootLayout(token) => write!(
                 formatter,
-                "unsupported root layout `{token}`: expected `legacy` or `ref-merkle-v1`"
+                "unsupported root layout `{token}`: expected `legacy` or `ref-merkle-v2`"
             ),
             Self::InvalidInitialBranch(name) => write!(
                 formatter,
@@ -841,7 +844,7 @@ fn extract_init_root_layout(
             let token = arguments.get(cursor + 1).ok_or(CliRefusal::Usage)?;
             layout = Some(match token.as_str() {
                 "legacy" => RootLayoutVersion::LegacyWholeBody,
-                "ref-merkle-v1" => RootLayoutVersion::RefStateMerkleV1,
+                "ref-merkle-v2" => RootLayoutVersion::RefStateMerkleV2,
                 _ => return Err(CliRefusal::UnsupportedRootLayout(token.clone())),
             });
             cursor += 2;
@@ -2463,10 +2466,10 @@ mod tests {
             (base.clone(), RootLayoutVersion::LegacyWholeBody)
         );
         let mut explicit = base.clone();
-        explicit.extend(["--root-layout".to_owned(), "ref-merkle-v1".to_owned()]);
+        explicit.extend(["--root-layout".to_owned(), "ref-merkle-v2".to_owned()]);
         assert_eq!(
             extract_init_root_layout(&explicit).unwrap(),
-            (base, RootLayoutVersion::RefStateMerkleV1)
+            (base, RootLayoutVersion::RefStateMerkleV2)
         );
         explicit.extend(["--root-layout".to_owned(), "legacy".to_owned()]);
         assert!(extract_init_root_layout(&explicit).is_err());
@@ -2485,7 +2488,13 @@ mod tests {
             (literal.clone(), RootLayoutVersion::LegacyWholeBody)
         );
         let mut invalid = literal[..4].to_vec();
-        invalid.extend(["--root-layout".to_owned(), "newer-layout".to_owned()]);
+        invalid.extend(["--root-layout".to_owned(), "ref-merkle-v1".to_owned()]);
+        assert!(matches!(
+            extract_init_root_layout(&invalid),
+            Err(CliRefusal::UnsupportedRootLayout(_))
+        ));
+        invalid.pop();
+        invalid.push("newer-layout".to_owned());
         assert!(matches!(
             extract_init_root_layout(&invalid),
             Err(CliRefusal::UnsupportedRootLayout(_))
@@ -2505,7 +2514,7 @@ mod tests {
                 "proof-layout-initialization".to_owned(),
                 format.to_owned(),
                 "--root-layout".to_owned(),
-                "ref-merkle-v1".to_owned(),
+                "ref-merkle-v2".to_owned(),
             ];
             assert!(matches!(run(&command), Ok(CliOutcome::Initialized(_))));
             assert!(matches!(
@@ -2528,7 +2537,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 materialized.root_layout(),
-                fgit_types::RootLayoutVersion::RefStateMerkleV1
+                fgit_types::RootLayoutVersion::RefStateMerkleV2
             );
             node.shutdown().unwrap();
         }
@@ -3089,22 +3098,59 @@ mod command_time_policy_tests {
     /// acceptance 3). Test modules may still mint class contexts for fixtures.
     #[test]
     fn no_command_path_mints_the_class_default_context() {
+        fn is_cfg_test_attr(trimmed: &str) -> bool {
+            trimmed == "#[cfg(test)]"
+                || (trimmed.starts_with("#[cfg(all(")
+                    && trimmed.ends_with("))]")
+                    && trimmed["#[cfg(all(".len()..trimmed.len() - "))]".len()]
+                        .split(',')
+                        .any(|part| part.trim() == "test"))
+        }
+
+        fn parent_gates_test_mod(parent_dir: &Path, mod_name: &str) -> bool {
+            let sibling_rs = parent_dir.with_extension("rs");
+            let parent_file = if sibling_rs.is_file() {
+                sibling_rs
+            } else {
+                parent_dir.join("mod.rs")
+            };
+            let Ok(parent) = std::fs::read_to_string(parent_file) else {
+                return false;
+            };
+            let target_decl = format!("mod {mod_name};");
+            let mut gated = false;
+            for line in parent.lines() {
+                let trimmed = line.split("//").next().unwrap().trim();
+                if is_cfg_test_attr(trimmed) {
+                    gated = true;
+                    continue;
+                }
+                if gated {
+                    if trimmed.starts_with("#[") || trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == target_decl {
+                        return true;
+                    }
+                    gated = false;
+                }
+            }
+            false
+        }
+
         fn visit(dir: &Path, offenders: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
-                    // A `tests/` directory is skipped only when its parent
-                    // module declares it `#[cfg(test)] mod tests;`.
-                    let gated_tests_dir = path.file_name().is_some_and(|name| name == "tests")
-                        && std::fs::read_to_string(path.parent().unwrap().with_extension("rs"))
-                            .is_ok_and(|parent| {
-                                parent
-                                    .lines()
-                                    .map(str::trim)
-                                    .collect::<Vec<_>>()
-                                    .windows(2)
-                                    .any(|pair| pair == ["#[cfg(test)]", "mod tests;"])
-                            });
+                    // A `tests/` or `*_tests/` directory is skipped only when
+                    // its parent module explicitly gates `mod <name>;` under `cfg(test)`.
+                    let gated_tests_dir = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            (name == "tests" || name.ends_with("_tests"))
+                                && parent_gates_test_mod(path.parent().unwrap(), name)
+                        });
                     if !gated_tests_dir {
                         visit(&path, offenders);
                     }
@@ -3132,7 +3178,7 @@ mod command_time_policy_tests {
                         continue;
                     }
                     let trimmed = code.trim();
-                    if trimmed == "#[cfg(test)]" {
+                    if is_cfg_test_attr(trimmed) {
                         gated = true;
                         continue;
                     }

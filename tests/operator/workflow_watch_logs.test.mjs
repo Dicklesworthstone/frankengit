@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { configuration, once, reconcile, status, serve, dispatchReport } from '../../scripts/operator/workflow_watch.mjs';
 import { markerMatches } from '../../scripts/operator/workflow_attempt_report.mjs';
 import { watchConfig, intentFor, encode, hex, sha256, nativeReport } from './fixtures/workflow_log_native.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 async function fixture(t, format = 'sha1', event = 'push', options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'fg-operator-logs-'));
@@ -25,7 +26,7 @@ async function fixture(t, format = 'sha1', event = 'push', options = {}) {
     marker: async report => readFile(join(batch, `workflow-${report.runs[0].run_id}`, 'attempt.json')) };
 }
 for (const format of ['sha1', 'sha256']) for (const event of ['push', 'workflow_dispatch']) {
-  test(`${format}/${event}: logs-only dispatch settles, binds original marker and never redispatches the same commit`, async t => {
+  test(`${format}/${event}: logs-only dispatch settles, binds original marker and never redispatches the same commit`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, event), result = await once(f.config), report = await f.report(), marker = await f.marker(report);
     assert.equal(result.outcome, 'observed_succeeded'); assert.equal(result.authoritative_check, false);
     assert.equal(report.plan.artifact_contract.log_capture.schema_version, 1);
@@ -41,7 +42,7 @@ for (const format of ['sha1', 'sha256']) for (const event of ['push', 'workflow_
   });
 }
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: lost reply reconciles logs offline without source, artifact root or executable`, async t => {
+  test(`${format}: lost reply reconciles logs offline without source, artifact root or executable`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, 'push', { drop_reply: true });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -56,7 +57,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.deepEqual(await f.lines('calls.ndjson'), calls); assert.equal((await f.lines('dispatches.ndjson')).length, 1);
   });
 }
-test('corrupt log evidence blocks settlement, replay and publication preparation', async t => {
+test('corrupt log evidence blocks settlement, replay and publication preparation', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 'push', { corrupt_log: true });
   await assert.rejects(once(f.config), /differs from the executed stream/);
   await assert.rejects(reconcile(f.config), /differs from the executed stream/);
@@ -67,14 +68,14 @@ test('corrupt log evidence blocks settlement, replay and publication preparation
   const corrupted = await f.report();
   assert.throws(() => dispatchReport(f.config, f.intent, corrupted), /differs from the executed stream/);
 });
-test('changing log capture cannot reuse an already-bound file-capture namespace', async t => {
+test('changing log capture cannot reuse an already-bound file-capture namespace', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 'push', { files: true }); await once(f.config);
   const before = await f.lines('calls.ndjson');
   await assert.rejects(once({ ...f.config, artifacts: { ...f.config.artifacts, capture_logs: false } }), /configuration changed/);
   assert.deepEqual(await f.lines('calls.ndjson'), before);
 });
 for (const [outcome, stopped, expected] of [['failed', false, 'observed_failed'], ['cancelled', true, 'observed_stopped'], ['timed_out', true, 'observed_stopped'], ['output_limit', true, 'observed_stopped']]) {
-  test(`${outcome}: diagnostic logs survive offline reconciliation without upgrading the result`, async t => {
+  test(`${outcome}: diagnostic logs survive offline reconciliation without upgrading the result`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, 'sha256', 'push', { outcome, stopped, drop_reply: true });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     const report = await f.report();
@@ -84,13 +85,13 @@ for (const [outcome, stopped, expected] of [['failed', false, 'observed_failed']
     assert.equal((await f.lines('dispatches.ndjson')).length, 1);
   });
 }
-test('continuous polling preserves one log-producing dispatch across idle polls', async t => {
+test('continuous polling preserves one log-producing dispatch across idle polls', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), observed = [];
   const result = await serve(f.config, { maxPolls: 2, pollMs: 100, onObservation: row => observed.push(row) });
   assert.equal(result.runs, 1); assert.equal(result.idle_polls, 1); assert.equal(result.execution_retried, false);
   assert.equal(observed[0].outcome, 'observed_succeeded'); assert.equal((await f.lines('dispatches.ndjson')).length, 1);
 });
-test('complete dispatch gate joins log receipts, immutable contracts and containment requirements', () => {
+test('complete dispatch gate joins log receipts, immutable contracts and containment requirements', LINUX_WORKFLOW, () => {
   const config = configuration(watchConfig('/fixture')), intent = intentFor(config);
   const good = nativeReport(config, intent).report;
   assert.equal(dispatchReport(config, intent, good).outcome, 'observed_succeeded');

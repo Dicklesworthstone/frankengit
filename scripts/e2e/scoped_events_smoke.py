@@ -39,6 +39,22 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def wait_process_interruptibly(process: subprocess.Popen[Any], timeout: float) -> int:
+    # CPython 3.15's Popen._wait_kqueue wraps kq.control() in `except OSError: return False`,
+    # which catches and discards signal-handler InterruptedError (an OSError subclass).
+    deadline = time.monotonic() + timeout
+    delay = 0.0005
+    while True:
+        code = process.poll()
+        if code is not None:
+            return code
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, 0.02)
+
+
 def rows(page: dict[str, Any]) -> list[tuple[str, str]]:
     return [(event["cursor"], event["event_frame_hex"]) for event in page["events"]]
 
@@ -180,7 +196,7 @@ class HttpServer:
         try:
             self.stop.touch(exist_ok=False)
             try:
-                process.wait(timeout=30)
+                wait_process_interruptibly(process, timeout=30)
             except subprocess.TimeoutExpired:
                 forced = True
                 process.terminate()

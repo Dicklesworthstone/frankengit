@@ -8,8 +8,7 @@ pub use super::queue_landing::TrustedQueueLanding;
 pub use super::queue_refresh::{QueueRefreshMode, TrustedQueueRefresh};
 use super::{
     Owner, check_directory, hex, lower_hash, merge_queue, pull_request, pull_request_merge,
-    queue_refresh,
-    reporting,
+    queue_refresh, reporting,
 };
 use crate::treefs_workspace::TrustedWorkflowArtifactConfig;
 use crate::{GitDaemonSessionTimeout, NodeConfig, NodeRequestContext, OneNode};
@@ -160,16 +159,16 @@ impl WorkflowWatchConfig {
     /// Discover visible open native PRs targeting the fixed `reference`.
     /// Every retained PR, including closed or hidden members, counts toward
     /// this lifetime custody bound and is reconciled before new execution.
-    /// This is source-head-only trusted host execution, never a merge profile.
+    /// Source-head execution is the default. Explicit collection candidate
+    /// configuration selects a distinct CI branch for each canonical PR.
     pub fn with_pull_requests(mut self, max_members: usize) -> io::Result<Self> {
         if !self.reference.as_bytes().starts_with(b"refs/heads/")
             || !(1..=64).contains(&max_members)
             || self.pull_request.is_some()
             || self.merge_queue.is_some()
-            || self.merge_candidate.is_some()
         {
             return Err(invalid(
-                "PR collection requires a branch and 1..64 retained members and excludes fixed PR, queue and merge-candidate selectors",
+                "PR collection requires a branch and 1..64 retained members and excludes fixed PR and queue selectors",
             ));
         }
         self.pull_requests = Some(max_members);
@@ -225,10 +224,37 @@ impl WorkflowWatchConfig {
         Ok(self)
     }
 
+    /// Test each discovered PR's actual combined tree on a distinct CI ref.
+    /// The configuration's reference is an operator-owned namespace stem:
+    /// PR `n` uses `<stem>/pr-<n>`, never the stem itself. This separately
+    /// authorizes ordinary exact-old creation/replacement of those CI refs.
+    /// The namespace, writer and deterministic commit inputs bind permanently
+    /// to the collection's existing custody scope; changing modes cannot
+    /// abandon source-head executions already owned by that collection.
+    pub fn with_pull_request_merge_candidates(
+        mut self,
+        config: PullRequestMergeWatchConfig,
+    ) -> io::Result<Self> {
+        if self.pull_requests.is_none() || self.pull_request.is_some() || self.merge_queue.is_some()
+        {
+            return Err(invalid(
+                "collection merge candidates require a PR collection selector",
+            ));
+        }
+        pull_requests::validate_candidate_namespace(&config, &self.reference)?;
+        self.merge_candidate = Some(config);
+        Ok(self)
+    }
+
     /// Validate the complete operator configuration without opening storage,
     /// acquiring custody or admitting execution. Call after composing operator
     /// options; this final check also guards infallible publisher selection.
     pub fn validate(&self) -> io::Result<()> {
+        if self.pull_requests.is_some()
+            && let Some(merge) = &self.merge_candidate
+        {
+            pull_requests::validate_candidate_namespace(merge, &self.reference)?;
+        }
         if self.reference.as_bytes().starts_with(b"refs/tags/")
             && (self.publisher.is_some()
                 || self.landing_principal.is_some()
@@ -678,7 +704,15 @@ fn attempt(
     if control.is_stopped() {
         return Ok(());
     }
-    if execute && refresh(node, request, config, receipt, QueueRefreshMode::RecoverOnly)? {
+    if execute
+        && refresh(
+            node,
+            request,
+            config,
+            receipt,
+            QueueRefreshMode::RecoverOnly,
+        )?
+    {
         return stopped(control, "attempt budget stopped queue refresh recovery");
     }
     if publish(node, request, config, receipt)? {
@@ -701,7 +735,13 @@ fn attempt(
     if control.is_stopped() {
         return Ok(());
     }
-    if refresh(node, request, config, receipt, QueueRefreshMode::RecoverAndSelect)? {
+    if refresh(
+        node,
+        request,
+        config,
+        receipt,
+        QueueRefreshMode::RecoverAndSelect,
+    )? {
         return stopped(control, "attempt budget stopped queue target refresh");
     }
     if control.is_stopped() {
@@ -971,8 +1011,9 @@ fn refresh(
             "automatic queue refresh requires its complete operator configuration".into(),
         ));
     };
-    let result = node.runtime().block_on(
-        node.refresh_trusted_queue_head_merge_workflows_in(
+    let result = node
+        .runtime()
+        .block_on(node.refresh_trusted_queue_head_merge_workflows_in(
             request,
             &config.reference,
             number,
@@ -984,8 +1025,7 @@ fn refresh(
             refresher,
             mode,
             |_| Ok(()),
-        ),
-    );
+        ));
     receipt.non_green |= result.refused != 0;
     receipt.interrupted |= result.request_stopped;
     receipt.requires_reconciliation |= result.error.is_some();
@@ -997,7 +1037,10 @@ fn refresh(
     receipt.publication_pending |= receipt.refresh_pending;
     add(&mut receipt.refreshes_committed, result.committed)?;
     add(&mut receipt.refreshes_refused, result.refused)?;
-    add(&mut receipt.refreshes_previously_decided, result.previously_decided)?;
+    add(
+        &mut receipt.refreshes_previously_decided,
+        result.previously_decided,
+    )?;
     add(&mut receipt.refreshes_waiting, result.waiting)?;
     if let Some(error) = result.error {
         return Err(WorkflowWatchError::Attempt(error));
@@ -1181,25 +1224,32 @@ impl Custody {
         let watch_owner = fs::File::open(events.join("owner.lock"))
             .map_err(|error| WorkflowWatchError::Custody(error.to_string()))?;
         let refresh_pending = match (config.merge_queue, config.merge_candidate.as_ref()) {
-            (Some(number), Some(merge)) => node.runtime().block_on(
-                queue_refresh::validated_pending_in(
-                    node, request, &config.reference, number, &events, &scope, merge,
+            (Some(number), Some(merge)) => node
+                .runtime()
+                .block_on(queue_refresh::validated_pending_in(
+                    node,
+                    request,
+                    &config.reference,
+                    number,
+                    &events,
+                    &scope,
+                    merge,
                     config.queue_refresh_principal,
-                ),
-            ).map_err(|error| {
-                if control.is_stopped()
-                    && matches!(
-                        &error,
-                        super::TrustedWorkflowFailure::InvalidInput(
-                            "queue refresh custody verification stopped"
+                ))
+                .map_err(|error| {
+                    if control.is_stopped()
+                        && matches!(
+                            &error,
+                            super::TrustedWorkflowFailure::InvalidInput(
+                                "queue refresh custody verification stopped"
+                            )
                         )
-                    )
-                {
-                    WorkflowWatchError::StoppedBeforeReadiness
-                } else {
-                    custody(error)
-                }
-            })?,
+                    {
+                        WorkflowWatchError::StoppedBeforeReadiness
+                    } else {
+                        custody(error)
+                    }
+                })?,
             _ => false,
         };
         let mut result = Self {

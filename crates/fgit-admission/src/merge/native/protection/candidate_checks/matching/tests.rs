@@ -227,3 +227,38 @@ fn candidate_evidence_does_not_depend_on_a_mutable_head_or_bundle_pack_spelling(
     let mut selected = ExactChecks::new(subject, binding, &[], &candidates);
     assert!(selected.observe(&observation).unwrap());
 }
+
+#[test]
+fn cloned_candidate_matchers_preserve_only_the_ordered_suffix_resolution() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (subject, binding, build) = setup(format);
+        let mut lint = build.clone();
+        lint.job = "lint".into();
+        let required = [build.clone(), lint.clone()];
+        let initial = ExactChecks::new(subject.clone(), binding, &[], &required);
+        let build_success =
+            candidate_event(&subject, binding, &build, WorkflowCheckConclusion::Success);
+        let build_failure =
+            candidate_event(&subject, binding, &build, WorkflowCheckConclusion::Failure);
+        let lint_success =
+            candidate_event(&subject, binding, &lint, WorkflowCheckConclusion::Success);
+
+        let mut suffix = initial.clone();
+        assert!(!suffix.observe(&build_success).unwrap());
+        // The known newer success settles build, while lint remains mandatory.
+        let mut remaining = suffix.clone();
+        assert!(!remaining.observe(&build_failure).unwrap());
+        assert!(remaining.observe(&lint_success).unwrap());
+
+        // A fresh pre-suffix clone must still see the same failure. Cloning
+        // neither shares mutable resolution nor erases a pending selector.
+        let mut independent = initial.clone();
+        assert_eq!(
+            independent.observe(&build_failure),
+            Err(RefusalCode::ProtectedRefTransitionDenied),
+        );
+        let mut another = initial;
+        assert!(!another.observe(&lint_success).unwrap());
+        assert!(another.observe(&build_success).unwrap());
+    }
+}

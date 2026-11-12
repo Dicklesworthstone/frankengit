@@ -1,9 +1,38 @@
 # Native source candidates over MCP
 
-`frankengit_source_candidate` closes the local sponsored agent's source-read to
-patch-candidate boundary. It is exposed by `--allow-source`, not by source-write,
-issue, PR, review or outcome permissions. This remains the explicit trusted-local
-MCP profile, not remote IAM or an agent credential issuer (x2mv.4.24 / FG-096).
+`frankengit_source_candidate` turns exact edits into a native candidate that can
+be independently inspected before publication. The `--allow-source` launch
+ceiling exposes it in both the trusted-local and canonical sponsored-agent
+profiles. Source-write, issue, PR, review and outcome permissions do not grant
+candidate work (x2mv.4.24 / FG-096).
+
+## Sponsored agent profile
+
+Launch with `--agent-token-file PRIVATE_FILE`, `--expected-incarnation INCARNATION`
+and `--allow-source`, using a canonical credential explicitly issued with
+`source-candidates`. Add `source-read` or `source-history-read` only if the agent
+also needs those independent source APIs. Existing grants, including masks
+`0x007f`, `0x00ff` and `0x01ff`, gain no candidate authority after an upgrade.
+
+Sponsored discovery exposes only `prepare_patch` with omitted profile or
+`exact-tree-v1`, and `inspect` for an uploaded single-parent candidate. Initial
+history, symlink preparation, replay, rebase, PR and queue operations are refused
+before authentication or native dispatch. The trusted-local schema retains its
+existing operations.
+
+Every call authenticates the current grant and borrows its opaque candidate
+capability. Native construction and inspection retain the original agent,
+sponsor, repository namespace, expiry and request deadline. The native boundary
+checks raw input against the request reservation; MCP separately bounds the
+complete request and response. A missing, expired, completed or differently
+scoped request cannot acquire a trusted-owner context. Revocation applies on the
+next call, including after restarting the MCP process.
+
+Returned `publication_arguments` are unsigned data for an independently
+authorized publisher. No source-publication, approval or merge tool is exposed
+to the sponsored profile. The work creates no durable agent execution run,
+process, network access or secret capability. The existing MCP artifact bounds
+below apply equally to both profiles.
 
 ## Prepare a patch without publication
 
@@ -37,7 +66,8 @@ semantics and refusals apply, including regular-file creation/deletion/modes,
 explicit supported renames and binary patch records. No fuzzy application or
 unsupported fallback is introduced by MCP.
 
-`prepare_patch` may explicitly select `"profile": "exact-symlink-v1"` to
+In the trusted-local profile, `prepare_patch` may explicitly select
+`"profile": "exact-symlink-v1"` to
 create, edit, delete or rename Git symlink blobs using mode `120000`. An omitted
 profile, or explicit `"exact-tree-v1"`, retains the existing regular-file
 behavior. Link targets are inert bytes and are never traversed or materialized
@@ -51,8 +81,8 @@ remain required.
 The complete result carries source RCR/base, candidate commit/tree, exact patch
 and bundle SHA-256, changed-path blob/mode receipts and `publication_arguments`.
 The latter uses the existing `frankengit_source_publish` field names and contains
-no idempotency key. A caller must review the candidate, obtain the independent
-write grant and supply its own original key before requesting publication.
+no idempotency key. A separately authorized publisher must review the candidate,
+obtain the independent write grant and supply its own original publication key.
 Preparation success does not imply that current protection will admit it.
 
 A native preparation result identifies an RCR but does not expose its selecting
@@ -86,8 +116,9 @@ narrow its bounded work/output profile. Exhaustion fails the whole inspection;
 there is no successful truncated diff. The shared renderer rechecks repository,
 refs, head and commit pins, entry order, types, spans and output bounds.
 
-Review `candidate_commit_body_hex` and `review`, then use the inspected result's
-`publication_arguments` with `frankengit_source_publish`, adding your own
+Review `candidate_commit_body_hex` and `review`, then an independently authorized
+publisher can use the inspected result's
+`publication_arguments` with `frankengit_source_publish`, adding its own
 original `idempotency_key`. Inspection grants no approval or publication right.
 The independent source-write grant, launch-bound sponsor, exact predecessor,
 quarantine and branch policy still govern publication. Repeat an ambiguous
@@ -110,7 +141,18 @@ still fit the 32-tool registry. Tests include strict parsing and exact byte
 round trips plus persisted SHA-1/SHA-256 MCP preparation, inspection,
 publication, same-key retry, reopen, sibling preservation and independent-grant
 regressions. Corrupt bundles, mismatched pins and deliberately too-small diff
-budgets are paired with successful reads of the same native candidate. These are authored coverage, not an executed native-test claim:
-this implementation session had no Rust toolchain or built `fg`. Independent
-compilation, native and real-binary verification remain required; no agent-day
-or bead closure is asserted.
+budgets are paired with successful reads of the same native candidate. The
+original trusted-local implementation recorded authored coverage without an
+available Rust toolchain or built `fg`; that historical note is not current
+native-test evidence. Compilation, native and real-binary verification must be
+bound to the revision under test; no agent-day or bead closure is asserted.
+
+Sponsored regressions in `backend/agent/tests/candidates.rs` use persisted
+canonical credentials and both native object formats. They cover the MCP
+prepare/inspect handoff, deterministic artifacts and reopen, unchanged authority
+and unstaged objects, old-mask and cross-scope denials, closed discovery and
+dispatch, exact source/path/refusal limits, original request/response lifetime,
+revocation and cross-incarnation rejection. Native bridge cases pair an exact
+raw-input reservation with a one-byte-short refusal and independently narrow
+inspection visibility. They require compilation and execution at the candidate
+revision before constituting verification evidence.

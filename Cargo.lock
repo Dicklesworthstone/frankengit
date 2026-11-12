@@ -737,8 +737,10 @@ dependencies = [
  "fgit-agent",
  "fgit-authority",
  "fgit-authority-fsqlite",
+ "fgit-claim",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-evidence",
  "fgit-forge",
  "fgit-git-object",
  "fgit-identity",
@@ -965,6 +967,7 @@ name = "fgit-projection"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+ "fgit-crypto",
  "fgit-runtime",
  "fgit-types",
  "sqlmodel-core",

@@ -510,3 +510,42 @@ fn shared_node_object_failure_preserves_the_offending_identity() {
         Refusal::Object { oid: id, detail }
     );
 }
+
+#[test]
+fn fsck_receipt_binds_deterministic_claim_rank_and_canonical_evidence_record_id() {
+    let graph_options = parse(&args(&[])).unwrap();
+    let mut graph_out = Vec::new();
+    assert_eq!(
+        finish(&mut graph_out, &graph_options, Ok(report()), None).unwrap(),
+        0
+    );
+    let graph_text = String::from_utf8(graph_out).unwrap();
+    assert!(graph_text.contains("\"claim_rank\":\"bounded_model\""));
+    assert!(graph_text.contains("\"evidence_record_id\":\"frankengit/evidence-record/"));
+
+    let mut repeat_out = Vec::new();
+    assert_eq!(
+        finish(&mut repeat_out, &graph_options, Ok(report()), None).unwrap(),
+        0
+    );
+    assert_eq!(String::from_utf8(repeat_out).unwrap(), graph_text);
+
+    let objects_only_options = parse(&args(&["--objects-only"])).unwrap();
+    let mut objects_only_report = report();
+    objects_only_report.graph = None;
+    let mut objects_only_out = Vec::new();
+    assert_eq!(
+        finish(
+            &mut objects_only_out,
+            &objects_only_options,
+            Ok(objects_only_report),
+            None
+        )
+        .unwrap(),
+        0
+    );
+    let objects_only_text = String::from_utf8(objects_only_out).unwrap();
+    assert!(objects_only_text.contains("\"claim_rank\":\"bounded_model\""));
+    assert!(objects_only_text.contains("\"evidence_record_id\":\"frankengit/evidence-record/"));
+    assert_ne!(objects_only_text, graph_text);
+}

@@ -5,7 +5,9 @@ use fgit_forge::preparation::{ConflictKind, MergeConflict, MergeEntry, PlannedMe
 use std::collections::BTreeSet;
 
 fn fields<const N: usize>(pairs: [(&str, Value); N]) -> Object {
-    let Value::Object(fields) = object(pairs) else { unreachable!() };
+    let Value::Object(fields) = object(pairs) else {
+        unreachable!()
+    };
     fields
 }
 fn id(format: GitHashAlgorithm, byte: u8) -> GitOid {
@@ -36,9 +38,15 @@ fn file(path: &[u8], bytes: &[u8]) -> Value {
         ("path_hex", text(hex(path))),
         ("choice", text("file")),
         ("mode", text("100755")),
-        ("bytes_hex_chunks", Value::Array(
-            bytes.chunks(CHUNK_BYTES).map(|part| text(hex(part))).collect(),
-        )),
+        (
+            "bytes_hex_chunks",
+            Value::Array(
+                bytes
+                    .chunks(CHUNK_BYTES)
+                    .map(|part| text(hex(part)))
+                    .collect(),
+            ),
+        ),
     ])
 }
 fn resolve(format: GitHashAlgorithm, rows: Vec<Value>) -> Object {
@@ -70,7 +78,10 @@ fn raw_refs_selected_history_and_commit_metadata_remain_exact_in_both_hash_domai
         fields.remove("mainline");
         fields.insert("source_reference_hex".into(), text(hex(b"refs/heads/\xff")));
         fields.insert("expected_source".into(), fields["expected_base"].clone());
-        assert!(input::parse(&fields, format).is_ok(), "same-ref revert is valid");
+        assert!(
+            input::parse(&fields, format).is_ok(),
+            "same-ref revert is valid"
+        );
     }
 }
 
@@ -78,21 +89,43 @@ fn raw_refs_selected_history_and_commit_metadata_remain_exact_in_both_hash_domai
 fn selectors_mainlines_authority_overrides_and_commit_header_injection_are_closed() {
     let format = GitHashAlgorithm::Sha256;
     for required in [
-        "operation", "profile", "direction", "reference", "source_reference",
-        "expected_base", "expected_source", "selected_commit", "author", "committer",
-        "timestamp", "message_hex",
+        "operation",
+        "profile",
+        "direction",
+        "reference",
+        "source_reference",
+        "expected_base",
+        "expected_source",
+        "selected_commit",
+        "author",
+        "committer",
+        "timestamp",
+        "message_hex",
     ] {
         let mut bad = args(format);
         bad.remove(required);
         assert!(input::parse(&bad, format).is_err(), "{required}");
     }
     for name in [
-        "principal", "storage", "tenant_id", "repository_id", "force", "idempotency_key",
-        "merge_base", "candidate_commit", "bundle_hex_chunks", "shell", "resolutions",
+        "principal",
+        "storage",
+        "tenant_id",
+        "repository_id",
+        "force",
+        "idempotency_key",
+        "merge_base",
+        "candidate_commit",
+        "bundle_hex_chunks",
+        "shell",
+        "resolutions",
     ] {
         let mut bad = args(format);
         bad.insert(name.into(), Value::Null);
-        assert_eq!(input::parse(&bad, format).err().unwrap().code, "unknown_argument", "{name}");
+        assert_eq!(
+            input::parse(&bad, format).err().unwrap().code,
+            "unknown_argument",
+            "{name}"
+        );
     }
     for (name, value) in [
         ("reference_hex", text(hex(b"refs/heads/main"))),
@@ -125,24 +158,46 @@ fn selectors_mainlines_authority_overrides_and_commit_header_injection_are_close
 #[test]
 fn resolution_requires_original_snapshot_and_every_choice_is_exact_and_bounded() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let good = resolve(format, vec![
-            file(b"z-\xff", b"\0\xff\r\n"), choice(b"b", "delete"), file(b"a", b""),
-        ]);
+        let good = resolve(
+            format,
+            vec![
+                file(b"z-\xff", b"\0\xff\r\n"),
+                choice(b"b", "delete"),
+                file(b"a", b""),
+            ],
+        );
         let parsed = input::parse(&good, format).unwrap();
         let choices = parsed.resolutions.unwrap();
-        assert_eq!(choices[0].choice, ResolutionChoice::File { mode: 0o100755, bytes: vec![] });
+        assert_eq!(
+            choices[0].choice,
+            ResolutionChoice::File {
+                mode: 0o100755,
+                bytes: vec![]
+            }
+        );
         assert_eq!(choices[1].choice, ResolutionChoice::Delete);
         assert_eq!(choices[2].path, b"z-\xff");
-        assert_eq!(choices[2].choice, ResolutionChoice::File {
-            mode: 0o100755, bytes: b"\0\xff\r\n".to_vec(),
-        });
+        assert_eq!(
+            choices[2].choice,
+            ResolutionChoice::File {
+                mode: 0o100755,
+                bytes: b"\0\xff\r\n".to_vec(),
+            }
+        );
         let mut missing = good;
         missing.remove("expected_head");
-        assert_eq!(input::parse(&missing, format).err().unwrap().code, "resolution_snapshot_required");
+        assert_eq!(
+            input::parse(&missing, format).err().unwrap().code,
+            "resolution_snapshot_required"
+        );
         for rows in [
             vec![],
             vec![choice(b"x", "ours"), choice(b"x", "theirs")],
-            vec![choice(b"a", "ours"), choice(b"a-", "base"), choice(b"a/b", "delete")],
+            vec![
+                choice(b"a", "ours"),
+                choice(b"a-", "base"),
+                choice(b"a/b", "delete"),
+            ],
             vec![choice(b"../x", "ours")],
             vec![choice(b"x/.GiT/config", "ours")],
             vec![choice(b"x", "auto")],
@@ -154,15 +209,39 @@ fn resolution_requires_original_snapshot_and_every_choice_is_exact_and_bounded()
         let boundary = resolve(format, vec![file(b"x", &exact)]);
         assert!(input::parse(&boundary, format).is_ok());
         let wire = object([
-            ("jsonrpc", text("2.0")), ("id", json::number(1)), ("method", text("tools/call")),
-            ("params", object([("name", text(NAME)), ("arguments", Value::Object(boundary))])),
-        ]).encode(json::MAX_INPUT).unwrap();
+            ("jsonrpc", text("2.0")),
+            ("id", json::number(1)),
+            ("method", text("tools/call")),
+            (
+                "params",
+                object([("name", text(NAME)), ("arguments", Value::Object(boundary))]),
+            ),
+        ])
+        .encode(json::MAX_INPUT)
+        .unwrap();
         assert!(json::parse(wire.as_bytes()).is_ok());
-        assert_eq!(input::parse(&resolve(format, vec![
-            file(b"a", &vec![1; MAX_BUNDLE_BYTES / 2]),
-            file(b"b", &vec![1; MAX_BUNDLE_BYTES / 2]),
-        ]), format).err().unwrap().code, "resolution_byte_limit");
-        for name in ["max_commits", "max_edges", "max_tree_entries", "max_preparation_bytes"] {
+        assert_eq!(
+            input::parse(
+                &resolve(
+                    format,
+                    vec![
+                        file(b"a", &vec![1; MAX_BUNDLE_BYTES / 2]),
+                        file(b"b", &vec![1; MAX_BUNDLE_BYTES / 2]),
+                    ]
+                ),
+                format
+            )
+            .err()
+            .unwrap()
+            .code,
+            "resolution_byte_limit"
+        );
+        for name in [
+            "max_commits",
+            "max_edges",
+            "max_tree_entries",
+            "max_preparation_bytes",
+        ] {
             for value in [json::number(0), json::number(u64::MAX), text("1")] {
                 let mut bad = args(format);
                 bad.insert(name.into(), value);
@@ -174,22 +253,40 @@ fn resolution_requires_original_snapshot_and_every_choice_is_exact_and_bounded()
 
 #[test]
 fn discovery_registry_and_parser_field_sets_match_for_both_operations() {
-    let entry = fgit_schema::mcp::REGISTRY.iter().find(|entry| entry.name == NAME).unwrap();
+    let entry = fgit_schema::mcp::REGISTRY
+        .iter()
+        .find(|entry| entry.name == NAME)
+        .unwrap();
     for resolving in [false, true] {
         let schema = schema(resolving);
         let root = schema.object().unwrap();
         assert_eq!(root["additionalProperties"], Value::Bool(false));
         let properties = root["properties"].object().unwrap();
         let mut names: BTreeSet<_> = input::COMMON_FIELDS.iter().copied().collect();
-        if resolving { names.insert("resolutions"); }
-        assert_eq!(properties.keys().map(String::as_str).collect::<BTreeSet<_>>(), names);
-        for name in names {
-            assert!(entry.input_fields.iter().any(|field| field.name == name), "{name}");
+        if resolving {
+            names.insert("resolutions");
         }
-        let Value::Array(required) = &root["required"] else { unreachable!() };
+        assert_eq!(
+            properties
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            names
+        );
+        for name in names {
+            assert!(
+                entry.input_fields.iter().any(|field| field.name == name),
+                "{name}"
+            );
+        }
+        let Value::Array(required) = &root["required"] else {
+            unreachable!()
+        };
         assert_eq!(required.contains(&text("expected_head")), resolving);
         assert_eq!(required.contains(&text("resolutions")), resolving);
-        let Value::Array(alternatives) = &root["allOf"] else { unreachable!() };
+        let Value::Array(alternatives) = &root["allOf"] else {
+            unreachable!()
+        };
         assert_eq!(alternatives.len(), 2);
         assert!(schema.encode(16 * 1024).is_ok());
     }
@@ -200,7 +297,9 @@ fn replay_coordinates_and_native_commit_headers_cannot_be_substituted() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let input = input::parse(&args(format), format).unwrap();
         let point = ReplayCoordinates {
-            request: input.request, selected_parent: Some(id(format, 4)), selected_mainline: Some(1),
+            request: input.request,
+            selected_parent: Some(id(format, 4)),
+            selected_mainline: Some(1),
         };
         output::coordinates(point, input.request).unwrap();
         let mut wrong = point;
@@ -219,14 +318,28 @@ fn replay_coordinates_and_native_commit_headers_cannot_be_substituted() {
         ).into_bytes();
         let commit = git_object_id(format, GitObjectKind::Commit, &body);
         let mut plan = PreparedReplay {
-            coordinates: point, tree, commit,
-            objects: vec![PlannedMergeObject { id: commit, kind: GitObjectKind::Commit, body: body.clone() }],
+            coordinates: point,
+            tree,
+            commit,
+            objects: vec![PlannedMergeObject {
+                id: commit,
+                kind: GitObjectKind::Commit,
+                body: body.clone(),
+            }],
         };
-        assert_eq!(output::commit_body(&input, &plan, &mut || true).unwrap(), body);
+        assert_eq!(
+            output::commit_body(&input, &plan, &mut || true).unwrap(),
+            body
+        );
         plan.objects[0].body.push(b'!');
         assert!(output::commit_body(&input, &plan, &mut || true).is_err());
         plan.objects[0].body = body;
-        assert_eq!(output::commit_body(&input, &plan, &mut || false).unwrap_err().code, "replay_cancelled");
+        assert_eq!(
+            output::commit_body(&input, &plan, &mut || false)
+                .unwrap_err()
+                .code,
+            "replay_cancelled"
+        );
     }
 }
 
@@ -234,25 +347,46 @@ fn replay_coordinates_and_native_commit_headers_cannot_be_substituted() {
 fn complete_resolution_receipts_check_original_sides_uploaded_hashes_and_raw_paths() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let side = |bytes: &[u8]| MergeEntry {
-            name: b"\xff".to_vec(), mode: 0o100755,
+            name: b"\xff".to_vec(),
+            mode: 0o100755,
             oid: git_object_id(format, GitObjectKind::Blob, bytes),
         };
         let conflict = MergeConflict {
-            path: b"dir/\xff".to_vec(), kind: ConflictKind::Binary,
-            base: Some(side(b"base")), ours: Some(side(b"ours")), theirs: Some(side(b"parent")),
+            path: b"dir/\xff".to_vec(),
+            kind: ConflictKind::Binary,
+            base: Some(side(b"base")),
+            ours: Some(side(b"ours")),
+            theirs: Some(side(b"parent")),
         };
-        let mut request = ConflictResolution { path: conflict.path.clone(), choice: ResolutionChoice::Theirs };
+        let mut request = ConflictResolution {
+            path: conflict.path.clone(),
+            choice: ResolutionChoice::Theirs,
+        };
         let mut row = ResolvedPath {
-            conflict: conflict.clone(), choice: ResolutionKind::Theirs, result: conflict.theirs.clone(),
+            conflict: conflict.clone(),
+            choice: ResolutionKind::Theirs,
+            result: conflict.theirs.clone(),
         };
         let check = |request: &ConflictResolution, row: &ResolvedPath| {
-            output::receipts(std::slice::from_ref(request), std::slice::from_ref(row), format, Default::default(), &mut || true)
+            output::receipts(
+                std::slice::from_ref(request),
+                std::slice::from_ref(row),
+                format,
+                Default::default(),
+                &mut || true,
+            )
         };
         let receipt = check(&request, &row).unwrap();
         assert!(receipt.encode(16 * 1024).unwrap().contains("6469722fff"));
         row.result = conflict.base.clone();
-        assert!(check(&request, &row).is_err(), "revert theirs cannot become selected-commit base");
-        request.choice = ResolutionChoice::File { mode: 0o100755, bytes: b"\0\xff".to_vec() };
+        assert!(
+            check(&request, &row).is_err(),
+            "revert theirs cannot become selected-commit base"
+        );
+        request.choice = ResolutionChoice::File {
+            mode: 0o100755,
+            bytes: b"\0\xff".to_vec(),
+        };
         row.choice = ResolutionKind::File;
         row.result = Some(side(b"\0\xff"));
         check(&request, &row).unwrap();
@@ -275,27 +409,55 @@ fn handoffs_fit_real_rpc_input_and_never_invent_retry_authority() {
         let input = input::parse(&args(format), format).unwrap();
         let bytes = vec![0xff; MAX_BUNDLE_BYTES];
         let (publication, inspection) = output::handoffs(
-            &input.reference, input.request.target, id(format, 7),
-            input.expected_head.unwrap(), &bytes,
-        ).unwrap();
-        assert!(!publication.object().unwrap().contains_key("idempotency_key"));
-        assert_eq!(inspection.object().unwrap()["expected_head"], args(format)["expected_head"]);
-        for (tool, value) in [("frankengit_source_publish", publication), (NAME, inspection)] {
+            &input.reference,
+            input.request.target,
+            id(format, 7),
+            input.expected_head.unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        assert!(
+            !publication
+                .object()
+                .unwrap()
+                .contains_key("idempotency_key")
+        );
+        assert_eq!(
+            inspection.object().unwrap()["expected_head"],
+            args(format)["expected_head"]
+        );
+        for (tool, value) in [
+            ("frankengit_source_publish", publication),
+            (NAME, inspection),
+        ] {
             let mut value = value.object().unwrap().clone();
             if tool == "frankengit_source_publish" {
                 value.insert("idempotency_key".into(), text("caller-owned-original-key"));
             }
             assert_eq!(chunks(&value, "bundle_hex_chunks").unwrap(), bytes);
             let wire = object([
-                ("jsonrpc", text("2.0")), ("id", json::number(1)), ("method", text("tools/call")),
-                ("params", object([("name", text(tool)), ("arguments", Value::Object(value))])),
-            ]).encode(json::MAX_INPUT).unwrap();
+                ("jsonrpc", text("2.0")),
+                ("id", json::number(1)),
+                ("method", text("tools/call")),
+                (
+                    "params",
+                    object([("name", text(tool)), ("arguments", Value::Object(value))]),
+                ),
+            ])
+            .encode(json::MAX_INPUT)
+            .unwrap();
             assert!(json::parse(wire.as_bytes()).is_ok());
         }
-        assert!(output::handoffs(
-            &input.reference, input.request.target, id(format, 7),
-            input.expected_head.unwrap(), &vec![0xff; MAX_BUNDLE_BYTES + 1],
-        ).is_err());
+        assert!(
+            output::handoffs(
+                &input.reference,
+                input.request.target,
+                id(format, 7),
+                input.expected_head.unwrap(),
+                &vec![0xff; MAX_BUNDLE_BYTES + 1],
+            )
+            .is_err()
+        );
     }
 }
 
@@ -306,16 +468,48 @@ fn encoded_result_exhaustion_and_cancellation_never_return_a_complete_prefix() {
     let within = object([("content", text("\\".repeat(MAX_RESULT_BYTES / 2 - 32)))]);
     output::bounded(within, &mut || true).unwrap();
     let over = object([("content", text("\\".repeat(MAX_RESULT_BYTES / 2)))]);
-    assert_eq!(output::bounded(over, &mut || true).unwrap_err().code, "candidate_response_limit");
-    assert_eq!(output::bounded(object([("complete", Value::Bool(true))]), &mut || false)
-        .unwrap_err().code, "replay_cancelled");
+    assert_eq!(
+        output::bounded(over, &mut || true).unwrap_err().code,
+        "candidate_response_limit"
+    );
+    assert_eq!(
+        output::bounded(object([("complete", Value::Bool(true))]), &mut || false)
+            .unwrap_err()
+            .code,
+        "replay_cancelled"
+    );
 }
 
 #[test]
 fn typed_replay_refusals_do_not_expose_private_object_or_conflict_details() {
-    assert_eq!(replay_error(&ReplayError::MainlineRequired { parents: 2 }).code, "mainline_required");
-    assert_eq!(replay_error(&ReplayError::InvalidMainline { requested: 3, parents: 2 }).code, "invalid_mainline");
-    assert_eq!(replay_error(&ReplayError::CommitOutsideSourceHistory).code, "reference_unavailable");
-    assert_eq!(replay_error(&ReplayError::Resolution(Box::new(ResolutionError::NoConflicts))).code, "no_conflicts_to_resolve");
-    assert_eq!(replay_error(&ReplayError::Preparation(PreparationError::Source(MergeSourceError::Cancelled))).code, "replay_cancelled");
+    assert_eq!(
+        replay_error(&ReplayError::MainlineRequired { parents: 2 }).code,
+        "mainline_required"
+    );
+    assert_eq!(
+        replay_error(&ReplayError::InvalidMainline {
+            requested: 3,
+            parents: 2
+        })
+        .code,
+        "invalid_mainline"
+    );
+    assert_eq!(
+        replay_error(&ReplayError::CommitOutsideSourceHistory).code,
+        "reference_unavailable"
+    );
+    assert_eq!(
+        replay_error(&ReplayError::Resolution(Box::new(
+            ResolutionError::NoConflicts
+        )))
+        .code,
+        "no_conflicts_to_resolve"
+    );
+    assert_eq!(
+        replay_error(&ReplayError::Preparation(PreparationError::Source(
+            MergeSourceError::Cancelled
+        )))
+        .code,
+        "replay_cancelled"
+    );
 }

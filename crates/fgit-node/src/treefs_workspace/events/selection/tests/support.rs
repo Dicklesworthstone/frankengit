@@ -174,7 +174,7 @@ impl Fixture {
             None
         };
         let configuration = RepositoryIncarnationConfigurationBodyV2_1 {
-            root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
             object_format: format,
             repository_incarnation_id: binding.incarnation,
             policy_root,

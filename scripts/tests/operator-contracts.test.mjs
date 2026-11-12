@@ -71,7 +71,7 @@ if __name__ == '__main__': unittest.main()
       `FGE_LIB=${join(repository, 'scripts/e2e/lib.sh')}`,
       `FGE_RUN_DIR=${join(root, runDirectory)}`, 'FGE_SCRIPT_ID=operator-contract-fixture',
       `FGE_NODE=${node}`, `FG_OPERATOR_FIXTURE_NODE=${process.execPath}`, `FG_BIN=${process.execPath}`, `TMPDIR=${root}`,
-      '/bin/bash', join(root, suite),
+      'bash', join(root, suite),
     ], { timeoutMs: 30000, signal: t.signal, stdoutLimit: 2 * 1024 * 1024, stderrLimit: 2 * 1024 * 1024 });
     const records = (await readFile(join(root, runDirectory, 'e2e.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
     return { ...result, records };

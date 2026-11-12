@@ -3,8 +3,9 @@ use fgit_admission::merge::native::agent_credentials::AgentCredentialState;
 use fgit_authority::TerminalOutcome;
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
-    DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
+    DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
+    MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_READ,
 };
 use fgit_types::{DecisionOutcome, TxId};
 
@@ -19,6 +20,9 @@ fn grant(value: &AgentCredentialGrant) -> String {
         (OUTCOMES_READ, "outcomes-read"),
         (SOURCE_READ, "source-read"),
         (SOURCE_HISTORY_READ, "source-history-read"),
+        (SOURCE_CANDIDATES, "source-candidates"),
+        (MILESTONES_READ, "milestones-read"),
+        (MILESTONES_WRITE, "milestones-write"),
     ]
     .into_iter()
     .filter(|(bit, _)| value.permits(*bit))
@@ -129,7 +133,7 @@ mod tests {
     use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
     #[test]
-    fn retained_grant_output_does_not_expand_old_scopes_or_hide_history_permission() {
+    fn retained_grant_output_preserves_each_explicit_scope_without_expanding_old_masks() {
         let value = AgentCredentialGrant {
             agent: PrincipalId::from_bytes([1; 16]),
             sponsor: PrincipalId::from_bytes([2; 16]),
@@ -142,6 +146,43 @@ mod tests {
             operations: SOURCE_HISTORY_READ,
         };
         assert!(grant(&value).contains("\"operations\":[\"source-history-read\"]"));
+        for (operations, expected) in [
+            (MILESTONES_READ, "\"operations\":[\"milestones-read\"]"),
+            (MILESTONES_WRITE, "\"operations\":[\"milestones-write\"]"),
+            (
+                MILESTONES_READ | MILESTONES_WRITE,
+                "\"operations\":[\"milestones-read\",\"milestones-write\"]",
+            ),
+        ] {
+            assert!(
+                grant(&AgentCredentialGrant {
+                    operations,
+                    ..value
+                })
+                .contains(expected)
+            );
+        }
+        assert!(
+            !grant(&AgentCredentialGrant {
+                operations: 0x03ff,
+                ..value
+            })
+            .contains("milestones-")
+        );
+        assert!(
+            grant(&AgentCredentialGrant {
+                operations: SOURCE_CANDIDATES,
+                ..value
+            })
+            .contains("\"operations\":[\"source-candidates\"]")
+        );
+        assert!(
+            !grant(&AgentCredentialGrant {
+                operations: 0x01ff,
+                ..value
+            })
+            .contains("source-candidates")
+        );
         assert!(
             grant(&AgentCredentialGrant {
                 operations: SOURCE_READ | SOURCE_HISTORY_READ,

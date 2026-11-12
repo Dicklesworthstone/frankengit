@@ -63,7 +63,7 @@ fn absent_ref() -> RefName {
 #[test]
 fn public_merkle_selection_reopens_and_serves_a_verified_ref_absence() {
     let scratch = ScratchDirectory::new();
-    let creation = config(scratch.0.clone()).with_root_layout(RootLayoutVersion::RefStateMerkleV1);
+    let creation = config(scratch.0.clone()).with_root_layout(RootLayoutVersion::RefStateMerkleV2);
     let (node, _) = OneNode::init(creation)
         .expect("the public creation API persists the selected proof-capable layout");
     node.shutdown()
@@ -100,7 +100,7 @@ fn public_merkle_selection_reopens_and_serves_a_verified_ref_absence() {
             VerifiedReadCapability::EnvelopeV1,
             VerifiedReadQuery::Ref(name),
         ))
-        .expect("the selected V1 ref Merkle layout makes a public verified read reachable");
+        .expect("the selected V2 ref Merkle layout makes a public verified read reachable");
     let ReadResponse::Verified(envelope) = verified.response() else {
         panic!("a proof-capable client must receive a verified envelope");
     };
@@ -113,7 +113,7 @@ fn public_merkle_selection_reopens_and_serves_a_verified_ref_absence() {
             .exact_configuration()
             .expect("a ref proof carries its authenticated selected configuration")
             .root_layout(),
-        RootLayoutVersion::RefStateMerkleV1,
+        RootLayoutVersion::RefStateMerkleV2,
         "the served envelope exposes the selected authenticated root layout"
     );
     assert_eq!(
@@ -124,6 +124,39 @@ fn public_merkle_selection_reopens_and_serves_a_verified_ref_absence() {
         .expect("the public server response verifies against its selected head"),
         VerifiedMembership::RefAbsence
     );
+
+    // The requested name stays public. An empty-map witness also reveals
+    // HEAD and its unborn target, so either hidden name must stop disclosure.
+    for hidden in [b"HEAD".as_slice(), b"refs/heads/main".as_slice()] {
+        let mut visibility = RefVisibility::new();
+        visibility
+            .push_rule(hidden, &fgit_wire::WireLimits::default())
+            .unwrap();
+        let refused = node.runtime().block_on(node.serve_current_verified_read_in(
+            &request,
+            &visibility,
+            fgit_types::ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV1,
+            VerifiedReadQuery::Ref(absent_ref()),
+        ));
+        assert!(matches!(
+            refused,
+            Err(VerifiedReadServingRefusal::VerifiedRead(refusal))
+                if *refusal == fgit_verified_read::VerifiedReadRefusal::RefNotFoundOrUnauthorized
+        ));
+        let unproven = node
+            .runtime()
+            .block_on(node.serve_current_verified_read_in(
+                &request,
+                &visibility,
+                fgit_types::ReadLabel::current(),
+                VerifiedReadCapability::Unproven,
+                VerifiedReadQuery::Ref(absent_ref()),
+            ))
+            .unwrap();
+        assert!(matches!(unproven.response(), ReadResponse::Unproven(_)));
+        assert_eq!(unproven.authority_head(), verified.authority_head());
+    }
 
     node.shutdown().expect("the reopened node closes cleanly");
 }

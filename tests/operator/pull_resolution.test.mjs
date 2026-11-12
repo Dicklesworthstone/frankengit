@@ -5,10 +5,11 @@ import { capturePullCandidate, resolvePullCandidate, validateCandidateCapture, c
 import { resolutionPeer, TOKEN, HEAD } from './pull_resolution_fixture.mjs';
 import { candidatePeer, mixed } from './pull_candidate_fixture.mjs';
 import { candidateRequest } from '../../scripts/operator/pull_candidate_io.mjs';
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 const capture = async p => (await capturePullCandidate(p.input, TOKEN)).capture;
 
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) {
-  for (const choice of ['base', 'ours', 'theirs', 'delete', 'file']) test(`${algorithm} ${method} ${choice}: conflict -> resolved -> inspected, exact native bytes`, async t => {
+  for (const choice of ['base', 'ours', 'theirs', 'delete', 'file']) test(`${algorithm} ${method} ${choice}: conflict -> resolved -> inspected, exact native bytes`, LINUX_ORACLE, async t => {
     const p = await resolutionPeer(t, { algorithm, method, choice }), original = await capture(p), before = candidateCanonical(original);
     const result = await resolvePullCandidate(original, p.choices, TOKEN);
     assert.equal(result.capture.schema, RESOLVED_CAPTURE_SCHEMA); assert.equal(result.capture.preparation.state, 'resolved');
@@ -34,14 +35,14 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     assert.equal(candidateCanonical(original), before); assert.deepEqual(result.capture.resolution.preparation, original.preparation);
     assert.equal(result.capture.preparation.snapshot_token, HEAD);
   });
-  test(`${algorithm} ${method}: ordinary clean capture is unchanged`, async t => {
+  test(`${algorithm} ${method}: ordinary clean capture is unchanged`, LINUX_ORACLE, async t => {
     const p = await candidatePeer(t, { algorithm, method }), r = await capturePullCandidate(p.input, TOKEN);
     assert.equal(r.capture.schema, 'frankengit-pull-candidate-capture-v1'); assert.equal(r.capture.preparation.state, 'clean');
     assert.equal(r.capture.resolution, undefined); assert.deepEqual((await validateCandidateCapture(r.capture, r.bundle)).bundle, r.bundle);
   });
 }
 for (const bytes of [Buffer.alloc(0), Buffer.from([0, 255, 10, 13, 45, 45, 0]), Buffer.alloc(1024 * 1024, 0)]) {
-  test(`explicit executable replacement preserves ${bytes.length} binary bytes including empty files`, async t => {
+  test(`explicit executable replacement preserves ${bytes.length} binary bytes including empty files`, LINUX_ORACLE, async t => {
     const p = await resolutionPeer(t, { choice: 'file', bytes, mode: '100755', algorithm: 'sha256' });
     const r = await resolvePullCandidate(await capture(p), p.choices, TOKEN);
     assert.equal(r.capture.preparation.resolutions[0].result.mode, 0o100755);
@@ -55,7 +56,7 @@ for (const edit of [
   c => { c[0].choice = 'file'; c[0].mode = '120000'; c[0].content_hex = ''; },
   c => { c[0].choice = 'file'; c[0].mode = '100644'; c[0].content_hex = '0'; },
   c => { c[0].choice = 'file'; c[0].mode = '100644'; c[0].content_hex = 'ff'.repeat(1048577); },
-]) test(`invalid choices refuse before networking: ${edit.toString()}`, async t => {
+]) test(`invalid choices refuse before networking: ${edit.toString()}`, LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), original = await capture(p), choices = structuredClone(p.choices); edit(choices);
   await assert.rejects(resolvePullCandidate(original, choices, TOKEN)); assert.equal(p.requests.length, 3);
 });
@@ -66,7 +67,7 @@ test('cumulative bytes include every path, exact ceiling and one-over', () => {
   assert.equal(candidateResolutionChoices(choices).length, 4);
   choices[0].content_hex += '00'; assert.throws(() => candidateResolutionChoices(choices), /content_limit/);
 });
-for (const state of ['clean', 'already_up_to_date']) test(`${state} is not a conflict resolution input`, async t => {
+for (const state of ['clean', 'already_up_to_date']) test(`${state} is not a conflict resolution input`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t, { state }), r = await capturePullCandidate(p.input, TOKEN), count = p.requests.length;
   await assert.rejects(resolvePullCandidate(r.capture, [{ path_hex: '61', choice: 'delete' }], TOKEN)); assert.equal(p.requests.length, count);
 });
@@ -78,17 +79,17 @@ for (const edit of [
   r => r.resolved.resolutions[0].choice = 'ours', r => r.resolved.resolutions[0].result.oid = `sha1:${'e'.repeat(40)}`,
   r => r.resolved.resolutions[0].theirs.oid = `sha1:${'e'.repeat(40)}`, r => r.resolved.resolutions[0].path_hex = '61',
   r => r.resolved.resolutions[0].result.mode = 0o100755,
-]) test(`changed resolution result refuses before inspection: ${edit.toString()}`, async t => {
+]) test(`changed resolution result refuses before inspection: ${edit.toString()}`, LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), original = await capture(p); edit(p);
   await assert.rejects(resolvePullCandidate(original, p.choices, TOKEN)); assert.equal(p.requests.length, 4);
 });
 for (const edit of [p => p.inspection.source_head = 'moved', p => p.inspection.candidate_commit_body_hex += '20',
   p => p.inspection.parents.reverse(), p => p.inspection.comparison.after_tree = `sha1:${'e'.repeat(40)}`,
-  p => p.inspection.all_changed_paths = false]) test(`inspection remains mandatory: ${edit.toString()}`, async t => {
+  p => p.inspection.all_changed_paths = false]) test(`inspection remains mandatory: ${edit.toString()}`, LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), original = await capture(p); edit(p);
   await assert.rejects(resolvePullCandidate(original, p.choices, TOKEN)); assert.equal(p.requests.length, 5);
 });
-test('offline replay rejects changed original conflicts, choices and resolved/automatic schema substitution', async t => {
+test('offline replay rejects changed original conflicts, choices and resolved/automatic schema substitution', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), result = await resolvePullCandidate(await capture(p), p.choices, TOKEN);
   for (const edit of [r => r.resolution.choices[0].choice = 'ours', r => r.resolution.preparation.merge_base = `sha1:${'f'.repeat(40)}`,
     r => r.schema = 'frankengit-pull-candidate-capture-v1', r => r.resolution.preparation.state = 'clean',
@@ -97,12 +98,12 @@ test('offline replay rejects changed original conflicts, choices and resolved/au
   }
   assert.equal(p.requests.length, 5);
 });
-for (const status of [401, 403, 409, 429, 503, 307]) test(`resolution HTTP ${status}: no refresh or retry`, async t => {
+for (const status of [401, 403, 409, 429, 503, 307]) test(`resolution HTTP ${status}: no refresh or retry`, LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t, { handle(r, res) { if (r.url.endsWith('/resolve')) { res.writeHead(status); res.end(); return true; } } });
   await assert.rejects(resolvePullCandidate(await capture(p), p.choices, TOKEN), e => e.status === status && e.phase === 'resolution');
   assert.equal(p.requests.length, 4);
 });
-for (const bad of ['digest', 'duplicate', 'truncated', 'encoding']) test(`binary resolution response ${bad} refuses`, async t => {
+for (const bad of ['digest', 'duplicate', 'truncated', 'encoding']) test(`binary resolution response ${bad} refuses`, LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t, { handle(r, res, s) {
     if (!r.url.endsWith('/resolve')) return;
     let { type, bytes } = mixed(s.resolved, s.f.bundle);
@@ -113,12 +114,12 @@ for (const bad of ['digest', 'duplicate', 'truncated', 'encoding']) test(`binary
   } });
   await assert.rejects(resolvePullCandidate(await capture(p), p.choices, TOKEN, { timeoutMs: 1000 })); assert.equal(p.requests.length, 4);
 });
-test('one response budget is shared by resolution and inspection, with an exact permitted twin', async t => {
+test('one response budget is shared by resolution and inspection, with an exact permitted twin', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), original = await capture(p), r = await resolvePullCandidate(original, p.choices, TOKEN);
   assert.equal((await resolvePullCandidate(original, p.choices, TOKEN, { maxWireBytes: r.usage.response_bytes })).usage.response_bytes, r.usage.response_bytes);
   await assert.rejects(resolvePullCandidate(original, p.choices, TOKEN, { maxWireBytes: r.usage.response_bytes - 1 }));
 });
-test('one deadline owns a stalled inspection; a cancelled call never yields an artifact', async t => {
+test('one deadline owns a stalled inspection; a cancelled call never yields an artifact', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t, { handle(r) { return r.url.endsWith('/inspect'); } });
   await assert.rejects(resolvePullCandidate(await capture(p), p.choices, TOKEN, { timeoutMs: 100 }), /candidate_timeout/);
   assert.equal(p.requests.length, 5);
@@ -126,13 +127,13 @@ test('one deadline owns a stalled inspection; a cancelled call never yields an a
   await assert.rejects(resolvePullCandidate({}, p.choices, TOKEN, { signal: c.signal }), /candidate_cancelled/);
   assert.equal(p.requests.length, 5);
 });
-test('caller edits after invocation cannot change detached conflict observations or choices', async t => {
+test('caller edits after invocation cannot change detached conflict observations or choices', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t), original = await capture(p), choices = structuredClone(p.choices);
   const promise = resolvePullCandidate(original, choices, TOKEN);
   choices[0].choice = 'ours'; original.request.scope.repository_id = 'f'.repeat(32);
   assert.equal((await promise).capture.resolution.choices[0].choice, 'theirs');
 });
-test('transport allows only the exact bounded resolve envelope, not a publication operation', async t => {
+test('transport allows only the exact bounded resolve envelope, not a publication operation', LINUX_ORACLE, async t => {
   const p = await resolutionPeer(t);
   for (const change of [r => r.kind = 'merge', r => r.key = 'key', r => r.body = Buffer.alloc(5 * 1024 * 1024 + 1),
     r => r.type = 'text/plain', r => r.number = 0]) {

@@ -139,22 +139,39 @@ pub(super) fn schema() -> Value {
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    let candidate_request = agent_request(backend, args)?;
     let input = parse(args, backend.options.format)?;
-    let request = fgit_cli::command_request_context(&backend.node);
-    let inspected = backend
-        .node
-        .runtime()
-        .block_on(backend.node.inspect_workspace_bundle_in(
-            &request,
-            &input.reference,
-            input.base,
-            input.candidate,
-            &input.bundle,
-            &Default::default(),
-            input.head,
-            &input.options,
-        ))
-        .map_err(|_| ToolError::failed("candidate_inspection_failed"))?;
+    let inspected = if let Some(candidate_request) = candidate_request.as_ref() {
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.inspect_agent_source_bundle_in(
+                candidate_request,
+                &input.reference,
+                input.base,
+                input.candidate,
+                &input.bundle,
+                &Default::default(),
+                input.head,
+                &input.options,
+            ))
+    } else {
+        let request = backend.command_context();
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.inspect_workspace_bundle_in(
+                &request,
+                &input.reference,
+                input.base,
+                input.candidate,
+                &input.bundle,
+                &Default::default(),
+                input.head,
+                &input.options,
+            ))
+    }
+    .map_err(|_| ToolError::failed("candidate_inspection_failed"))?;
     // A failed or over-budget native read never turns into an empty diff or a
     // prefix labelled complete. Verify transport and native coordinates again
     // before the common review renderer receives any source bytes.

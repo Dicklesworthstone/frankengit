@@ -195,8 +195,7 @@ fn explicit_formats_match_and_opposite_formats_refuse_before_output() {
                     let bytes = legacy_request(&repo, Some(capability));
                     for chunk in [1, 3, bytes.len()] {
                         let mut machine = legacy(&repo, version, http);
-                        let result =
-                            collect(&bytes, chunk, |part| machine.push_bytes(part, &repo));
+                        let result = collect(&bytes, chunk, |part| machine.push_bytes(part, &repo));
                         if accepted {
                             let result = result.expect("matching legacy format");
                             assert_eq!(selected_pack(&result).wants, vec![repo.refs[0].oid]);
@@ -215,8 +214,7 @@ fn explicit_formats_match_and_opposite_formats_refuse_before_output() {
                     let bytes = v2_request(&repo, command, &[capability]);
                     for chunk in [1, 3, bytes.len()] {
                         let mut machine = v2(&repo, http);
-                        let result =
-                            collect(&bytes, chunk, |part| machine.push_bytes(part, &repo));
+                        let result = collect(&bytes, chunk, |part| machine.push_bytes(part, &repo));
                         if accepted {
                             assert_v2_result(&repo, command, &result.expect("matching v2 format"));
                             machine.finish().unwrap();
@@ -358,7 +356,10 @@ fn legacy_format_refusal_installs_no_flags_or_want_state() {
                 .expect("refused packet did not install a capability suffix or want");
             assert!(transition.output.is_empty() && transition.events.is_empty());
             let transition = machine.push_packet(&Packet::Flush, &repo).unwrap();
-            assert!(transition.output.is_empty(), "no failed-request ACK mode remains");
+            assert!(
+                transition.output.is_empty(),
+                "no failed-request ACK mode remains"
+            );
             assert_eq!(
                 machine.push_packet(&Packet::Flush, &repo),
                 Err(WireError::IllegalTransition {
@@ -436,22 +437,16 @@ fn a_matching_format_does_not_authorize_an_unadvertised_capability() {
             capability: b"object-format".to_vec(),
         };
         for version in [UploadPackVersion::V0, UploadPackVersion::V1] {
-            let mut machine = LegacyUploadPack::new(
-                version,
-                Capabilities::default(),
-                WireLimits::default(),
-            )
-            .unwrap();
+            let mut machine =
+                LegacyUploadPack::new(version, Capabilities::default(), WireLimits::default())
+                    .unwrap();
             assert_eq!(
                 machine.push_bytes(&legacy_request(&repo, Some(&matching)), &repo),
                 Err(error.clone()),
             );
-            let mut machine = LegacyUploadPack::new(
-                version,
-                Capabilities::default(),
-                WireLimits::default(),
-            )
-            .unwrap();
+            let mut machine =
+                LegacyUploadPack::new(version, Capabilities::default(), WireLimits::default())
+                    .unwrap();
             let result = machine
                 .push_bytes(&legacy_request(&repo, None), &repo)
                 .expect("no unadvertised capability was requested");

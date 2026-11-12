@@ -10,9 +10,8 @@ host's, or the pinned oracle through --git-bin/--git-exec-path) exercises:
   can observe the omission exactly;
 - lazy fetch of omitted objects from the promisor remote (one object, then a
   checkout), compared with the source tree;
-- the sparse-filter refusal (fg serves no sparse filters) for both the
-  `<rev>:<path>` and the object-id spelling, which must reach the client as a
-  typed refusal rather than a hang-up, beside its permitted blob:none twin;
+- exact visible-blob `sparse:oid` selection, independently computed omissions
+  and lazy checkout; symbolic `<rev>:<path>` retains its typed refusal;
 - push and fetch of refs/notes/commits;
 - clone and fetch of a superproject whose gitlink targets are absent by
   design, including a pushed gitlink update;
@@ -146,6 +145,7 @@ def build_source(git: Git, root: Path, fmt: str) -> dict:
     (source / "big.bin").write_bytes(hashlib.sha256(b"big").digest() * 128)  # 4 KiB, > 1k limit
     (source / "d1" / "mid.txt").write_text("mid\n")
     (source / "d1" / "d2" / "deep.txt").write_text("deep\n")
+    (source / ".sparse-patterns").write_text("/small.txt\n/d1/\n!/d1/d2/\n")
     git.run("-C", source, "add", ".", check=True)
     git.run("-C", source, "commit", "-qm", "base", check=True)
     git.run("-C", source, "branch", "topic", check=True)
@@ -319,7 +319,7 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
             if focus in ("unreachable-wants", "ref-errors"):
                 unreachable_wants(git, work, url, env, root, fmt, prefix, checks)
             return
-        # Partial clone, lazy fetch, and the sparse refusal twins (protocol v2, then v0 for blob:none).
+        # Partial clone, lazy fetch, and sparse support/refusal twins.
         for name, spec, mode in FILTERS:
             clone = root / f"clone-{prefix}-{name}"
             cloned = git.run("-c", "protocol.version=2", "clone", "-q", "--no-checkout", f"--filter={spec}", url, clone,
@@ -352,17 +352,33 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
         checks.add(f"{prefix}-filter-blob-none-v0", cloned.returncode == 0
                    and cloned.returncode == 0 and missing(git, v0) == omitted(git, source["path"], "blob:none"),
                    text(cloned))
-        for name, spec in (("expression", "sparse:oid=main:.gitmodules"),
-                           ("object-id", f"sparse:oid={git.out('-C', source['path'], 'rev-parse', 'main:.gitmodules')}")):
+        for name, spec in (("expression", "sparse:oid=main:.sparse-patterns"),
+                           ("object-id", f"sparse:oid={git.out('-C', source['path'], 'rev-parse', 'main:.sparse-patterns')}")):
             for version in ("2", "0"):
                 target = root / f"clone-{prefix}-sparse-{name}-v{version}"
-                refused = git.run("-c", f"protocol.version={version}", "clone", "-q", "--no-checkout", f"--filter={spec}",
-                                  url, target, env=env)
-                said = text(refused)
-                fatal = [line for line in said.splitlines() if line.startswith("fatal:")]
-                checks.add(f"{prefix}-sparse-{name}-v{version}-refused",
-                           refused.returncode != 0 and not target.exists() and fatal[:1] == [SPARSE_REFUSAL],
-                           f"rc={refused.returncode} {said}")
+                result = git.run("-c", f"protocol.version={version}", "clone", "-q", "--no-checkout", f"--filter={spec}",
+                                 url, target, env=env)
+                said = text(result)
+                if name == "expression":
+                    fatal = [line for line in said.splitlines() if line.startswith("fatal:")]
+                    checks.add(f"{prefix}-sparse-{name}-v{version}-refused",
+                               result.returncode != 0 and not target.exists() and fatal[:1] == [SPARSE_REFUSAL],
+                               f"rc={result.returncode} {said}")
+                    continue
+                if not checks.add(f"{prefix}-sparse-{name}-v{version}-clone", result.returncode == 0, said):
+                    continue
+                expected = omitted(git, source["path"], spec)
+                gone = missing(git, target)
+                promisor = git.out("-C", target, "config", "--get", "remote.origin.promisor")
+                checks.add(f"{prefix}-sparse-{name}-v{version}-omits",
+                           promisor == "true" and gone == expected and expected,
+                           f"missing={sorted(gone)} expected={sorted(expected)} promisor={promisor}")
+                checkout = git.run("-C", target, "checkout", "-q", "main", env=env)
+                tree = git.out("-C", target, "rev-parse", "HEAD^{tree}")
+                clean = git.out("-C", target, "status", "--porcelain")
+                checks.add(f"{prefix}-sparse-{name}-v{version}-lazy-checkout",
+                           checkout.returncode == 0 and tree == source["tree"] and clean == "",
+                           f"rc={checkout.returncode} tree={tree} status={clean!r} {text(checkout)[-300:]}")
         # Notes: fetch the imported note, push a second, read both from a fresh clone.
         work = root / f"work-{prefix}"
         cloned = git.run("clone", "-q", url, work, env=env)

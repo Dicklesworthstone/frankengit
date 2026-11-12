@@ -11,7 +11,6 @@ fge_context bead frankengit-audit-native-linkage-l0xt
 fge_context non_claim 'cached build-script inspection is not a current release attestation'
 
 fge_phase setup
-export RCH_CARGO_WRAPPER_BYPASS=1
 export CARGO_TARGET_DIR="$(fge_tempdir native-linkage-target)"
 export CARGO_NET_OFFLINE=true
 export FGIT_LINKAGE_PROFILE=debug

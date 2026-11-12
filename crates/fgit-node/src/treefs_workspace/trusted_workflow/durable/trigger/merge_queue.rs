@@ -2,6 +2,7 @@
 //! queue scope owns every selected PR's custody; neither workflow success nor
 //! this selector grants target publication or autonomous merge authority.
 
+use super::queue_refresh::RefreshSelection;
 use super::{
     NodeRequestContext, NodeWorkspaceRefusal, OneNode, Path, RefName, RepositoryAuthorityHeadId,
     Selected, Selection, TrustedRefWorkflowPoll, TrustedWorkflowArtifactConfig,
@@ -9,13 +10,12 @@ use super::{
     pull_request_merge, reporting, workspace_request_live,
 };
 use fgit_admission::merge::native::queue;
-use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand};
-use fgit_forge::{ExpectedVersion, ForgeEventPayload};
-use super::queue_refresh::RefreshSelection;
+use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::merge_queue::MergeQueueSnapshot;
 use fgit_forge::preparation::MergeCommitStyle;
 use fgit_forge::{AggregateVersion, QueueNumber};
+use fgit_forge::{ExpectedVersion, ForgeEventPayload};
 use fgit_wire::visibility::RefVisibility;
 
 #[derive(Clone, Debug)]
@@ -265,7 +265,8 @@ impl OneNode {
         )
         .await
         .map_err(|error| invalid_owned(error.to_string()))?;
-        let Some(selected_queue) = selected_queue.filter(|queue| queue.target_ref == *target) else {
+        let Some(selected_queue) = selected_queue.filter(|queue| queue.target_ref == *target)
+        else {
             return Ok(RefreshSelection::Unneeded);
         };
         if selected_queue.active_batch.is_some() {

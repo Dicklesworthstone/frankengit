@@ -6,8 +6,10 @@ use fgit_node::OneNode;
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId};
 use support::*;
 
+mod candidates;
 mod history;
 mod lifecycle;
+mod milestones;
 mod pull_reopen;
 mod source;
 mod support;
@@ -30,7 +32,12 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 50);
+    assert_eq!(tools.len(), 58);
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == "frankengit_discussion_append_comment")
+    );
     for tool in &tools {
         assert!(operation(&options, tool.name).is_some());
     }
@@ -38,12 +45,9 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
     backend.options = options;
     for name in [
-        "frankengit_milestone_list",
-        "frankengit_milestone_open",
         "frankengit_notifications",
         "frankengit_pull_checks",
         "frankengit_pull_reviews",
-        "frankengit_source_candidate",
         "frankengit_pull_diff",
         "frankengit_source_publish",
         "frankengit_branch_transaction",
@@ -66,7 +70,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
 }
 
 #[test]
-fn canonical_scope_and_launch_ceiling_are_separate_for_all_seven_metadata_operations() {
+fn canonical_scope_and_launch_ceiling_are_separate_for_all_nine_metadata_operations() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha256);
     let operations = [
         (ISSUES_READ, "frankengit_issue_list"),
@@ -76,6 +80,8 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_seven_metadata_operat
         (DISCUSSIONS_READ, "frankengit_discussion_list"),
         (DISCUSSIONS_WRITE, "frankengit_discussion_open"),
         (OUTCOMES_READ, "frankengit_transaction_outcome"),
+        (MILESTONES_READ, "frankengit_milestone_list"),
+        (MILESTONES_WRITE, "frankengit_milestone_open"),
     ];
     let administrator = NodeTools::open(fixture.options.clone()).unwrap();
     for (index, (scope, _)) in operations.iter().enumerate() {
@@ -94,7 +100,9 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_seven_metadata_operat
         for (other_scope, name) in operations {
             let retry = format!("scope-{index}-operation-{other_scope}");
             let args = match other_scope {
-                ISSUES_WRITE | DISCUSSIONS_WRITE => opening(index as u64 + 100, &retry),
+                ISSUES_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE => {
+                    opening(index as u64 + 100, &retry)
+                }
                 PULLS_WRITE => pull_opening(&fixture, index as u64 + 100, &retry),
                 OUTCOMES_READ => recovery(&retry),
                 _ => Object::new(),
@@ -114,6 +122,21 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_seven_metadata_operat
             }
             assert!(backend.agent.as_ref().unwrap().request.is_none());
         }
+        // Append uses the same independent canonical discussion write grant;
+        // it must not disappear from the sponsored-agent operation map or be
+        // authorized by read-only, issue or PR access.
+        let mut append = recovery(&format!("scope-{index}-discussion-append"));
+        append.insert("number".into(), text((index as u64 + 100).to_string()));
+        append.insert("body".into(), text("Independent authored reply"));
+        let result = backend.call("frankengit_discussion_append_comment", &append);
+        if *scope == DISCUSSIONS_WRITE {
+            let result = result.unwrap();
+            committed(&result);
+            assert_eq!(result.object().unwrap()["expected_version"], Value::Null);
+        } else {
+            assert_eq!(result.unwrap_err().code, "agent_operation_not_granted");
+        }
+        assert!(backend.agent.as_ref().unwrap().request.is_none());
         backend.close().unwrap();
     }
 
@@ -127,7 +150,7 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_seven_metadata_operat
     options.writes.pulls = false;
     options.outcomes = false;
     let mut backend = NodeTools::open(options).unwrap();
-    assert_eq!(backend.tools().len(), 14);
+    assert_eq!(backend.tools().len(), 18);
     assert!(
         backend
             .tools()
@@ -136,9 +159,11 @@ fn canonical_scope_and_launch_ceiling_are_separate_for_all_seven_metadata_operat
     );
     for name in [
         "frankengit_issue_list",
+        "frankengit_milestone_list",
         "frankengit_transaction_outcome",
         "frankengit_pull_open",
         "frankengit_discussion_open",
+        "frankengit_discussion_append_comment",
     ] {
         assert_eq!(
             backend

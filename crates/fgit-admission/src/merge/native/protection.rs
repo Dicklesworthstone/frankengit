@@ -61,7 +61,7 @@ fn infrastructure(error: AdmissionError) -> ProjectionFailure {
 /// The initial sponsored credential profile permits only its explicit forge
 /// metadata operations. A single-factor policy result cannot expand it into
 /// code publication, a review, or a merge, even without installed protection.
-pub(super) async fn require_non_agent_publication_at<S, C>(
+pub(crate) async fn require_non_agent_publication_at<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,
@@ -1222,10 +1222,27 @@ where
         record.forge_event_batch_root,
     )
     .await?;
+    let previous = read_at(store, cx, predecessor, cancelled).await?;
+    let successor_id = fgit_codec::body_id(&fgit_codec::CryptoBodyIdentity, successor)
+        .and_then(|id| RepositoryAuthorityHeadId::from_internal_object_id(id).map_err(Into::into))
+        .map_err(|_| unavailable(RefusalCode::AuthorityReceiptInvalid))?;
+    if selected.events.is_empty() {
+        return verify_hidden_ref_policy_advance_at(
+            store,
+            cx,
+            predecessor,
+            successor,
+            successor_id,
+            batch,
+            record,
+            &previous,
+            cancelled,
+        )
+        .await;
+    }
     let [event] = selected.events.as_slice() else {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     };
-    let previous = read_at(store, cx, predecessor, cancelled).await?;
     validate_transition(
         previous.event.as_ref(),
         event,
@@ -1240,9 +1257,6 @@ where
         record.forge_event_batch_root,
     )
     .await?;
-    let successor_id = fgit_codec::body_id(&fgit_codec::CryptoBodyIdentity, successor)
-        .and_then(|id| RepositoryAuthorityHeadId::from_internal_object_id(id).map_err(Into::into))
-        .map_err(|_| unavailable(RefusalCode::AuthorityReceiptInvalid))?;
     let current = read_at(
         store,
         cx,
@@ -1254,6 +1268,327 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     live(cancelled)
+}
+
+const OBJECT_CLOSURE_NAMESPACE: &[u8] = b"frankengit/admission/object-closure/v1/";
+
+async fn verify_hidden_ref_policy_advance_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    predecessor: &PublicationBasis,
+    successor: &fgit_codec::schema::RepositoryAuthorityHeadBody,
+    successor_id: RepositoryAuthorityHeadId,
+    batch: &fgit_codec::schema::RepositoryDecisionBatchBody,
+    record: &fgit_codec::schema::RepositoryCommitRecord,
+    previous: &ProtectionState,
+    cancelled: &C,
+) -> Result<(), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let empty_closure_root =
+        crate::permitted_object_closure_root(&PermittedObjectClosure::default())
+            .map_err(unavailable)?;
+    if successor.forge_position_root != predecessor.body().forge_position_root
+        || record.resulting_forge_position_root != predecessor.body().forge_position_root
+        || successor.ref_root != predecessor.body().ref_root
+        || successor.outbox_root != predecessor.body().outbox_root
+        || batch.compaction_generation_link.is_some()
+        || record.object_closure_root != empty_closure_root
+        || successor.configuration_root == predecessor.body().configuration_root
+    {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    let before = fgit_authority::read_repository_incarnation_configuration_async(
+        store,
+        cx,
+        &predecessor.body().configuration_root,
+    )
+    .await?;
+    let after = fgit_authority::read_repository_incarnation_configuration_async(
+        store,
+        cx,
+        &successor.configuration_root,
+    )
+    .await?;
+    if after.root_layout != before.root_layout
+        || after.object_format != before.object_format
+        || after.repository_incarnation_id != before.repository_incarnation_id
+        || after.policy_root == before.policy_root
+    {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    if let Some(policy_root) = after.policy_root {
+        let policy_body =
+            fgit_authority::read_hidden_ref_policy_async(store, cx, &policy_root).await?;
+        let mut visibility = fgit_wire::visibility::RefVisibility::new();
+        for rule in &policy_body.rules {
+            visibility
+                .push_rule(rule, &fgit_wire::WireLimits::default())
+                .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+        }
+    }
+    match (
+        before.capability_revocation_root,
+        after.capability_revocation_root,
+    ) {
+        (None, None) => {}
+        (Some(before_gen_root), Some(after_gen_root)) => {
+            let before_gen = fgit_authority::read_capability_revocation_generation_by_id_async(
+                store,
+                cx,
+                fgit_authority::capability_revocation_generation_id_from_root(&before_gen_root),
+            )
+            .await
+            .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+            let after_gen = fgit_authority::read_capability_revocation_generation_by_id_async(
+                store,
+                cx,
+                fgit_authority::capability_revocation_generation_id_from_root(&after_gen_root),
+            )
+            .await
+            .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+            if after_gen.body().tenant_id() != before_gen.body().tenant_id()
+                || after_gen.body().repository_id() != predecessor.body().repository_id
+                || after_gen.body().repository_incarnation_id() != before.repository_incarnation_id
+                || after_gen.body().policy_epoch() != successor.policy_epoch
+                || after_gen.body().predecessor_generation_id() != Some(before_gen.generation_id())
+                || after_gen.body().revoked_capability_ids()
+                    != before_gen.body().revoked_capability_ids()
+                || after_gen.body().evidence_root() != record.forge_event_batch_root
+            {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
+            }
+        }
+        _ => return Err(unavailable(RefusalCode::EvidenceInvalid)),
+    }
+    let current = read_at(
+        store,
+        cx,
+        &PublicationBasis::new(successor_id, successor.clone()),
+        cancelled,
+    )
+    .await?;
+    if current.event != previous.event {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    live(cancelled)
+}
+
+/// Stage and atomically publish a canonical hidden-ref policy transition as an
+/// authenticated 1-decision policy-epoch advance, preserving all source, forge,
+/// retention, outbox, and capability-revocation roots.
+pub async fn publish_hidden_ref_policy_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &fgit_authority::HeadKey,
+    tenant_id: fgit_types::TenantId,
+    policy: Option<&fgit_codec::HiddenRefPolicyBody>,
+    tx_id: fgit_types::TxId,
+) -> Result<RepositoryAuthorityHeadId, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    if let Some(policy_body) = policy {
+        let mut visibility = fgit_wire::visibility::RefVisibility::new();
+        for rule in &policy_body.rules {
+            visibility
+                .push_rule(rule, &fgit_wire::WireLimits::default())
+                .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+        }
+    }
+    let fgit_authority::HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
+        return Err(unavailable(RefusalCode::AuthorityReceiptInvalid));
+    };
+    let authenticated = store.authenticate_head_receipt(cx, &receipt).await?;
+    let prior = authenticated
+        .body()
+        .map_err(|_| unavailable(RefusalCode::AuthorityReceiptInvalid))?;
+    let prior_id = fgit_authority::authority_head_identity(&prior)?;
+    let basis = PublicationBasis::new(prior_id, prior.clone());
+    if read_at(store, cx, &basis, &|| false).await?.event.is_some() {
+        return Err(unavailable(RefusalCode::ProtectedRefTransitionDenied));
+    }
+    let existing_evidence =
+        fgit_authority::read_repository_incarnation_configuration_evidence_async(
+            store,
+            cx,
+            &prior.configuration_root,
+        )
+        .await?;
+    let existing = existing_evidence.normalized();
+    let policy_root = match policy {
+        Some(policy_body) => {
+            Some(fgit_authority::stage_hidden_ref_policy_async(store, cx, policy_body).await?)
+        }
+        None => None,
+    };
+    if policy_root == existing.policy_root {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    let empty_closure = PermittedObjectClosure::default();
+    let object_closure_root =
+        crate::permitted_object_closure_root(&empty_closure).map_err(unavailable)?;
+    let closure_frame = fgit_codec::encode_body(&empty_closure)
+        .map_err(|_| unavailable(RefusalCode::CanonicalFramingInvalid))?;
+    match store
+        .put_if_absent(
+            cx,
+            &storage::body_key(
+                OBJECT_CLOSURE_NAMESPACE,
+                prior.repository_id,
+                object_closure_root,
+            )?,
+            &closure_frame,
+        )
+        .await?
+    {
+        fgit_authority::PutOutcome::Created | fgit_authority::PutOutcome::IdenticalRetry => {}
+        fgit_authority::PutOutcome::Conflict => {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+    }
+    let empty_event_root = storage::stage_body(
+        store,
+        cx,
+        prior.repository_id,
+        storage::EVENT_NAMESPACE,
+        &ForgeEventBatch { events: Vec::new() },
+    )
+    .await?;
+    let next_epoch = prior
+        .policy_epoch
+        .next()
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+    let configuration_root = if let Some(before_gen_root) = existing.capability_revocation_root {
+        let before_gen = fgit_authority::read_capability_revocation_generation_by_id_async(
+            store,
+            cx,
+            fgit_authority::capability_revocation_generation_id_from_root(&before_gen_root),
+        )
+        .await
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+        let carried_gen = fgit_authority::CapabilityRevocationGenerationBody::try_new(
+            tenant_id,
+            prior.repository_id,
+            existing.repository_incarnation_id,
+            next_epoch,
+            Some(before_gen.generation_id()),
+            before_gen.body().revoked_capability_ids().to_vec(),
+            empty_event_root,
+        )
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+        let staged_gen =
+            fgit_authority::stage_capability_revocation_generation_async(store, cx, &carried_gen)
+                .await
+                .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+        fgit_authority::stage_revocation_aware_repository_incarnation_configuration_async(
+            store,
+            cx,
+            &fgit_codec::RepositoryIncarnationConfigurationBodyV2_2 {
+                root_layout: existing.root_layout,
+                object_format: existing.object_format,
+                repository_incarnation_id: existing.repository_incarnation_id,
+                policy_root,
+                capability_revocation_root: Some(staged_gen.generation_root()),
+            },
+        )
+        .await?
+    } else if matches!(
+        existing_evidence,
+        fgit_authority::RepositoryIncarnationConfigurationEvidence::V2_2(_)
+    ) {
+        fgit_authority::stage_revocation_aware_repository_incarnation_configuration_async(
+            store,
+            cx,
+            &fgit_codec::RepositoryIncarnationConfigurationBodyV2_2 {
+                root_layout: existing.root_layout,
+                object_format: existing.object_format,
+                repository_incarnation_id: existing.repository_incarnation_id,
+                policy_root,
+                capability_revocation_root: None,
+            },
+        )
+        .await?
+    } else {
+        fgit_authority::stage_latest_repository_incarnation_configuration_async(
+            store,
+            cx,
+            &fgit_codec::RepositoryIncarnationConfigurationBodyV2_1 {
+                root_layout: existing.root_layout,
+                object_format: existing.object_format,
+                repository_incarnation_id: existing.repository_incarnation_id,
+                policy_root,
+            },
+        )
+        .await?
+    };
+    let cumulative = fgit_authority::collect_cumulative_outcomes_at_authenticated_head_async(
+        store,
+        cx,
+        &authenticated,
+    )
+    .await?;
+    let mut plan = fgit_chronicle::PublicationPlan::open(basis.clone())?;
+    plan.commit(fgit_codec::RepositoryCommitRecord {
+        repository_id: prior.repository_id,
+        repository_sequence: basis
+            .open_repository_sequence()
+            .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?,
+        parent_rcr_id: prior.latest_committed_rcr_id,
+        tx_id,
+        principal_snapshot_id: fgit_types::PrincipalSnapshotId::from_digest(
+            configuration_root.algorithm(),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            *configuration_root.bytes(),
+        ),
+        canonical_request_digest: configuration_root,
+        ref_delta_root: empty_event_root,
+        resulting_ref_root: prior.ref_root,
+        object_closure_root,
+        forge_event_batch_root: empty_event_root,
+        resulting_forge_position_root: prior.forge_position_root,
+        policy_epoch: prior.policy_epoch,
+        policy_decision_root: configuration_root,
+        invariant_evidence_root: empty_event_root,
+        outbox_effect_root: empty_event_root,
+        retention_delta_root: empty_event_root,
+    });
+    let roots = fgit_chronicle::ResultingRoots {
+        policy_epoch: next_epoch,
+        ..fgit_chronicle::ResultingRoots::carried_forward(&basis)
+    };
+    let publication = plan.seal(
+        &fgit_codec::CryptoBodyIdentity,
+        roots,
+        &cumulative,
+        receipt.token(),
+    )?;
+    let mut head = publication.head().clone();
+    head.configuration_root = configuration_root;
+    let outcome = fgit_authority::publish_decisions_with_cumulative_async(
+        store,
+        cx,
+        head_key,
+        receipt.token(),
+        publication.batch(),
+        &head,
+        tenant_id,
+        &cumulative,
+    )
+    .await?;
+    match outcome {
+        fgit_authority::PublicationOutcome::Published(_) => {
+            Ok(fgit_authority::authority_head_identity(&head)?)
+        }
+        fgit_authority::PublicationOutcome::PredecessorMismatch => {
+            Err(unavailable(RefusalCode::AuthorityReceiptStale))
+        }
+        fgit_authority::PublicationOutcome::AlreadyDecided { .. } => {
+            Err(unavailable(RefusalCode::EvidenceInvalid))
+        }
+    }
 }
 
 #[cfg(test)]

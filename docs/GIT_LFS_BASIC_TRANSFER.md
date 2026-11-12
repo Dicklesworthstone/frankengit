@@ -100,6 +100,39 @@ than 64 KiB. A later change to the original custody file cannot change this
 verified response. Cancellation, an expired deadline, or a write failure ends
 the response; a partial binary response never gains an appended error document.
 
+### Resume a verified download
+
+Object downloads advertise `Accept-Ranges: bytes` and a strong `ETag` binding
+the complete SHA-256 payload identity and length. A client can resume with
+`Range: bytes=<received>-` and the previously returned `If-Range` validator.
+Closed ranges (`bytes=100-199`) and suffix ranges (`bytes=-100`) are supported
+too. Successful ranges return `206 Partial Content`, an exact `Content-Range`,
+and a `Content-Length` equal to the transmitted slice. A range ending beyond
+the payload is clipped to its last byte.
+
+The adapter follows the single-range and validator rules in
+[RFC 9110 §§13.1.5 and 14](https://www.rfc-editor.org/rfc/rfc9110.html#section-14).
+An unknown range unit or multi-range request selects the ordinary full `200`
+response. A mismatched or weak `If-Range` tag, or a date validator (no
+`Last-Modified` is published), also selects the full response. `If-Range`
+without `Range` is ignored. Malformed, reversed, oversized or duplicate range
+fields return `400` after authentication. Byte-range syntax is bounded to 256
+bytes; large decimal end positions and suffix lengths clamp without integer
+overflow. Unsatisfiable single ranges, including a zero-length suffix or a
+range on an empty object, return `416` with `Content-Range: bytes */<size>`.
+
+Authentication, LFS scope, quota, and whole-object integrity still precede
+representation disclosure. Missing custody returns `404`; corrupt custody
+returns `503`, even when the damaged bytes lie outside the requested range or
+the requested range is unsatisfiable. The complete verified private copy is
+created before any `206` or `416` response. The range sender discards the prefix
+and streams the selected bytes in at most 64 KiB chunks under the original
+operation deadline. Resume saves network transfer, but does not avoid complete
+verification, temporary-disk custody, or the prefix read. Interruption while
+skipping emits no successful payload header; interruption after response
+output begins terminates it without a second error document. `Range` on PUT
+is ignored and never enables partial uploads.
+
 Fixed-length and chunked HTTP request bodies use the existing bounded native
 framing parser. Short bodies, malformed chunks, incorrect lengths, and digest
 mismatches cannot publish an object. Authentication and the endpoint's required
@@ -150,7 +183,12 @@ automatic replication, or deletion of retained payloads.
 The native adapter tests cover fixed/chunked upload and retry, persistent
 reopen, empty and binary payloads, verification, corruption refusal, credential
 and scope isolation, namespace separation, untrusted Host headers, and bounded
-batch parsing. The real-client campaign uses a prebuilt binary and an installed
+batch parsing. Range tests reconstruct a payload from two separately verified
+responses, check exact offsets and lengths, exercise conditional/full fallback,
+empty and missing objects, oversized/duplicate fields, corruption outside the
+selected slice, bounded streaming, and cancellation before headers and at
+response/flush boundaries. These adapter tests are separate from the real-client
+campaign, which uses a prebuilt binary and an installed
 Git LFS client:
 
 ```sh

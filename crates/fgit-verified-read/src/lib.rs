@@ -15,11 +15,13 @@
 //!
 //! # Typed non-claim: forge positions
 //!
-//! The V1 ref layout admits ordered non-membership proofs only after the
-//! disclosure boundary has authorized the lookup. The independent Merkle
-//! verifier's sorted-tree precondition is discharged by an authenticated V1
-//! ref root built through the canonical layout; an arbitrary opaque root is
-//! not enough. Likewise,
+//! Ref layouts admit ordered non-membership proofs only after the disclosure
+//! boundary has authorized the lookup and every name revealed by its witness.
+//! The independent Merkle verifier's sorted-tree precondition is discharged
+//! by an authenticated ref root built through the selected canonical layout;
+//! an arbitrary opaque root is not enough. Historical V1 roots keep their
+//! direct-ref-only meaning. V2 roots also commit the optional symbolic HEAD
+//! target, and an empty direct-ref map's witness discloses that target. Likewise,
 //! `forge_position_root` has no published canonical Merkle layout yet, so
 //! forge-position proof generation is a typed refusal.
 
@@ -30,8 +32,8 @@ pub mod freshness;
 
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{
-    CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder,
-    RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
+    CODEC_MAJOR, CODEC_MINOR, CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits,
+    Decoder, Encoder, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
     RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1,
     RepositoryIncarnationConfigurationBodyV2_2, body_id, decode_body, encode_body,
 };
@@ -190,6 +192,53 @@ impl CanonicalBody for ObjectClosureNonMembershipProofBody {
     }
 }
 
+/// Cross-checks a decoded canonical body's wire header, payload boundary, and
+/// canonical round-trip byte equivalence with the independent
+/// `fgit_codec_verify` frame parser.
+pub(crate) fn verify_canonical_frame<B: CanonicalBody>(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    body: &B,
+) -> Result<(), CodecRefusal> {
+    let max_frame = usize::try_from(limits.frame_bytes).unwrap_or(usize::MAX);
+    let mismatch = || CodecRefusal::TrailingBytes {
+        offset: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        remaining: 0,
+    };
+    let frame = fgit_codec_verify::parse_frame_bounded(bytes, max_frame).map_err(|_| mismatch())?;
+    if frame.codec_major != CODEC_MAJOR
+        || frame.codec_minor != CODEC_MINOR
+        || frame.domain != B::DOMAIN.as_str()
+        || frame.family != B::SCHEMA_FAMILY.as_str()
+        || frame.schema_major != B::SCHEMA_MAJOR
+        || frame.schema_minor != B::SCHEMA_MINOR
+    {
+        return Err(mismatch());
+    }
+    let canonical = encode_body(body)?;
+    if canonical != bytes {
+        return Err(mismatch());
+    }
+    let rechecked =
+        fgit_codec_verify::parse_frame_bounded(&canonical, max_frame).map_err(|_| mismatch())?;
+    if rechecked != frame {
+        return Err(mismatch());
+    }
+    Ok(())
+}
+
+/// Decodes a canonical frame through `fgit_codec` and cross-checks its wire
+/// header, payload boundary, and canonical round-trip byte equivalence with
+/// the independent `fgit_codec_verify` frame parser.
+pub(crate) fn decode_verified_canonical_frame<B: CanonicalBody>(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<B, CodecRefusal> {
+    let body = decode_body::<B>(bytes, limits)?;
+    verify_canonical_frame(bytes, limits, &body)?;
+    Ok(body)
+}
+
 /// Encodes a native Merkle proof as its canonical transport frame.
 ///
 /// # Errors
@@ -211,7 +260,7 @@ pub fn decode_merkle_proof(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<MerkleProof, VerifiedReadRefusal> {
-    decode_body::<MerkleProofBody>(bytes, limits)
+    decode_verified_canonical_frame::<MerkleProofBody>(bytes, limits)
         .map(MerkleProofBody::into_proof)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
@@ -239,7 +288,7 @@ pub fn decode_ref_state_non_membership_proof(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<RefStateNonMembershipProof, VerifiedReadRefusal> {
-    decode_body::<RefStateNonMembershipProofBody>(bytes, limits)
+    decode_verified_canonical_frame::<RefStateNonMembershipProofBody>(bytes, limits)
         .map(RefStateNonMembershipProofBody::into_proof)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
@@ -267,7 +316,7 @@ pub fn decode_object_closure_non_membership_proof(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<ObjectClosureNonMembershipProof, VerifiedReadRefusal> {
-    decode_body::<ObjectClosureNonMembershipProofBody>(bytes, limits)
+    decode_verified_canonical_frame::<ObjectClosureNonMembershipProofBody>(bytes, limits)
         .map(ObjectClosureNonMembershipProofBody::into_proof)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
@@ -463,6 +512,59 @@ where
         return Err(VerifiedReadRefusal::RefPresent);
     }
     Ok(AuthorizedRefAbsence { name })
+}
+
+/// Authorizes every additional name revealed by an ordered ref absence proof.
+///
+/// The serving boundary must call this after [`authorize_ref_absence`] and
+/// proof construction, before returning the witness. A permitted query can
+/// still have a hidden neighbouring ref. An empty V2 direct-ref map instead
+/// reveals whether HEAD has a symbolic target, including the exact unborn
+/// branch name when present; both HEAD and that target require disclosure.
+/// Hash siblings in a populated tree reveal no additional names.
+///
+/// This check grants no membership, root selection, or freshness claim.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::RefNotFoundOrUnauthorized`] when any name
+/// disclosed by the witness is outside the caller's authorized scope.
+pub fn authorize_ref_absence_witness<P>(
+    policy: &P,
+    proof: &RefStateNonMembershipProof,
+) -> Result<(), VerifiedReadRefusal>
+where
+    P: RefDisclosurePolicy + ?Sized,
+{
+    let permitted = match proof {
+        RefStateNonMembershipProof::EmptyState => true,
+        RefStateNonMembershipProof::BeforeFirst { first } => {
+            policy.permits_ref_disclosure(first.name())
+        }
+        RefStateNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            policy.permits_ref_disclosure(predecessor.name())
+                && policy.permits_ref_disclosure(successor.name())
+        }
+        RefStateNonMembershipProof::AfterLast { last } => {
+            policy.permits_ref_disclosure(last.name())
+        }
+        RefStateNonMembershipProof::HeadOnly { head_target } => {
+            let head = RefName::try_new_one_level(b"HEAD")
+                .map_err(|_| VerifiedReadRefusal::RefNotFoundOrUnauthorized)?;
+            policy.permits_ref_disclosure(&head)
+                && head_target
+                    .as_ref()
+                    .is_none_or(|target| policy.permits_ref_disclosure(target))
+        }
+    };
+    if permitted {
+        Ok(())
+    } else {
+        Err(VerifiedReadRefusal::RefNotFoundOrUnauthorized)
+    }
 }
 
 /// Applies authorization before looking up a possible object absence.
@@ -787,6 +889,8 @@ pub fn decode_verified_read_envelope(
             observed: envelope.version,
         });
     }
+    verify_canonical_frame(bytes, limits, &envelope)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
     Ok(envelope)
 }
 
@@ -886,6 +990,10 @@ fn write_non_membership_proof_payload(
             out.write_raw_byte(3);
             write_ref_state_neighbour(out, last)?;
         }
+        RefStateNonMembershipProof::HeadOnly { head_target } => {
+            out.write_raw_byte(4);
+            out.write_option(head_target.as_ref(), Encoder::write_ref_name)?;
+        }
     }
     Ok(())
 }
@@ -905,6 +1013,12 @@ fn read_non_membership_proof_payload(
         }),
         3 => Ok(RefStateNonMembershipProof::AfterLast {
             last: Box::new(read_ref_state_neighbour(input)?),
+        }),
+        4 => Ok(RefStateNonMembershipProof::HeadOnly {
+            head_target: input.read_option(
+                "ref_state_non_membership_proof.head_target",
+                Decoder::read_ref_name,
+            )?,
         }),
         observed => Err(CodecRefusal::VariantUnknown {
             field: "RefStateNonMembershipProof",
@@ -1369,4 +1483,54 @@ fn selected_ref_layout(
         return Err(VerifiedReadRefusal::ConfigurationRootMismatch);
     }
     Ok(configuration.root_layout())
+}
+
+#[cfg(test)]
+mod codec_verify_tests {
+    use super::*;
+
+    #[test]
+    fn production_decoders_cross_check_frames_with_independent_codec_verifier() {
+        let proof = MerkleProof::new(0, 1, Vec::new());
+        let proof_bytes = encode_merkle_proof(&proof).expect("encode merkle proof");
+        let parsed = fgit_codec_verify::parse_frame(&proof_bytes).expect("independent parse");
+        assert_eq!(parsed.domain, MerkleProofBody::DOMAIN.as_str());
+        assert_eq!(parsed.family, MerkleProofBody::SCHEMA_FAMILY.as_str());
+        assert_eq!(
+            decode_merkle_proof(&proof_bytes, DecodeLimits::default()).expect("decode proof"),
+            proof
+        );
+
+        let mut trailing = proof_bytes.clone();
+        trailing.push(0xff);
+        assert!(matches!(
+            decode_merkle_proof(&trailing, DecodeLimits::default()),
+            Err(VerifiedReadRefusal::WireDecode(_))
+        ));
+
+        let mut bad_magic = proof_bytes;
+        bad_magic[0] ^= 0x01;
+        assert!(matches!(
+            decode_merkle_proof(&bad_magic, DecodeLimits::default()),
+            Err(VerifiedReadRefusal::WireDecode(_))
+        ));
+
+        let ref_absence = RefStateNonMembershipProof::EmptyState;
+        let ref_bytes =
+            encode_ref_state_non_membership_proof(&ref_absence).expect("encode ref absence");
+        assert_eq!(
+            decode_ref_state_non_membership_proof(&ref_bytes, DecodeLimits::default())
+                .expect("decode ref absence"),
+            ref_absence
+        );
+
+        let obj_absence = ObjectClosureNonMembershipProof::EmptyClosure;
+        let obj_bytes =
+            encode_object_closure_non_membership_proof(&obj_absence).expect("encode obj absence");
+        assert_eq!(
+            decode_object_closure_non_membership_proof(&obj_bytes, DecodeLimits::default())
+                .expect("decode obj absence"),
+            obj_absence
+        );
+    }
 }

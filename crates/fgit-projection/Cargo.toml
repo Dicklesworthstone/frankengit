@@ -9,6 +9,7 @@ description = "Watermarked derived-state projection substrate on the admitted sq
 
 [dependencies]
 asupersync.workspace = true
+fgit-crypto.workspace = true
 fgit-types.workspace = true
 sqlmodel-core = { version = "0.5.0", default-features = false }
 sqlmodel-frankensqlite = { version = "0.5.0", default-features = false }

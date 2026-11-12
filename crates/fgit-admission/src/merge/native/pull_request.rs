@@ -297,92 +297,69 @@ where
             last_metadata_actor: actor,
         });
     }
-    // Scan retained canonical outbox payloads once for the whole page. This is
-    // bounded replay of derived metadata, not another persistence or authority.
-    let positions: BTreeMap<_, _> = selected
+    // Retain only the latest full metadata and opener for each selected PR.
+    // Delivery retirement cannot erase these facts: missing versions are read
+    // from the same authority basis's authenticated decision history.
+    let positions = selected
         .iter()
-        .map(|view| (view.number, view.event.version))
-        .collect();
+        .map(|view| {
+            let aggregate = AggregateId::PullRequest(view.number);
+            let position = state
+                .forge
+                .entry(storage::aggregate_label(aggregate)?)
+                .copied()
+                .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+            Ok((aggregate, position))
+        })
+        .collect::<Result<BTreeMap<_, _>, AdmissionError>>()?;
     let mut metadata: BTreeMap<
         PullRequestNumber,
         (AggregateVersion, NativePullRequestEvent, usize),
     > = BTreeMap::new();
     let mut openers = BTreeMap::new();
-    let mut seen = BTreeMap::new();
-    let mut events_read = 0usize;
-    let mut scanned_bytes = 0usize;
-    let mut batches = BTreeSet::new();
-    if !selected.is_empty() {
-        for obligation in state.outbox.entries() {
-            checkpoint(cancelled)?;
-            // Canonical fan-out may name one payload from several deliveries.
-            // Replaying it once preserves its identity without counting it as
-            // multiple histories or exhausting the scan on duplicate roots.
-            if !batches.insert(obligation.payload_root()) {
-                continue;
+    super::event_history::visit_selected_at(
+        store,
+        cx,
+        basis,
+        &state.forge,
+        &state.outbox,
+        &positions,
+        super::event_history::HistoryReadLimits {
+            events: MAX_READ_EVENTS,
+            scan_bytes: MAX_SCAN_BYTES,
+        },
+        &mut |event: &ForgeEvent, size: usize| {
+            let AggregateId::PullRequest(number) = event.aggregate else {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
+            };
+            let ForgeEventPayload::PullRequestChangedNative(change) = &event.payload else {
+                return Ok(());
+            };
+            if change.action == PullRequestAction::Open
+                && let Some(previous) = openers.insert(number, change.actor)
+                && previous != change.actor
+            {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
-            let batch = storage::read_events(
-                store,
-                cx,
-                basis.body().repository_id,
-                obligation.payload_root(),
-            )
-            .await?;
-            delivery::validate_payload_positions(&state.forge, &batch)?;
-            events_read = events_read
-                .checked_add(batch.events.len())
-                .filter(|count| *count <= MAX_READ_EVENTS)
-                .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-            for event in batch.events {
-                checkpoint(cancelled)?;
-                let size = event_size(&event)?;
-                scanned_bytes = scanned_bytes
-                    .checked_add(size)
-                    .filter(|total| *total <= MAX_SCAN_BYTES)
+            if metadata
+                .get(&number)
+                .is_none_or(|(held, _, _)| *held < event.version)
+            {
+                // Superseded payloads spend scan work, but do not accumulate
+                // against the bounded memory used for the page's latest rows.
+                let replaced = metadata.get(&number).map_or(0, |(_, _, size)| *size);
+                bytes = bytes
+                    .checked_sub(replaced)
+                    .and_then(|total| total.checked_add(size))
+                    .filter(|total| *total <= MAX_READ_BYTES)
                     .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-                let AggregateId::PullRequest(number) = event.aggregate else {
-                    continue;
-                };
-                let Some(version) = positions.get(&number) else {
-                    continue;
-                };
-                if event.version > *version {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
-                }
-                let digest = storage::root(&event)?;
-                if let Some(previous) = seen.insert((number, event.version), digest) {
-                    if previous != digest {
-                        return Err(unavailable(RefusalCode::EvidenceInvalid));
-                    }
-                    continue;
-                }
-                let ForgeEventPayload::PullRequestChangedNative(change) = event.payload else {
-                    continue;
-                };
-                if change.action == PullRequestAction::Open
-                    && let Some(previous) = openers.insert(number, change.actor)
-                    && previous != change.actor
-                {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
-                }
-                if metadata
-                    .get(&number)
-                    .is_none_or(|(held, _, _)| *held < event.version)
-                {
-                    // Only the latest full state is retained. Replacing it
-                    // releases the prior event's charge; scan accounting above
-                    // still bounds every superseded or unrelated event visited.
-                    let replaced = metadata.get(&number).map_or(0, |(_, _, size)| *size);
-                    bytes = bytes
-                        .checked_sub(replaced)
-                        .and_then(|total| total.checked_add(size))
-                        .filter(|total| *total <= MAX_READ_BYTES)
-                        .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-                    metadata.insert(number, (event.version, change, size));
-                }
+                metadata.insert(number, (event.version, change.clone(), size));
             }
-        }
-    }
+            Ok(())
+        },
+        cancelled,
+    )
+    .await?;
     for view in &mut selected {
         checkpoint(cancelled)?;
         if let Some((version, change, _)) = metadata.remove(&view.number) {

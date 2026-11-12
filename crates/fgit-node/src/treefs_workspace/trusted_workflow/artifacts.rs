@@ -36,7 +36,7 @@ pub use retained::{
 };
 
 /// Filesystem namespace selected with fg artifact inspect/export --trust-domain.
-pub const TRUSTED_WORKFLOW_ARTIFACT_TRUST: &str = "trusted-workflow-local-owner";
+pub use crate::TRUSTED_WORKFLOW_ARTIFACT_TRUST;
 pub const DEFAULT_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_ARTIFACT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;

@@ -264,24 +264,30 @@ fn discussion_replay_refuses_conflicting_or_missing_history_and_future_or_orphan
     *title = "Different canonical history".into();
     fixture.extra_payload(ForgeEventBatch::of_one(conflict));
     assert!(fixture.replay_kind(1, kind).is_err());
-    for remove in [first.clone(), second.clone()] {
+    for (remove, recoverable) in [(first.clone(), false), (second.clone(), true)] {
         let mut fixture = Fixture::new(vec![
             ForgeEventBatch::of_one(first.clone()),
             ForgeEventBatch::of_one(second.clone()),
         ]);
         let root = storage::root(&ForgeEventBatch::of_one(remove)).unwrap();
-        fixture.outbox = CanonicalOutboxState::try_new(
-            fixture.basis.body().repository_id,
-            fixture
-                .outbox
-                .entries()
-                .iter()
-                .copied()
-                .filter(|entry| entry.payload_root() != root)
-                .collect(),
-        )
-        .unwrap();
-        assert!(fixture.replay_kind(1, kind).is_err());
+        let entries = fixture
+            .outbox
+            .entries()
+            .iter()
+            .copied()
+            .filter(|entry| entry.payload_root() != root)
+            .collect();
+        fixture.select_outbox(entries);
+        if recoverable {
+            assert_eq!(fixture.source_kind(1, kind).unwrap().threads, original);
+        } else {
+            assert!(matches!(
+                fixture.source_kind(1, kind),
+                Err(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::EvidenceMissing
+                ))
+            ));
+        }
     }
     for event in [
         preference(

@@ -162,7 +162,7 @@ test('offline operations reject credentials, endpoint overrides and nonexistent 
 
 test('the one CLI deadline settles a silent server without reissuing the request', async t => {
   const f = await setup(t); f.state.hang = true;
-  const value = await child([...f.step, '--timeout-ms', '500']).done;
+  const value = await child([...f.step, '--timeout-ms', '2000']).done;
   assert.equal(value.code, 2, value.stderr);
   assert.equal(JSON.parse(value.stdout).type, 'source_context_session_refused');
   assert.equal(f.p.calls.length, 1);

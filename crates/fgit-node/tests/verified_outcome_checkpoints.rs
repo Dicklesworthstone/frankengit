@@ -45,7 +45,7 @@ impl Scratch {
             RepositoryId::from_bytes([0x93; 16]),
         )
         .with_object_format(format)
-        .with_root_layout(RootLayoutVersion::RefStateMerkleV1)
+        .with_root_layout(RootLayoutVersion::RefStateMerkleV2)
         .with_worker_threads(2)
     }
 }

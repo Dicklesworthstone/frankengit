@@ -45,6 +45,8 @@ use fgit_types::{
 use super::*;
 use crate::{MaterializedAdmission, NodeConfig, admission_immutable_key, read_evidence_body_in};
 
+mod ancestry_tests;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const CLASS: AsciiSlug = AsciiSlug::from_static("forge-event");
 const DESTINATION: AsciiSlug = AsciiSlug::from_static("forge-projection");
@@ -136,6 +138,7 @@ fn frontier_headers_never_shadow_a_supplied_overlap_with_a_healthy_permanent_cop
         let selected = BTreeSet::from([id]);
         let headers = NativeFrontierHeaders {
             source: source(),
+            ancestry: AncestryMetadataAccess::for_node(&node),
             selected: &selected,
             staging: &staging,
             maximum_blob_bytes: 4096,
@@ -168,6 +171,7 @@ fn frontier_headers_never_shadow_a_supplied_overlap_with_a_healthy_permanent_cop
             source: source(),
             selected: &selected,
             staging: &empty,
+            ancestry: AncestryMetadataAccess::for_node(&node),
             maximum_blob_bytes: 4096,
         };
         let header = headers.load_header(&id).unwrap().unwrap();

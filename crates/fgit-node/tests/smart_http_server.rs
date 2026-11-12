@@ -20,10 +20,10 @@ use fgit_types::{
 use fgit_wire::smart_http::{BodyDecoder, BodyFraming, HttpLimits};
 use fgit_wire::{Packet, PktLineDecoder, WireLimits, encode_packets};
 
-#[path = "smart_http_server/pack_cache.rs"]
-mod pack_cache;
 #[path = "smart_http_server/attempt_visibility.rs"]
 mod attempt_visibility;
+#[path = "smart_http_server/pack_cache.rs"]
+mod pack_cache;
 #[path = "smart_http_server/upload_limits.rs"]
 mod upload_limits;
 

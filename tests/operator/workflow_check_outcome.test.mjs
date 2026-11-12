@@ -14,6 +14,7 @@ import { configuration, recover, status, once } from '../../scripts/operator/wor
 import { encode, sha256, jobKey } from '../../scripts/operator/workflow_check_protocol.mjs';
 import { recoveryScope, recoveryRecord, recoveredTerminal } from '../../scripts/operator/workflow_check_outcome.mjs';
 import { main } from '../../scripts/fg_workflow_checks.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const token = 'a'.repeat(64), hex = text => Buffer.from(text).toString('hex');
 const cli = new URL('../../scripts/fg_workflow_checks.mjs', import.meta.url).pathname;
@@ -99,7 +100,7 @@ function child(t, args) {
 }
 
 for (const format of ['sha1', 'sha256']) for (const state of ['committed', 'refused']) {
-  test(`${format}: ${state} recovers without native files, executable or source and leaves the sender lock intact`, async t => {
+  test(`${format}: ${state} recovers without native files, executable or source and leaves the sender lock intact`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format), server = await peer(t, f, call => outcome(f, call.job, state));
     const plan = await readFile(f.planPath), started = await readFile(f.path('started'));
     await mkdir(join(f.config.state_directory, 'owner.lock'), { mode: 0o700 });
@@ -117,21 +118,21 @@ for (const format of ['sha1', 'sha256']) for (const state of ['committed', 'refu
   });
 }
 
-test('a fresh resume skips a recovered request rather than invoking the native publisher', async t => {
+test('a fresh resume skips a recovered request rather than invoking the native publisher', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f);
   await recover(f.config, server.address, token);
   const result = await once(f.config, { resume: true });
   assert.equal(result.publications, 0); assert.equal(result.runs[0].committed, 1);
 });
 for (const state of ['key_not_observed', 'seal_not_observed', 'undecided']) {
-  test(`${state} retains unknown publication and never permits an automatic resend`, async t => {
+  test(`${state} retains unknown publication and never permits an automatic resend`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t), server = await peer(t, f, call => outcome(f, call.job, state));
     assert.equal((await recover(f.config, server.address, token)).runs[0].unknown, 1);
     await assert.rejects(once(f.config), /unresolved/);
     assert.equal(server.calls.length, 1); assert.ok((await readdir(f.config.state_directory)).includes(f.path('started').split('/').at(-1)));
   });
 }
-test('first transaction and terminal evidence survive restart as distinct create-only records', async t => {
+test('first transaction and terminal evidence survive restart as distinct create-only records', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); let state = 'undecided'; const server = await peer(t, f, call => outcome(f, call.job, state));
   await recover(f.config, server.address, token); const first = await readFile(f.path('observed'));
   state = 'committed'; await recover(f.config, server.address, 'b'.repeat(64));
@@ -141,7 +142,7 @@ test('first transaction and terminal evidence survive restart as distinct create
   assert.equal(server.calls[0].headers['idempotency-key'], server.calls[1].headers['idempotency-key']);
 });
 for (const change of ['absent', 'transaction', 'seal', 'digest']) {
-  test(`a later ${change} conflict cannot erase first-transaction evidence`, async t => {
+  test(`a later ${change} conflict cannot erase first-transaction evidence`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t); let changed = false;
     const server = await peer(t, f, call => {
       const value = outcome(f, call.job, !changed ? 'undecided' : change === 'absent' ? 'key_not_observed' : 'committed');
@@ -158,32 +159,32 @@ for (const change of ['absent', 'transaction', 'seal', 'digest']) {
   });
 }
 for (const name of ['tenant_id', 'repository_id', 'repository_incarnation', 'principal_id']) {
-  test(`mismatched ${name} refuses and a valid later lookup still works`, async t => {
+  test(`mismatched ${name} refuses and a valid later lookup still works`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t); let mismatch = true;
     const server = await peer(t, f, call => ({ ...outcome(f, call.job), ...(mismatch ? { [name]: 'f'.repeat(32) } : {}) }));
     await assert.rejects(recover(f.config, server.address, token), /scope_or_semantics/); assert.equal((await status(f.config)).runs[0].unknown, 1);
     mismatch = false; assert.equal((await recover(f.config, server.address, token)).runs[0].committed, 1);
   });
 }
-test('bounded multi-job recovery preserves all original keys across independent invocations', async t => {
+test('bounded multi-job recovery preserves all original keys across independent invocations', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha256', 3), server = await peer(t, f);
   const first = await recover(f.config, server.address, token, { maxLookups: 1 });
   assert.equal(first.lookups, 1); assert.equal(first.limit_reached, true); assert.equal(first.runs[0].unknown, 2);
   const second = await recover(f.config, server.address, token); assert.equal(second.lookups, 2); assert.equal(second.runs[0].committed, 3);
   assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), f.jobs.map(job => job.key));
 });
-test('a prepared but never-started job is not looked up or accidentally submitted', async t => {
+test('a prepared but never-started job is not looked up or accidentally submitted', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f); await rm(f.path('started', 1));
   const result = await recover(f.config, server.address, token);
   assert.equal(result.lookups, 1); assert.equal(result.runs[0].pending, 1); assert.equal(result.runs[0].unknown, 0);
   assert.equal(server.calls[0].headers['idempotency-key'], f.jobs[0].key);
 });
-test('changing the retained endpoint refuses before sending credentials or keys', async t => {
+test('changing the retained endpoint refuses before sending credentials or keys', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), first = await peer(t, f, call => outcome(f, call.job, 'key_not_observed')), second = await peer(t, f);
   await recover(f.config, first.address, token);
   await assert.rejects(recover(f.config, second.address, token), /endpoint changed/); assert.equal(second.calls.length, 0);
 });
-test('tampered plans and orphaned receipts refuse before any network request', async t => {
+test('tampered plans and orphaned receipts refuse before any network request', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f); const saved = await readFile(f.planPath);
   const changed = structuredClone(f.plan); changed.jobs[0].source_commit = 'f'.repeat(40); await save(f.planPath, changed);
   await assert.rejects(recover(f.config, server.address, token), /request changed/); assert.equal(server.calls.length, 0);
@@ -191,7 +192,7 @@ test('tampered plans and orphaned receipts refuse before any network request', a
   await remoteBinding(f, server.address); await save(f.path('observed'), recoveryRecord(outcome(f), f.config, f.jobs[0])); await rm(f.path('started'));
   await assert.rejects(recover(f.config, server.address, token), /start responsibility/); assert.equal(server.calls.length, 0);
 });
-test('retained native and recovered decisions must agree; no synthetic check-specific receipt is written', async t => {
+test('retained native and recovered decisions must agree; no synthetic check-specific receipt is written', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f);
   await remoteBinding(f, server.address); await save(f.path('observed'), recoveryRecord(outcome(f), f.config, f.jobs[0]));
   const terminal = nativeTerminal(f); await save(f.path('terminal'), terminal);
@@ -199,31 +200,31 @@ test('retained native and recovered decisions must agree; no synthetic check-spe
   terminal.repository_commit_id = 'conflicting-record'; await save(f.path('terminal'), terminal);
   await assert.rejects(status(f.config), /contradicts/); assert.equal(server.calls.length, 0);
 });
-test('a native terminal written during an outcome read is reconciled before persistence', async t => {
+test('a native terminal written during an outcome read is reconciled before persistence', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f, async call => { await save(f.path('terminal'), nativeTerminal(f)); return outcome(f, call.job); });
   assert.equal((await recover(f.config, server.address, token)).runs[0].committed, 1);
   assert.equal((await json(f.path('terminal'))).check_id, `check/${'0'.repeat(52)}`);
   assert.equal(Object.hasOwn((await json(f.path('observed'))).reply, 'check_id'), false);
 });
-test('a conflicting concurrent native terminal is preserved and reported, not overwritten', async t => {
+test('a conflicting concurrent native terminal is preserved and reported, not overwritten', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), local = { ...nativeTerminal(f), tx_id: 'a-different-native-tx' };
   const server = await peer(t, f, async call => { await save(f.path('terminal'), local); return outcome(f, call.job); });
   await assert.rejects(recover(f.config, server.address, token), /contradicts/);
   assert.deepEqual(await json(f.path('terminal')), local);
   await assert.rejects(readFile(f.path('observed')), error => error.code === 'ENOENT');
 });
-test('failed output observer retains the completed job and next invocation reads only the remainder', async t => {
+test('failed output observer retains the completed job and next invocation reads only the remainder', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f);
   await assert.rejects(recover(f.config, server.address, token, { onObservation() { throw new Error('output lost'); } }), error => error.retained_terminal?.outcome === 'committed');
   assert.equal((await status(f.config)).runs[0].committed, 1);
   assert.equal((await recover(f.config, server.address, token)).lookups, 1); assert.equal(server.calls.length, 2);
 });
-test('receipt persistence failure still exposes the known terminal and never submits another key', async t => {
+test('receipt persistence failure still exposes the known terminal and never submits another key', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f, async call => { await mkdir(f.path('observed'), { mode: 0o700 }); return outcome(f, call.job); });
   await assert.rejects(recover(f.config, server.address, token), error => error.retained_terminal?.outcome === 'committed');
   assert.equal(server.calls.length, 1); assert.ok(await readFile(f.path('started')));
 });
-test('simultaneous recovery owners are excluded without touching the native sender lock', async t => {
+test('simultaneous recovery owners are excluded without touching the native sender lock', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); let release, arrived;
   const seen = new Promise(resolve => arrived = resolve), held = new Promise(resolve => release = resolve);
   const server = await peer(t, f, async call => { arrived(); await held; return outcome(f, call.job); });
@@ -232,25 +233,25 @@ test('simultaneous recovery owners are excluded without touching the native send
   await assert.rejects(recover(f.config, server.address, token), error => error.code === 'EEXIST');
   release(); await first; assert.equal(server.calls.length, 1); assert.equal((await status(f.config)).owner_present, true);
 });
-test('whole-operation deadline applies across lookups, not once per job', async t => {
+test('whole-operation deadline applies across lookups, not once per job', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f, async call => { await new Promise(resolve => setTimeout(resolve, 100)); return outcome(f, call.job); });
   await assert.rejects(recover(f.config, server.address, token, { timeoutMs: 30 }), /timeout/); assert.equal(server.calls.length, 1);
   assert.equal((await status(f.config)).runs[0].unknown, 2);
 });
-test('cancellation after a validated terminal saves it and stops before the next job', async t => {
+test('cancellation after a validated terminal saves it and stops before the next job', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f), controller = new AbortController();
   const result = await recover(f.config, server.address, token, { signal: controller.signal, onObservation() { controller.abort(); } });
   assert.equal(result.stopped, true); assert.equal(result.runs[0].committed, 1); assert.equal(result.runs[0].unknown, 1);
   assert.equal(server.calls.length, 1);
 });
-test('CLI recovery uses a private token file and exits with the native terminal state', async t => {
+test('CLI recovery uses a private token file and exits with the native terminal state', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f); await rm(f.config.watch.fg);
   const result = await child(t, argumentsFor(f, server.address)).done;
   assert.equal(result.code, 0, result.stderr); assert.equal(result.signal, null);
   const lines = result.stdout.trim().split('\n').map(JSON.parse); assert.equal(lines.at(-1).runs[0].committed, 1);
   assert.equal(result.stdout.includes(token), false); assert.equal(result.stderr.includes(token), false); assert.equal(result.stdout.includes(f.jobs[0].key), false);
 });
-test('CLI rejects publication flags, missing scopes, unsafe token files and malformed credentials before HTTP', async t => {
+test('CLI rejects publication flags, missing scopes, unsafe token files and malformed credentials before HTTP', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f);
   for (const args of [argumentsFor(f, server.address, 'recover', ['--max-publications', '1']),
     argumentsFor(f, server.address, 'recover', ['--key', 'new-key']), argumentsFor(f, server.address, 'resume', ['--endpoint', server.address])]) {
@@ -260,14 +261,14 @@ test('CLI rejects publication flags, missing scopes, unsafe token files and malf
   await chmod(f.tokenFile, 0o600); await writeFile(f.tokenFile, `${token} `); assert.equal((await child(t, argumentsFor(f, server.address)).done).code, 2);
   assert.equal(server.calls.length, 0);
 });
-test('SIGTERM cancels an active recovery socket and retains unknown work for a later original-key read', async t => {
+test('SIGTERM cancels an active recovery socket and retains unknown work for a later original-key read', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); let arrived, silent = true; const seen = new Promise(resolve => arrived = resolve);
   const server = await peer(t, f, call => { arrived(); return silent ? undefined : outcome(f, call.job); });
   const first = child(t, argumentsFor(f, server.address)); await seen; first.process.kill('SIGTERM');
   const stopped = await first.done; assert.equal(stopped.code, 3, stopped.stderr); assert.equal((await status(f.config)).runs[0].unknown, 1);
   silent = false; assert.equal((await child(t, argumentsFor(f, server.address)).done).code, 0); assert.equal(server.calls.length, 2);
 });
-test('SIGKILL retains only the recovery owner lock; offline status works and no lock is stolen', async t => {
+test('SIGKILL retains only the recovery owner lock; offline status works and no lock is stolen', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); let arrived; const seen = new Promise(resolve => arrived = resolve);
   const server = await peer(t, f, () => { arrived(); }); const first = child(t, argumentsFor(f, server.address));
   await seen; first.process.kill('SIGKILL'); assert.equal((await first.done).signal, 'SIGKILL');
@@ -276,7 +277,7 @@ test('SIGKILL retains only the recovery owner lock; offline status works and no 
   assert.equal((await status(f.config)).recovery_owner_present, true);
   assert.notEqual((await child(t, argumentsFor(f, server.address)).done).code, 0); assert.equal(server.calls.length, 1);
 });
-test('CLI broken output after recovery does not turn a known commit into rollback', async t => {
+test('CLI broken output after recovery does not turn a known commit into rollback', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f); let errors = '';
   const stdout = new Writable({ write(_chunk, _encoding, done) { done(new Error('broken stdout')); } });
   const stderr = new Writable({ write(chunk, _encoding, done) { errors += chunk; done(); } });
@@ -284,7 +285,7 @@ test('CLI broken output after recovery does not turn a known commit into rollbac
   assert.equal(exit, 4); assert.equal((await status(f.config)).runs[0].committed, 1); assert.match(errors, /retained_terminal/);
 });
 
-for (const format of ['sha1', 'sha256']) test(`${format}: actual watcher/publisher custody with a lost reply recovers without its native files`, async t => {
+for (const format of ['sha1', 'sha256']) test(`${format}: actual watcher/publisher custody with a lost reply recovers without its native files`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t, format), watch = f.config.watch;
   // Start from empty publication custody, not the seeded plan used by unit cases.
   for (const name of await readdir(f.config.state_directory)) await rm(join(f.config.state_directory, name));
@@ -334,7 +335,7 @@ for (const format of ['sha1', 'sha256']) test(`${format}: actual watcher/publish
   assert.equal(server.calls.length, 1, 'durably recovered transaction is never read or published again by ordinary recovery');
 });
 
-test('CLI reports known terminal plus recovery-lock cleanup failure separately from rollback', async t => {
+test('CLI reports known terminal plus recovery-lock cleanup failure separately from rollback', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f); let errors = '';
   const stdout = new Writable({ write(chunk, _encoding, done) {
     if (String(chunk).includes('workflow_check_outcome_observed')) {

@@ -4,6 +4,7 @@
 
 mod files;
 mod options;
+mod verification;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -65,7 +66,7 @@ pub fn error_json(error: &LfsTransferFailure) -> String {
     )
 }
 
-/// Run one explicit inventory/export/import operation. This is a synchronous
+/// Run one explicit inventory/verification/export/import operation. This is a synchronous
 /// top-level host boundary, not a request handler or an ambient capability.
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), LfsTransferFailure> {
     run_with_timeout(args, output, None)
@@ -91,7 +92,10 @@ fn run_inner(
     if args == ["--help"]
         || (args.len() == 2
             && args[1] == "--help"
-            && matches!(args[0].as_str(), "inventory" | "export" | "import"))
+            && matches!(
+                args[0].as_str(),
+                "inventory" | "verify" | "export" | "import"
+            ))
     {
         return emit(output, options::USAGE);
     }
@@ -106,6 +110,7 @@ fn run_inner(
             revalidate(node, &request, &inventory.receipt, deadline)?;
             inventory_json(&inventory, deadline)
         })?,
+        Action::Verify => verification::run(&options, deadline)?,
         Action::Export => {
             let path = options.archive.as_ref().ok_or("missing archive path")?;
             files::output(path)?;
@@ -122,12 +127,12 @@ fn run_inner(
     deadline.check().map_err(|error| match options.action {
         Action::Export => format!("LFS archive is published; {error}"),
         Action::Import => format!("LFS import may have retained verified custody; {error}; retry the identical archive and target pins"),
-        Action::Inventory => error,
+        Action::Inventory | Action::Verify => error,
     })?;
     emit(output, &receipt).map_err(|e| match options.action {
         Action::Export => format!("LFS archive is published; receipt output failed: {e}"),
         Action::Import => format!("LFS import finished with retained custody; receipt output failed: {e}; retry the identical archive and target pins"),
-        Action::Inventory => e,
+        Action::Inventory | Action::Verify => e,
     })
 }
 

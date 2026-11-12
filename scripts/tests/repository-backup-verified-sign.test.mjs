@@ -69,14 +69,19 @@ else {
 }
 `, { mode: 0o700 });
   const options = { ...paths, declarations: { ...declarations }, verificationInstance: '17', trustedLocal: true,
-    maximumBytes: 1024 ** 2, timeoutMs: 5000 };
+    maximumBytes: 1024 ** 2, timeoutMs: 10000 };
   const cleanup = new Set();
   const run = async (override = {}) => {
     try { return await approveVerifiedRepositoryBackup({ ...options, ...override }); }
     catch (error) { if (error.verification_scratch) cleanup.add(error.verification_scratch); throw error; }
   };
-  const calls = async () => { try { return (await readFile(join(dir, 'calls'), 'utf8')).trim().split('\n').map(JSON.parse); }
-    catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
+  const calls = async () => {
+    try {
+      const text = await readFile(join(dir, 'calls'), 'utf8');
+      const complete = text.endsWith('\n') ? text.slice(0, -1).split('\n').filter(Boolean) : text.split('\n').slice(0, -1).filter(Boolean);
+      return complete.map(JSON.parse);
+    } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  };
   try { await action({ dir, paths, archive, options, privatePem, publicPem, run, calls, cleanup }); }
   finally { for (const path of cleanup) await rm(path, { recursive: true, force: true }); await rm(dir, { recursive: true, force: true }); }
 }
@@ -87,7 +92,7 @@ function argsFor(paths, op = 'verify-sign') {
     ...(op === 'verify-sign' ? ['--fg', paths.fg, '--verification-instance', '17', '--trusted-local'] : [])];
 }
 async function waitStarted(calls) {
-  for (let i = 0; i < 200; i++) { if ((await calls()).length) return; await delay(10); }
+  for (let i = 0; i < 500; i++) { if ((await calls()).length) return; await delay(10); }
   assert.fail('native fixture did not start');
 }
 

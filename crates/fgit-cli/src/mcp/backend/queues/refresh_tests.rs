@@ -96,9 +96,18 @@ fn refresh_observes_queue_version_but_requires_a_pr_successor_and_new_target() {
             ("expected_pull_request_version", text(u64::MAX.to_string())),
             ("expected_policy_epoch", text("0")),
             ("expected_policy_epoch", text("04")),
-            ("expected_recorded_target", text("00".repeat(format.digest_len()))),
-            ("expected_recorded_target", text("CC".repeat(format.digest_len()))),
-            ("expected_recorded_target", text("bb".repeat(format.digest_len()))),
+            (
+                "expected_recorded_target",
+                text("00".repeat(format.digest_len())),
+            ),
+            (
+                "expected_recorded_target",
+                text("CC".repeat(format.digest_len())),
+            ),
+            (
+                "expected_recorded_target",
+                text("bb".repeat(format.digest_len())),
+            ),
             ("expected_source", text("00".repeat(format.digest_len()))),
             ("expected_target", text("00".repeat(format.digest_len()))),
             ("expected_incarnation", text("AB".repeat(16))),
@@ -123,7 +132,11 @@ fn refresh_observes_queue_version_but_requires_a_pr_successor_and_new_target() {
         } else {
             GitHashAlgorithm::Sha1
         };
-        for name in ["expected_source", "expected_target", "expected_recorded_target"] {
+        for name in [
+            "expected_source",
+            "expected_target",
+            "expected_recorded_target",
+        ] {
             let mut invalid = original.clone();
             invalid.insert(name.into(), text("dd".repeat(other.digest_len())));
             assert!(input::parse(REFRESH, &invalid, format, incarnation()).is_err());
@@ -142,16 +155,28 @@ fn refresh_retains_raw_reference_bytes_and_rejects_ambiguous_encodings() {
     let format = GitHashAlgorithm::Sha1;
     let mut raw = args(REFRESH, format);
     raw.remove("source_reference");
-    raw.insert("source_reference_hex".into(), text("726566732f68656164732fff"));
+    raw.insert(
+        "source_reference_hex".into(),
+        text("726566732f68656164732fff"),
+    );
     raw.remove("target_reference");
-    raw.insert("target_reference_hex".into(), text("726566732f68656164732ffe"));
+    raw.insert(
+        "target_reference_hex".into(),
+        text("726566732f68656164732ffe"),
+    );
     let (_, Command::Refresh(command)) =
         input::parse(REFRESH, &raw, format, incarnation()).unwrap()
     else {
         panic!()
     };
-    assert_eq!(command.pull_request.data.source_ref.as_bytes(), b"refs/heads/\xff");
-    assert_eq!(command.pull_request.data.target_ref.as_bytes(), b"refs/heads/\xfe");
+    assert_eq!(
+        command.pull_request.data.source_ref.as_bytes(),
+        b"refs/heads/\xff"
+    );
+    assert_eq!(
+        command.pull_request.data.target_ref.as_bytes(),
+        b"refs/heads/\xfe"
+    );
     for (name, value) in [
         ("source_reference", text("refs/heads/topic")),
         ("target_reference", text("refs/heads/main")),

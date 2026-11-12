@@ -20,10 +20,13 @@
 
 use fgit_authority::{
     MemoryAuthorityStore, OutcomeFailure, StoreInstanceId, head_selected_ref_state_absence_proof,
-    stage_repository_configuration,
+    head_selected_ref_state_absence_proof_with_head, stage_repository_configuration,
 };
 use fgit_codec::RepositoryConfigurationBody;
-use fgit_crypto::{MerkleRefusal, ref_state_merkle_root, verify_ref_state_non_membership_under};
+use fgit_crypto::{
+    MerkleRefusal, ref_state_merkle_root, ref_state_merkle_root_v2,
+    verify_ref_state_non_membership_under,
+};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
@@ -124,5 +127,105 @@ fn asking_a_v1_head_to_prove_a_present_ref_absent_is_refused() {
         head_selected_ref_state_absence_proof(&backing, &v1, &entries, &name("refs/heads/mai"))
             .is_ok(),
         "a near-miss name is genuinely absent and must still emit"
+    );
+}
+
+#[test]
+fn v2_producers_require_explicit_head_data_and_prove_the_exact_root() {
+    let backing = store();
+    let target = name("refs/heads/unborn");
+    let query = name("refs/heads/other");
+    for layout in [
+        RootLayoutVersion::RefStateMerkleV2,
+        RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+    ] {
+        let configuration_root =
+            stage_repository_configuration(&backing, &configuration(layout)).unwrap();
+        for state in [Vec::new(), entries()] {
+            assert!(matches!(
+                head_selected_ref_state_absence_proof(&backing, &configuration_root, &state, &query),
+                Err(OutcomeFailure::RefHeadTargetRequired { layout: selected }) if selected == layout
+            ));
+            for head_target in [None, Some(&target)] {
+                let proof = head_selected_ref_state_absence_proof_with_head(
+                    &backing,
+                    &configuration_root,
+                    &state,
+                    head_target,
+                    &query,
+                )
+                .unwrap();
+                let root = ref_state_merkle_root_v2(&state, head_target).unwrap();
+                assert_eq!(
+                    verify_ref_state_non_membership_under(layout, &root, &query, &proof),
+                    Ok(true)
+                );
+                let changed_target = if head_target.is_some() {
+                    None
+                } else {
+                    Some(&target)
+                };
+                let changed = ref_state_merkle_root_v2(&state, changed_target).unwrap();
+                assert_eq!(
+                    verify_ref_state_non_membership_under(layout, &changed, &query, &proof),
+                    Ok(false)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_head_producer_preserves_v1_and_refuses_invalid_v2_head_or_present_ref() {
+    let backing = store();
+    let state = entries();
+    let query = name("refs/heads/other");
+    let target = name("refs/heads/main");
+    let legacy_root = stage_repository_configuration(
+        &backing,
+        &configuration(RootLayoutVersion::RefStateMerkleV1),
+    )
+    .unwrap();
+    let original =
+        head_selected_ref_state_absence_proof(&backing, &legacy_root, &state, &query).unwrap();
+    assert_eq!(
+        head_selected_ref_state_absence_proof_with_head(
+            &backing,
+            &legacy_root,
+            &state,
+            Some(&target),
+            &query
+        )
+        .unwrap(),
+        original
+    );
+
+    let root = stage_repository_configuration(
+        &backing,
+        &configuration(RootLayoutVersion::RefStateMerkleV2),
+    )
+    .unwrap();
+    for (head_target, query, expected) in [
+        (
+            name("refs/tags/v1"),
+            query.clone(),
+            MerkleRefusal::InvalidHeadTarget,
+        ),
+        (target.clone(), target.clone(), MerkleRefusal::RefIsPresent),
+    ] {
+        assert!(matches!(
+            head_selected_ref_state_absence_proof_with_head(&backing, &root, &state, Some(&head_target), &query),
+            Err(OutcomeFailure::MerkleShape(refusal)) if *refusal == expected
+        ));
+    }
+    assert!(
+        head_selected_ref_state_absence_proof_with_head(
+            &backing,
+            &root,
+            &state,
+            Some(&target),
+            &query
+        )
+        .is_ok()
     );
 }

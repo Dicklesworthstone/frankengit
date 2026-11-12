@@ -36,6 +36,15 @@ point delegates to the same algorithm with its existing per-call defaults.
 `createGithubSource` additionally accepts a lower `maxRequests` (1–4096).
 Request statistics count actual fetch invocations, not the rejected next call.
 
+New sessions use `frankengit-github-issue-capture-session-v2` and produce
+lock-preserving capture v2 for every batch. A retained session-v1 header continues
+to select capture v1 on resume, including its historical attribution-only lock
+semantics. No existing header, completed capture, native plan or request key is
+rewritten. A retained capture whose dialect disagrees with its session refuses
+before source access, even if its filename contains a matching digest. Library
+callers resuming legacy owners can explicitly select `captureSchema` on
+`createGithubIssueCaptureSession`; new callers default to capture v2.
+
 The acquisition invocation has one deadline of at most 300 seconds, including
 initialization and filesystem checks. Defaults are eight new batches, 4096 HTTP
 requests, 64 MiB of successful response bodies and no automatic source retries.
@@ -47,7 +56,7 @@ HTTP owner. Requests are serial, GET-only and use constructed GitHub API URLs.
 ## Retained captures and complete handoff
 
 Each complete capture is synchronized into
-`capture-NNNNNN-<sha256>.json` in the original capture format. Its filename binds
+`capture-NNNNNN-<sha256>.json` in the session's pinned capture format. Its filename binds
 its batch and bytes; there is no mutable last-batch cursor or a separate
 per-batch receipt window. Every invocation validates the entire retained prefix,
 including exact inventory membership, native text limits and comment identities
@@ -56,8 +65,10 @@ hard links and incomplete writes refuse before new network access. Nothing is
 automatically erased, evicted, overwritten or repaired.
 
 The persistent envelope is at most 128 batches, 64 MiB of captures and 10,000
-native command steps. Each original capture keeps its own 100-issue, 2000-comment
-and 1-MiB limits. `maxCaptureBytes`, `maxSteps` and `offset` may be selected at
+native command steps. Each original capture keeps its own 100-issue, 2000-comment,
+1-MiB and 2,200-compiled-command limits. Final closes and v2 locks spend the
+per-capture and aggregate command budgets before a capture or complete handoff
+is published. `maxCaptureBytes`, `maxSteps` and `offset` may be selected at
 start and then become immutable. A population exceeding 128 fixed batches must
 be repartitioned through a separately reviewed inventory, not changed on resume.
 

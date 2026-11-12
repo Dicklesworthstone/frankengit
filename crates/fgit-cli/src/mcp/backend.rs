@@ -87,7 +87,7 @@ impl NodeTools {
                 .runtime()
                 .block_on(node.authenticate_authority_head())
                 .map_err(|_| "MCP repository authority could not be authenticated")?;
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             if options.artifacts {
                 node.validate_workflow_artifact_storage().map_err(|error| {
                     format!("MCP workflow artifact storage refused: {}", error.code())
@@ -249,7 +249,11 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.extend(source::tools());
         tools.push(verified_blob::tool());
         tools.extend(search::tools());
-        tools.push(candidate::tool());
+        tools.push(if options.agent_token_file.is_some() {
+            candidate::agent_tool()
+        } else {
+            candidate::tool()
+        });
         tools.push(refs::tool());
         tools.extend(retrieval::tools());
         tools.push(tags::read_tool());
@@ -279,7 +283,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.outcomes {
         tools.extend(outcomes::tools());
     }
-    if options.issues || options.pulls {
+    if options.issues || options.pulls || options.discussions {
         tools.push(events::tool());
     }
     tools.extend(review::tools(options.source, options.pulls));
@@ -411,7 +415,9 @@ impl NodeTools {
         if queues::permitted(self.options.queues, self.options.writes.pulls, name) {
             return queues::call(self, name, args);
         }
-        if name == events::NAME && (self.options.issues || self.options.pulls) {
+        if name == events::NAME
+            && (self.options.issues || self.options.pulls || self.options.discussions)
+        {
             return events::call(self, args);
         }
         if self.options.writes.issues && issue_writes::is_tool(name) {
@@ -712,13 +718,14 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 96);
+        assert_eq!(server_names.len(), 97);
         assert!(server_names.contains(&pull_writes::REOPEN));
         assert!(server_names.contains(&source::HISTORICAL_TREE));
         assert!(server_names.contains(&source::HISTORICAL_BLOB));
         assert!(server_names.contains(&pull_comments::APPEND));
         assert!(server_names.contains(&source_writes::TRANSACTION));
         assert!(server_names.contains(&"frankengit_issue_append_comment"));
+        assert!(server_names.contains(&"frankengit_discussion_append_comment"));
         for name in [
             "frankengit_issue_lock",
             "frankengit_issue_unlock",

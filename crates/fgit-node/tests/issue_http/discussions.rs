@@ -1,4 +1,7 @@
 //! Real TCP discussion routes with independent grants, native decisions and restart.
+#[path = "discussions/append.rs"]
+mod append;
+
 use super::*;
 
 fn credentials(node: &OneNode, path: &Path) -> String {
@@ -282,7 +285,7 @@ fn valid_discussion_credentials_do_not_enable_the_disabled_service() {
     let node = start_node(configuration.clone());
     let path = root.0.join("credentials");
     credentials(&node, &path);
-    let server = Server::start(node, path, 2, true);
+    let server = Server::start(node, path, 3, true);
     status(&get(&server, "/api/v1/discussions", 'a'), 403);
     status(
         &post(
@@ -295,7 +298,18 @@ fn valid_discussion_credentials_do_not_enable_the_disabled_service() {
         ),
         403,
     );
-    assert_eq!(server.finish().accepted_sessions(), 2);
+    status(
+        &post(
+            &server,
+            "/api/v1/discussions/1/append-comment",
+            'b',
+            "disabled-append",
+            "body=Disabled",
+            false,
+        ),
+        403,
+    );
+    assert_eq!(server.finish().accepted_sessions(), 3);
     let node = reopened(configuration);
     let page = node
         .runtime()

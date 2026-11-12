@@ -12,7 +12,7 @@ use fgit_forge::ExpectedVersion;
 use fgit_forge::IssueNumber;
 use fgit_forge::event::issue::{IssueAction, IssueCommand};
 use fgit_forge::event::milestone::{MilestoneAction, MilestoneState};
-use fgit_types::PrincipalId;
+use fgit_types::{PrincipalId, RepositoryId};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
@@ -142,6 +142,24 @@ impl Fixture {
             forge,
             outbox,
         }
+    }
+    /// Select an explicit incomplete genesis, not a simulated delivery.
+    /// An old complete basis would legitimately recover retired predecessors.
+    fn select_outbox(&mut self, entries: Vec<CanonicalOutboxStateEntry>) {
+        let repository = self.basis.body().repository_id;
+        self.outbox = CanonicalOutboxState::try_new(repository, entries).unwrap();
+        let mut head = self.basis.body().clone();
+        head.outbox_root = stage(
+            &self.store,
+            repository,
+            delivery::OUTBOX_NAMESPACE,
+            &self.outbox,
+        );
+        let key = HeadKey::new(b"milestones-replay/incomplete-genesis".to_vec()).unwrap();
+        fgit_authority::initialize_repository(&self.store.0, &key, &head).unwrap();
+        self.basis = run(crate::read_basis_async(&self.store, &(), &key))
+            .unwrap()
+            .0;
     }
     fn page(&self, after: u64, limit: u16) -> MilestonePage {
         run(read_page_at(
@@ -311,14 +329,14 @@ fn missing_issue_predecessors_cannot_be_reported_as_zero_or_partial_progress() {
             })
         })
         .collect();
-    fixture.outbox = CanonicalOutboxState::try_new(repository, kept).unwrap();
+    fixture.select_outbox(kept);
     // The milestone is readable on its own, but the selected head's progress
     // depends on a complete issue fold. It cannot substitute an empty count.
     assert!(
         run(read_snapshot_from_roots(
             &fixture.store,
             &(),
-            repository,
+            &fixture.basis,
             &fixture.forge,
             &fixture.outbox,
             number(1),
@@ -331,7 +349,7 @@ fn missing_issue_predecessors_cannot_be_reported_as_zero_or_partial_progress() {
         run(issues::milestone_counts_at_roots(
             &fixture.store,
             &(),
-            repository,
+            &fixture.basis,
             &fixture.forge,
             &fixture.outbox,
             &BTreeSet::from([number(1)]),
@@ -371,12 +389,12 @@ fn missing_milestone_predecessors_and_cancellation_never_return_successful_parti
             batch.events[0].version.get() == 2
         })
         .collect();
-    fixture.outbox = CanonicalOutboxState::try_new(repository, kept).unwrap();
+    fixture.select_outbox(kept);
     assert!(
         run(read_snapshot_from_roots(
             &fixture.store,
             &(),
-            repository,
+            &fixture.basis,
             &fixture.forge,
             &fixture.outbox,
             number(1),

@@ -1,5 +1,5 @@
 //! Canonical publication receipts and bounded, snapshot-bound discussion JSON.
-use super::options::{Mutation, Options, ReadOptions, expected_version};
+use super::options::{Mutation, MutationCommand, Options, ReadOptions, expected_version};
 use crate::issues::options::head_token;
 use crate::publication_support::quote;
 use fgit_authority::TerminalOutcome;
@@ -88,9 +88,15 @@ pub(super) fn mutation(
         quote(&options.repository.to_string()),
         quote(&mutation.principal.to_string()),
         quote(options.format.as_str()),
-        mutation.command.number.get(),
-        expected_version(&mutation.command),
-        action(&mutation.command.action),
+        mutation.command.number().get(),
+        optional_number(expected_version(&mutation.command)),
+        match &mutation.command {
+            MutationCommand::Exact(command) => action(&command.action),
+            MutationCommand::Append(intent) => format!(
+                "{{\"name\":\"append-comment\",\"body\":{}}}",
+                quote(&intent.body)
+            ),
+        },
         cleanup.is_none(),
         cleanup.map_or_else(|| "null".into(), quote),
     )

@@ -10,10 +10,25 @@ const LIMITS: &[(&str, usize, usize)] = &[
     ("max_preparation_bytes", 256 * 1024, 1024 * 1024),
 ];
 pub(super) const COMMON_FIELDS: &[&str] = &[
-    "operation", "profile", "direction", "reference", "reference_hex",
-    "source_reference", "source_reference_hex", "expected_base", "expected_source",
-    "selected_commit", "mainline", "expected_head", "author", "committer",
-    "timestamp", "message_hex", "max_commits", "max_edges", "max_tree_entries",
+    "operation",
+    "profile",
+    "direction",
+    "reference",
+    "reference_hex",
+    "source_reference",
+    "source_reference_hex",
+    "expected_base",
+    "expected_source",
+    "selected_commit",
+    "mainline",
+    "expected_head",
+    "author",
+    "committer",
+    "timestamp",
+    "message_hex",
+    "max_commits",
+    "max_edges",
+    "max_tree_entries",
     "max_preparation_bytes",
 ];
 
@@ -28,7 +43,11 @@ pub(super) struct Input {
 }
 impl Input {
     pub fn operation(&self) -> &'static str {
-        if self.resolutions.is_some() { RESOLVE } else { PREPARE }
+        if self.resolutions.is_some() {
+            RESOLVE
+        } else {
+            PREPARE
+        }
     }
 }
 fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
@@ -36,11 +55,16 @@ fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
         .iter()
         .find(|value| value.0 == name)
         .ok_or(ToolError::invalid("invalid_replay_limit"))?;
-    let value = args.get(name).map(|value| {
-        value.unsigned().ok_or(ToolError::invalid("invalid_replay_limit"))
-    }).transpose()?.unwrap_or(default as u64);
-    let value = usize::try_from(value)
-        .map_err(|_| ToolError::invalid("invalid_replay_limit"))?;
+    let value = args
+        .get(name)
+        .map(|value| {
+            value
+                .unsigned()
+                .ok_or(ToolError::invalid("invalid_replay_limit"))
+        })
+        .transpose()?
+        .unwrap_or(default as u64);
+    let value = usize::try_from(value).map_err(|_| ToolError::invalid("invalid_replay_limit"))?;
     if value == 0 || value > maximum {
         return Err(ToolError::invalid("invalid_replay_limit"));
     }
@@ -66,12 +90,16 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         "revert" => ReplayDirection::Revert,
         _ => return Err(ToolError::invalid("invalid_replay_direction")),
     };
-    let mainline = args.get("mainline").map(|value| {
-        value.unsigned()
-            .and_then(|value| u16::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or(ToolError::invalid("invalid_mainline"))
-    }).transpose()?;
+    let mainline = args
+        .get("mainline")
+        .map(|value| {
+            value
+                .unsigned()
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or(ToolError::invalid("invalid_mainline"))
+        })
+        .transpose()?;
     let expected_head = head(args, 0)?;
     if resolving && expected_head.is_none() {
         return Err(ToolError::invalid("resolution_snapshot_required"));
@@ -85,7 +113,9 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         max_objects: 1024,
         ..PreparationLimits::default()
     };
-    limits.validate().map_err(|_| ToolError::invalid("invalid_replay_limit"))?;
+    limits
+        .validate()
+        .map_err(|_| ToolError::invalid("invalid_replay_limit"))?;
     let resolutions = if resolving {
         let choices = resolutions(args)?;
         validate_resolutions(&choices, limits)
@@ -218,15 +248,20 @@ pub(in super::super) fn resolutions(args: &Object) -> Result<Vec<ConflictResolut
     Ok(result)
 }
 
-
 pub(super) fn schema(resolving: bool) -> Value {
     let operation = if resolving { RESOLVE } else { PREPARE };
     let mut properties = common_properties(operation);
     properties.insert("profile".into(), object([("const", text("path-v1"))]));
-    properties.insert("direction".into(), object([
-        ("type", text("string")),
-        ("enum", Value::Array(vec![text("cherry-pick"), text("revert")])),
-    ]));
+    properties.insert(
+        "direction".into(),
+        object([
+            ("type", text("string")),
+            (
+                "enum",
+                Value::Array(vec![text("cherry-pick"), text("revert")]),
+            ),
+        ]),
+    );
     properties.insert("source_reference".into(), text_schema(4096));
     properties.insert("source_reference_hex".into(), hex_schema(4096));
     for name in ["expected_source", "selected_commit"] {
@@ -245,16 +280,27 @@ pub(super) fn schema(resolving: bool) -> Value {
     properties.insert("timestamp".into(), super::super::super::decimal_schema());
     properties.insert("message_hex".into(), hex_schema(4096));
     for &(name, default, maximum) in LIMITS {
-        properties.insert(name.into(), object([
-            ("type", text("integer")),
-            ("minimum", json::number(1)),
-            ("maximum", json::number(maximum as u64)),
-            ("default", json::number(default as u64)),
-        ]));
+        properties.insert(
+            name.into(),
+            object([
+                ("type", text("integer")),
+                ("minimum", json::number(1)),
+                ("maximum", json::number(maximum as u64)),
+                ("default", json::number(default as u64)),
+            ]),
+        );
     }
     let mut required = vec![
-        "operation", "profile", "direction", "expected_base", "expected_source",
-        "selected_commit", "author", "committer", "timestamp", "message_hex",
+        "operation",
+        "profile",
+        "direction",
+        "expected_base",
+        "expected_source",
+        "selected_commit",
+        "author",
+        "committer",
+        "timestamp",
+        "message_hex",
     ];
     if resolving {
         properties.insert("resolutions".into(), resolution_schema());
@@ -334,8 +380,18 @@ pub(in super::super) fn resolution_schema() -> Value {
         ),
     ]);
     object([
-        ("type", text("array")), ("minItems", json::number(1)), ("maxItems", json::number(MAX_RESOLUTIONS as u64)),
-        ("items", object([("oneOf", Value::Array(vec![simple, file]))])),
-        ("description", text("Every and only actual PathMergeV1 conflict. At most 24 KiB decoded paths plus file bytes in total. Explicit file [] means empty; a missing side is never deletion.")),
+        ("type", text("array")),
+        ("minItems", json::number(1)),
+        ("maxItems", json::number(MAX_RESOLUTIONS as u64)),
+        (
+            "items",
+            object([("oneOf", Value::Array(vec![simple, file]))]),
+        ),
+        (
+            "description",
+            text(
+                "Every and only actual PathMergeV1 conflict. At most 24 KiB decoded paths plus file bytes in total. Explicit file [] means empty; a missing side is never deletion.",
+            ),
+        ),
     ])
 }

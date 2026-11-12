@@ -15,7 +15,7 @@ use fgit_node::source_retrieval::integrity::scrub::{
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{GitHashAlgorithm, GitOid, HeadGeneration, RepositoryId, TenantId};
 
-use super::fsck::{head_token, parse_head};
+use super::fsck::{AuditEvidenceInput, audit_evidence_receipt, head_token, parse_head};
 use super::publication_support::quote;
 
 const MIB: u64 = 1024 * 1024;
@@ -265,6 +265,33 @@ fn render_page(options: &Options, report: &SelectedObjectScrub, closed: bool) ->
         ScrubStop::FindingLimit => "finding_limit",
         ScrubStop::PayloadLimit => "payload_limit",
     };
+    let closure_text = report.closure_root().to_string();
+    let exact_window = format!(
+        "generation:{}:selected:{}:verified:{}:bytes:{}",
+        report.generation().get(),
+        report.selected_objects(),
+        report.verified_objects(),
+        report.payload_bytes()
+    );
+    let (claim_rank, evidence_record_id) = if closed && report.entire_selection_verified() {
+        audit_evidence_receipt(&AuditEvidenceInput {
+            claim_id: "CLM-SCRUB-NATIVE-BYTES-V1",
+            claim_scope: "authority_selected_native_object_bytes",
+            tenant: options.tenant,
+            repository: report.repository_id(),
+            format: options.format,
+            head: report.head(),
+            closure_root: &closure_text,
+            selection_strata: "scope:authority_selected_native_object_bytes:page",
+            exact_window: &exact_window,
+        })
+        .map_or_else(
+            |_| ("null".into(), "null".into()),
+            |(rank, id)| (quote(rank.token()), quote(&id.to_string())),
+        )
+    } else {
+        ("null".into(), "null".into())
+    };
     format!(
         concat!(
             "{{\"type\":{},\"schema_version\":1,",
@@ -274,7 +301,8 @@ fn render_page(options: &Options, report: &SelectedObjectScrub, closed: bool) ->
             "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
             "\"payload_bytes_accounted\":{},\"findings\":[{}],\"next_cursor\":{},\"stop\":{},",
             "\"page_complete\":{},\"complete\":{},\"all_selected_object_bytes_verified\":{},",
-            "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
+            "\"scope\":\"authority_selected_native_object_bytes\",",
+            "\"claim_rank\":{},\"evidence_record_id\":{},\"head_revalidated\":true,",
             "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
             "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":{}}}"
         ),
@@ -289,7 +317,7 @@ fn render_page(options: &Options, report: &SelectedObjectScrub, closed: bool) ->
         quote(options.format.as_str()),
         report.generation().get(),
         quote(&head_token(report.head())),
-        quote(&report.closure_root().to_string()),
+        quote(&closure_text),
         report.selected_objects(),
         nullable_oid(report.start_after()),
         report.checked_objects(),
@@ -302,6 +330,8 @@ fn render_page(options: &Options, report: &SelectedObjectScrub, closed: bool) ->
         closed,
         closed && report.entire_selection_checked(),
         closed && report.entire_selection_verified(),
+        claim_rank,
+        evidence_record_id,
         closed,
     )
 }

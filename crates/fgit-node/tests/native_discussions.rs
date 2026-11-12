@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 //! Discussions persist through real node admission, retained reads and fresh reopen.
+#[path = "native_discussions/append.rs"]
+mod append;
+
 use fgit_admission::AdmissionLimits;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::event::discussion::{

@@ -86,13 +86,13 @@ impl AsyncAuthorityStore for Store {
     }
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     store: Store,
     basis: PublicationBasis,
     outbox: CanonicalOutboxState,
 }
 impl Fixture {
-    fn new(batches: Vec<ForgeEventBatch>) -> Self {
+    pub(super) fn new(batches: Vec<ForgeEventBatch>) -> Self {
         let store = Store(MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x1557)));
         let repository = RepositoryId::from_bytes([0x44; 16]);
         let mut forge = CanonicalForgePositionState::try_new(repository, Vec::new()).unwrap();
@@ -151,6 +151,28 @@ impl Fixture {
         ))
         .unwrap()
     }
+    pub(super) fn comments_page<V, C>(
+        &self,
+        after: u64,
+        limit: u16,
+        visible: &V,
+        cancelled: &C,
+    ) -> Result<Option<comments::PullRequestCommentsPage>, AdmissionError>
+    where
+        V: Fn(&RefName, &RefName) -> bool + Sync,
+        C: Fn() -> bool + Sync,
+    {
+        run(comments::read_page_at(
+            &self.store,
+            &(),
+            &self.basis,
+            PullRequestNumber::FIRST,
+            after,
+            limit,
+            visible,
+            cancelled,
+        ))
+    }
 }
 fn stage<B: CanonicalBody + Sync>(
     store: &Store,
@@ -176,7 +198,12 @@ fn data(pr: u64, version: u64, format: GitHashAlgorithm, body_bytes: usize) -> P
         body: "x".repeat(body_bytes),
     }
 }
-fn event(pr: u64, version: u64, format: GitHashAlgorithm, body_bytes: usize) -> ForgeEvent {
+pub(super) fn event(
+    pr: u64,
+    version: u64,
+    format: GitHashAlgorithm,
+    body_bytes: usize,
+) -> ForgeEvent {
     PullRequestCommand {
         number: number(pr),
         expected_version: if version == 1 {
@@ -216,7 +243,7 @@ fn history(
 }
 impl Fixture {
     /// Select another explicit genesis fixture, not a simulated publication.
-    fn select_outbox(&mut self, entries: Vec<CanonicalOutboxStateEntry>) {
+    pub(super) fn select_outbox(&mut self, entries: Vec<CanonicalOutboxStateEntry>) {
         let repository = self.basis.body().repository_id;
         self.outbox = CanonicalOutboxState::try_new(repository, entries).unwrap();
         let mut head = self.basis.body().clone();
@@ -400,6 +427,30 @@ fn visibility_and_numeric_pagination_are_preserved_after_replay_changes() {
 }
 
 #[test]
+fn retired_frontier_delivery_preserves_latest_metadata_and_original_opener() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let opening = ForgeEventBatch::of_one(event(1, 1, format, 0));
+        let latest = ForgeEventBatch::of_one(event(1, 2, format, 12));
+        let mut fixture = Fixture::new(vec![opening, latest.clone()]);
+        let original = fixture.page(0, 1);
+        let latest_root = storage::root(&latest).unwrap();
+        let entries = fixture
+            .outbox
+            .entries()
+            .iter()
+            .filter(|entry| entry.payload_root() != latest_root)
+            .copied()
+            .collect();
+        fixture.select_outbox(entries);
+        let recovered = fixture.page(0, 1);
+        assert_ne!(recovered.source_head, original.source_head);
+        assert_eq!(recovered.source_head, fixture.basis.id());
+        assert_eq!(recovered.pull_requests, original.pull_requests);
+        assert_eq!(recovered.next_after, original.next_after);
+    }
+}
+
+#[test]
 fn an_unselected_opening_object_cannot_supply_missing_canonical_provenance() {
     let mut fixture = Fixture::new(vec![
         ForgeEventBatch::of_one(event(1, 1, GitHashAlgorithm::Sha1, 0)),
@@ -420,8 +471,9 @@ fn an_unselected_opening_object_cannot_supply_missing_canonical_provenance() {
         .copied()
         .collect();
     fixture.select_outbox(entries);
-    // The old opener still exists in storage but is not selected by the outbox.
-    assert!(
+    // This explicit genesis selects the update frontier and its delivery only.
+    // The stored opener has no selected frontier, outbox, or predecessor witness.
+    assert!(matches!(
         run(read_page_at(
             &fixture.store,
             &(),
@@ -430,9 +482,11 @@ fn an_unselected_opening_object_cannot_supply_missing_canonical_provenance() {
             1,
             &|_, _| true,
             &|| false
+        )),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceMissing
         ))
-        .is_err()
-    );
+    ));
 }
 
 #[test]

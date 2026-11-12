@@ -36,6 +36,22 @@ pub(super) fn stale(name: &str) -> &'static str {
     }
 }
 
+pub(super) fn snapshot_moved(name: &str) -> &'static str {
+    if name == SYMBOLS {
+        "snapshot_moved"
+    } else {
+        "source_snapshot_moved"
+    }
+}
+
+pub(super) fn missing_ref(name: &str) -> &'static str {
+    if name == SYMBOLS {
+        "reference_unavailable"
+    } else {
+        "not_found"
+    }
+}
+
 fn head_bytes(backend: &NodeTools) -> Vec<u8> {
     backend
         .node
@@ -190,7 +206,7 @@ fn sponsored_indexes_preserve_generation_and_original_source_through_metadata_an
             );
             assert_eq!(
                 backend.call(name, &pinned).unwrap_err().code,
-                "source_snapshot_moved"
+                snapshot_moved(name)
             );
             let current = backend
                 .call(name, &with_floor(args.clone(), original))

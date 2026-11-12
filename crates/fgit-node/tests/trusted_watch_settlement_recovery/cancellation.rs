@@ -28,7 +28,10 @@ fn cancel_active(f: &Fixture, mode: Mode) -> Retained {
                 std::thread::sleep(Duration::from_millis(2));
             }
             request.cancel();
-            assert!(started, "a real workflow process must start before the stop");
+            assert!(
+                started,
+                "a real workflow process must start before the stop"
+            );
         });
         let result = poll_with_request(f, mode, &request);
         observer.join().unwrap();
@@ -70,8 +73,14 @@ fn closed_cancellation_recovers_original_cancelled_checks_once_in_every_watch_mo
             assert!(lines[1].contains("\"conclusion\":\"cancelled\""));
             assert!(lines[1].contains("\"command_committed\":true"));
             assert_eq!(fs::read(retained.event.join("settled")).unwrap(), settled);
-            assert_eq!(fs::read(retained.event.join("check-sources")).unwrap(), handoff);
-            assert_eq!(fs::read(retained.child.join("execution.owner")).unwrap(), owner);
+            assert_eq!(
+                fs::read(retained.event.join("check-sources")).unwrap(),
+                handoff
+            );
+            assert_eq!(
+                fs::read(retained.child.join("execution.owner")).unwrap(),
+                owner
+            );
             assert_eq!(
                 fs::read(retained.child.join("check-proposals.journal")).unwrap(),
                 journal
@@ -80,7 +89,10 @@ fn closed_cancellation_recovers_original_cancelled_checks_once_in_every_watch_mo
             assert_refs(&f, mode, retained.commit);
             let before = generation(f.node());
             let (repeated, dispatch) = poll(&f, mode).unwrap();
-            assert!(repeated.contains("\"state\":\"previously_settled\""), "{repeated}");
+            assert!(
+                repeated.contains("\"state\":\"previously_settled\""),
+                "{repeated}"
+            );
             assert!(dispatch.is_none());
             let (committed, previous, lines, error) = publish(&f, mode);
             assert!(error.is_none(), "{error:?}");
@@ -184,11 +196,7 @@ fn advance_source(f: &mut Fixture) {
         GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
     };
     bundle.extend_from_slice(
-        format!(
-            "-{} original source\n{next} refs/heads/topic\n\n",
-            f.source
-        )
-        .as_bytes(),
+        format!("-{} original source\n{next} refs/heads/topic\n\n", f.source).as_bytes(),
     );
     bundle.extend_from_slice(&pack);
     let imported = f
@@ -237,7 +245,10 @@ fn the_same_ref_watch_can_execute_a_later_event_after_a_clean_stop() {
         assert!(published.3.is_none(), "{:?}", published.3);
         assert_eq!((published.0, published.1), (1, 1));
         assert!(
-            published.2.iter().any(|line| line.contains("\"conclusion\":\"success\""))
+            published
+                .2
+                .iter()
+                .any(|line| line.contains("\"conclusion\":\"success\""))
         );
         assert_eq!(fs::read(f.root.join("executed")).unwrap(), b"xx");
     }
@@ -273,12 +284,8 @@ fn service_stop_retains_cancelled_publication_without_an_execution_reconciliatio
                 control.request_stop();
                 assert!(started, "the owned service must start its real workflow");
             });
-            let result = run_service_with_ready(
-                f.config.clone(),
-                watch.clone(),
-                control.clone(),
-                || Ok(()),
-            );
+            let result =
+                run_service_with_ready(f.config.clone(), watch.clone(), control.clone(), || Ok(()));
             observer.join().unwrap();
             result.unwrap()
         });

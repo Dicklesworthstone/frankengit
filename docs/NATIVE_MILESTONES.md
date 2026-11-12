@@ -117,11 +117,23 @@ it does not turn the outcome into non-commit.
 ## Authenticated HTTP and MCP
 
 The native HTTP server and stdio MCP expose the same lifecycle, exact-version
-membership commands and snapshot reads. They reuse the existing independent
-issue grants: `issues-read` for milestone reads and `issues-write` for milestone
-mutations and issue membership. A write grant does not imply read, and Git grants
-imply neither. HTTP uses its authenticated bearer principal; MCP uses its bound
-launch principal. No title, body, identifier or tool argument may impersonate one.
+membership commands and snapshot reads. Ordinary operator credentials reuse the
+existing independent issue grants: `issues-read` for milestone reads and
+`issues-write` for milestone mutations and issue membership. Sponsored agent
+credentials instead require independent `milestones-read` and `milestones-write`
+scopes for milestone metadata; issue membership still requires `issues-write`.
+A write grant does not imply read, and Git grants imply neither. HTTP and MCP use
+the authenticated principal; sponsored requests retain the verified agent and
+sponsor. No title, body, identifier or tool argument may impersonate one.
+
+Both credential profiles retain the existing issue-service switches. MCP uses
+`--allow-issues` for milestone reads and `--allow-issue-writes` for mutations.
+These launch ceilings cannot widen an agent's canonical grant. A milestone-only
+agent sees lifecycle metadata and same-snapshot issue counts without gaining
+issue text, issue mutation, source or publication authority. Existing sponsored
+issue grants do not gain milestone access; issue a new credential with the
+explicit scopes. See [sponsored credentials](SPONSORED_AGENT_CREDENTIALS.md) for
+issuance, revocation, retained evidence and upgrade behavior.
 
 With the existing `--allow-issues` service enabled, HTTP exposes:
 
@@ -159,7 +171,9 @@ date, supply its decimal string to replace it, or supply `null` to clear it.
 Milestone webhook selection uses the explicit `milestone` family or `kind:22`.
 An issue-only subscription does not silently gain milestone lifecycle events.
 The existing scoped `issues-pulls-v1` event API retains its declared families;
-milestone history is available through the milestone read surface.
+milestone history is available through the milestone read surface. Integrations
+can also select the explicit [`collaboration-v2` event profile](SCOPED_FORGE_EVENT_FEED.md)
+to include milestone lifecycle events under the existing issue-read grant.
 
 ## Browser planning
 
@@ -167,8 +181,15 @@ With `--allow-issues` enabled, open `<repository-route>/ui/milestones/` from
 the source browser or issue page. The page and its complete module graph use
 the existing issue service switch. Source or pull-request enablement alone
 does not enable milestone assets, and loading the static page grants no access
-to repository data. Connect an explicitly scoped issue token to read or change
-milestones; outcome recovery retains its separate `outcomes-read` requirement.
+to repository data. Ordinary repository tokens use their explicit `issues-read`
+and `issues-write` grants. Sponsored `fgagent_` credentials require independent
+`milestones-read` and `milestones-write` grants; issue membership changes still
+require `issues-write`. Outcome recovery retains its separate `outcomes-read`
+requirement. The issue and milestone browser clients and network operators
+accept both token forms without changing native scope checks. Private operator
+token files accept one optional final LF. Saved request receipts bind the full
+original token fingerprint; a replacement credential cannot resend or restore
+them through this browser custody profile.
 
 The milestone list shows each selected milestone's state, due date and open/
 closed issue counts. Opening a milestone shows its current summary at the

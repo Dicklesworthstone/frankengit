@@ -3,12 +3,16 @@
 //! quarantine and durable host journals. ECC assertions are explicit fixture
 //! inputs; the tests execute the native publication consumer separately.
 
+#[path = "abort_tests.rs"]
+mod abort;
 #[path = "checkpoint_tests.rs"]
 mod checkpoint;
 #[path = "cleanup_tests.rs"]
 mod cleanup;
 #[path = "evidence_tests.rs"]
 mod evidence;
+#[path = "prepared_patch_tests.rs"]
+mod prepared_patch;
 #[path = "resumption_tests.rs"]
 mod resumption;
 

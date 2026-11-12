@@ -575,6 +575,10 @@ pub enum IdentityDomain {
     /// place and `registry_id == index + 1` makes the append order
     /// load-bearing.
     PolicySnapshot,
+    /// One canonical symbolic-HEAD transition, bound to its original request,
+    /// exact publication basis and authenticated before/after ref roots.
+    /// It is distinct from a direct-ref delta and cannot encode a synthetic OID.
+    AdmissionHeadDelta,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -915,6 +919,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/policy-snapshot/v1",
         None,
     ),
+    owned_row(
+        54,
+        IdentityDomain::AdmissionHeadDelta,
+        "frankengit/admission-head-delta/v1",
+        Some("DUR-024"),
+    ),
 ];
 
 const fn pinned_row(
@@ -1155,6 +1165,7 @@ impl IdentityDomain {
         Self::TokenGrant,
         Self::Session,
         Self::PolicySnapshot,
+        Self::AdmissionHeadDelta,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1229,6 +1240,7 @@ impl IdentityDomain {
             | Self::TokenGrant
             | Self::Session
             | Self::PolicySnapshot
+            | Self::AdmissionHeadDelta
             | Self::HiddenRefPolicy => (),
         }
     }

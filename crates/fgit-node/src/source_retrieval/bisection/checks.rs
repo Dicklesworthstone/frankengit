@@ -58,8 +58,11 @@ impl<'history> WorkflowChecks<'history> {
                 )
             }
             (AggregateId::WorkflowCheck(_), _)
-            | (_, ForgeEventPayload::WorkflowCheckObservedNative(_))
-            | (_, ForgeEventPayload::CandidateWorkflowCheckObservedNative(_)) => {
+            | (
+                _,
+                ForgeEventPayload::WorkflowCheckObservedNative(_)
+                | ForgeEventPayload::CandidateWorkflowCheckObservedNative(_),
+            ) => {
                 return Err(corrupt("workflow-check aggregate and payload disagree"));
             }
             _ => return Ok(()),

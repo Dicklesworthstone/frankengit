@@ -450,7 +450,15 @@ export class IssueClient {
   }
   get binding() { return this.#binding && { ...this.#binding }; }
   async connect(token) {
-    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
+    // These two native route families have independently scoped sponsored
+    // operations. Accept only the same closed spelling as credential_token.mjs;
+    // the server still authenticates the current grant for every request.
+    const sponsored = ['issue', 'milestone'].includes(this.#kind);
+    if (typeof token !== 'string' || !(/^[0-9a-f]{64}$/.test(token) ||
+        (sponsored && /^fgagent_[0-9a-f]{64}$/.test(token)))) {
+      fail(sponsored ? 'A lowercase hexadecimal repository token or fgagent_ credential is required.'
+        : 'A 64-character lowercase hexadecimal token is required.');
+    }
     this.disconnect();
     const epoch = this.#epoch;
     const digest = await this.#crypto.subtle.digest('SHA-256', encoder.encode(token));

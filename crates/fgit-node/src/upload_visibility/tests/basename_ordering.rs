@@ -155,14 +155,14 @@ fn cancellation_during_name_hashing_does_not_publish_a_partial_hint() {
     source.stop_at.set(2);
     let mut hashes = BTreeMap::new();
     let edges = [(blob, ObjectType::Blob)];
-    let hinted = tree_path_hints(&source, &entries, &edges);
+    let hinted = tree_path_facts(&source, &entries, &edges);
     assert!(matches!(
         &hinted,
         Err(NodePackMaterializationRefusal::Pack(error))
             if matches!(error.as_ref(), PackWriteError::Pack(PackError::DeadlineExceeded))
     ));
     // Hints are merged only from a complete result.
-    if let Ok(hints) = hinted {
+    if let Ok((hints, _names)) = hinted {
         merge_path_hints(&edges, &hints, &mut hashes);
     }
     assert!(hashes.is_empty());

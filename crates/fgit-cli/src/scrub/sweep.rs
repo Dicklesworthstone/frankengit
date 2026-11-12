@@ -118,8 +118,33 @@ impl Summary {
         }
         Ok(())
     }
-    fn receipt(&self, options: &Options) -> String {
-        format!(
+    fn receipt(&self, options: &Options) -> Result<String, String> {
+        let closure_text = self.closure.to_string();
+        let exact_window = format!(
+            "generation:{}:pages:{}:selected:{}:verified:{}:bytes:{}",
+            self.generation.get(),
+            self.pages,
+            self.selected,
+            self.verified,
+            self.bytes
+        );
+        let (claim_rank, evidence_record_id) = if self.findings == 0 {
+            let (rank, id) = audit_evidence_receipt(&AuditEvidenceInput {
+                claim_id: "CLM-SCRUB-SWEEP-V1",
+                claim_scope: "authority_selected_native_object_bytes",
+                tenant: options.tenant,
+                repository: self.repository,
+                format: options.format,
+                head: self.head,
+                closure_root: &closure_text,
+                selection_strata: "scope:authority_selected_native_object_bytes:sweep",
+                exact_window: &exact_window,
+            })?;
+            (quote(rank.token()), quote(&id.to_string()))
+        } else {
+            ("null".into(), "null".into())
+        };
+        Ok(format!(
             concat!(
                 "{{\"type\":\"repository_scrub_sweep\",\"schema_version\":1,",
                 "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation_id\":{},",
@@ -128,7 +153,8 @@ impl Summary {
                 "\"objects_checked\":{},\"objects_verified\":{},\"object_read_attempts\":{},",
                 "\"payload_bytes_accounted\":{},\"finding_count\":{},",
                 "\"complete\":true,\"all_selected_object_bytes_verified\":{},",
-                "\"scope\":\"authority_selected_native_object_bytes\",\"head_revalidated\":true,",
+                "\"scope\":\"authority_selected_native_object_bytes\",",
+                "\"claim_rank\":{},\"evidence_record_id\":{},\"head_revalidated\":true,",
                 "\"object_graph_verified\":false,\"physical_orphans_scanned\":false,",
                 "\"objects_repaired\":false,\"repository_changed\":false,\"node_closed\":true}}"
             ),
@@ -138,7 +164,7 @@ impl Summary {
             quote(options.format.as_str()),
             self.generation.get(),
             quote(&head_token(self.head)),
-            quote(&self.closure.to_string()),
+            quote(&closure_text),
             self.selected,
             self.pages,
             self.checked,
@@ -146,8 +172,10 @@ impl Summary {
             self.attempts,
             self.bytes,
             self.findings,
-            self.findings == 0
-        )
+            self.findings == 0,
+            claim_rank,
+            evidence_record_id,
+        ))
     }
 }
 
@@ -223,7 +251,8 @@ fn finish(
         }
     };
     let code = if summary.findings == 0 { 0 } else { 3 };
-    writeln!(output, "{}", summary.receipt(options))
+    let line = summary.receipt(options)?;
+    writeln!(output, "{line}")
         .and_then(|()| output.flush())
         .map_err(|error| format!("scrub sweep receipt output incomplete: {error}"))?;
     Ok(code)

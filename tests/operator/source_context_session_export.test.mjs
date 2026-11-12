@@ -239,11 +239,19 @@ test('cancellation before publication withholds output, cancellation after direc
   await assert.rejects(exportAt(f, join(f.root, 'stopped'), {}, { signal: stopped.signal }));
   await assert.rejects(lstat(join(f.root, 'stopped')), e => e.code === 'ENOENT');
   const late = new AbortController(), output = join(f.root, 'draining');
+  let polling = true;
   const watcher = watch(f.root, (_event, name) => { if (name?.toString() === 'draining') late.abort(); });
+  const poller = (async () => {
+    while (polling && !late.signal.aborted) {
+      try { await lstat(output); late.abort(); break; }
+      catch (e) { if (e.code !== 'ENOENT') throw e; }
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  })();
   try {
     const saved = await exportAt(f, output, {}, { signal: late.signal }); assert.equal(late.signal.aborted, true);
     assert.equal((await inspectAt(f, saved)).replay_verified, true);
-  } finally { watcher.close(); }
+  } finally { polling = false; watcher.close(); await poller; }
 });
 test('actual CLI preserves a committed export receipt after stdout closes', async t => {
   const f = await setup(t); const run = await cli(f, 'export', ['--output', join(f.root, 'lost-stdout')], { lostOutput: true });

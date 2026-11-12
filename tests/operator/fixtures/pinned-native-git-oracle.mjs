@@ -15,8 +15,9 @@ export function pinnedNativeGitOracle(t, label) {
     env: { ...process.env, FGIT_ORACLE_PIN_MANIFEST: undefined },
   });
   const verified = invoke(['verify', pin]);
-  if (verified.status === 69 && verified.stderr.trim() ===
-      `FGIT_ORACLE_UNAVAILABLE: oracle ${pin} has no local binary receipt`) {
+  if (verified.status === 69 && (
+      verified.stderr.trim() === `FGIT_ORACLE_UNAVAILABLE: oracle ${pin} has no local binary receipt` ||
+      verified.stderr.trim() === 'FGIT_ORACLE_UNAVAILABLE: required command is unavailable: bwrap')) {
     t.skip('exact pinned Git 2.47.3 sandbox oracle unavailable'); return null;
   }
   assert.equal(verified.status, 0, verified.error?.message ?? verified.stderr);

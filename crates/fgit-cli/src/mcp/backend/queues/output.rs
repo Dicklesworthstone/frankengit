@@ -270,8 +270,14 @@ fn action(command: &Command) -> (Object, &'static str) {
                 text(command.expected_policy_epoch.get().to_string()),
             );
             reference(&mut fields, "source_reference", &pull.data.source_ref);
-            fields.insert("expected_source".into(), text(pull.data.source_tip.to_string()));
-            fields.insert("expected_target".into(), text(pull.data.target_tip.to_string()));
+            fields.insert(
+                "expected_source".into(),
+                text(pull.data.source_tip.to_string()),
+            );
+            fields.insert(
+                "expected_target".into(),
+                text(pull.data.target_tip.to_string()),
+            );
             fields.insert(
                 "expected_recorded_target".into(),
                 text(command.expected_recorded_target_tip.to_string()),

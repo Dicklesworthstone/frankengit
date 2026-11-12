@@ -45,6 +45,13 @@ use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
 
+mod ref_state_v2;
+pub use ref_state_v2::{
+    ref_state_head_leaf_v2, ref_state_head_membership_proof_v2, ref_state_leaf_v2,
+    ref_state_membership_proof_v2, ref_state_merkle_root_v2, ref_state_non_membership_proof_v2,
+    ref_state_schema_v2, verify_ref_state_head_membership_under,
+};
+
 /// Why a Merkle operation could not be completed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MerkleRefusal {
@@ -63,6 +70,8 @@ pub enum MerkleRefusal {
     /// rather than a client-visible condition — but hashing it would silently
     /// commit to whichever copy sorted first.
     DuplicateRefName,
+    /// A symbolic HEAD must target a branch, never a tag or another namespace.
+    InvalidHeadTarget,
     /// Two entries carry the same object identity.
     DuplicateObjectOid,
     /// The named ref is not present in the entries offered.
@@ -78,7 +87,7 @@ pub enum MerkleRefusal {
     RefIsPresent,
     /// A non-membership proof was requested for an object the closure contains.
     ObjectIsPresent,
-    /// This layout version admits no membership proof for the ref state or object closure.
+    /// This layout version admits no proof for the requested root or HEAD claim.
     ///
     /// [`RootLayoutVersion::LegacyWholeBody`] commits to the whole canonical
     /// body, so there is no tree to walk and no proof to check. Refusing is the
@@ -102,6 +111,7 @@ impl core::fmt::Display for MerkleRefusal {
             Self::DuplicateRefName => {
                 f.write_str("two entries carry the same ref name; a ref state is a map")
             }
+            Self::InvalidHeadTarget => f.write_str("symbolic HEAD must target refs/heads/*"),
             Self::DuplicateObjectOid => {
                 f.write_str("two entries carry the same object identity; a closure is a set")
             }
@@ -117,8 +127,7 @@ impl core::fmt::Display for MerkleRefusal {
             }
             Self::LayoutAdmitsNoProof { version } => write!(
                 f,
-                "root layout version {} commits to the whole body, so no membership \
-                 proof exists under it",
+                "root layout version {} does not admit the requested proof family",
                 version.code_point()
             ),
         }
@@ -134,6 +143,11 @@ impl core::error::Error for MerkleRefusal {}
 /// verifier derives from the leaf count rather than being told per level. A
 /// proof that carried only siblings would leave the verifier guessing the
 /// shape, and a guessed shape is a second implementation of the tree.
+///
+/// A raw odd-promotion apex does not uniquely authenticate these numbers: a
+/// promoted subtree can also occupy one position in a claimed smaller tree.
+/// Layouts requiring an exact count must commit it separately, as the v2
+/// ref-state root envelope does. Historical v1 folds keep their original bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MerkleProof {
     index: usize,
@@ -483,7 +497,11 @@ pub fn verify_ref_state_membership_under(
     if !version.admits_ref_state_membership_proof() {
         return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
     }
-    Ok(verify_ref_state_membership(root, name, oid, proof))
+    Ok(if version.uses_head_aware_ref_merkle() {
+        ref_state_v2::verify_membership(root, name, oid, proof)
+    } else {
+        verify_ref_state_membership(root, name, oid, proof)
+    })
 }
 
 // --- ordered non-membership (frankengit-56i4) ---------------------------------
@@ -562,12 +580,14 @@ impl RefStateNeighbour {
     }
 }
 
-/// Evidence that a ref name is **absent** from a v1 ref state.
+/// Evidence that a direct ref name is **absent** from a versioned ref state.
 ///
 /// Absence is proved by exhibiting the leaves that would have surrounded the
-/// name, so the four variants are the four places a name can fail to be: in an
+/// name. There are four places a name can fail to be: in an
 /// empty state, before everything, between two adjacent leaves, or after
-/// everything. The edges are separate variants rather than an `Option` pair
+/// everything. An empty direct-ref map has separate witnesses for the v1 empty
+/// tree and the v2 mandatory HEAD leaf. The edges are separate variants rather
+/// than an `Option` pair
 /// because "there is no predecessor" is a structural fact the verifier must
 /// check differently — at the edges it checks a position against the tree's
 /// bounds, and in the middle it checks two positions against each other.
@@ -582,19 +602,29 @@ impl RefStateNeighbour {
 /// establish it.
 ///
 /// In this system that assumption is discharged upstream rather than ignored:
-/// every ref-state root is produced by [`ref_state_merkle_root`], which sorts
-/// through [`ref_name_order`] and refuses duplicates, and the root is named by
-/// an authenticated head. So the trust already required for the root to mean
-/// anything is the same trust this relies on. What a caller must **not** do is
+/// every ref-state root is produced by [`ref_state_merkle_root`] or its v2
+/// counterpart, which sort through [`ref_name_order`] and refuse duplicates,
+/// and the root is named by an authenticated head. So the trust already
+/// required for the root to mean anything is the same trust this relies on.
+/// What a caller must **not** do is
 /// hand this verifier a root of unknown provenance and read a `true` as proof
 /// of absence — against an adversarially built tree it is not one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefStateNonMembershipProof {
     /// The ref state holds no refs at all.
     EmptyState,
+    /// No direct refs exist under the v2 layout. The required typed HEAD leaf
+    /// is the entire tree, so its exact target (or absence) and count one
+    /// re-derive the root envelope.
+    /// This variant is invalid under historical v1 layouts; `EmptyState` is
+    /// invalid under v2. The target is data, never authorization.
+    HeadOnly {
+        /// The optional symbolic branch target, including an unborn branch.
+        head_target: Option<RefName>,
+    },
     /// The queried name sorts before the first leaf.
     BeforeFirst {
-        /// The leaf at index 0.
+        /// The first direct-ref leaf: index 0 under v1, index 1 under v2.
         first: Box<RefStateNeighbour>,
     },
     /// The queried name sorts strictly between two adjacent leaves.
@@ -690,6 +720,7 @@ pub fn verify_ref_state_non_membership(
         RefStateNonMembershipProof::EmptyState => {
             *root.bytes() == empty_merkle_root(ref_state_schema())
         }
+        RefStateNonMembershipProof::HeadOnly { .. } => false,
         RefStateNonMembershipProof::BeforeFirst { first } => {
             // Index 0 *is* the first position, so nothing can sort before it
             // without displacing this leaf — and the path binds this leaf to
@@ -699,8 +730,9 @@ pub fn verify_ref_state_non_membership(
                 && holds(first)
         }
         RefStateNonMembershipProof::AfterLast { last } => {
-            // `leaf_count` is bound into the fold shape, so claiming the last
-            // position cannot be done by inventing a larger tree.
+            // A right-edge path has only left siblings at joined levels.
+            // Relabelling a raw proof's count may rescale positions, but cannot
+            // make a real leaf with a right sibling become the rightmost leaf.
             // The index is decoded, untrusted input. Checked arithmetic turns
             // a saturated claim into a plain refusal instead of a debug-build
             // panic or a release-build wraparound.
@@ -740,7 +772,11 @@ pub fn verify_ref_state_non_membership_under(
     if !version.admits_ref_state_membership_proof() {
         return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
     }
-    Ok(verify_ref_state_non_membership(root, name, proof))
+    Ok(if version.uses_head_aware_ref_merkle() {
+        ref_state_v2::verify_non_membership(root, name, proof)
+    } else {
+        verify_ref_state_non_membership(root, name, proof)
+    })
 }
 
 // --- object closure Merkle layout and membership (frankengit-c7tb) -------------

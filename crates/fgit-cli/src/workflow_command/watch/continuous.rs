@@ -111,11 +111,13 @@ pub(super) fn run(
         };
         let parent = node.command_request_context(Some(timeout));
         let probe = control.clone();
-        let (result, cleanup) = parent.run_until_stopped(
-            node.runtime(),
-            move || probe.requested(),
-            |request| validate_refresh_custody(node, request, options, summary),
-        ).map_err(|error| error.to_string())?;
+        let (result, cleanup) = parent
+            .run_until_stopped(
+                node.runtime(),
+                move || probe.requested(),
+                |request| validate_refresh_custody(node, request, options, summary),
+            )
+            .map_err(|error| error.to_string())?;
         *monitor = cleanup.err().map(|error| error.to_string());
         let stopped = match (result, control.observe(summary)) {
             (Err(operation), Err(control)) => return Err(format!("{operation}; {control}")),

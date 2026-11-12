@@ -71,8 +71,9 @@ mod outcome_collection;
 pub mod source_retrieval;
 mod treefs_workspace;
 mod upload_refusal;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod workflow_artifacts;
+pub const TRUSTED_WORKFLOW_ARTIFACT_TRUST: &str = "trusted-workflow-local-owner";
 pub use treefs_workspace::DiscussionReadRefusal;
 pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::MilestoneReadRefusal;
@@ -83,23 +84,29 @@ pub use treefs_workspace::candidate_inspection::{
 /// Operator-owned native CI, with canonical event custody and explicit drain.
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::workflow_watch;
+pub use treefs_workspace::{
+    AgentWorkspacePatchInput, AgentWorkspacePatchRefusal, PatchPathReceipt,
+    PreparedAgentPatchCandidate, WorkspacePatchCandidate,
+};
 #[cfg(target_os = "linux")]
 pub use treefs_workspace::{
     DEFAULT_ARTIFACT_BYTES, DEFAULT_ARTIFACT_INPUT_TOTAL_BYTES, DEFAULT_ARTIFACT_TOTAL_BYTES,
-    TRUSTED_WORKFLOW_ARTIFACT_TRUST, TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
+    TrustedWorkflowArtifactConfig, TrustedWorkflowArtifactInput,
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
     TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
     TrustedWorkflowRetainedArtifactInput, TrustedWorkflowRetainedArtifactProvenance,
-    TrustedWorkflowRun, TrustedWorkflowStepLog,
+    TrustedWorkflowRun, TrustedWorkflowStepLog, WorkspaceBatchJob, WorkspaceBatchResult,
+    WorkspaceHostTelemetry, WorkspaceInputSharing, WorkspaceToolFailure, WorkspaceToolResult,
+};
+pub use treefs_workspace::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
+pub use treefs_workspace::{
+    InboxSyncOutcome, NotificationInboxPage, NotificationReadRefusal, NotificationThreadState,
+    NotificationThreadView,
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
-pub use treefs_workspace::{
-    NotificationInboxPage, NotificationReadRefusal, NotificationThreadState, NotificationThreadView,
-};
-pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{
     PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
     QueueReadRefusal,
@@ -1386,6 +1393,9 @@ pub enum AdmissionMaterializationRefusal {
     CanonicalFrame(CodecRefusal),
     /// A canonical frame did not reproduce the root named by authority.
     CanonicalRoot(RefusalCode),
+    /// Historical V1 Merkle roots authenticate direct refs but not HEAD.
+    /// Neither a decoded target nor its absence can govern serving or writes.
+    UnboundHeadLayout { layout: RootLayoutVersion },
     /// No immutable canonical frame existed for the authority-selected root.
     ImmutableAbsent(Digest),
     /// A deterministic immutable key was already occupied by different bytes.
@@ -1446,6 +1456,10 @@ impl Display for AdmissionMaterializationRefusal {
                 formatter,
                 "canonical admission body did not reproduce its authority root: {code:?}"
             ),
+            Self::UnboundHeadLayout { layout } => write!(
+                formatter,
+                "{layout:?} does not authenticate HEAD; live use requires an explicitly established legacy whole-body or ref-merkle-v2 repository, not an inferred default branch"
+            ),
             Self::ImmutableAbsent(root) => {
                 write!(formatter, "canonical admission body {root} is absent")
             }
@@ -1489,6 +1503,7 @@ impl Error for AdmissionMaterializationRefusal {
             | Self::SelectedCommitStateMismatch { .. }
             | Self::NonEmptyGenesisWithoutClosure
             | Self::CanonicalRoot(_)
+            | Self::UnboundHeadLayout { .. }
             | Self::ImmutableAbsent(_)
             | Self::ImmutableConflict
             | Self::CacheContainment
@@ -1879,6 +1894,7 @@ impl DurableAdmissionMaterializer {
     where
         Authority: AsyncAuthorityStore + ?Sized,
     {
+        require_authenticated_head_layout(root_layout)?;
         let root = ref_state_root(root_layout, &state)
             .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
         let frame = encode_body(&state).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
@@ -2140,6 +2156,7 @@ impl DurableAdmissionMaterializer {
                         )));
                     }
                 };
+            require_authenticated_head_layout(root_layout)?;
             if ref_state_root(root_layout, &ref_state)
                 .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
                 != body.ref_root
@@ -2948,6 +2965,7 @@ fn async_projection_unavailable(
         AdmissionMaterializationRefusal::Cancelled => RefusalCode::CancellationInProgress,
         AdmissionMaterializationRefusal::CheckpointTransition(_) => RefusalCode::EvidenceInvalid,
         AdmissionMaterializationRefusal::CanonicalRoot(code) => code,
+        AdmissionMaterializationRefusal::UnboundHeadLayout { .. } => RefusalCode::EvidenceInvalid,
         AdmissionMaterializationRefusal::CanonicalFrame(_) => RefusalCode::CanonicalFramingInvalid,
         AdmissionMaterializationRefusal::Resource(_)
         | AdmissionMaterializationRefusal::CacheGrant(_)
@@ -3361,6 +3379,20 @@ fn ensure_materializer_catch_up_live(
     }
 }
 
+/// V1 Merkle roots prove direct refs only. Treating even `None` as an
+/// authenticated HEAD would permit removing an existing target and its deletion
+/// protection without moving authority. Historical cryptographic verification
+/// retains V1 semantics; live repository state requires a complete commitment.
+fn require_authenticated_head_layout(
+    layout: RootLayoutVersion,
+) -> Result<(), AdmissionMaterializationRefusal> {
+    if layout.commits_head_target() {
+        Ok(())
+    } else {
+        Err(AdmissionMaterializationRefusal::UnboundHeadLayout { layout })
+    }
+}
+
 fn authority_head_id(
     body: &RepositoryAuthorityHeadBody,
 ) -> Result<RepositoryAuthorityHeadId, AdmissionMaterializationRefusal> {
@@ -3428,6 +3460,7 @@ where
             )));
         }
     };
+    require_authenticated_head_layout(root_layout)?;
     if ref_state_root(root_layout, &state)
         .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
         != head.ref_root
@@ -7877,7 +7910,8 @@ impl NodeConfig {
     /// record and the repository-incarnation configuration selected by its
     /// genesis head. [`OneNode::open_existing`] instead reads the stored,
     /// authenticated configuration and never migrates a repository from this
-    /// caller input.
+    /// caller input. Live repositories require the whole-body or a V2 layout;
+    /// initialization and reopening refuse historical V1 Merkle layouts.
     #[must_use]
     pub const fn with_root_layout(mut self, root_layout: RootLayoutVersion) -> Self {
         self.root_layout = root_layout;
@@ -8517,6 +8551,7 @@ impl OneNode {
         config: NodeConfig,
         agent_revocations: bool,
     ) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        require_authenticated_head_layout(config.root_layout)?;
         if agent_revocations && config.creation_idempotency_key.is_some() {
             return Err(NodeRefusal::CreationKeyWithAgentRevocations);
         }
@@ -8680,10 +8715,8 @@ impl OneNode {
         genesis.forge_position_root = forge_position_root;
         genesis.outbox_root = outbox_root;
         // Compare an existing repository before staging its ref-state frame.
-        // Under a Merkle ref layout the root commits only to the ref entries,
-        // so another initial branch over the same empty refs names the stored
-        // frame's key with different bytes. Staging first would report that
-        // immutable conflict instead of the initialization conflict.
+        // A retry must match the complete genesis and intended HEAD target;
+        // provisional immutable bytes do not establish an identical creation.
         let staged = match node
             .runtime
             .block_on(node.existing_head_differs_from_genesis(
@@ -8835,6 +8868,7 @@ impl OneNode {
                 &head.configuration_root,
             )
             .await?;
+            require_authenticated_head_layout(configuration.root_layout)?;
             if let Some(supplied) = supplied_object_format
                 && supplied != configuration.object_format
             {
@@ -10343,6 +10377,8 @@ impl OneNode {
         request: &PackRequest,
         deadline: &GitDaemonSessionDeadline,
         pack_context: &FsqliteCx,
+        database_context: &FsqliteCx,
+        database_exhaustion: &Cell<Option<Exhaustion>>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<PreparedUploadPack, NodePackMaterializationRefusal> {
         disclosure.closure_for(materialized)?;
@@ -10351,8 +10387,27 @@ impl OneNode {
         }
         let (limits, write_profile, maximum_object_bytes) =
             self.selected_pack_write_envelope(selected_fetch_write_profile(request));
-        let (keys, held, expanded_bytes) =
-            disclosure.prepare_selection(request, &limits, maximum_object_bytes, live)?;
+        let session_is_live = || !deadline.expired();
+        let mut load_pattern = |id, maximum: usize| {
+            let source = VerifiedFabricPackSource {
+                fabric: &self.fabric,
+                object_format: self.object_format,
+                maximum_object_bytes: maximum.min(maximum_object_bytes),
+                database_context,
+                database_exhaustion,
+                session_is_live: Some(&session_is_live),
+            };
+            source
+                .read_object(&id)
+                .map_err(NodePackMaterializationRefusal::from)
+        };
+        let (keys, held, expanded_bytes) = disclosure.prepare_selection(
+            request,
+            &limits,
+            maximum_object_bytes,
+            &mut load_pattern,
+            live,
+        )?;
         // The caller's checkpoint retains peer cancellation and exact Transfer
         // exhaustion. Neither a refused selection nor a stopped peer earns time.
         if !live() {
@@ -10574,7 +10629,16 @@ impl OneNode {
             };
         if let Some((scope, request)) = fetch {
             scope.closure_for(materialized)?;
-            scope.select_partial(&mut ids, request, &limits, is_live)?;
+            let mut load_pattern = |id, maximum: usize| {
+                let bounded = VerifiedFabricPackSource {
+                    maximum_object_bytes: maximum.min(source.maximum_object_bytes),
+                    ..source
+                };
+                bounded
+                    .read_object(&id)
+                    .map_err(NodePackMaterializationRefusal::from)
+            };
+            scope.select_partial(&mut ids, request, &limits, &mut load_pattern, is_live)?;
             if request.options.include_tag() {
                 scope.tags.extend_selected(&mut ids, &limits, is_live)?;
             }
@@ -10913,6 +10977,8 @@ impl OneNode {
                         pack_request,
                         &deadline,
                         &pack_context,
+                        request.authority(),
+                        &database_exhaustion,
                         &mut is_live,
                     )
                     .and_then(|prepared| {

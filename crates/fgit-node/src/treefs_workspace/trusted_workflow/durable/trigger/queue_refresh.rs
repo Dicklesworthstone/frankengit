@@ -3,9 +3,9 @@
 //! every retained original outcome and earlier execution have been reconciled.
 
 use super::{
-    NodeRequestContext, OneNode, Owner, Path, RefName, TrustedWorkflowFailure,
-    check_directory, commitment, fs, hex, invalid, invalid_owned, io, lower_hash,
-    merge_queue, pull_request_merge, queue_landing, reporting,
+    NodeRequestContext, OneNode, Owner, Path, RefName, TrustedWorkflowFailure, check_directory,
+    commitment, fs, hex, invalid, invalid_owned, io, lower_hash, merge_queue, pull_request_merge,
+    queue_landing, reporting,
 };
 use fgit_admission::merge::native::queue::QueueHeadRefreshCommand;
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
@@ -48,7 +48,9 @@ impl TrustedQueueRefresh {
             self.waiting,
             self.pending,
             self.request_stopped,
-            self.error.as_deref().map_or_else(|| "null".into(), reporting::quote),
+            self.error
+                .as_deref()
+                .map_or_else(|| "null".into(), reporting::quote),
         )
     }
 }
@@ -130,9 +132,15 @@ async fn inspect_retained(
     let bound = binding(root)?;
     if names.is_empty() {
         if bound.is_some() || fs::symlink_metadata(root.join("queue-refresh")).is_ok() {
-            return Err(invalid("queue refresh custody is missing its original intent"));
+            return Err(invalid(
+                "queue refresh custody is missing its original intent",
+            ));
         }
-        return Ok(Retained { pending: None, acknowledged: 0, refused_semantics: BTreeSet::new() });
+        return Ok(Retained {
+            pending: None,
+            acknowledged: 0,
+            refused_semantics: BTreeSet::new(),
+        });
     }
     // A crash can leave a fully synced first intent before its separate
     // principal marker. Only the independently configured principal can supply
@@ -147,9 +155,15 @@ async fn inspect_retained(
         ),
     };
     if refresher.is_some_and(|principal| identity(scope, merge, principal) != bound) {
-        return Err(invalid("queue refresh principal differs from original custody"));
+        return Err(invalid(
+            "queue refresh principal differs from original custody",
+        ));
     }
-    let mut retained = Retained { pending: None, acknowledged: 0, refused_semantics: BTreeSet::new() };
+    let mut retained = Retained {
+        pending: None,
+        acknowledged: 0,
+        refused_semantics: BTreeSet::new(),
+    };
     for name in names {
         if !request.checkpoint_is_live() {
             return Err(invalid("queue refresh custody verification stopped"));
@@ -158,27 +172,35 @@ async fn inspect_retained(
         let recorded_principal = custody::record_principal(&bytes)?;
         let expected_identity = identity(scope, merge, recorded_principal);
         if expected_identity != bound {
-            return Err(invalid("queue refresh record has a foreign principal or scope"));
+            return Err(invalid(
+                "queue refresh record has a foreign principal or scope",
+            ));
         }
-        let attempt = Attempt::decode(
-            node, recorded_principal, expected_identity, &name, &bytes,
-        )?;
+        let attempt = Attempt::decode(node, recorded_principal, expected_identity, &name, &bytes)?;
         if attempt.command.number.get() != number
             || attempt.command.pull_request.data.target_ref != *target
         {
-            return Err(invalid("queue refresh command exceeds its fixed queue target"));
+            return Err(invalid(
+                "queue refresh command exceeds its fixed queue target",
+            ));
         }
         if let Some((ack, sequence)) = custody::acknowledged(root, &attempt)? {
-            let outcome = node.resolve_outcome_checkpointed_in(request, attempt.tx_id)
-                .await.map_err(outcome_read_error)?;
+            let outcome = node
+                .resolve_outcome_checkpointed_in(request, attempt.tx_id)
+                .await
+                .map_err(outcome_read_error)?;
             let OutcomeLookup::Decided(terminal) = outcome else {
-                return Err(invalid("queue refresh acknowledgement lacks its canonical outcome"));
+                return Err(invalid(
+                    "queue refresh acknowledgement lacks its canonical outcome",
+                ));
             };
             if terminal.decision_sequence.get() != sequence
                 || matches!(terminal.outcome, DecisionOutcome::Committed { .. })
                     != (ack == Acknowledgement::Committed)
             {
-                return Err(invalid("queue refresh acknowledgement differs from native authority"));
+                return Err(invalid(
+                    "queue refresh acknowledgement differs from native authority",
+                ));
             }
             retained.acknowledged += 1;
             if ack == Acknowledgement::Refused {
@@ -186,7 +208,9 @@ async fn inspect_retained(
             }
         } else {
             if refresher != Some(recorded_principal) {
-                return Err(invalid("pending queue refresh requires its original explicit principal"));
+                return Err(invalid(
+                    "pending queue refresh requires its original explicit principal",
+                ));
             }
             if retained.pending.replace(attempt).is_some() {
                 return Err(invalid("multiple unresolved queue refresh intents"));
@@ -217,9 +241,12 @@ pub(super) async fn validated_pending_in(
     merge: &pull_request_merge::PullRequestMergeWatchConfig,
     refresher: Option<PrincipalId>,
 ) -> Result<bool, TrustedWorkflowFailure> {
-    Ok(inspect_retained(
-        node, request, target, number, root, scope, merge, refresher,
-    ).await?.pending.is_some())
+    Ok(
+        inspect_retained(node, request, target, number, root, scope, merge, refresher)
+            .await?
+            .pending
+            .is_some(),
+    )
 }
 
 /// Ordinary polling and landing cannot escape unresolved refresh responsibility
@@ -261,7 +288,8 @@ impl OneNode {
         merge.bind(&root)?;
         validated_pending_in(
             self, request, target, number, &root, &scope, merge, refresher,
-        ).await
+        )
+        .await
     }
 
     /// Explicit trusted-operator authority to update only the idle queue head's
@@ -291,31 +319,50 @@ impl OneNode {
         let mut result = TrustedQueueRefresh::default();
         let work: Result<(), TrustedWorkflowFailure> = async {
             scope_inputs(target, number, directory, parent, merge)?;
-            if stopped(request, &mut result) { return Ok(()); }
+            if stopped(request, &mut result) {
+                return Ok(());
+            }
             check_directory(parent)?;
             let scope = merge_queue::scope(self, target, directory, number);
             let root = parent.join(format!("watch-{}", hex(&scope)));
             let _owner = Owner::open(&root)?;
             merge.bind(&root)?;
             let mut retained = inspect_retained(
-                self, request, target, number, &root, &scope, merge, Some(refresher),
-            ).await?;
+                self,
+                request,
+                target,
+                number,
+                &root,
+                &scope,
+                merge,
+                Some(refresher),
+            )
+            .await?;
             result.previously_decided = retained.acknowledged;
             result.pending = retained.pending.is_some();
-            if stopped(request, &mut result) { return Ok(()); }
+            if stopped(request, &mut result) {
+                return Ok(());
+            }
             if retained.acknowledged != 0 || retained.pending.is_some() {
                 // Repair the first-reservation crash window only after every
                 // record has validated under the explicit launch authority.
                 // This pass runs after readiness; startup never repairs it.
                 reporting::bind_identity(
-                    &root, "refresh-principal", &identity(&scope, merge, refresher),
+                    &root,
+                    "refresh-principal",
+                    &identity(&scope, merge, refresher),
                 )?;
             }
             if let Some(attempt) = retained.pending.take() {
                 let refused = result.refused;
                 self.finish_queue_watch_refresh(
-                    request, &root, &attempt, &mut result, &mut observe,
-                ).await?;
+                    request,
+                    &root,
+                    &attempt,
+                    &mut result,
+                    &mut observe,
+                )
+                .await?;
                 if result.refused != refused {
                     retained.refused_semantics.insert(attempt.semantic.clone());
                 }
@@ -325,7 +372,9 @@ impl OneNode {
             }
             if !queue_landing::settled_for_refresh_in(
                 self, request, target, directory, &root, &scope, merge, publisher, lander,
-            ).await? {
+            )
+            .await?
+            {
                 result.waiting += 1;
                 return Ok(());
             }
@@ -334,14 +383,23 @@ impl OneNode {
             // not invalidate it or bypass its canonical publication recovery.
             let mut settled = true;
             for entry in reporting::event_entries(&root)? {
-                if stopped(request, &mut result) { return Ok(()); }
+                if stopped(request, &mut result) {
+                    return Ok(());
+                }
                 check_directory(&entry.path())?;
                 let name = entry.file_name();
-                let key = name.to_str().and_then(|name| name.strip_prefix("event-"))
+                let key = name
+                    .to_str()
+                    .and_then(|name| name.strip_prefix("event-"))
                     .filter(|key| lower_hash(key))
                     .ok_or_else(|| invalid("invalid queue refresh event custody"))?;
                 settled &= reporting::recover_settlement(
-                    self, merge.reference(), directory, &entry.path(), &scope, key,
+                    self,
+                    merge.reference(),
+                    directory,
+                    &entry.path(),
+                    &scope,
+                    key,
                     &|| request.checkpoint_is_live(),
                 )?;
             }
@@ -349,9 +407,12 @@ impl OneNode {
                 result.waiting += 1;
                 return Ok(());
             }
-            if stopped(request, &mut result) { return Ok(()); }
+            if stopped(request, &mut result) {
+                return Ok(());
+            }
             let (basis, command) = match self
-                .select_queue_target_refresh_in(request, target, number).await?
+                .select_queue_target_refresh_in(request, target, number)
+                .await?
             {
                 RefreshSelection::Unneeded => return Ok(()),
                 RefreshSelection::Waiting => {
@@ -376,21 +437,26 @@ impl OneNode {
                     "\"queue_number\":\"{}\",\"pull_request\":\"{}\",",
                     "\"transaction_id\":{},\"old_target\":\"{}\",\"new_target\":\"{}\"}}"
                 ),
-                command.number.get(), command.pull_request.number.get(),
+                command.number.get(),
+                command.pull_request.number.get(),
                 reporting::quote(&attempt.tx_id.to_string()),
-                command.expected_recorded_target_tip, command.pull_request.data.target_tip,
-            )).map_err(invalid_owned)?;
-            if stopped(request, &mut result) { return Ok(()); }
+                command.expected_recorded_target_tip,
+                command.pull_request.data.target_tip,
+            ))
+            .map_err(invalid_owned)?;
+            if stopped(request, &mut result) {
+                return Ok(());
+            }
             custody::retain(&root, &attempt)?;
             result.pending = true;
             reporting::bind_identity(&root, "refresh-principal", &expected_identity)?;
             // From this point, interruption retains an original complete command
             // and blocks later work until it has a known canonical outcome.
-            self.finish_queue_watch_refresh(
-                request, &root, &attempt, &mut result, &mut observe,
-            ).await?;
+            self.finish_queue_watch_refresh(request, &root, &attempt, &mut result, &mut observe)
+                .await?;
             Ok(())
-        }.await;
+        }
+        .await;
         if let Err(error) = work {
             result.request_stopped = !request.checkpoint_is_live();
             result.error = Some(format!("{error}; retain original queue refresh custody"));
@@ -407,18 +473,30 @@ impl OneNode {
         observe: &mut impl FnMut(&str) -> Result<(), String>,
     ) -> Result<(), TrustedWorkflowFailure> {
         if !request.checkpoint_is_live() {
-            return Err(invalid("queue refresh stopped with original intent retained"));
+            return Err(invalid(
+                "queue refresh stopped with original intent retained",
+            ));
         }
-        let terminal = match self.resolve_outcome_checkpointed_in(request, attempt.tx_id)
-            .await.map_err(|error| invalid_owned(error.to_string()))?
+        let terminal = match self
+            .resolve_outcome_checkpointed_in(request, attempt.tx_id)
+            .await
+            .map_err(|error| invalid_owned(error.to_string()))?
         {
             OutcomeLookup::Decided(terminal) => terminal,
             OutcomeLookup::Undecided => {
-                let (tx, terminal) = self.refresh_queue_head_durable_in(
-                    request, &attempt.session(), &attempt.command, Default::default(),
-                ).await.map_err(|error| invalid_owned(error.to_string()))?;
+                let (tx, terminal) = self
+                    .refresh_queue_head_durable_in(
+                        request,
+                        &attempt.session(),
+                        &attempt.command,
+                        Default::default(),
+                    )
+                    .await
+                    .map_err(|error| invalid_owned(error.to_string()))?;
                 if tx != attempt.tx_id {
-                    return Err(invalid("queue refresh returned a different original transaction"));
+                    return Err(invalid(
+                        "queue refresh returned a different original transaction",
+                    ));
                 }
                 terminal
             }
@@ -436,19 +514,25 @@ impl OneNode {
 }
 
 fn stopped(request: &NodeRequestContext, result: &mut TrustedQueueRefresh) -> bool {
-    if request.checkpoint_is_live() { return false; }
+    if request.checkpoint_is_live() {
+        return false;
+    }
     result.request_stopped = true;
     true
 }
 
 fn decision_json(attempt: &Attempt, terminal: &TerminalOutcome) -> String {
     let (committed, repository_commit, refusal) = match terminal.outcome {
-        DecisionOutcome::Committed { repository_commit_id } => (
-            true, reporting::quote(&repository_commit_id.to_string()), "null".into(),
+        DecisionOutcome::Committed {
+            repository_commit_id,
+        } => (
+            true,
+            reporting::quote(&repository_commit_id.to_string()),
+            "null".into(),
         ),
-        DecisionOutcome::Refused { code, .. } => (
-            false, "null".into(), reporting::quote(&format!("{code:?}")),
-        ),
+        DecisionOutcome::Refused { code, .. } => {
+            (false, "null".into(), reporting::quote(&format!("{code:?}")))
+        }
     };
     format!(
         concat!(
@@ -457,8 +541,12 @@ fn decision_json(attempt: &Attempt, terminal: &TerminalOutcome) -> String {
             "\"committed\":{},\"repository_commit_id\":{},\"refusal_code\":{},",
             "\"historical_outcome\":true,\"refs_changed\":false,\"execution_retried\":false}}"
         ),
-        attempt.command.number.get(), attempt.command.pull_request.number.get(),
-        reporting::quote(&attempt.tx_id.to_string()), terminal.decision_sequence.get(),
-        committed, repository_commit, refusal,
+        attempt.command.number.get(),
+        attempt.command.pull_request.number.get(),
+        reporting::quote(&attempt.tx_id.to_string()),
+        terminal.decision_sequence.get(),
+        committed,
+        repository_commit,
+        refusal,
     )
 }

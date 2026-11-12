@@ -1,6 +1,7 @@
 // Native milestone metadata through the same exact-key custody and transport
 // implementation as issues. The /ui/issues/ URL selects a repository only;
-// milestone grants remain the explicitly scoped native issues-read/write grants.
+// Ordinary tokens use issues-read/write; sponsored credentials require their
+// independent milestones-read/write scopes on every native request.
 import { IssueClient, MAX_FORM_BYTES, natural, snapshotToken } from './issues.mjs';
 
 const encoder = new TextEncoder();

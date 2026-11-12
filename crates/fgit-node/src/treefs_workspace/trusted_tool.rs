@@ -15,8 +15,13 @@ use fgit_pack::{
     CanonicalObjectSource, CanonicalPackObject, PackLimits, PackPlanner, PackWriteError,
     PackWriteProfile, PackWriter,
 };
-use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
-use fgit_runner::sparse_workspace::{HostRefusal, SparseWorkspace, SparseWorkspacePlan};
+use fgit_resource::{
+    LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId, TerminalEvidence,
+};
+use fgit_runner::sparse_workspace::{
+    HostClosed, HostRefusal, SharedInputCache, SharedInputCachePlan, SharedInputCacheStats,
+    SharedInputPolicy, SparseWorkspace, SparseWorkspacePlan,
+};
 use fgit_treefs::{BaseView, SparseLimits, SparseManifest, TreeCapability, TreePath, WorkspaceId};
 use fgit_types::numeric::ByteCount;
 use fgit_types::{
@@ -35,6 +40,80 @@ use std::time::{Duration, Instant};
 const FETCH_BYTES: u64 = 256 * 1024 * 1024;
 const FETCH_OBJECTS: u64 = 100_000;
 const PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BATCH_JOBS: usize = 64;
+
+/// Host input-materialization policy for sparse TreeFS workspaces.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkspaceInputSharing {
+    /// Clone extents from sealed anonymous descriptors when supported by the
+    /// host filesystem, falling back to private byte copies otherwise.
+    #[default]
+    PreferReflink,
+    /// Require kernel copy-on-write cloning (`FICLONE`); refuse before tool
+    /// execution when the host filesystem cannot share immutable extents.
+    RequireReflink,
+    /// Copy every materialized file privately without probing or seeding a
+    /// shared-input descriptor cache.
+    Copy,
+}
+impl WorkspaceInputSharing {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreferReflink => "prefer-reflink",
+            Self::RequireReflink => "require-reflink",
+            Self::Copy => "copy",
+        }
+    }
+
+    const fn cache_policy(self) -> Option<SharedInputPolicy> {
+        match self {
+            Self::PreferReflink => Some(SharedInputPolicy::PreferReflink),
+            Self::RequireReflink => Some(SharedInputPolicy::RequireReflink),
+            Self::Copy => None,
+        }
+    }
+}
+
+/// Measured host materialization, sharing, import, and cleanup telemetry for
+/// one settled workspace lease.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceHostTelemetry {
+    pub sharing_mode: WorkspaceInputSharing,
+    pub reflink_supported: bool,
+    pub copied_bytes: u64,
+    pub shared_host_bytes: u64,
+    pub metadata_bytes: u64,
+    pub imported_bytes: u64,
+    pub created_entries: u64,
+    pub imported_entries: u64,
+    pub removed_entries: u64,
+    pub seeded_bytes: u64,
+    pub cloned_bytes: u64,
+    pub fallback_bytes: u64,
+    pub creation_ns: u64,
+    pub execution_ns: u64,
+    pub cleanup_ns: u64,
+}
+
+/// One isolated tool job in a shared-base parallel workspace batch.
+#[derive(Debug)]
+pub struct WorkspaceBatchJob {
+    pub workspace_id: [u8; 16],
+    pub output_paths: Vec<Vec<u8>>,
+    pub command: Command,
+    pub author: String,
+    pub timestamp: u64,
+    pub message: Vec<u8>,
+}
+
+/// Settled batch execution over one authority-selected immutable TreeFS base.
+#[derive(Debug)]
+pub struct WorkspaceBatchResult {
+    pub sharing_mode: WorkspaceInputSharing,
+    pub cache_stats: SharedInputCacheStats,
+    pub results: Vec<WorkspaceToolResult>,
+}
 
 /// A complete incremental candidate pack. Reused objects remain in the base
 /// repository named by `source_commit`; this is not a standalone clone bundle.
@@ -47,6 +126,7 @@ pub struct WorkspaceToolResult {
     pub root_tree: AnyOid,
     pub changed_paths: Vec<Vec<u8>>,
     pub object_count: usize,
+    pub telemetry: WorkspaceHostTelemetry,
     pack: Vec<u8>,
 }
 impl WorkspaceToolResult {
@@ -162,6 +242,38 @@ impl OneNode {
         timeout: Duration,
         commit_metadata: (&str, u64, &[u8]),
     ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
+        self.run_trusted_workspace_tool_shared_at_in(
+            request,
+            reference,
+            expected,
+            workspace_id,
+            parent,
+            read_prefixes,
+            output_paths,
+            WorkspaceInputSharing::PreferReflink,
+            command,
+            timeout,
+            commit_metadata,
+        )
+        .await
+    }
+
+    /// Execute one bounded trusted local tool under an explicit host input
+    /// sharing policy (`PreferReflink`, `RequireReflink`, or `Copy`).
+    pub async fn run_trusted_workspace_tool_shared_at_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected: (Option<RepositoryAuthorityHeadId>, Option<AnyOid>),
+        workspace_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        output_paths: &[Vec<u8>],
+        sharing: WorkspaceInputSharing,
+        command: &mut Command,
+        timeout: Duration,
+        commit_metadata: (&str, u64, &[u8]),
+    ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
         if expected
             .1
             .is_some_and(|commit| commit.algorithm() != self.object_format || commit.is_zero())
@@ -187,6 +299,7 @@ impl OneNode {
                     parent,
                     read_prefixes,
                     output_paths,
+                    sharing,
                     command,
                     timeout,
                     commit_metadata,
@@ -202,9 +315,84 @@ impl OneNode {
                     parent,
                     read_prefixes,
                     output_paths,
+                    sharing,
                     command,
                     timeout,
                     commit_metadata,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Materialize `1..=64` parallel sparse workspaces from one authenticated
+    /// canonical selection, sharing the immutable base through one bounded
+    /// `SharedInputCache` when `sharing != Copy`, run all bounded tools in
+    /// parallel without cross-workspace overlay leakage, and export each job's
+    /// semantic changes into an independent native candidate commit and pack.
+    pub async fn run_trusted_workspace_batch_at_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected: (Option<RepositoryAuthorityHeadId>, Option<AnyOid>),
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        sharing: WorkspaceInputSharing,
+        timeout: Duration,
+        jobs: &mut [WorkspaceBatchJob],
+    ) -> Result<WorkspaceBatchResult, WorkspaceToolFailure> {
+        if expected
+            .1
+            .is_some_and(|commit| commit.algorithm() != self.object_format || commit.is_zero())
+        {
+            return Err(WorkspaceToolFailure::InvalidInput(
+                "invalid expected workspace commit",
+            ));
+        }
+        if jobs.is_empty() || jobs.len() > MAX_BATCH_JOBS {
+            return Err(WorkspaceToolFailure::InvalidInput(
+                "require 1..64 batch workspace jobs",
+            ));
+        }
+        let mut seen_ids = BTreeSet::new();
+        for job in jobs.iter() {
+            if !seen_ids.insert(job.workspace_id) {
+                return Err(WorkspaceToolFailure::InvalidInput(
+                    "duplicate workspace id in batch",
+                ));
+            }
+            validate_inputs(
+                read_prefixes,
+                &job.output_paths,
+                &job.command,
+                timeout,
+                (&job.author, job.timestamp, &job.message),
+            )?;
+        }
+        match self.object_format {
+            ObjectFormat::Sha1 => {
+                self.run_workspace_batch_format::<Sha1>(
+                    request,
+                    reference,
+                    expected,
+                    parent,
+                    read_prefixes,
+                    sharing,
+                    timeout,
+                    jobs,
+                )
+                .await
+            }
+            ObjectFormat::Sha256 => {
+                self.run_workspace_batch_format::<Sha256>(
+                    request,
+                    reference,
+                    expected,
+                    parent,
+                    read_prefixes,
+                    sharing,
+                    timeout,
+                    jobs,
                 )
                 .await
             }
@@ -220,6 +408,7 @@ impl OneNode {
         parent: &Path,
         reads: &[Vec<u8>],
         writes: &[Vec<u8>],
+        sharing: WorkspaceInputSharing,
         command: &mut Command,
         timeout: Duration,
         metadata: (&str, u64, &[u8]),
@@ -263,8 +452,8 @@ impl OneNode {
                 usize::MAX,
                 |base, source, seed, _head, _metadata_bytes| {
                     let result = run_at_base(
-                        base, source, seed, request, parent, &reads, &writes, command, started,
-                        timeout, metadata,
+                        base, source, seed, request, parent, &reads, &writes, sharing, command,
+                        started, timeout, metadata,
                     );
                     *operation
                         .lock()
@@ -283,6 +472,95 @@ impl OneNode {
             (Err(error), _) => Err(WorkspaceToolFailure::Node(error)),
             (Ok(()), None) => Err(WorkspaceToolFailure::InvalidInput(
                 "workspace operation did not complete",
+            )),
+        }
+    }
+
+    async fn run_workspace_batch_format<A>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected: (Option<RepositoryAuthorityHeadId>, Option<AnyOid>),
+        parent: &Path,
+        reads: &[Vec<u8>],
+        sharing: WorkspaceInputSharing,
+        timeout: Duration,
+        jobs: &mut [WorkspaceBatchJob],
+    ) -> Result<WorkspaceBatchResult, WorkspaceToolFailure>
+    where
+        A: GitHashAlgorithm + Send + Sync,
+        A::Oid: Send + Sync,
+    {
+        let reads = parse_paths(reads)?;
+        if reads.iter().any(|path| path.component_count() != 1) {
+            return Err(WorkspaceToolFailure::InvalidInput(
+                "read prefixes must be top-level files or directories",
+            ));
+        }
+        let mut parsed_job_writes = Vec::with_capacity(jobs.len());
+        for job in jobs.iter() {
+            let writes = parse_paths(&job.output_paths)?;
+            if writes
+                .iter()
+                .any(|path| !reads.iter().any(|prefix| path.starts_with(prefix)))
+            {
+                return Err(WorkspaceToolFailure::InvalidInput(
+                    "every output must be within a declared read prefix",
+                ));
+            }
+            parsed_job_writes.push(writes);
+        }
+        let started = Instant::now();
+        let mut seed = budgeted_capability(
+            WorkspaceId::from_bytes(jobs[0].workspace_id),
+            self.repository_id(),
+            reads.clone(),
+            Vec::new(),
+            FETCH_BYTES,
+            FETCH_OBJECTS,
+        )?;
+        let operation = Mutex::new(None);
+        let selection = self
+            .with_workspace_snapshot_in::<A, _>(
+                request,
+                reference,
+                &RefVisibility::new(),
+                &mut seed,
+                0,
+                expected.0,
+                expected.1,
+                usize::MAX,
+                |base, source, seed, _head, _metadata_bytes| {
+                    let result = run_batch_at_base(
+                        base,
+                        source,
+                        seed,
+                        request,
+                        parent,
+                        &reads,
+                        &parsed_job_writes,
+                        sharing,
+                        started,
+                        timeout,
+                        jobs,
+                    );
+                    *operation
+                        .lock()
+                        .map_err(|_| NodeWorkspaceRefusal::UnsupportedWorkspaceEdit)? =
+                        Some(result);
+                    Ok(())
+                },
+            )
+            .await;
+        let operation = operation
+            .into_inner()
+            .map_err(|_| WorkspaceToolFailure::InvalidInput("workspace result lock poisoned"))?;
+        match (selection, operation) {
+            (_, Some(Err(error))) => Err(error),
+            (Ok(()), Some(Ok(result))) => Ok(result),
+            (Err(error), _) => Err(WorkspaceToolFailure::Node(error)),
+            (Ok(()), None) => Err(WorkspaceToolFailure::InvalidInput(
+                "workspace batch operation did not complete",
             )),
         }
     }
@@ -360,28 +638,118 @@ fn budgeted_capability(
         .with_file_budget(objects))
 }
 
-fn run_at_base<A: GitHashAlgorithm>(
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+struct SharedCacheOwner {
+    cache: Option<SharedInputCache>,
+    ledger: Option<ObligationLedger>,
+}
+
+impl SharedCacheOwner {
+    fn open<A: GitHashAlgorithm>(
+        source: &SparseWorkspacePlan<A>,
+        parent: &File,
+        policy: SharedInputPolicy,
+        live: &dyn Fn() -> bool,
+    ) -> Result<Self, WorkspaceToolFailure> {
+        let parent = parent
+            .try_clone()
+            .map_err(|source| WorkspaceToolFailure::Io {
+                operation: "retain shared workspace input parent",
+                source,
+            })?;
+        let plan = SharedInputCachePlan::for_workspace(source, policy);
+        let ledger = ObligationLedger::root(
+            RegionId::new(u64::MAX),
+            LeakDisposition::RecordAndContinue,
+            plan.budget(),
+        );
+        let reserved = ledger
+            .grant(plan.budget())
+            .map_err(|_| HostRefusal::ReservationMismatch)
+            .and_then(|grant| {
+                ledger
+                    .reserve(plan.reservation(), grant)
+                    .map_err(|_| HostRefusal::ReservationMismatch)
+            });
+        let opened = reserved
+            .and_then(|reserved| SharedInputCache::create(plan, parent, reserved, &|| !live()));
+        match opened {
+            Ok(cache) => Ok(Self {
+                cache: Some(cache),
+                ledger: Some(ledger),
+            }),
+            Err(error) => match ledger.close() {
+                RegionCloseOutcome::Quiescent(_) => Err(WorkspaceToolFailure::Host(error)),
+                _ => Err(WorkspaceToolFailure::Host(
+                    HostRefusal::SharedInputCacheUnusable,
+                )),
+            },
+        }
+    }
+
+    fn cache_mut(&mut self) -> Result<&mut SharedInputCache, WorkspaceToolFailure> {
+        self.cache.as_mut().ok_or(WorkspaceToolFailure::Host(
+            HostRefusal::SharedInputCacheUnusable,
+        ))
+    }
+
+    fn close(mut self) -> Result<SharedInputCacheStats, WorkspaceToolFailure> {
+        let cache = self.cache.take().ok_or(WorkspaceToolFailure::Host(
+            HostRefusal::SharedInputCacheUnusable,
+        ))?;
+        let ledger = self.ledger.take().ok_or(WorkspaceToolFailure::Host(
+            HostRefusal::SharedInputCacheUnusable,
+        ))?;
+        let closed = cache.close();
+        let quiescent = matches!(ledger.close(), RegionCloseOutcome::Quiescent(_));
+        let closed = closed.map_err(WorkspaceToolFailure::Host)?;
+        if !quiescent {
+            return Err(WorkspaceToolFailure::Host(
+                HostRefusal::SharedInputCacheUnusable,
+            ));
+        }
+        match closed.into_evidence() {
+            TerminalEvidence::Acknowledged(receipt, _)
+                if receipt.stats.resident_bytes == 0 && receipt.stats.resident_entries == 0 =>
+            {
+                Ok(receipt.stats)
+            }
+            _ => Err(WorkspaceToolFailure::Host(
+                HostRefusal::SharedInputCacheUnusable,
+            )),
+        }
+    }
+}
+
+fn close_workspace_and_ledger<A: GitHashAlgorithm>(
+    workspace: SparseWorkspace<A>,
+    ledger: ObligationLedger,
+) -> Result<HostClosed, WorkspaceToolFailure> {
+    let cleanup = workspace.close().map_err(WorkspaceToolFailure::Host);
+    let close = ledger.close();
+    match (cleanup, close) {
+        (Ok(settled), RegionCloseOutcome::Quiescent(_)) => match settled.into_evidence() {
+            TerminalEvidence::Acknowledged(receipt, _) => Ok(receipt),
+            _ => Err(WorkspaceToolFailure::InvalidInput(
+                "workspace close receipt unavailable",
+            )),
+        },
+        (Err(error), _) => Err(error),
+        (Ok(_), _) => Err(WorkspaceToolFailure::InvalidInput(
+            "workspace obligation did not settle",
+        )),
+    }
+}
+
+fn discover_complete_top_level_paths<A: GitHashAlgorithm>(
     base: &BaseView<A>,
     source: &NodeTreeSource<'_>,
     seed: &mut TreeCapability,
-    request: &NodeRequestContext,
-    parent: &Path,
     reads: &[TreePath],
-    writes: &[TreePath],
-    command: &mut Command,
-    started: Instant,
-    timeout: Duration,
-    metadata: (&str, u64, &[u8]),
-) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
-    let live = || started.elapsed() < timeout && workspace_request_live(request);
-    if !live() {
-        return Err(WorkspaceToolFailure::InvalidInput(
-            "request expired before workspace creation",
-        ));
-    }
-    // This is the local operator's complete tree scope, NOT a widening of the
-    // tool's delegated capability. Account discovery before minting the
-    // remaining finite allowance, then share that allowance with the tool.
+) -> Result<Vec<TreePath>, WorkspaceToolFailure> {
     let grant = seed
         .authorize_root(0)
         .map_err(|_| WorkspaceToolFailure::InvalidInput("root not authorized"))?;
@@ -405,10 +773,37 @@ fn run_at_base<A: GitHashAlgorithm>(
         );
     }
     complete.extend(reads.iter().cloned());
+    Ok(complete.into_iter().collect())
+}
+
+fn run_at_base<A: GitHashAlgorithm>(
+    base: &BaseView<A>,
+    source: &NodeTreeSource<'_>,
+    seed: &mut TreeCapability,
+    request: &NodeRequestContext,
+    parent: &Path,
+    reads: &[TreePath],
+    writes: &[TreePath],
+    sharing: WorkspaceInputSharing,
+    command: &mut Command,
+    started: Instant,
+    timeout: Duration,
+    metadata: (&str, u64, &[u8]),
+) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
+    let live = || started.elapsed() < timeout && workspace_request_live(request);
+    if !live() {
+        return Err(WorkspaceToolFailure::InvalidInput(
+            "request expired before workspace creation",
+        ));
+    }
+    // This is the local operator's complete tree scope, NOT a widening of the
+    // tool's delegated capability. Account discovery before minting the
+    // remaining finite allowance, then share that allowance with the tool.
+    let complete = discover_complete_top_level_paths(base, source, seed, reads)?;
     let mut owner = budgeted_capability(
         seed.workspace_id(),
         base.repository_id(),
-        complete.into_iter().collect(),
+        complete,
         writes.to_vec(),
         FETCH_BYTES.saturating_sub(seed.fetched_bytes()),
         FETCH_OBJECTS.saturating_sub(seed.fetched_files()),
@@ -431,6 +826,10 @@ fn run_at_base<A: GitHashAlgorithm>(
         operation: "open private workspace parent",
         source,
     })?;
+    let mut cache_owner = match sharing.cache_policy() {
+        Some(policy) => Some(SharedCacheOwner::open(&plan, &parent_file, policy, &live)?),
+        None => None,
+    };
     let slot = format!("workspace-{}", hex(seed.workspace_id().as_bytes()));
     let slot = TreePath::parse_default(slot.as_bytes())
         .map_err(|_| WorkspaceToolFailure::InvalidInput("workspace slot"))?;
@@ -440,26 +839,81 @@ fn run_at_base<A: GitHashAlgorithm>(
         LeakDisposition::RecordAndContinue,
         plan.budget(),
     );
-    let granted = ledger
-        .grant(plan.budget())
-        .map_err(|_| WorkspaceToolFailure::InvalidInput("workspace budget grant"))?;
-    let reserved = ledger
-        .reserve(plan.reservation(), granted)
-        .map_err(|_| WorkspaceToolFailure::InvalidInput("workspace reservation"))?;
-    let workspace =
-        SparseWorkspace::materialize(plan, parent_file, slot, reserved, &tool, 0, &|_| !live());
+    let granted = match ledger.grant(plan.budget()) {
+        Ok(granted) => granted,
+        Err(_) => {
+            if let Some(owner) = cache_owner {
+                let _ = owner.close();
+            }
+            let _ = ledger.close();
+            return Err(WorkspaceToolFailure::InvalidInput("workspace budget grant"));
+        }
+    };
+    let reserved = match ledger.reserve(plan.reservation(), granted) {
+        Ok(reserved) => reserved,
+        Err(_) => {
+            if let Some(owner) = cache_owner {
+                let _ = owner.close();
+            }
+            let _ = ledger.close();
+            return Err(WorkspaceToolFailure::InvalidInput("workspace reservation"));
+        }
+    };
+    let creation_started = Instant::now();
+    let workspace = match cache_owner.as_mut() {
+        Some(owner) => SparseWorkspace::materialize_with_cache(
+            plan,
+            parent_file,
+            slot,
+            reserved,
+            &tool,
+            0,
+            &|_| !live(),
+            owner.cache_mut()?,
+        ),
+        None => {
+            SparseWorkspace::materialize(plan, parent_file, slot, reserved, &tool, 0, &|_| !live())
+        }
+    };
+    let creation_ns = elapsed_ns(creation_started);
+    let cache_close = match cache_owner {
+        Some(owner) => owner.close().map(Some),
+        None => Ok(None),
+    };
     let mut workspace = match workspace {
         Ok(workspace) => workspace,
         Err(error) => {
             let original = WorkspaceToolFailure::Host(error);
-            return match ledger.close() {
-                RegionCloseOutcome::Quiescent(_) => Err(original),
-                _ => Err(WorkspaceToolFailure::Cleanup {
+            let ws_quiescent = matches!(ledger.close(), RegionCloseOutcome::Quiescent(_));
+            if let Err(cache_err) = cache_close {
+                return Err(WorkspaceToolFailure::Cleanup {
+                    workspace: workspace_path,
+                    operation: Some(Box::new(original)),
+                    cleanup: Box::new(cache_err),
+                });
+            }
+            return if ws_quiescent {
+                Err(original)
+            } else {
+                Err(WorkspaceToolFailure::Cleanup {
                     workspace: workspace_path,
                     operation: Some(Box::new(original)),
                     cleanup: Box::new(WorkspaceToolFailure::InvalidInput(
                         "workspace obligation did not settle",
                     )),
+                })
+            };
+        }
+    };
+    let cache_stats = match cache_close {
+        Ok(stats) => stats.unwrap_or_default(),
+        Err(cache_err) => {
+            return match close_workspace_and_ledger(workspace, ledger) {
+                Ok(_) => Err(cache_err),
+                Err(ws_err) => Err(WorkspaceToolFailure::Cleanup {
+                    workspace: workspace_path,
+                    operation: Some(Box::new(cache_err)),
+                    cleanup: Box::new(ws_err),
                 }),
             };
         }
@@ -471,6 +925,7 @@ fn run_at_base<A: GitHashAlgorithm>(
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    let exec_started = Instant::now();
     let operation = (|| {
         // Keep the caller's stdout available for a machine-readable receipt.
         // Neither stream is accumulated in unbounded in-memory buffers.
@@ -490,7 +945,7 @@ fn run_at_base<A: GitHashAlgorithm>(
             source.inner.object_format,
             base.base_commit_oid().digest_bytes(),
         )?;
-        let exported = candidate::export_from_base(
+        candidate::export_from_base(
             base,
             source,
             &mut owner,
@@ -504,34 +959,464 @@ fn run_at_base<A: GitHashAlgorithm>(
             },
             &|| !live(),
         )
-        .map_err(WorkspaceToolFailure::Node)?;
-        make_pack(source.inner.object_format, exported, metadata, &live)
+        .map_err(WorkspaceToolFailure::Node)
     })();
+    let execution_ns = elapsed_ns(exec_started);
     if matches!(&operation, Err(WorkspaceToolFailure::Containment { .. })) {
         // Group cleanup was attempted; unresolved descendants may retain filesystem
         // access. Never delete the directory or claim that lease close passed.
         drop(workspace);
         let _unsettled = ledger.close();
-        return operation;
+        return operation.map(|_| unreachable!());
     }
-    let cleanup = workspace.close().map_err(WorkspaceToolFailure::Host);
-    let close = ledger.close();
-    let cleanup = match (cleanup, close) {
-        (Ok(_), RegionCloseOutcome::Quiescent(_)) => Ok(()),
-        (Err(error), _) => Err(error),
-        (Ok(_), _) => Err(WorkspaceToolFailure::InvalidInput(
-            "workspace obligation did not settle",
-        )),
-    };
+    let cleanup_started = Instant::now();
+    let cleanup = close_workspace_and_ledger(workspace, ledger);
+    let cleanup_ns = elapsed_ns(cleanup_started);
     match (operation, cleanup) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(error), Ok(())) => Err(error),
+        (Ok(exported), Ok(closed)) => {
+            let telemetry = WorkspaceHostTelemetry {
+                sharing_mode: sharing,
+                reflink_supported: cache_stats.reflink_supported,
+                copied_bytes: closed.copied_bytes,
+                shared_host_bytes: closed.shared_host_bytes,
+                metadata_bytes: closed.metadata_bytes,
+                imported_bytes: closed.imported_bytes,
+                created_entries: closed.created_entries,
+                imported_entries: closed.imported_entries,
+                removed_entries: closed.removed_entries,
+                seeded_bytes: cache_stats.seeded_bytes,
+                cloned_bytes: cache_stats.cloned_bytes,
+                fallback_bytes: cache_stats.fallback_bytes,
+                creation_ns,
+                execution_ns,
+                cleanup_ns,
+            };
+            make_pack(
+                source.inner.object_format,
+                exported,
+                metadata,
+                telemetry,
+                &live,
+            )
+        }
+        (Err(error), Ok(_)) => Err(error),
         (operation, Err(cleanup)) => Err(WorkspaceToolFailure::Cleanup {
             workspace: workspace_path,
             operation: operation.err().map(Box::new),
             cleanup: Box::new(cleanup),
         }),
     }
+}
+
+struct PreparedBatchWorkspace<A: GitHashAlgorithm> {
+    workspace: SparseWorkspace<A>,
+    ledger: ObligationLedger,
+    tool_capability: TreeCapability,
+    workspace_path: PathBuf,
+    creation_ns: u64,
+    seeded_bytes: u64,
+    cloned_bytes: u64,
+    fallback_bytes: u64,
+}
+
+fn reap_prepared_batch<A: GitHashAlgorithm>(
+    prepared: Vec<PreparedBatchWorkspace<A>>,
+    primary: WorkspaceToolFailure,
+) -> WorkspaceToolFailure {
+    let mut failure = primary;
+    for item in prepared {
+        if let Err(cleanup) = close_workspace_and_ledger(item.workspace, item.ledger) {
+            failure = WorkspaceToolFailure::Cleanup {
+                workspace: item.workspace_path,
+                operation: Some(Box::new(failure)),
+                cleanup: Box::new(cleanup),
+            };
+        }
+    }
+    failure
+}
+
+fn run_batch_at_base<A>(
+    base: &BaseView<A>,
+    source: &NodeTreeSource<'_>,
+    seed: &mut TreeCapability,
+    request: &NodeRequestContext,
+    parent: &Path,
+    reads: &[TreePath],
+    job_writes: &[Vec<TreePath>],
+    sharing: WorkspaceInputSharing,
+    started: Instant,
+    timeout: Duration,
+    jobs: &mut [WorkspaceBatchJob],
+) -> Result<WorkspaceBatchResult, WorkspaceToolFailure>
+where
+    A: GitHashAlgorithm + Send + Sync,
+    A::Oid: Send + Sync,
+{
+    let live = || started.elapsed() < timeout && workspace_request_live(request);
+    if !live() {
+        return Err(WorkspaceToolFailure::InvalidInput(
+            "request expired before workspace batch creation",
+        ));
+    }
+    let complete = discover_complete_top_level_paths(base, source, seed, reads)?;
+    let shared_owner = budgeted_capability(
+        seed.workspace_id(),
+        base.repository_id(),
+        complete.clone(),
+        Vec::new(),
+        FETCH_BYTES.saturating_sub(seed.fetched_bytes()),
+        FETCH_OBJECTS.saturating_sub(seed.fetched_files()),
+    )?;
+    let mut shared_reader = shared_owner
+        .attenuate(reads.to_vec(), Vec::new())
+        .map_err(|_| {
+            WorkspaceToolFailure::InvalidInput("invalid shared batch reader delegation")
+        })?;
+    let limits = SparseLimits {
+        max_entries: 10_000,
+        max_entry_bytes: 16 * 1024 * 1024,
+        max_payload_bytes: PAYLOAD_BYTES,
+    };
+    let manifest = Arc::new(
+        SparseManifest::build(base, source, &mut shared_reader, 0, limits)
+            .map_err(|e| WorkspaceToolFailure::Node(NodeWorkspaceRefusal::Manifest(e)))?,
+    );
+    let mut remaining_fetch_bytes = FETCH_BYTES
+        .saturating_sub(seed.fetched_bytes())
+        .saturating_sub(shared_reader.fetched_bytes());
+    let mut remaining_fetch_objects = FETCH_OBJECTS
+        .saturating_sub(seed.fetched_files())
+        .saturating_sub(shared_reader.fetched_files());
+
+    let mut job_plans = Vec::with_capacity(jobs.len());
+    for (job, writes) in jobs.iter().zip(job_writes.iter()) {
+        let tool_cap = budgeted_capability(
+            WorkspaceId::from_bytes(job.workspace_id),
+            base.repository_id(),
+            reads.to_vec(),
+            writes.clone(),
+            FETCH_BYTES,
+            FETCH_OBJECTS,
+        )?;
+        let plan =
+            SparseWorkspacePlan::new(Arc::clone(&manifest), writes.clone(), &tool_cap, 0, limits)
+                .map_err(WorkspaceToolFailure::Host)?;
+        job_plans.push((tool_cap, plan));
+    }
+
+    let root_parent = File::open(parent).map_err(|source| WorkspaceToolFailure::Io {
+        operation: "open private workspace parent",
+        source,
+    })?;
+    let mut cache_owner = match sharing.cache_policy() {
+        Some(policy) => Some(SharedCacheOwner::open(
+            &job_plans[0].1,
+            &root_parent,
+            policy,
+            &live,
+        )?),
+        None => None,
+    };
+
+    let mut prepared = Vec::with_capacity(jobs.len());
+    for (index, (job, (tool_capability, plan))) in jobs.iter().zip(job_plans).enumerate() {
+        let slot_text = format!("workspace-{}", hex(&job.workspace_id));
+        let slot = match TreePath::parse_default(slot_text.as_bytes()) {
+            Ok(slot) => slot,
+            Err(_) => {
+                if let Some(owner) = cache_owner {
+                    let _ = owner.close();
+                }
+                return Err(reap_prepared_batch(
+                    prepared,
+                    WorkspaceToolFailure::InvalidInput("workspace slot"),
+                ));
+            }
+        };
+        let workspace_path = parent.join(slot.to_string());
+        let parent_fd = match root_parent.try_clone() {
+            Ok(fd) => fd,
+            Err(source) => {
+                if let Some(owner) = cache_owner {
+                    let _ = owner.close();
+                }
+                return Err(reap_prepared_batch(
+                    prepared,
+                    WorkspaceToolFailure::Io {
+                        operation: "clone workspace parent descriptor",
+                        source,
+                    },
+                ));
+            }
+        };
+        let ledger = ObligationLedger::root(
+            RegionId::new((index as u64) + 1),
+            LeakDisposition::RecordAndContinue,
+            plan.budget(),
+        );
+        let reserved = ledger
+            .grant(plan.budget())
+            .map_err(|_| WorkspaceToolFailure::InvalidInput("workspace budget grant"))
+            .and_then(|granted| {
+                ledger
+                    .reserve(plan.reservation(), granted)
+                    .map_err(|_| WorkspaceToolFailure::InvalidInput("workspace reservation"))
+            });
+        let reserved = match reserved {
+            Ok(reserved) => reserved,
+            Err(err) => {
+                let _ = ledger.close();
+                if let Some(owner) = cache_owner {
+                    let _ = owner.close();
+                }
+                return Err(reap_prepared_batch(prepared, err));
+            }
+        };
+        let before_stats = cache_owner
+            .as_ref()
+            .and_then(|owner| owner.cache.as_ref().map(SharedInputCache::stats))
+            .unwrap_or_default();
+        let creation_started = Instant::now();
+        let materialized = match cache_owner.as_mut() {
+            Some(owner) => match owner.cache_mut() {
+                Ok(cache) => SparseWorkspace::materialize_with_cache(
+                    plan,
+                    parent_fd,
+                    slot,
+                    reserved,
+                    &tool_capability,
+                    0,
+                    &|_| !live(),
+                    cache,
+                )
+                .map_err(WorkspaceToolFailure::Host),
+                Err(err) => {
+                    let _ = reserved.abort_unused(HostRefusal::SharedInputCacheUnusable);
+                    Err(err)
+                }
+            },
+            None => SparseWorkspace::materialize(
+                plan,
+                parent_fd,
+                slot,
+                reserved,
+                &tool_capability,
+                0,
+                &|_| !live(),
+            )
+            .map_err(WorkspaceToolFailure::Host),
+        };
+        let creation_ns = elapsed_ns(creation_started);
+        let after_stats = cache_owner
+            .as_ref()
+            .and_then(|owner| owner.cache.as_ref().map(SharedInputCache::stats))
+            .unwrap_or_default();
+        match materialized {
+            Ok(workspace) => {
+                prepared.push(PreparedBatchWorkspace {
+                    workspace,
+                    ledger,
+                    tool_capability,
+                    workspace_path,
+                    creation_ns,
+                    seeded_bytes: after_stats
+                        .seeded_bytes
+                        .saturating_sub(before_stats.seeded_bytes),
+                    cloned_bytes: after_stats
+                        .cloned_bytes
+                        .saturating_sub(before_stats.cloned_bytes),
+                    fallback_bytes: after_stats
+                        .fallback_bytes
+                        .saturating_sub(before_stats.fallback_bytes),
+                });
+            }
+            Err(original) => {
+                let ws_quiescent = matches!(ledger.close(), RegionCloseOutcome::Quiescent(_));
+                let cache_err = cache_owner.and_then(|owner| owner.close().err());
+                let base_err = if let Some(cache_err) = cache_err {
+                    WorkspaceToolFailure::Cleanup {
+                        workspace: workspace_path,
+                        operation: Some(Box::new(original)),
+                        cleanup: Box::new(cache_err),
+                    }
+                } else if ws_quiescent {
+                    original
+                } else {
+                    WorkspaceToolFailure::Cleanup {
+                        workspace: workspace_path,
+                        operation: Some(Box::new(original)),
+                        cleanup: Box::new(WorkspaceToolFailure::InvalidInput(
+                            "workspace obligation did not settle",
+                        )),
+                    }
+                };
+                return Err(reap_prepared_batch(prepared, base_err));
+            }
+        }
+    }
+
+    let cache_stats = match cache_owner {
+        Some(owner) => match owner.close() {
+            Ok(stats) => stats,
+            Err(cache_err) => return Err(reap_prepared_batch(prepared, cache_err)),
+        },
+        None => SharedInputCacheStats::default(),
+    };
+    let reflink_supported = cache_stats.reflink_supported;
+
+    let outcomes = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(jobs.len());
+        for (job, item) in jobs.iter_mut().zip(prepared) {
+            handles.push(scope.spawn(move || {
+                let live_job = || started.elapsed() < timeout && workspace_request_live(request);
+                let PreparedBatchWorkspace {
+                    mut workspace,
+                    ledger,
+                    tool_capability,
+                    workspace_path,
+                    creation_ns,
+                    seeded_bytes,
+                    cloned_bytes,
+                    fallback_bytes,
+                } = item;
+                job.command
+                    .current_dir(workspace.tool_directory())
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
+                let exec_started = Instant::now();
+                let operation = (|| {
+                    let diagnostics = File::options()
+                        .write(true)
+                        .open("/proc/self/fd/2")
+                        .map_err(|source| WorkspaceToolFailure::Io {
+                            operation: "open tool diagnostics",
+                            source,
+                        })?;
+                    job.command.stdout(diagnostics);
+                    execute_foreground(&mut job.command, &live_job, &workspace_path)?;
+                    workspace
+                        .import(&tool_capability, 0, &|_| !live_job())
+                        .map_err(WorkspaceToolFailure::Host)
+                })();
+                let execution_ns = elapsed_ns(exec_started);
+                if matches!(&operation, Err(WorkspaceToolFailure::Containment { .. })) {
+                    drop(workspace);
+                    let _unsettled = ledger.close();
+                    return operation.map(|_| unreachable!());
+                }
+                let cleanup_started = Instant::now();
+                let cleanup = close_workspace_and_ledger(workspace, ledger);
+                let cleanup_ns = elapsed_ns(cleanup_started);
+                match (operation, cleanup) {
+                    (Ok(log), Ok(closed)) => Ok((
+                        log,
+                        WorkspaceHostTelemetry {
+                            sharing_mode: sharing,
+                            reflink_supported,
+                            copied_bytes: closed.copied_bytes,
+                            shared_host_bytes: closed.shared_host_bytes,
+                            metadata_bytes: closed.metadata_bytes,
+                            imported_bytes: closed.imported_bytes,
+                            created_entries: closed.created_entries,
+                            imported_entries: closed.imported_entries,
+                            removed_entries: closed.removed_entries,
+                            seeded_bytes,
+                            cloned_bytes,
+                            fallback_bytes,
+                            creation_ns,
+                            execution_ns,
+                            cleanup_ns,
+                        },
+                    )),
+                    (Err(error), Ok(_)) => Err(error),
+                    (operation, Err(cleanup)) => Err(WorkspaceToolFailure::Cleanup {
+                        workspace: workspace_path,
+                        operation: operation.err().map(Box::new),
+                        cleanup: Box::new(cleanup),
+                    }),
+                }
+            }));
+        }
+        let mut collected = Vec::with_capacity(handles.len());
+        for handle in handles {
+            collected.push(
+                handle
+                    .join()
+                    .unwrap_or(Err(WorkspaceToolFailure::InvalidInput(
+                        "workspace batch worker panicked",
+                    ))),
+            );
+        }
+        collected
+    });
+
+    let mut retained_failure = None;
+    let mut first_failure = None;
+    let mut imported_jobs = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        match outcome {
+            Ok(pair) => imported_jobs.push(pair),
+            Err(err) => {
+                if err.retained_workspace().is_some() && retained_failure.is_none() {
+                    retained_failure = Some(err);
+                } else if first_failure.is_none() {
+                    first_failure = Some(err);
+                }
+            }
+        }
+    }
+    if let Some(err) = retained_failure.or(first_failure) {
+        return Err(err);
+    }
+
+    let source_commit = native_id(
+        source.inner.object_format,
+        base.base_commit_oid().digest_bytes(),
+    )?;
+    let mut results = Vec::with_capacity(jobs.len());
+    for ((job, writes), (log, telemetry)) in jobs.iter().zip(job_writes.iter()).zip(imported_jobs) {
+        let mut job_owner = budgeted_capability(
+            seed.workspace_id(),
+            base.repository_id(),
+            complete.clone(),
+            writes.clone(),
+            remaining_fetch_bytes,
+            remaining_fetch_objects,
+        )?;
+        let exported = candidate::export_from_base(
+            base,
+            source,
+            &mut job_owner,
+            &log,
+            source_commit,
+            0,
+            fgit_treefs::ExportLimits {
+                max_objects: 100_000,
+                max_total_bytes: PAYLOAD_BYTES,
+                max_tree_entries: 100_000,
+            },
+            &|| !live(),
+        )
+        .map_err(WorkspaceToolFailure::Node)?;
+        remaining_fetch_bytes = remaining_fetch_bytes.saturating_sub(job_owner.fetched_bytes());
+        remaining_fetch_objects = remaining_fetch_objects.saturating_sub(job_owner.fetched_files());
+        results.push(make_pack(
+            source.inner.object_format,
+            exported,
+            (&job.author, job.timestamp, &job.message),
+            telemetry,
+            &live,
+        )?);
+    }
+    Ok(WorkspaceBatchResult {
+        sharing_mode: sharing,
+        cache_stats,
+        results,
+    })
 }
 
 fn execute_foreground(
@@ -597,6 +1482,7 @@ fn make_pack<A: GitHashAlgorithm>(
     format: ObjectFormat,
     exported: candidate::WorkspaceEditExport<A>,
     (author, timestamp, message): (&str, u64, &[u8]),
+    telemetry: WorkspaceHostTelemetry,
     live: &dyn Fn() -> bool,
 ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
     let source_commit = native_id(format, exported.source_commit.digest_bytes())?;
@@ -680,6 +1566,7 @@ fn make_pack<A: GitHashAlgorithm>(
             .map(|p| p.as_bytes().to_vec())
             .collect(),
         object_count: selected.len(),
+        telemetry,
         pack,
     })
 }

@@ -141,7 +141,10 @@ export async function nativePeer(format = 'sha1', options = {}) {
     const bytes = Buffer.concat(chunks), route = req.url.replace('/repo/api/v1/', '');
     peer.requests.push({ route, bytes, headers: { ...req.headers } }); peer.onRequest?.(route);
     assert.equal(req.method, 'POST');
-    assert.ok([`Bearer ${TOKEN}`, `Bearer ${ROTATED_TOKEN}`].includes(req.headers.authorization));
+    assert.ok([`Bearer ${TOKEN}`, `Bearer ${ROTATED_TOKEN}`, ...(options.candidateToken ? [`Bearer ${options.candidateToken}`] : [])].includes(req.headers.authorization));
+    if (options.candidateToken && req.headers.authorization === `Bearer ${options.candidateToken}`) {
+      assert.ok(['source/prepare', 'source/inspect'].includes(route), 'candidate credential reached publication or recovery');
+    }
     if (peer.held) return;
     if (peer.httpStatus) { res.writeHead(peer.httpStatus, { 'Content-Type': 'application/json' }); res.end('{"error":"private server diagnostic"}'); return; }
     let response, type = 'application/json';

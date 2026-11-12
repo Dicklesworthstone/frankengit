@@ -1,7 +1,7 @@
 use super::*;
 use fgit_authority::{HeadKey, IdempotencyKey};
 use fgit_forge::event::discussion::{DiscussionAction, DiscussionEdit};
-use fgit_types::{GitHashAlgorithm, PrincipalId, TenantId};
+use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 
 fn context() -> AdmissionContext {
     AdmissionContext {
@@ -162,5 +162,128 @@ fn empty_extra_or_replaced_request_scopes_cannot_authorize_a_discussion_event() 
             verify_event_seal(&context, &event, &attempt),
             Err(RefusalCode::EvidenceInvalid)
         );
+    }
+}
+
+#[test]
+fn only_explicit_append_seals_allow_a_replanned_non_open_event_position() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut context = context();
+        context.object_format = format;
+        let intent = DiscussionCommentIntent {
+            number: DiscussionNumber::FIRST,
+            body: "The same exact contribution é\r\n".into(),
+        };
+        let (template, append) = append_proposal(&context, &intent).unwrap();
+        let (_, strict) = proposal(
+            &context,
+            &command(DiscussionAction::Comment { body: intent.body }),
+        )
+        .unwrap();
+        for version in [2, 3, 28, u64::MAX] {
+            let event = ForgeEvent {
+                version: AggregateVersion::try_new(version).unwrap(),
+                ..template.clone()
+            };
+            assert_eq!(verify_event_seal(&context, &event, &append), Ok(()));
+            assert_eq!(
+                verify_event_seal(&context, &event, &strict).is_ok(),
+                version == 2
+            );
+        }
+        let creation = ForgeEvent {
+            version: AggregateVersion::FIRST,
+            ..template
+        };
+        assert_eq!(
+            verify_event_seal(&context, &creation, &append),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+    }
+}
+
+#[test]
+fn append_seals_independently_reject_substituted_content_scope_and_profile() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut context = context();
+        context.object_format = format;
+        let (template, seal) = append_proposal(
+            &context,
+            &DiscussionCommentIntent {
+                number: DiscussionNumber::FIRST,
+                body: "Original contribution".into(),
+            },
+        )
+        .unwrap();
+        for field in 0..9 {
+            let mut event = template.clone();
+            let mut changed_context = context.clone();
+            let ForgeEventPayload::DiscussionChangedNative(change) = &mut event.payload else {
+                unreachable!()
+            };
+            match field {
+                0 => change.actor = PrincipalId::from_bytes([4; 16]),
+                1 => {
+                    event.aggregate = AggregateId::Discussion(DiscussionNumber::try_new(2).unwrap())
+                }
+                2 => {
+                    change.action = DiscussionAction::Comment {
+                        body: "Substituted body".into(),
+                    }
+                }
+                3 => change.action = DiscussionAction::Close,
+                4 => changed_context.repository_id = RepositoryId::from_bytes([5; 16]),
+                5 => changed_context.tenant_id = TenantId::from_bytes([5; 16]),
+                6 => {
+                    changed_context.idempotency_key =
+                        IdempotencyKey::new(b"other-key".to_vec()).unwrap()
+                }
+                7 => {
+                    changed_context.object_format = if format == GitHashAlgorithm::Sha1 {
+                        GitHashAlgorithm::Sha256
+                    } else {
+                        GitHashAlgorithm::Sha1
+                    }
+                }
+                _ => event.aggregate = AggregateId::Issue(fgit_forge::IssueNumber::FIRST),
+            }
+            assert_eq!(
+                verify_event_seal(&changed_context, &event, &seal),
+                Err(RefusalCode::EvidenceInvalid),
+                "field {field}"
+            );
+        }
+        let root = storage::root(&ForgeEventBatch::of_one(template.clone())).unwrap();
+        let entry = |name| {
+            ScopedEntry::new(
+                AsciiSlug::from_static("forge"),
+                AsciiSlug::from_static(name),
+                root.bytes().as_bytes(),
+            )
+            .unwrap()
+        };
+        for scoped in [
+            vec![],
+            vec![entry("issue.append-comment.v1")],
+            vec![entry("pull-request.append-comment.v1")],
+            vec![entry("discussion.append-comment.v1"), entry("unrelated")],
+        ] {
+            let forged = SealAttempt {
+                request: SemanticRequest::build(
+                    fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                    format,
+                    true,
+                    Vec::new(),
+                    Vec::new(),
+                    scoped,
+                )
+                .unwrap(),
+                ..seal.clone()
+            };
+            assert_eq!(
+                verify_event_seal(&context, &template, &forged),
+                Err(RefusalCode::EvidenceInvalid)
+            );
+        }
     }
 }

@@ -580,6 +580,137 @@ as Merkle layouts or disclosed as a fallback. Selecting an existing supported
 Merkle layout during new repository initialization is distinct from migrating
 an existing repository.
 
+### 16.5 Authenticated symbolic HEAD and ref Merkle layout V2
+
+The authority-selected `ref_root` MUST commit to the exact symbolic `HEAD`
+target, including the distinction between no target and an unborn target.
+Direct refs alone cannot authorize a default-branch advertisement or the
+deletion protection associated with `HEAD`.
+
+Root-layout code points 0, 1 and 2 retain their historical meanings. Code 0
+(`LegacyWholeBody`) commits to the complete canonical ref-state body. Codes 1
+and 2 commit only to sorted direct refs and do not authenticate the body's
+`head_target`; a live node MUST refuse those layouts even when the decoded
+target is absent. Historical direct-ref proofs remain verifiable under their
+original definitions. Code point 3 remains reserved for forge-position work.
+
+Codes 4 (`RefStateMerkleV2`) and 5
+(`RefStateAndObjectClosureMerkleV2`) use schema family `ref-state-merkle`,
+version `2.0`, for every ref-tree leaf and interior node. Index zero is always
+the HEAD leaf. Its payload parts are discriminator `0`, option tag `0` for no
+target or `1` followed by the big-endian `u32` target-byte length and the exact
+target bytes. A present target MUST be a valid `refs/heads/*` reference. Each
+remaining leaf has discriminator `1`, the big-endian `u32` ref-name length,
+the exact ref-name bytes, the native hash algorithm's big-endian `u16` code point,
+and the native OID bytes. Direct refs follow canonical raw-byte name order;
+duplicates refuse. The registered Merkle identity domains, hash algorithms,
+part framing and odd-width node rule remain unchanged. No fake Git OID or
+configuration-field alias represents HEAD.
+
+After folding the leaves, V2 wraps the raw apex in the registered `MerkleNode`
+identity domain with schema `ref-state-merkle` version `2.0` and payload
+`02 || u64be(total_leaf_count) || raw_apex32`. The count includes HEAD and is
+at least one. This 41-byte root payload is distinct from a 64-byte interior
+node payload. A verifier MUST reconstruct the raw apex and wrap it using the
+proof's count before comparing with `ref_root`. Authenticating the count is
+required: odd-node promotion otherwise permits relabelling a final leaf as
+the first direct ref and claiming an existing earlier ref absent.
+
+Code 4 leaves other root families unchanged from code 1. Code 5 retains the
+object-closure proof semantics of code 2. V2 direct-ref membership proofs MUST
+have an index above zero. Ordered absence uses direct neighbours beginning at
+index one; a state with no direct refs is represented by the single HEAD leaf.
+The verified-read absence tag `4` (`HeadOnly`) carries that exact optional
+target and verifies the wrapped one-leaf root; it is valid only under V2.
+Existing absence tags and frame meanings
+remain unchanged. A server MUST authorize every disclosed neighbour, and
+both HEAD and its target when a HeadOnly witness discloses them. A proof's
+validity never grants disclosure permission.
+
+New repositories may explicitly select `ref-merkle-v2`; the default whole-body
+layout remains valid. Initialization MUST refuse the old Merkle layouts before
+staging anything. Reopening or reading a historical V1 node MUST NOT infer a
+default, erase the target, relabel the old root, or silently migrate it.
+Existing V1 data require an explicitly authorized recovery from independently
+verified source and an independently selected default branch. This repair
+does not provide an in-place migration or authenticate a past target that was
+never committed.
+
+### 16.6 Canonical default-branch changes
+
+An explicit default-branch change is a repository-administration intent in the
+ordinary sealed decision stream. It MUST publish through the exact predecessor
+authority-head CAS and one RCR. The command contains the exact expected optional
+old symbolic target, a new full `refs/heads/*` target and that branch's exact
+expected nonzero native commit OID. An absent target and a named unborn target
+are distinct preconditions. The selected new branch MUST already exist, be
+visible under canonical policy and point to an admitted, independently verified
+native Commit in the repository's object-format domain. No conventional branch
+name, refreshed expectation, fake direct-ref OID or mutable configuration default
+may substitute for these inputs.
+
+The semantic-request schema is `default-branch-admission` version `1.0` in the
+existing semantic-request identity domain. The atomic request contains no direct
+ref commands or push options and exactly one scoped metadata entry: namespace
+`ref-state`, key `default-branch.v1`. Its value uses the canonical codec to write,
+in order, the optional old RefName, the new RefName and the expected GitOid. The
+ordinary tenant/repository/authenticated-principal/idempotency-key derivation
+defines TxId. A preparation basis and policy witness MUST NOT enter the sealed
+request identity; a losing CAS revalidates the same command against a new basis.
+Key reuse with different command semantics MUST fail closed.
+
+The trusted-local operation requires operator-asserted authentication and no
+narrowed ref-write credential scope. Canonically declared agent principals MUST
+be refused even when presented with operator provenance. With no installed
+review-protection policy, the explicitly authorized local operator may establish
+the default. With an installed policy, the actor MUST be one of its current
+canonical administrators. Proposed or historical administrators cannot authorize
+a new request. This authority does not follow from remote Git push permission,
+source publication grants, agent sponsorship, branch review approval or a model
+recommendation. Each CAS preparation checks the currently selected policy before
+reading target objects. Canonical visibility of HEAD, its old target and the new
+target applies independently of administrator status.
+
+The canonical symbolic-ref delta has domain
+`frankengit/admission-head-delta/v1`, schema family `admission-head-delta`, version
+`1.0` (DUR-024). Its canonical payload order is tenant ID, repository ID,
+authenticated principal ID, TxId, canonical request digest, exact basis head ID,
+root-layout code point, previous ref root, resulting ref root, the three command
+fields above, and an optional protection-witness digest. When present, that last
+digest identifies a canonical single-event ForgeEventBatch containing the exact
+selected ReviewProtection event. The authenticated basis and forge reader, not
+the existence of that staged witness, establish the event's authority. An absent
+witness records that no protection policy was installed at that basis.
+
+The RCR's `ref_delta_root` and `invariant_evidence_root` both identify this genuine
+HEAD-transition body. It is staged in the repository-scoped
+`frankengit/admission/head-delta/v1/` and existing invariant-evidence namespaces.
+Verifiers MUST independently authenticate the named basis, the selected layout
+from its configuration root and the selected administrator policy; then recompute
+the exact request binding, old/new HEAD and both ref roots. Merely decoding the
+body does not establish publication. Existing direct-ref delta encodings and
+domain IDs retain their meanings.
+
+Only layouts that authenticate HEAD (§16.5) may publish this operation. Direct
+refs MUST be identical before and after it. Forge-position, policy-epoch,
+configuration, outbox and retention state remain selected from the predecessor;
+the RCR admits an empty incremental object closure while retaining the existing
+reachable closure. A same-target command is an authorized, separately audited
+terminal no-op with equal ref roots. It still checks the exact target tip and
+current administrator policy. Deletion/rename protection thereafter follows the
+new canonical HEAD, and advertisements and historical reads select that same
+authenticated state.
+
+Exact historical terminal recovery MUST precede current administrator, quota,
+readiness and target-existence checks once original operator provenance and
+request identity are established. Later policy rotation, branch deletion or
+default selection cannot rewrite an earlier decision. A cancellation, failed
+receipt write or disconnect cannot establish non-commit. The caller recovers the
+original scoped TxId or retries the exact command and key, without refreshing
+either expectation. Reads report absent, unborn and resolved states distinctly,
+bound to one authenticated head, and authorize disclosure of both HEAD and its
+target.
+
 ## 17. Object fabric and segmentation
 
 Canonical Git objects preserve native OIDs and exact logical bytes. Internal envelopes may add strong digest/type/length. Object-aware segments provide:
@@ -989,8 +1120,15 @@ continuations preserve both lifecycle and membership history; incomplete replay,
 missing evidence, cancellation or exhausted bounds refuse the read. Issue search
 can conjunctively select a milestone number or explicitly unassigned issues.
 
-Native HTTP and MCP adapters require their existing independent issue-read or
-issue-write grants for milestone metadata; Git read/write never implies either.
+Native HTTP and MCP adapters retain their issue-service launch ceilings. Ordinary
+operator credentials require the existing independent issue-read or issue-write
+grants for milestone metadata. Canonical sponsored credentials instead require
+the independent `MILESTONES_READ` or `MILESTONES_WRITE` operation; issue membership
+still requires `ISSUES_WRITE`. Legacy masks MUST NOT acquire milestone authority.
+Git read/write never implies either milestone scope. Reads include same-snapshot
+issue counts, not issue text. Every sponsored mutation MUST revalidate its exact
+credential at the publication basis and retain the original agent/sponsor evidence
+and request expiry.
 The milestone's selected number, title, body and date cannot select the actor or
 widen capabilities. The frozen issue archive/import v1/v2 profiles do not define
 cross-repository milestone mappings: they MUST explicitly refuse milestone-bearing
@@ -1111,8 +1249,8 @@ An edit selects at least one field. Omission preserves a field; a selected empty
 body clears it. Text is untrusted data and never selects the actor, grants
 permissions, changes Git refs, or becomes a policy instruction.
 
-Creation requires `ExpectedVersion::NewStream`. Every subsequent action,
-including a comment, requires the exact positive predecessor version. Missing
+Creation requires `ExpectedVersion::NewStream`. Every subsequent exact-version
+`DiscussionCommand`, including a strict comment, requires the exact positive predecessor version. Missing
 or stale predecessors refuse with `EvidenceStale`. Closing requires an open
 discussion; reopening requires a closed one. Locking requires an unlocked
 discussion; unlocking requires a locked one. Repeating these transitions under
@@ -1127,11 +1265,43 @@ The canonical event batch root is sealed under the distinct `forge` scope
 expected version, action and exact text. Native admission replays authenticated
 current discussion history, enforces current policy, and publishes the event,
 forge position and one outbox obligation through the ordinary exact authority
-head CAS. Discussion commands use the strict CALM `HeadCasRequired` profile;
-they do not opt into predecessor-independent append replanning. The reference
+head CAS. Exact-version discussion commands preserve their strict CALM
+preconditions; a Comment payload alone never opts into append replanning. The reference
 and transaction codecs use new metadata-only trace tag **13**. Discussion
 effects cannot substitute for an issue or PR event even when numeric identifiers
 coincide, and cannot imply a reference effect.
+
+`DiscussionCommentIntent` is a separate, explicit predecessor-independent
+profile for one authored comment on an existing discussion. It binds the
+discussion number, authenticated actor and exact body together with the ordinary
+tenant, repository, object format and idempotency key. Adapters MUST reject an
+`expected_version` field for this profile. Its single-event batch root uses the
+existing Comment encoding at fixed **version 2** solely as a commitment template,
+under the distinct `forge` entry `discussion.append-comment.v1`. This template
+is neither a selected predecessor nor a publication position. The request stays
+atomic and has no ref updates or push options. The legacy strict seal and every
+stored event encoding remain unchanged.
+
+For each preparation attempt, admission authenticates the current authority
+head, selects the next checked discussion version, reconstructs and verifies
+the complete original append seal, and replays the same current canonical
+discussion history used by strict mutations. Only the event position may change.
+Missing discussions refuse with `EvidenceStale`; exhausted versions refuse with
+`ResourceBudgetExceeded`; current locks refuse with
+`ProtectedRefTransitionDenied`. Current permissions and resource/cancellation
+budgets remain mandatory. Intervening edits, state changes and other comments
+are preserved. Closed but unlocked discussions accept this profile too.
+
+The CALM table permits this explicit profile to revalidate after a head-CAS loss
+with the same TxId, actor, number, body and request digest. It remains
+`HeadCasRequired`; no second authority or commutative history root is introduced.
+One successful decision publishes exactly one Comment event and its outbox
+obligation. Two distinct original keys with equal text are two comments, whereas
+an exact retry recovers its original terminal decision. Unavailable evidence,
+cancellation, exhausted replans and ambiguous store replies preserve the ordinary
+undecided/recovery contract. Append publication receipts use action
+`append-comment` and `expected_version: null`; history records the ordinary
+Comment event at its actual canonical version.
 
 A retry MUST retain its original key and complete command. A known terminal
 outcome is recovered, with the original seal rechecked, before new native

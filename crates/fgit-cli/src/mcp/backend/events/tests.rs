@@ -67,6 +67,8 @@ fn unknown_authority_fields_and_out_of_profile_requests_never_become_options() {
         "tenant_id",
         "repository_id",
         "issues_read",
+        "reviews_read",
+        "discussions_read",
         "kind",
         "wait_ms",
     ] {
@@ -98,6 +100,21 @@ fn unknown_authority_fields_and_out_of_profile_requests_never_become_options() {
         ("expected_head", text(format!("alg:1:{}", "ab".repeat(32)))),
     ]);
     assert!(parse(&valid).is_ok());
+    assert_eq!(
+        parse(&Object::new()).unwrap().disclosure_profile,
+        ForgeEventDisclosureProfile::IssuesPullsV1
+    );
+    for profile in ["issues-pulls-v1", "collaboration-v2"] {
+        assert!(parse(&fields([("profile", text(profile))])).is_ok());
+    }
+    for profile in [
+        text("collaboration-v3"),
+        text(""),
+        Value::Null,
+        Value::Bool(true),
+    ] {
+        assert!(parse(&fields([("profile", profile)])).is_err());
+    }
     let schema = tool().schema;
     assert_eq!(
         schema.object().unwrap()["additionalProperties"],
@@ -379,6 +396,7 @@ fn independent_read_grants_filter_before_disclosure_and_do_not_break_the_full_re
     );
     backend.options.issues = true;
     backend.options.pulls = true;
+    backend.options.discussions = true;
     backend.options.source = true;
     backend.options.writes.pulls = true;
     backend.options.writes.source = true;
@@ -419,4 +437,152 @@ fn result_frames_larger_than_request_string_limits_do_not_weaken_request_parsing
         .unwrap();
     assert!(json::parse(hostile.as_bytes()).is_err());
     backend.close().unwrap();
+}
+
+#[test]
+fn collaboration_profile_discloses_native_families_under_launch_grants_and_survives_reopen() {
+    use fgit_forge::event::discussion::{DiscussionAction, DiscussionCommand};
+    use fgit_forge::event::milestone::{MilestoneAction, MilestoneCommand};
+    use fgit_forge::{DiscussionNumber, MilestoneNumber};
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let mut backend = open(&scratch, format, "Issue event");
+        let request = fgit_cli::command_request_context(&backend.node);
+        let session = |key: &[u8]| {
+            LoopbackReceiveSession::authenticated(
+                actor(),
+                IdempotencyKey::new(key.to_vec()).unwrap(),
+            )
+        };
+        let (_, milestone) = backend
+            .node
+            .runtime()
+            .block_on(backend.node.admit_milestone_durable_in(
+                &request,
+                &session(b"milestone"),
+                &MilestoneCommand {
+                    number: MilestoneNumber::try_new(1).unwrap(),
+                    expected_version: ExpectedVersion::NewStream,
+                    action: MilestoneAction::Open {
+                        title: "Release".into(),
+                        body: "Milestone event".into(),
+                        due_at: None,
+                    },
+                },
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            milestone.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let (_, discussion) = backend
+            .node
+            .runtime()
+            .block_on(backend.node.admit_discussion_durable_in(
+                &request,
+                &session(b"discussion"),
+                &DiscussionCommand {
+                    number: DiscussionNumber::try_new(1).unwrap(),
+                    expected_version: ExpectedVersion::NewStream,
+                    action: DiscussionAction::Open {
+                        title: "Design".into(),
+                        body: "Discussion event".into(),
+                    },
+                },
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            discussion.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let legacy = backend.call(NAME, &Object::new()).unwrap();
+        assert_eq!(events(&legacy).len(), 2);
+        assert!(!legacy.object().unwrap().contains_key("discussions_read"));
+        assert_eq!(
+            backend
+                .call(NAME, &fields([("profile", text("issues-pulls-v1"))]))
+                .unwrap(),
+            legacy
+        );
+
+        let args = fields([("profile", text("collaboration-v2"))]);
+        for mask in 1_u8..8 {
+            backend.options.issues = mask & 1 != 0;
+            backend.options.pulls = mask & 2 != 0;
+            backend.options.discussions = mask & 4 != 0;
+            assert_eq!(
+                backend
+                    .tools()
+                    .iter()
+                    .filter(|tool| tool.name == NAME)
+                    .count(),
+                1
+            );
+            let actual = backend.call(NAME, &args).unwrap();
+            let shared = backend
+                .node
+                .runtime()
+                .block_on(backend.node.read_profiled_forge_events_in(
+                    &request,
+                    None,
+                    20,
+                    None,
+                    ForgeEventDisclosureProfile::CollaborationV2,
+                    ForgeEventReadGrants {
+                        issues: backend.options.issues,
+                        pulls: backend.options.pulls,
+                        discussions: backend.options.discussions,
+                        reviews: backend.options.pulls,
+                    },
+                ))
+                .unwrap();
+            assert_eq!(
+                actual,
+                json::parse(shared.to_json().unwrap().as_bytes()).unwrap()
+            );
+            assert_eq!(
+                events(&actual).len(),
+                usize::from(mask & 1 != 0) * 3 + usize::from(mask & 4 != 0)
+            );
+            assert_eq!(
+                actual.object().unwrap()["reviews_read"],
+                Value::Bool(backend.options.pulls)
+            );
+        }
+        backend.options.issues = false;
+        backend.options.pulls = false;
+        backend.options.discussions = true;
+        assert_eq!(
+            backend.call(NAME, &Object::new()).unwrap_err().code,
+            "events_not_granted"
+        );
+        let first = backend
+            .call(
+                NAME,
+                &fields([
+                    ("profile", text("collaboration-v2")),
+                    ("limit", json::number(1)),
+                ]),
+            )
+            .unwrap();
+        assert!(events(&first).is_empty());
+        assert_ne!(first.object().unwrap()["next_after"], Value::Null);
+        let expected = backend.call(NAME, &args).unwrap();
+        let options = backend.options.clone();
+        backend.close().unwrap();
+        let mut backend = NodeTools::open(options).unwrap();
+        assert_eq!(backend.call(NAME, &args).unwrap(), expected);
+        backend.options.discussions = false;
+        backend.options.writes.discussions = true;
+        backend.options.principal = Some(actor());
+        assert!(backend.tools().iter().all(|tool| tool.name != NAME));
+        assert_eq!(
+            backend.call(NAME, &args).unwrap_err().code,
+            "tool_not_granted"
+        );
+        backend.close().unwrap();
+    }
 }

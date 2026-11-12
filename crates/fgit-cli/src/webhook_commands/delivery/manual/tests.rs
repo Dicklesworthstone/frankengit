@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod guarded_replay;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn secret() -> WebhookSecret {
@@ -36,6 +38,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_format(GitHashAlgorithm::Sha1)
+    }
+
+    fn with_format(format: GitHashAlgorithm) -> Self {
         let scratch = std::env::temp_dir().join(format!(
             "fg-webhook-manual-{}-{}",
             std::process::id(),
@@ -45,7 +51,9 @@ impl Fixture {
         let storage = scratch.join("node");
         let tenant = TenantId::from_bytes([0xc1; 16]);
         let repository = RepositoryId::from_bytes([0xc2; 16]);
-        let config = NodeConfig::new(storage.clone(), tenant, repository).with_worker_threads(2);
+        let config = NodeConfig::new(storage.clone(), tenant, repository)
+            .with_object_format(format)
+            .with_worker_threads(2);
         let (mut node, _) = OneNode::init(config).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         let request = node.request_context();
@@ -91,7 +99,7 @@ impl Fixture {
             storage,
             tenant,
             repository,
-            format: GitHashAlgorithm::Sha1,
+            format,
             expected_head: Some(head_token(page.source_head)),
             after: None,
             limit: 10,
@@ -239,14 +247,15 @@ fn capture(stream: &mut TcpStream) -> io::Result<Captured> {
 }
 
 fn assert_exact_signed_event(fixture: &Fixture, captured: &Captured) {
+    assert_exact_signed_event_for(fixture, captured, fixture.options.key.unwrap());
+}
+
+fn assert_exact_signed_event_for(fixture: &Fixture, captured: &Captured, key: AsciiSlug) {
     assert_eq!(
         captured.headers["x-frankengit-signature-256"],
         secret().sign_hex(&captured.body)
     );
-    assert_eq!(
-        captured.headers["x-frankengit-delivery"],
-        fixture.options.key.unwrap().as_str()
-    );
+    assert_eq!(captured.headers["x-frankengit-delivery"], key.as_str());
     let text = std::str::from_utf8(&captured.body).unwrap();
     let expected: String = fixture
         .frame

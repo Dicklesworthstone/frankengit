@@ -21,11 +21,36 @@ fn metadata(format: GitHashAlgorithm, message: &str) -> VerifiedCommitMetadata {
 }
 
 #[test]
+fn admission_metadata_preserves_historical_ancestry_order_hints() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let tree = git_object_id(format, ObjectType::Tree, b"");
+        for committer in ["Test <t@example.invalid> 123 bad-zone", "unusual 123 +0000"] {
+            let body = format!("tree {tree}\ncommitter {committer}\n\nhistorical\n");
+            let id = git_object_id(format, ObjectType::Commit, body.as_bytes());
+            let entry = VerifiedCommitMetadata::parse(id, body.as_bytes(), &ParseLimits::default())
+                .unwrap();
+            assert_eq!(entry.date, None, "the time-filter profile remains strict");
+            let cache = AncestryMetadataCache::new(16 * 1024);
+            let scope = Scope { format, ..scope() };
+            cache.insert(scope, &entry);
+            let reused = cache
+                .lookup(scope, id, &ParseLimits::default(), usize::MAX)
+                .unwrap()
+                .unwrap()
+                .into_frontier_metadata();
+            assert_eq!(reused.id(), id);
+            assert_eq!(reused.order_hint(), Some(123));
+            assert_eq!(reused.body_bytes(), body.len());
+        }
+    }
+}
+
+#[test]
 fn exact_verified_metadata_preserves_parent_order_dates_and_parser_budgets() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scope = Scope { format, ..scope() };
         let entry = metadata(format, "message is not retained");
-        let id = entry.id;
+        let id = entry.id();
         let expected = entry.try_copy().unwrap().into_commit();
         assert_eq!(expected.0.parents.len(), 2);
         assert_eq!(expected.0.parents[0], expected.0.parents[1]);
@@ -42,15 +67,15 @@ fn exact_verified_metadata_preserves_parent_order_dates_and_parser_budgets() {
         );
         for narrowed in [
             ParseLimits {
-                max_object_bytes: entry.body_bytes - 1,
+                max_object_bytes: entry.body_bytes() - 1,
                 ..ParseLimits::default()
             },
             ParseLimits {
-                max_header_lines: entry.header_lines - 1,
+                max_header_lines: entry.native.header_lines() - 1,
                 ..ParseLimits::default()
             },
             ParseLimits {
-                max_header_line_bytes: entry.maximum_header_line_bytes - 1,
+                max_header_line_bytes: entry.native.maximum_header_line_bytes() - 1,
                 ..ParseLimits::default()
             },
         ] {
@@ -60,18 +85,18 @@ fn exact_verified_metadata_preserves_parent_order_dates_and_parser_budgets() {
             ));
         }
         assert!(matches!(
-            cache.lookup(scope, id, &ParseLimits::default(), entry.body_bytes - 1),
+            cache.lookup(scope, id, &ParseLimits::default(), entry.body_bytes() - 1),
             Some(Err(MergeSourceError::BudgetExceeded))
         ));
         let exact = ParseLimits {
-            max_object_bytes: entry.body_bytes,
-            max_header_lines: entry.header_lines,
-            max_header_line_bytes: entry.maximum_header_line_bytes,
+            max_object_bytes: entry.body_bytes(),
+            max_header_lines: entry.native.header_lines(),
+            max_header_line_bytes: entry.native.maximum_header_line_bytes(),
             ..ParseLimits::default()
         };
         assert!(
             cache
-                .lookup(scope, id, &exact, entry.body_bytes)
+                .lookup(scope, id, &exact, entry.body_bytes())
                 .unwrap()
                 .is_ok()
         );
@@ -108,7 +133,7 @@ fn repository_incarnation_format_and_store_are_all_part_of_scope() {
     ] {
         assert!(
             cache
-                .lookup(other, entry.id, &ParseLimits::default(), usize::MAX)
+                .lookup(other, entry.id(), &ParseLimits::default(), usize::MAX)
                 .is_none()
         );
     }
@@ -119,12 +144,12 @@ fn repository_incarnation_format_and_store_are_all_part_of_scope() {
     cache.insert(other, &entry);
     assert!(
         cache
-            .lookup(scope, entry.id, &ParseLimits::default(), usize::MAX)
+            .lookup(scope, entry.id(), &ParseLimits::default(), usize::MAX)
             .is_none()
     );
     assert!(
         cache
-            .lookup(other, entry.id, &ParseLimits::default(), usize::MAX)
+            .lookup(other, entry.id(), &ParseLimits::default(), usize::MAX)
             .unwrap()
             .is_ok()
     );
@@ -143,15 +168,15 @@ fn byte_bound_fifo_disable_and_busy_cache_fall_back_without_retaining_bodies() {
     cache.insert(scope, &second);
     cache.insert(scope, &third);
     let read = |id| cache.lookup(scope, id, &ParseLimits::default(), usize::MAX);
-    assert!(read(first.id).is_none());
-    assert!(read(second.id).unwrap().is_ok());
-    assert!(read(third.id).unwrap().is_ok());
+    assert!(read(first.id()).is_none());
+    assert!(read(second.id()).unwrap().is_ok());
+    assert!(read(third.id()).unwrap().is_ok());
     {
         let state = cache.state.lock().unwrap();
         assert_eq!(state.entries.len(), 2);
         assert!(state.retained_bytes <= budget);
         assert!(
-            read(second.id).is_none(),
+            read(second.id()).is_none(),
             "contention is a miss, never a wait"
         );
         cache.insert(scope, &first);
@@ -161,7 +186,7 @@ fn byte_bound_fifo_disable_and_busy_cache_fall_back_without_retaining_bodies() {
     disabled.insert(scope, &first);
     assert!(
         disabled
-            .lookup(scope, first.id, &ParseLimits::default(), usize::MAX)
+            .lookup(scope, first.id(), &ParseLimits::default(), usize::MAX)
             .is_none()
     );
     let undersized = AncestryMetadataCache::new(scope_bytes + first.retained_bytes().unwrap() - 1);
@@ -176,7 +201,7 @@ fn byte_bound_fifo_disable_and_busy_cache_fall_back_without_retaining_bodies() {
     small_cache.insert(scope, &large);
     assert!(
         small_cache
-            .lookup(scope, large.id, &ParseLimits::default(), usize::MAX)
+            .lookup(scope, large.id(), &ParseLimits::default(), usize::MAX)
             .unwrap()
             .is_ok()
     );

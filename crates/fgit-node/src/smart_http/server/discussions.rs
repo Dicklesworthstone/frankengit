@@ -1,4 +1,4 @@
-//! Independently authenticated native discussion reads and exact-version writes.
+//! Independently authenticated discussion reads, strict writes and append intents.
 mod output;
 mod request;
 #[cfg(test)]
@@ -15,8 +15,8 @@ use super::{Profile, Status, retry_key};
 use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
 };
-use request::Operation;
 pub(super) use request::Request;
+use request::{Command, Operation};
 
 const ROUTE: &str = "/api/v1/discussions";
 const MAX_RESPONSE_BYTES: usize = 48 * 1024 * 1024;
@@ -138,15 +138,35 @@ pub(super) fn execute(
         }
         Operation::Mutate { .. } => {
             let command = command.ok_or_else(|| ApiError::bad("missing_command"))?;
-            command
-                .proposed_event(principal)
-                .map_err(|_| ApiError::bad("invalid_discussion_command"))?;
-            let (tx, terminal) = drive_request_while(
-                node,
-                &context,
-                node.admit_discussion_durable_in(&context, session, &command, Default::default()),
-                &mut live,
-            )
+            match &command {
+                Command::Versioned(command) => command.proposed_event(principal),
+                Command::AppendComment(intent) => intent.commitment_event(principal),
+            }
+            .map_err(|_| ApiError::bad("invalid_discussion_command"))?;
+            let (tx, terminal) = match &command {
+                Command::Versioned(command) => drive_request_while(
+                    node,
+                    &context,
+                    node.admit_discussion_durable_in(
+                        &context,
+                        session,
+                        command,
+                        Default::default(),
+                    ),
+                    &mut live,
+                ),
+                Command::AppendComment(intent) => drive_request_while(
+                    node,
+                    &context,
+                    node.admit_discussion_comment_durable_in(
+                        &context,
+                        session,
+                        intent,
+                        Default::default(),
+                    ),
+                    &mut live,
+                ),
+            }
             .map_err(admission_error)?;
             let body = output::mutation(node, principal, &command, tx, terminal);
             if body.len() > maximum {

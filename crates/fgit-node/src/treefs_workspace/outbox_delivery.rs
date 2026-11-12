@@ -254,6 +254,21 @@ impl OneNode {
         intent: &fgit_admission::merge::native::dispatch::replay::ReplayIntent,
         limits: AdmissionLimits,
     ) -> Result<AsciiSlug, NodeReceiveTransportRefusal> {
+        self.enqueue_forge_replay_at_head_in(request, session, intent, None, limits)
+            .await
+    }
+
+    /// Enqueue only while the exact selected head remains current, or recover
+    /// the already published identical replay. The guard applies inside every
+    /// authority CAS plan, never to recovery of an existing responsibility.
+    pub async fn enqueue_forge_replay_at_head_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        intent: &fgit_admission::merge::native::dispatch::replay::ReplayIntent,
+        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
+        limits: AdmissionLimits,
+    ) -> Result<AsciiSlug, NodeReceiveTransportRefusal> {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
@@ -280,11 +295,12 @@ impl OneNode {
             } => Err(RefusalCode::CancellationInProgress),
         };
         Box::pin(
-            fgit_admission::merge::native::dispatch::replay::enqueue_replay_async(
+            fgit_admission::merge::native::dispatch::replay::enqueue_replay_at_head_async(
                 &self.authority,
                 request.authority(),
                 &context,
                 intent,
+                expected_head,
                 &projection,
                 limits,
                 &checkpoint,

@@ -9,6 +9,7 @@ import { capturePullCandidate, candidateCanonical, candidateHash } from '../../s
 import { saveCandidatePackage, loadCandidatePackage, readCandidatePrivate, readCandidateToken, candidateClock } from '../../scripts/operator/pull_candidate_files.mjs';
 import { candidatePeer, TOKEN } from './pull_candidate_fixture.mjs';
 import { localCapture } from './pull_candidate_package_fixture.mjs';
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 
 async function directory(t) {
   const root = await mkdtemp(join(tmpdir(), 'fg-candidate-files-')); await chmod(root, 0o700);
@@ -20,7 +21,7 @@ async function saved(t, config = []) {
   return { ...result, root, path, receipt };
 }
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) {
-  test(`${algorithm} ${method}: real acquisition survives private save and offline load`, async t => {
+  test(`${algorithm} ${method}: real acquisition survives private save and offline load`, LINUX_ORACLE, async t => {
     const p = await candidatePeer(t, { algorithm, method, reviewCount: 51 }), root = await directory(t);
     const result = await capturePullCandidate(p.input, TOKEN), count = p.requests.length;
     const receipt = await saveCandidatePackage(join(root, 'capture'), result.capture, result.bundle);
@@ -40,18 +41,18 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
   });
 }
 for (const algorithm of ['sha1', 'sha256']) for (const state of ['conflicted', 'already_up_to_date']) {
-  test(`${algorithm} ${state}: retain noncandidate without inventing bundle or inspection`, async t => {
+  test(`${algorithm} ${state}: retain noncandidate without inventing bundle or inspection`, LINUX_ORACLE, async t => {
     const s = await saved(t, [algorithm, 'merge-commit', state]), value = await loadCandidatePackage(s.path, s.receipt.sha256);
     assert.equal(s.receipt.state, state); assert.equal(s.receipt.bundle_path, null);
     assert.equal(value.bundle, null); assert.equal(value.artifact, null); assert.equal(value.capture.inspection, null);
     assert.deepEqual((await readdir(s.path)).sort(), ['capture.json', 'manifest.json']);
   });
 }
-for (const pin of [null, '', 'f'.repeat(64), 'A'.repeat(64)]) test(`independent manifest pin required: ${pin}`, async t => {
+for (const pin of [null, '', 'f'.repeat(64), 'A'.repeat(64)]) test(`independent manifest pin required: ${pin}`, LINUX_ORACLE, async t => {
   const s = await saved(t); await assert.rejects(loadCandidatePackage(s.path, pin));
 });
 for (const name of ['manifest.json', 'capture.json', 'candidate.bundle']) for (const action of ['delete', 'truncate', 'alter', 'public', 'symlink', 'hardlink']) {
-  test(`${name} ${action}: changed package is never a successful capture`, async t => {
+  test(`${name} ${action}: changed package is never a successful capture`, LINUX_ORACLE, async t => {
     const s = await saved(t), path = join(s.path, name), bytes = await readFile(path);
     if (action === 'delete') await rm(path);
     if (action === 'truncate') await writeFile(path, bytes.subarray(0, bytes.length - 1));
@@ -64,7 +65,7 @@ for (const name of ['manifest.json', 'capture.json', 'candidate.bundle']) for (c
 }
 for (const mutate of [c => c.inspection.source_head = 'another-source', c => c.inspection.comparison.entry_count = 0,
   c => c.review_pages = [], c => c.preparation.merge_authorized = true]) {
-  test(`rehashed local bytes still undergo native consistency checks: ${mutate}`, async t => {
+  test(`rehashed local bytes still undergo native consistency checks: ${mutate}`, LINUX_ORACLE, async t => {
     const s = await saved(t), c = structuredClone(s.capture); mutate(c);
     const bytes = Buffer.from(candidateCanonical(c)), manifest = JSON.parse(await readFile(join(s.path, 'manifest.json'), 'utf8'));
     manifest.capture = { bytes: bytes.length, sha256: candidateHash(bytes) };
@@ -73,28 +74,28 @@ for (const mutate of [c => c.inspection.source_head = 'another-source', c => c.i
     await assert.rejects(loadCandidatePackage(s.path, candidateHash(root)));
   });
 }
-test('extra entries and fake candidate bytes on noncandidate reports refuse', async t => {
+test('extra entries and fake candidate bytes on noncandidate reports refuse', LINUX_ORACLE, async t => {
   for (const config of [[], ['sha1', 'merge-commit', 'conflicted']]) {
     const s = await saved(t, config);
     await writeFile(join(s.path, config.length ? 'candidate.bundle' : 'unexpected'), 'not selected', { mode: 0o600 });
     await assert.rejects(loadCandidatePackage(s.path, s.receipt.sha256));
   }
 });
-test('existing or interrupted slots are never overwritten or repaired', async t => {
+test('existing or interrupted slots are never overwritten or repaired', LINUX_ORACLE, async t => {
   const root = await directory(t), path = join(root, 'package'), value = await localCapture();
   await mkdir(path, { mode: 0o700 }); await writeFile(join(path, 'capture.json'), '{partial', { mode: 0o600 });
   await assert.rejects(saveCandidatePackage(path, value.capture, value.bundle));
   await assert.rejects(loadCandidatePackage(path, 'a'.repeat(64)));
   assert.equal(await readFile(join(path, 'capture.json'), 'utf8'), '{partial');
 });
-test('concurrent preparation has one winner and leaves a replayable root', async t => {
+test('concurrent preparation has one winner and leaves a replayable root', LINUX_ORACLE, async t => {
   const root = await directory(t), value = await localCapture(), path = join(root, 'package');
   const results = await Promise.allSettled([saveCandidatePackage(path, value.capture, value.bundle), saveCandidatePackage(path, value.capture, value.bundle)]);
   assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
   const receipt = results.find(r => r.status === 'fulfilled').value;
   assert.deepEqual((await loadCandidatePackage(path, receipt.sha256)).bundle, value.bundle);
 });
-test('caller edits during asynchronous validation cannot change the retained candidate', async t => {
+test('caller edits during asynchronous validation cannot change the retained candidate', LINUX_ORACLE, async t => {
   const root = await directory(t), value = await localCapture(), expected = structuredClone(value.capture), bundle = Buffer.from(value.bundle);
   const pending = saveCandidatePackage(join(root, 'package'), value.capture, value.bundle);
   value.capture.request.metadata.message = 'edited'; value.bundle.fill(0);
@@ -102,7 +103,7 @@ test('caller edits during asynchronous validation cannot change the retained can
   assert.deepEqual(read.capture, expected); assert.deepEqual(read.bundle, bundle);
   read.bundle.fill(0); assert.deepEqual((await loadCandidatePackage(receipt.path, receipt.sha256)).bundle, bundle);
 });
-test('cancellation before publication leaves no success or overwritten destination', async t => {
+test('cancellation before publication leaves no success or overwritten destination', LINUX_ORACLE, async t => {
   const root = await directory(t), value = await localCapture(), controller = new AbortController(), path = join(root, 'package');
   const pending = saveCandidatePackage(path, value.capture, value.bundle, { signal: controller.signal }); controller.abort();
   await assert.rejects(pending, e => e.code === 'candidate_cancelled');
@@ -114,7 +115,7 @@ test('private reader admits exact byte ceiling and refuses the next byte', async
   await assert.rejects(readCandidatePrivate(path, bytes.length - 1));
   await writeFile(path, Buffer.concat([bytes, Buffer.from([0])])); await assert.rejects(readCandidatePrivate(path, bytes.length));
 });
-for (const kind of ['worktree', 'alias', 'public-parent']) test(`unsafe package location: ${kind}`, async t => {
+for (const kind of ['worktree', 'alias', 'public-parent']) test(`unsafe package location: ${kind}`, LINUX_ORACLE, async t => {
   const s = await saved(t); let path = s.path;
   if (kind === 'worktree') await mkdir(join(s.root, '.git'));
   if (kind === 'alias') { path = join(s.root, 'alias'); await symlink(s.path, path); }
@@ -127,7 +128,7 @@ test('tokens are explicit private files; malformed and public files refuse', asy
   await chmod(path, 0o644); await assert.rejects(readCandidateToken(path)); await chmod(path, 0o600);
   await writeFile(path, TOKEN + '\r\n'); await assert.rejects(readCandidateToken(path));
 });
-test('bounded options and shared mutable bundle storage refuse', async t => {
+test('bounded options and shared mutable bundle storage refuse', LINUX_ORACLE, async t => {
   for (const options of [{ timeoutMs: 0 }, { timeoutMs: 300001 }, { signal: {} }, { force: true }]) assert.throws(() => candidateClock(options));
   const root = await directory(t), value = await localCapture();
   await assert.rejects(saveCandidatePackage(join(root, 'package'), value.capture, new Uint8Array(new SharedArrayBuffer(5))));

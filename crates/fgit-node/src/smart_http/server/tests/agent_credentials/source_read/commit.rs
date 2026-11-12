@@ -170,6 +170,7 @@ fn current_commit_http_execution_preserves_exact_output_limit_and_original_agent
             &selected,
             session,
             None,
+            None,
             BodyFraming::ContentLength(body.len() as u64),
             &mut body.as_slice(),
             HttpLimits::default(),

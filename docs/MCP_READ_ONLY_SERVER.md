@@ -74,9 +74,15 @@ With `source-history-read`, `--allow-source` exposes only
 `source-read`; an existing `0x00ff` grant gains no history operation. History
 queries can disclose current-tip content through historical selection, blame
 and diff, but do not enable current-source search, indexes or agent context.
-Candidate preparation, PR-specific diffs, verified-blob streaming, bundles,
-queues and workflow artifacts remain outside the sponsored profile even when
-an operator source launch supports them.
+With the separate `source-candidates` scope, `--allow-source` exposes
+`frankengit_source_candidate` with only `prepare_patch` (regular-file
+`exact-tree-v1`) and single-parent `inspect`. Discovery describes this narrower
+schema; both operations retain the original authenticated request and produce
+unstaged artifacts. Historical masks through `0x01ff` gain no candidate scope.
+Initial-history, symlink/replay/rebase/PR/queue candidate preparation, source
+publication, PR-specific diffs, verified-blob streaming, general bundle
+export/import, queues and workflow artifacts remain unavailable. See the
+[candidate guide](MCP_SOURCE_CANDIDATES.md) for the bounded artifact handoff.
 
 Agent mode requires the exact incarnation and rejects `--trusted-local` and
 `--principal`. Every call verifies the current canonical grant and retains its

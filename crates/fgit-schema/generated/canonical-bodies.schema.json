@@ -318,6 +318,22 @@
             "discriminant": { "const": 3 },
             "last": { "$ref": "#/$defs/RefStateNeighbour" }
           }
+        },
+        {
+          "description": "The V2 tree contains only its mandatory typed HEAD leaf; invalid under V1.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "HeadOnly" },
+            "discriminant": { "const": 4 },
+            "head_target": {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$",
+              "minLength": 2,
+              "maxLength": 2048
+            }
+          }
         }
       ]
     },

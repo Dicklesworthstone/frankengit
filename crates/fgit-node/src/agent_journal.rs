@@ -6,8 +6,9 @@
 //! blocking lane; it starts no detached worker or alternate runtime. Cancellation
 //! is checked before I/O and after synchronization. An in-progress OS sync is
 //! drained before return, so this profile does not promise a hard syscall deadline.
-//! Recovery never creates an issuing broker. Canonical ref submissions have a
-//! cleanup-only ACK path; other recovery remains inspection/reconciliation.
+//! Recovery never creates an issuing broker. Canonical ref submissions have
+//! separate cleanup-only ACK and pre-start Abort paths; other recovery remains
+//! inspection/reconciliation.
 
 use std::path::Path;
 

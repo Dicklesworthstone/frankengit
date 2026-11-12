@@ -846,6 +846,26 @@ fn check_native_linkage_policy(surface: &EnabledSurface, rows: &[SurfaceRow], re
                 row.id,
                 row.ffi_policy,
             ));
+        } else if row.ffi_policy == "host_assembled_stack_stub_no_foreign_engine" {
+            let unauthorized: Vec<String> = libraries
+                .iter()
+                .filter(|directive| {
+                    package != "psm"
+                        || !(*directive == "rustc-link-lib=static=psm_s"
+                            || (directive.starts_with("rustc-link-lib=static:")
+                                && directive.ends_with("=psm_s"))
+                            || directive.starts_with("rustc-link-search=native="))
+                })
+                .cloned()
+                .collect();
+            if !unauthorized.is_empty() {
+                report.error(format!(
+                    "package `{package}` links native object code outside Owner Decision D4 `psm_s` stack-probe stub ({}) under row `{}` (`{}`)",
+                    unauthorized.join(", "),
+                    row.id,
+                    row.ffi_policy,
+                ));
+            }
         }
     }
 }
@@ -1676,6 +1696,44 @@ cargo:rustc-link-lib=static=blake3_avx512_assembly
         let mut report = Report::new();
         check_native_linkage_policy(&surface, &denying, &mut report);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn psm_stack_stub_ffi_policy_permits_only_psm_s_and_refuses_foreign_engine() {
+        let rows = vec![SurfaceRow {
+            id: "DEP-262".to_owned(),
+            crate_pattern: "psm".to_owned(),
+            ffi_policy: "host_assembled_stack_stub_no_foreign_engine".to_owned(),
+            build_script: SurfaceState::Enabled,
+            proc_macro: SurfaceState::Absent,
+        }];
+        let mut surface = EnabledSurface {
+            triple: "x86_64-unknown-linux-gnu".to_owned(),
+            linkage_is_observed: true,
+            ..EnabledSurface::default()
+        };
+        surface.build_scripts.insert("psm".to_owned());
+        surface.native_linkage.insert(
+            "psm".to_owned(),
+            parse_linkage_lines(
+                "cargo:rustc-link-search=native=/tmp/out\ncargo:rustc-link-lib=static=psm_s\n",
+            ),
+        );
+
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        surface.native_linkage.insert(
+            "psm".to_owned(),
+            parse_linkage_lines(
+                "cargo:rustc-link-search=native=/tmp/out\ncargo:rustc-link-lib=static=sqlite3\n",
+            ),
+        );
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("outside Owner Decision D4 `psm_s`"));
     }
 
     #[test]

@@ -52,7 +52,10 @@ pub(super) fn render(
         ("schema_version", json::number(1)),
         ("page", page(backend, &selected.result.page)),
         ("offset", text(selected.query.offset.to_string())),
-        ("byte_count", text((selected.end - selected.start).to_string())),
+        (
+            "byte_count",
+            text((selected.end - selected.start).to_string()),
+        ),
         (
             "content_hex",
             text(hex(&selected.result.evidence[selected.start..selected.end])),
@@ -88,7 +91,10 @@ fn page(backend: &NodeTools, page: &PullRequestChecksPage) -> Value {
         ("type", text("pull_request_checks")),
         ("schema_version", json::number(1)),
         ("tenant_id", text(backend.options.tenant.to_string())),
-        ("repository_id", text(backend.options.repository.to_string())),
+        (
+            "repository_id",
+            text(backend.options.repository.to_string()),
+        ),
         (
             "repository_incarnation",
             text(backend.node.repository_incarnation_id().to_string()),

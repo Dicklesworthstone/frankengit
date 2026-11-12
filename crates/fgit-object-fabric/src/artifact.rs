@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod storage;
 
 use fgit_crypto::{DigestHasher, Sha256Hasher};

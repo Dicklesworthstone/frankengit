@@ -3,14 +3,12 @@
 //! permission to publish as a principal read from disk.
 
 use super::super::{
-    File, OneNode, Path, TrustedWorkflowFailure, check_directory, commitment, fs, hex,
-    invalid, invalid_owned, io, lower_hash, reporting, write_new,
+    File, OneNode, Path, TrustedWorkflowFailure, check_directory, commitment, fs, hex, invalid,
+    invalid_owned, io, lower_hash, reporting, write_new,
 };
 use crate::LoopbackReceiveSession;
 use fgit_admission::AdmissionContext;
-use fgit_admission::merge::native::queue::{
-    QueueHeadRefreshCommand, queue_head_refresh_proposal,
-};
+use fgit_admission::merge::native::queue::{QueueHeadRefreshCommand, queue_head_refresh_proposal};
 use fgit_authority::{IdempotencyKey, TerminalOutcome, canonical_request_digest};
 use fgit_crypto::{DigestAlgorithm, sha256_digest};
 use fgit_forge::event::pull_request::{
@@ -18,8 +16,8 @@ use fgit_forge::event::pull_request::{
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber, QueueNumber};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId,
-    RepositoryAuthorityHeadId, TxId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId, RepositoryAuthorityHeadId,
+    TxId,
 };
 use std::collections::BTreeSet;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -56,9 +54,14 @@ impl Attempt {
     ) -> Result<Self, TrustedWorkflowFailure> {
         let native = basis.as_internal_object_id();
         if native.algorithm() != DigestAlgorithm::Sha256.id() {
-            return Err(invalid("queue refresh custody requires SHA-256 authority identities"));
+            return Err(invalid(
+                "queue refresh custody requires SHA-256 authority identities",
+            ));
         }
-        let basis = native.digest().as_bytes().try_into()
+        let basis = native
+            .digest()
+            .as_bytes()
+            .try_into()
             .map_err(|_| invalid("invalid queue refresh authority width"))?;
         Self::from_basis(node, refresher, command, identity, basis)
     }
@@ -78,9 +81,8 @@ impl Attempt {
             tenant_id: node.tenant_id(),
             repository_id: node.repository_id(),
             principal_id: refresher,
-            idempotency_key: IdempotencyKey::new(
-                b"queue-refresh-custody-digest-only".to_vec(),
-            ).map_err(|_| invalid("invalid queue refresh digest key"))?,
+            idempotency_key: IdempotencyKey::new(b"queue-refresh-custody-digest-only".to_vec())
+                .map_err(|_| invalid("invalid queue refresh digest key"))?,
             object_format: node.object_format(),
         };
         let (_, proposed) = queue_head_refresh_proposal(&context, command)
@@ -103,7 +105,10 @@ impl Attempt {
             .map_err(|_| invalid("invalid queue refresh retry key"))?;
         let (_, seal) = queue_head_refresh_proposal(&context, command)
             .map_err(|error| invalid_owned(error.to_string()))?;
-        let tx_id = seal.derive().map_err(|error| invalid_owned(error.to_string()))?.0;
+        let tx_id = seal
+            .derive()
+            .map_err(|error| invalid_owned(error.to_string()))?
+            .0;
         let attempt = Self {
             identity,
             refresher,
@@ -130,7 +135,10 @@ impl Attempt {
         bytes: &[u8],
     ) -> Result<Self, TrustedWorkflowFailure> {
         check_frame(bytes)?;
-        let mut input = Input { bytes: &bytes[..bytes.len() - 32], offset: 8 };
+        let mut input = Input {
+            bytes: &bytes[..bytes.len() - 32],
+            offset: 8,
+        };
         if input.array::<32>()? != identity
             || input.array::<16>()? != *refresher.as_bytes()
             || input.array::<16>()? != *node.tenant_id().as_bytes()
@@ -177,7 +185,12 @@ impl Attempt {
                 expected_version: ExpectedVersion::Exactly(pull_version),
                 action: PullRequestAction::Update,
                 data: PullRequestData {
-                    source_ref, target_ref, source_tip, target_tip, title, body,
+                    source_ref,
+                    target_ref,
+                    source_tip,
+                    target_tip,
+                    title,
+                    body,
                 },
             },
         };
@@ -206,7 +219,8 @@ impl Attempt {
     }
 
     fn bytes(&self) -> Result<Vec<u8>, TrustedWorkflowFailure> {
-        self.command.proposed_event(self.refresher, self.format)
+        self.command
+            .proposed_event(self.refresher, self.format)
             .map_err(|_| invalid("invalid original queue refresh command"))?;
         let pull = &self.command.pull_request;
         let ExpectedVersion::Exactly(previous) = pull.expected_version else {
@@ -220,18 +234,20 @@ impl Attempt {
             pull.data.body.as_bytes(),
             tx.as_bytes(),
         ];
-        let mut size = 8 + 32 + 16 * 4 + 1 + 32 + 8 * 5
-            + self.format.digest_len() * 3 + 32 + 32;
+        let mut size = 8 + 32 + 16 * 4 + 1 + 32 + 8 * 5 + self.format.digest_len() * 3 + 32 + 32;
         for field in &fields {
             if field.len() > u32::MAX as usize {
                 return Err(invalid("queue refresh custody field is too large"));
             }
-            size = size.checked_add(4).and_then(|size| size.checked_add(field.len()))
+            size = size
+                .checked_add(4)
+                .and_then(|size| size.checked_add(field.len()))
                 .filter(|size| *size <= MAX_RECORD)
                 .ok_or_else(|| invalid("queue refresh attempt record exceeds its byte bound"))?;
         }
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(size)
+        bytes
+            .try_reserve_exact(size)
             .map_err(|_| invalid("queue refresh record allocation refused"))?;
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&self.identity);
@@ -289,8 +305,9 @@ fn check_frame(bytes: &[u8]) -> Result<(), TrustedWorkflowFailure> {
 /// canonical outcome. This accessor never authorizes submission as that actor.
 pub(super) fn record_principal(bytes: &[u8]) -> Result<PrincipalId, TrustedWorkflowFailure> {
     check_frame(bytes)?;
-    Ok(PrincipalId::from_bytes(bytes[40..56].try_into()
-        .map_err(|_| invalid("invalid retained refresh principal"))?))
+    Ok(PrincipalId::from_bytes(bytes[40..56].try_into().map_err(
+        |_| invalid("invalid retained refresh principal"),
+    )?))
 }
 
 struct Input<'a> {
@@ -300,16 +317,22 @@ struct Input<'a> {
 
 impl<'a> Input<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], TrustedWorkflowFailure> {
-        let end = self.offset.checked_add(length)
+        let end = self
+            .offset
+            .checked_add(length)
             .ok_or_else(|| invalid("queue refresh custody length overflow"))?;
-        let bytes = self.bytes.get(self.offset..end)
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
             .ok_or_else(|| invalid("truncated queue refresh custody"))?;
         self.offset = end;
         Ok(bytes)
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], TrustedWorkflowFailure> {
-        self.take(N)?.try_into().map_err(|_| invalid("invalid queue refresh custody field"))
+        self.take(N)?
+            .try_into()
+            .map_err(|_| invalid("invalid queue refresh custody field"))
     }
 
     fn counter(&mut self) -> Result<u64, TrustedWorkflowFailure> {
@@ -320,7 +343,9 @@ impl<'a> Input<'a> {
         let length = usize::try_from(u32::from_be_bytes(self.array()?))
             .map_err(|_| invalid("queue refresh custody length overflow"))?;
         if length > maximum {
-            return Err(invalid("queue refresh custody field exceeds its byte bound"));
+            return Err(invalid(
+                "queue refresh custody field exceeds its byte bound",
+            ));
         }
         self.take(length)
     }
@@ -355,7 +380,9 @@ pub(super) fn records(root: &Path) -> Result<Vec<String>, TrustedWorkflowFailure
         }
         let entry = entry.map_err(io)?;
         let name = entry.file_name();
-        let name = name.to_str().ok_or_else(|| invalid("invalid queue refresh custody entry"))?;
+        let name = name
+            .to_str()
+            .ok_or_else(|| invalid("invalid queue refresh custody entry"))?;
         if let Some(key) = name.strip_prefix("attempt-").filter(|key| lower_hash(key)) {
             private_metadata(&entry.path(), MAX_RECORD)?;
             attempts.insert(key.to_owned());
@@ -367,14 +394,21 @@ pub(super) fn records(root: &Path) -> Result<Vec<String>, TrustedWorkflowFailure
         }
     }
     if attempts.len() > MAX_ATTEMPTS || outcomes.iter().any(|key| !attempts.contains(key)) {
-        return Err(invalid("orphaned or excessive queue refresh acknowledgement"));
+        return Err(invalid(
+            "orphaned or excessive queue refresh acknowledgement",
+        ));
     }
-    Ok(attempts.into_iter().map(|key| format!("attempt-{key}")).collect())
+    Ok(attempts
+        .into_iter()
+        .map(|key| format!("attempt-{key}"))
+        .collect())
 }
 
 fn private_metadata(path: &Path, maximum: usize) -> Result<(), TrustedWorkflowFailure> {
     let meta = fs::symlink_metadata(path).map_err(io)?;
-    if !meta.is_file() || meta.mode() & 0o777 != 0o600 || meta.nlink() != 1
+    if !meta.is_file()
+        || meta.mode() & 0o777 != 0o600
+        || meta.nlink() != 1
         || meta.len() > maximum as u64
     {
         return Err(invalid("invalid bounded private queue refresh record"));
@@ -383,7 +417,10 @@ fn private_metadata(path: &Path, maximum: usize) -> Result<(), TrustedWorkflowFa
 }
 
 pub(super) fn read_record(root: &Path, name: &str) -> Result<Vec<u8>, TrustedWorkflowFailure> {
-    if name.strip_prefix("attempt-").is_none_or(|key| !lower_hash(key)) {
+    if name
+        .strip_prefix("attempt-")
+        .is_none_or(|key| !lower_hash(key))
+    {
         return Err(invalid("invalid queue refresh attempt filename"));
     }
     let directory = root.join(DIRECTORY);
@@ -406,7 +443,9 @@ pub(super) fn retain(root: &Path, attempt: &Attempt) -> Result<(), TrustedWorkfl
     }
     let directory = root.join(DIRECTORY);
     match fs::DirBuilder::new().mode(0o700).create(&directory) {
-        Ok(()) => File::open(root).and_then(|file| file.sync_all()).map_err(io)?,
+        Ok(()) => File::open(root)
+            .and_then(|file| file.sync_all())
+            .map_err(io)?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(io(error)),
     }
@@ -448,8 +487,11 @@ pub(super) fn acknowledged(
         2 => Acknowledgement::Refused,
         _ => return Err(invalid("invalid queue refresh acknowledgement outcome")),
     };
-    let sequence = u64::from_be_bytes(bytes[41..49].try_into()
-        .map_err(|_| invalid("invalid queue refresh acknowledgement sequence"))?);
+    let sequence = u64::from_be_bytes(
+        bytes[41..49]
+            .try_into()
+            .map_err(|_| invalid("invalid queue refresh acknowledgement sequence"))?,
+    );
     sync(&directory, &file)?;
     Ok(Some((acknowledgement, sequence)))
 }
@@ -463,9 +505,15 @@ pub(super) fn acknowledge(
 ) -> Result<(), TrustedWorkflowFailure> {
     let original = attempt.bytes()?;
     if read_record(root, &attempt.name())? != original {
-        return Err(invalid("queue refresh acknowledgement lost its original attempt"));
+        return Err(invalid(
+            "queue refresh acknowledgement lost its original attempt",
+        ));
     }
-    let tag = if matches!(terminal.outcome, DecisionOutcome::Committed { .. }) { 1 } else { 2 };
+    let tag = if matches!(terminal.outcome, DecisionOutcome::Committed { .. }) {
+        1
+    } else {
+        2
+    };
     let mut bytes = Vec::with_capacity(ACK_BYTES);
     bytes.extend_from_slice(ACK_MAGIC);
     bytes.extend_from_slice(&sha256_digest(&original));
@@ -481,8 +529,10 @@ pub(super) fn acknowledge(
 }
 
 fn sync(directory: &Path, file: &Path) -> Result<(), TrustedWorkflowFailure> {
-    File::open(file).and_then(|file| file.sync_all())
-        .and_then(|()| File::open(directory)?.sync_all()).map_err(io)
+    File::open(file)
+        .and_then(|file| file.sync_all())
+        .and_then(|()| File::open(directory)?.sync_all())
+        .map_err(io)
 }
 
 #[cfg(test)]

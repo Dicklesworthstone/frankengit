@@ -142,6 +142,13 @@ fn generated_large_payload_roundtrips_through_pinned_native_companion_and_cold_c
         retried.contains("\"objects_already_present\":1"),
         "{retried}"
     );
+    let verified = invoke_streaming(&verify_args(
+        &target,
+        &target_custody,
+        GitHashAlgorithm::Sha1,
+    ));
+    assert!(verified.contains("\"custody_verified\":true"), "{verified}");
+    assert!(verified.contains(&format!("\"payload_bytes\":{}", object.size)));
     assert_eq!(
         invoke_streaming(&args("inventory", &target, GitHashAlgorithm::Sha1)),
         pins

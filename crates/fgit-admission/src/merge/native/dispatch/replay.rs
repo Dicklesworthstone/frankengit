@@ -15,7 +15,9 @@ use fgit_codec::{
     CryptoBodyIdentity, OutboxDeliveryIdentityInput, derive_outbox_delivery_key,
 };
 use fgit_resource::ObligationState;
-use fgit_types::{AsciiSlug, Digest, DigestAlgorithmId, DigestBytes, RefusalCode, TxId};
+use fgit_types::{
+    AsciiSlug, Digest, DigestAlgorithmId, DigestBytes, RefusalCode, RepositoryAuthorityHeadId, TxId,
+};
 
 pub const REPLAY_REQUEST_NAMESPACE: &[u8] = b"frankengit/admission/outbox-replay-request/v1/";
 pub const REPLAY_CLASS: AsciiSlug = AsciiSlug::from_static("forge-replay");
@@ -307,6 +309,33 @@ where
     P: AsyncAdmissionProjection<S> + ?Sized,
     C: Fn() -> Result<(), RefusalCode> + Sync,
 {
+    enqueue_replay_at_head_async(
+        store, cx, context, intent, None, projection, limits, checkpoint,
+    )
+    .await
+}
+
+/// Enqueue against an optional exact authority head. This is a fresh-publication
+/// precondition, not a new semantic request or a new transaction identity.
+/// Recover an already decided identical request before testing the head: its
+/// original publication necessarily advanced that head, and a lost response
+/// must not strand the obligation or grant another send. Every fresh CAS plan,
+/// including a replan after another writer wins, retains the supplied guard.
+pub async fn enqueue_replay_at_head_async<S, P, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    intent: &ReplayIntent,
+    expected_head: Option<RepositoryAuthorityHeadId>,
+    projection: &P,
+    limits: AdmissionLimits,
+    checkpoint: &C,
+) -> Result<AsciiSlug, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: AsyncAdmissionProjection<S> + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
     limits.validate()?;
     checkpoint().map_err(unavailable)?;
     let semantic = intent.request(context.object_format)?;
@@ -375,6 +404,9 @@ where
         };
         if let OutcomeLookup::Decided(terminal) = outcome {
             return recover_created_key(store, cx, context, tx, terminal, checkpoint).await;
+        }
+        if expected_head.is_some_and(|head| head != basis.id()) {
+            return Err(unavailable(RefusalCode::EvidenceStale));
         }
         let source = source_for_route(store, cx, &basis, intent, &|| checkpoint().is_err()).await?;
         if source.payload_root() != intent.payload

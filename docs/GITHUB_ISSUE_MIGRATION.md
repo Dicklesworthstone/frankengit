@@ -41,7 +41,12 @@ existing importer format for explicit diagnosis, not automatic fallback.
 The profile permits at most 128 fixed batches, 64 MiB of captured source,
 128 MiB of saved native request records and 10,000 native mutation steps. Each
 child keeps the existing 100-issue, 2,000-comment, 1-MiB capture and 16-MiB request
-ceilings. A caller may lower capture/request/step budgets. The remaining global
+ceilings, with at most 2,200 compiled commands. Capture v2 adds final native
+locks after all comments and any close; each lock spends both the child and
+aggregate command budgets. Capture v1 commands and saved plans stay unchanged.
+The complete preflight binds each capture's dialect and every later lock request
+before any earlier batch can contact the destination. A caller may lower
+capture/request/step budgets. The remaining global
 request-byte allowance is passed into each child's writer, so a failing child
 cannot overspend the session's saved-request bound. This option leaves existing
 single-batch callers and their manifest format unchanged.

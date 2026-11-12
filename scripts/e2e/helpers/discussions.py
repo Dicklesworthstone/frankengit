@@ -51,9 +51,12 @@ def campaign(fg, work, fmt):
         return value
 
     def command(family, action, number, version, key, fields=(), storage=None):
-        return [family, action, root if storage is None else storage, tenant, repository,
+        args = [family, action, root if storage is None else storage, tenant, repository,
                 number, "--trusted-local", "--object-format", fmt, "--principal", actor,
-                "--idempotency-key", key, "--expected-version", version, *fields]
+                "--idempotency-key", key]
+        if version is not None:
+            args.extend(["--expected-version", version])
+        return [*args, *fields]
 
     def mutation(family, action, number, version, key, fields=(), expected=0):
         value = invoke(command(family, action, number, version, key, fields), expected)
@@ -254,6 +257,56 @@ def campaign(fg, work, fmt):
     final = read()
     assert final["discussion"] == current["discussion"] and final["events"] == current["events"]
     passed("RESTART-RECOVERY")
+
+    # Explicit append requests preserve their identity as the aggregate changes.
+    # Each invocation is a fresh process. Forced CAS interleavings are separately
+    # exercised by the admission and native-node regression targets.
+    mutation("discussion", "open", 11, 0, "append-discussion-open",
+             ["--title", "Concurrent replies", "--body", "Original description"])
+    appended_body = "Independent é\r\n<script>literal reply</script>"
+    append_fields = ["--body", appended_body]
+    appended = mutation("discussion", "append-comment", 11, None, "append-first-private", append_fields)
+    mutation("discussion", "append-comment", 11, None, "append-second-private", append_fields)
+    mutation("discussion", "edit", 11, 3, "append-preserved-edit", ["--title", "Preserved title"])
+    mutation("discussion", "append-comment", 11, None, "append-third-private", ["--body", "After edit"])
+    mutation("discussion", "close", 11, 5, "append-closed-discussion")
+    mutation("discussion", "append-comment", 11, None, "append-closed-private", ["--body", "Closed but unlocked"])
+    append_state = read(number=11)
+    assert append_state["discussion"]["version"] == 7
+    assert append_state["discussion"]["comments"] == 4
+    assert append_state["discussion"]["title"] == "Preserved title"
+    assert append_state["discussion"]["body"] == "Original description"
+    assert append_state["discussion"]["state"] == "closed"
+    assert [event["action"]["body"] for event in append_state["events"]
+            if event["action"]["name"] == "comment"] == [appended_body, appended_body, "After edit", "Closed but unlocked"]
+    passed("APPEND-PRESERVES-CHANGES")
+
+    mutation("discussion", "lock", 11, 7, "append-lock")
+    refused_fields = ["--body", "Refused even after later unlock"]
+    append_refused = mutation("discussion", "append-comment", 11, None, "append-refused-private", refused_fields, 3)
+    assert append_refused["refusal_code"] == "ProtectedRefTransitionDenied"
+    same_outcome(appended, mutation("discussion", "append-comment", 11, None, "append-first-private", append_fields))
+    mutation("discussion", "unlock", 11, 8, "append-unlock")
+    same_outcome(append_refused, mutation("discussion", "append-comment", 11, None, "append-refused-private", refused_fields, 3))
+    strict_stale = mutation("discussion", "comment", 11, 1, "append-strict-twin", ["--body", "Strict remains stale"], 3)
+    assert strict_stale["refusal_code"] == "EvidenceStale"
+    assert read(number=11)["discussion"]["comments"] == 4
+    passed("APPEND-LOCK-STRICT-TWINS")
+
+    before_append_retry = read(action="list")["snapshot_token"]
+    for action, version, fields in [
+        ("append-comment", None, ["--body", "Changed bytes"]),
+        ("comment", 1, append_fields),
+    ]:
+        conflict = invoke(command("discussion", action, 11, version, "append-first-private", fields), 2, False)
+        assert conflict.stdout == b"" and b"idempotency key already bound" in conflict.stderr
+    invalid = invoke(command("discussion", "append-comment", 11, 9, "append-invalid-version", append_fields), 2, False)
+    assert invalid.stdout == b"" and b"inapplicable discussion option" in invalid.stderr
+    recover("append-first-private", appended)
+    recover("append-refused-private", append_refused)
+    same_outcome(appended, mutation("discussion", "append-comment", 11, None, "append-first-private", append_fields))
+    assert read(action="list")["snapshot_token"] == before_append_retry
+    passed("APPEND-ORIGINAL-RECOVERY")
     return {"format": fmt, "commands": calls, "result": "passed", "checks": checks}
 
 

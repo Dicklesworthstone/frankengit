@@ -24,7 +24,7 @@ fn profile() -> Profile {
             .with(RepositoryHttpService::Outcomes, false)
             .with(RepositoryHttpService::Pulls, false)
             .with(RepositoryHttpService::Source, false),
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         lfs: None,
         http: HttpLimits::default(),
         maximum_response_bytes: 1024,

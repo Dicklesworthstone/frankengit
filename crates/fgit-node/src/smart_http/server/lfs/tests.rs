@@ -21,6 +21,7 @@ use crate::{
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, NodeConfig, PushQuota, WriterGate,
 };
 
+mod range;
 mod streaming;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -35,7 +36,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let root = base.join(format!(
             "fg-lfs-http-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

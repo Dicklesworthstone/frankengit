@@ -182,8 +182,7 @@ impl BodyCache {
         // Preflight the complete entry before evicting anything, and make room
         // before allocating either key copy or the body. Oversized candidates
         // therefore leave useful entries intact.
-        while state.bodies.len() >= self.max_entries
-            || state.accounted_bytes > self.budget - charge
+        while state.bodies.len() >= self.max_entries || state.accounted_bytes > self.budget - charge
         {
             if !state.evict_oldest() {
                 // Recency is only an acceleration. If it ever disagrees with

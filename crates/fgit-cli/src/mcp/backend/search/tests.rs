@@ -280,14 +280,21 @@ fn failures_are_sanitized_not_empty_searches() {
 #[test]
 fn tool_schema_disallows_unknown_authority_fields() {
     let descriptors = tools();
-    // Literal/regex, batch, and Rust declaration search (frankengit_source_symbols).
-    assert_eq!(descriptors.len(), 3);
-    assert_eq!(descriptors[2].name, SYMBOLS_NAME);
+    // Literal/regex, batch, Rust declaration search, and persisted index paging.
+    assert_eq!(descriptors.len(), 4);
     assert_eq!(descriptors[0].name, NAME);
-    let schema = descriptors[0].schema.object().unwrap();
-    assert_eq!(schema["additionalProperties"], Value::Bool(false));
-    let properties = schema["properties"].object().unwrap();
-    assert!(!properties.contains_key("principal"));
-    assert!(!properties.contains_key("storage"));
+    assert_eq!(descriptors[1].name, BATCH_NAME);
+    assert_eq!(descriptors[2].name, SYMBOLS_NAME);
+    assert_eq!(descriptors[3].name, INDEXED_NAME);
+    for descriptor in &descriptors {
+        let schema = descriptor.schema.object().unwrap();
+        assert_eq!(schema["additionalProperties"], Value::Bool(false));
+        let properties = schema["properties"].object().unwrap();
+        assert!(!properties.contains_key("principal"));
+        assert!(!properties.contains_key("storage"));
+    }
+    let properties = descriptors[0].schema.object().unwrap()["properties"]
+        .object()
+        .unwrap();
     assert!(properties.contains_key("expected_head"));
 }

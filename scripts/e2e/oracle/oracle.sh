@@ -47,6 +47,93 @@ PIN_URL=""
 PIN_SHA256=""
 PIN_ARCHIVE=""
 
+oracle_resolve_missing_path() {
+    local target="$1"
+    if realpath -m -- / >/dev/null 2>&1; then
+        realpath -m -- "${target}" && printf .
+        return
+    fi
+    local cur="/"
+    local missing_depth=0
+    local hops=0
+    local remaining="${target#/}"
+    local comp=""
+    local next=""
+    local resolved=""
+    local link_target=""
+    local readlink_bin=""
+    while [[ -n "${remaining}" ]]; do
+        if [[ "${remaining}" == */* ]]; then
+            comp="${remaining%%/*}"
+            remaining="${remaining#*/}"
+        else
+            comp="${remaining}"
+            remaining=""
+        fi
+        case "${comp}" in
+            ""|".")
+                continue
+                ;;
+            "..")
+                if (( missing_depth > 0 )); then
+                    missing_depth=$((missing_depth - 1))
+                fi
+                if [[ "${cur}" != "/" ]]; then
+                    cur="$(dirname -- "${cur}" && printf .)" || return 1
+                    cur="${cur%.}"
+                    cur="${cur%$'\n'}"
+                fi
+                continue
+                ;;
+        esac
+        if [[ "${cur}" == "/" ]]; then
+            next="/${comp}"
+        else
+            next="${cur}/${comp}"
+        fi
+        if (( missing_depth > 0 )); then
+            cur="${next}"
+            missing_depth=$((missing_depth + 1))
+            continue
+        fi
+        if [[ -L "${next}" ]]; then
+            hops=$((hops + 1))
+            (( hops <= 40 )) || return 1
+            if resolved="$(realpath -- "${next}" 2>/dev/null && printf .)"; then
+                cur="${resolved%.}"
+                cur="${cur%$'\n'}"
+            else
+                if command -v readlink >/dev/null 2>&1; then
+                    readlink_bin="readlink"
+                elif [[ -x /usr/bin/readlink ]]; then
+                    readlink_bin="/usr/bin/readlink"
+                else
+                    return 1
+                fi
+                link_target="$("${readlink_bin}" -n -- "${next}" && printf .)" || return 1
+                link_target="${link_target%.}"
+                if [[ -n "${remaining}" ]]; then
+                    remaining="${link_target}/${remaining}"
+                else
+                    remaining="${link_target}"
+                fi
+                if [[ "${link_target}" == /* ]]; then
+                    cur="/"
+                    remaining="${remaining#/}"
+                fi
+            fi
+        elif [[ -e "${next}" ]]; then
+            resolved="$(realpath -- "${next}" 2>/dev/null && printf .)" || return 1
+            cur="${resolved%.}"
+            cur="${cur%$'\n'}"
+        else
+            cur="${next}"
+            missing_depth=1
+        fi
+    done
+    printf '%s\n.' "${cur}"
+}
+
 oracle_root() {
     local root="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
     case "${root}" in
@@ -68,7 +155,7 @@ oracle_root() {
     oracle_require_command realpath
     # The sentinel preserves pathname LFs through command substitution. Remove
     # only the sentinel and the tool's one line terminator before validation.
-    root="$(realpath -m -- "${root}" && printf .)" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
+    root="$(oracle_resolve_missing_path "${root}")" || oracle_die "UNAVAILABLE" "cannot resolve oracle root"
     root="${root%.}"
     root="${root%$'\n'}"
     case "${root}" in

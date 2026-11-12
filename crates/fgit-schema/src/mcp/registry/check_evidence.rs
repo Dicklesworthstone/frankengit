@@ -263,21 +263,43 @@ mod tests {
         assert_eq!(find_tool(READ.name), Some(&READ));
         assert_eq!(find_tool_version(READ.name, 1), Some(&READ));
         assert!(find_tool_version(READ.name, 2).is_none());
-        assert_eq!(READ.capability, CapabilityRequirement::READ_WORKFLOW_ARTIFACT);
+        assert_eq!(
+            READ.capability,
+            CapabilityRequirement::READ_WORKFLOW_ARTIFACT
+        );
         assert_eq!(READ.read_mutation, ReadMutationClass::ReadOnly);
         assert_eq!(READ.principal, PrincipalRequirement::None);
         assert_eq!(READ.idempotency, IdempotencyRequirement::NotApplicable);
-        assert_eq!(READ.authority_root, InputAuthorityRootRequirement::ExactSnapshotToken);
+        assert_eq!(
+            READ.authority_root,
+            InputAuthorityRootRequirement::ExactSnapshotToken
+        );
         assert_eq!(READ.pagination, PaginationRules::OffsetBytes);
         assert_eq!(READ.receipt, EvidenceReceiptClass::None);
         assert_eq!(READ.cancellation, CancellationBehavior::SerialGracefulDrain);
         assert_eq!(
-            INPUT.iter().filter(|field| field.required).map(|field| field.name).collect::<Vec<_>>(),
-            ["number", "check", "expected_head", "expected_evidence_sha256"]
+            INPUT
+                .iter()
+                .filter(|field| field.required)
+                .map(|field| field.name)
+                .collect::<Vec<_>>(),
+            [
+                "number",
+                "check",
+                "expected_head",
+                "expected_evidence_sha256"
+            ]
         );
         for forbidden in [
-            "artifact_id", "path", "artifact_root", "tenant_id", "repository_id",
-            "incarnation", "principal", "idempotency_key", "expected_version",
+            "artifact_id",
+            "path",
+            "artifact_root",
+            "tenant_id",
+            "repository_id",
+            "incarnation",
+            "principal",
+            "idempotency_key",
+            "expected_version",
         ] {
             assert!(!INPUT.iter().any(|field| field.name == forbidden));
         }
@@ -297,7 +319,11 @@ mod tests {
         assert!(OUTPUT.iter().all(|field| field.required));
         for name in ["page", "content_hex"] {
             assert_eq!(
-                OUTPUT.iter().find(|field| field.name == name).unwrap().classification,
+                OUTPUT
+                    .iter()
+                    .find(|field| field.name == name)
+                    .unwrap()
+                    .classification,
                 FieldClassification::UntrustedContent
             );
         }
@@ -314,8 +340,14 @@ mod tests {
                 field: "content_hex",
             })
         );
-        assert!(OUTPUT.iter().find(|field| field.name == "approval_granted")
-            .unwrap().description.starts_with("False;"));
+        assert!(
+            OUTPUT
+                .iter()
+                .find(|field| field.name == "approval_granted")
+                .unwrap()
+                .description
+                .starts_with("False;")
+        );
         assert_eq!(OUTPUT.last().unwrap().field_type, "null");
     }
 }

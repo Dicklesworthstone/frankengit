@@ -37,8 +37,7 @@
 //! # Typed non-claim: `forge_position_root`
 //!
 //! This vocabulary says nothing about how `forge_position_root` is laid out,
-//! and neither [`RootLayoutVersion::RefStateMerkleV1`] nor
-//! [`RootLayoutVersion::RefStateAndObjectClosureMerkleV1`] changes it.
+//! and no version defined here changes it.
 //!
 //! A Merkle layout for forge positions needs a canonical forge materialisation
 //! to commit to. `frankengit-fg029a` landed one while this was being written,
@@ -131,6 +130,22 @@ pub enum RootLayoutVersion {
     /// That invariant belongs where head transitions are validated — this crate
     /// names a layout, it does not police publication.
     RefStateAndObjectClosureMerkleV1,
+    /// A version-two ref tree with one typed symbolic-HEAD leaf followed by
+    /// direct refs in canonical name order. The mandatory first leaf commits
+    /// to absence or the exact branch target, including an unborn target.
+    /// A typed root envelope authenticates the exact total leaf count and raw
+    /// tree apex. No Git object identity represents a symbolic ref.
+    ///
+    /// This is wire code point 4; code point 3 stays reserved for forge
+    /// positions. Versions 1 and 2 keep their historical direct-ref-only
+    /// commitment and proof meaning. Their staged HEAD is not authenticated.
+    /// Adoption is an explicit authority transition, never reinterpretation
+    /// of a published root. Other roots retain the legacy layout.
+    RefStateMerkleV2,
+    /// The version-two HEAD-bound ref tree and the object-closure proof family
+    /// admitted by `RefStateAndObjectClosureMerkleV1`. Its object-closure
+    /// adoption and authority-binding obligations remain unchanged. Wire code 5.
+    RefStateAndObjectClosureMerkleV2,
 }
 
 impl RootLayoutVersion {
@@ -139,6 +154,8 @@ impl RootLayoutVersion {
         Self::LegacyWholeBody,
         Self::RefStateMerkleV1,
         Self::RefStateAndObjectClosureMerkleV1,
+        Self::RefStateMerkleV2,
+        Self::RefStateAndObjectClosureMerkleV2,
     ];
 
     /// Compile-time completeness guard for [`RootLayoutVersion::ALL`].
@@ -160,7 +177,9 @@ impl RootLayoutVersion {
         match value {
             Self::LegacyWholeBody
             | Self::RefStateMerkleV1
-            | Self::RefStateAndObjectClosureMerkleV1 => (),
+            | Self::RefStateAndObjectClosureMerkleV1
+            | Self::RefStateMerkleV2
+            | Self::RefStateAndObjectClosureMerkleV2 => (),
         }
     }
 
@@ -171,6 +190,8 @@ impl RootLayoutVersion {
             Self::LegacyWholeBody => 0,
             Self::RefStateMerkleV1 => 1,
             Self::RefStateAndObjectClosureMerkleV1 => 2,
+            Self::RefStateMerkleV2 => 4,
+            Self::RefStateAndObjectClosureMerkleV2 => 5,
         }
     }
 
@@ -201,13 +222,16 @@ impl RootLayoutVersion {
     pub const fn admits_ref_state_membership_proof(self) -> bool {
         match self {
             Self::LegacyWholeBody => false,
-            Self::RefStateMerkleV1 | Self::RefStateAndObjectClosureMerkleV1 => true,
+            Self::RefStateMerkleV1
+            | Self::RefStateAndObjectClosureMerkleV1
+            | Self::RefStateMerkleV2
+            | Self::RefStateAndObjectClosureMerkleV2 => true,
         }
     }
 
     /// Whether this layout admits a membership proof for the object closure.
     ///
-    /// Only [`Self::RefStateAndObjectClosureMerkleV1`] does.
+    /// Only the two `RefStateAndObjectClosureMerkle` layouts do.
     /// [`Self::LegacyWholeBody`] does not because a whole-body digest cannot be
     /// walked with a sibling path — and [`Self::RefStateMerkleV1`] does not for
     /// exactly the same reason: it advances the *ref state* only, and its own
@@ -226,8 +250,33 @@ impl RootLayoutVersion {
     #[must_use]
     pub const fn admits_object_closure_membership_proof(self) -> bool {
         match self {
-            Self::LegacyWholeBody | Self::RefStateMerkleV1 => false,
-            Self::RefStateAndObjectClosureMerkleV1 => true,
+            Self::LegacyWholeBody | Self::RefStateMerkleV1 | Self::RefStateMerkleV2 => false,
+            Self::RefStateAndObjectClosureMerkleV1 | Self::RefStateAndObjectClosureMerkleV2 => true,
+        }
+    }
+
+    /// Whether the ref-root authenticates the optional symbolic-HEAD target.
+    /// Historical v1 Merkle layouts authenticate direct refs only. Their
+    /// staged HEAD must not drive advertisement, protection or migration.
+    #[must_use]
+    pub const fn commits_head_target(self) -> bool {
+        match self {
+            Self::LegacyWholeBody
+            | Self::RefStateMerkleV2
+            | Self::RefStateAndObjectClosureMerkleV2 => true,
+            Self::RefStateMerkleV1 | Self::RefStateAndObjectClosureMerkleV1 => false,
+        }
+    }
+
+    /// Selects the v2 typed-HEAD leaf and v2 direct-ref/proof schema. Legacy
+    /// whole-body state also authenticates HEAD but has no Merkle proof family.
+    #[must_use]
+    pub const fn uses_head_aware_ref_merkle(self) -> bool {
+        match self {
+            Self::RefStateMerkleV2 | Self::RefStateAndObjectClosureMerkleV2 => true,
+            Self::LegacyWholeBody
+            | Self::RefStateMerkleV1
+            | Self::RefStateAndObjectClosureMerkleV1 => false,
         }
     }
 }

@@ -204,7 +204,7 @@ def run_case(c: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
     oracle("fsck", "fsck", "--full", "--strict", "--no-reflogs")
     run_native_bundle_case(c, home, fmt, source, base, base_tree, original, BEFORE, oracle)
     offline_compilers_case(c, home, fmt, source, base, result_tree, candidate, commit_body, expected_objects, oracle)
-    c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v1")
+    c.run("init", repository, TENANT, REPOSITORY, fmt, "--root-layout", "ref-merkle-v2")
     c.run("import", repository, TENANT, REPOSITORY, PRINCIPAL, "operator-workspace-import", source)
     initial_index = json.loads(c.run("index", repository, TENANT, REPOSITORY, fmt, REF, "build", "genesis"))
     credentials, incarnation = c.credentials(repository, home)

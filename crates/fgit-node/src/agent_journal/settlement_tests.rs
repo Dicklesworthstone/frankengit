@@ -139,7 +139,7 @@ fn configuration(store: &MemoryAuthorityStore) -> Digest {
     stage_revocation_aware_repository_incarnation_configuration(
         store,
         &RepositoryIncarnationConfigurationBodyV2_2 {
-            root_layout: RootLayoutVersion::RefStateMerkleV1,
+            root_layout: RootLayoutVersion::RefStateMerkleV2,
             object_format: GitFormat::Sha256,
             repository_incarnation_id: INCARNATION,
             policy_root: None,

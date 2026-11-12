@@ -35,6 +35,22 @@ test('discussion actions preserve literal bytes and enforce bounded exact comman
   assert.deepEqual(discussionAction('edit', { body: '' }), { body: '' });
   assert.deepEqual(discussionAction('unlock', {}), {});
 });
+test('append requests carry only literal body and never reinterpret strict history or predecessors', () => {
+  const body = '\nA & B 雪 🦀 %2F\n', request = discussionMutationRequest(7, null, 'append-comment', { body });
+  assert.equal(request.expected_version, null);
+  assert.equal(request.action, 'append-comment');
+  assert.deepEqual([...new URLSearchParams(request.body)], [['body', body]]);
+  for (const version of [0, 1, undefined, '1', Number.MAX_SAFE_INTEGER]) {
+    assert.throws(() => discussionMutationRequest(7, version, 'append-comment', { body }));
+  }
+  for (const fields of [{}, { body: ' \n' }, { body: '\0' }, { body: '\ud800' },
+      { body: '雪'.repeat(21846) }, { body, expected_version: 1 }, { body, principal: actor },
+      { body, title: 'wrong profile' }]) assert.throws(() => discussionMutationRequest(7, null, 'append-comment', fields));
+  assert.throws(() => discussionMutationRequest(7, null, 'comment', { body }));
+  assert.throws(() => discussionAction('append-comment', { body }));
+  assert.throws(() => discussionHistory({ ...history, discussion: { ...row, version: 2, comments: 1 },
+    events: [...history.events, { version: 2, actor, action: { name: 'append-comment', body } }] }, 7));
+});
 test('discussion reads require exact scope, repository, ordering and continuation', () => {
   assert.equal(discussionPage(page).head, head);
   assert.equal(discussionHistory(history, 7).reply.found, true);
@@ -119,4 +135,69 @@ test('outcome recovery does not replay a discussion and absence never clears cus
   assert.throws(() => client.discardUnsent()); decided = true;
   assert.equal((await client.recover()).tx, 'original-tx'); assert.equal(client.pending, null);
   assert.ok(calls.every(call => call.url.endsWith('/outcomes'))); client.disconnect();
+});
+
+test('lost append replies restore and retry the original profile and exact bytes', async () => {
+  const calls = [], appendTerminal = { ...terminal, expected_version: null, action: 'append-comment' };
+  const first = fresh(async (url, options) => { calls.push({ url: String(url), ...options }); throw new Error('reply lost'); });
+  await first.connect(token); await first.stage(7, null, 'append-comment', { body: 'Original & 雪\n' }, binding);
+  const pending = first.pending;
+  await assert.rejects(first.send(), error => error.outcomeUnknown === true);
+  const receipt = first.exportReceipt(); first.disconnect();
+  assert.equal(receipt.includes(token), false);
+  const restored = fresh(async (url, options) => { calls.push({ url: String(url), ...options }); return json(appendTerminal); });
+  await restored.connect(token); await restored.restoreReceipt(receipt);
+  assert.equal(restored.pending.expected_version, null);
+  assert.equal(restored.pending.action, 'append-comment');
+  assert.equal(restored.pending.key, pending.key);
+  assert.equal((await restored.send()).tx, terminal.tx_id);
+  assert.equal(restored.pending, null);
+  for (const call of calls) {
+    assert.ok(call.url.endsWith('/discussions/7/append-comment'));
+    assert.equal(call.body, pending.body);
+    assert.equal(call.headers['Idempotency-Key'], pending.key);
+    assert.equal(new URLSearchParams(call.body).has('expected_version'), false);
+  }
+  restored.disconnect();
+});
+
+test('saved discussion receipts cannot change between strict and append profiles', async () => {
+  const cryptoImpl = { subtle: webcrypto.subtle, getRandomValues(value) { value.fill(6); return value; } };
+  const strict = new DiscussionClient({ href, cryptoImpl }), append = new DiscussionClient({ href, cryptoImpl });
+  await strict.connect(token); await append.connect(token);
+  await strict.stage(7, 1, 'comment', { body: 'Same text' }, binding);
+  await append.stage(7, null, 'append-comment', { body: 'Same text' }, binding);
+  const originalStrict = JSON.parse(strict.exportReceipt()), originalAppend = JSON.parse(append.exportReceipt());
+  assert.notEqual(originalStrict.request.key, originalAppend.request.key);
+  for (const [original, replacement] of [[originalStrict, originalAppend], [originalAppend, originalStrict]]) {
+    const forged = structuredClone(original);
+    for (const field of ['expected_version', 'action', 'fields', 'body']) forged.request[field] = replacement.request[field];
+    const restored = new DiscussionClient({ href, cryptoImpl }); await restored.connect(token);
+    await assert.rejects(restored.restoreReceipt(JSON.stringify(forged)), /does not commit/);
+    assert.equal(restored.pending, null); restored.disconnect();
+  }
+  strict.disconnect(); append.disconnect();
+});
+
+test('append custody requires matching profile, family, predecessor and terminal status', async () => {
+  const committed = { ...terminal, action: 'append-comment', expected_version: null };
+  const refused = { ...committed, outcome: 'refused', repository_commit_id: null,
+    refusal_record_id: 'locked-rcr', refusal_code: 'protected_ref_transition_denied' };
+  for (const [reply, status] of [[committed, 200], [refused, 409]]) {
+    const client = fresh(async () => json(reply, status)); await client.connect(token);
+    await client.stage(7, null, 'append-comment', { body: 'Original' }, binding);
+    assert.equal((await client.send()).outcome, reply.outcome);
+    assert.equal(client.pending, null); client.disconnect();
+  }
+  for (const [reply, status] of [[terminal, 200], [{ ...committed, action: 'comment' }, 200],
+      [{ ...committed, expected_version: 1 }, 200], [{ ...committed, type: 'issue_publication' }, 200],
+      [{ ...committed, number: 8 }, 200], [committed, 409], [refused, 200]]) {
+    const client = fresh(async () => json(reply, status)); await client.connect(token);
+    await client.stage(7, null, 'append-comment', { body: 'Original' }, binding);
+    const original = client.pending;
+    await assert.rejects(client.send());
+    assert.equal(client.pending.key, original.key);
+    assert.equal(client.pending.body, original.body);
+    assert.equal(client.pending.sent, true); client.disconnect();
+  }
 });

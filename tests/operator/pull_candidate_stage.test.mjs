@@ -16,6 +16,7 @@ import { pullHash, pullCanonical } from '../../scripts/operator/pull_command.mjs
 import { submitPull, recoverPull } from '../../scripts/operator/remote_pull.mjs';
 import { resolutionPeer, TOKEN } from './pull_resolution_fixture.mjs';
 import { candidatePeer } from './pull_candidate_fixture.mjs';
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 const CLI = resolve('scripts/fg_pull_candidate.mjs'), ROTATED = 'b'.repeat(64), REVIEWER = '00000000000000000000000000000001';
 function choice(p, action = 'approve') {
   return { action, principal_id: action === 'merge' ? 'e'.repeat(32) : REVIEWER, candidate_commit: p.f.candidate,
@@ -95,7 +96,7 @@ const consent = (intent, bundle) => ({ bundle, confirmKey: intent.key, confirmCa
   ...(intent.action === 'merge' ? { confirmMergeMethod: intent.fields.method } : {}) });
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) {
   for (const action of ['approve', 'request-changes', 'merge']) for (const state of ['committed', 'refused']) {
-    test(`${algorithm} ${method} ${action} ${state}: resolved package -> executable stage -> unchanged sender -> recovery`, async t => {
+    test(`${algorithm} ${method} ${action} ${state}: resolved package -> executable stage -> unchanged sender -> recovery`, LINUX_ORACLE, async t => {
       const { p, f } = await setup(t, { algorithm, method, choice: 'file', bytes: Buffer.from([0, 255, 10]), mode: '100755', commandHandle: commands(state) });
       await writeFile(f.choices, candidateCanonical(choice(p, action)), { mode: 0o600 });
       const result = await cli(t, args(f)); assert.equal(result.code, 0, result.err); assert.equal(p.requests.length, 5);
@@ -116,7 +117,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     });
   }
 }
-test('lost response recovers with original key after both package and saved bundle are removed', async t => {
+test('lost response recovers with original key after both package and saved bundle are removed', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t, { commandHandle: commands('committed', true) });
   const staged = await stageCandidateReview(selection(f, choice(p)), TOKEN);
   p.intent = await loadPullIntent(f.request); const bundle = await loadPullBundle(f.request, p.intent);
@@ -127,7 +128,7 @@ test('lost response recovers with original key after both package and saved bund
   await assert.rejects(stageCandidateReview(selection(f, choice(p)), TOKEN));
   assert.equal((await loadPullIntent(f.request)).key, staged.key);
 });
-test('staging does not waive the production sender key, candidate, method or credential confirmations', async t => {
+test('staging does not waive the production sender key, candidate, method or credential confirmations', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t, { commandHandle: commands() });
   await stageCandidateReview(selection(f, choice(p, 'merge')), TOKEN);
   p.intent = await loadPullIntent(f.request); const bundle = await loadPullBundle(f.request, p.intent), options = consent(p.intent, bundle);
@@ -138,7 +139,7 @@ test('staging does not waive the production sender key, candidate, method or cre
   assert.equal(p.requests.length, 5); assert.equal(p.sent, undefined);
   assert.equal((await submitPull(p.intent, TOKEN, options)).outcome.state, 'committed');
 });
-for (const bad of ['pin', 'bundle', 'choice', 'token-mode', 'occupied']) test(`stage ${bad} refuses without creating or replacing a request`, async t => {
+for (const bad of ['pin', 'bundle', 'choice', 'token-mode', 'occupied']) test(`stage ${bad} refuses without creating or replacing a request`, LINUX_ORACLE, async t => {
   const { p, f } = await setup(t), original = choice(p);
   await writeFile(f.choices, candidateCanonical(original), { mode: 0o600 });
   if (bad === 'pin') f.hash = '0'.repeat(64);
@@ -150,21 +151,21 @@ for (const bad of ['pin', 'bundle', 'choice', 'token-mode', 'occupied']) test(`s
   if (bad === 'occupied') assert.equal(await readFile(join(f.request, 'intent.json'), 'utf8'), '{partial');
   else await assert.rejects(lstat(f.request), { code: 'ENOENT' });
 });
-test('two executable stagers have one immutable request winner', async t => {
+test('two executable stagers have one immutable request winner', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t); await writeFile(f.choices, candidateCanonical(choice(p)), { mode: 0o600 });
   const results = await Promise.all([cli(t, args(f)), cli(t, args(f))]);
   const winner = results.filter(r => r.code === 0); assert.equal(winner.length, 1);
   assert.ok([2, 3].includes(results.find(r => r.code !== 0).code));
   assert.equal((await loadPullIntent(f.request)).key, JSON.parse(winner[0].out).key); assert.equal(p.requests.length, 5);
 });
-test('closed stdout retains the complete staged request and bounded completion receipt', async t => {
+test('closed stdout retains the complete staged request and bounded completion receipt', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t); await writeFile(f.choices, candidateCanonical(choice(p)), { mode: 0o600 });
   const result = await cli(t, args(f), true); assert.equal(result.code, 3, result.err);
   const intent = await loadPullIntent(f.request), receipt = JSON.parse(result.err).completed;
   assert.equal(receipt.key, intent.key); assert.deepEqual(await loadPullBundle(f.request, intent), p.f.bundle);
   assert.equal(result.err.includes(TOKEN), false); assert.equal(p.requests.length, 5);
 });
-test('stage input mutation and pre-cancellation cannot select a different action or request', async t => {
+test('stage input mutation and pre-cancellation cannot select a different action or request', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t), input = selection(f, choice(p)), expected = structuredClone(input);
   const pending = stageCandidateReview(input, TOKEN); input.choices.action = 'merge'; input.request_dir = join(f.root, 'other');
   const done = await pending; assert.equal(done.action, expected.choices.action); assert.equal(done.request_dir, expected.request_dir);
@@ -173,17 +174,17 @@ test('stage input mutation and pre-cancellation cannot select a different action
   await assert.rejects(lstat(join(f.root, 'cancelled')), { code: 'ENOENT' }); assert.equal(p.requests.length, 5);
 });
 for (const extra of [['--bundle', 'other'], ['--ca-file', 'other'], ['--endpoint', 'https://other.invalid/repo'], ['--force', 'true']]) {
-  test(`offline staging grammar refuses ${extra[0]}`, async t => {
+  test(`offline staging grammar refuses ${extra[0]}`, LINUX_ORACLE, async t => {
     const { p, f } = await setup(t); await writeFile(f.choices, candidateCanonical(choice(p)), { mode: 0o600 });
     const result = await cli(t, [...args(f), ...extra]); assert.equal(result.code, 2); assert.equal(p.requests.length, 5);
   });
 }
-test('stage refuses an output inside its source package and leaves that package loadable', async t => {
+test('stage refuses an output inside its source package and leaves that package loadable', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t); f.request = join(f.package, 'request');
   await assert.rejects(stageCandidateReview(selection(f, choice(p)), TOKEN), /candidate_output_inside_package/);
   await loadCandidatePackage(f.package, f.hash); assert.equal(p.requests.length, 5);
 });
-test('resolve refuses an output inside its original conflict package', async t => {
+test('resolve refuses an output inside its original conflict package', LINUX_ORACLE, async t => {
   const { p, f, original } = await setup(t);
   const source = await saveCandidatePackage(join(f.root, 'conflict'), original.capture);
   await writeFile(f.choices, candidateCanonical(p.choices), { mode: 0o600 });
@@ -194,7 +195,7 @@ test('resolve refuses an output inside its original conflict package', async t =
   assert.equal(code, 2, err); assert.match(err, /candidate_output_inside_package/);
   await loadCandidatePackage(source.path, source.sha256); assert.equal(p.requests.length, 5);
 });
-test('draft refuses to invalidate its source package by writing a file inside it', async t => {
+test('draft refuses to invalidate its source package by writing a file inside it', LINUX_ORACLE, async t => {
   const { p, f } = await setup(t); await writeFile(f.choices, candidateCanonical(choice(p)), { mode: 0o600 });
   const result = await cli(t, ['draft', '--package', f.package, '--sha256', f.hash,
     '--choices', f.choices, '--output', join(f.package, 'draft.json')]);
@@ -202,7 +203,7 @@ test('draft refuses to invalidate its source package by writing a file inside it
   await loadCandidatePackage(f.package, f.hash); assert.equal(p.requests.length, 5);
 });
 
-for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: ordinary clean candidates stage through the same CLI without resolution`, async t => {
+for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: ordinary clean candidates stage through the same CLI without resolution`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t, { algorithm, method: algorithm === 'sha256' ? 'squash' : 'merge-commit' });
   const root = await mkdtemp(join(tmpdir(), 'fg-stage-clean-')); await chmod(root, 0o700);
   t.after(() => rm(root, { recursive: true, force: true }));

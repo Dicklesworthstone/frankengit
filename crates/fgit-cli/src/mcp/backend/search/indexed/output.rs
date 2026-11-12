@@ -32,12 +32,7 @@ fn numeric(value: &Value, strings: bool) -> Result<u64, ToolError> {
         value.unsigned().ok_or_else(invalid)
     }
 }
-fn counter(
-    fields: &mut Object,
-    name: &str,
-    strings: bool,
-    maximum: u64,
-) -> Result<u64, ToolError> {
+fn counter(fields: &mut Object, name: &str, strings: bool, maximum: u64) -> Result<u64, ToolError> {
     let number = numeric(fields.get(name).ok_or_else(invalid)?, strings)?;
     if number > maximum {
         return Err(invalid());
@@ -79,9 +74,14 @@ fn native_oid(fields: &Object, name: &str, scope: &Scope) -> Result<(), ToolErro
 }
 fn provenance(fields: &Object, query: &input::Query, scope: &Scope) -> Result<(), ToolError> {
     if query.mode == input::Mode::Exact {
-        if ["source_mode", "current_source", "indexed_source", "distinct_provenance"]
-            .iter()
-            .any(|name| fields.contains_key(*name))
+        if [
+            "source_mode",
+            "current_source",
+            "indexed_source",
+            "distinct_provenance",
+        ]
+        .iter()
+        .any(|name| fields.contains_key(*name))
         {
             return Err(invalid());
         }
@@ -215,10 +215,9 @@ pub(super) fn decode(
         || fields.get("published") != Some(&Value::Bool(false))
         || fields.get("ref").and_then(Value::text) != Some(query.reference.as_str())
         || required_text(fields, "ref_hex")? != hex(query.reference.as_bytes())
-        || query
-            .head
-            .as_ref()
-            .is_some_and(|head| fields.get("snapshot_token").and_then(Value::text) != Some(head.as_str()))
+        || query.head.as_ref().is_some_and(|head| {
+            fields.get("snapshot_token").and_then(Value::text) != Some(head.as_str())
+        })
         || query.commit.is_some_and(|commit| {
             fields.get("source_commit").and_then(Value::text) != Some(commit.to_string().as_str())
         })
@@ -244,7 +243,12 @@ pub(super) fn decode(
         LexicalChannel::Content => "content",
         LexicalChannel::Path => "path",
     };
-    let terms: Vec<_> = query.query.terms().iter().map(|term| text(hex(term))).collect();
+    let terms: Vec<_> = query
+        .query
+        .terms()
+        .iter()
+        .map(|term| text(hex(term)))
+        .collect();
     let prefixes: Vec<_> = query
         .query
         .prefixes()
@@ -263,9 +267,13 @@ pub(super) fn decode(
     if index == 0
         || selected < index
         || query.generation.as_ref().is_some_and(|(token, number)| {
-            fields.get("index_token").and_then(Value::text) != Some(token.as_str()) || index != *number
+            fields.get("index_token").and_then(Value::text) != Some(token.as_str())
+                || index != *number
         })
-        || query.minimum.as_ref().is_some_and(|(_, floor)| selected < *floor)
+        || query
+            .minimum
+            .as_ref()
+            .is_some_and(|(_, floor)| selected < *floor)
     {
         return Err(invalid());
     }
@@ -337,7 +345,9 @@ pub(super) fn decode(
             let offset = counter(span, "byte_offset", false, 8 * 1024 * 1024)?;
             let length = counter(span, "byte_length", false, 128)?;
             if length != query.query.terms()[index].len() as u64
-                || offset.checked_add(length).is_none_or(|end| end > span_bound)
+                || offset
+                    .checked_add(length)
+                    .is_none_or(|end| end > span_bound)
             {
                 return Err(invalid());
             }

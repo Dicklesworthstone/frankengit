@@ -343,10 +343,7 @@ fn publication_receipt(
     let mut result = common::binding(backend, principal, false);
     result.extend(common::terminal(tx, &terminal));
     result.insert("type".into(), text("source_publication"));
-    result.insert(
-        "action".into(),
-        text(action),
-    );
+    result.insert("action".into(), text(action));
     result.insert("atomic".into(), Value::Bool(true));
     result.insert("complete".into(), Value::Bool(true));
     result.insert("historical_outcome".into(), Value::Bool(true));

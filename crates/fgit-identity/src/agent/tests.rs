@@ -53,12 +53,73 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         OUTCOMES_READ,
         SOURCE_READ,
         SOURCE_HISTORY_READ,
+        SOURCE_CANDIDATES,
+        MILESTONES_READ,
+        MILESTONES_WRITE,
         1 << 15,
     ] {
         assert_eq!(
             authenticated.authorize(operation),
             Err(AgentCredentialRefusal::OperationNotGranted)
         );
+    }
+}
+
+#[test]
+fn milestone_authentication_requires_explicit_independent_scopes_and_live_evidence() {
+    let old = AgentCredentialGrant {
+        operations: 0x03ff,
+        ..grant()
+    };
+    for scope in [MILESTONES_READ, MILESTONES_WRITE] {
+        let milestone = AgentCredentialGrant {
+            operations: scope,
+            ..grant()
+        };
+        let authenticated =
+            authenticate(&milestone, BEARER, 100, RevocationEvidence::Live).unwrap();
+        assert_eq!(authenticated.authorize(scope), Ok(()));
+        assert_eq!(authenticated.principal(), milestone.agent);
+        assert_eq!(authenticated.sponsor(), milestone.sponsor);
+        for other in (0..16).map(|bit| 1u16 << bit).filter(|bit| *bit != scope) {
+            assert_eq!(
+                authenticated.authorize(other),
+                Err(AgentCredentialRefusal::OperationNotGranted)
+            );
+        }
+        assert_eq!(
+            authenticate(&old, BEARER, 100, RevocationEvidence::Live)
+                .unwrap()
+                .authorize(scope),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+        for (now, revocation, expected) in [
+            (
+                99,
+                RevocationEvidence::Live,
+                AgentCredentialRefusal::NotYetValid,
+            ),
+            (
+                200,
+                RevocationEvidence::Live,
+                AgentCredentialRefusal::Expired,
+            ),
+            (
+                100,
+                RevocationEvidence::Revoked,
+                AgentCredentialRefusal::Revoked,
+            ),
+            (
+                100,
+                RevocationEvidence::NotChecked,
+                AgentCredentialRefusal::RevocationEvidenceRequired,
+            ),
+        ] {
+            assert_eq!(
+                authenticate(&milestone, BEARER, now, revocation),
+                Err(expected)
+            );
+        }
     }
 }
 
@@ -84,6 +145,7 @@ fn explicit_source_read_authentication_preserves_scope_lifetime_and_revocation()
         OUTCOMES_READ,
         SOURCE_READ | ISSUES_READ,
         SOURCE_HISTORY_READ,
+        SOURCE_CANDIDATES,
         SOURCE_READ | (1 << 15),
     ] {
         assert_eq!(
@@ -183,6 +245,40 @@ fn history_credential_cannot_be_used_for_current_source_or_metadata() {
             Err(expected)
         );
     }
+}
+
+#[test]
+fn candidate_credential_is_independent_and_preserves_expiry_and_revocation() {
+    let candidate = AgentCredentialGrant {
+        operations: SOURCE_CANDIDATES,
+        ..grant()
+    };
+    let authenticated = authenticate(&candidate, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.authorize(SOURCE_CANDIDATES), Ok(()));
+    for operation in (0..9).map(|bit| 1u16 << bit) {
+        assert_eq!(
+            authenticated.authorize(operation),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    let previous = AgentCredentialGrant {
+        operations: 0x01ff,
+        ..candidate
+    };
+    assert_eq!(
+        authenticate(&previous, BEARER, 100, RevocationEvidence::Live)
+            .unwrap()
+            .authorize(SOURCE_CANDIDATES),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    assert_eq!(
+        authenticate(&candidate, BEARER, 200, RevocationEvidence::Live),
+        Err(AgentCredentialRefusal::Expired)
+    );
+    assert_eq!(
+        authenticate(&candidate, BEARER, 100, RevocationEvidence::Revoked),
+        Err(AgentCredentialRefusal::Revoked)
+    );
 }
 
 #[test]

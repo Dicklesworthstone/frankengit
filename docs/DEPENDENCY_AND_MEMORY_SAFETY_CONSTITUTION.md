@@ -1,8 +1,8 @@
 # FrankenGit Dependency and Memory-Safety Constitution
 
-**Status:** normative pre-implementation constitution  
-**Version:** 1.0  
-**Last revised:** 2026-08-19
+**Status:** normative constitution  
+**Version:** 1.1  
+**Last revised:** 2026-11-11
 
 FrankenGit is a clean-room, pure-Rust implementation of Git hosting and forge semantics. It does not wrap the C Git implementation, `libgit2`, JGit, Dulwich, or another production Git engine. It does not link C/C++ libraries through FFI to obtain protocol, packfile, diff, compression, storage, TLS, database, or sandbox behavior. Existing Git implementations are permitted only as separately executed differential oracles inside conformance lanes; they never enter a FrankenGit production process or define an internal data structure by ABI accident.
 
@@ -37,11 +37,11 @@ The preferred dependency universe is:
 - franken_markdown for source-spanned parsing and safe deterministic rendering;
 - other FrankenSuite crates only through an explicit, pinned constellation.
 
-The adopted web/UI siblings and their guardrails are: `fastapi_rust` for the gateway/API; `sqlmodel_rust`, restricted to its `sqlmodel-frankensqlite` backend plus the exact core/query/schema/macros/session/pool closure needed for DERIVED projections only; and `frankentui` kernel crates for the TUI and optional alternate web surface. The sqlmodel C-SQLite/Postgres/MySQL backends, ftui demo/showcase closures, Tokio, and any unrelated default feature remain excluded. “Adopted” does not bypass admission: the owned sibling projects must first converge on the one selected Asupersync 0.4.x API/version, sqlmodel must remove unpublished absolute FrankenSQLite path patches, and each exact feature closure must pass the registry, unsafe, build-script/proc-macro, license, target, and conformance gates. Until then dependent FrankenGit integration remains blocked; the framework choices are not reopened.
+The adopted web/UI siblings and their guardrails are: `fastapi_rust` for the gateway/API; `sqlmodel_rust`, restricted to its `sqlmodel-frankensqlite` backend plus the exact core/query/schema/macros/session/pool closure needed for DERIVED projections only; and `frankentui` kernel crates for the TUI and optional alternate web surface. The sqlmodel C-SQLite/Postgres/MySQL backends, ftui demo/showcase closures, Tokio, and any unrelated default feature remain excluded. “Adopted” does not bypass admission: all consumed siblings must converge on the one admitted `asupersync 0.5.0` runtime constellation (`fsqlite 0.4.10`, `sqlmodel-frankensqlite 0.5.0`, published `ftui-runtime 0.10.0` / `ftui-a11y 0.10.0`, and `fastapi-rust 0.5.0`), avoid unpublished local path patches, and pass the registry, unsafe, build-script/proc-macro, license, target, and conformance gates. Note that per Owner Decision D1 (`2026-11-11`), FrankenGit ships its own pure-Rust HTTP gateway and embedded vanilla browser UI on `main`; `ftui-*` rows remain `specified` until a first-party TUI crate links them.
 
 There is no client or WASM exception to rules 1–2. Every first-party Rust crate, including L4 browser adapters, forbids unsafe. Unsafe emitted or linked by wasm-bindgen, a proc macro, or another admitted dependency remains transitive/generated dependency surface: it must be pinned, expanded where practicable, audited, feature-bounded, and recorded in the unsafe ledger. A feature that requires first-party unsafe or a lint relaxation is blocked pending an upstream correction.
 
-A sibling dependency is not automatically trusted because it is in the family. Before the first release-facing build that consumes a sibling, its exact revision, feature set, public contract, unsafe inventory, and claim level must be pinned in a checked-in `constellation.lock` evidence manifest and verified by the registry checker; no such manifest exists yet because no sibling dependency has been admitted.
+A sibling dependency is not automatically trusted because it is in the family. Every admitted sibling's exact version, Cargo.lock content checksum, feature set, public-contract fingerprint, unsafe inventory, and claim state are pinned in the checked-in [`constellation.lock`](../constellation.lock) evidence manifest (`state = admitted`) and verified by `fgit-registry-check`.
 
 The operational caller contract for Asupersync and FrankenSQLite—including production `Cx` creation, budget/outcome propagation, node lifecycle, obligation leak policy, connection ownership, whole-transaction retry, concurrency support limits, and shutdown—is maintained in [`ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md). Dependency admission must satisfy that contract as well as the graph-level checks here.
 
@@ -131,7 +131,7 @@ Every admitted dependency records:
 - the exact feature graph that keeps unrelated unsafe modules disabled;
 - a replacement or containment plan.
 
-The V1 target is zero first-party unsafe, zero foreign-language runtime code, and a sharply minimized, ledgered transitive unsafe surface. Cryptographic or platform primitives do not receive blanket exemptions.
+The V1 target is zero first-party unsafe, zero foreign-language runtime engines, and a sharply minimized, ledgered transitive unsafe surface. Cryptographic or platform primitives do not receive blanket exemptions. **Owner-approved constitutional carve-out (Decision D4, 2026-11-11):** `psm 0.1.32` (`DEP-262`, reached transitively via `fsqlite-core 0.4.10 -> stacker 0.1.25 -> psm 0.1.32` for deep SQL parser/evaluator recursion stack guards) is permitted to invoke `cc 1.4.3` (`DEP-182`) at build time solely to assemble and link its architecture-specific stack-pointer probe stub (`psm_s`). `blake3 1.8.7` remains forced pure-Rust (`DEP-181`/`DEP-220`), and `fgit-registry-check` audits native-linkage build-script outputs so any undeclared native object linkage fails closed.
 
 ## 6. Build-script and proc-macro policy
 
@@ -183,7 +183,7 @@ A release is blocked unless:
 
 - every first-party crate contains `#![forbid(unsafe_code)]`;
 - the workspace lint also forbids unsafe;
-- no production binary links a non-Rust object or shared library beyond the operating system ABI allowed by the target contract;
+- no production binary links a non-Rust object or shared library beyond the operating system ABI allowed by the target contract and the ledgered `psm_s` stack-pointer probe stub authorized by Owner Decision D4 (`DEP-262`);
 - no production feature invokes `git` or another foreign engine;
 - the dependency graph matches `registries/dependency_policy.tsv`;
 - all enabled transitive unsafe is acknowledged in the generated dependency evidence report;

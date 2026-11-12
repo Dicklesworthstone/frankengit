@@ -7,6 +7,7 @@ use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
 use fgit_forge::event::workflow_check::WorkflowCheckConclusion;
 use fgit_types::RefusalCode;
 
+#[derive(Clone)]
 pub(super) struct ExactChecks<'a> {
     subject: ReviewSubject,
     candidate: CandidateBinding,

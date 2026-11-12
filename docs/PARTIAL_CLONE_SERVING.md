@@ -1,10 +1,11 @@
 # Partial-clone serving through the native node
 
-The bounded raw Git-daemon profile now applies partial-clone filters to the
-actual outgoing pack and supports authorized lazy object requests. This extends
-[the exact-head visibility and tag boundary](UPLOAD_PACK_VISIBILITY_AND_TAGS.md);
-it does not add smart HTTP, SSH authentication, shallow history or a new
-canonical storage format.
+The native upload-pack selector applies partial-clone filters to the outgoing
+pack and supports authorized lazy object requests. Git-daemon, smart HTTP and
+SSH adapters share this selector and
+[the visibility and tag boundary](UPLOAD_PACK_VISIBILITY_AND_TAGS.md).
+[Shallow fetch](SHALLOW_FETCH_SERVING.md) clips history before filtering.
+Filters do not change canonical storage or retention.
 
 ## Client behavior
 
@@ -20,13 +21,52 @@ packs as promisor packs on the client. Subsequent explicit object requests use
 normal upload-pack negotiation and the native pack writer; there is no foreign
 Git process in production and no alternative object-disclosure route.
 
-The server supports `blob:none`, `blob:limit=<n>`, `tree:<depth>` and `combine:`
+The server supports `blob:none`, `blob:limit=<n>`, `tree:<depth>`, exact visible-blob
+`sparse:oid=<OID>` and `combine:`
 conjunctions, including percent-encoded compound terms. Blob-size suffixes
 `k`, `m`, and `g` (and uppercase forms) use checked binary scaling. Oversized,
 overflowing, malformed, over-nested or over-budget filters are typed refusals.
-Sparse filters and shallow controls do not silently fall back to full packs:
-unsupported production semantics remain typed refusals. Shallow support is not
-advertised by this profile.
+Unsupported filter grammar and semantics remain typed refusals.
+
+### Sparse pattern blobs
+
+Commit a sparse-checkout pattern file to a visible branch, independently obtain
+its complete native blob OID, and pass that OID to the clone:
+
+```sh
+git clone --no-checkout --filter=sparse:oid=<full-blob-oid> <repository-url> partial
+```
+
+The server accepts only an exact SHA-1 or SHA-256 OID in the repository's native
+domain. The pattern must be a blob in the current authenticated visible graph.
+Symbolic blob expressions such as `main:.sparse-patterns` and `sparse:path=`
+remain explicitly unsupported. No pattern can name a host filesystem path.
+
+Matching preserves raw path bytes and ordered sparse-checkout rules: anchored
+and basename matches, directory inheritance, exclusions and child reinclusion,
+`*`, `?`, component `**`, byte classes/ranges, escapes, comments and trailing
+space handling. The unnamed root has its own pattern-derived state. An excluded
+directory is still traversed; a positive child rule may select a descendant.
+POSIX named/collating/equivalence classes, malformed classes, reversed ranges,
+escaped path separators and trailing escapes refuse rather than inventing
+locale-dependent or approximate behavior.
+
+Sparse filters omit blobs only. Shared trees are revisited under each path;
+a blob survives when any visited path matches. Multiple sparse filters first
+form their own blob sets, then intersect those sets with each other and the
+other requested filters. Explicit lazy wants retain their existing semantics.
+Native combination behavior is defined and tested at the object-set level.
+Parity with pinned Git for shared blobs matching different paths in different
+sparse terms is unverified; the native test is not differential evidence.
+
+At most 32 distinct pattern blobs, 1 MiB of aggregate pattern bytes, 4,096
+aggregate rules, and 4,096 bytes per pattern line or complete repository path
+are admitted. Lower operator object/expanded-byte limits also apply. All pattern
+identities, kinds and sizes are checked before the first pattern body read.
+Reads use the original Database context and session deadline; compilation and
+every wildcard transition consume the existing selection work ledger. Tree
+traversal keeps one path buffer and a bounded frame stack. Verified local names
+are shared with the disposable projection and bounded by its charged tree bytes.
 
 ## Selection and authorization
 
@@ -44,7 +84,10 @@ zero; a longer path encountered first cannot hide a shared shallow subtree.
 Compound filters intersect their predicates.
 
 Explicitly requested objects bypass omission predicates, matching Git's
-provided-object semantics. A partial client's `have` commit does not prove that
+provided-object semantics. An explicitly requested annotated tag passes that
+status through its verified tag chain to the terminal blob or tree; descendants
+remain filtered, and directly held tags/targets retain their have exclusions.
+A partial client's `have` commit does not prove that
 an explicitly requested blob or tree is present. The selector restores such
 lazy object roots (and the required local subtree for a tree request), but only
 inside the already-verified visible scope. An explicit have of the same object
@@ -75,15 +118,20 @@ only after the whole selection succeeds. Pack planning and writing retain their
 native checksum, selected-object, byte, delta and deadline limits. No dependency,
 lockfile, schema or Beads closure is introduced by this implementation.
 
-The existing profile still eagerly verifies the complete visible graph before
-advertising. Filtering reduces transferred object data; this implementation does
-not claim that it avoids all server-side blob reads, lifts the configured full
-visible-graph envelope, or improves measured latency/throughput.
+The profile verifies visible commit/tree/tag bodies and blob metadata before
+advertising, with authenticated projection reuse. Sparse selection additionally
+reads its bounded pattern blobs; selected payloads are verified during pack
+materialization. Filtering reduces transferred data; it does not lift the full
+visible-graph envelope or establish measured latency/throughput gains.
 
 The native tests cover exact emitted bodies, both hash domains, v0/v1/v2,
 minimum shared-tree depth, exclusive blob thresholds, compound grammar,
 explicit lazy retrieval, common haves, unsupported controls, current visibility,
 read-only retention, inclusive resource limits and cancellation before output.
+Sparse-specific targets are `fgit-wire`'s `sparse_patterns` and
+`sparse_path_context`, and `fgit-node`'s `upload_visibility::tests::partial_clone::sparse`.
+They include shared subtrees, combined filters, native Git/HTTP pack bodies,
+restart, hidden/unknown pattern refusal and original Database cancellation.
 The optional pinned-Git campaign additionally checks real `.promisor` files,
 initial missing-object sets, exact lazy blob hydration and `fsck --strict`.
 It requires the repository-verified Git 2.54.0 oracle and Bubblewrap; unavailable
@@ -93,6 +141,8 @@ Git. Run it with:
 ```sh
 cargo test --locked -p fgit-node --lib \
   pinned_git_partial_clone_promisor_and_lazy_read_round_trip -- --ignored --nocapture
+cargo test --locked -p fgit-node --lib \
+  pinned_git_sparse_clone_records_promisor_and_lazily_recovers_omitted_blob -- --ignored --nocapture
 ```
 
 Execution results must be read at their named revisions; test presence alone

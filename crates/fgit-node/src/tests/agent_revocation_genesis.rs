@@ -92,8 +92,8 @@ fn agent_revocation_genesis_is_canonical_and_survives_exact_retry_and_reopen() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for layout in [
             RootLayoutVersion::LegacyWholeBody,
-            RootLayoutVersion::RefStateMerkleV1,
-            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            RootLayoutVersion::RefStateMerkleV2,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
         ] {
             let scratch = ScratchDirectory::new();
             let config = test_config(scratch.path().to_path_buf())
@@ -255,7 +255,7 @@ fn initialization_profile_conflicts_preserve_the_existing_canonical_head() {
         let scratch = ScratchDirectory::new();
         let config = test_config(scratch.path().to_path_buf())
             .with_object_format(GitHashAlgorithm::Sha256)
-            .with_root_layout(RootLayoutVersion::RefStateMerkleV1);
+            .with_root_layout(RootLayoutVersion::RefStateMerkleV2);
         let (node, status) = initialize(config.clone(), agent_revocations).unwrap();
         assert_eq!(status, NodeInitialization::Created);
         let (before, configuration) = selected_configuration(&node);

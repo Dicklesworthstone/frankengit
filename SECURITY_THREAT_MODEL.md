@@ -15,6 +15,14 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - A repository state is canonical only if reachable from the verified `RepositoryAuthorityHead` selected by an exact predecessor conditional replacement.
 - One sealed logical transaction has at most one terminal decision.
 - Ref and forge transitions belonging to one operation publish atomically in one RCR.
+- Symbolic HEAD, including its absence or unborn target, is authenticated by
+  whole-body ref roots or the explicit V2 ref Merkle layout. Historical V1
+  Merkle roots authenticate only direct refs and are refused for live node
+  state. Changing or removing an unbound HEAD must not redirect clones or
+  remove default-branch deletion protection under an unchanged authority head.
+- V2 ref roots authenticate total leaf count as well as the tree apex. Proof
+  indices and counts cannot be relabelled across odd-width tree shapes to
+  turn a later ref into the first direct ref and forge an absence claim.
 - No unpublished object, candidate batch, local row, cache, gossip message, or materialization may be reported as committed.
 - Head predecessor/generation, decision sequence, repository sequence, and authenticated roots cannot roll back or fork silently.
 - A higher acknowledged unresolved root fails closed rather than falling back quietly.
@@ -32,6 +40,14 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Every authority attempt binds an authenticated principal snapshot and effective capability root.
 - Capabilities are scoped by tenant/repository/ref/path/object/effect/secret/network/time/budget and revocable handle.
 - Delegation can only narrow authority.
+- Changing the canonical default branch requires a trusted-local operator and,
+  when review protection is installed, membership in its current administrator
+  set. A Git push grant, narrowed ref-write credential or canonically declared
+  agent principal cannot acquire this authority. Every CAS rechecks policy and
+  the exact old HEAD and new branch tip before publishing the HEAD-only RCR.
+  Hidden HEAD/branch names remain unavailable to administrators through this
+  operation. An exact historical terminal retry retains its earlier decision
+  after administrator rotation without reexecuting the change.
 - Canonical policy uses one exact input root and does not consult mutable projections, wall clock, network calls, or unversioned model output.
 - Stale/replayed/confused-deputy/cross-tenant capabilities fail deterministically.
 - Native issue assignments are bounded metadata links to opaque principal IDs.
@@ -506,6 +522,14 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+Sponsored milestone planning similarly uses independent `MILESTONES_READ` and
+`MILESTONES_WRITE` operations. Existing issue/source credential masks acquire no
+milestone access; milestone scopes expose metadata and aggregate issue counts,
+not issue text or issue mutation. HTTP and MCP intersect these scopes with their
+issue-service launch ceilings. The original request lifetime survives reads,
+publication and response output; admission revalidates the current credential at
+the publication basis, and retries retain original agent/sponsor evidence across
+rotation. An absent or completed MCP request cannot become trusted-local authority.
 Historical source analysis uses a separate `SOURCE_HISTORY_READ` credential bit.
 The HTTP and MCP hosts admit only bounded log, blame, historical tree/blob and
 reference-comparison queries under it; old metadata and current-source masks do

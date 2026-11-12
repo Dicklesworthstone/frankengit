@@ -85,11 +85,7 @@ fn decimal(args: &Object, name: &str) -> Result<Option<u64>, ToolError> {
         })
         .transpose()
 }
-fn pair(
-    args: &Object,
-    token: &str,
-    number: &str,
-) -> Result<Option<(String, u64)>, ToolError> {
+fn pair(args: &Object, token: &str, number: &str) -> Result<Option<(String, u64)>, ToolError> {
     match (bounded_text(args, token, 140)?, decimal(args, number)?) {
         (None, None) => Ok(None),
         (Some(token), Some(number)) => Ok(Some((token.to_owned(), number))),
@@ -277,7 +273,11 @@ pub(super) fn schema() -> Value {
     let mut properties = Object::new();
     properties.insert(
         "reference".into(),
-        string_field(1024, "Full visible UTF-8 refs/* name, at most 1024 native bytes.", None),
+        string_field(
+            1024,
+            "Full visible UTF-8 refs/* name, at most 1024 native bytes.",
+            None,
+        ),
     );
     properties.insert(
         "terms_hex".into(),
@@ -301,10 +301,26 @@ pub(super) fn schema() -> Value {
         );
     }
     for (name, maximum, description) in [
-        ("expected_head", 140, "Optional exact current source snapshot token; mandatory for continuation."),
-        ("expected_commit", 64, "Exact nonzero bare native commit hex in the launch hash domain; mandatory for continuation."),
-        ("index_token", 140, "Exact index identity paired with index_number; mandatory for continuation."),
-        ("minimum_index_token", 140, "Independent retained anti-rollback floor, paired with minimum_index_number."),
+        (
+            "expected_head",
+            140,
+            "Optional exact current source snapshot token; mandatory for continuation.",
+        ),
+        (
+            "expected_commit",
+            64,
+            "Exact nonzero bare native commit hex in the launch hash domain; mandatory for continuation.",
+        ),
+        (
+            "index_token",
+            140,
+            "Exact index identity paired with index_number; mandatory for continuation.",
+        ),
+        (
+            "minimum_index_token",
+            140,
+            "Independent retained anti-rollback floor, paired with minimum_index_number.",
+        ),
     ] {
         properties.insert(name.into(), string_field(maximum, description, None));
     }

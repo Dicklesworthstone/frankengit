@@ -11,9 +11,7 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::aggregate::{AggregateId, AggregateVersion, ExpectedVersion, QueueNumber};
-use fgit_forge::event::pull_request::{
-    PullRequestAction, PullRequestCommand, validate_transition,
-};
+use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, validate_transition};
 use fgit_forge::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_types::{AsciiSlug, GitHashAlgorithm, GitOid, PolicyEpoch, PrincipalId, RefusalCode};
 
@@ -45,7 +43,10 @@ impl QueueHeadRefreshCommand {
         format: GitHashAlgorithm,
     ) -> Result<ForgeEvent, RefusalCode> {
         if self.pull_request.action != PullRequestAction::Update
-            || !matches!(self.pull_request.expected_version, ExpectedVersion::Exactly(_))
+            || !matches!(
+                self.pull_request.expected_version,
+                ExpectedVersion::Exactly(_)
+            )
             || self.expected_recorded_target_tip.is_zero()
             || self.expected_recorded_target_tip.algorithm() != format
             || self.expected_recorded_target_tip == self.pull_request.data.target_tip
@@ -102,7 +103,10 @@ pub fn queue_head_refresh_proposal(
             )?,
             guard(
                 "queue-head-refresh.expected-recorded-target-tip",
-                command.expected_recorded_target_tip.to_string().into_bytes(),
+                command
+                    .expected_recorded_target_tip
+                    .to_string()
+                    .into_bytes(),
             )?,
         ],
     )?;
@@ -125,10 +129,8 @@ pub(in crate::merge) fn verify_refresh_event_seal(
     event: &ForgeEvent,
     attempt: &SealAttempt,
 ) -> Result<QueueHeadRefreshCommand, RefusalCode> {
-    let (
-        AggregateId::PullRequest(number),
-        ForgeEventPayload::PullRequestChangedNative(change),
-    ) = (event.aggregate, &event.payload)
+    let (AggregateId::PullRequest(number), ForgeEventPayload::PullRequestChangedNative(change)) =
+        (event.aggregate, &event.payload)
     else {
         return Err(RefusalCode::EvidenceInvalid);
     };
@@ -220,7 +222,9 @@ where
         if snapshot.hidden_refs.hides(data.source_ref.as_bytes())
             || snapshot.hidden_refs.hides(data.target_ref.as_bytes())
         {
-            return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized));
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::HiddenRefUnauthorized,
+            ));
         }
         Ok(())
     }
@@ -250,11 +254,12 @@ where
             &cancelled,
         )
         .await?;
-        let queue = queues.remove(&command.number).ok_or(ProjectionFailure::Refuse(
-            RefusalCode::ProtectedRefTransitionDenied,
-        ))?;
-        if hidden(&queue.target_ref)
-            || queue.entries.iter().any(|entry| hidden(&entry.source_ref))
+        let queue = queues
+            .remove(&command.number)
+            .ok_or(ProjectionFailure::Refuse(
+                RefusalCode::ProtectedRefTransitionDenied,
+            ))?;
+        if hidden(&queue.target_ref) || queue.entries.iter().any(|entry| hidden(&entry.source_ref))
         {
             return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
         }
@@ -263,7 +268,9 @@ where
         let position = resolved
             .forge
             .entry(storage::aggregate_label(aggregate)?)
-            .ok_or(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+            .ok_or(ProjectionFailure::Refuse(
+                RefusalCode::ProtectedRefTransitionDenied,
+            ))?;
         let batch = storage::read_events(
             store,
             cx,
@@ -286,10 +293,9 @@ where
                 (&change.source_ref, &change.target_ref)
             }
             _ => {
-                return Err(ProjectionFailure::Refuse(
-                    RefusalCode::ProtectedRefTransitionDenied,
-                )
-                .into());
+                return Err(
+                    ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied).into(),
+                );
             }
         };
         if hidden(source) || hidden(target) {
@@ -304,7 +310,9 @@ where
             || queue.active_batch.is_some()
             || queue.entries.first().map(|entry| entry.pull_request) != Some(pull.number)
         {
-            return Err(ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied).into());
+            return Err(
+                ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied).into(),
+            );
         }
         let entry = queue.entries.first().ok_or(ProjectionFailure::Refuse(
             RefusalCode::ProtectedRefTransitionDenied,
@@ -320,9 +328,7 @@ where
         validate_transition(Some(selected), event).map_err(ProjectionFailure::Refuse)?;
         let mut refreshed = previous.clone();
         refreshed.target_tip = pull.data.target_tip;
-        if previous.target_tip != command.expected_recorded_target_tip
-            || refreshed != pull.data
-        {
+        if previous.target_tip != command.expected_recorded_target_tip || refreshed != pull.data {
             return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
         }
         if snapshot.refs.get(&pull.data.source_ref) != Some(&pull.data.source_tip)
@@ -330,7 +336,9 @@ where
         {
             return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
         }
-        projection.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
+        projection
+            .merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
         Ok(projection
             .validate_pull_request_async(store, cx, basis, authenticated, pull)
             .await?)

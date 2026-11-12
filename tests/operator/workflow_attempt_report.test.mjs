@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { configuration, dispatchReport } from '../../scripts/operator/workflow_watch.mjs';
 import { markerMatches } from '../../scripts/operator/workflow_attempt_report.mjs';
 import { watchConfig, intentFor, nativeReport, attemptMarker, encode, sha256, hex } from './fixtures/workflow_log_native.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 function fixture(format = 'sha1', options = {}) {
   const raw = watchConfig('/fixture', format);
@@ -23,7 +24,7 @@ function prepare(f) {
 const sharedInputs = () => ({ profile: 'verified-reflink-or-copy-v1', cache_closed: true, reflink_supported: false,
   resident_bytes: 0, resident_entries: 0, seeded_bytes: 0, seeded_entries: 0, probe_entries: 2,
   cloned_bytes: 0, clone_operations: 0, fallback_bytes: 1622, fallback_files: 4, unsupported_files: 4, capacity_files: 0 });
-for (const format of ['sha1', 'sha256']) test(`${format}: drained shared-input statistics do not change immutable attempt identity`, () => {
+for (const format of ['sha1', 'sha256']) test(`${format}: drained shared-input statistics do not change immutable attempt identity`, LINUX_WORKFLOW, () => {
   const f = fixture(format), original = encode(f.marker);
   f.report.runs[0].shared_inputs = sharedInputs();
   assert.equal(Object.hasOwn(f.marker, 'shared_inputs'), false);
@@ -32,7 +33,7 @@ for (const format of ['sha1', 'sha256']) test(`${format}: drained shared-input s
   f.marker.source_tree = `${format}:${'d'.repeat(format === 'sha1' ? 40 : 64)}`;
   assert.throws(() => prepare(f), /Original workflow marker/);
 });
-test('shared-input observations require the closed native profile and bounded counters', () => {
+test('shared-input observations require the closed native profile and bounded counters', LINUX_WORKFLOW, () => {
   for (const mutate of [s => { s.cache_closed = false; }, s => { s.resident_bytes = 1; },
     s => { s.resident_entries = 1; }, s => { s.profile = 'unknown'; }, s => { s.reflink_supported = 'false'; },
     s => { s.fallback_bytes = -1; }, s => { s.probe_entries = Number.MAX_SAFE_INTEGER + 1; },
@@ -41,18 +42,18 @@ test('shared-input observations require the closed native profile and bounded co
     assert.throws(() => prepare(f));
   }
 });
-test('shared-input completion statistics cannot be inserted into the original start marker', () => {
+test('shared-input completion statistics cannot be inserted into the original start marker', LINUX_WORKFLOW, () => {
   const f = fixture(); f.report.runs[0].shared_inputs = sharedInputs(); f.marker.shared_inputs = sharedInputs();
   assert.throws(() => prepare(f));
 });
-for (const format of ['sha1', 'sha256']) test(`${format}: logs are post-execution observations, not missing start-marker inputs`, () => {
+for (const format of ['sha1', 'sha256']) test(`${format}: logs are post-execution observations, not missing start-marker inputs`, LINUX_WORKFLOW, () => {
   const f = fixture(format), bytes = encode(f.marker), journal = sha256(bytes);
   assert.equal(Object.hasOwn(f.marker, 'artifact_logs'), false);
   assert.equal(prepare(f).outcome, 'observed_succeeded');
   assert.equal(prepare(f).outcome, 'observed_succeeded');
   assert.deepEqual(encode(f.marker), bytes); assert.equal(sha256(encode(f.marker)), journal);
 });
-test('legacy file-only attempts retain the same marker and compiled-plan checks', () => {
+test('legacy file-only attempts retain the same marker and compiled-plan checks', LINUX_WORKFLOW, () => {
   const f = fixture('sha1', { legacy: true });
   assert.equal(Object.hasOwn(f.report.runs[0], 'artifact_logs'), false);
   assert.equal(Object.hasOwn(f.marker.artifact_contract, 'log_capture'), false);
@@ -80,17 +81,17 @@ const mutations = {
   'pre-execution success injected': f => { f.marker.execution_plan.succeeded = true; },
   'unknown input extension': f => { f.report.runs[0].future_execution_input = 'not-bound'; },
 };
-for (const [name, mutate] of Object.entries(mutations)) test(`publication preparation refuses ${name}`, () => {
+for (const [name, mutate] of Object.entries(mutations)) test(`publication preparation refuses ${name}`, LINUX_WORKFLOW, () => {
   const f = fixture(); prepare(f); mutate(f); assert.throws(() => prepare(f), /Original workflow marker/);
 });
-test('missing or invalid original start markers cannot authorize history selection', () => {
+test('missing or invalid original start markers cannot authorize history selection', LINUX_WORKFLOW, () => {
   const f = fixture();
   for (const marker of [null, [], {}, { ...f.marker, type: 'trusted_workflow_run' }, { ...f.marker, state: 'completed' },
     { ...f.marker, execution_plan: [] }, { ...f.marker, execution_plan: null }]) {
     assert.throws(() => markerMatches(marker, f.report.runs[0]), /Original workflow marker/);
   }
 });
-test('ignoring post-run arrays in marker matching never bypasses earlier receipt validation', () => {
+test('ignoring post-run arrays in marker matching never bypasses earlier receipt validation', LINUX_WORKFLOW, () => {
   for (const mutate of [
     r => { r.artifact_logs[0].logs[0].payload_sha256 = 'f'.repeat(64); },
     r => { r.artifact_logs[0].logs.pop(); }, r => { r.artifact_logs = []; },
@@ -101,7 +102,7 @@ test('ignoring post-run arrays in marker matching never bypasses earlier receipt
     assert.throws(() => prepare(f));
   }
 });
-test('failed and stopped log-producing runs stay non-green through both preparation gates', () => {
+test('failed and stopped log-producing runs stay non-green through both preparation gates', LINUX_WORKFLOW, () => {
   for (const outcome of ['failed', 'cancelled', 'timed_out', 'output_limit']) {
     const f = fixture('sha256', { outcome, stopped: outcome !== 'failed' });
     assert.notEqual(prepare(f).outcome, 'observed_succeeded');

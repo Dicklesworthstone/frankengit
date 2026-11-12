@@ -1016,15 +1016,23 @@ fn hidden_ref_rules_select_the_negotiation_scope_before_any_hidden_body_read() {
 }
 
 fn publish_tag_fixture(node: &OneNode, target: GitOid) -> (GitOid, GitOid, GitOid) {
+    publish_typed_tag_fixture(node, target, "commit")
+}
+
+fn publish_typed_tag_fixture(
+    node: &OneNode,
+    target: GitOid,
+    kind: &str,
+) -> (GitOid, GitOid, GitOid) {
     let inner = node
-        .put_git_object(ObjectType::Tag, tag_bytes(target, "commit"))
+        .put_git_object(ObjectType::Tag, tag_bytes(target, kind))
         .unwrap()
         .identity();
     let outer = node
         .put_git_object(ObjectType::Tag, tag_bytes(inner, "tag"))
         .unwrap()
         .identity();
-    let mut deleted_body = tag_bytes(target, "commit");
+    let mut deleted_body = tag_bytes(target, kind);
     deleted_body
         .extend_from_slice(b"formerly visible tag, never automatically resend after deletion\n");
     let deleted = node

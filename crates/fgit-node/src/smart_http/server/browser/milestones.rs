@@ -54,7 +54,7 @@ mod tests {
                 .with(RepositoryHttpService::Source, source)
                 .with(RepositoryHttpService::Issues, issues)
                 .with(RepositoryHttpService::Pulls, pulls),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             lfs: None,
             http: HttpLimits::default(),
             maximum_response_bytes: u64::MAX,

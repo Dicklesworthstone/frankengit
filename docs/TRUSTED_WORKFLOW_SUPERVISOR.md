@@ -120,8 +120,10 @@ waits for the stream's write callback; a stalled reader stops the service after
 a 30-second reporting deadline instead of accumulating unbounded output or
 starting more executions without reporting the prior cycle.
 Failed or timed-out reporting stops admission and releases ordinary writable
-streams. Their error listener remains until close so asynchronous destruction
-errors cannot escape after the original report failure has been returned.
+streams. Thrown failures never count as delivered observations, even when their
+error value is `null` or `undefined`. Their error listener remains until close
+so asynchronous destruction errors cannot escape after the original report
+failure has been returned.
 After awaited supervisor cleanup, the CLI reports the failure to stderr
 and exits explicitly: Node keeps stdout's descriptor open even after destroying
 that stream, so a blocked pipe write must not keep the failed process alive.

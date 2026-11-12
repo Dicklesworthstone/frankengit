@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { Writable } from 'node:stream';
 import { main } from '../../scripts/fg_workflow_watch.mjs';
 import { configuration, once, status, reconcile, serve } from '../../scripts/operator/workflow_watch.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const hex = value => Buffer.from(value).toString('hex');
 const peer = await readFile(new URL('./fixtures/workflow_watch_native.mjs', import.meta.url), 'utf8');
@@ -44,7 +45,7 @@ function child(args) {
   return { p, done, get output() { return output; } };
 }
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: new observed tip dispatches pinned native code, persists result, and is never replayed`, async t => {
+  test(`${format}: new observed tip dispatches pinned native code, persists result, and is never replayed`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format), result = await once(f.config);
     assert.equal(result.outcome, 'observed_succeeded'); assert.equal(result.authoritative_check, false);
     const calls = await f.lines('calls.ndjson'); assert.equal(calls.length, 2);
@@ -65,21 +66,21 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
     assert.equal((await f.lines('effects.ndjson')).length, 1);
   });
-  test(`${format}: a new commit runs, returning to an old commit does not duplicate its effects`, async t => {
+  test(`${format}: a new commit runs, returning to an old commit does not duplicate its effects`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format), first = await once(f.config), old = f.control.commit;
     await f.set({ commit: 'e'.repeat(old.length), source_head: 'new-head', snapshot: `alg:2:${'5'.repeat(64)}` });
     const next = await once(f.config); assert.notEqual(first.id, next.id);
     await f.set({ commit: old }); assert.equal((await once(f.config)).reason, 'commit_already_observed');
     assert.equal((await f.lines('effects.ndjson')).length, 2);
   });
-  test(`${format}: no-match and job failure remain explicit non-authoritative observations`, async t => {
+  test(`${format}: no-match and job failure remain explicit non-authoritative observations`, LINUX_WORKFLOW, async t => {
     const empty = await fixture(t, format, { no_match: true });
     const report = await once(empty.config); assert.equal(report.outcome, 'no_matching_workflows'); assert.equal(report.matched_count, 0);
     const failed = await fixture(t, format, { job_failure: true });
     assert.equal((await once(failed.config)).outcome, 'observed_failed');
     assert.equal((await once(failed.config)).reason, 'commit_already_observed');
   });
-  test(`${format}: lost stdout recovers the original saved report without running again`, async t => {
+  test(`${format}: lost stdout recovers the original saved report without running again`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, { drop_stdout: true });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -93,7 +94,7 @@ for (const format of ['sha1', 'sha256']) {
   });
 }
 
-test('missing branch is idle, whereas read refusal cannot be fabricated into absence', async t => {
+test('missing branch is idle, whereas read refusal cannot be fabricated into absence', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { references: [] });
   assert.equal((await once(f.config)).reason, 'branch_unavailable');
   assert.equal((await f.lines('effects.ndjson')).length, 0);
@@ -101,7 +102,7 @@ test('missing branch is idle, whereas read refusal cannot be fabricated into abs
   assert.equal((await status(f.config)).records.length, 0);
 });
 
-test('bounded reference pagination retains exact head and raw ref coordinates', async t => {
+test('bounded reference pagination retains exact head and raw ref coordinates', LINUX_WORKFLOW, async t => {
   const ref = hex('refs/heads/zz\u00e9'), f = await fixture(t, 'sha1', {}, { ref_hex: ref });
   const rows = Array.from({ length: 100 }, (_, i) => ({ reference_hex: hex(`refs/heads/a${String(i).padStart(3, '0')}`), tip: `sha1:${'c'.repeat(40)}` }));
   rows.push({ reference_hex: ref, tip: `sha1:${f.control.commit}` }); await f.set({ references: rows });
@@ -113,7 +114,7 @@ test('bounded reference pagination retains exact head and raw ref coordinates', 
   await assert.rejects(once(other.config), /snapshot moved/); assert.equal((await other.lines('effects.ndjson')).length, 0);
 });
 
-test('byte-only native ref/workflow names are passed as hex, never decoded into arguments', async t => {
+test('byte-only native ref/workflow names are passed as hex, never decoded into arguments', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', {}, { ref_hex: `${hex('refs/heads/')}ff`, workflow_directory_hex: `${hex('.github/')}fe` });
   assert.equal((await once(f.config)).outcome, 'observed_succeeded');
   const args = (await f.lines('calls.ndjson'))[1]; assert.equal(args[5], f.config.ref_hex);
@@ -123,7 +124,7 @@ for (const patch of [
   { page_patch: { tenant_id: '9'.repeat(32) } }, { page_patch: { node_closed: false } },
   { page_patch: { has_more: true, next_after_hex: hex('refs/heads/main') } },
   { page_patch: { references: [{ reference_hex: hex('refs/heads/main'), tip: `sha256:${'a'.repeat(64)}` }] } },
-]) test(`malformed or foreign reference observation refuses before native execution: ${JSON.stringify(patch)}`, async t => {
+]) test(`malformed or foreign reference observation refuses before native execution: ${JSON.stringify(patch)}`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', patch);
   await assert.rejects(once(f.config)); assert.equal((await f.lines('effects.ndjson')).length, 0);
 });
@@ -135,7 +136,7 @@ for (const patch of [
   { run_patch: { workspaces_closed: false } }, { run_patch: { authoritative_check: true } },
   { run_patch: { request_interrupted: true } }, { run_patch: { run_id: '8'.repeat(32) } },
   { exit_code: 1 },
-]) test(`native report mismatch leaves original responsibility pending: ${JSON.stringify(patch)}`, async t => {
+]) test(`native report mismatch leaves original responsibility pending: ${JSON.stringify(patch)}`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', patch);
   await assert.rejects(once(f.config));
   assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -143,7 +144,7 @@ for (const patch of [
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('native refuses a moved expected head; watcher never refreshes the original execution intent', async t => {
+test('native refuses a moved expected head; watcher never refreshes the original execution intent', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { change_after_read: { snapshot: `alg:2:${'9'.repeat(64)}`, source_head: 'new' } });
   await assert.rejects(once(f.config), /Dispatch unresolved/);
   assert.equal((await f.lines('effects.ndjson')).length, 0);
@@ -152,7 +153,7 @@ test('native refuses a moved expected head; watcher never refreshes the original
   await assert.rejects(once(f.config), /unresolved/);
 });
 
-test('absent report after execution blocks every later commit, including after process restart', async t => {
+test('absent report after execution blocks every later commit, including after process restart', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { no_report: true }); await assert.rejects(once(f.config));
   await f.set({ no_report: false, commit: 'e'.repeat(40) });
   assert.equal((await reconcile(f.config)).records[0].state, 'execution_unknown');
@@ -161,14 +162,14 @@ test('absent report after execution blocks every later commit, including after p
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('two concurrent owners cannot dispatch a second execution', async t => {
+test('two concurrent owners cannot dispatch a second execution', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { dispatch_delay: 150 });
   const first = once(f.config); await waitFor(async () => (await f.lines('effects.ndjson')).length === 1);
   await assert.rejects(once(f.config), error => error.code === 'EEXIST');
   await first; assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('signal cancellation drains a started native process and keeps its terminal report', async t => {
+test('signal cancellation drains a started native process and keeps its terminal report', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { dispatch_delay: 200 }), stop = new AbortController();
   const first = once(f.config, { signal: stop.signal });
   await waitFor(async () => (await f.lines('effects.ndjson')).length === 1); stop.abort();
@@ -176,20 +177,20 @@ test('signal cancellation drains a started native process and keeps its terminal
   assert.equal((await status(f.config)).owner_present, false);
 });
 
-test('watchdog failure retains owner lock and cannot be mistaken for child containment', async t => {
+test('watchdog failure retains owner lock and cannot be mistaken for child containment', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { dispatch_delay: 1000 });
   await assert.rejects(once(f.config, { dispatchTimeoutMs: 100 }), error => error.containment_unknown === true);
   const state = await status(f.config); assert.equal(state.owner_present, true); assert.equal(state.records[0].state, 'execution_unknown');
   await assert.rejects(once(f.config), error => error.code === 'EEXIST');
 });
 
-test('pre-aborted requests cannot spawn a child or create execution responsibility', async t => {
+test('pre-aborted requests cannot spawn a child or create execution responsibility', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), stop = new AbortController(); stop.abort();
   await assert.rejects(once(f.config, { signal: stop.signal }));
   assert.equal((await f.lines('calls.ndjson')).length, 0); assert.equal((await status(f.config)).records.length, 0);
 });
 
-test('configuration mutation, exhausted capacity and unsafe custody do not create a new run namespace', async t => {
+test('configuration mutation, exhausted capacity and unsafe custody do not create a new run namespace', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', {}, { max_runs: 1 }); await once(f.config);
   await assert.rejects(once({ ...f.config, event: 'workflow_dispatch' }), /configuration changed/);
   await f.set({ commit: 'e'.repeat(40) }); await assert.rejects(once(f.config), /capacity/);
@@ -200,7 +201,7 @@ test('configuration mutation, exhausted capacity and unsafe custody do not creat
   await assert.rejects(once({ ...f.config, state_directory: alias }), /symlink/);
 });
 
-test('config trust, byte paths and independent directory bounds are mandatory', async t => {
+test('config trust, byte paths and independent directory bounds are mandatory', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   for (const patch of [{ trust: 'yes' }, { event: 'pull_request' }, { object_format: 'sha512' }, { max_runs: 0 },
     { run_parent: f.config.state_directory }, { storage_root: '/' }, { input_prefixes_hex: [hex('src')] }, { input_prefixes_hex: [hex('.github'), hex('.github')] },
@@ -208,7 +209,7 @@ test('config trust, byte paths and independent directory bounds are mandatory', 
     { unknown: true }]) assert.throws(() => configuration({ ...f.config, ...patch }));
 });
 
-for (const format of ['sha1', 'sha256']) test(`${format}: nested workflow inputs pass unchanged to native dispatch and retain their namespace`, async t => {
+for (const format of ['sha1', 'sha256']) test(`${format}: nested workflow inputs pass unchanged to native dispatch and retain their namespace`, LINUX_WORKFLOW, async t => {
   const prefixes = [hex('.github/workflows'), hex('src/input'), hex('src/input-old')];
   const f = await fixture(t, format, {}, { input_prefixes_hex: prefixes });
   const observed = await once(f.config), calls = await f.lines('calls.ndjson');
@@ -220,7 +221,7 @@ for (const format of ['sha1', 'sha256']) test(`${format}: nested workflow inputs
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('input prefix ancestors are byte aligned and separated siblings remain permitted', async t => {
+test('input prefix ancestors are byte aligned and separated siblings remain permitted', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), select = values => configuration({ ...f.config, input_prefixes_hex: [hex('.github'), ...values] });
   assert.doesNotThrow(() => select([hex('src/input'), hex('src/input-old')]));
   assert.doesNotThrow(() => select(['f2', 'f2f1']));
@@ -228,7 +229,7 @@ test('input prefix ancestors are byte aligned and separated siblings remain perm
     ['f2f1', 'f2f12f61'], [hex('src/input'), hex('src/input')]]) assert.throws(() => select(paths));
 });
 
-test('native input count, component, depth and byte bounds apply before dispatch', async t => {
+test('native input count, component, depth and byte bounds apply before dispatch', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), select = values => configuration({ ...f.config, input_prefixes_hex: [hex('.github'), ...values.map(hex)] });
   assert.doesNotThrow(() => select(['x'.repeat(255), Array(64).fill('d').join('/')]));
   assert.throws(() => select(['x'.repeat(256)]));
@@ -242,7 +243,7 @@ test('native input count, component, depth and byte bounds apply before dispatch
   assert.throws(() => select(tooManyBytes), /source input paths exceed 64 KiB/);
 });
 
-test('actual CLI emits a machine-readable result and requires explicit trusted-local invocation', async t => {
+test('actual CLI emits a machine-readable result and requires explicit trusted-local invocation', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   const bad = await child(['once', '--config', f.configFile]).done; assert.equal(bad.code, 2);
   assert.equal((await f.lines('calls.ndjson')).length, 0);
@@ -252,7 +253,7 @@ test('actual CLI emits a machine-readable result and requires explicit trusted-l
   assert.equal(view.code, 0); assert.equal(JSON.parse(view.output).records.length, 1);
 });
 
-test('continuous service executes new tips, deduplicates idle polls and retains one owner', async t => {
+test('continuous service executes new tips, deduplicates idle polls and retains one owner', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), events = [];
   const result = await serve(f.config, { pollMs: 100, maxPolls: 3, onObservation: async event => {
     events.push(event); assert.equal((await status(f.config)).owner_present, true);
@@ -264,7 +265,7 @@ test('continuous service executes new tips, deduplicates idle polls and retains 
   assert.equal((await status(f.config)).owner_present, false);
 });
 
-test('ordinary failed jobs do not prevent a later tip from running', async t => {
+test('ordinary failed jobs do not prevent a later tip from running', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha256', { job_failure: true });
   const result = await serve(f.config, { pollMs: 100, maxPolls: 2, onObservation: async event => {
     if (event.outcome === 'observed_failed') await f.set({ job_failure: false, commit: 'e'.repeat(64) });
@@ -273,7 +274,7 @@ test('ordinary failed jobs do not prevent a later tip from running', async t => 
   assert.equal((await f.lines('effects.ndjson')).length, 2);
 });
 
-test('only observation reads receive bounded automatic retries', async t => {
+test('only observation reads receive bounded automatic retries', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { read_fail: true }), events = [];
   const result = await serve(f.config, { pollMs: 100, maxPolls: 3, onObservation: async event => {
     events.push(event); if (event.type === 'workflow_watch_observation_unavailable') await f.set({ read_fail: false });
@@ -283,21 +284,21 @@ test('only observation reads receive bounded automatic retries', async t => {
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('three consecutive native observation failures stop the service, without execution', async t => {
+test('three consecutive native observation failures stop the service, without execution', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { read_fail: true }), events = [];
   await assert.rejects(serve(f.config, { pollMs: 100, maxPolls: 10, onObservation: event => events.push(event) }), /observation unavailable/);
   assert.equal(events.length, 2); assert.equal((await f.lines('calls.ndjson')).length, 3);
   assert.equal((await f.lines('effects.ndjson')).length, 0);
 });
 
-test('continuous service does not retry execution failures as observation failures', async t => {
+test('continuous service does not retry execution failures as observation failures', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { no_report: true });
   await assert.rejects(serve(f.config, { pollMs: 100, maxPolls: 100 }), /Dispatch unresolved/);
   assert.equal((await f.lines('calls.ndjson')).length, 2);
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('observer failure is fatal after the completed run has been durably retained', async t => {
+test('observer failure is fatal after the completed run has been durably retained', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   await assert.rejects(serve(f.config, { pollMs: 100, maxPolls: 10, onObservation: () => { throw new Error('output lost'); } }),
     error => error.message === 'output lost' && error.retained_observation.outcome === 'observed_succeeded');
@@ -306,7 +307,7 @@ test('observer failure is fatal after the completed run has been durably retaine
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('stop during polling releases the owner without another native read', async t => {
+test('stop during polling releases the owner without another native read', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), stop = new AbortController();
   const result = await serve(f.config, { signal: stop.signal, pollMs: 60000, onObservation: () => { stop.abort(); } });
   assert.equal(result.stopped, true); assert.equal(result.polls, 1);
@@ -314,7 +315,7 @@ test('stop during polling releases the owner without another native read', async
   assert.equal((await status(f.config)).owner_present, false);
 });
 
-test('queued pre-execution intent resumes at its original pins without another source observation', async t => {
+test('queued pre-execution intent resumes at its original pins without another source observation', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { read_fail: true });
   const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -329,7 +330,7 @@ test('queued pre-execution intent resumes at its original pins without another s
   const calls = await f.lines('calls.ndjson'); assert.equal(calls.length, 1); assert.equal(calls[0][0], 'workflow');
 });
 
-test('corrupt local summary cannot gain check authority or alter complete-run accounting', async t => {
+test('corrupt local summary cannot gain check authority or alter complete-run accounting', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), result = await once(f.config), path = join(f.config.state_directory, `result-${result.id}.json`);
   const saved = JSON.parse(await readFile(path, 'utf8'));
   for (const patch of [{ authoritative_check: true }, { executed_count: 0 }, { outcome: 'no_matching_workflows' }]) {
@@ -339,7 +340,7 @@ test('corrupt local summary cannot gain check authority or alter complete-run ac
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('actual CLI SIGTERM drains active native dispatch and exits with retained observation', async t => {
+test('actual CLI SIGTERM drains active native dispatch and exits with retained observation', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { dispatch_delay: 300 });
   const run = child(['serve', '--config', f.configFile, '--trusted-local', '--poll-millis', '100', '--max-polls', '20']);
   t.after(() => { if (run.p.exitCode === null && run.p.signalCode === null) run.p.kill('SIGKILL'); });
@@ -352,7 +353,7 @@ test('actual CLI SIGTERM drains active native dispatch and exits with retained o
   assert.equal((await f.lines('calls.ndjson')).length, 2);
 });
 
-test('actual CLI SIGKILL between polls retains the owner lock; restart never steals it', async t => {
+test('actual CLI SIGKILL between polls retains the owner lock; restart never steals it', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   const run = child(['serve', '--config', f.configFile, '--trusted-local', '--poll-millis', '60000']);
   t.after(() => { if (run.p.exitCode === null && run.p.signalCode === null) run.p.kill('SIGKILL'); });
@@ -368,7 +369,7 @@ test('actual CLI SIGKILL between polls retains the owner lock; restart never ste
 });
 
 for (const signal of [null, 'SIGINT', 'SIGTERM']) {
-  test(`CLI reconciliation ${signal ? `honors delivered ${signal}` : 'completes with no stop request'} without replay`, async t => {
+  test(`CLI reconciliation ${signal ? `honors delivered ${signal}` : 'completes with no stop request'} without replay`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, 'sha1', { drop_stdout: true });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     const original = (await status(f.config)).records[0];
@@ -414,7 +415,7 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
   });
 }
 
-test('CLI output failure after native completion retains the result and reports delivery failure', async t => {
+test('CLI output failure after native completion retains the result and reports delivery failure', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); let diagnostic = '';
   const stdout = new Writable({ write(_chunk, _encoding, callback) { callback(Object.assign(new Error('broken output'), { code: 'EPIPE' })); } });
   const stderr = new Writable({ write(chunk, _encoding, callback) { diagnostic += chunk; callback(); } });
@@ -425,7 +426,7 @@ test('CLI output failure after native completion retains the result and reports 
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('CLI serve validates loop limits and refuses duplicate or inapplicable options', async t => {
+test('CLI serve validates loop limits and refuses duplicate or inapplicable options', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   for (const extra of [['--poll-millis', '99'], ['--max-polls', '1000001'], ['--max-polls', '01'],
     ['--max-polls', '1', '--max-polls', '2'], ['--retry', '1']]) {
@@ -439,7 +440,7 @@ test('CLI serve validates loop limits and refuses duplicate or inapplicable opti
   assert.equal(rows.length, 2); assert.equal(rows[1].poll_limit_reached, true);
 });
 
-test('offline status and report reconciliation survive loss of the native executable and source store', async t => {
+test('offline status and report reconciliation survive loss of the native executable and source store', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { drop_stdout: true });
   await assert.rejects(once(f.config), /Dispatch unresolved/);
   await unlink(f.config.fg); await rm(f.config.storage_root, { recursive: true });
@@ -448,7 +449,7 @@ test('offline status and report reconciliation survive loss of the native execut
   await assert.rejects(once(f.config));
 });
 
-test('pagination shares a whole-observation deadline rather than refreshing it per page', async t => {
+test('pagination shares a whole-observation deadline rather than refreshing it per page', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { read_delay: 100 }, { ref_hex: hex('refs/heads/zzzz') });
   const rows = Array.from({ length: 500 }, (_, i) => ({ reference_hex: hex(`refs/heads/a${String(i).padStart(3, '0')}`), tip: `sha1:${'c'.repeat(40)}` }));
   rows.push({ reference_hex: f.config.ref_hex, tip: `sha1:${f.control.commit}` }); await f.set({ references: rows });
@@ -458,7 +459,7 @@ test('pagination shares a whole-observation deadline rather than refreshing it p
 });
 
 for (const reason of ['request_stopped', 'output_budget_exhausted', 'workflow_refused', 'workflow_timed_out', 'workflow_output_limit']) {
-  test(`native ${reason} with closed workspaces settles as non-green and allows a later commit`, async t => {
+  test(`native ${reason} with closed workspaces settles as non-green and allows a later commit`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, 'sha1', { job_failure: true, report_patch: { stop_reason: reason }, run_patch: { request_interrupted: reason === 'request_stopped' } });
     const first = await once(f.config); assert.equal(first.outcome, 'observed_stopped'); assert.equal(first.stop_reason, reason);
     assert.equal(first.authoritative_check, false); assert.equal((await once(f.config)).reason, 'commit_already_observed');
@@ -468,7 +469,7 @@ for (const reason of ['request_stopped', 'output_budget_exhausted', 'workflow_re
   });
 }
 
-test('explicitly stopped unstarted children are counted, never silently resumed', async t => {
+test('explicitly stopped unstarted children are counted, never silently resumed', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { job_failure: true, report_patch: { stop_reason: 'request_stopped', runs: [], executed_count: 0 } });
   const result = await once(f.config); assert.equal(result.outcome, 'observed_stopped');
   assert.equal(result.matched_count, 1); assert.equal(result.executed_count, 0);
@@ -480,12 +481,12 @@ for (const patch of [
   { report_patch: { stop_reason: 'new_unknown_reason', succeeded: false } },
   { report_patch: { stop_reason: 'workflow_timed_out', succeeded: true } },
   { report_patch: { stop_reason: 'workflow_timed_out', succeeded: false }, run_patch: { workspaces_closed: false } },
-]) test(`stopped reports cannot hide uncertainty or claim success: ${JSON.stringify(patch)}`, async t => {
+]) test(`stopped reports cannot hide uncertainty or claim success: ${JSON.stringify(patch)}`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', patch); await assert.rejects(once(f.config));
   assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
 });
 
-test('settled native stops contribute to service non-green summary and CLI exit', async t => {
+test('settled native stops contribute to service non-green summary and CLI exit', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { job_failure: true, report_patch: { stop_reason: 'workflow_timed_out' } });
   const run = await child(['serve', '--config', f.configFile, '--trusted-local', '--max-polls', '1']).done;
   assert.equal(run.code, 1, run.errors);
@@ -498,15 +499,25 @@ for (const patch of [
   { execution_patch: { authoritative_check: true } }, { execution_patch: { jobs: [], succeeded: true } },
   { execution_patch: { profile: 'unregistered-sandbox' } }, { step_patch: { output_complete: false } },
   { step_patch: { exit_code: 1 } },
-]) test(`native job evidence is checked beneath top-level success: ${JSON.stringify(patch)}`, async t => {
+]) test(`native job evidence is checked beneath top-level success: ${JSON.stringify(patch)}`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', patch); await assert.rejects(once(f.config));
   assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
   assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('even a recognized timeout cannot conceal a retained native step workspace', async t => {
+test('even a recognized timeout cannot conceal a retained native step workspace', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { job_failure: true, report_patch: { stop_reason: 'workflow_timed_out' }, step_patch: { workspace_retained: true } });
   await assert.rejects(once(f.config), /containment/);
   await assert.rejects(reconcile(f.config), /containment/);
   assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
+});
+
+test('non-Linux host explicitly refuses the trusted-local Linux workflow profile', { skip: process.platform === 'linux' }, () => {
+  assert.throws(() => configuration({
+    schema: 'frankengit-workflow-watch-v1', fg: '/fixture/fg', storage_root: '/fixture/store',
+    tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32), object_format: 'sha1',
+    ref_hex: hex('refs/heads/main'), workflow_directory_hex: hex('.github/workflows'), input_prefixes_hex: [hex('.github')],
+    event: 'push', state_directory: '/fixture/state', run_parent: '/fixture/runs', max_runs: 16,
+    trust: 'selected-branch-host-execution',
+  }), /Select the explicit trusted-local Linux workflow profile\./);
 });

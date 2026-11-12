@@ -145,7 +145,6 @@ fn exercise_preparation_grants(operation: &str) {
     );
 }
 
-
 #[test]
 fn queue_refresh_requires_queue_and_pull_writes_from_one_credential_before_body_acceptance() {
     let credentials = Credentials::new();
@@ -170,11 +169,18 @@ fn queue_refresh_requires_queue_and_pull_writes_from_one_credential_before_body_
         ('7', "pulls-write,queues-read"),
     ] {
         let digest: String = sha256_digest(token.to_string().repeat(64).as_bytes())
-            .iter().map(|byte| format!("{byte:02x}")).collect();
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         table.push_str(&format!("{digest} {principal} {scopes} none\n"));
     }
     let path = credentials.0.join("refresh-tokens");
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
     file.write_all(table.as_bytes()).unwrap();
     drop(file);
     let mut enabled = profile();
@@ -182,7 +188,9 @@ fn queue_refresh_requires_queue_and_pull_writes_from_one_credential_before_body_
     enabled.services = RepositoryHttpServices::NONE.with(RepositoryHttpService::Pulls, true);
     enabled.credentials = CredentialSource::File { path, binding };
     let authenticate_refresh = |profile: &Profile, bytes: &[u8]| {
-        let envelope = fgit_wire::smart_http::head::parse(bytes, profile.http).unwrap().unwrap();
+        let envelope = fgit_wire::smart_http::head::parse(bytes, profile.http)
+            .unwrap()
+            .unwrap();
         let request = queues::Request::parse(&envelope)?;
         assert!(request.is_mutation() && request.accepts_body());
         queues::authenticate(&request, &envelope, bytes, profile)
@@ -192,9 +200,13 @@ fn queue_refresh_requires_queue_and_pull_writes_from_one_credential_before_body_
     let authenticated = session.authenticated_session().unwrap();
     assert_eq!(authenticated.principal_id(), principal);
     assert!(!authenticated.permits_ref_write_bytes(b"refs/heads/main"));
-    assert_eq!(authenticated.authentication(), fgit_admission::evidence::AdmissionAuthentication::HttpToken);
+    assert_eq!(
+        authenticated.authentication(),
+        fgit_admission::evidence::AdmissionAuthentication::HttpToken
+    );
     for token in ['1', '2', '3', '4', '5', '6', '7'] {
-        let error = authenticate_refresh(&enabled, &preparation_head("refresh", token, key)).unwrap_err();
+        let error =
+            authenticate_refresh(&enabled, &preparation_head("refresh", token, key)).unwrap_err();
         assert_eq!(error.status, Status::Forbidden, "token {token}");
         assert!(!error.outcome_unknown);
     }
@@ -204,11 +216,23 @@ fn queue_refresh_requires_queue_and_pull_writes_from_one_credential_before_body_
         if !queues {
             profile.config = super::profile().config;
         }
-        assert_eq!(authenticate_refresh(&profile, &preparation_head("refresh", '0', key))
-            .unwrap_err().status, Status::Forbidden);
+        assert_eq!(
+            authenticate_refresh(&profile, &preparation_head("refresh", '0', key))
+                .unwrap_err()
+                .status,
+            Status::Forbidden
+        );
     }
-    assert_eq!(authenticate_refresh(&enabled, &preparation_head("refresh", '0', ""))
-        .unwrap_err().code, "idempotency_key_required");
-    assert_eq!(authenticate_refresh(&enabled, &preparation_head("refresh", 'f', key))
-        .unwrap_err().status, Status::Unauthorized);
+    assert_eq!(
+        authenticate_refresh(&enabled, &preparation_head("refresh", '0', ""))
+            .unwrap_err()
+            .code,
+        "idempotency_key_required"
+    );
+    assert_eq!(
+        authenticate_refresh(&enabled, &preparation_head("refresh", 'f', key))
+            .unwrap_err()
+            .status,
+        Status::Unauthorized
+    );
 }

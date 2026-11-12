@@ -231,7 +231,10 @@ impl<'a> Request<'a> {
     pub(in crate::smart_http::server) const fn is_mutation(&self) -> bool {
         matches!(
             self.operation,
-            Operation::Mutate { .. } | Operation::Land { .. } | Operation::LandCandidate { .. } | Operation::Refresh { .. }
+            Operation::Mutate { .. }
+                | Operation::Land { .. }
+                | Operation::LandCandidate { .. }
+                | Operation::Refresh { .. }
         )
     }
 

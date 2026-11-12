@@ -29,3 +29,8 @@ execution of canonical engines rather than an alternate product runtime.
 emitting source and the mandatory `replay_completeness` field. The registry
 checker pins the four closed protocol spellings and refuses a source whose
 encoder no longer carries the declaration.
+
+`artifact_inventory.tsv` binds the forbidden-artifact gate in `fgit-registry-check`:
+active `keep` rows register explicit product inputs outside standard crate or
+`scripts/` locations, while `rejected` `remove` rows record prohibited
+patch-transport debris and fail verification if reintroduced on disk.

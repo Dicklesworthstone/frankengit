@@ -91,6 +91,26 @@ fn mcp_agent_publishes_metadata_and_recovers_original_sponsored_evidence_after_r
         );
         assert!(!failed(&discussion), "{discussion:?}");
         committed(result(&discussion));
+        let mut discussion_comment = recovery("agent-discussion-comment");
+        discussion_comment.insert("number".into(), text("7"));
+        discussion_comment.insert("body".into(), text("Sponsored discussion reply"));
+        let discussion_reply = invoke(
+            &mut server,
+            &mut backend,
+            14,
+            "frankengit_discussion_append_comment",
+            &discussion_comment,
+        );
+        assert!(!failed(&discussion_reply), "{discussion_reply:?}");
+        committed(result(&discussion_reply));
+        assert_eq!(
+            result(&discussion_reply).object().unwrap()["expected_version"],
+            Value::Null
+        );
+        assert_eq!(
+            result(&discussion_reply).object().unwrap()["action"],
+            text("append-comment")
+        );
 
         for (id, tool, entity) in [
             (6, "frankengit_issue_show", Some("issue")),
@@ -161,6 +181,7 @@ fn mcp_agent_publishes_metadata_and_recovers_original_sponsored_evidence_after_r
             "agent-pull-original",
             "agent-pull-comment",
             "agent-discussion-original",
+            "agent-discussion-comment",
         ] {
             let snapshot = provenance(&backend, retry);
             let witness = snapshot.agent_provenance().unwrap();
@@ -178,11 +199,22 @@ fn mcp_agent_publishes_metadata_and_recovers_original_sponsored_evidence_after_r
             *result(&first)
         );
         assert_eq!(provenance(&backend, "agent-issue-original"), original);
+        let discussion_provenance = provenance(&backend, "agent-discussion-comment");
+        assert_eq!(
+            backend
+                .call("frankengit_discussion_append_comment", &discussion_comment)
+                .unwrap(),
+            *result(&discussion_reply)
+        );
         // A live process must consult a new canonical frontier on its next call.
         revoke(&backend.node, fixture.credential_id, "revoke-primary");
         for (name, args) in [
             ("frankengit_issue_list", Object::new()),
             ("frankengit_issue_open", opening(9, "after-revocation")),
+            (
+                "frankengit_discussion_append_comment",
+                discussion_comment.clone(),
+            ),
             (
                 "frankengit_transaction_outcome",
                 recovery("agent-issue-original"),
@@ -222,6 +254,16 @@ fn mcp_agent_publishes_metadata_and_recovers_original_sponsored_evidence_after_r
             *result(&first)
         );
         assert_eq!(provenance(&replacement, "agent-issue-original"), original);
+        assert_eq!(
+            replacement
+                .call("frankengit_discussion_append_comment", &discussion_comment)
+                .unwrap(),
+            *result(&discussion_reply)
+        );
+        assert_eq!(
+            provenance(&replacement, "agent-discussion-comment"),
+            discussion_provenance
+        );
         assert_ne!(
             original.agent_provenance().unwrap().credential_id(),
             replacement_id

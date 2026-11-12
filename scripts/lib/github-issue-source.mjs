@@ -6,9 +6,11 @@ import { createGithubSource, githubIdentity as id, githubRepository, GITHUB_API 
 export { API_VERSION, githubRepository } from './github-source-http.mjs';
 
 export const CAPTURE_SCHEMA = 'frankengit-github-issue-capture-v1';
+export const CAPTURE_SCHEMA_V2 = 'frankengit-github-issue-capture-v2';
 export const CAPTURE_LIMIT = 1024 * 1024;
 export const ISSUE_LIMIT = 100;
 export const COMMENT_LIMIT = 2000;
+const MAX_STEPS = 2200;
 const CONSISTENCY = 'two-equal-observations-not-atomic';
 const fail = code => { throw operatorError(`github_import_${code}`); };
 const object = v => { if (!v || typeof v !== 'object' || Array.isArray(v)) fail('invalid_object'); return v; };
@@ -78,13 +80,17 @@ function selectedNumbers(v) {
   return numbers;
 }
 function encode(value) { return Buffer.from(JSON.stringify(value) + '\n'); }
+function selectedCaptureSchema(value) {
+  if (value !== CAPTURE_SCHEMA && value !== CAPTURE_SCHEMA_V2) fail('capture_schema');
+  return value;
+}
 export function captureBytes(value) {
   object(value); const source = object(value.source), repository = githubRepository(source.repository);
-  const issues = value.issues;
-  if (value.schema !== CAPTURE_SCHEMA || value.consistency !== CONSISTENCY || !Array.isArray(issues)) fail('capture_schema');
+  const schema = selectedCaptureSchema(value.schema), issues = value.issues;
+  if (value.consistency !== CONSISTENCY || !Array.isArray(issues)) fail('capture_schema');
   const numbers = selectedNumbers(issues.map(v => object(v).number));
   let count = 0; const ids = new Set(), comments = new Set();
-  const checked = { schema: CAPTURE_SCHEMA, consistency: CONSISTENCY,
+  const checked = { schema, consistency: CONSISTENCY,
     source: { repository, repository_id: id(source.repository_id) },
     issues: issues.map((row, index) => {
       if (row.number !== numbers[index] || !Array.isArray(row.comments)) fail('capture_order');
@@ -132,10 +138,15 @@ export function issueImportSteps(value, offset = 0) {
       const version = action === 'open' ? 0 : steps.at(-1).expected_version + 1;
       const request = mutationRequest(number, version, action, fields);
       steps.push({ source, number, expected_version: version, action, fields: request.fields });
+      if (steps.length > MAX_STEPS) fail('native_plan_steps');
     };
     add('open', { title: issue.title, body: provenance(value.source, issue), labels: issue.labels.map(l => l.name) }, issue.html_url);
     for (const comment of issue.comments) add('comment', { body: provenance(value.source, issue, comment) }, comment.html_url);
     if (issue.state === 'closed') add('close', {}, issue.html_url);
+    // V1's commands, provenance and retry identities are frozen. New V2
+    // captures preserve final moderation only after all discussion is copied;
+    // applying the lock earlier would prevent the imported comments.
+    if (value.schema === CAPTURE_SCHEMA_V2 && issue.locked) add('lock', {}, issue.html_url);
   }
   if (encode(steps).length > CAPTURE_LIMIT) fail('native_plan_bytes');
   return steps;
@@ -184,7 +195,8 @@ function selectedIdentities(value, repository, numbers) {
 // capture. Sequential callers cannot reset limits between inventory batches.
 // An error poisons the owner: a failed batch is retried only in a new explicit
 // source session, never by continuing a damaged or cleanup-uncertain lifetime.
-export function createGithubIssueCaptureSession(options = {}) {
+export function createGithubIssueCaptureSession({ captureSchema = CAPTURE_SCHEMA_V2, ...options } = {}) {
+  captureSchema = selectedCaptureSchema(captureSchema);
   const source = createGithubSource(options); let busy = false, closed = false;
   const close = () => { closed = true; source.close(); };
   return Object.freeze({
@@ -195,22 +207,23 @@ export function createGithubIssueCaptureSession(options = {}) {
       githubRepository(repository); numbers = selectedNumbers(numbers);
       const expected = selectedIdentities(expectedSelection, repository, numbers);
       busy = true;
-      try { return await captureFromSource(repository, numbers, expected, source); }
+      try { return await captureFromSource(repository, numbers, expected, source, captureSchema); }
       catch (error) { close(); throw error; }
       finally { busy = false; }
     },
   });
 }
 export async function captureGithubIssues({ repository, numbers, token = null, signal,
-  timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch, expectedSelection = null } = {}) {
+  timeoutMs = 300000, maxReadBytes = 64 * 1024 * 1024, maxSourceRetries = 0, fetchImpl = globalThis.fetch,
+  expectedSelection = null, captureSchema = CAPTURE_SCHEMA_V2 } = {}) {
   // Preserve validation-before-owner acquisition for the existing single batch API.
   githubRepository(repository); numbers = selectedNumbers(numbers);
   selectedIdentities(expectedSelection, repository, numbers);
-  const session = createGithubIssueCaptureSession({ token, signal, timeoutMs, maxReadBytes, maxSourceRetries, fetchImpl });
+  const session = createGithubIssueCaptureSession({ token, signal, timeoutMs, maxReadBytes, maxSourceRetries, fetchImpl, captureSchema });
   try { return await session.capture({ repository, numbers, expectedSelection }); }
   finally { session.close(); }
 }
-async function captureFromSource(repository, numbers, expected, source) {
+async function captureFromSource(repository, numbers, expected, source, schema) {
   const { get, check } = source;
   async function pass() {
     const repo = object((await get(`/repos/${repository}`)).value);
@@ -240,7 +253,7 @@ async function captureFromSource(repository, numbers, expected, source) {
       // Bound retained bytes after each complete issue, not after a whole repo.
       if (encode(issues).length > CAPTURE_LIMIT) fail('capture_bytes');
     }
-    return { schema: CAPTURE_SCHEMA, consistency: CONSISTENCY, source: { repository: selected, repository_id: repositoryId }, issues };
+    return { schema, consistency: CONSISTENCY, source: { repository: selected, repository_id: repositoryId }, issues };
   }
   const first = await pass(), bytes = captureBytes(first);
   issueImportSteps(first); // Refuse unrepresentable native text before saving a usable package.

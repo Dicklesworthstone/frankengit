@@ -11,6 +11,7 @@ import { once as execute, configuration as watchConfiguration } from '../../scri
 import { configuration, once, status, serve } from '../../scripts/operator/workflow_check_publish.mjs';
 import { sha256, encode, conclusion, journalConclusion, jobKey } from '../../scripts/operator/workflow_check_protocol.mjs';
 import { main } from '../../scripts/fg_workflow_checks.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const publisherPeer = new URL('./fixtures/workflow_check_native.mjs', import.meta.url).href;
 const watcherPeer = new URL('./fixtures/workflow_watch_native.mjs', import.meta.url).href;
@@ -82,7 +83,7 @@ const multiple = { execution_patch: { jobs: [
   { id: 'second', outcome: 'succeeded', steps: [], failure: null },
 ] } };
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: artifact pipeline publication matches the immutable contract without treating output receipts as marker fields`, async t => {
+  test(`${format}: artifact pipeline publication matches the immutable contract without treating output receipts as marker fields`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, { execution_patch: { jobs: [
       { id: 'build', outcome: 'succeeded', steps: [], failure: null },
       { id: 'test', outcome: 'succeeded', steps: [], failure: null },
@@ -117,7 +118,7 @@ for (const format of ['sha1', 'sha256']) {
   });
 }
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: successful execution publishes a check observation, not merge approval`, async t => {
+  test(`${format}: successful execution publishes a check observation, not merge approval`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format); await f.run();
     const events = [], result = await once(f.config, { onObservation: event => events.push(event) });
     assert.equal(result.publications, 1); assert.equal(result.runs[0].committed, 1);
@@ -131,7 +132,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await once(f.config)).publications, 0);
     assert.equal((await f.lines('published.ndjson')).length, 1); assert.equal((await f.lines('effects.ndjson')).length, 1);
   });
-  test(`${format}: lost publication reply stops automatic work; explicit resume uses the original exact key`, async t => {
+  test(`${format}: lost publication reply stops automatic work; explicit resume uses the original exact key`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, { drop_publication: true }); await f.run();
     await assert.rejects(once(f.config));
     assert.equal((await status(f.config)).runs[0].unknown, 1);
@@ -145,7 +146,7 @@ for (const format of ['sha1', 'sha256']) {
   });
 }
 
-test('multiple jobs are recovered through pinned pages and partial publication resumes without duplicate effects', async t => {
+test('multiple jobs are recovered through pinned pages and partial publication resumes without duplicate effects', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { ...multiple, recovery_page_size: 1, drop_job: 'second' }); await f.run();
   await assert.rejects(once(f.config));
   const view = await status(f.config); assert.equal(view.runs[0].committed, 1); assert.equal(view.runs[0].unknown, 1);
@@ -156,26 +157,26 @@ test('multiple jobs are recovered through pinned pages and partial publication r
   assert.deepEqual(sends[1], sends[2]); assert.equal((await f.lines('published.ndjson')).length, 2);
 });
 
-test('bounded publication quota leaves only unsent original requests; later polls finish them', async t => {
+test('bounded publication quota leaves only unsent original requests; later polls finish them', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', multiple); await f.run();
   const first = await once(f.config, { maxPublications: 1 }); assert.equal(first.limit_reached, true); assert.equal(first.runs[0].unknown, 0);
   const next = await once(f.config); assert.equal(next.runs[0].committed, 2);
   assert.equal((await f.lines('published.ndjson')).length, 2);
 });
 
-test('canonical stale-source refusal settles without changing refs or rerunning code', async t => {
+test('canonical stale-source refusal settles without changing refs or rerunning code', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { refuse: true }); await f.run();
   assert.equal((await once(f.config)).runs[0].refused, 1);
   assert.equal((await once(f.config)).publications, 0); assert.equal((await f.lines('effects.ndjson')).length, 1);
 });
 
-test('no matching workflows creates no synthetic passing check or publication process', async t => {
+test('no matching workflows creates no synthetic passing check or publication process', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { no_match: true }); await f.run();
   const result = await once(f.config); assert.equal(result.publications, 0); assert.equal(result.runs[0].jobs, 0);
   assert.equal((await f.lines('calls.ndjson')).length, 2);
 });
 
-test('unresolved execution is never consumed as a completed workflow', async t => {
+test('unresolved execution is never consumed as a completed workflow', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { no_report: true }); await assert.rejects(execute(f.watch));
   assert.equal((await once(f.config)).runs.length, 0); assert.equal((await f.lines('calls.ndjson')).length, 2);
 });
@@ -184,7 +185,7 @@ for (const patch of [
   { scope: { tenant: '9'.repeat(32), repository: '2'.repeat(32), journal_id: '1'.repeat(64) } },
   { authoritative_check: true }, { execution_retried: true }, { execution_completion: 'complete' },
   { evidence_payloads_included: true }, { retained_batches: 2 }, { entries: [] },
-]) test(`foreign/incomplete native custody refuses before admission: ${JSON.stringify(patch)}`, async t => {
+]) test(`foreign/incomplete native custody refuses before admission: ${JSON.stringify(patch)}`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { history_patch: patch }); await f.run();
   await assert.rejects(once(f.config)); assert.equal((await f.lines('published.ndjson')).length, 0);
   assert.equal((await status(f.config)).runs.length, 0);
@@ -194,21 +195,21 @@ for (const patch of [{ principal_id: '9'.repeat(32) }, { source_ref_hex: hex('re
   { journal_id: '9'.repeat(64) }, { batch_sha256: '9'.repeat(64) }, { fact_index: 1 }, { evidence_sha256: '9'.repeat(64) },
   { merge_permission: true }, { authoritative_check: true }, { conclusion: 'action_required' }, { decision_sequence: 9007199254740992 },
   { decision_sequence: '18446744073709551616' }, { node_closed: false }]) {
-  test(`wrong terminal remains unresolved: ${JSON.stringify(patch)}`, async t => {
+  test(`wrong terminal remains unresolved: ${JSON.stringify(patch)}`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, 'sha1', { publication_patch: patch }); await f.run();
     await assert.rejects(once(f.config)); assert.equal((await status(f.config)).runs[0].unknown, 1);
     await assert.rejects(once(f.config), /unresolved/); assert.equal((await f.lines('published.ndjson')).length, 1);
   });
 }
 
-test('native cleanup failure preserves the validated canonical terminal and does not resubmit', async t => {
+test('native cleanup failure preserves the validated canonical terminal and does not resubmit', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { cleanup_failure: true }); await f.run();
   await assert.rejects(once(f.config), error => error.retained_terminal?.outcome === 'committed');
   assert.equal((await status(f.config)).runs[0].committed, 1);
   assert.equal((await once(f.config)).publications, 0);
 });
 
-test('configuration change or forged saved request cannot replace the original publisher namespace', async t => {
+test('configuration change or forged saved request cannot replace the original publisher namespace', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { drop_publication: true }); await f.run(); await assert.rejects(once(f.config));
   await assert.rejects(once({ ...f.config, principal_id: '9'.repeat(32) }, { resume: true }), /configuration changed/);
   const file = (await readdir(f.config.state_directory)).find(name => name.startsWith('plan-'));
@@ -217,27 +218,27 @@ test('configuration change or forged saved request cannot replace the original p
   assert.equal((await f.lines('published.ndjson')).length, 1);
 });
 
-test('concurrent publisher refuses another owner before any admission', async t => {
+test('concurrent publisher refuses another owner before any admission', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { publish_delay: 150 }); await f.run();
   const first = once(f.config); await waitFor(async () => (await f.lines('published.ndjson')).length === 1);
   await assert.rejects(once(f.config), error => error.code === 'EEXIST'); await first;
   assert.equal((await f.lines('published.ndjson')).length, 1);
 });
 
-test('cancellation drains an active publisher and persists its terminal', async t => {
+test('cancellation drains an active publisher and persists its terminal', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { publish_delay: 150 }); await f.run(); const stop = new AbortController();
   const running = once(f.config, { signal: stop.signal }); await waitFor(async () => (await f.lines('published.ndjson')).length === 1); stop.abort();
   await running; assert.equal((await status(f.config)).runs[0].committed, 1); assert.equal((await status(f.config)).owner_present, false);
 });
 
-test('status works without the native executable or source store, even with a retained owner lock', async t => {
+test('status works without the native executable or source store, even with a retained owner lock', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { drop_publication: true }); await f.run(); await assert.rejects(once(f.config));
   await unlink(f.watch.fg); await rm(f.watch.storage_root, { recursive: true });
   await mkdir(join(f.config.state_directory, 'owner.lock'), { mode: 0o700 });
   assert.equal((await status(f.config)).runs[0].unknown, 1); assert.equal((await status(f.config)).owner_present, true);
 });
 
-test('continuous publisher discovers later completed executions without running workflows itself', async t => {
+test('continuous publisher discovers later completed executions without running workflows itself', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run(); let observed = 0;
   const result = await serve(f.config, { pollMs: 100, maxPolls: 2, onObservation: async () => {
     if (++observed === 1) { await f.set({ commit: 'e'.repeat(40) }); await f.run(); }
@@ -246,7 +247,7 @@ test('continuous publisher discovers later completed executions without running 
   assert.equal((await f.lines('published.ndjson')).length, 2); assert.equal((await f.lines('effects.ndjson')).length, 2);
 });
 
-test('actual CLI drains SIGTERM and retains historical decisions', async t => {
+test('actual CLI drains SIGTERM and retains historical decisions', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { publish_delay: 200 }); await f.run();
   const run = child(f, 'serve'); t.after(() => { if (run.p.exitCode === null && run.p.signalCode === null) run.p.kill('SIGKILL'); });
   await waitFor(async () => (await f.lines('published.ndjson')).length === 1); run.p.kill('SIGTERM');
@@ -254,7 +255,7 @@ test('actual CLI drains SIGTERM and retains historical decisions', async t => {
   const rows = result.output.trim().split('\n').map(JSON.parse); assert.equal(rows[0].outcome, 'committed'); assert.equal(rows.at(-1).stopped, true);
 });
 
-test('actual CLI SIGKILL retains the owner lock; status works but restart never steals it', async t => {
+test('actual CLI SIGKILL retains the owner lock; status works but restart never steals it', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run(); const run = child(f, 'serve', ['--poll-millis', '60000']);
   t.after(() => { if (run.p.exitCode === null && run.p.signalCode === null) run.p.kill('SIGKILL'); });
   await waitFor(() => run.output.includes('workflow_check_observed')); run.p.kill('SIGKILL'); await run.done;
@@ -263,7 +264,7 @@ test('actual CLI SIGKILL retains the owner lock; status works but restart never 
   const view = await child(f, 'status').done; assert.equal(view.code, 0, view.errors); assert.equal(JSON.parse(view.output).owner_present, true);
 });
 
-test('output failure after publication retains its decision and the CLI reports delivery failure', async t => {
+test('output failure after publication retains its decision and the CLI reports delivery failure', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run(); let diagnostic = '';
   const stdout = new Writable({ write(_chunk, _encoding, callback) { callback(new Error('broken output')); } });
   const stderr = new Writable({ write(chunk, _encoding, callback) { diagnostic += chunk; callback(); } });
@@ -272,14 +273,14 @@ test('output failure after publication retains its decision and the CLI reports 
   assert.equal((await once(f.config)).publications, 0);
 });
 
-test('a CLI publication with a lost reply is exit 3, not a pre-admission input error', async t => {
+test('a CLI publication with a lost reply is exit 3, not a pre-admission input error', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { drop_publication: true }); await f.run();
   const result = await child(f, 'once').done;
   assert.equal(result.code, 3, result.errors);
   assert.equal((await status(f.config)).runs[0].unknown, 1);
 });
 
-test('cancelling after one of several jobs retains its terminal and leaves later requests unsent', async t => {
+test('cancelling after one of several jobs retains its terminal and leaves later requests unsent', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', multiple); await f.run(); const stop = new AbortController();
   const result = await once(f.config, { signal: stop.signal, onObservation: () => stop.abort() });
   assert.equal(result.stopped, true); assert.equal(result.runs[0].committed, 1);
@@ -288,20 +289,20 @@ test('cancelling after one of several jobs retains its terminal and leaves later
   assert.equal((await once(f.config)).runs[0].committed, 2);
 });
 
-test('a moved history snapshot cannot prepare a mixed job set', async t => {
+test('a moved history snapshot cannot prepare a mixed job set', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { ...multiple, recovery_page_size: 1, second_history_patch: { snapshot: `2048:${'8'.repeat(64)}` } });
   await f.run(); await assert.rejects(once(f.config), /snapshot moved/);
   assert.equal((await status(f.config)).runs.length, 0); assert.equal((await f.lines('published.ndjson')).length, 0);
 });
 
-test('acknowledged batches remain publishable observations; delivery never hides native history', async t => {
+test('acknowledged batches remain publishable observations; delivery never hides native history', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), run = await f.run(), path = join(run.directory, 'custody.json');
   const data = await json(path); data.history.entries[0].delivery = 'acknowledged';
   data.history.entries[0].delivery_receipt_sha256 = '8'.repeat(64); data.history.pending_batches = 0; await save(path, data);
   assert.equal((await once(f.config)).runs[0].committed, 1);
 });
 
-test('duplicated completed facts refuse before any publication', async t => {
+test('duplicated completed facts refuse before any publication', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), run = await f.run(), path = join(run.directory, 'custody.json');
   const data = await json(path);
   data.history.entries.push({ ...data.history.entries[0], ordinal: 1, batch_sha256: '8'.repeat(64) });
@@ -309,13 +310,13 @@ test('duplicated completed facts refuse before any publication', async t => {
   await assert.rejects(once(f.config), /duplicated/); assert.equal((await f.lines('published.ndjson')).length, 0);
 });
 
-test('an empty completed-fact set cannot masquerade as a finished publication plan', async t => {
+test('an empty completed-fact set cannot masquerade as a finished publication plan', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), run = await f.run(), path = join(run.directory, 'custody.json');
   const data = await json(path); data.history.entries[0].facts[0].status = 'in_progress'; await save(path, data);
   await assert.rejects(once(f.config), /omitted completed/); assert.equal((await f.lines('published.ndjson')).length, 0);
 });
 
-test('a self-consistent substituted marker still fails its selected execution binding', async t => {
+test('a self-consistent substituted marker still fails its selected execution binding', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), run = await f.run(), path = join(run.directory, 'attempt.json');
   const marker = await json(path); marker.executed_commit = `sha1:${'e'.repeat(40)}`; await save(path, marker);
   const data = await json(join(run.directory, 'custody.json')); data.history.scope.journal_id = sha256(await readFile(path));
@@ -324,7 +325,7 @@ test('a self-consistent substituted marker still fails its selected execution bi
   assert.equal((await f.lines('calls.ndjson')).length, 2);
 });
 
-test('a changed minimum journal pin on resume is never silently refreshed', async t => {
+test('a changed minimum journal pin on resume is never silently refreshed', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { drop_publication: true }), run = await f.run(); await assert.rejects(once(f.config));
   const path = join(run.directory, 'custody.json'), data = await json(path); data.history.snapshot = `72:${'9'.repeat(64)}`; await save(path, data);
   await f.set({ drop_publication: false }); await assert.rejects(once(f.config, { resume: true }));
@@ -332,19 +333,19 @@ test('a changed minimum journal pin on resume is never silently refreshed', asyn
   const calls = (await f.lines('calls.ndjson')).filter(args => args[1] === 'publish'); assert.deepEqual(calls[0], calls[1]);
 });
 
-test('native watchdog retains the owner and unresolved publication without replay', async t => {
+test('native watchdog retains the owner and unresolved publication without replay', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', { publish_delay: 2000 }); await f.run();
   await assert.rejects(once(f.config, { timeoutMs: 300 }), error => error.containment_unknown && error.publication_unknown);
   const view = await status(f.config); assert.equal(view.owner_present, true); assert.equal(view.runs[0].unknown, 1);
   await assert.rejects(once(f.config, { resume: true }), error => error.code === 'EEXIST');
 });
 
-test('resume cannot prepare or publish a newly observed run', async t => {
+test('resume cannot prepare or publish a newly observed run', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run(); assert.equal((await once(f.config, { resume: true })).runs.length, 0);
   assert.equal((await f.lines('calls.ndjson')).length, 2);
 });
 
-test('unsafe or overlapping publication custody is refused before child operations', async t => {
+test('unsafe or overlapping publication custody is refused before child operations', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run();
   assert.throws(() => configuration({ ...f.config, state_directory: f.watch.run_parent }), /disjoint/);
   assert.throws(() => configuration({ ...f.config, principal_id: 'not-a-principal' }), /principal/);
@@ -354,7 +355,7 @@ test('unsafe or overlapping publication custody is refused before child operatio
   assert.equal((await f.lines('calls.ndjson')).length, 2);
 });
 
-test('CLI rejects implicit publication, duplicate options and invalid budgets before native work', async t => {
+test('CLI rejects implicit publication, duplicate options and invalid budgets before native work', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run();
   for (const [operation, extra] of [['once', ['--poll-millis', '100']], ['status', ['--max-publications', '1']],
     ['serve', ['--max-polls', '0']], ['serve', ['--max-polls', '01']], ['once', ['--max-publications', '129']],
@@ -365,7 +366,7 @@ test('CLI rejects implicit publication, duplicate options and invalid budgets be
 });
 
 
-test('receipt capacity refuses a new plan before admission while existing results stay readable', async t => {
+test('receipt capacity refuses a new plan before admission while existing results stay readable', LINUX_WORKFLOW, async t => {
   const f = await fixture(t); await f.run(); await once(f.config);
   const firstName = (await readdir(f.config.state_directory)).find(name => name.startsWith('plan-'));
   const original = await json(join(f.config.state_directory, firstName));
@@ -396,7 +397,7 @@ test('receipt capacity refuses a new plan before admission while existing result
 });
 
 
-test('native mixed lifecycle batches retain the completed fact index rather than assuming zero', async t => {
+test('native mixed lifecycle batches retain the completed fact index rather than assuming zero', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), run = await f.run();
   const path = join(run.directory, 'custody.json'), custody = await json(path), entry = custody.history.entries[0];
   const complete = entry.facts[0];
@@ -408,7 +409,7 @@ test('native mixed lifecycle batches retain the completed fact index rather than
   assert.equal(args[args.indexOf('--fact-index') + 1], '2');
 });
 
-for (const impossible of ['success', 'neutral']) test(`trusted custody cannot advertise native-forbidden ${impossible} conclusions`, async t => {
+for (const impossible of ['success', 'neutral']) test(`trusted custody cannot advertise native-forbidden ${impossible} conclusions`, LINUX_WORKFLOW, async t => {
   const f = await fixture(t), run = await f.run(), path = join(run.directory, 'custody.json');
   const custody = await json(path); custody.history.entries[0].facts[0].conclusion = impossible; await save(path, custody);
   await assert.rejects(once(f.config), /Completed native workflow fact/);
@@ -424,7 +425,7 @@ for (const format of ['sha1', 'sha256']) {
     ['missing capture', run => { run.artifacts = []; }],
     ['missing delivery', run => { run.artifact_inputs = []; }],
     ['substituted producer manifest', run => { run.artifact_inputs[0].inputs[0].producer_manifest_id_sha256 = '0'.repeat(64); }],
-  ]) test(`${format}: ${name} cannot reach check publication even with a matching saved report hash`, async t => {
+  ]) test(`${format}: ${name} cannot reach check publication even with a matching saved report hash`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, {}, true), run = await f.run();
     const reportPath = join(run.observation.native_directory, 'report.json');
     const resultPath = join(f.watch.state_directory, `result-${run.observation.id}.json`);

@@ -11,8 +11,8 @@ The byte, version, authority and retry contract is specified in
 [NORMATIVE_PROTOCOL_CONTRACTS.md §20.2.7](NORMATIVE_PROTOCOL_CONTRACTS.md#2027-native-standalone-discussions).
 Discussion replies and subscriptions participate in a separate
 [native notification inbox](NATIVE_NOTIFICATIONS.md#discussion-inboxes).
-Categories, accepted answers, cross-repository migration and
-predecessor-independent comments remain outside this lifecycle profile.
+Categories, accepted answers and cross-repository migration remain outside this
+lifecycle profile.
 
 ## Use the CLI
 
@@ -36,12 +36,31 @@ fg discussion comment "$STORAGE" "$TENANT" "$REPOSITORY" 7 \
 fg discussion list "$STORAGE" "$TENANT" "$REPOSITORY" --trusted-local
 ```
 
-Opening requires an unused positive discussion number and version zero. All
-subsequent changes, including comments, require the exact version returned by
+Opening requires an unused positive discussion number and version zero. Strict
+subsequent changes, including `comment`, require the exact version returned by
 the read. If another writer changes that discussion first, the stale command
 receives a canonical refusal. Read the current discussion before preparing a
 new command with a new idempotency key. A discussion and an issue may have the
 same number; their identities and state remain separate.
+
+Use `append-comment` when a reply should survive another writer adding a comment
+or editing the discussion first:
+
+```bash
+fg discussion append-comment "$STORAGE" "$TENANT" "$REPOSITORY" 7 \
+  --trusted-local --principal "$PRINCIPAL" \
+  --idempotency-key discussion-7-independent-reply \
+  --body 'Include the recovery steps alongside the upgrade example.'
+```
+
+This command rejects `--expected-version`. It seals the original number, actor,
+body and retry identity, then selects a current publication position. A race
+revalidates the same intent; it cannot change the submitted text or create a
+second comment. Current locks and permissions still apply, including a lock
+published by a competing writer. A closed, unlocked discussion accepts replies.
+The receipt reports `expected_version: null` and action `append-comment`; its
+history entry is an ordinary comment with its actual accepted version. Keep
+using strict `comment` when publication must depend on the version you read.
 
 `edit` accepts either or both `--title` and `--body`/`--body-file`. Omitted
 fields survive. `--body ''` explicitly clears the description. Comments must
@@ -75,16 +94,19 @@ bound to the exact repository incarnation and are reloaded per request.
 | Lifecycle or comment | `POST /{repository}/api/v1/discussions/{number}/{action}` |
 | Browser | `GET /{repository}/ui/discussions/` |
 
-Actions are `open`, `edit`, `comment`, `close`, `reopen`, `lock`, and `unlock`.
-POST bodies are bounded `application/x-www-form-urlencoded` forms containing
-`expected_version` and only the fields applicable to the action. Send the
+Actions are `open`, `edit`, `comment`, `append-comment`, `close`, `reopen`, `lock`,
+and `unlock`. POST bodies are bounded `application/x-www-form-urlencoded` forms.
+Strict actions contain `expected_version` and only their applicable fields;
+`append-comment` contains only `body` and rejects `expected_version`. Send the
 original printable `Idempotency-Key` header and bearer token; callers cannot
 override the authenticated actor. Reads support `after` or `after_version`,
 `limit`, `expected_head`, and optional `render=html_safe` or `render=api_json`.
 
 The browser lets you list and open discussions, read the authored history,
 prepare edits or replies, and close/reopen or lock/unlock a conversation. It
-captures the version you read and previews the exact request before sending.
+captures the version you read for strict commands and previews the exact request
+before sending. Its explicit Append comment action prepares a version-independent
+reply; Comment retains the strict version requirement.
 Titles and raw text remain inert. Optional Markdown presentations use the
 existing bounded, allowlisted renderer and retain the original text.
 
@@ -98,8 +120,8 @@ scopes. For example, the subset containing outcome and discussion access is
 
 `fg-mcp` enables reads with `--allow-discussions` and mutations with
 `--allow-discussion-writes`, independently of the issue grants. Mutations use
-the launch-bound principal. Discovery exposes the nine tools
-`frankengit_discussion_list`, `show`, `open`, `edit`, `comment`, `close`,
+the launch-bound principal. Discovery exposes the ten tools
+`frankengit_discussion_list`, `show`, `open`, `edit`, `comment`, `append_comment`, `close`,
 `reopen`, `lock`, and `unlock` under the same prefix.
 
 Identifiers, versions and cursors use canonical decimal strings, retaining
@@ -116,6 +138,10 @@ the full native `u64` domain. An example comment call is:
   }
 }
 ```
+
+For a version-independent reply, select `frankengit_discussion_append_comment`
+with `number`, `idempotency_key` and `body` only. The same independent
+discussion-write grant is required; supplying `expected_version` refuses.
 
 MCP pages retain the existing smaller adapter limits: default five rows,
 maximum twenty. MCP text input is bounded to 16 KiB; native CLI and HTTP bodies
@@ -146,7 +172,8 @@ against the discussion request family before clearing recovery responsibility.
 ## Verification coverage
 
 The source includes native core, admission, node, HTTP and MCP regression tests
-for lifecycle, exact predecessors, locked-comment refusals, both hash formats,
+for lifecycle, exact predecessors, append replanning after real competing
+publication, locked-comment refusals, both hash formats,
 retained pagination, independent disclosure grants, restart and original-key
 recovery. Browser tests cover response validation, safe display, captured
 versions, disconnect races and immutable retry receipts. The discoverable

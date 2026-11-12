@@ -475,7 +475,7 @@ fn emit(output: &mut impl Write, text: &str) -> Result<(), String> {
         .map_err(|e| format!("dispatch output failed; synced observations remain in the journal and a receiver may have accepted: {e}"))
 }
 
-fn execute(
+pub(super) fn execute(
     options: &Options,
     stop_signal: &impl Fn() -> Result<bool, String>,
     clock: &impl Fn() -> Result<u64, String>,

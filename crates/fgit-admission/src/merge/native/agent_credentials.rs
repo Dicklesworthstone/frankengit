@@ -264,7 +264,9 @@ where
     S: AsyncAuthorityStore + ?Sized,
     P: NativeMergeProjection<S> + ?Sized,
 {
-    use fgit_forge::event::agent_credential::{DISCUSSIONS_WRITE, ISSUES_WRITE, PULLS_WRITE};
+    use fgit_forge::event::agent_credential::{
+        DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE,
+    };
     let denied = || ProjectionFailure::Refuse(RefusalCode::CapabilityScopeViolation);
     let authentication = projection.admission_authentication();
     let Some(agent) = authentication
@@ -284,6 +286,7 @@ where
     };
     let operation = match &event.payload {
         ForgeEventPayload::IssueChangedNative(_) => ISSUES_WRITE,
+        ForgeEventPayload::MilestoneChangedNative(_) => MILESTONES_WRITE,
         ForgeEventPayload::PullRequestChangedNative(_)
         | ForgeEventPayload::PullRequestCommentedNative(_) => PULLS_WRITE,
         ForgeEventPayload::DiscussionChangedNative(_) => DISCUSSIONS_WRITE,

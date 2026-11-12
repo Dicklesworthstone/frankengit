@@ -745,7 +745,7 @@ where
         Ok(resolver)
     }
 
-/// Resolves one offset with base-result caching. The output is the scalar
+    /// Resolves one offset with base-result caching. The output is the scalar
     /// resolver's; the budget is charged the work this resolver performs (see
     /// the type documentation), not the scalar resolver's re-resolution.
     pub fn resolve_offset(

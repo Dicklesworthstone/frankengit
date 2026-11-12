@@ -63,6 +63,38 @@ test('comment preparation captures the selected version and sends the immutable 
   assert.equal(h.calls[2].body, body); assert.equal(h.client.pending, null);
   assert.match(h.elements['discussion-status'].textContent, /^Committed/);
 });
+test('append is an explicit choice without a version and survives changes to the editor', async () => {
+  const reply = { ...terminal, expected_version: null, action: 'append-comment' };
+  const h = harness(call => json(call.method === 'POST' ? reply : call.url.includes('/discussions?') ? page() : history()));
+  await h.connect(); await h.read(7);
+  await click(h.elements['discussion-content'], 'Comment');
+  assert.equal(h.elements['change-action'].value, 'comment');
+  assert.equal(h.elements['version-field'].hidden, false);
+  assert.equal(h.elements['change-version'].required, true);
+  await click(h.elements['discussion-content'], 'Append comment');
+  assert.equal(h.elements['change-action'].value, 'append-comment');
+  assert.equal(h.elements['change-version'].value, '');
+  assert.equal(h.elements['version-field'].hidden, true);
+  assert.equal(h.elements['change-version'].disabled, true);
+  assert.equal(h.elements['change-version'].required, false);
+  assert.equal(h.elements['append-comment-hint'].hidden, false);
+  assert.equal(h.elements['change-body'].value, '');
+  h.elements['change-body'].value = 'Keep my reply & 雪';
+  h.elements['change-version'].value = 'stale input is not a precondition';
+  await h.elements['discussion-change'].fire('submit');
+  const original = h.client.pending;
+  assert.equal(original.action, 'append-comment'); assert.equal(original.expected_version, null);
+  assert.deepEqual([...new URLSearchParams(original.body)], [['body', 'Keep my reply & 雪']]);
+  assert.match(h.elements['prepared-summary'].textContent, /accept concurrent replies/);
+  h.elements['change-body'].value = 'later edit'; h.choose(row, 'comment');
+  await h.elements['send-change'].fire('click');
+  assert.ok(h.calls[2].url.endsWith('/discussions/7/append-comment'));
+  assert.equal(h.calls[2].body, original.body);
+  assert.equal(h.calls[2].headers['Idempotency-Key'], original.key);
+  assert.equal(h.client.pending, null);
+  assert.equal(h.elements['version-field'].hidden, false);
+  assert.equal(h.elements['change-version'].required, true);
+});
 for (const state of ['open', 'closed']) test(`locked ${state} discussion disables comments and preserves exact unlock version`, async () => {
   const events = [...history().events, { version: 2, actor, action: { name: 'lock' } }];
   if (state === 'closed') events.push({ version: 3, actor, action: { name: 'close' } });
@@ -70,13 +102,29 @@ for (const state of ['open', 'closed']) test(`locked ${state} discussion disable
   const h = harness(call => json(call.url.includes('/discussions?') ? page({ discussions: [current] }) : history({ discussion: current, events })));
   await h.connect(); await h.read(7);
   assert.equal(buttons(h.elements['discussion-content']).find(b => b.textContent === 'Comment').disabled, true);
+  assert.equal(buttons(h.elements['discussion-content']).find(b => b.textContent === 'Append comment').disabled, true);
   h.choose(current, 'comment'); assert.equal(h.elements['prepare-change'].disabled, true);
+  await h.elements['discussion-change'].fire('submit'); assert.equal(h.client.pending, null);
+  h.choose(current, 'append-comment'); assert.equal(h.elements['prepare-change'].disabled, true);
   await h.elements['discussion-change'].fire('submit'); assert.equal(h.client.pending, null);
   await click(h.elements['discussion-content'], 'Unlock comments');
   assert.equal(h.elements['change-version'].value, String(events.length));
   assert.equal(h.elements['prepare-change'].disabled, false);
   await h.elements['discussion-change'].fire('submit');
   assert.equal(h.client.pending.action, 'unlock'); assert.equal(h.client.pending.expected_version, events.length);
+});
+test('write-only browser append needs no read or guessed predecessor', async () => {
+  const reply = { ...terminal, expected_version: null, action: 'append-comment' };
+  const h = harness(call => call.method === 'GET' ? new Response('', { status: 403 }) : json(reply));
+  await h.connect(); assert.equal(h.client.connected, true);
+  h.elements['change-number'].value = '7'; h.elements['change-action'].value = 'append-comment';
+  h.elements['change-action'].fire('change'); h.elements['change-body'].value = 'Write-only reply';
+  await h.elements['discussion-change'].fire('submit');
+  assert.equal(h.client.pending.expected_version, null);
+  await h.elements['send-change'].fire('click');
+  assert.equal(h.client.pending, null);
+  assert.match(h.elements['discussion-status'].textContent, /^Committed/);
+  assert.deepEqual([...new URLSearchParams(h.calls[1].body)], [['body', 'Write-only reply']]);
 });
 test('lost mutation and disconnect preserve recoverable custody without exposing the token', async () => {
   const h = harness(call => { if (call.method === 'POST') throw new Error('lost'); return json(page()); });

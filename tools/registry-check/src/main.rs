@@ -245,6 +245,7 @@ fn main() -> ExitCode {
             || invocation.check_set.includes_constitution()
         {
             check_status_vocabulary_pin(&root, &mut report);
+            check_dependency_policy_rationale_versions(&root, &mut report);
         }
         if invocation.check_set.includes_registries() {
             check_registries(&root, &mut report);
@@ -356,6 +357,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "docs/RAPTORQ_PERMEATION_MAP.md",
         "docs/RESEARCH_PROVENANCE.md",
         "registries/README.md",
+        "registries/artifact_inventory.tsv",
         "registries/attack_matrix.tsv",
         "registries/calm_operations.tsv",
         "registries/claim_classes.tsv",
@@ -389,6 +391,17 @@ const CALM_CLASS_COUNT: usize = 7;
 
 fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
     BTreeMap::from([
+        (
+            "artifact_inventory.tsv",
+            &[
+                "id",
+                "path",
+                "classification",
+                "disposition",
+                "rationale",
+                "status",
+            ][..],
+        ),
         (
             "attack_matrix.tsv",
             &[
@@ -777,6 +790,8 @@ fn check_registries(root: &Path, report: &mut Report) {
     check_evidence_packs(root, report);
     check_attack_matrix(root, report);
     check_compatibility_tiers(root, report);
+    check_artifact_inventory(root, report);
+    check_negative_evidence_ledger_parity(root, report);
     claims::check(root, report);
 }
 
@@ -1605,6 +1620,141 @@ fn check_workflows(root: &Path, report: &mut Report) {
             }
         }
     }
+    check_dsr_workflow_mappings(root, report);
+}
+
+fn check_dsr_workflow_mappings(root: &Path, report: &mut Report) {
+    let dsr_dir = root.join("ops/dsr");
+    let mut files = Vec::new();
+    collect_files(&dsr_dir, &mut files);
+    files.sort();
+    for path in files {
+        let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+        if !file_name.contains(".yaml") && !file_name.contains(".yml") {
+            continue;
+        }
+        let display = relative(root, &path);
+        let Ok(text) = fs::read_to_string(&path) else {
+            report.error(format!("cannot read DSR manifest {display}"));
+            continue;
+        };
+        let Some(workflow_rel) = extract_top_level_yaml_scalar(&text, "workflow") else {
+            report.error(format!(
+                "DSR manifest {display} must declare a top-level `workflow:` path"
+            ));
+            continue;
+        };
+        if workflow_rel.starts_with('/') || workflow_rel.split('/').any(|part| part == "..") {
+            report.error(format!(
+                "DSR manifest {display} declares unsafe workflow path `{workflow_rel}`"
+            ));
+            continue;
+        }
+        let workflow_path = root.join(&workflow_rel);
+        let Ok(workflow_text) = fs::read_to_string(&workflow_path) else {
+            report.error(format!(
+                "DSR manifest {display} references missing workflow `{workflow_rel}`"
+            ));
+            continue;
+        };
+        let defined_jobs = extract_yaml_block_keys(&workflow_text, "jobs");
+        let mapped_jobs = extract_yaml_block_pairs(&text, "act_job_map");
+        if mapped_jobs.is_empty() {
+            report.error(format!(
+                "DSR manifest {display} must declare at least one `act_job_map` entry"
+            ));
+            continue;
+        }
+        for (target, job) in mapped_jobs {
+            if job.is_empty() || !defined_jobs.contains(&job) {
+                let available = defined_jobs.iter().cloned().collect::<Vec<_>>().join(", ");
+                report.error(format!(
+                    "DSR manifest {display} act_job_map maps `{target}` to `{job}`, which is absent from `{workflow_rel}` (defined jobs: [{available}])"
+                ));
+            }
+        }
+    }
+}
+
+fn strip_yaml_comment_and_quotes(value: &str) -> String {
+    let trimmed = value.split('#').next().unwrap_or("").trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed)
+        .trim()
+        .to_owned()
+}
+
+fn extract_top_level_yaml_scalar(text: &str, key: &str) -> Option<String> {
+    for raw_line in text.lines() {
+        let without_comment = raw_line.split('#').next().unwrap_or("");
+        if without_comment.trim().is_empty() {
+            continue;
+        }
+        let indent = without_comment.len() - without_comment.trim_start_matches(' ').len();
+        if indent != 0 {
+            continue;
+        }
+        if let Some((k, v)) = without_comment.split_once(':')
+            && k.trim() == key
+        {
+            let value = strip_yaml_comment_and_quotes(v);
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn extract_yaml_block_keys(text: &str, section: &str) -> BTreeSet<String> {
+    extract_yaml_block_pairs(text, section)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+fn extract_yaml_block_pairs(text: &str, section: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut in_section = false;
+    let mut child_indent: Option<usize> = None;
+    for raw_line in text.lines() {
+        let without_comment = raw_line.split('#').next().unwrap_or("");
+        if without_comment.trim().is_empty() {
+            continue;
+        }
+        let indent = without_comment.len() - without_comment.trim_start_matches(' ').len();
+        let trimmed = without_comment.trim();
+        if indent == 0 {
+            in_section = trimmed == format!("{section}:");
+            child_indent = None;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let expected_indent = *child_indent.get_or_insert(indent);
+        if indent < expected_indent {
+            in_section = false;
+            continue;
+        }
+        if indent == expected_indent
+            && let Some((key, value)) = trimmed.split_once(':')
+        {
+            let clean_key = strip_yaml_comment_and_quotes(key);
+            let clean_val = strip_yaml_comment_and_quotes(value);
+            if !clean_key.is_empty() {
+                pairs.push((clean_key, clean_val));
+            }
+        }
+    }
+    pairs
 }
 
 /// Detects hosted automatic triggers in block form (`push:`), bare-scalar and
@@ -1773,6 +1923,16 @@ fn check_contract_phrases(root: &Path, report: &mut Report) {
     let dsr = fs::read_to_string(root.join("ops/dsr/frankengit.yaml.example")).unwrap_or_default();
     if !dsr.contains("workflow: .github/workflows/docs-integrity.yml") {
         report.error("DSR example must point to the checked-in local workflow manifest");
+    }
+    if !dsr.contains("main_package: fgit-cli") {
+        report.error("DSR example must declare main_package: fgit-cli");
+    }
+    for target in ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"] {
+        if !dsr.contains(&format!("- {target}")) {
+            report.error(format!(
+                "DSR example must declare release target `{target}`"
+            ));
+        }
     }
 }
 
@@ -3077,7 +3237,7 @@ const fn admission_ledger_config(command: CheckSet) -> Option<AdmissionLedgerCon
         }),
         CheckSet::LedgerTuiPolicy => Some(AdmissionLedgerConfig {
             root_package: "ftui-runtime",
-            root_version: "0.6.0",
+            root_version: "0.10.0",
             decision: "allow_transitive_admitted_tui",
             owner: "tui",
         }),
@@ -5905,9 +6065,346 @@ fn check_toolchain(root: &Path, report: &mut Report) {
     }
 }
 
+fn parse_semver_prefix(value: &str) -> Option<&str> {
+    let end = value.find('_').unwrap_or(value.len());
+    let candidate = &value[..end];
+    let core = candidate
+        .split_once(['-', '+'])
+        .map_or(candidate, |(prefix, _)| prefix);
+    let mut parts = core.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if [major, minor, patch]
+        .iter()
+        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    if !candidate
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn is_valid_crate_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && token.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+fn extract_rationale_crate_versions(
+    rationale: &str,
+    lock_crates: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let tokens: Vec<&str> = rationale
+        .split(|character: char| matches!(character, ';' | ',') || character.is_ascii_whitespace())
+        .map(|token| {
+            token.trim_matches(|character: char| {
+                matches!(character, '(' | ')' | ':' | '\'' | '"' | '`')
+            })
+        })
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    for (index, raw_token) in tokens.iter().enumerate() {
+        let token = raw_token.trim_start_matches('_').trim_end_matches('.');
+        for (offset, character) in token.char_indices() {
+            if character != '_' {
+                continue;
+            }
+            let crate_name = &token[..offset];
+            let rest = &token[offset + 1..];
+            if is_valid_crate_token(crate_name)
+                && let Some(semver) = parse_semver_prefix(rest)
+            {
+                pairs.push((crate_name.to_owned(), semver.to_owned()));
+                break;
+            }
+        }
+        if index > 0 {
+            let prev = tokens[index - 1].trim_matches('_');
+            let curr = token;
+            if is_valid_crate_token(prev)
+                && lock_crates.contains_key(prev)
+                && parse_semver_prefix(curr) == Some(curr)
+            {
+                pairs.push((prev.to_owned(), curr.to_owned()));
+            }
+        }
+    }
+    pairs
+}
+
+fn check_dependency_policy_rationale_versions(root: &Path, report: &mut Report) {
+    let lock_path = root.join("Cargo.lock");
+    let policy_path = root.join("registries/dependency_policy.tsv");
+    let Ok(lock_text) = fs::read_to_string(&lock_path) else {
+        return;
+    };
+    let Ok(packages) = parse_lock_packages(&lock_text) else {
+        return;
+    };
+    let Ok(policy_text) = fs::read_to_string(&policy_path) else {
+        return;
+    };
+
+    let mut lock_versions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in &packages {
+        lock_versions
+            .entry(package.name.clone())
+            .or_default()
+            .insert(package.version.clone());
+    }
+
+    for (line_index, line) in policy_text.lines().enumerate() {
+        let Some(fields) = dependency_policy_fields(line) else {
+            continue;
+        };
+        let id = fields[0];
+        let pattern = fields[1];
+        let scope = fields[2];
+        let decision = fields[3];
+        let rationale = fields[5];
+        let status = fields[9];
+        if status != "active" {
+            continue;
+        }
+        if scope == "production"
+            && decision.starts_with("allow_")
+            && decision != "allow_by_audit"
+            && pattern != "std"
+        {
+            let matches_lock = packages
+                .iter()
+                .any(|package| dependency_pattern_matches(pattern, &package.name));
+            if !matches_lock {
+                report.error(format!(
+                    "registries/dependency_policy.tsv:{}: active production allow row `{id}` (`{pattern}`) matches zero packages in Cargo.lock; mark unlinked rows `specified` or `rejected`",
+                    line_index + 1
+                ));
+            }
+        }
+        for (crate_name, semver) in extract_rationale_crate_versions(rationale, &lock_versions) {
+            let resolved = lock_versions.get(&crate_name);
+            if !resolved.is_some_and(|versions| versions.contains(&semver)) {
+                let actual = resolved.map_or_else(
+                    || "absent".to_owned(),
+                    |versions| versions.iter().cloned().collect::<Vec<_>>().join(", "),
+                );
+                report.error(format!(
+                    "registries/dependency_policy.tsv:{}: active row `{id}` (`{pattern}`) rationale cites `{crate_name}_{semver}`, which is absent from Cargo.lock (resolved: {actual})",
+                    line_index + 1
+                ));
+            }
+        }
+    }
+}
+
+fn check_negative_evidence_ledger_parity(root: &Path, report: &mut Report) {
+    let tsv_path = root.join("registries/negative_evidence.tsv");
+    let md_path = root.join("docs/NEGATIVE_EVIDENCE_LEDGER.md");
+    let Ok(tsv_text) = fs::read_to_string(&tsv_path) else {
+        return;
+    };
+    let Ok(md_text) = fs::read_to_string(&md_path) else {
+        return;
+    };
+
+    let mut tsv_ids = BTreeSet::new();
+    for line in tsv_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("id\t") {
+            continue;
+        }
+        if let Some(id) = line.split('\t').next()
+            && id.starts_with("NEG-")
+        {
+            tsv_ids.insert(id.to_owned());
+        }
+    }
+
+    let mut md_entry_ids = BTreeSet::new();
+    for line in md_text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("### NEG-") {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                md_entry_ids.insert(format!("NEG-{digits}"));
+            }
+        }
+        let mut cursor = trimmed;
+        while let Some(index) = cursor.find("(`NEG-") {
+            let after = &cursor[index + "(`NEG-".len()..];
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() && after[digits.len()..].starts_with("`)") {
+                md_entry_ids.insert(format!("NEG-{digits}"));
+            }
+            cursor = &after[digits.len()..];
+        }
+    }
+
+    for missing in tsv_ids.difference(&md_entry_ids) {
+        report.error(format!(
+            "registries/negative_evidence.tsv declares `{missing}`, which lacks a dedicated entry in docs/NEGATIVE_EVIDENCE_LEDGER.md"
+        ));
+    }
+    for extra in md_entry_ids.difference(&tsv_ids) {
+        report.error(format!(
+            "docs/NEGATIVE_EVIDENCE_LEDGER.md documents `{extra}`, which is absent from registries/negative_evidence.tsv"
+        ));
+    }
+}
+
+fn check_artifact_inventory(root: &Path, report: &mut Report) {
+    let path = root.join("registries/artifact_inventory.tsv");
+    let display = relative(root, &path);
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!("cannot read {display}: {error}"));
+            return;
+        }
+    };
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    let relative_files: Vec<String> = files.iter().map(|file| relative(root, file)).collect();
+
+    for (line_index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("id\t") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 6 {
+            continue;
+        }
+        let id = fields[0];
+        let pattern = fields[1];
+        let classification = fields[2];
+        let disposition = fields[3];
+        let status = fields[5];
+        if !matches!(
+            classification,
+            "product_input" | "historical_evidence" | "transport_debris"
+        ) {
+            report.error(format!(
+                "unknown artifact classification `{classification}` for `{id}` at {display}:{}",
+                line_index + 1
+            ));
+        }
+        if !matches!(disposition, "keep" | "relocate" | "archive" | "remove") {
+            report.error(format!(
+                "unknown artifact disposition `{disposition}` for `{id}` at {display}:{}",
+                line_index + 1
+            ));
+        }
+        let matches_any = relative_files
+            .iter()
+            .any(|candidate| artifact_pattern_matches(pattern, candidate));
+        if disposition == "keep" && status == "active" && !matches_any {
+            report.error(format!(
+                "{display}: active keep row `{id}` (`{pattern}`) matches zero files on disk"
+            ));
+        }
+        if disposition == "remove" {
+            if status != "rejected" {
+                report.error(format!(
+                    "{display}: remove row `{id}` (`{pattern}`) must have status `rejected`, found `{status}`"
+                ));
+            }
+            if matches_any {
+                report.error(format!(
+                    "{display}: prohibited artifact row `{id}` (`{pattern}`) still matches file(s) on disk"
+                ));
+            }
+        }
+    }
+}
+
+fn load_registered_keep_patterns(root: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root.join("registries/artifact_inventory.tsv")) else {
+        return Vec::new();
+    };
+    let mut patterns = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("id\t") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() == 6 && fields[3] == "keep" && fields[5] == "active" {
+            patterns.push(fields[1].to_owned());
+        }
+    }
+    patterns
+}
+
+fn artifact_pattern_matches(pattern: &str, candidate: &str) -> bool {
+    if pattern == candidate {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return candidate
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty());
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*.yml") {
+        return candidate
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/') && tail.ends_with(".yml"));
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return candidate
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'));
+    }
+    false
+}
+
+fn is_patch_transport_debris_name(name: &str) -> bool {
+    if name.ends_with(".b64") {
+        return true;
+    }
+    for prefix in ["part", "chunk"] {
+        if let Some(rest) = name.strip_prefix(prefix)
+            && rest.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        {
+            return true;
+        }
+    }
+    if let Some(index) = name.find(".part") {
+        let rest = &name[index + ".part".len()..];
+        if rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return true;
+        }
+    }
+    false
+}
+
 fn check_forbidden_artifacts(root: &Path, report: &mut Report) {
     let mut files = Vec::new();
     collect_files(root, &mut files);
+    let registered_keeps = load_registered_keep_patterns(root);
+    let workspace_members = fs::read_to_string(root.join("Cargo.toml"))
+        .map(|manifest| extract_workspace_string_list(&manifest, "members"))
+        .unwrap_or_else(|_| vec!["tools/registry-check".to_owned()]);
+
     for path in files {
         let display = relative(root, &path);
         let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
@@ -5923,6 +6420,57 @@ fn check_forbidden_artifacts(root: &Path, report: &mut Report) {
         if name == "Cargo.lock" && display != "Cargo.lock" {
             report.error(format!(
                 "nested lockfile {display}: the workspace has exactly one root Cargo.lock"
+            ));
+        }
+
+        let is_registered = registered_keeps
+            .iter()
+            .any(|pattern| artifact_pattern_matches(pattern, &display));
+        if is_registered {
+            continue;
+        }
+
+        if display.starts_with(".visibility-payload/") {
+            report.error(format!("forbidden staging payload artifact: {display}"));
+        }
+        if let Some(tail) = display.strip_prefix(".github/") {
+            let valid_workflow = tail.strip_prefix("workflows/").is_some_and(|file| {
+                !file.is_empty() && !file.contains('/') && file.ends_with(".yml")
+            });
+            let valid_template = tail
+                .strip_prefix("ISSUE_TEMPLATE/")
+                .is_some_and(|file| !file.is_empty() && !file.contains('/'));
+            if !valid_workflow && !valid_template {
+                report.error(format!(
+                    "unregistered .github artifact {display}; register product inputs in registries/artifact_inventory.tsv"
+                ));
+            }
+        }
+        if let Some(tail) = display.strip_prefix("tools/") {
+            let member_dir = tail
+                .split('/')
+                .next()
+                .map(|segment| format!("tools/{segment}"))
+                .unwrap_or_else(|| "tools".to_owned());
+            if !tail.contains('/')
+                || !workspace_member_path_is_declared(&workspace_members, &member_dir)
+            {
+                report.error(format!(
+                    "unregistered tools artifact {display}; only declared workspace members or registered product inputs in registries/artifact_inventory.tsv are permitted under tools/"
+                ));
+            }
+        }
+        if is_patch_transport_debris_name(name) {
+            report.error(format!(
+                "patch-transport debris artifact {display}; register legitimate inputs in registries/artifact_inventory.tsv"
+            ));
+        }
+        if name.ends_with(".py")
+            && !display.starts_with("scripts/")
+            && !display.starts_with("crates/")
+        {
+            report.error(format!(
+                "unregistered Python script outside scripts/ or crates/: {display}; relocate or register in registries/artifact_inventory.tsv"
             ));
         }
     }
@@ -7921,7 +8469,7 @@ impl CanonicalBody for EvidenceRecordBody {
         let config = admission_ledger_config(CheckSet::LedgerTuiPolicy)
             .expect("tui policy generator must have a configuration");
         assert_eq!(config.root_package, "ftui-runtime");
-        assert_eq!(config.root_version, "0.6.0");
+        assert_eq!(config.root_version, "0.10.0");
         assert_eq!(config.decision, "allow_transitive_admitted_tui");
         assert_eq!(config.owner, "tui");
         assert_ne!(
@@ -8153,6 +8701,241 @@ impl CanonicalBody for EvidenceRecordBody {
         assert_eq!(
             parse_invocation(vec!["--root".to_owned()]),
             Err("--root requires a directory path".to_owned())
+        );
+    }
+
+    fn empty_fixture_workspace(label: &str) -> FixtureWorkspace {
+        let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock precedes epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("fgit-registry-check-{label}-{nanos}-{nonce}"));
+        fs::create_dir_all(&root).expect("create empty fixture workspace");
+        FixtureWorkspace { root }
+    }
+
+    #[test]
+    fn dsr_act_job_map_cross_checks_referenced_workflow_jobs() {
+        let workspace = empty_fixture_workspace("dsr-job-map");
+        let workflows = workspace.root.join(".github/workflows");
+        let dsr_dir = workspace.root.join("ops/dsr");
+        fs::create_dir_all(&workflows).expect("create workflows dir");
+        fs::create_dir_all(&dsr_dir).expect("create dsr dir");
+        fs::write(
+            workflows.join("docs-integrity.yml"),
+            concat!(
+                "name: Documentation and Registry Integrity\n",
+                "on:\n",
+                "  workflow_dispatch:\n",
+                "jobs:\n",
+                "  docs-integrity:\n",
+                "    runs-on: ubuntu-latest\n",
+                "    steps:\n",
+                "      - run: ./scripts/verify.sh docs\n",
+            ),
+        )
+        .expect("write workflow fixture");
+
+        // Permitted twin: act_job_map names docs-integrity matching the workflow.
+        fs::write(
+            dsr_dir.join("frankengit.yaml.example"),
+            concat!(
+                "tool_name: frankengit\n",
+                "main_package: fgit-cli\n",
+                "workflow: .github/workflows/docs-integrity.yml\n",
+                "act_job_map:\n",
+                "  linux/amd64: docs-integrity\n",
+            ),
+        )
+        .expect("write valid dsr fixture");
+        let mut valid_report = Report::new();
+        check_workflows(&workspace.root, &mut valid_report);
+        assert!(
+            valid_report.errors.is_empty(),
+            "permitted DSR workflow mapping must pass: {:?}",
+            valid_report.errors
+        );
+
+        // Near-identical forbidden twin: act_job_map names verify-docs (absent from workflow).
+        fs::write(
+            dsr_dir.join("frankengit.yaml.example"),
+            concat!(
+                "tool_name: frankengit\n",
+                "main_package: fgit-cli\n",
+                "workflow: .github/workflows/docs-integrity.yml\n",
+                "act_job_map:\n",
+                "  linux/amd64: verify-docs\n",
+            ),
+        )
+        .expect("write mismatched dsr fixture");
+        let mut invalid_report = Report::new();
+        check_workflows(&workspace.root, &mut invalid_report);
+        assert!(
+            invalid_report.errors.iter().any(|err| {
+                err.contains("act_job_map maps `linux/amd64` to `verify-docs`")
+                    && err.contains(".github/workflows/docs-integrity.yml")
+            }),
+            "mismatched DSR job mapping must be refused: {:?}",
+            invalid_report.errors
+        );
+    }
+
+    #[test]
+    fn planted_patch_transport_debris_under_tools_is_refused_while_registered_twin_passes() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let planted = workspace.root.join("tools/foo/part01.b64");
+        fs::create_dir_all(planted.parent().expect("tools/foo parent")).expect("create tools/foo");
+        fs::write(&planted, b"cGF0Y2g=\n").expect("write planted b64 shard");
+
+        // Unregistered case: both the unregistered tools/ directory check and
+        // the patch-transport debris filename check refuse `tools/foo/part01.b64`.
+        let mut refused = Report::new();
+        check_forbidden_artifacts(&workspace.root, &mut refused);
+        assert_error(&refused, "unregistered tools artifact tools/foo/part01.b64");
+        assert_error(
+            &refused,
+            "patch-transport debris artifact tools/foo/part01.b64",
+        );
+
+        // Near-identical permitted twin: registering `tools/foo/part01.b64` in
+        // `registries/artifact_inventory.tsv` satisfies both the forbidden-artifact
+        // gate and the artifact-inventory registry gate.
+        let registries_dir = workspace.root.join("registries");
+        fs::create_dir_all(&registries_dir).expect("create registries dir");
+        fs::write(
+            registries_dir.join("artifact_inventory.tsv"),
+            concat!(
+                "# franken-registry-v1\n",
+                "id\tpath\tclassification\tdisposition\trationale\tstatus\n",
+                "ART-001\ttools/foo/part01.b64\tproduct_input\tkeep\texplicitly registered fixture twin\tactive\n",
+                "ART-002\t.visibility-payload/**\ttransport_debris\tremove\tprohibited root payload debris\trejected\n",
+            ),
+        )
+        .expect("write artifact_inventory.tsv");
+
+        let mut permitted = Report::new();
+        check_forbidden_artifacts(&workspace.root, &mut permitted);
+        check_artifact_inventory(&workspace.root, &mut permitted);
+        assert!(
+            permitted.errors.is_empty(),
+            "registered twin must pass without errors: {:?}",
+            permitted.errors
+        );
+
+        // Reintroducing a rejected `remove` path on disk must also be refused.
+        let visibility_file = workspace.root.join(".visibility-payload/apply.py");
+        fs::create_dir_all(visibility_file.parent().expect("visibility parent"))
+            .expect("create .visibility-payload");
+        fs::write(&visibility_file, b"print('debris')\n").expect("write visibility debris");
+        let mut reintroduced = Report::new();
+        check_forbidden_artifacts(&workspace.root, &mut reintroduced);
+        check_artifact_inventory(&workspace.root, &mut reintroduced);
+        assert_error(
+            &reintroduced,
+            "forbidden staging payload artifact: .visibility-payload/apply.py",
+        );
+        assert_error(
+            &reintroduced,
+            "prohibited artifact row `ART-002` (`.visibility-payload/**`) still matches file(s) on disk",
+        );
+    }
+
+    #[test]
+    fn active_dependency_rationale_citing_version_absent_from_lockfile_is_refused() {
+        let workspace = fixture_workspace("admitted");
+        let registries_dir = workspace.root.join("registries");
+        fs::create_dir_all(&registries_dir).expect("create registries dir");
+
+        // Fixture Cargo.lock resolves asupersync 0.4.9. An active row citing
+        // asupersync_0.4.8 (or an unlinked active crate) must fail closed.
+        fs::write(
+            registries_dir.join("dependency_policy.tsv"),
+            concat!(
+                "# franken-registry-v2\n",
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
+                "DEP-001\tasupersync\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.8_transitive_direct_parent_asupersync\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-002\tftui-runtime\tproduction\tallow_transitive_admitted_tui\ttui\tftui-runtime_0.10.0_transitive_direct_parent_ftui-runtime\tresolved_none\tledgered\tno_ffi\tactive\tnot_applicable\tnot_applicable\n",
+            ),
+        )
+        .expect("write mismatched dependency_policy.tsv");
+
+        let mut refused = Report::new();
+        check_dependency_policy_rationale_versions(&workspace.root, &mut refused);
+        assert_error(
+            &refused,
+            "active row `DEP-001` (`asupersync`) rationale cites `asupersync_0.4.8`, which is absent from Cargo.lock (resolved: 0.4.9)",
+        );
+        assert_error(
+            &refused,
+            "active production allow row `DEP-002` (`ftui-runtime`) matches zero packages in Cargo.lock",
+        );
+
+        // Near-identical permitted twin: DEP-001 cites the resolved 0.4.9 version
+        // and the unlinked ftui-runtime row is marked `specified`.
+        fs::write(
+            registries_dir.join("dependency_policy.tsv"),
+            concat!(
+                "# franken-registry-v2\n",
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
+                "DEP-001\tasupersync\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_asupersync\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-002\tftui-runtime\tproduction\tallow_transitive_admitted_tui\ttui\tftui-runtime_0.10.0_transitive_direct_parent_ftui-runtime\tresolved_none\tledgered\tno_ffi\tspecified\tnot_applicable\tnot_applicable\n",
+            ),
+        )
+        .expect("write aligned dependency_policy.tsv");
+
+        let mut permitted = Report::new();
+        check_dependency_policy_rationale_versions(&workspace.root, &mut permitted);
+        assert!(
+            permitted.errors.is_empty(),
+            "aligned rationale versions and specified unlinked rows must pass: {:?}",
+            permitted.errors
+        );
+    }
+
+    #[test]
+    fn negative_evidence_ledger_and_tsv_must_maintain_one_to_one_id_parity() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let registries_dir = workspace.root.join("registries");
+        let docs_dir = workspace.root.join("docs");
+        fs::create_dir_all(&registries_dir).expect("create registries dir");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+
+        fs::write(
+            registries_dir.join("negative_evidence.tsv"),
+            concat!(
+                "# franken-registry-v1\n",
+                "id\tclass\thypothesis\tdisposition\tevidence\trevisit_condition\tstatus\n",
+                "NEG-001\tperformance\th1\trefuted\te1\tr1\tactive\n",
+                "NEG-002\tverification\th2\trefuted\te2\tr2\tactive\n",
+            ),
+        )
+        .expect("write negative_evidence.tsv");
+        fs::write(
+            docs_dir.join("NEGATIVE_EVIDENCE_LEDGER.md"),
+            "1. First entry (`NEG-001`) — refuted.\n",
+        )
+        .expect("write incomplete NEGATIVE_EVIDENCE_LEDGER.md");
+
+        let mut refused = Report::new();
+        check_negative_evidence_ledger_parity(&workspace.root, &mut refused);
+        assert_error(
+            &refused,
+            "registries/negative_evidence.tsv declares `NEG-002`, which lacks a dedicated entry in docs/NEGATIVE_EVIDENCE_LEDGER.md",
+        );
+
+        fs::write(
+            docs_dir.join("NEGATIVE_EVIDENCE_LEDGER.md"),
+            "1. First entry (`NEG-001`) — refuted.\n\n### NEG-002 — Second entry\n\nRefuted.\n",
+        )
+        .expect("write complete NEGATIVE_EVIDENCE_LEDGER.md");
+
+        let mut permitted = Report::new();
+        check_negative_evidence_ledger_parity(&workspace.root, &mut permitted);
+        assert!(
+            permitted.errors.is_empty(),
+            "1:1 negative-evidence parity must pass: {:?}",
+            permitted.errors
         );
     }
 }

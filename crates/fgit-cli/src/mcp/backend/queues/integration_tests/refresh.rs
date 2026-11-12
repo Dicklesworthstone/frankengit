@@ -61,9 +61,15 @@ fn offered(fixture: &Fixture, next: GitOid, version: u64, key: &str) -> Object {
     args.extend([
         ("expected_policy_epoch".into(), text("1")),
         ("expected_target".into(), text(next.to_string())),
-        ("expected_recorded_target".into(), text(fixture.target.to_string())),
+        (
+            "expected_recorded_target".into(),
+            text(fixture.target.to_string()),
+        ),
         ("title".into(), text("Native queue PR 7")),
-        ("body".into(), text("Literal repository text, not authority")),
+        (
+            "body".into(),
+            text("Literal repository text, not authority"),
+        ),
     ]);
     args
 }
@@ -98,17 +104,37 @@ fn refresh_moves_only_the_recorded_target_and_replays_after_queue_changes_and_re
         assert_eq!(value(&receipt, "outcome"), "committed");
         assert_eq!(value(&receipt, "action"), "refresh");
         assert_eq!(value(&receipt, "principal_id"), actor().to_string());
-        assert_eq!(receipt.object().unwrap()["refs_changed"], Value::Bool(false));
-        assert_eq!(receipt.object().unwrap()["historical_outcome"], Value::Bool(true));
-        assert_eq!(receipt.object().unwrap()["delivery_acknowledged"], Value::Null);
+        assert_eq!(
+            receipt.object().unwrap()["refs_changed"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            receipt.object().unwrap()["historical_outcome"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            receipt.object().unwrap()["delivery_acknowledged"],
+            Value::Null
+        );
         let proposed = &receipt.object().unwrap()["proposed_action"];
-        assert_eq!(value(proposed, "expected_recorded_target"), fixture.target.to_string());
+        assert_eq!(
+            value(proposed, "expected_recorded_target"),
+            fixture.target.to_string()
+        );
         assert_eq!(value(proposed, "expected_target"), next.to_string());
-        assert_eq!(value(proposed, "expected_source"), fixture.source.to_string());
+        assert_eq!(
+            value(proposed, "expected_source"),
+            fixture.source.to_string()
+        );
         assert_eq!(value(proposed, "expected_pull_request_version"), "1");
         assert!(!proposed.object().unwrap().contains_key("body"));
         assert!(!proposed.object().unwrap().contains_key("title"));
-        assert!(!receipt.encode(MAX_RESPONSE).unwrap().contains("original-refresh"));
+        assert!(
+            !receipt
+                .encode(MAX_RESPONSE)
+                .unwrap()
+                .contains("original-refresh")
+        );
         assert_eq!(refs(&backend), before_refs);
         let current = show(&mut backend, 1);
         assert_queue(&current, 2, &[7, 9]);
@@ -118,7 +144,10 @@ fn refresh_moves_only_the_recorded_target_and_replays_after_queue_changes_and_re
             .runtime()
             .block_on(backend.node.materialize_admission())
             .unwrap();
-        assert_eq!(after.snapshot().outbox.len(), before.snapshot().outbox.len() + 1);
+        assert_eq!(
+            after.snapshot().outbox.len(),
+            before.snapshot().outbox.len() + 1
+        );
 
         let context = fgit_cli::command_request_context(&backend.node);
         let history = backend
@@ -131,8 +160,7 @@ fn refresh_moves_only_the_recorded_target_and_replays_after_queue_changes_and_re
         assert_eq!(decision.batch.committed_rcrs.len(), 1);
         assert_eq!(decision.forge_events.len(), 1);
         assert_eq!(decision.forge_events[0].version.get(), 2);
-        let ForgeEventPayload::PullRequestChangedNative(event) =
-            &decision.forge_events[0].payload
+        let ForgeEventPayload::PullRequestChangedNative(event) = &decision.forge_events[0].payload
         else {
             panic!("refresh must publish the sole PR Update")
         };
@@ -256,23 +284,47 @@ fn refresh_cannot_use_one_grant_or_modify_metadata_outside_the_exact_head() {
         ("expected_version", text("1"), "EvidenceStale"),
         ("expected_pull_request_version", text("2"), "EvidenceStale"),
         ("expected_policy_epoch", text("2"), "EvidenceStale"),
-        ("expected_recorded_target", text(fixture.source.to_string()), "EvidenceStale"),
-        ("expected_source", text(fixture.target.to_string()), "EvidenceStale"),
-        ("expected_target", text(fixture.source.to_string()), "TargetRefMoved"),
+        (
+            "expected_recorded_target",
+            text(fixture.source.to_string()),
+            "EvidenceStale",
+        ),
+        (
+            "expected_source",
+            text(fixture.target.to_string()),
+            "EvidenceStale",
+        ),
+        (
+            "expected_target",
+            text(fixture.source.to_string()),
+            "TargetRefMoved",
+        ),
         ("pull_request", text("9"), "ProtectedRefTransitionDenied"),
     ] {
         let mut changed = original.clone();
         changed.insert(field.into(), replacement);
-        changed.insert("idempotency_key".into(), text(format!("refresh-refuse-{field}")));
+        changed.insert(
+            "idempotency_key".into(),
+            text(format!("refresh-refuse-{field}")),
+        );
         let receipt = invoke(&mut backend, REFRESH, changed);
         assert_eq!(value(&receipt, "outcome"), "refused", "{field}");
         assert_eq!(value(&receipt, "refusal_code"), refusal, "{field}");
-        assert_eq!(receipt.object().unwrap()["refs_changed"], Value::Bool(false));
+        assert_eq!(
+            receipt.object().unwrap()["refs_changed"],
+            Value::Bool(false)
+        );
         assert_eq!(refs(&backend), before_refs);
-        assert_eq!(show(&mut backend, 1).object().unwrap()["queue"], before_queue);
+        assert_eq!(
+            show(&mut backend, 1).object().unwrap()["queue"],
+            before_queue
+        );
     }
     let valid = offered(&fixture, next, 2, "refresh-after-refusals");
-    assert_eq!(value(&invoke(&mut backend, REFRESH, valid), "outcome"), "committed");
+    assert_eq!(
+        value(&invoke(&mut backend, REFRESH, valid), "outcome"),
+        "committed"
+    );
     assert_queue(&show(&mut backend, 1), 2, &[7, 9]);
     backend.close().unwrap();
 }
@@ -323,7 +375,10 @@ fn lost_refresh_stdout_recovers_the_original_update_and_stops_the_next_tool() {
     let held = selected_head(&backend);
     let receipt = invoke(&mut backend, REFRESH, original);
     assert_eq!(value(&receipt, "outcome"), "committed");
-    assert_eq!(receipt.object().unwrap()["refs_changed"], Value::Bool(false));
+    assert_eq!(
+        receipt.object().unwrap()["refs_changed"],
+        Value::Bool(false)
+    );
     let recovered = invoke(
         &mut backend,
         "frankengit_transaction_outcome",

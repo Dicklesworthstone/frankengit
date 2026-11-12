@@ -5,6 +5,7 @@ use super::*;
 
 use crate::outcome_checkpoint::{
     OutcomeCheckpointLimits, OutcomeCheckpointReceipt, OutcomeCheckpointRefusal,
+    RepositoryCheckpointLimits, RepositoryCheckpointReceipt,
 };
 use crate::{LoopbackReceiveSession, MaterializedAdmission};
 use fgit_admission::CommandOutcome;
@@ -1227,5 +1228,278 @@ fn reused_checkpoint_receipts_and_byte_limits_follow_the_actual_archive_chunks()
     );
     assert_eq!(retained(&node, root), (body, decisions.clone()));
     assert_decisions(&node, &decisions);
+    node.shutdown().unwrap();
+}
+
+fn maintain_repository(
+    node: &OneNode,
+    limits: RepositoryCheckpointLimits,
+) -> Result<RepositoryCheckpointReceipt, OutcomeCheckpointRefusal> {
+    let request = node.request_context();
+    node.runtime()
+        .block_on(node.checkpoint_repository_in(&request, limits))
+}
+
+#[test]
+fn repository_checkpoint_verifies_full_closure_upgrades_outcomes_and_repeats_idempotently() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf())
+            .with_object_format(format)
+            .with_worker_threads(2);
+        let (node, _) = OneNode::init(config).unwrap();
+
+        let (commit, objects) = branch_objects(&node, "full-closure-main");
+        let imported = import_ref(
+            &node,
+            "full-closure-import",
+            "refs/heads/main",
+            zero(&node),
+            commit,
+            &objects,
+        );
+        assert!(matches!(
+            imported.terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        add_tag(&node, 0);
+
+        // First create an outcome-only checkpoint; repository checkpoint must upgrade
+        // coverage to FullClosure while reusing the verified retained leaf archive.
+        let outcome_only = checkpoint(&node);
+        assert_eq!(
+            outcome_only.backup_profile,
+            BackupProfile::DecisionHistoryWithAdmissionClosureV1.as_str()
+        );
+        let before = selected(&node);
+        let first = maintain_repository(
+            &node,
+            RepositoryCheckpointLimits {
+                expected_head: Some(before.basis().id()),
+                expected_generation: Some(before.basis().generation()),
+                ..RepositoryCheckpointLimits::default()
+            },
+        )
+        .unwrap();
+        assert!(first.published);
+        assert_eq!(first.backup_profile, BackupProfile::FullClosure.as_str());
+        assert_eq!(first.checkpoint_root, outcome_only.checkpoint_root);
+        assert_eq!(first.leaf_objects, outcome_only.leaf_objects);
+        assert_eq!(first.leaf_bytes, outcome_only.leaf_bytes);
+        assert_eq!(first.decisions, 2);
+        assert_eq!(first.objects, 4);
+        assert_eq!(first.references, 2);
+        assert_eq!(first.local_edges, 2);
+        assert_eq!(first.external_gitlinks, 0);
+        assert!(first.payload_bytes > 0);
+        assert_eq!(first.object_closure_root, before.selected_closure().root());
+
+        let after = selected(&node);
+        assert_eq!(first.published_head, after.basis().id());
+        let capsule_body = capsule(&node, first.capsule_id);
+        assert_eq!(capsule_body.backup_profile, BackupProfile::FullClosure);
+        assert_eq!(
+            capsule_body.predecessor_capsule_id,
+            Some(outcome_only.capsule_id)
+        );
+        assert_eq!(capsule_body.object_closure_root, first.object_closure_root);
+
+        // Repeating at the newly published head verifies everything and emits published=false.
+        let again = maintain_repository(
+            &node,
+            RepositoryCheckpointLimits {
+                expected_head: Some(first.published_head),
+                ..RepositoryCheckpointLimits::default()
+            },
+        )
+        .unwrap();
+        assert!(!again.published);
+        assert_eq!(again.source_head, first.published_head);
+        assert_eq!(again.published_head, first.published_head);
+        assert_eq!(again.generation, first.generation);
+        assert_eq!(again.capsule_id, first.capsule_id);
+        assert_eq!(again.checkpoint_root, first.checkpoint_root);
+        assert_eq!(again.object_closure_root, first.object_closure_root);
+        assert_eq!(again.objects, 4);
+        assert_eq!(again.references, 2);
+        assert_eq!(again.payload_bytes, first.payload_bytes);
+
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn repository_checkpoint_refuses_stale_head_corrupt_git_object_and_tampered_capsule_twins() {
+    let scratch = ScratchDirectory::new();
+    let (node, _) =
+        OneNode::init(test_config(scratch.path().to_path_buf()).with_worker_threads(2)).unwrap();
+    let stale_head = selected(&node).basis().id();
+    let (commit, objects) = branch_objects(&node, "tamper-target");
+    import_ref(
+        &node,
+        "tamper-branch",
+        "refs/heads/main",
+        zero(&node),
+        commit,
+        &objects,
+    );
+    let current = selected(&node);
+
+    // 1. Stale expected-head / expected-generation and resource-limit refusal twins.
+    assert!(matches!(
+        maintain_repository(
+            &node,
+            RepositoryCheckpointLimits {
+                expected_head: Some(stale_head),
+                ..RepositoryCheckpointLimits::default()
+            },
+        ),
+        Err(OutcomeCheckpointRefusal::HeadMoved)
+    ));
+    assert!(matches!(
+        maintain_repository(
+            &node,
+            RepositoryCheckpointLimits {
+                expected_generation: Some(HeadGeneration::FIRST),
+                ..RepositoryCheckpointLimits::default()
+            },
+        ),
+        Err(OutcomeCheckpointRefusal::HeadMoved)
+    ));
+    assert!(matches!(
+        maintain_repository(
+            &node,
+            RepositoryCheckpointLimits {
+                max_objects: 2,
+                ..RepositoryCheckpointLimits::default()
+            },
+        ),
+        Err(OutcomeCheckpointRefusal::LimitExceeded(
+            "repository objects"
+        ))
+    ));
+    assert!(matches!(
+        maintain_repository(
+            &node,
+            RepositoryCheckpointLimits {
+                max_payload_bytes: 1,
+                ..RepositoryCheckpointLimits::default()
+            },
+        ),
+        Err(OutcomeCheckpointRefusal::LimitExceeded("payload bytes"))
+    ));
+    assert_eq!(
+        selected(&node).authenticated().receipt(),
+        current.authenticated().receipt()
+    );
+
+    // 2. Permitted baseline checkpoint succeeds.
+    let published = maintain_repository(&node, RepositoryCheckpointLimits::default()).unwrap();
+    assert!(published.published);
+    assert_eq!(published.objects, 3);
+
+    // 3. Corrupting a Git object in fabric refuses even an idempotent repeat!
+    let blob_oid = *objects
+        .iter()
+        .find(|&&oid| {
+            node.git_object_header(oid).unwrap().kind == fgit_object_fabric::ObjectKind::Blob
+        })
+        .unwrap();
+    let hex = fgit_crypto::lowercase_hex;
+    let blob_path = node
+        .storage_root
+        .join("objects")
+        .join(hex(&node.namespace))
+        .join(hex(&blob_oid.algorithm().code_point().to_be_bytes()))
+        .join(hex(blob_oid.as_bytes()));
+    let saved_blob = fs::read(&blob_path).unwrap();
+    fs::write(&blob_path, b"corrupt git blob envelope and payload").unwrap();
+    let head_after_publish = selected(&node);
+    assert!(maintain_repository(&node, RepositoryCheckpointLimits::default()).is_err());
+    assert_eq!(
+        selected(&node).authenticated().receipt(),
+        head_after_publish.authenticated().receipt()
+    );
+    fs::write(&blob_path, &saved_blob).unwrap();
+    let recovered = maintain_repository(&node, RepositoryCheckpointLimits::default()).unwrap();
+    assert!(!recovered.published);
+
+    // 4. Tampered capsule slot (declared capsule ID holds bytes of a different capsule)
+    // refuses cleanly without advancing authority.
+    let fake_capsule = RepositoryCapsuleBody::at_head(
+        head_after_publish.basis().id(),
+        head_after_publish.basis().body(),
+        Some(published.capsule_id),
+        published.object_closure_root,
+        capsule(&node, published.capsule_id).segment_manifest_root,
+        BackupProfile::FullClosure,
+    );
+    let mut mutated_capsule = fake_capsule.clone();
+    mutated_capsule.backup_profile = BackupProfile::DecisionHistoryOnly;
+    let fake_id = capsule_identity(&CryptoBodyIdentity, &fake_capsule).unwrap();
+    let request = node.request_context();
+    node.runtime()
+        .block_on(AsyncAuthorityStore::put_if_absent(
+            &node.authority,
+            request.authority(),
+            &body_key_for_id(fake_id.as_internal_object_id()).unwrap(),
+            &fgit_codec::encode_body(&mutated_capsule).unwrap(),
+        ))
+        .unwrap();
+    let mut tampered_head = head_after_publish.basis().body().clone();
+    tampered_head.predecessor_head_id = Some(head_after_publish.basis().id());
+    tampered_head.generation = tampered_head.generation.next().unwrap();
+    tampered_head.last_checkpoint_id = Some(fake_id);
+    let tampered_head_bytes = fgit_codec::encode_body(&tampered_head).unwrap();
+    node.runtime()
+        .block_on(AsyncAuthorityStore::put_if_absent(
+            &node.authority,
+            request.authority(),
+            &fgit_authority::body_key(
+                fgit_crypto::IdentityDomain::RepositoryAuthorityHead,
+                &tampered_head,
+            )
+            .unwrap(),
+            &tampered_head_bytes,
+        ))
+        .unwrap();
+    let fgit_authority::CasOutcome::Committed(tampered_receipt) = node
+        .runtime()
+        .block_on(AsyncAuthorityStore::compare_exchange_head(
+            &node.authority,
+            request.authority(),
+            &node.head_key,
+            head_after_publish.authenticated().receipt().token(),
+            tampered_head.generation,
+            &tampered_head_bytes,
+        ))
+        .unwrap()
+    else {
+        panic!("expected CAS to install tampered head fixture");
+    };
+    let tamper_refusal = maintain_repository(&node, RepositoryCheckpointLimits::default())
+        .expect_err("tampered capsule slot must refuse repository checkpoint");
+    assert!(
+        matches!(
+            tamper_refusal,
+            OutcomeCheckpointRefusal::Selection(_)
+                | OutcomeCheckpointRefusal::CapsuleChain
+                | OutcomeCheckpointRefusal::CapsuleVerification(_)
+        ),
+        "unexpected tamper refusal: {tamper_refusal:?}"
+    );
+    let fgit_authority::HeadRead::Present(after_tamper_receipt) = node
+        .runtime()
+        .block_on(AsyncAuthorityStore::read_head(
+            &node.authority,
+            request.authority(),
+            &node.head_key,
+        ))
+        .unwrap()
+    else {
+        panic!("expected head to remain readable after refused checkpoint");
+    };
+    assert_eq!(after_tamper_receipt, tampered_receipt);
+
     node.shutdown().unwrap();
 }

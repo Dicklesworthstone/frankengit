@@ -293,6 +293,248 @@ fn enqueue(
         ),
     )
 }
+
+fn enqueue_at_head(
+    f: &Fixture,
+    intent: &crate::merge::native::dispatch::replay::ReplayIntent,
+    expected_head: fgit_types::RepositoryAuthorityHeadId,
+) -> Result<AsciiSlug, AdmissionError> {
+    run(
+        crate::merge::native::dispatch::replay::enqueue_replay_at_head_async(
+            &f.store,
+            &(),
+            &f.context,
+            intent,
+            Some(expected_head),
+            &f.projection(MaterializationFault::None),
+            Default::default(),
+            &|| {
+                if f.store.stopped.load(Ordering::SeqCst) {
+                    Err(RefusalCode::CancellationInProgress)
+                } else {
+                    Ok(())
+                }
+            },
+        ),
+    )
+}
+
+#[test]
+fn guarded_replay_refuses_stale_new_admission_beside_the_current_head_twin() {
+    let f = Fixture::new();
+    let stale = f.basis().id();
+    drive(
+        &f,
+        &mut Routes::new(1, [DeliveryVerdict::PermanentRejection]),
+        1,
+        100,
+    )
+    .unwrap();
+    let current = f.basis().id();
+    let original = f.effect();
+    let intent = replay_intent(&f);
+    assert!(matches!(
+        enqueue_at_head(&f, &intent, stale),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceStale
+        ))
+    ));
+    assert_eq!(f.basis().id(), current);
+    assert!(
+        run(delivery::read_in(&f.store, &(), &f.basis(), &|| false))
+            .unwrap()
+            .outbox
+            .entries()
+            .is_empty()
+    );
+    let key = enqueue_at_head(&f, &intent, current).unwrap();
+    assert_ne!(key, f.key);
+    assert_ne!(f.basis().id(), current);
+    assert_eq!(f.effect(), original);
+}
+
+#[test]
+fn guarded_replay_recovers_the_original_key_before_rechecking_its_old_head() {
+    let f = Fixture::new();
+    drive(
+        &f,
+        &mut Routes::new(1, [DeliveryVerdict::PermanentRejection]),
+        1,
+        100,
+    )
+    .unwrap();
+    let selected = f.basis().id();
+    let intent = replay_intent(&f);
+    let original = f.effect();
+    let key = enqueue_at_head(&f, &intent, selected).unwrap();
+    let admitted = f.basis().id();
+    assert_ne!(selected, admitted);
+    assert_eq!(enqueue_at_head(&f, &intent, selected).unwrap(), key);
+    assert_eq!(admitted, f.basis().id());
+
+    // Cancellation remains uncertainty, including when an old request already
+    // committed. A subsequent live recovery retains the original identity.
+    f.store.stopped.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        enqueue_at_head(&f, &intent, selected),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::CancellationInProgress
+        ))
+    ));
+    f.resume();
+    assert_eq!(enqueue_at_head(&f, &intent, selected).unwrap(), key);
+
+    let mut routes = replay_routes(DeliveryVerdict::Accepted);
+    let outcome = drive_replay(&f, key, &mut routes).unwrap();
+    assert_eq!(
+        outcome.effect.unwrap().state(),
+        ObligationState::Acknowledged
+    );
+    let settled = f.basis().id();
+    assert_eq!(enqueue_at_head(&f, &intent, selected).unwrap(), key);
+    assert_eq!(drive_replay(&f, key, &mut routes).unwrap().sends, 0);
+    assert_eq!(routes.calls, [(1, 1)]);
+    assert_eq!(f.basis().id(), settled);
+    assert_eq!(f.effect(), original);
+
+    let changed = crate::merge::native::dispatch::replay::ReplayIntent {
+        route_binding: digest_of(99),
+        ..intent
+    };
+    assert!(enqueue_at_head(&f, &changed, settled).is_err());
+    assert_eq!(f.basis().id(), settled);
+}
+
+/// Publish a real competing replay after the guarded request has selected and
+/// prepared its predecessor. The tested request must lose CAS and must not
+/// quietly replace its expected head while replanning.
+struct AdvanceBeforeReplayCas<'a> {
+    fixture: &'a Fixture,
+    inner: Projection,
+    winner: Mutex<Option<AsciiSlug>>,
+}
+
+impl AsyncAdmissionProjection<Store> for AdvanceBeforeReplayCas<'_> {
+    async fn snapshot_async<'a>(
+        &'a self,
+        store: &'a Store,
+        cx: &'a (),
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
+        self.inner
+            .snapshot_async(store, cx, basis, authenticated)
+            .await
+    }
+
+    async fn materialize_commit_async<'a>(
+        &'a self,
+        store: &'a Store,
+        cx: &'a (),
+        basis: &'a PublicationBasis,
+        request: &'a TransactionRequest,
+        fold: &'a TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        let prepared = self
+            .inner
+            .materialize_commit_async(store, cx, basis, request, fold, closure)
+            .await?;
+        let should_advance = self.winner.lock().unwrap().is_none();
+        if should_advance {
+            let mut context = self.fixture.context.clone();
+            context.idempotency_key =
+                fgit_authority::IdempotencyKey::new(b"competing-replay".to_vec()).unwrap();
+            let key = crate::merge::native::dispatch::replay::enqueue_replay_async(
+                store,
+                cx,
+                &context,
+                &replay_intent(self.fixture),
+                &self.fixture.projection(MaterializationFault::None),
+                Default::default(),
+                &|| Ok(()),
+            )
+            .await
+            .map_err(unavailable_projection)?;
+            *self.winner.lock().unwrap() = Some(key);
+        }
+        Ok(prepared)
+    }
+
+    async fn materialize_refusal_async<'a>(
+        &'a self,
+        store: &'a Store,
+        cx: &'a (),
+        basis: &'a PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<RefusalMaterialization, ProjectionFailure> {
+        self.inner
+            .materialize_refusal_async(store, cx, basis, tx_id, code)
+            .await
+    }
+}
+
+#[test]
+fn guarded_replay_keeps_its_original_head_after_a_competing_publication_wins_cas() {
+    let f = Fixture::new();
+    drive(
+        &f,
+        &mut Routes::new(1, [DeliveryVerdict::PermanentRejection]),
+        1,
+        100,
+    )
+    .unwrap();
+    let selected = f.basis().id();
+    let intent = replay_intent(&f);
+    let race = AdvanceBeforeReplayCas {
+        fixture: &f,
+        inner: f.projection(MaterializationFault::None),
+        winner: Mutex::new(None),
+    };
+    let result = run(
+        crate::merge::native::dispatch::replay::enqueue_replay_at_head_async(
+            &f.store,
+            &(),
+            &f.context,
+            &intent,
+            Some(selected),
+            &race,
+            Default::default(),
+            &|| Ok(()),
+        ),
+    );
+    assert!(matches!(
+        result,
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceStale
+        ))
+    ));
+    let winner = race
+        .winner
+        .lock()
+        .unwrap()
+        .expect("competing publication ran");
+    let current = f.basis().id();
+    assert_ne!(current, selected);
+    let outbox = run(delivery::read_in(&f.store, &(), &f.basis(), &|| false)).unwrap();
+    assert_eq!(outbox.outbox.entries().len(), 1);
+    assert!(outbox.outbox.entry(winner).is_some());
+
+    // The uncommitted loser may be explicitly selected again at the current
+    // head. It retains its own sealed identity and creates one distinct slot.
+    let key = enqueue_at_head(&f, &intent, current).unwrap();
+    assert_ne!(key, winner);
+    assert_eq!(
+        run(delivery::read_in(&f.store, &(), &f.basis(), &|| false))
+            .unwrap()
+            .outbox
+            .entries()
+            .len(),
+        2
+    );
+}
+
 fn replay_routes(outcome: DeliveryVerdict) -> Routes {
     let mut r = Routes::new(1, [outcome]);
     r.definitions[0].max_attempts = 1;

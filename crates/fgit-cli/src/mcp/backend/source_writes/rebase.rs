@@ -1,7 +1,7 @@
 //! Explicit publication of an independently inspected native linear series.
 //! The source-tip lease and the bundle's onto prerequisite have distinct roles.
 use super::*;
-use fgit_types::{GitOid, RefName, MAX_REF_NAME_LEN};
+use fgit_types::{GitOid, MAX_REF_NAME_LEN, RefName};
 
 pub(super) const NAME: &str = "frankengit_source_publish_rebase";
 const FIELDS: &[&str] = &[
@@ -36,9 +36,18 @@ pub(super) fn schema() -> Value {
         ]),
     );
     for (name, description) in [
-        ("expected_source", "Exact old SOURCE branch tip. This is the publication lease; the onto commit does not replace it."),
-        ("onto", "Exact native commit used as the bundle's sole prerequisite. Not a branch lease or a current-tip lookup."),
-        ("expected_candidate", "Exact independently inspected final tip of the complete linear series; may equal onto for a zero-commit series."),
+        (
+            "expected_source",
+            "Exact old SOURCE branch tip. This is the publication lease; the onto commit does not replace it.",
+        ),
+        (
+            "onto",
+            "Exact native commit used as the bundle's sole prerequisite. Not a branch lease or a current-tip lookup.",
+        ),
+        (
+            "expected_candidate",
+            "Exact independently inspected final tip of the complete linear series; may equal onto for a zero-commit series.",
+        ),
     ] {
         properties.insert(
             name.into(),
@@ -66,7 +75,13 @@ pub(super) fn schema() -> Value {
     );
     let mut result = common::input_schema(
         properties,
-        &["expected_source", "onto", "expected_candidate", "bundle_hex_chunks", "idempotency_key"],
+        &[
+            "expected_source",
+            "onto",
+            "expected_candidate",
+            "bundle_hex_chunks",
+            "idempotency_key",
+        ],
     );
     if let Value::Object(fields) = &mut result {
         fields.insert(
@@ -153,6 +168,6 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod tests;

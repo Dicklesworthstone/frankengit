@@ -90,7 +90,18 @@ fn loose(
     id
 }
 fn fixture(scratch: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid, GitOid, GitOid) {
-    let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
+    fixture_with_layout(
+        scratch,
+        format,
+        fgit_types::RootLayoutVersion::LegacyWholeBody,
+    )
+}
+fn fixture_with_layout(
+    scratch: &Scratch,
+    format: GitHashAlgorithm,
+    layout: fgit_types::RootLayoutVersion,
+) -> (OneNode, GitOid, GitOid, GitOid) {
+    let (mut node, _) = OneNode::init(scratch.config(format).with_root_layout(layout)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let root = scratch.0.join("source");
     fs::create_dir_all(root.join("refs/heads")).unwrap();
@@ -590,4 +601,5 @@ fn fast_forward_checks_stay_exact_beyond_four_thousand_ninety_six_commits() {
     }
 }
 
+mod default_branch;
 mod transactions;

@@ -27,7 +27,7 @@ OTHER_TARGET = "refs/heads/release"
 
 
 class Fixture:
-    def __init__(self, campaign, fmt, label):
+    def __init__(self, campaign, fmt, label, *, merge_candidates=False):
         self.campaign, self.format = campaign, fmt
         self.root = campaign.root / f"{fmt}-{label}"
         self.root.mkdir(mode=0o700)
@@ -43,22 +43,31 @@ class Fixture:
         )
         empty = write_object(self.source, fmt, "tree", b"")
         self.base = write_object(self.source, fmt, "commit", commit(empty, None, 1, b"base\n"))
-        self.tips, self.future, self.pulls = {}, {}, {}
+        self.tips, self.future, self.pulls, self.merged_trees = {}, {}, {}, {}
+        target_blob = write_object(self.source, fmt, "blob", b"only in the target branch\n") if merge_candidates else None
         for number in (1, 2, 3, 4, 9):
+            target_check = "test -f target-only || exit 91; " if merge_candidates else ""
             definition = (
                 "name: native-pr-collection\non:\n  pull_request:\n    branches: [target]\njobs:\n"
                 "  check:\n    runs-on: fgit-trusted-local\n    steps:\n"
-                f"      - run: printf '{number}\\n' >> {shlex.quote(str(self.effects))}; "
+                f"      - run: {target_check}printf '{number}\\n' >> {shlex.quote(str(self.effects))}; "
                 f"printf 'checked source {number}\\n'\n"
             )
             blob = write_object(self.source, fmt, "blob", definition.encode())
             ci = write_object(self.source, fmt, "tree", tree([(b"100644", b"build.yml", blob)]))
             root = write_object(self.source, fmt, "tree", tree([(b"40000", b"ci", ci)]))
+            if merge_candidates:
+                self.merged_trees[number] = write_object(self.source, fmt, "tree", tree([
+                    (b"40000", b"ci", ci), (b"100644", b"target-only", target_blob),
+                ]))
             tip = write_object(self.source, fmt, "commit", commit(root, self.base, 2, f"topic {number}\n".encode()))
             future = write_object(self.source, fmt, "commit", commit(root, tip, 3, f"advance {number}\n".encode()))
             self.tips[number], self.future[number] = tip, future
             (self.source / self.reference(number)).write_text(tip + "\n", encoding="utf-8")
             (self.source / f"refs/heads/future-{number}").write_text(future + "\n", encoding="utf-8")
+        if merge_candidates:
+            target_tree = write_object(self.source, fmt, "tree", tree([(b"100644", b"target-only", target_blob)]))
+            self.base = write_object(self.source, fmt, "commit", commit(target_tree, self.base, 4, b"target-only change\n"))
         for name in (TARGET, OTHER_TARGET):
             (self.source / name).write_text(self.base + "\n", encoding="utf-8")
         self.scope = [self.node, TENANT, REPOSITORY]

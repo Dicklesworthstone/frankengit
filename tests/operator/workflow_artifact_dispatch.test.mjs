@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, unlink } from 'node:fs/promises';
 import { configuration, dispatchReport, once, reconcile, status } from '../../scripts/operator/workflow_watch.mjs';
 import { writeNew } from '../../scripts/operator/workflow_watch_io.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const hex = text => Buffer.from(text).toString('hex');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -53,7 +54,7 @@ function fixture(root = '/frankengit-artifact-report-test', format = 'sha1') {
       selected: true, graph_sha256: digest('e'), run_id: child }] };
   return { config, intent, batch, report: { type: 'trusted_workflow_dispatch', plan, runs: [run], succeeded: true, matched_count: 1, executed_count: 1, stop_reason: null } };
 }
-for (const format of ['sha1', 'sha256']) test(`complete ${format} artifact report settles without mutation`, () => {
+for (const format of ['sha1', 'sha256']) test(`complete ${format} artifact report settles without mutation`, LINUX_WORKFLOW, () => {
   const f = fixture(undefined, format), before = encode(f.report);
   const result = dispatchReport(f.config, f.intent, f.report);
   assert.equal(result.outcome, 'observed_succeeded'); assert.equal(result.authoritative_check, false);
@@ -64,11 +65,11 @@ for (const [name, mutate] of Object.entries({
   'missing selected delivery': f => { f.report.runs[0].artifact_inputs = []; },
   'substituted producer manifest': f => { f.report.runs[0].artifact_inputs[0].inputs[0].producer_manifest_id_sha256 = digest('1'); },
   'substituted executable mode': f => { f.report.runs[0].artifact_inputs[0].inputs[0].output.executable = false; },
-})) test(`dispatch settlement refuses ${name}`, () => {
+})) test(`dispatch settlement refuses ${name}`, LINUX_WORKFLOW, () => {
   const f = fixture(); dispatchReport(f.config, f.intent, f.report); mutate(f);
   assert.throws(() => dispatchReport(f.config, f.intent, f.report));
 });
-test('unstarted workflow in a stopped dispatch does not need artifact receipts', () => {
+test('unstarted workflow in a stopped dispatch does not need artifact receipts', LINUX_WORKFLOW, () => {
   const f = fixture(); f.report.runs = []; f.report.executed_count = 0; f.report.succeeded = false; f.report.stop_reason = 'request_stopped';
   assert.equal(dispatchReport(f.config, f.intent, f.report).outcome, 'observed_stopped');
 });
@@ -86,13 +87,13 @@ async function custody(t, mutate) {
   for (const [path, value] of documents) await writeNew(path, encode(value));
   return { ...f, documents: documents.map(([path, value]) => [path, encode(value)]) };
 }
-test('offline reconciliation retains complete artifact custody without invoking an executable', async t => {
+test('offline reconciliation retains complete artifact custody without invoking an executable', LINUX_WORKFLOW, async t => {
   const f = await custody(t); const result = await reconcile(f.config);
   assert.equal(result.records[0].state, 'observed_succeeded');
   for (const [path, bytes] of f.documents) assert.deepEqual(await readFile(path), bytes);
   assert.equal((await readdir(f.config.state_directory)).length, 4);
 });
-test('missing delivery leaves original execution unknown and never writes completion', async t => {
+test('missing delivery leaves original execution unknown and never writes completion', LINUX_WORKFLOW, async t => {
   const f = await custody(t, value => { value.report.runs[0].artifact_inputs = []; });
   await assert.rejects(reconcile(f.config), /missing.*delivery/);
   assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -130,7 +131,7 @@ ${peer}`, { mode: 0o700 });
   return { config, saved, effects };
 }
 for (const format of ['sha1', 'sha256']) {
-  test(`${format} schema peer: complete capture and delivery settles once through real process IO`, async t => {
+  test(`${format} schema peer: complete capture and delivery settles once through real process IO`, LINUX_WORKFLOW, async t => {
     const f = await processPeer(t, format);
     assert.equal((await once(f.config)).outcome, 'observed_succeeded');
     const { report } = await f.saved();
@@ -140,7 +141,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
     assert.equal(await f.effects(), 1);
   });
-  test(`${format} schema peer: lost stdout reconciles complete receipts without reexecuting`, async t => {
+  test(`${format} schema peer: lost stdout reconciles complete receipts without reexecuting`, LINUX_WORKFLOW, async t => {
     const f = await processPeer(t, format, { control: { drop_stdout: true } });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -151,7 +152,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(await f.effects(), 1);
   });
 }
-test('legacy schema peer retains the original no-artifact report shape and success', async t => {
+test('legacy schema peer retains the original no-artifact report shape and success', LINUX_WORKFLOW, async t => {
   const f = await processPeer(t, 'sha1', { legacy: true });
   assert.equal((await once(f.config)).outcome, 'observed_succeeded');
   const { report } = await f.saved();
@@ -159,14 +160,14 @@ test('legacy schema peer retains the original no-artifact report shape and succe
   assert.equal(Object.hasOwn(report.runs[0], 'artifact_inputs'), false);
   assert.equal(report.runs[0].execution.jobs[0].id, 'fixture-job');
 });
-test('capture-only schema peer settles without an input-delivery field', async t => {
+test('capture-only schema peer settles without an input-delivery field', LINUX_WORKFLOW, async t => {
   const f = await processPeer(t, 'sha1', { captureOnly: true });
   assert.equal((await once(f.config)).outcome, 'observed_succeeded');
   const { report } = await f.saved();
   assert.equal(report.runs[0].artifacts.length, 1);
   assert.equal(Object.hasOwn(report.runs[0], 'artifact_inputs'), false);
 });
-test('failed schema-peer producer retains diagnostic capture but skips delivery and never claims success', async t => {
+test('failed schema-peer producer retains diagnostic capture but skips delivery and never claims success', LINUX_WORKFLOW, async t => {
   const f = await processPeer(t, 'sha1', { control: { job_failure: true } });
   assert.equal((await once(f.config)).outcome, 'observed_failed');
   const { report } = await f.saved();
@@ -175,7 +176,7 @@ test('failed schema-peer producer retains diagnostic capture but skips delivery 
   assert.deepEqual(report.runs[0].artifact_inputs, []);
   assert.equal(await f.effects(), 1);
 });
-test('schema-peer missing capture leaves uncertainty fenced across once and reconcile', async t => {
+test('schema-peer missing capture leaves uncertainty fenced across once and reconcile', LINUX_WORKFLOW, async t => {
   const f = await processPeer(t, 'sha1', { control: { run_patch: { artifacts: [] } } });
   await assert.rejects(once(f.config), /missing.*capture/);
   await assert.rejects(reconcile(f.config), /missing.*capture/);

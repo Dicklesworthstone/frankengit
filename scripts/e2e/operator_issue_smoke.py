@@ -21,7 +21,9 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
-from scoped_events_smoke import Campaign, HttpServer, PRINCIPAL, REPOSITORY, TENANT, require, file_sha256
+from scoped_events_smoke import (
+    Campaign, HttpServer, PRINCIPAL, REPOSITORY, TENANT, require, file_sha256, wait_process_interruptibly,
+)
 from operator_inbox_smoke import run_inbox_case, missing_inbox_service
 from operator_discussion_inbox_smoke import seed_discussions, run_discussion_inbox_case
 from operator_output_smoke import output_sink, run_output_cases
@@ -60,7 +62,7 @@ class OperatorCampaign(Campaign):
             try:
                 owner = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=sink, stderr=err,
                                          start_new_session=os.name == "posix")
-                exit_code = owner.wait(timeout=timeout)
+                exit_code = wait_process_interruptibly(owner, timeout=timeout)
             except BaseException as interruption:
                 if owner is None:
                     self.record(kind="operator", command=command, spawn_error=type(interruption).__name__,

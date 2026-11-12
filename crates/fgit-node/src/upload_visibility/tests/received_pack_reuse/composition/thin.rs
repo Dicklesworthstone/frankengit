@@ -61,7 +61,16 @@ fn prepare_fetch(
     edit(&mut fetch);
     let context = node.session_pack_materialization_context(&deadline);
     let prepared = node
-        .prepare_upload_pack_selection(&head, &scope, &fetch, &deadline, &context, &mut || true)
+        .prepare_upload_pack_selection(
+            &head,
+            &scope,
+            &fetch,
+            &deadline,
+            &context,
+            node.request_context().authority(),
+            &Cell::new(None),
+            &mut || true,
+        )
         .unwrap();
     (head, prepared)
 }
@@ -390,7 +399,7 @@ fn deleted_refs_and_changed_bases_cannot_reuse_an_old_thin_selection() {
                 &scope,
                 &selection.request,
                 &deadline,
-                &context,
+                &context, fixture.node.request_context().authority(), &Cell::new(None),
                 &mut || true,
             ),
             Err(NodePackMaterializationRefusal::RequestedWantOutsideClosure(id))

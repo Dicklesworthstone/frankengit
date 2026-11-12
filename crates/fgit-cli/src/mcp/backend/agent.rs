@@ -9,8 +9,9 @@ use super::super::protocol::{MAX_MESSAGE_BYTES, MAX_RESPONSE};
 use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, text};
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
-    DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ,
+    DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
+    MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -48,11 +49,23 @@ impl Profile {
 }
 
 /// One exhaustive list owns both discovery and dispatch. Do not derive this
-/// from broad operator groups: those also grant milestones, notifications,
-/// checks, reviews, candidates and events not covered by these grants.
+/// from broad operator groups: those also grant notifications,
+/// checks, reviews and events not covered by these grants. Candidate operations
+/// have an additional closed argument gate before authentication and dispatch.
 pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     match name {
         "frankengit_issue_list" | "frankengit_issue_show" if options.issues => Some(ISSUES_READ),
+        "frankengit_milestone_list" | "frankengit_milestone_show" if options.issues => {
+            Some(MILESTONES_READ)
+        }
+        "frankengit_milestone_open"
+        | "frankengit_milestone_edit"
+        | "frankengit_milestone_close"
+        | "frankengit_milestone_reopen"
+            if options.writes.issues =>
+        {
+            Some(MILESTONES_WRITE)
+        }
         "frankengit_issue_open"
         | "frankengit_issue_edit"
         | "frankengit_issue_close"
@@ -92,6 +105,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         "frankengit_discussion_open"
         | "frankengit_discussion_edit"
         | "frankengit_discussion_comment"
+        | "frankengit_discussion_append_comment"
         | "frankengit_discussion_lock"
         | "frankengit_discussion_unlock"
         | "frankengit_discussion_close"
@@ -115,6 +129,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
             Some(SOURCE_READ)
         }
         "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
+        super::candidate::NAME if options.source => Some(SOURCE_CANDIDATES),
         "frankengit_source_log"
         | "frankengit_source_blame"
         | "frankengit_source_historical_tree"
@@ -129,7 +144,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
 }
 
 pub(super) fn is_write(operation: u16) -> bool {
-    operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE) != 0
+    operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE) != 0
 }
 
 fn request_commitment(name: &str, args: &Object) -> Result<[u8; 32], ToolError> {
@@ -172,6 +187,9 @@ pub(super) fn call(backend: &mut NodeTools, name: &str, args: &Object) -> Result
     // direct backend calls that do not pass through protocol discovery.
     let operation =
         operation(&backend.options, name).ok_or(ToolError::invalid("tool_not_granted"))?;
+    if operation == SOURCE_CANDIDATES {
+        super::candidate::agent_operation(args)?;
+    }
     let key = if is_write(operation) || operation == OUTCOMES_READ {
         mutations::key(args)?
     } else {
@@ -273,6 +291,20 @@ pub(super) fn source_read_context(
         .and_then(|profile| profile.request.as_ref())
         .ok_or(ToolError::failed("agent_request_required"))?
         .mcp_source_read_context(&backend.node)
+        .map_err(auth_error)
+}
+
+/// A candidate handler cannot convert a missing request, another operation's
+/// reservation, or public attribution into trusted local source authority.
+pub(super) fn source_candidate_request(
+    backend: &NodeTools,
+) -> Result<fgit_node::agent_credentials::SourceCandidateRequest<'_>, ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .source_candidates(&backend.node)
         .map_err(auth_error)
 }
 

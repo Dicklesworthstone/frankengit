@@ -28,7 +28,18 @@ pub const SOURCE_READ: u16 = 1 << 7;
 /// only their closed read-only history routes and retain canonical visibility;
 /// it grants no arbitrary-object access, candidate work or review mutation.
 pub const SOURCE_HISTORY_READ: u16 = 1 << 8;
-pub const ALL_OPERATIONS: u16 = (1 << 9) - 1;
+/// Prepare exact-patch candidates and inspect supplied single-parent bundles
+/// against an explicitly selected current branch. This independently grants
+/// source disclosure through those operations and finite in-memory TreeFS work,
+/// never durable staging, ref publication, review, merge or process execution.
+pub const SOURCE_CANDIDATES: u16 = 1 << 9;
+/// Native milestone summaries, exact lifecycle history and same-snapshot issue
+/// counts. This does not grant issue text, source access or milestone mutations.
+pub const MILESTONES_READ: u16 = 1 << 10;
+/// Open, edit, close and reopen native milestones. Issue membership changes
+/// still require ISSUES_WRITE; this scope grants neither issue nor milestone reads.
+pub const MILESTONES_WRITE: u16 = 1 << 11;
+pub const ALL_OPERATIONS: u16 = (1 << 12) - 1;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";

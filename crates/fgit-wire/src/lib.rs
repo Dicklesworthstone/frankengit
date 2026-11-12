@@ -48,6 +48,8 @@ pub mod receive;
 mod shallow_response;
 /// Bounded smart HTTP discovery, routing, and streaming message framing.
 pub mod smart_http;
+/// Pure, bounded sparse-checkout pattern predicates for native fetch selection.
+pub mod sparse;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
 pub mod stale_disclosure;
 pub mod visibility;

@@ -162,7 +162,8 @@ export type RefStateNonMembershipProof =
   | RefStateNonMembershipProofEmptyState
   | RefStateNonMembershipProofBeforeFirst
   | RefStateNonMembershipProofBetween
-  | RefStateNonMembershipProofAfterLast;
+  | RefStateNonMembershipProofAfterLast
+  | RefStateNonMembershipProofHeadOnly;
 
 /** The committed ref-state tree has no leaves. */
 export interface RefStateNonMembershipProofEmptyState {
@@ -194,6 +195,14 @@ export interface RefStateNonMembershipProofAfterLast {
   discriminant: 3;
   /** The authenticated last neighbour. */
   last: RefStateNeighbour;
+}
+
+/** The V2 tree contains only its mandatory typed HEAD leaf; invalid under V1. */
+export interface RefStateNonMembershipProofHeadOnly {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 4;
+  /** Exact optional symbolic branch target, including an unborn branch. */
+  head_target?: string;
 }
 
 /** One proof answer; unknown tags cannot be skipped and must refuse. */
@@ -453,7 +462,7 @@ export interface VerifiedReadMerkleProofV1 {
  * schema verified-read-ref-non-membership-proof v1.0, domain frankengit/verified-read-ref-non-membership-proof/v1
  */
 export interface VerifiedReadRefNonMembershipProofV1 {
-  /** The empty, boundary, or between-neighbours absence shape. */
+  /** The historical empty, V2 HEAD-only, boundary, or between-neighbours absence shape. */
   proof: RefStateNonMembershipProof;
 }
 

@@ -1,6 +1,8 @@
 use super::options::Options;
 use super::*;
-use fgit_forge::event::discussion::{DiscussionAction, DiscussionEdit, apply_event};
+use fgit_forge::event::discussion::{
+    DiscussionAction, DiscussionCommand, DiscussionEdit, apply_event,
+};
 use fgit_forge::{AggregateVersion, DiscussionNumber, ExpectedVersion};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{CANONICAL_CODEC_VERSION, RepositoryAuthorityHeadId};
@@ -22,9 +24,13 @@ fn args(action: &str, extra: &[&str]) -> Vec<String> {
             "33".repeat(16),
             "--idempotency-key".into(),
             "stable-private-key".into(),
-            "--expected-version".into(),
-            if action == "open" { "0" } else { "1" }.into(),
         ]);
+        if action != "append-comment" {
+            result.extend([
+                "--expected-version".into(),
+                if action == "open" { "0" } else { "1" }.into(),
+            ]);
+        }
     }
     result.extend(extra.iter().map(|value| (*value).to_owned()));
     result
@@ -34,6 +40,12 @@ fn mutation(options: &Options) -> &options::Mutation {
         panic!("mutation");
     };
     value
+}
+fn exact(options: &Options) -> &DiscussionCommand {
+    let MutationCommand::Exact(command) = &mutation(options).command else {
+        panic!("exact-version mutation");
+    };
+    command
 }
 fn head(seed: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
@@ -59,12 +71,9 @@ fn parses_exact_discussion_lifecycle_and_preserves_description_bytes() {
         ))
         .unwrap();
         assert_eq!(opened.format.as_str(), format);
+        assert_eq!(exact(&opened).expected_version, ExpectedVersion::NewStream);
         assert_eq!(
-            mutation(&opened).command.expected_version,
-            ExpectedVersion::NewStream
-        );
-        assert_eq!(
-            mutation(&opened).command.action,
+            exact(&opened).action,
             DiscussionAction::Open {
                 title: "Design 🦀".into(),
                 body: "é\r\n<script>data</script>".into(),
@@ -72,7 +81,7 @@ fn parses_exact_discussion_lifecycle_and_preserves_description_bytes() {
         );
         let edited = options::parse(&args("edit", &["--body", ""])).unwrap();
         assert_eq!(
-            mutation(&edited).command.action,
+            exact(&edited).action,
             DiscussionAction::Edit(DiscussionEdit {
                 title: None,
                 body: Some(String::new())
@@ -80,7 +89,7 @@ fn parses_exact_discussion_lifecycle_and_preserves_description_bytes() {
         );
         let renamed = options::parse(&args("edit", &["--title", "Renamed"])).unwrap();
         assert_eq!(
-            mutation(&renamed).command.action,
+            exact(&renamed).action,
             DiscussionAction::Edit(DiscussionEdit {
                 title: Some("Renamed".into()),
                 body: None
@@ -88,20 +97,65 @@ fn parses_exact_discussion_lifecycle_and_preserves_description_bytes() {
         );
         let comment = options::parse(&args("comment", &["--body", "Exact\r\nreply"])).unwrap();
         assert_eq!(
-            mutation(&comment).command.action,
+            exact(&comment).action,
             DiscussionAction::Comment {
                 body: "Exact\r\nreply".into()
             }
         );
         for action in ["close", "reopen", "lock", "unlock"] {
             let parsed = options::parse(&args(action, &[])).unwrap();
-            assert_eq!(mutation(&parsed).command.action.name(), action);
+            assert_eq!(exact(&parsed).action.name(), action);
             assert_eq!(
-                mutation(&parsed).command.expected_version,
+                exact(&parsed).expected_version,
                 ExpectedVersion::Exactly(AggregateVersion::FIRST)
             );
         }
     }
+}
+
+#[test]
+fn append_comments_bind_exact_text_without_accepting_a_predecessor() {
+    for format in ["sha1", "sha256"] {
+        let parsed = options::parse(&args(
+            "append-comment",
+            &[
+                "--body",
+                "Independent é\r\nreply",
+                "--object-format",
+                format,
+            ],
+        ))
+        .unwrap();
+        let command = &mutation(&parsed).command;
+        let MutationCommand::Append(intent) = command else {
+            panic!("explicit append intent required");
+        };
+        assert_eq!(parsed.format.as_str(), format);
+        assert_eq!(intent.number.get(), 7);
+        assert_eq!(intent.body, "Independent é\r\nreply");
+        assert_eq!(options::expected_version(command), None);
+        assert_eq!(mutation(&parsed).key, b"stable-private-key");
+    }
+    for fields in [
+        vec![],
+        vec!["--body", "   "],
+        vec!["--body", "reply", "--expected-version", "1"],
+        vec!["--body", "reply", "--title", "rename"],
+        vec!["--body", "reply", "--body-file", "unopened"],
+    ] {
+        assert!(options::parse(&args("append-comment", &fields)).is_err());
+    }
+    let mut parsed = options::parse(&args("append-comment", &["--body-file", "unopened"])).unwrap();
+    let Operation::Mutate(mutation) = &mut parsed.operation else {
+        panic!("append mutation");
+    };
+    assert!(mutation.body_file.is_some());
+    *options::body_slot(&mut mutation.command).unwrap() = "File reply\r\n".into();
+    mutation.command.validate(mutation.principal).unwrap();
+    let MutationCommand::Append(intent) = &mutation.command else {
+        panic!("append body custody");
+    };
+    assert_eq!(intent.body, "File reply\r\n");
 }
 
 #[test]
@@ -170,7 +224,7 @@ fn read_output_requires_bound_snapshot_and_exact_contiguous_history() {
     ))
     .unwrap();
     let m = mutation(&options);
-    let event = m.command.proposed_event(m.principal).unwrap();
+    let event = exact(&options).proposed_event(m.principal).unwrap();
     let snapshot = apply_event(None, &event).unwrap();
     let read = options::ReadOptions {
         number: Some(DiscussionNumber::try_new(7).unwrap()),

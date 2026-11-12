@@ -7,7 +7,7 @@ use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnat
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes (--allow-issues|--allow-discussions|--allow-pulls)]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Discussion reads and writes each require their own\nexplicit grant; issue access never implies discussion access.\nRead groups, issue/discussion/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require the selected kind's --allow-issues, --allow-discussions or --allow-pulls\ngrant plus the launch-bound principal and incarnation; kind defaults to issue.\nNotification writes additionally require --allow-notification-writes; content-write\npermission does not grant them. Read acknowledgements supply an explicit observed\nthread prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes] [--allow-source-writes]\n  [--allow-notification-writes (--allow-issues|--allow-discussions|--allow-pulls)]\n  [--allow-review-writes] [--allow-reviewed-merges] [--allow-outcomes]\n  [--allow-queues] [--allow-queue-writes] [--allow-queue-landings]\n  [--allow-agent-context --principal <id> --expected-incarnation <id>]\n  [--allow-artifacts --artifact-root <private-absolute-root> --expected-incarnation <id>]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Discussion reads and writes each require their own\nexplicit grant; issue access never implies discussion access.\nRead groups, issue/discussion/PR/source/review writes, reviewed\nmerges and outcome recovery are INDEPENDENT grants. Writes or recovery require\nboth a launch-bound principal and an exact incarnation pin. No write grant\nimplies another write, read or recovery grant. Self inbox reads require the selected kind's --allow-issues, --allow-discussions or --allow-pulls\ngrant plus the launch-bound principal and incarnation; kind defaults to issue.\nNotification writes additionally require --allow-notification-writes; content-write\npermission does not grant them. Read acknowledgements supply an explicit observed\nthread prefix; later activity\nstays unread. No tool accepts another notification recipient. Queue reads, metadata writes and\nfast-forward head landings have separate grants. Queue writes/landings require\ncanonical launch identities plus matching expected_incarnation/object_format\nin every call; landing also pins queue/PR versions, both tips and policy epoch.\nNative branch protection remains mandatory and no merge-method fallback exists.\nAgent context requires its independent grant, a launch-bound sponsor principal\nand the exact incarnation pin. It opens a bounded, invocation-only read run and\nreturns authenticated source evidence; it grants no writes or durable execution.\nArtifact reads require their independent grant, an existing private absolute root\nand the exact incarnation pin. They disclose the ENTIRE configured workflow\nnamespace, including hidden-ref outputs; source-read grants do not filter it.\nArtifact provenance records custody, not canonical checks or producer authority.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires its original durable client key. Exact-version tools retain\ntheir predecessors; explicit append tools select the current publication position.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nReviews bind exact candidate bytes, PR/reviewer versions, tips and policy epoch.\nChange requests and withdrawals require a nonblank explanation. Review permission\ndoes not grant code publication. Reviewed merge requires every explicitly named\nreviewer to approve the exact candidate; opener and submitter votes cannot count.\nThere is no unreviewed merge fallback or repository-wide protection configuration.\nNo shell, secret, network listener, sampling, or ambient filesystem tool is available.\nMCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
 const MAINTENANCE_USAGE: &str = "Optional operator-owned index maintenance for either profile:
   --expected-incarnation <id> (--allow-source|--allow-agent-context)
@@ -45,9 +45,14 @@ Current source browsing, search, reference listing and initial/context retrieval
 require --allow-source and the canonical source-read scope. --allow-agent-context
 independently exposes the authenticated Agent Protocol context document under
 that same canonical scope; neither launch flag grants the other tool group.
-These source reads preserve the credential's real agent, sponsor and request
-deadline, and create no durable execution run. Source writes, history, candidate
-preparation/inspection, diffs, Git transport and bundles remain unavailable.
+History, blame, historical tree/blob and reference comparison tools independently
+require source-history-read. With source-candidates, --allow-source exposes only
+prepare_patch (regular-file exact-tree-v1) and single-parent inspect operations of
+frankengit_source_candidate. Candidate data grants no publication authority.
+Source work preserves the credential's real agent, sponsor and original request
+deadline, and creates no durable execution run. Source writes, initial-history,
+symlink/replay/rebase/PR/queue candidate preparation, PR-specific diffs, Git
+transport and general bundle export/import remain unavailable.
 Issue, PR metadata/conversation, discussion and own-principal outcome tools keep
 their independent grants. Milestones, notifications, checks, reviews, artifacts,
 queues, events and administration remain unavailable.
@@ -173,8 +178,8 @@ impl Options {
             return Err("--allow-artifacts and --artifact-root must be supplied together".into());
         }
         if let Some(root) = &self.artifact_root {
-            if !cfg!(target_os = "linux") {
-                return Err("workflow artifact reads are supported only on Linux".into());
+            if !cfg!(unix) {
+                return Err("workflow artifact reads are supported only on Unix".into());
             }
             if self.incarnation.is_none() {
                 return Err("artifact reads require --expected-incarnation".into());
@@ -199,7 +204,7 @@ impl Options {
             || self.queues.mutation()
             || self.outcomes
             || self.agent_context
-            || ((self.issues || self.discussions) && self.principal.is_some());
+            || ((self.issues || self.discussions || self.pulls) && self.principal.is_some());
         if principal_scoped && (self.principal.is_none() || self.incarnation.is_none()) {
             return Err(
                 "writes, recovery, agent context and personal inbox reads require --principal and --expected-incarnation"
@@ -208,7 +213,7 @@ impl Options {
         }
         if !principal_scoped && self.principal.is_some() {
             return Err(
-                "--principal requires an explicit write, outcome, issue/discussion-read or agent-context grant".into(),
+                "--principal requires an explicit write, outcome, issue/discussion/pull-read or agent-context grant".into(),
             );
         }
         Ok(())

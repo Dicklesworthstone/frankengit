@@ -1,4 +1,4 @@
-//! Trusted-local acknowledgement of one recovered native agent publication.
+//! Trusted-local cleanup of one recovered native agent publication obligation.
 //!
 //! The independently retained run and journal anchors identify old responsibility.
 //! This command cannot issue effects or resubmit a repository transaction.
@@ -8,6 +8,7 @@ mod output;
 
 use fgit_agent::ref_publication::ObservedRefTransaction;
 use fgit_node::agent_publication::{
+    NativeRecoveredRefTransactionAbort, NativeRecoveredRefTransactionAbortRefusal,
     NativeRecoveredRefTransactionRefusal, NativeRecoveredRefTransactionSettlement,
 };
 use fgit_node::{GitDaemonSessionTimeout, NodeConfig, OneNode, TerminationSignals};
@@ -16,6 +17,7 @@ use std::io::Write;
 use std::time::Duration;
 
 const PROFILE: &str = "native-agent-publication-settlement-v1";
+const ABORT_PROFILE: &str = "native-agent-reservation-abort-v1";
 const MIN_OUTPUT_BYTES: usize = 8192;
 const USAGE: &str =
     "usage: fg agent settle <storage-root> <tenant-id> <repository-id> <absolute-journal-directory>
@@ -26,14 +28,21 @@ const USAGE: &str =
   --expected-tail-bytes <canonical-decimal>
   --expected-tail-digest <64-lowercase-hex>
   --observed-at <canonical-logical-time>
+  [--action acknowledge|abort-reserved]
   [--object-format sha1|sha256] [--max-output-bytes <8192..1048576>]
 
-Authenticate an original native publication and durably acknowledge its
-committed or refused canonical outcome in the existing responsibility journal.
-This explicit trusted-local operation writes only its deterministic ACK. The
-principal must match the original seal under exclusive journal custody. It
-does not submit a transaction, move refs, resume a broker, renew capability,
-or prove whole-run/process quiescence. An undecided outcome writes nothing.
+The default action, acknowledge, authenticates an original native publication
+and durably acknowledges its committed or refused canonical outcome. An
+undecided outcome writes nothing. Explicit --action abort-reserved instead
+aborts only a bound reservation whose journal proves it never reached start.
+Started responsibilities and unknown suffixes refuse. Aborting a reservation
+does not observe or cancel the canonical transaction; identical work may have
+been submitted independently. Its canonical_status is not_observed.
+
+The principal must match the original seal under exclusive journal custody.
+Both actions write only their deterministic lifecycle frame. Neither submits a
+transaction, moves refs, resumes a broker, renews capability, or proves
+whole-run/process quiescence. There is no automatic fallback between actions.
 Use fg agent recover for read-only inspection.
 
 Supply the original complete-run commitment and acknowledged journal tail
@@ -42,18 +51,25 @@ files. --observed-at dates cleanup in the original host's logical-time domain;
 it is not Unix time and does not refresh the run. Expired runs can be settled.
 Retain journal.current_tail from a confirmed receipt independently afterward.
 
-Retry with the SAME original anchors after a lost receipt or interrupted ACK.
-Only an exact prefix of this ACK may follow the supplied tail; other suffixes
-refuse without truncation. A matching complete ACK is synchronized without
-duplication. input_already_acknowledged describes the supplied prefix, not
-whether an earlier uncertain cleanup wrote the ACK. Native custody is bounded
+Retry the SAME action and original anchors after a lost receipt or interrupted
+write. Only an exact prefix of that action's frame may follow the supplied tail;
+other suffixes refuse without truncation. A complete matching frame is synced
+without duplication. input_already_acknowledged or input_already_aborted describes
+the supplied prefix, not a frame written by an uncertain cleanup after it.
+Native custody is bounded
 to 16 MiB and 32768 events. One finite request is capped at 30 seconds; a
 leading --timeout-secs can shorten it. In-flight filesystem calls are drained.
 
 JSON ceiling defaults to 64 KiB. Values below 8 KiB refuse before journal I/O.
 Exit 0: committed and ACK confirmed; 3: refused and ACK confirmed;
 4: undecided, unchanged journal; 2: error or incomplete cleanup/output.
-A missing receipt or timeout proves neither rollback nor absence of an ACK.";
+For abort-reserved, exit 0 means only the reservation's Abort is confirmed.
+A missing receipt or timeout proves neither rollback nor absence of a frame.";
+
+enum SettlementResult {
+    Acknowledgement(NativeRecoveredRefTransactionSettlement),
+    Aborted(NativeRecoveredRefTransactionAbort),
+}
 
 /// Settle only the original selected publication under independently pinned custody.
 pub fn run(arguments: &[String]) -> Result<u8, String> {
@@ -88,8 +104,9 @@ fn run_with(arguments: &[String], output: &mut impl Write) -> Result<u8, String>
         .map_err(|error| error.to_string())?,
     ));
     let monitored = signals
-        .run_request(node.runtime(), &request, |request| {
-            node.runtime()
+        .run_request(node.runtime(), &request, |request| match options.action {
+            options::Action::Acknowledge => node
+                .runtime()
                 .block_on(
                     node.settle_recovered_agent_ref_transaction_for_principal_in(
                         request,
@@ -102,7 +119,22 @@ fn run_with(arguments: &[String], output: &mut impl Write) -> Result<u8, String>
                         options.observed_at,
                     ),
                 )
-                .map_err(operation_error)
+                .map(SettlementResult::Acknowledgement)
+                .map_err(operation_error),
+            options::Action::AbortReserved => node
+                .runtime()
+                .block_on(node.abort_recovered_agent_ref_transaction_for_principal_in(
+                    request,
+                    &original.directory,
+                    original.run,
+                    &original.expected_run,
+                    original.expected_tail,
+                    original.effect,
+                    original.principal,
+                    options.observed_at,
+                ))
+                .map(SettlementResult::Aborted)
+                .map_err(abort_error),
         })
         .map_err(|error| error.to_string());
     let (operation, monitor_cleanup) = match monitored {
@@ -124,6 +156,13 @@ fn run_with(arguments: &[String], output: &mut impl Write) -> Result<u8, String>
         (Some(monitor), Some(node)) => Some(format!("{monitor}; {node}")),
     };
     finish(output, &options, operation, cleanup.as_deref())
+}
+
+fn abort_error(error: NativeRecoveredRefTransactionAbortRefusal) -> String {
+    format!(
+        "{}; reservation abort durability is unconfirmed; retry abort-reserved with the original independent anchors; canonical transaction status was not observed and no resubmission is authorized",
+        bounded_diagnostic(&error.to_string())
+    )
 }
 
 fn operation_error(error: NativeRecoveredRefTransactionRefusal) -> String {
@@ -165,20 +204,35 @@ fn observation_fact(observed: &ObservedRefTransaction) -> String {
     )
 }
 
-fn result_fact(result: &NativeRecoveredRefTransactionSettlement) -> String {
+fn result_fact(result: &SettlementResult) -> String {
     match result {
-        NativeRecoveredRefTransactionSettlement::Undecided { tx_id, .. } => {
+        SettlementResult::Acknowledgement(NativeRecoveredRefTransactionSettlement::Undecided {
+            tx_id,
+            ..
+        }) => {
             format!("original transaction {tx_id} is undecided; no ACK was written")
         }
-        NativeRecoveredRefTransactionSettlement::Acknowledged {
-            observation,
-            recovered,
-            ..
-        } => {
+        SettlementResult::Acknowledgement(
+            NativeRecoveredRefTransactionSettlement::Acknowledged {
+                observation,
+                recovered,
+                ..
+            },
+        ) => {
             let tail = recovered.journal().position();
             format!(
                 "{}; ACK was synchronized at journal tail entries={}, bytes={}, digest={}; retry cleanup with the original independent anchors if the receipt was lost",
                 observation_fact(observation),
+                tail.entries,
+                tail.bytes,
+                output::hex(&tail.digest)
+            )
+        }
+        SettlementResult::Aborted(result) => {
+            let tail = result.recovered.journal().position();
+            format!(
+                "reservation for original transaction {} was aborted at synchronized journal tail entries={}, bytes={}, digest={}; canonical transaction status was not observed; retry abort-reserved with the original independent anchors if the receipt was lost",
+                result.binding.tx_id(),
                 tail.entries,
                 tail.bytes,
                 output::hex(&tail.digest)
@@ -190,7 +244,7 @@ fn result_fact(result: &NativeRecoveredRefTransactionSettlement) -> String {
 fn finish(
     output: &mut impl Write,
     options: &options::Options,
-    operation: Result<NativeRecoveredRefTransactionSettlement, String>,
+    operation: Result<SettlementResult, String>,
     cleanup_error: Option<&str>,
 ) -> Result<u8, String> {
     let result = operation.map_err(|error| match cleanup_error {
@@ -198,9 +252,13 @@ fn finish(
         Some(cleanup) => format!("{error}; {}", bounded_diagnostic(cleanup)),
     })?;
     // A cleanup or output failure must preserve established canonical/durability
-    // knowledge. It cannot retroactively turn a synchronized ACK into a refusal.
-    let (document, status) = output::render(options, &result, cleanup_error)
-        .map_err(|error| format!("{error}; {}", result_fact(&result)))?;
+    // knowledge. It cannot retroactively undo a synchronized lifecycle frame.
+    let rendered = match &result {
+        SettlementResult::Acknowledgement(result) => output::render(options, result, cleanup_error),
+        SettlementResult::Aborted(result) => output::render_abort(options, result, cleanup_error),
+    };
+    let (document, status) =
+        rendered.map_err(|error| format!("{error}; {}", result_fact(&result)))?;
     writeln!(output, "{document}")
         .and_then(|()| output.flush())
         .map_err(|error| {
@@ -224,5 +282,5 @@ pub fn error_json(error: &str) -> String {
         ("error", text(error)),
     ])
     .encode(8192)
-    .unwrap_or_else(|_| "{\"type\":\"agent_settlement_error\",\"schema_version\":1,\"complete\":false,\"read_only\":false,\"publication_authorized\":false,\"resumption_authorized\":false,\"error\":\"response_limit; ACK may already be durable; retry cleanup with original anchors\"}".into())
+    .unwrap_or_else(|_| "{\"type\":\"agent_settlement_error\",\"schema_version\":1,\"complete\":false,\"read_only\":false,\"publication_authorized\":false,\"resumption_authorized\":false,\"error\":\"response_limit; cleanup may already be durable; retry the same action with original anchors\"}".into())
 }

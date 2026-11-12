@@ -30,6 +30,29 @@ polls are coalesced, not reported as tested. A check, comment, checkpoint or cha
 to an unrelated ref cannot create a new event for this branch. A later return to
 an earlier tip is a distinct decision batch and therefore a distinct event.
 
+Selection walks backward from the authenticated current head and stops at the
+latest decision batch whose net ref state changes the watched reference.
+Every traversed decision or checkpoint edge is verified. The selected batch's
+predecessor ref map supplies the exact previous tip, including absence after
+deletion; the selector does not reconstruct every older snapshot or read
+unrelated forge event payloads. Both canonical ref layouts use their existing
+repository and digest validation.
+
+The event remains the batch's net change: multiple writes within one batch
+collapse to its before/after values, and a batch returning the ref to its
+original value creates no new event. Tag events retain their raw old/new tips
+before the existing verified peeling step. The authenticated current head is
+still reread before reservation, so a race selects `source_moved` without
+creating execution custody.
+
+The existing history-step ceiling and request cancellation remain binding.
+Missing or corrupt evidence on the required suffix refuses selection; no
+cached polling observation replaces canonical evidence. History older than
+the selected change is outside this query's proof and is not read. This
+bounds selection work by the suffix needed for the latest change; it does
+not remove the independent materialization bounds, retain an all-events queue,
+or establish an end-to-end throughput claim.
+
 The watch scope binds tenant, repository, incarnation, raw branch bytes and raw
 workflow-directory bytes. Each event binds that scope and its canonical decision
 batch. Input selectors, time limits and output settings cannot create a second
@@ -80,6 +103,20 @@ The custody scan is bounded to 1024 retained events; source-history and dispatch
 retain their existing finite work/byte limits. Filesystem parents must remain
 stable and operator-owned. No directory scan or local marker is repository truth.
 
+
+## Selection regression coverage
+
+The focused native test definitions compare reverse selection with the existing
+complete-history projection over the same embedded authority. They include
+branch creation, unrelated changes, repeated values, deletion/recreation,
+checkpoints, both Git object formats, stopped requests and missing/corrupt
+required evidence. A selected suffix can succeed without consulting older
+history; this is selection evidence, separate from actual workflow execution
+and whole-service throughput.
+
+```sh
+cargo test --locked -p fgit-node --lib ref_selection::tests -- --test-threads=1
+```
 
 ## Native CLI
 

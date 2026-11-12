@@ -1,5 +1,5 @@
 //! Explicit local immutable payload custody; object-fabric owns storage semantics.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod execute;
 mod options;
 mod output;
@@ -20,7 +20,7 @@ put: --source <absolute-regular-file> --payload-sha256 <sha256> --payload-bytes 
 inspect: --id <artifact-sha256>
 export: --id <artifact-sha256> --output <absolute-new-file>
 
-Digests are exactly 64 lowercase hexadecimal digits. Linux trusted-local only.
+Digests are exactly 64 lowercase hexadecimal digits. Unix trusted-local only.
 Put verifies supplied length/digest and retained bytes before immutable install.
 Inspect and export verify the entire stored payload, not just a metadata record.
 Existing export destinations are never replaced. A lost reply does not prove absence.
@@ -48,7 +48,7 @@ pub(super) fn run(args: &[String]) -> u8 {
         Ok(value) => value,
         Err(error) => return output::error(err, "invalid_input", &error, 2),
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let signals = match fgit_node::TerminationSignals::install() {
             Ok(value) => value,
@@ -62,13 +62,13 @@ pub(super) fn run(args: &[String]) -> u8 {
             err,
         )
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = options;
         output::error(
             err,
             "unsupported_platform",
-            "artifact custody requires Linux; no fallback selected",
+            "artifact custody requires Unix; no fallback selected",
             2,
         )
     }

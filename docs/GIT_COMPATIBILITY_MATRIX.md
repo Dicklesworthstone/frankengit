@@ -17,7 +17,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Git protocol v2 `ls-refs`/`fetch` | required-v1 | Capability-scoped command tests and byte transcripts |
 | “Protocol v2 push” | explicitly-out-of-scope | No standardized Git v2 push command; push compatibility is `git-receive-pack` |
 | SHA-1 repositories | required-v1 | Exact native OIDs, framing, pack behavior, and stronger internal envelope commitments |
-| SHA-256 repositories | planned, constitutionally typed | Native SHA-256 object format and transition fixtures; never digest-byte aliasing with SHA-1 |
+| SHA-256 repositories | required-v1 | Native SHA-256 object format per [`docs/D3_SHA256_REPOSITORY_DECISION.md`](D3_SHA256_REPOSITORY_DECISION.md); mixed-format traffic fails closed and transition mappings apply only where upstream Git defines them; never digest-byte aliasing with SHA-1 |
 | Blob/tree/commit/annotated-tag parsing | required-v1 | Exact framing, header semantics, ordering, encoding, and resource bounds |
 | Pack v2 parsing/writing | required-v1 | Header/trailer/checksum, OFS/REF delta, thin packs, bounded reconstruction, deterministic writer profiles |
 | Commit-graph V1 materialization | planned compatibility surface | Source-receipted deterministic graph materializer and exact graph-walk comparison exist internally; no pinned-Git reader-parse evidence is declared yet |
@@ -47,6 +47,14 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
 ## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
+
+Current implementation supports `sparse:oid=<exact visible blob OID>` through
+the shared native selector. Symbolic blob expressions and `sparse:path` remain
+unsupported. See [the supported grammar and bounds](PARTIAL_CLONE_SERVING.md#sparse-pattern-blobs).
+The historical sparse-refusal results below remain tied to their named
+revision. The stock-transport helper now exercises exact-OID omission and lazy
+checkout against Git's own omitted set, but that updated campaign requires its
+own execution; the old passing result does not validate the new capability.
 
 These rows come from one discovered suite, `suites-transport-stock_transport_capabilities`
 (`scripts/e2e/suites/transport/stock_transport_capabilities.sh`, helper

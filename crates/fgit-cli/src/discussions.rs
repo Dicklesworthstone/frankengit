@@ -8,7 +8,7 @@ use crate::publication_support::{describe, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{DecisionOutcome, HeadGeneration, TxId};
-use options::Operation;
+use options::{MutationCommand, Operation};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -23,12 +23,18 @@ usage: fg discussion <open|edit|comment|close|reopen|lock|unlock> <storage-root>
   comment: positive version; --body <text> or --body-file <file>
   close/reopen/lock/unlock: positive version; no metadata options
 
+usage: fg discussion append-comment <storage-root> <tenant-id> <repository-id> <number>
+  --trusted-local --principal <id> --idempotency-key <key>
+  (--body <text> | --body-file <file>) [--object-format sha1|sha256]
+  Appends across concurrent changes; no expected version. Current locks still apply.
+
 usage: fg discussion list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--limit <1..100>] [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 usage: fg discussion show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--limit <1..100>] [--after-version <version> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 
-Discussions are independent repository aggregates with exact predecessor versions.
+Discussions are independent repository aggregates. Strict mutations bind exact versions;
+append-comment binds the actor, number and exact body and replans only its position.
 Edits preserve omitted fields; --body '' explicitly clears the description.
 Locking blocks comments independently of open/closed state. History preserves exact text.
 Continue reads with the original snapshot token. Retry uncertain mutations with
@@ -50,6 +56,7 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                 "open"
                     | "edit"
                     | "comment"
+                    | "append-comment"
                     | "close"
                     | "reopen"
                     | "lock"
@@ -67,10 +74,7 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             let body = read_body_file(path)?;
             *options::body_slot(&mut mutation.command)? = body;
         }
-        mutation
-            .command
-            .proposed_event(mutation.principal)
-            .map_err(|_| "invalid discussion command or file contents")?;
+        mutation.command.validate(mutation.principal)?;
     }
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
@@ -89,13 +93,26 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                     mutation.principal,
                     IdempotencyKey::new(mutation.key.clone()).map_err(|_| "invalid retry key")?,
                 );
-                node.runtime()
-                    .block_on(node.admit_discussion_durable_in(
-                        &request,
-                        &session,
-                        &mutation.command,
-                        Default::default(),
-                    ))
+                let result = match &mutation.command {
+                    MutationCommand::Exact(command) => {
+                        node.runtime().block_on(node.admit_discussion_durable_in(
+                            &request,
+                            &session,
+                            command,
+                            Default::default(),
+                        ))
+                    }
+                    MutationCommand::Append(intent) => {
+                        node.runtime()
+                            .block_on(node.admit_discussion_comment_durable_in(
+                                &request,
+                                &session,
+                                intent,
+                                Default::default(),
+                            ))
+                    }
+                };
+                result
                     .map(Completed::Mutation)
                     .map_err(|error| match service {
                         Ok(()) => error.to_string(),
@@ -164,7 +181,7 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             });
             if matches!(operation, Operation::Mutate(_)) {
                 Err(format!(
-                    "no terminal discussion outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover using fg outcome with the same principal and key, or retry the identical command, version and content. Do not replace the key or refresh the expected version"
+                    "no terminal discussion outcome returned: {error}{cleanup}; this is not evidence of non-commit. Recover using fg outcome with the same principal and key, or retry the identical command and content, including the expected version when supplied. Do not replace the key or change the original preconditions"
                 ))
             } else {
                 Err(format!("{error}{cleanup}"))

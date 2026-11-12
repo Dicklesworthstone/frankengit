@@ -1,7 +1,8 @@
 //! Exclusive, cleanup-only custody of an existing responsibility journal.
 //! The general reader remains strict. This owner privately validates an old
-//! anchored prefix and retains any suffix until the ordinary authority reader
-//! proves the one exact ACK that may complete it. It never truncates a file.
+//! anchored prefix and retains any suffix until a typed cleanup preparation
+//! proves the one exact ACK or pre-start Abort that may complete it. It never
+//! truncates a file or accepts caller-selected lifecycle bytes.
 
 use std::{
     fs::{File, OpenOptions},
@@ -15,7 +16,10 @@ use fgit_agent::{
         EffectJournalPersistenceRefusal, EffectJournalPosition, MAX_EFFECT_JOURNAL_BYTES,
         MAX_EFFECT_JOURNAL_FRAME_BYTES, RecoveredEffectJournal,
     },
-    ref_publication::{PreparedRefTransactionAcknowledgement, RefTransactionAcknowledgementSink},
+    ref_publication::{
+        PreparedRefTransactionAbort, PreparedRefTransactionAcknowledgement,
+        RefTransactionAbortSink, RefTransactionAcknowledgementSink,
+    },
 };
 
 use super::file::{AgentJournalHostRefusal, checked_directory, journal_path};
@@ -97,15 +101,36 @@ impl FileRefTransactionSettlement {
         ))
     }
 
-    fn persist(
+    // Only the two sealed cleanup-specific sink implementations below can call
+    // this private byte routine. Sharing the filesystem mechanics does not let
+    // an ACK prove an Abort, or expose an arbitrary lifecycle append API.
+    fn persist_exact_frame(
         &mut self,
-        prepared: &PreparedRefTransactionAcknowledgement,
+        run: IntentRunCommitment,
+        before: EffectJournalPosition,
+        after: EffectJournalPosition,
+        frame: &[u8],
+    ) -> Result<EffectJournalPosition, EffectJournalPersistenceRefusal> {
+        if self.failed {
+            return Err(EffectJournalPersistenceRefusal::Unavailable);
+        }
+        let result = self.append_exact_frame(run, before, after, frame);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn append_exact_frame(
+        &mut self,
+        run: IntentRunCommitment,
+        before: EffectJournalPosition,
+        after: EffectJournalPosition,
+        frame: &[u8],
     ) -> Result<EffectJournalPosition, EffectJournalPersistenceRefusal> {
         (self.checkpoint)()?;
-        let frame = prepared.frame();
-        let after = prepared.after_position();
-        if prepared.run_commitment() != self.run
-            || prepared.before_position() != self.before
+        if run != self.run
+            || before != self.before
             || self.before.bytes.checked_add(frame.len() as u64) != Some(after.bytes)
             || self
                 .before
@@ -137,7 +162,7 @@ impl FileRefTransactionSettlement {
             .write_all(&frame[suffix.len()..])
             .and_then(|()| self.file.sync_all())
             .map_err(|_| EffectJournalPersistenceRefusal::OutcomeUnknown)?;
-        // Even a complete pre-existing ACK or an already-ACKed input takes
+        // Even a complete pre-existing frame or an already-settled input takes
         // this sync and checkpoint. Cancellation retains debt, never success.
         (self.checkpoint)()?;
         if self
@@ -158,14 +183,26 @@ impl RefTransactionAcknowledgementSink for FileRefTransactionSettlement {
         &mut self,
         prepared: &PreparedRefTransactionAcknowledgement,
     ) -> Result<EffectJournalPosition, EffectJournalPersistenceRefusal> {
-        if self.failed {
-            return Err(EffectJournalPersistenceRefusal::Unavailable);
-        }
-        let result = self.persist(prepared);
-        if result.is_err() {
-            self.failed = true;
-        }
-        result
+        self.persist_exact_frame(
+            prepared.run_commitment(),
+            prepared.before_position(),
+            prepared.after_position(),
+            prepared.frame(),
+        )
+    }
+}
+
+impl RefTransactionAbortSink for FileRefTransactionSettlement {
+    fn persist_abort(
+        &mut self,
+        prepared: &PreparedRefTransactionAbort,
+    ) -> Result<EffectJournalPosition, EffectJournalPersistenceRefusal> {
+        self.persist_exact_frame(
+            prepared.run_commitment(),
+            prepared.before_position(),
+            prepared.after_position(),
+            prepared.frame(),
+        )
     }
 }
 

@@ -4,6 +4,7 @@ import { IssueClient, mutationRequest, MAX_RECEIPT_BYTES } from '../../crates/fg
 import { MilestoneClient, milestoneMutationRequest } from '../../crates/fgit-node/src/smart_http/server/browser/milestones.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, readPrivateOperatorFile,
   readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
+import { isCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from '../operator/credential_token.mjs';
 
 const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray(v) &&
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
@@ -22,11 +23,12 @@ export function issueConnectionOptions(raw) {
   return o;
 }
 export async function connectIssueToken(client, o, check) {
-  const token = await readPrivateOperatorFile(o.tokenFile, 65, check);
+  const bytes = await readPrivateOperatorFile(o.tokenFile, MAX_CREDENTIAL_TOKEN_BYTES + 1, check);
   try {
-    if (!/^[0-9a-f]{64}\n?$/.test(token.toString('ascii')) || token.some(b => b > 127)) fail('issue_operator_invalid_token');
-    await client.connect(token.toString('ascii').replace(/\n$/, '')); check();
-  } finally { token.fill(0); }
+    const token = bytes.toString('ascii').replace(/\n$/, '');
+    if (bytes.some(b => b > 127) || !isCredentialToken(token)) fail('issue_operator_invalid_token');
+    await client.connect(token); check();
+  } finally { bytes.fill(0); }
 }
 // Node operators identify themselves; browser clients retain browser-owned headers.
 export function issueOperatorFetch(url, init, signal) {

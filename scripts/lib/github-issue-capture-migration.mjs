@@ -3,13 +3,15 @@
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir, realpath, rmdir } from 'node:fs/promises';
 import { dirname, join, sep } from 'node:path';
-import { createGithubIssueCaptureSession, parseCapture, issueImportSteps, CAPTURE_LIMIT } from './github-issue-source.mjs';
+import { createGithubIssueCaptureSession, parseCapture, issueImportSteps, CAPTURE_LIMIT,
+  CAPTURE_SCHEMA, CAPTURE_SCHEMA_V2 } from './github-issue-source.mjs';
 import { parseIssueInventory, selectIssueInventoryBatch, INVENTORY_LIMIT } from './github-issue-inventory.mjs';
 import { parseGithubIssueMigrationSources } from './github-issue-migration-sources.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, recordDigest, parseOperatorJson,
   readPrivateOperatorFile, readSynchronizedOperatorRecord, saveOperatorRecord } from './forge-operator-io.mjs';
 
 const SCHEMA = 'frankengit-github-issue-capture-session-v1';
+const SCHEMA_V2 = 'frankengit-github-issue-capture-session-v2';
 const LIMITS = Object.freeze({ batches: 128, captureBytes: 64 * 1024 * 1024, steps: 10000 });
 const HEADER_LIMIT = 8192, SOURCES_LIMIT = 1024 * 1024;
 const encode = value => Buffer.from(JSON.stringify(value) + '\n');
@@ -103,7 +105,7 @@ async function initialize(o, life) {
   const inventory = parseIssueInventory(bytes); totalBatches(inventory);
   if (inventory.issues.length > o.maxSteps || inventory.issues.some(row => !Number.isSafeInteger(row.number + o.offset))) fail('budget');
   const credential = await token(o, root, life.check);
-  const header = { schema: SCHEMA, workdir: root, inventory_sha256: o.inventorySha256,
+  const header = { schema: SCHEMA_V2, workdir: root, inventory_sha256: o.inventorySha256,
     credential_sha256: credential.fingerprint, offset: o.offset, max_capture_bytes: o.maxCaptureBytes, max_steps: o.maxSteps };
   if (encode(header).length > HEADER_LIMIT) fail('header_limit');
   life.check(); await mkdir(root, { mode: 0o700 }); await syncDirectory(dirname(root));
@@ -129,6 +131,7 @@ function canonical(bytes) {
 }
 function account(bytes, inventory, header, batch, counts) {
   const selection = selectIssueInventoryBatch(inventory, header.inventory_sha256, batch), capture = parseCapture(bytes);
+  if (capture.schema !== captureSchema(header)) fail('capture_profile_changed');
   if (!equal(selection.source, capture.source) || !equal(selection.issues, capture.issues.map(({ number, id }) => ({ number, id })))) fail('membership_changed');
   const steps = issueImportSteps(capture, header.offset).length;
   if (counts.bytes + bytes.length > header.max_capture_bytes || counts.steps + steps > header.max_steps) fail('capacity');
@@ -137,6 +140,14 @@ function account(bytes, inventory, header, batch, counts) {
     counts.comments.add(comment.id);
   }
   counts.bytes += bytes.length; counts.steps += steps;
+}
+function captureSchema(header) {
+  // A source-acquisition upgrade must not change the meaning of later batches
+  // in an already pinned session. V1 continues to produce V1, including locks
+  // as attribution only. New V2 sessions pin lock-preserving compilation.
+  if (header.schema === SCHEMA) return CAPTURE_SCHEMA;
+  if (header.schema === SCHEMA_V2) return CAPTURE_SCHEMA_V2;
+  fail('session_changed');
 }
 function sourceSelection(selected) {
   const value = { schema: 'frankengit-github-issue-migration-sources-v1',
@@ -153,7 +164,8 @@ async function load(o, life) {
   if (recordDigest(bytes) !== o.confirm) fail('pin_mismatch');
   const header = canonical(bytes);
   fields(header, ['schema', 'workdir', 'inventory_sha256', 'credential_sha256', 'offset', 'max_capture_bytes', 'max_steps']);
-  if (header.schema !== SCHEMA || header.workdir !== root) fail('session_changed');
+  captureSchema(header);
+  if (header.workdir !== root) fail('session_changed');
   pin(header.inventory_sha256); if (header.credential_sha256 !== null) pin(header.credential_sha256);
   integer(header.offset, 0, Number.MAX_SAFE_INTEGER); integer(header.max_capture_bytes, 1, LIMITS.captureBytes); integer(header.max_steps, 1, LIMITS.steps);
   const raw = await read(join(root, 'inventory.json'), INVENTORY_LIMIT, life.check);
@@ -215,7 +227,8 @@ export async function captureGithubIssueMigration(raw) {
         if (credential.fingerprint !== selected.header.credential_sha256) fail('source_credential_changed');
         session = createGithubIssueCaptureSession({ token: credential.value, signal: life.signal,
           timeoutMs: life.remaining(), maxReadBytes: o.maxReadBytes, maxRequests: o.maxRequests,
-          maxSourceRetries: o.maxSourceRetries, fetchImpl: o.fetchImpl });
+          maxSourceRetries: o.maxSourceRetries, fetchImpl: o.fetchImpl,
+          captureSchema: captureSchema(selected.header) });
       }
       while (selected.captures.length < selected.total && captured < o.maxBatches) {
         life.check(); const batch = selected.captures.length + 1;

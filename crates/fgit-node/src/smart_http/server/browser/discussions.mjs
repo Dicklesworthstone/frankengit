@@ -38,10 +38,17 @@ export function discussionAction(name, fields) {
 }
 export function discussionMutationRequest(number, version, action, fields) {
   natural(number, 'discussion number', 1);
-  natural(version, 'expected discussion version', 0, Number.MAX_SAFE_INTEGER - 1);
-  if ((action === 'open') !== (version === 0)) fail('Only a new discussion uses expected version zero.');
-  const checked = discussionAction(action, fields);
-  const form = new URLSearchParams({ expected_version: String(version) });
+  const append = action === 'append-comment';
+  if (append) {
+    if (version !== null) fail('An append comment has no expected discussion version.');
+  } else {
+    natural(version, 'expected discussion version', 0, Number.MAX_SAFE_INTEGER - 1);
+    if ((action === 'open') !== (version === 0)) fail('Only a new discussion uses expected version zero.');
+  }
+  // Append is a separate request profile, not a new canonical history action.
+  // Legacy exact-version commands and their saved retry identities stay intact.
+  const checked = discussionAction(append ? 'comment' : action, fields);
+  const form = new URLSearchParams(append ? {} : { expected_version: String(version) });
   for (const name of ['title', 'body']) if (own(checked, name)) form.append(name, checked[name]);
   const body = form.toString();
   if (body.length > MAX_FORM_BYTES) fail('Encoded discussion form exceeds 256 KiB.');

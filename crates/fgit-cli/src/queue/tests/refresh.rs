@@ -24,7 +24,11 @@ fn refresh_binds_original_metadata_and_old_and_live_target_in_both_hash_formats(
         args.extend(["--object-format", format].map(str::to_owned));
         replace(&mut args, "--expected-source-tip", &"aa".repeat(width));
         replace(&mut args, "--expected-target-tip", &"bb".repeat(width));
-        replace(&mut args, "--expected-recorded-target-tip", &"cc".repeat(width));
+        replace(
+            &mut args,
+            "--expected-recorded-target-tip",
+            &"cc".repeat(width),
+        );
         let parsed = options::parse(&args).unwrap();
         let Operation::Refresh {
             principal,
@@ -66,7 +70,11 @@ fn refresh_binds_original_metadata_and_old_and_live_target_in_both_hash_formats(
         );
         assert_eq!(pull.data.source_tip.algorithm(), parsed.format);
         assert_eq!(
-            command.proposed_event(principal, parsed.format).unwrap().version.get(),
+            command
+                .proposed_event(principal, parsed.format)
+                .unwrap()
+                .version
+                .get(),
             4
         );
     }
@@ -117,7 +125,11 @@ fn refresh_requires_full_original_command_and_rejects_unrelated_options() {
 #[test]
 fn refresh_advances_only_pr_version_and_requires_a_distinct_native_target() {
     let mut maximum_queue = refresh_args();
-    replace(&mut maximum_queue, "--expected-version", &u64::MAX.to_string());
+    replace(
+        &mut maximum_queue,
+        "--expected-version",
+        &u64::MAX.to_string(),
+    );
     assert!(
         options::parse(&maximum_queue).is_ok(),
         "refresh does not advance the queue stream"
@@ -135,7 +147,10 @@ fn refresh_advances_only_pr_version_and_requires_a_distinct_native_target() {
     ] {
         let mut args = refresh_args();
         replace(&mut args, flag, value);
-        assert!(options::parse(&args).is_err(), "refresh accepted invalid {flag}");
+        assert!(
+            options::parse(&args).is_err(),
+            "refresh accepted invalid {flag}"
+        );
     }
     for flag in [
         "--expected-recorded-target-tip",
@@ -145,12 +160,22 @@ fn refresh_advances_only_pr_version_and_requires_a_distinct_native_target() {
         for value in ["00".repeat(20), "dd".repeat(32)] {
             let mut args = refresh_args();
             replace(&mut args, flag, &value);
-            assert!(options::parse(&args).is_err(), "refresh accepted invalid {flag}");
+            assert!(
+                options::parse(&args).is_err(),
+                "refresh accepted invalid {flag}"
+            );
         }
     }
     let mut unchanged = refresh_args();
-    replace(&mut unchanged, "--expected-recorded-target-tip", &"bb".repeat(20));
-    assert!(options::parse(&unchanged).is_err(), "a no-op must not seal a new update");
+    replace(
+        &mut unchanged,
+        "--expected-recorded-target-tip",
+        &"bb".repeat(20),
+    );
+    assert!(
+        options::parse(&unchanged).is_err(),
+        "a no-op must not seal a new update"
+    );
     let mut title = refresh_args();
     replace(&mut title, "--title", &"x".repeat(257));
     assert!(options::parse(&title).is_err());
@@ -192,7 +217,10 @@ fn refresh_accepts_explicit_empty_body_or_one_file_and_reads_it_before_repositor
     );
     let error = run_to(&file, &mut Vec::new()).unwrap_err();
     assert!(error.contains("PR body metadata"), "{error}");
-    assert!(!root.exists(), "missing body must not open or initialize storage");
+    assert!(
+        !root.exists(),
+        "missing body must not open or initialize storage"
+    );
     replace(&mut file, "--body-file", "");
     assert!(options::parse(&file).is_err());
 }
@@ -211,10 +239,7 @@ fn refresh_receipts_preserve_terminal_identity_without_claiming_ref_movement() {
             "\"expected_recorded_target_tip\":\"{}\"",
             "cc".repeat(20)
         )));
-        assert!(report.contains(&format!(
-            "\"expected_target_tip\":\"{}\"",
-            "bb".repeat(20)
-        )));
+        assert!(report.contains(&format!("\"expected_target_tip\":\"{}\"", "bb".repeat(20))));
         assert!(report.contains("\"refs_changed\":false"));
         assert!(report.contains(&format!("\"tx_id\":\"{tx}\"")));
         assert!(!report.contains("private-stable-queue-key"));
@@ -243,5 +268,9 @@ fn refresh_receipts_preserve_terminal_identity_without_claiming_ref_movement() {
         run_to(&["refresh".into(), "--help".into()], &mut help).unwrap(),
         0
     );
-    assert!(String::from_utf8(help).unwrap().contains("--expected-recorded-target-tip"));
+    assert!(
+        String::from_utf8(help)
+            .unwrap()
+            .contains("--expected-recorded-target-tip")
+    );
 }

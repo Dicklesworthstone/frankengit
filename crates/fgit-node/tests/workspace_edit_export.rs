@@ -415,5 +415,261 @@ fn timed_out_tool_reports_retained_workspace_instead_of_claiming_descendant_clea
 }
 
 #[cfg(target_os = "linux")]
+#[test]
+fn single_workspace_sharing_policies_account_exact_bytes_and_refuse_unsupported_require_reflink() {
+    use fgit_node::{WorkspaceInputSharing, WorkspaceToolFailure};
+    use fgit_runner::sparse_workspace::{HostRefusal, SharedInputFallback};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::Duration;
+
+    let fixture = Fixture::new();
+    let parent_base = std::env::var_os("FGIT_SHARED_WORKSPACE_TEST_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture.root.clone());
+    let parent = parent_base.join(format!(
+        "fgit-ws-sharing-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let node = fixture.node();
+    let request = node.request_context();
+    let reads = vec![b"edit.txt".to_vec()];
+    let writes = reads.clone();
+
+    let mut copy_cmd = Command::new("/bin/sh");
+    copy_cmd.args(["-c", "printf 'after\\n' > edit.txt"]);
+    let copy_res = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_tool_shared_at_in(
+            &request,
+            &reference(),
+            (None, None),
+            [0x91; 16],
+            &parent,
+            &reads,
+            &writes,
+            WorkspaceInputSharing::Copy,
+            &mut copy_cmd,
+            Duration::from_secs(10),
+            ("Test <test@example.invalid>", 1, b"copy mode\n"),
+        ))
+        .unwrap();
+    assert_eq!(copy_res.telemetry.sharing_mode, WorkspaceInputSharing::Copy);
+    assert!(!copy_res.telemetry.reflink_supported);
+    assert_eq!(copy_res.telemetry.copied_bytes, 7);
+    assert_eq!(copy_res.telemetry.shared_host_bytes, 0);
+    assert_eq!(copy_res.telemetry.seeded_bytes, 0);
+    assert_eq!(copy_res.telemetry.cloned_bytes, 0);
+    assert_eq!(copy_res.telemetry.fallback_bytes, 0);
+    assert_eq!(copy_res.telemetry.imported_bytes, 6);
+
+    let mut prefer_cmd = Command::new("/bin/sh");
+    prefer_cmd.args(["-c", "printf 'after\\n' > edit.txt"]);
+    let prefer_res = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_tool_shared_at_in(
+            &request,
+            &reference(),
+            (None, None),
+            [0x92; 16],
+            &parent,
+            &reads,
+            &writes,
+            WorkspaceInputSharing::PreferReflink,
+            &mut prefer_cmd,
+            Duration::from_secs(10),
+            ("Test <test@example.invalid>", 1, b"copy mode\n"),
+        ))
+        .unwrap();
+    assert_eq!(prefer_res.candidate_commit, copy_res.candidate_commit);
+    assert_eq!(prefer_res.pack_bytes(), copy_res.pack_bytes());
+    assert_eq!(
+        prefer_res.telemetry.copied_bytes + prefer_res.telemetry.shared_host_bytes,
+        7
+    );
+
+    let mut require_cmd = Command::new("/bin/sh");
+    require_cmd.args(["-c", "printf 'after\\n' > edit.txt"]);
+    let require_res = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_tool_shared_at_in(
+            &request,
+            &reference(),
+            (None, None),
+            [0x93; 16],
+            &parent,
+            &reads,
+            &writes,
+            WorkspaceInputSharing::RequireReflink,
+            &mut require_cmd,
+            Duration::from_secs(10),
+            ("Test <test@example.invalid>", 1, b"copy mode\n"),
+        ));
+    if prefer_res.telemetry.reflink_supported {
+        assert_eq!(prefer_res.telemetry.shared_host_bytes, 7);
+        assert_eq!(prefer_res.telemetry.copied_bytes, 0);
+        assert_eq!(prefer_res.telemetry.seeded_bytes, 7);
+        assert_eq!(prefer_res.telemetry.cloned_bytes, 7);
+        let required = require_res.expect("CoW filesystem must satisfy RequireReflink");
+        assert_eq!(required.telemetry.shared_host_bytes, 7);
+        assert_eq!(required.telemetry.copied_bytes, 0);
+    } else {
+        assert_eq!(prefer_res.telemetry.copied_bytes, 7);
+        assert_eq!(prefer_res.telemetry.shared_host_bytes, 0);
+        assert_eq!(prefer_res.telemetry.fallback_bytes, 7);
+        assert!(matches!(
+            require_res,
+            Err(WorkspaceToolFailure::Host(
+                HostRefusal::SharedInputUnavailable(SharedInputFallback::UnsupportedFilesystem)
+            ))
+        ));
+    }
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    let _ = fs::remove_dir_all(&parent);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn parallel_batch_workspaces_share_base_without_cross_run_overlay_leakage_and_rebuild_deterministically()
+ {
+    use fgit_node::{WorkspaceBatchJob, WorkspaceInputSharing};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::Duration;
+
+    let fixture = Fixture::new();
+    let parent_base = std::env::var_os("FGIT_SHARED_WORKSPACE_TEST_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture.root.clone());
+    let parent = parent_base.join(format!(
+        "fgit-ws-batch-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let node = fixture.node();
+    let request = node.request_context();
+    let reads = vec![b"edit.txt".to_vec(), b"new.txt".to_vec()];
+    let build_jobs = |seed_byte: u8| -> Vec<WorkspaceBatchJob> {
+        (0u8..4)
+            .map(|idx| {
+                let mut command = Command::new("/bin/sh");
+                command.args([
+                    "-c",
+                    &format!(
+                        "test ! -e keep.txt && test \"$(cat edit.txt)\" = 'before' && sleep 0.02 && test \"$(cat edit.txt)\" = 'before' && printf 'job-{idx}\\n' > edit.txt && printf 'extra-{idx}\\n' > new.txt && chmod 755 new.txt"
+                    ),
+                ]);
+                WorkspaceBatchJob {
+                    workspace_id: [seed_byte.wrapping_add(idx); 16],
+                    output_paths: reads.clone(),
+                    command,
+                    author: "Test <test@example.invalid>".to_owned(),
+                    timestamp: u64::from(idx) + 10,
+                    message: format!("batch job {idx}\n").into_bytes(),
+                }
+            })
+            .collect()
+    };
+
+    let mut shared_jobs = build_jobs(0xa0);
+    let shared_batch = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_batch_at_in(
+            &request,
+            &reference(),
+            (None, None),
+            &parent,
+            &reads,
+            WorkspaceInputSharing::PreferReflink,
+            Duration::from_secs(15),
+            &mut shared_jobs,
+        ))
+        .unwrap();
+    assert_eq!(shared_batch.results.len(), 4);
+    assert_eq!(shared_batch.cache_stats.resident_bytes, 0);
+    assert_eq!(shared_batch.cache_stats.resident_entries, 0);
+    if shared_batch.cache_stats.reflink_supported {
+        assert_eq!(shared_batch.cache_stats.seeded_bytes, 7);
+        assert_eq!(shared_batch.cache_stats.cloned_bytes, 28);
+        assert_eq!(shared_batch.results[0].telemetry.seeded_bytes, 7);
+        for res in &shared_batch.results[1..] {
+            assert_eq!(res.telemetry.seeded_bytes, 0);
+        }
+        for res in &shared_batch.results {
+            assert_eq!(res.telemetry.shared_host_bytes, 7);
+            assert_eq!(res.telemetry.copied_bytes, 0);
+        }
+    } else {
+        assert_eq!(shared_batch.cache_stats.seeded_bytes, 0);
+        assert_eq!(shared_batch.cache_stats.fallback_bytes, 28);
+        for res in &shared_batch.results {
+            assert_eq!(res.telemetry.copied_bytes, 7);
+            assert_eq!(res.telemetry.shared_host_bytes, 0);
+        }
+    }
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+
+    let mut copy_jobs = build_jobs(0xb0);
+    let copy_batch = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_batch_at_in(
+            &request,
+            &reference(),
+            (None, None),
+            &parent,
+            &reads,
+            WorkspaceInputSharing::Copy,
+            Duration::from_secs(15),
+            &mut copy_jobs,
+        ))
+        .unwrap();
+    for (idx, (shared_res, copy_res)) in shared_batch
+        .results
+        .iter()
+        .zip(copy_batch.results.iter())
+        .enumerate()
+    {
+        let edited = git_object_id(
+            GitHashAlgorithm::Sha1,
+            GitObjectKind::Blob,
+            format!("job-{idx}\n").as_bytes(),
+        );
+        let added = git_object_id(
+            GitHashAlgorithm::Sha1,
+            GitObjectKind::Blob,
+            format!("extra-{idx}\n").as_bytes(),
+        );
+        let expected_tree = git_object_id(
+            GitHashAlgorithm::Sha1,
+            GitObjectKind::Tree,
+            &[
+                b"100644 edit.txt\0".as_slice(),
+                edited.as_bytes(),
+                b"100644 keep.txt\0".as_slice(),
+                fixture.untouched.as_bytes(),
+                b"100755 new.txt\0".as_slice(),
+                added.as_bytes(),
+            ]
+            .concat(),
+        );
+        assert_eq!(shared_res.root_tree, expected_tree);
+        assert_eq!(shared_res.candidate_commit, copy_res.candidate_commit);
+        assert_eq!(shared_res.changed_paths, copy_res.changed_paths);
+        assert_eq!(shared_res.pack_bytes(), copy_res.pack_bytes());
+        assert_eq!(copy_res.telemetry.copied_bytes, 7);
+        assert_eq!(copy_res.telemetry.shared_host_bytes, 0);
+    }
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    let _ = fs::remove_dir_all(&parent);
+}
+
+#[cfg(target_os = "linux")]
 #[path = "workspace_edit_export/process_ownership.rs"]
 mod process_ownership;

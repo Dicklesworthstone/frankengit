@@ -10,7 +10,10 @@ use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
 use super::super::drive_request_while;
 use super::issues::{self, ApiError};
 use super::{Profile, Status};
-use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, OneNode};
+use crate::{
+    ForgeEventDisclosureProfile, ForgeEventReadGrants, GitDaemonSessionDeadline,
+    GitDaemonSessionWorkScaling, OneNode,
+};
 
 const ROUTE: &str = "/api/v1/events";
 const MAX_QUERY_BYTES: usize = 2048;
@@ -28,6 +31,7 @@ struct Request<'a> {
     after: Option<(u64, u32)>,
     limit: u16,
     expected_head: Option<RepositoryAuthorityHeadId>,
+    disclosure_profile: ForgeEventDisclosureProfile,
 }
 impl<'a> Request<'a> {
     fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
@@ -54,9 +58,11 @@ impl<'a> Request<'a> {
         }
         let mut fields = BTreeMap::new();
         if !query.is_empty() {
-            for (name, value) in issues::parse_form(query.as_bytes(), 3)? {
-                if !matches!(name.as_str(), "after" | "limit" | "expected_head")
-                    || fields.insert(name, value).is_some()
+            for (name, value) in issues::parse_form(query.as_bytes(), 4)? {
+                if !matches!(
+                    name.as_str(),
+                    "after" | "limit" | "expected_head" | "profile"
+                ) || fields.insert(name, value).is_some()
                 {
                     return Err(ApiError::bad("invalid_event_query"));
                 }
@@ -82,11 +88,17 @@ impl<'a> Request<'a> {
                 issues::parse_snapshot(value)
             })
             .transpose()?;
+        let disclosure_profile = match fields.get("profile").map(String::as_str) {
+            None | Some("issues-pulls-v1") => ForgeEventDisclosureProfile::IssuesPullsV1,
+            Some("collaboration-v2") => ForgeEventDisclosureProfile::CollaborationV2,
+            Some(_) => return Err(ApiError::bad("invalid_event_profile")),
+        };
         Ok(Self {
             repository_route,
             after,
             limit: limit as u16,
             expected_head,
+            disclosure_profile,
         })
     }
 }
@@ -96,6 +108,8 @@ struct ReadGrant {
     principal: PrincipalId,
     issues: bool,
     pulls: bool,
+    discussions: bool,
+    reviews: bool,
 }
 fn authenticate(
     profile: &Profile,
@@ -111,13 +125,20 @@ fn authenticate(
     }
     let issues = profile.allow_issues() && grant.permits_issues(false);
     let pulls = profile.allow_pulls() && grant.permits_pulls(false);
-    if !issues && !pulls {
+    let collaboration = request.disclosure_profile == ForgeEventDisclosureProfile::CollaborationV2;
+    let discussions = collaboration
+        && profile.config.http_discussions_enabled()
+        && grant.permits_discussions(false);
+    let reviews = collaboration && profile.allow_pulls() && grant.permits_reviews(false);
+    if !issues && !pulls && !discussions && !reviews {
         return Err(ApiError::new(Status::Forbidden, "events_not_granted"));
     }
     Ok(ReadGrant {
         principal: grant.principal,
         issues,
         pulls,
+        discussions,
+        reviews,
     })
 }
 
@@ -177,13 +198,18 @@ fn execute(
     let page = drive_request_while(
         node,
         &request,
-        node.read_scoped_forge_events_in(
+        node.read_profiled_forge_events_in(
             &request,
             query.after,
             query.limit,
             query.expected_head,
-            grant.issues,
-            grant.pulls,
+            query.disclosure_profile,
+            ForgeEventReadGrants {
+                issues: grant.issues,
+                pulls: grant.pulls,
+                discussions: grant.discussions,
+                reviews: grant.reviews,
+            },
         ),
         &mut || !deadline.expired(),
     )

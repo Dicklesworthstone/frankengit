@@ -1,11 +1,11 @@
 //! One historical change, through the native replay planner and ordinary
 //! single-parent candidate workflow. A replay never admits or stages objects.
 pub(super) mod input;
+#[cfg(test)]
+mod integration_tests;
 pub(super) mod output;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod integration_tests;
 
 use super::super::{head, head_token};
 use super::*;
@@ -15,7 +15,9 @@ use fgit_forge::preparation::replay::{
 use fgit_forge::preparation::resolution::{
     ConflictResolution, ResolutionChoice, ResolutionError, ResolutionKind, ResolvedPath,
 };
-use fgit_forge::preparation::{MergeMetadata, MergeSourceError, PreparationError, PreparationLimits};
+use fgit_forge::preparation::{
+    MergeMetadata, MergeSourceError, PreparationError, PreparationLimits,
+};
 use fgit_types::RepositoryAuthorityHeadId;
 
 pub(super) const PREPARE: &str = "prepare_replay";

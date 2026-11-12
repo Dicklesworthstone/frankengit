@@ -1,19 +1,14 @@
 //! Real canonical hidden-ref policy reaches fresh and retained PR inbox reads.
 use super::*;
-use crate::treefs_workspace::{NotificationInboxPage, NotificationReadRefusal};
-use fgit_authority::{
-    PublicationOutcome, authority_head_identity, collect_cumulative_outcomes_async,
-    publish_decisions_async, read_repository_incarnation_configuration_async,
-    stage_hidden_ref_policy_async, stage_latest_repository_incarnation_configuration_async,
-};
-use fgit_chronicle::{PublicationBasis, PublicationPlan, ResultingRoots};
-use fgit_codec::{
-    CryptoBodyIdentity, DecodeLimits, HiddenRefPolicyBody, RepositoryAuthorityHeadBody,
-    RepositoryIncarnationConfigurationBodyV2_1, decode_body,
-};
+use crate::treefs_workspace::{InboxSyncOutcome, NotificationInboxPage, NotificationReadRefusal};
+use fgit_admission::merge::native::protection::publish_hidden_ref_policy_async;
+use fgit_authority::read_repository_incarnation_configuration_async;
+use fgit_codec::{DecodeLimits, HiddenRefPolicyBody, RepositoryAuthorityHeadBody, decode_body};
 use fgit_forge::IssueNumber;
 use fgit_forge::event::issue::{IssueAction, IssueCommand};
-use fgit_forge::event::notification::{NotificationTarget, NotificationTargetKind};
+use fgit_forge::event::notification::{
+    NotificationAction, NotificationCommand, NotificationTarget, NotificationTargetKind,
+};
 
 fn inbox(
     node: &OneNode,
@@ -45,8 +40,8 @@ fn inbox(
 }
 
 /// Like hidden_ref_policy_end_to_end, stage actual canonical bodies and select
-/// the configuration with an authenticated CAS over a refusal-only batch.
-/// All existing committed roots are carried forward unchanged.
+/// the configuration with an authenticated 1-decision policy-epoch advance.
+/// All existing committed source/forge roots are carried forward unchanged.
 fn hide(node: &OneNode, reference: &RefName) -> RepositoryAuthorityHeadId {
     let request = node.request_context();
     node.runtime().block_on(async {
@@ -62,59 +57,21 @@ fn hide(node: &OneNode, reference: &RefName) -> RepositoryAuthorityHeadId {
         .await
         .unwrap();
         assert!(original.policy_root.is_none());
-        let policy_root = stage_hidden_ref_policy_async(
+        let policy = HiddenRefPolicyBody {
+            rules: vec![reference.as_bytes().to_vec()],
+        };
+        let head_id = publish_hidden_ref_policy_async(
             &node.authority,
             request.authority(),
-            &HiddenRefPolicyBody {
-                rules: vec![reference.as_bytes().to_vec()],
-            },
-        )
-        .await
-        .unwrap();
-        let configuration_root = stage_latest_repository_incarnation_configuration_async(
-            &node.authority,
-            request.authority(),
-            &RepositoryIncarnationConfigurationBodyV2_1 {
-                root_layout: original.root_layout,
-                object_format: original.object_format,
-                repository_incarnation_id: original.repository_incarnation_id,
-                policy_root: Some(policy_root),
-            },
-        )
-        .await
-        .unwrap();
-        let basis = PublicationBasis::new(authority_head_identity(&prior).unwrap(), prior);
-        let roots = ResultingRoots::carried_forward(&basis);
-        let mut plan = PublicationPlan::open(basis).unwrap();
-        plan.refuse(
+            &node.head_key,
+            node.tenant_id,
+            Some(&policy),
             fgit_codec::harness::tx_id(),
-            fgit_types::RefusalCode::QuotaExceeded,
-            fgit_codec::harness::refusal_record_id(),
-        );
-        let outcomes =
-            collect_cumulative_outcomes_async(&node.authority, request.authority(), &node.head_key)
-                .await
-                .unwrap();
-        let publication = plan
-            .seal(&CryptoBodyIdentity, roots, &outcomes, receipt.token())
-            .unwrap();
-        let mut head = publication.head().clone();
-        head.configuration_root = configuration_root;
-        assert!(matches!(
-            publish_decisions_async(
-                &node.authority,
-                request.authority(),
-                &node.head_key,
-                receipt.token(),
-                publication.batch(),
-                &head,
-                node.tenant_id,
-            )
-            .await
-            .unwrap(),
-            PublicationOutcome::Published(_)
-        ));
+        )
+        .await
+        .unwrap();
         let selected = node.materialize_admission_in(&request).await.unwrap();
+        assert_eq!(selected.basis().id(), head_id);
         assert!(selected.snapshot().hidden_refs.hides(reference.as_bytes()));
         selected.basis().id()
     })
@@ -207,4 +164,147 @@ fn current_source_or_target_policy_hides_fresh_and_retained_pull_request_notific
             reopened.shutdown().unwrap();
         }
     }
+}
+
+#[test]
+fn persisted_inbox_projection_reuses_watermark_invalidates_on_advance_and_rebuilds_after_corruption()
+ {
+    let scratch = Scratch::new();
+    let node = node(&scratch, GitHashAlgorithm::Sha1);
+    for raw_number in 1..=3 {
+        let number = IssueNumber::try_new(raw_number).unwrap();
+        let request = node.request_context();
+        accepted(node.runtime().block_on(node.admit_issue_durable_in(
+            &request,
+            &session(&format!("open-issue-{raw_number}")),
+            &IssueCommand {
+                number,
+                expected_version: ExpectedVersion::NewStream,
+                action: IssueAction::Open {
+                    title: format!("Issue #{raw_number}"),
+                    body: String::new(),
+                    labels: Vec::new(),
+                },
+            },
+            AdmissionLimits::default(),
+        )));
+    }
+
+    let reader = session("inbox-reader-page-1");
+    let principal = reader.authenticated_session().unwrap().principal_id();
+    let projection_path =
+        node.notification_inbox_projection_path(principal, NotificationTargetKind::Issue);
+    assert!(
+        projection_path.starts_with(node.storage_root().join("projections").join("inbox")),
+        "projection file lives under <storage-root>/projections/inbox"
+    );
+
+    let request = node.request_context();
+    let page_one = node
+        .runtime()
+        .block_on(node.read_notification_inbox_in(&request, &reader, 0, 2, None, false, false))
+        .unwrap();
+    assert_eq!(
+        page_one.sync_outcome,
+        Some(InboxSyncOutcome::InstalledGeneration)
+    );
+    assert_eq!(page_one.threads.len(), 2);
+    assert_eq!(page_one.next_after, Some(2));
+    assert!(projection_path.is_file(), "SQLite projection persisted");
+
+    // Second page at the same head reuses the persisted watermark without rewriting rows.
+    let page_two = node
+        .runtime()
+        .block_on(node.read_notification_inbox_in(
+            &request,
+            &reader,
+            page_one.next_after.unwrap(),
+            2,
+            Some(page_one.binding.authority_head),
+            false,
+            false,
+        ))
+        .unwrap();
+    assert_eq!(
+        page_two.sync_outcome,
+        Some(InboxSyncOutcome::ReusedWatermark)
+    );
+    assert_eq!(page_two.threads.len(), 1);
+    assert_eq!(page_two.threads[0].target.number(), 3);
+    assert_eq!(page_two.next_after, None);
+    node.shutdown().unwrap();
+
+    // Across node restart, the persisted watermark is still reused cleanly.
+    let mut reopened = OneNode::open_existing(scratch.config(GitHashAlgorithm::Sha1)).unwrap();
+    let head = reopened
+        .runtime()
+        .block_on(reopened.authenticate_authority_head())
+        .unwrap();
+    reopened
+        .bring_into_service(head.receipt().generation())
+        .unwrap();
+    let request = reopened.request_context();
+    let reused_after_restart = reopened
+        .runtime()
+        .block_on(reopened.read_notification_inbox_in(&request, &reader, 0, 10, None, false, false))
+        .unwrap();
+    assert_eq!(
+        reused_after_restart.sync_outcome,
+        Some(InboxSyncOutcome::ReusedWatermark)
+    );
+    assert_eq!(reused_after_restart.threads.len(), 3);
+
+    // Advancing preference/forge state invalidates the watermark immediately.
+    accepted(
+        reopened
+            .runtime()
+            .block_on(reopened.admit_notification_durable_in(
+                &request,
+                &session("mark-issue-1-read"),
+                &NotificationCommand {
+                    target: NotificationTarget::Issue(IssueNumber::FIRST),
+                    expected_version: ExpectedVersion::NewStream,
+                    action: NotificationAction::SetReadThrough(Some(AggregateVersion::FIRST)),
+                },
+                AdmissionLimits::default(),
+            )),
+    );
+    let after_preference = reopened
+        .runtime()
+        .block_on(reopened.read_notification_inbox_in(&request, &reader, 0, 10, None, false, false))
+        .unwrap();
+    assert_eq!(
+        after_preference.sync_outcome,
+        Some(InboxSyncOutcome::InstalledGeneration)
+    );
+    assert_eq!(
+        after_preference.threads[0].read_through,
+        Some(AggregateVersion::FIRST)
+    );
+
+    // Corrupting the on-disk SQLite file rebuilds cleanly from canonical authority.
+    fs::write(&projection_path, b"corrupt-non-sqlite-projection-bytes").unwrap();
+    let rebuilt = reopened
+        .runtime()
+        .block_on(reopened.read_notification_inbox_in(&request, &reader, 0, 10, None, false, false))
+        .unwrap();
+    assert_eq!(
+        rebuilt.sync_outcome,
+        Some(InboxSyncOutcome::InstalledGeneration)
+    );
+    assert_eq!(rebuilt.threads.len(), 3);
+    assert_eq!(
+        rebuilt.threads[0].read_through,
+        Some(AggregateVersion::FIRST)
+    );
+
+    let reused_again = reopened
+        .runtime()
+        .block_on(reopened.read_notification_inbox_in(&request, &reader, 0, 10, None, false, false))
+        .unwrap();
+    assert_eq!(
+        reused_again.sync_outcome,
+        Some(InboxSyncOutcome::ReusedWatermark)
+    );
+    reopened.shutdown().unwrap();
 }

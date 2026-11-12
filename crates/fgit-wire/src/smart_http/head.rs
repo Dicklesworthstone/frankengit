@@ -33,12 +33,25 @@ pub struct Envelope<'a> {
     /// The browser-supplied `Sec-Fetch-Site`, if any.
     pub sec_fetch_site: Option<&'a str>,
     pub(super) authorization: Option<&'a str>,
+    range: Result<Option<&'a str>, HttpError>,
+    if_range: Result<Option<&'a str>, HttpError>,
 }
 
 impl Envelope<'_> {
     #[must_use]
     pub const fn authorization(&self) -> Option<&str> {
         self.authorization
+    }
+
+    /// Borrowed Range metadata, with duplicate fields reported to the endpoint.
+    /// The envelope does not interpret ranges or change unrelated route behavior.
+    pub const fn range(&self) -> Result<Option<&str>, HttpError> {
+        self.range
+    }
+
+    /// Borrowed If-Range metadata; only an endpoint serving ranges evaluates it.
+    pub const fn if_range(&self) -> Result<Option<&str>, HttpError> {
+        self.if_range
     }
 }
 
@@ -105,6 +118,7 @@ pub(super) fn parse_with<'a, T>(
         (None, None, None, None, None, None);
     let (mut encoding, mut expectation, mut connection) = (None, None, None);
     let (mut origin, mut sec_fetch_site) = (None, None);
+    let (mut range, mut if_range) = (Ok(None), Ok(None));
     for (index, line) in lines.enumerate() {
         if index >= limits.max_headers {
             return Err(HttpError::TooManyHeaders);
@@ -141,6 +155,10 @@ pub(super) fn parse_with<'a, T>(
             unique(&mut origin, value)?;
         } else if name.eq_ignore_ascii_case("sec-fetch-site") {
             unique(&mut sec_fetch_site, value)?;
+        } else if name.eq_ignore_ascii_case("range") {
+            deferred_unique(&mut range, value);
+        } else if name.eq_ignore_ascii_case("if-range") {
+            deferred_unique(&mut if_range, value);
         } else if name.eq_ignore_ascii_case("trailer") {
             return Err(HttpError::TrailersNotSupported);
         }
@@ -221,14 +239,52 @@ pub(super) fn parse_with<'a, T>(
             origin,
             sec_fetch_site,
             authorization,
+            range,
+            if_range,
         },
         selected,
     )))
 }
 
+// Range is endpoint policy, not message framing. Remember ambiguity without
+// rejecting requests to endpoints which previously ignored these fields.
+fn deferred_unique<'a>(field: &mut Result<Option<&'a str>, HttpError>, value: &'a str) {
+    *field = match *field {
+        Ok(None) => Ok(Some(value)),
+        _ => Err(HttpError::DuplicateHeader),
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_metadata_is_borrowed_and_duplicate_policy_is_deferred_to_the_endpoint() {
+        let bytes = b"GET /repo.git/info/lfs/objects/id/10 HTTP/1.1\r\nHost: local\r\nRaNgE: bytes=2-\r\nIF-RANGE: \"strong\"\r\n\r\n";
+        let head = parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        assert_eq!(head.range(), Ok(Some("bytes=2-")));
+        assert_eq!(head.if_range(), Ok(Some("\"strong\"")));
+        for (field, value) in [("Range", "bytes=2-"), ("If-Range", "\"strong\"")] {
+            let bytes = format!(
+                "GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\n{field}: {value}\r\n{field}: {value}\r\n\r\n"
+            );
+            let head = parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                if field == "Range" {
+                    head.range()
+                } else {
+                    head.if_range()
+                },
+                Err(HttpError::DuplicateHeader)
+            );
+            assert!(super::super::parse_head(bytes.as_bytes(), HttpLimits::default()).is_ok());
+        }
+        let bytes = b"GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\nRange: malformed\r\n\r\n";
+        assert!(super::super::parse_head(bytes, HttpLimits::default()).is_ok());
+    }
 
     #[test]
     fn native_envelopes_do_not_relax_git_endpoint_policy() {

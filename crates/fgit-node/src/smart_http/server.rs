@@ -10,14 +10,14 @@
 //! forms have a separate small envelope. Outcome queries never mutate state.
 
 mod agent;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod artifacts;
 mod browser;
 mod credentials;
 mod discussions;
 mod events;
 mod issues;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod lfs;
 mod lifetime;
 mod maintenance;
@@ -161,7 +161,7 @@ struct Profile {
     route: Vec<u8>,
     credentials: CredentialSource,
     services: RepositoryHttpServices,
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     lfs: Option<lfs::Service>,
     http: HttpLimits,
     maximum_response_bytes: u64,
@@ -294,22 +294,22 @@ impl OneNode {
     /// The namespace comes from this already authenticated node, never from an
     /// HTTP path or caller-provided incarnation. Validation creates no objects.
     pub fn validate_smart_http_lfs_storage(&self) -> Result<(), NodeSmartHttpRefusal> {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             self.smart_http_lfs_service().map(|_| ())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
             if self.service_config.http_lfs_root().is_some() {
                 return Err(invalid_configuration(
-                    "the Git LFS artifact-fabric backend requires Linux",
+                    "the Git LFS artifact-fabric backend requires Unix",
                 ));
             }
             Ok(())
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn smart_http_lfs_service(&self) -> Result<Option<lfs::Service>, NodeSmartHttpRefusal> {
         self.service_config
             .http_lfs_root()
@@ -579,32 +579,32 @@ impl OneNode {
         }
         credentials.validate().map_err(credential_error)?;
         self.validate_smart_http_lfs_storage()?;
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if self.service_config.workflow_artifact_root().is_some() {
             self.validate_workflow_artifact_storage().map_err(|error| {
                 io_error("open workflow artifact custody", io::Error::other(error))
             })?;
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         if self.service_config.workflow_artifact_root().is_some() {
             return Err(invalid_configuration(
-                "workflow artifact custody requires Linux",
+                "workflow artifact custody requires Unix",
             ));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         let lfs = self.smart_http_lfs_service()?;
         let maximum_git_body =
             u64::try_from(self.git_daemon_receive_limits.pack.max_input_bytes)
                 .map_err(|_| invalid_configuration("HTTP input envelope is not representable"))?;
         // Git pack ceilings and the independently enabled LFS profile are
         // separate. Each service still applies its own tighter body limit.
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         let maximum_body = if self.service_config.http_lfs_root().is_some() {
             maximum_git_body.max(fgit_object_fabric::artifact::storage::lfs::MAX_OBJECT_BYTES)
         } else {
             maximum_git_body
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         let maximum_body = maximum_git_body;
         let maximum_wire = maximum_body
             .checked_add(FRAMING_ALLOWANCE)
@@ -631,7 +631,7 @@ impl OneNode {
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
             services,
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             lfs,
             http,
             maximum_response_bytes,
@@ -899,6 +899,7 @@ const fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRe
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
     Success,
+    PartialContent,
     BadRequest,
     Unauthorized,
     Forbidden,
@@ -907,6 +908,7 @@ enum Status {
     TooLarge,
     HeaderTooLarge,
     MediaType,
+    RangeNotSatisfiable,
     Method,
     Expectation,
     Timeout,
@@ -919,6 +921,7 @@ impl Status {
     const fn line(self) -> &'static str {
         match self {
             Self::Success => "200 OK",
+            Self::PartialContent => "206 Partial Content",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
@@ -927,6 +930,7 @@ impl Status {
             Self::TooLarge => "413 Content Too Large",
             Self::HeaderTooLarge => "431 Request Header Fields Too Large",
             Self::MediaType => "415 Unsupported Media Type",
+            Self::RangeNotSatisfiable => "416 Range Not Satisfiable",
             Self::Method => "405 Method Not Allowed",
             Self::Expectation => "417 Expectation Failed",
             Self::Timeout => "408 Request Timeout",
@@ -1389,7 +1393,12 @@ fn serve_connection(
                 .next()
                 .is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST" && !source_api;
-        let agent_profile = agent::authenticate(profile, &envelope, &bytes[..envelope.consumed])?;
+        let agent_profile = agent::authenticate(
+            profile,
+            &envelope,
+            &bytes[..envelope.consumed],
+            &admission_deadline,
+        )?;
         let agent_profile = agent_profile.map(|(profile, request)| {
             reader.cap_deadline(request.deadline());
             writer.inner.cap_deadline(request.deadline());
@@ -1397,7 +1406,7 @@ fn serve_connection(
             profile
         });
         let profile = agent_profile.as_ref().unwrap_or(profile);
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if lfs::is_route(envelope.target, &profile.route) {
             // LFS may verify and spool a large payload before writing headers.
             // Intake, verification and delivery share the original deadline;
@@ -1413,7 +1422,7 @@ fn serve_connection(
                 local,
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if artifacts::is_route(envelope.target) {
             return artifacts::serve(
                 profile,
@@ -1719,6 +1728,7 @@ fn serve_connection(
                     request,
                     &session,
                     source_read_grant.as_ref(),
+                    writer.agent.as_ref(),
                     envelope.body,
                     &mut body,
                     profile.http,
@@ -2013,7 +2023,7 @@ mod tests {
                 .with(RepositoryHttpService::Outcomes, false)
                 .with(RepositoryHttpService::Pulls, false)
                 .with(RepositoryHttpService::Source, false),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             lfs: None,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,

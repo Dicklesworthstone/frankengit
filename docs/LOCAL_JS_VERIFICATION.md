@@ -47,9 +47,10 @@ against the explicitly older `a9d65885` native binary identified below. Receipt:
 SHA-256 `0de21b1bcd9760e5b6fc35d132ec95ffe18d7d4c363f47e576659ff74ab20133`.
 The full operator matrix and current-source native qualification remain open.
 
-The shared GitHub pull peer and issue operator fixture allocate listeners through
-`tests/fetch-peer.mjs`. Hosts may assign ephemeral ports that Fetch refuses
-before any TCP request. The helper retires those selections before exposing a
+The shared GitHub pull peer, source package peer, issue operator and issue archive
+fixtures allocate listeners through `tests/fetch-peer.mjs`. Hosts may assign
+ephemeral ports that Fetch refuses before any TCP request. The helper retires
+those selections before exposing a
 URL, preserves an already usable listener, and fails after sixteen forbidden
 selections. Tests exercise a real blocked listener, its permitted Fetch twin and
 bounded exhaustion. This changes fixture allocation, with no production request
@@ -117,7 +118,7 @@ forge or Git compatibility evidence.
 Each invocation discovers all `.test.mjs` files in the selected directory. The
 `scripts` scope includes both `scripts/tests/` and the root `scripts/` directory,
 where the workflow-supervisor entrypoint tests live. Each invocation
-runs TAP with two concurrent files, a five-minute per-test bound, and a ten-minute
+runs TAP with bounded file concurrency (`2..=4` concurrent files), a five-minute per-test bound, and a ten-minute
 campaign bound. The 101-publication bootstrap test performs hundreds of durable
 filesystem operations. An exploratory 30-second bound timed it out on macOS;
 the unchanged test subsequently passed all five lifecycle cases in 172 seconds
@@ -174,11 +175,15 @@ Module tests using DOM/fetch doubles or HTTP schema peers remain module/peer
 tests, even when all pass. A browser suite pass does not prove real-browser or
 live-node operation; full/release gates and D10 remain separate obligations.
 
-At the 2026-10-20 qualification snapshot, `x2mv.4.71` remains in progress: the
+At the 2026-10-20 qualification snapshot, `x2mv.4.71` remained in progress: the
 whole macOS operator campaign exceeded its ten-minute bound, and the broader
-scripts corpus retained failures. A browser lane pass does not complete those
-obligations. The authoritative bead records the exact tested revisions and
-remaining work; later peer source additions require their own qualification.
+scripts corpus retained failures. At the 2026-11-11 remediation (`eaff7251`,
+independently verified under `frankengit-root-doctrine-x2mv.4.75` at `cb36aafb`),
+all three local macOS (`darwin/arm64`) JS profiles pass with zero failures
+(`scripts`: 1,583 pass / 0 fail; `browser`: 4,278 pass / 0 fail; `operator`:
+5,169 pass / 0 fail / 0 cancelled). Remaining native-binary and host-path
+representability obligations on `x2mv.4.71` stay tracked on their owning bead,
+and later peer source additions require their own qualification.
 
 The macOS sparse-directory workspace profile refuses invalid UTF-8 repository
 path bytes with `source_workspace_host_path_unrepresentable` before acquiring
@@ -210,3 +215,14 @@ cancellation. It is never downgraded to an ordinary timeout/interruption. Stop
 escalates after five seconds and allows at most another five seconds for leader
 closure; inability to establish closure retires the local child handle and
 reports containment failure, without claiming the child was reaped.
+
+The controller fault tests discover PID, parent and group metadata before
+reading the command line of the owned runner. They do not collect unrelated
+process arguments, which previously overflowed the fixed subprocess buffer
+before a planted containment fault could be checked. A real long-argument
+process fixture exercises that failure beside the unchanged cancellation and
+denied-signal assertions. The fixed capture limit, one-second bound on each
+`ps` call, and existing test/controller deadlines are unchanged.
+The padding children report readiness and remain live through observation;
+their output streams are captured, and bounded teardown retains ownership
+until their process handles close.

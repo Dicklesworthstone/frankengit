@@ -20,11 +20,17 @@ FrankenGit is not “GitHub rewritten in Rust.” It is a forge designed around 
 
 The project is a synthesis of concrete machinery from Asupersync, FrankenSQLite, FrankenFS, FrankenSearch, franken_markdown, FrankenGraphDB, FrankenNetworkX, and Doodlestein Self-Releaser — with the gateway/API on fastapi_rust, projection read-models on sqlmodel_rust's FrankenSQLite backend, a familiar GitHub-like web UI (DOM-oriented pure-Rust/WASM, Leptos or Dioxus with SSR and Tailwind, native source-spanned rendering and trustless verified reads; a generated TypeScript client and React reference are the supported alternative), plus a terminal TUI (and an optional parallel terminal-style web surface) on the frankentui (ftui) kernel — combined with the object-store-native insight in Cursor’s “Git at Any Scale.” The detailed source-to-design map is in [`docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md`](docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md); the concrete defects found in the first-cut architecture and their dispositions are in [`docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md`](docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md).
 
-Those product-stack choices remain the accepted architecture. The integration
-profile still names Asupersync 0.4.x, while the current admitted
-`constellation.lock` selects 0.5.0; this documented mismatch remains owned by
-`frankengit-root-doctrine-x2mv.4.15`. The exact runtime, cancellation, connection,
-retry, shutdown and verification obligations are in
+Those product-stack choices remain the accepted architecture. Under the
+2026-11-11 constitutional alignment (`frankengit-root-doctrine-x2mv.4.15`,
+independently verified at `cb36aafb`), `constellation.lock`,
+[`docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md`](docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md),
+and [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md)
+are synchronized on Asupersync `0.5.0`, FrankenSQLite `0.4.10`,
+`sqlmodel-frankensqlite 0.5.0`, and `ftui 0.10.0` (`specified`), with pure-Rust
+HTTP + embedded vanilla UI ratified as the primary web surface (Owner Decision
+D1) and the `stacker 0.1.25` / `psm 0.1.32` stack-probe assembly recorded as a
+narrow ledgered carve-out (Owner Decision D4). The exact runtime, cancellation,
+connection, retry, shutdown and verification obligations are in
 [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
 
 ## Current one-node integration boundary
@@ -51,6 +57,16 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
 ```
 
 `init` creates or re-authenticates the empty canonical authority head.
+`fg branch default` reads its exact symbolic HEAD and current tip, distinguishing
+absent and unborn targets. `fg branch set-default` changes it through the ordinary
+sealed admission/RCR/head-CAS path with explicit old-target and new-tip
+expectations. The existing target must be a verified native commit; direct
+branch tips remain unchanged. Current canonical administrators authorize changes
+once review protection is installed, and exact retries recover their original
+outcome after later branch or policy changes. See the
+[default-branch guide](docs/NATIVE_DEFAULT_BRANCH.md) for the trusted-local CLI,
+raw-byte names, recovery and supported authenticated layouts.
+
 `import` verifies a bounded local object source composed of loose objects and
 checksum-bound idx-v2/pack-v2 pairs, then publishes its source refs through the
 sealed admission/RCR/head-CAS path. Sources include bare repositories, ordinary
@@ -225,15 +241,20 @@ incremental pushes, retry behavior, and clone-back identity.
 
 On Linux, `fg serve-http --workflow-pull-requests` discovers visible open
 same-repository PRs targeting the fixed `--workflow-ref` and services their
-source-head workflows in rotating order. The operator supplies the execution
+workflows in rotating order. Source-head execution is the default. Adding
+`--workflow-merge-candidate-ref-prefix` and the complete merge writer/metadata
+group executes each PR's actual merge or squash tree on its own stable CI ref,
+with checks bound to the candidate that ran. The operator supplies the execution
 inputs, trusted host acknowledgement, repository incarnation, retained-member
 limit and optional canonical check publisher. Durable membership keeps each
 PR's original execution and reporting responsibility across closure, visibility
 changes and restart. A member with unknown execution blocks the controller;
 discovery never admits a partial scan or silently drops an old member. See the
 [native PR collection guide](docs/NATIVE_PULL_REQUEST_WORKFLOW_COLLECTION.md)
-for setup, trust scope, capacity and recovery. Exact merge-candidate execution
-continues through the explicit fixed-PR and queue profiles.
+for setup, trust scope, capacity and recovery. The collection retains original
+candidate custody across restarts and refuses configuration changes or observed
+PR branches that overlap its operator-exclusive CI namespace. Fixed-PR and queue
+profiles remain available for explicit selection and queue landing.
 
 ### Reuse verified packs in bundle exports
 
@@ -295,6 +316,13 @@ subsequently locked or unlocked.
 
 ### Native standalone discussions
 
+Discussion replies now also have an explicit `append-comment` operation across
+the CLI, HTTP, MCP and browser. Independent replies can replan after competing
+publication with the same sealed content and retry identity. Current discussion
+locks and permissions are rechecked; strict `comment`, edits and moderation keep
+their exact predecessor requirements. See the
+[discussion guide](docs/NATIVE_DISCUSSIONS.md) for both profiles and recovery.
+
 `fg discussion` opens and edits repository discussions, records immutable
 authored comments, and closes/reopens or locks/unlocks a conversation. Exact
 predecessor versions prevent overwriting another writer, and original-key
@@ -307,6 +335,18 @@ Discussion read/write grants are independent of issue and PR grants. The
 browser supports safe Markdown, prepared changes and saved recovery receipts.
 See [native discussions](docs/NATIVE_DISCUSSIONS.md) for commands, scopes,
 recovery, pagination and the initial lifecycle profile's limits.
+
+### Collaboration event integrations
+
+The authenticated HTTP event endpoint and `frankengit_events` MCP tool accept
+an explicit `collaboration-v2` profile. It adds milestones, standalone
+discussions, PR conversations and review votes to the existing issue/PR event
+feed under their independent read grants. Returned frames retain the exact
+canonical bytes, and resumable cursors survive restart. PR conversations and
+reviews use the same selected authority and hidden-ref rules as their native
+readers. Existing clients retain the default `issues-pulls-v1` response. See
+[scoped collaboration events](docs/SCOPED_FORGE_EVENT_FEED.md) for profile
+selection, permission mapping, polling and work bounds.
 
 ### Native issue, discussion and pull request notifications
 
@@ -342,9 +382,17 @@ and run under finite operation scopes, byte envelopes and expiry. An independent
 and authority-bound context with the actual agent and sponsor retained. The
 separate `source-history-read` grant enables bounded log, blame, historical
 tree/blob reads and comparisons of visible references through HTTP and MCP.
+The independent `source-candidates` scope enables HTTP exact-patch preparation
+and bundle inspection, including the shipped source authoring operators. The
+[MCP candidate tool](docs/MCP_SOURCE_CANDIDATES.md) exposes regular-file patch
+preparation and single-parent inspection under that same independent scope.
+Candidate objects stay unstaged and publication remains separately authorized.
 Existing metadata and current-source credentials gain no history permission;
 history APIs can include current-tip content but do not grant search, indexes
-or agent context. Issue, PR metadata/conversation, discussion and individual
+or agent context. Independent `milestones-read` and `milestones-write` scopes
+enable HTTP and MCP milestone lifecycle planning and snapshot-bound issue counts;
+existing issue grants gain no milestone rights, and issue membership changes
+still require `issues-write`. Issue, PR metadata/conversation, discussion and individual
 outcome operations are supported;
 Git publication, reviews, merges and administration remain outside this profile.
 `fg mcp --agent-token-file ... --expected-incarnation ...` uses the same canonical
@@ -585,6 +633,15 @@ configuration and delivery are refreshed separately, and other projections,
 including legacy forge-position and outbox checks, can still replay history.
 This improves warm closure selection; the remaining history-scaling work in
 `frankengit-uxo2` stays open.
+
+Native merge, squash and fast-forward publication also reuse the node's bounded
+verified commit-metadata cache for ancestry above that selected closure. Each
+lookup still requires current selected membership and the original parser,
+object-size and live-request limits. Candidate and newly staged bytes take
+precedence over cached history. Cold reads use the original native parser and
+retain eligible metadata for later queries; cache eviction or restart restores
+that same path. This shares parsing work with merge preparation without
+persisting an ancestry index or making cached entries publication authority.
 
 Non-atomic receives now publish independent ref decisions in bounded groups:
 at most 64 decisions and 1 MiB of canonical decision-batch bytes share one
@@ -1073,6 +1130,15 @@ tail for independent retention; an undecided transaction leaves the journal
 unchanged. This closes one publication's cleanup debt, without resubmitting a
 transaction, renewing a capability or establishing whole-run quiescence. See
 [agent publication settlement](docs/AGENT_EFFECT_JOURNAL.md#cli-publication-settlement).
+
+`fg agent settle --action abort-reserved` also clears a recovered publication
+reservation that never reached its durable start boundary. It requires the same
+original principal and independently retained run/tail pins, appends only the
+checked deterministic Abort frame, and refuses started work or any unrelated
+suffix. Its receipt reports `canonical_status: not_observed`: another attempt
+may have published the same transaction, and reservation cleanup neither
+cancels that transaction nor permits a retry. See
+[reservation recovery](docs/AGENT_EFFECT_JOURNAL.md#abort-a-recovered-pre-start-reservation).
 
 ---
 

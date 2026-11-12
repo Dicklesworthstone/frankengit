@@ -11,8 +11,8 @@ use fgit_forge::event::notification::{
 use fgit_forge::{
     AggregateId, AggregateVersion, DiscussionNumber, ForgeEvent, IssueNumber, PullRequestNumber,
 };
-use fgit_types::{Digest, PrincipalId, RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
-use std::collections::{BTreeMap, BTreeSet};
+use fgit_types::{Digest, PrincipalId, RefusalCode, RepositoryAuthorityHeadId};
+use std::collections::BTreeMap;
 
 mod pull_request;
 mod subject;
@@ -101,7 +101,7 @@ where
         replay(
             store,
             cx,
-            basis.body().repository_id,
+            basis,
             &roots.forge,
             &roots.outbox,
             principal,
@@ -205,7 +205,7 @@ fn subject_target(aggregate: AggregateId) -> Option<NotificationTarget> {
 async fn replay<S, C>(
     store: &S,
     cx: &S::Context,
-    repository: RepositoryId,
+    basis: &PublicationBasis,
     forge: &CanonicalForgePositionState,
     outbox: &CanonicalOutboxState,
     principal: PrincipalId,
@@ -217,93 +217,38 @@ where
     C: Fn() -> bool + Sync,
 {
     checkpoint(cancelled)?;
-    if forge.repository_id() != repository || outbox.repository_id() != repository {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    }
     let frontiers = frontiers(forge, principal, kind, cancelled)?;
-    let mut selected_batches =
-        BTreeMap::<Digest, Vec<(AggregateId, ForgePositionStateEntry)>>::new();
-    for (aggregate, entry) in &frontiers {
-        selected_batches
-            .entry(entry.event_batch_root())
-            .or_default()
-            .push((*aggregate, *entry));
-    }
     let mut selected_latest = BTreeMap::new();
-    let mut batches = BTreeSet::new();
     let mut events = BTreeMap::<(AggregateId, AggregateVersion), ForgeEvent>::new();
-    let (mut scanned, mut scanned_bytes, mut retained_bytes) = (0usize, 0usize, 0usize);
-    for entry in outbox.entries() {
-        checkpoint(cancelled)?;
-        if !batches.insert(entry.payload_root()) {
-            continue;
-        }
-        let (batch, frame_bytes) =
-            storage::read_events_with_size(store, cx, repository, entry.payload_root()).await?;
-        checkpoint(cancelled)?;
-        scanned = scanned
-            .checked_add(batch.events.len())
-            .filter(|n| *n <= MAX_EVENTS)
-            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        scanned_bytes = scanned_bytes
-            .checked_add(frame_bytes)
-            .filter(|n| *n <= MAX_SCAN_BYTES)
-            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        delivery::validate_payload_positions(forge, &batch)?;
-        if let Some(positions) = selected_batches.remove(&entry.payload_root()) {
-            let mut ranges = positions
-                .iter()
-                .map(|(_, position)| (position.stream(), (position, 0u32)))
-                .collect();
-            if !delivery::validate_position_ranges(&mut ranges, &batch, cancelled)?.is_empty() {
-                return Err(unavailable(RefusalCode::EvidenceInvalid));
-            }
-            let selected: BTreeSet<_> = positions
-                .into_iter()
-                .map(|(aggregate, _)| aggregate)
-                .collect();
-            for event in &batch.events {
-                checkpoint(cancelled)?;
-                if selected.contains(&event.aggregate) {
-                    selected_latest.insert(event.aggregate, event.clone());
-                }
-            }
-        }
-        for event in batch.events {
-            checkpoint(cancelled)?;
-            let relevant = subject_target(event.aggregate)
-                .is_some_and(|target| target.kind() == kind)
-                || NotificationTarget::from_preference_aggregate(event.aggregate)
-                    .is_some_and(|(owner, target)| owner == principal && target.kind() == kind);
-            if !relevant {
-                continue;
-            }
+    let mut retained_bytes = 0usize;
+    super::super::event_history::visit_selected_at(
+        store,
+        cx,
+        basis,
+        forge,
+        outbox,
+        &frontiers,
+        super::super::event_history::HistoryReadLimits {
+            events: MAX_EVENTS,
+            scan_bytes: MAX_SCAN_BYTES,
+        },
+        &mut |event: &ForgeEvent, size: usize| {
+            retained_bytes = retained_bytes
+                .checked_add(size)
+                .filter(|n| *n <= MAX_RETAINED_BYTES)
+                .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
             let frontier = frontiers
                 .get(&event.aggregate)
                 .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-            if event.version.get() > frontier.successor_position() {
-                return Err(unavailable(RefusalCode::EvidenceInvalid));
+            if event.version.get() == frontier.successor_position() {
+                selected_latest.insert(event.aggregate, event.clone());
             }
-            let key = (event.aggregate, event.version);
-            if let Some(previous) = events.get(&key) {
-                if *previous != event {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
-                }
-            } else {
-                let size = fgit_codec::encode_body(&event)
-                    .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
-                    .len();
-                retained_bytes = retained_bytes
-                    .checked_add(size)
-                    .filter(|n| *n <= MAX_RETAINED_BYTES)
-                    .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-                events.insert(key, event);
-            }
-        }
-    }
-    if !selected_batches.is_empty() {
-        return Err(unavailable(RefusalCode::EvidenceMissing));
-    }
+            events.insert((event.aggregate, event.version), event.clone());
+            Ok(())
+        },
+        cancelled,
+    )
+    .await?;
     let mut threads = BTreeMap::<NotificationTarget, NotificationThread>::new();
     let mut preferences = BTreeMap::<NotificationTarget, NotificationPreferenceSnapshot>::new();
     let mut latest = BTreeMap::new();

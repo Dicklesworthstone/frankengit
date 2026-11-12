@@ -9,7 +9,8 @@ use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
 use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialGrant, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-    PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind, agent_credential_id,
+    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
+    agent_credential_id,
 };
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId,
@@ -19,6 +20,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod candidate_context;
+mod milestones;
 #[path = "../tests/authority_read_fault.rs"]
 mod read_fault;
 
@@ -821,6 +824,56 @@ fn history_requests_keep_independent_finite_authority_across_reopen_and_revocati
         ));
         reopened.shutdown().unwrap();
     }
+}
+
+#[test]
+fn candidate_requests_bind_native_scope_namespace_budget_and_original_deadline() {
+    let scratch = Scratch::new();
+    let node = scratch.node(GitHashAlgorithm::Sha256);
+    let token = bearer('f');
+    let candidate = AgentCredentialGrant {
+        operations: SOURCE_CANDIDATES,
+        ..grant(&node)
+    };
+    committed(credential(
+        &node,
+        &issue_command(&token, candidate),
+        actor(1),
+        "issue-candidate",
+    ));
+    let mut run = authentication(&node, &token, "candidate-request", SOURCE_CANDIDATES);
+    for class in OperationClass::ALL {
+        assert_eq!(
+            run.run.allowed_operation_classes().contains(class),
+            matches!(
+                class,
+                OperationClass::ReadCanonicalObject
+                    | OperationClass::TreeFsWorkspace
+                    | OperationClass::CreateCandidateObject
+            )
+        );
+    }
+    assert!(run.mcp_source_read_context(&node).is_err());
+    let bounded = run.source_candidates(&node).unwrap();
+    assert!(bounded.context(&node).unwrap().is_live());
+    assert_eq!(bounded.workspace_id(), *candidate.agent.as_bytes());
+    run.check(4096, 8192).unwrap();
+    assert!(run.check(4097, 8192).is_err());
+    assert!(run.check(4096, 8193).is_err());
+    let namespace = run.namespace;
+    run.namespace.incarnation = RepositoryIncarnationId::from_bytes([0xff; 16]);
+    assert!(run.source_candidates(&node).is_err());
+    run.namespace = namespace;
+    let operation = run.operation;
+    for wrong in [SOURCE_READ, SOURCE_HISTORY_READ, ISSUES_READ, ISSUES_WRITE] {
+        run.operation = wrong;
+        assert!(run.source_candidates(&node).is_err());
+    }
+    run.operation = operation;
+    run.constrain_deadline(Instant::now());
+    assert!(run.source_candidates(&node).is_err());
+    assert!(!run.context(&node).is_live());
+    node.shutdown().unwrap();
 }
 
 #[test]

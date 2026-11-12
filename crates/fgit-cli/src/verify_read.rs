@@ -39,7 +39,7 @@ new regular file without replacing an existing path, then emits a JSON receipt.
 Symlink blobs are emitted as their literal target bytes; no symlink is followed
 or created. Current-head requests fail if the supplied pin is stale. Legacy
 root-layout repositories cannot serve these proofs; select --root-layout
-ref-merkle-v1 explicitly when creating a NEW repository with fg init.
+ref-merkle-v2 explicitly when creating a NEW repository with fg init.
 Limits: 16 MiB blob, 16 MiB commit/tree proof data, 64 path components, 100,000
 tree entries. HTTP request targets are limited to 4,096 encoded bytes, including
 the route, hex reference/path, and head pin; oversize URLs refuse before connect.

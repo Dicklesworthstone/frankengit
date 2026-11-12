@@ -87,6 +87,7 @@ const ADDITIONS: &[McpToolEntry] = &[
     artifacts::INSPECT,
     artifacts::READ,
     TRANSACTION,
+    discussions::APPEND_COMMENT,
     discussions::CLOSE,
     discussions::COMMENT,
     discussions::EDIT,

@@ -59,7 +59,9 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    [--workflow-artifact-input-hex <workflow-hex:consumer:producer:output-hex:destination-hex> ...]
    [--workflow-max-artifact-mib <1..64>] [--workflow-max-artifact-total-mib <1..512>]
    [--workflow-max-artifact-input-total-mib <1..512>]
-   [--workflow-merge-candidate-ref <separate-ci-branch> --workflow-merge-principal <id>
+   [--workflow-merge-candidate-ref <separate-ci-branch> |
+    --workflow-merge-candidate-ref-prefix <collection-ci-namespace>]
+   [--workflow-merge-principal <id>
     --workflow-merge-author <name-and-email> --workflow-merge-committer <name-and-email>
     --workflow-merge-timestamp <positive-unix-seconds> --workflow-merge-message <text>
     [--workflow-merge-profile path|exact-renames]
@@ -106,8 +108,8 @@ consumer workspace, with a separate 64 MiB cumulative delivery allowance. The
 entire input/output contract is checked before jobs start; delivery revalidates
 current-attempt provenance and bytes. Missing, unsafe or oversized outputs refuse
 success. Artifact downloads still require the independent artifact-read grant.
-The merge-candidate group requires --workflow-pull-request or --workflow-merge-queue,
-plus --expected-incarnation.
+The exact-ref merge-candidate group requires --workflow-pull-request or
+--workflow-merge-queue, plus --expected-incarnation.
 It authorizes ordinary exact-old create/rewrite of the selected CI branch, then
 executes the actual merge or squash candidate there. The CI branch must differ
 from both PR branches. Explicit stable commit metadata makes it reproducible;
@@ -137,8 +139,15 @@ removed on restart. These operator flags never grant an HTTP request permission.
 --workflow-pull-requests discovers visible open same-repository PRs targeting
 --workflow-ref and executes their source heads, one member per poll in rotating
 order. It requires --expected-incarnation and trusts scripts from every current
-and future eligible PR. It cannot be combined with a fixed PR, merge queue or
-merge-candidate options. --workflow-max-pull-requests defaults to 64 and bounds
+and future eligible PR. It cannot be combined with a fixed PR or merge queue.
+To test actual merge/squash trees, supply --workflow-merge-candidate-ref-prefix
+(or --workflow-merge-candidate-ref-prefix-hex for raw bytes) and the complete
+merge writer/metadata group. The prefix is an operator-exclusive branch namespace
+stem without a trailing slash: PR 7 uses <stem>/pr-7. Each PR has its own stable
+CI ref and original candidate custody. The namespace must be disjoint from
+visible PR source/target branches. No target landing or PR metadata refresh is
+granted. Mode, namespace or commit-input changes cannot bypass retained custody.
+--workflow-max-pull-requests defaults to 64 and bounds
 all retained members, including closed or hidden PRs. Durable membership and
 each member's original execution/check custody survive restart; there is no
 automatic retirement. Incomplete discovery or capacity overflow refuses new
@@ -252,7 +261,7 @@ not complete no-match results. See docs/HTTP_SOURCE_API.md for limits and exampl
 Complete independently pinned file proofs use the same read grant and --allow-source:
   GET /api/v1/source/verified-blob?ref_hex=HEX&path_hex=HEX&expected_head=PIN
 This bodyless read returns a bounded binary canonical proof, requires an exact
-current-head pin, and rejects Idempotency-Key. Select --root-layout ref-merkle-v1
+current-head pin, and rejects Idempotency-Key. Select --root-layout ref-merkle-v2
 when initializing a new repository; existing legacy roots are not migrated.
 Use fg verify-read with a separately trusted head to check the complete response.
 Original tree witnesses include sibling entries within the authorized ref.
@@ -595,8 +604,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         if !matches!(&credentials, CredentialInput::Reloadable(_)) {
             return Err("Git LFS requires explicit scopes in --credentials-file".into());
         }
-        #[cfg(not(target_os = "linux"))]
-        return Err("the Git LFS artifact-fabric backend requires Linux".into());
+        #[cfg(not(unix))]
+        return Err("the Git LFS artifact-fabric backend requires Unix".into());
     }
     if let Some(root) = flags.get("--artifact-root") {
         if !matches!(&credentials, CredentialInput::Reloadable(_)) {
@@ -607,8 +616,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         if root.len() > 4096 || !Path::new(root).is_absolute() {
             return Err("artifact root must be an absolute bounded private directory".into());
         }
-        #[cfg(not(target_os = "linux"))]
-        return Err("workflow artifact custody requires Linux".into());
+        #[cfg(not(unix))]
+        return Err("workflow artifact custody requires Unix".into());
     }
     if (allow_issues
         || allow_discussions
@@ -905,7 +914,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         }
         node.validate_smart_http_lfs_storage()
             .map_err(|e| e.to_string())?;
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if artifacts_enabled {
             node.validate_workflow_artifact_storage()
                 .map_err(|error| error.to_string())?;
@@ -1221,7 +1230,7 @@ mod tests {
                 .into_iter()
                 .map(str::to_owned),
         );
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let options = parse(&scoped).unwrap();
             assert_eq!(
@@ -1230,7 +1239,7 @@ mod tests {
             );
             assert!(!options.allow_receive && !options.allow_source && !options.allow_pulls);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         assert!(parse(&scoped).is_err());
         scoped.extend(["--lfs-root".into(), "other".into()]);
         assert!(parse(&scoped).is_err());
@@ -1259,7 +1268,7 @@ mod tests {
             .into_iter()
             .map(str::to_owned),
         );
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let options = parse(&scoped).unwrap();
             assert_eq!(
@@ -1275,7 +1284,7 @@ mod tests {
             );
             assert!(options.config.http_lfs_root().is_none());
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         assert!(parse(&scoped).is_err());
         let mut relative = scoped.clone();
         *relative.last_mut().unwrap() = "relative-artifacts".into();

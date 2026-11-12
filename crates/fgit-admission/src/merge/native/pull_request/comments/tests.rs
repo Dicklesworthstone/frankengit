@@ -196,3 +196,122 @@ fn page_window_requires_contiguous_exact_versions_and_truthful_continuation() {
     complete.discussion_version = None;
     assert_eq!(complete.validate_window(0, 2), Ok(()));
 }
+
+fn comment(version: u64, anchor: Option<SourceCommentAnchor>) -> ForgeEvent {
+    PullRequestCommentCommand {
+        number: PullRequestNumber::FIRST,
+        expected_version: if version == 1 {
+            ExpectedVersion::NewStream
+        } else {
+            ExpectedVersion::Exactly(AggregateVersion::try_new(version - 1).unwrap())
+        },
+        body: format!("Comment {version}"),
+        anchor,
+    }
+    .proposed_event(context().principal_id)
+    .unwrap()
+}
+
+#[test]
+fn retired_conversation_delivery_preserves_exact_page_windows() {
+    use super::super::replay_tests::{Fixture, event};
+    let mut fixture = Fixture::new(vec![ForgeEventBatch {
+        events: vec![
+            event(1, 1, GitHashAlgorithm::Sha1, 0),
+            comment(1, None),
+            comment(2, None),
+            comment(3, None),
+        ],
+    }]);
+    let original = fixture
+        .comments_page(0, 2, &|_, _| true, &|| false)
+        .unwrap()
+        .unwrap();
+    fixture.select_outbox(Vec::new());
+    let recovered = fixture
+        .comments_page(0, 2, &|_, _| true, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_ne!(recovered.source_head, original.source_head);
+    assert_eq!(recovered.comments, original.comments);
+    assert_eq!(recovered.discussion_version, original.discussion_version);
+    assert_eq!(recovered.next_after, Some(2));
+    recovered.validate_window(0, 2).unwrap();
+    let tail = fixture
+        .comments_page(2, 2, &|_, _| true, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(tail.comments.len(), 1);
+    assert_eq!(tail.comments[0].body, "Comment 3");
+    assert_eq!(tail.comments[0].version.get(), 3);
+    assert_eq!(tail.next_after, None);
+    tail.validate_window(2, 2).unwrap();
+}
+
+#[test]
+fn retired_conversation_still_refuses_gaps_and_hides_older_private_anchors() {
+    use super::super::replay_tests::{Fixture, event};
+    use fgit_forge::event::pull_request_comment::{SourceCommentComparison, SourceCommentSide};
+    use fgit_types::{GitOid, RefName};
+
+    let mut gap = Fixture::new(vec![
+        ForgeEventBatch::of_one(event(1, 1, GitHashAlgorithm::Sha1, 0)),
+        ForgeEventBatch::of_one(comment(1, None)),
+        ForgeEventBatch::of_one(comment(2, None)),
+    ]);
+    gap.select_outbox(Vec::new());
+    // The first comment still exists, but this genesis's selected latest
+    // frontier and empty outbox do not authenticate its missing prefix.
+    assert!(matches!(
+        gap.comments_page(1, 1, &|_, _| true, &|| false),
+        Err(AdmissionError::AsyncProjectionUnavailable(
+            RefusalCode::EvidenceMissing
+        ))
+    ));
+
+    let id = |n: &str| GitOid::from_hex(GitHashAlgorithm::Sha1, &n.repeat(20)).unwrap();
+    let anchor = SourceCommentAnchor {
+        pull_request_version: AggregateVersion::FIRST,
+        source_ref: RefName::try_new(b"refs/heads/private-source").unwrap(),
+        target_ref: RefName::try_new(b"refs/heads/main").unwrap(),
+        source_tip: id("11"),
+        target_tip: id("22"),
+        compared_base: id("22"),
+        comparison: SourceCommentComparison::Direct,
+        path: b"src/main.rs".to_vec(),
+        side: SourceCommentSide::After,
+        blob: id("33"),
+        mode: 0o100644,
+        byte_start: 0,
+        byte_end: 4,
+        line_start: 0,
+        line_count: 1,
+    };
+    let mut fixture = Fixture::new(vec![ForgeEventBatch {
+        events: vec![
+            event(1, 1, GitHashAlgorithm::Sha1, 0),
+            comment(1, Some(anchor)),
+            comment(2, None),
+        ],
+    }]);
+    fixture.select_outbox(Vec::new());
+    let permitted = fixture
+        .comments_page(1, 1, &|_, _| true, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(permitted.comments.len(), 1);
+    assert_eq!(permitted.comments[0].body, "Comment 2");
+    // Neither the current PR refs nor this page reveal the older private
+    // anchor. Its recovered event still makes the whole conversation hidden.
+    assert!(
+        fixture
+            .comments_page(
+                1,
+                1,
+                &|source, _| source.as_bytes() != b"refs/heads/private-source",
+                &|| false,
+            )
+            .unwrap()
+            .is_none()
+    );
+}

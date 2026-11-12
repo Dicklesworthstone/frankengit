@@ -15,7 +15,8 @@ impl Scratch {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
             "fg-queue-refresh-custody-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         private_directory(&path);
         Self(path)
@@ -43,8 +44,11 @@ fn fixture(format: GitHashAlgorithm) -> (Scratch, OneNode, PrincipalId, QueueHea
             scratch.0.join("node"),
             TenantId::from_bytes([0xb1; 16]),
             RepositoryId::from_bytes([0xb2; 16]),
-        ).with_object_format(format).with_worker_threads(1),
-    ).unwrap();
+        )
+        .with_object_format(format)
+        .with_worker_threads(1),
+    )
+    .unwrap();
     let oid = |value: u8| {
         GitOid::from_hex(format, &format!("{value:02x}").repeat(format.digest_len())).unwrap()
     };
@@ -72,15 +76,21 @@ fn fixture(format: GitHashAlgorithm) -> (Scratch, OneNode, PrincipalId, QueueHea
 
 fn assert_no_submission(node: &OneNode, attempt: &Attempt) {
     let request = node.request_context();
-    assert!(node.runtime().block_on(read_seal_async(
-        &node.authority,
-        request.authority(),
-        node.tenant_id(),
-        node.repository_id(),
-        attempt.tx_id,
-    )).unwrap().is_none());
+    assert!(
+        node.runtime()
+            .block_on(read_seal_async(
+                &node.authority,
+                request.authority(),
+                node.tenant_id(),
+                node.repository_id(),
+                attempt.tx_id,
+            ))
+            .unwrap()
+            .is_none()
+    );
     assert!(matches!(
-        node.runtime().block_on(node.resolve_outcome_checkpointed_in(&request, attempt.tx_id))
+        node.runtime()
+            .block_on(node.resolve_outcome_checkpointed_in(&request, attempt.tx_id))
             .unwrap(),
         OutcomeLookup::Undecided,
     ));
@@ -98,19 +108,24 @@ fn original_full_body_raw_refs_and_retry_identity_round_trip_in_both_formats() {
         let (_scratch, node, refresher, mut command) = fixture(format);
         command.pull_request.data.body = "é".repeat(MAX_BODY_BYTES / 2);
         let identity = [0xc1; 32];
-        let attempt = Attempt::from_basis(&node, refresher, &command, identity, [0xc2; 32])
-            .unwrap();
+        let attempt =
+            Attempt::from_basis(&node, refresher, &command, identity, [0xc2; 32]).unwrap();
         let bytes = attempt.bytes().unwrap();
         assert_eq!(&bytes[..8], b"FGQRA001");
         assert!(bytes.len() > MAX_BODY_BYTES && bytes.len() <= MAX_RECORD);
-        let decode = |bytes: &[u8]| {
-            Attempt::decode(&node, refresher, identity, &attempt.name(), bytes)
-        };
+        let decode =
+            |bytes: &[u8]| Attempt::decode(&node, refresher, identity, &attempt.name(), bytes);
         let restored = decode(&bytes).unwrap();
         assert_eq!(restored.bytes().unwrap(), bytes);
         assert_eq!(restored.command, command);
-        assert_eq!(restored.command.pull_request.data.body.len(), MAX_BODY_BYTES);
-        assert_eq!(restored.command.pull_request.data.source_ref.as_bytes(), b"refs/heads/topic-\xff");
+        assert_eq!(
+            restored.command.pull_request.data.body.len(),
+            MAX_BODY_BYTES
+        );
+        assert_eq!(
+            restored.command.pull_request.data.source_ref.as_bytes(),
+            b"refs/heads/topic-\xff"
+        );
         assert_eq!(restored.key, attempt.key);
         assert_eq!(restored.tx_id, attempt.tx_id);
         assert_eq!(restored.semantic, attempt.semantic);
@@ -123,8 +138,24 @@ fn original_full_body_raw_refs_and_retry_identity_round_trip_in_both_formats() {
             &IdempotencyKey::new(attempt.key.to_vec()).unwrap(),
         );
         for length in [
-            0, 1, 7, 8, 39, 40, 55, 56, 103, 104, 105, 136, 137, 176, 177,
-            bytes.len() - 33, bytes.len() - 32, bytes.len() - 1,
+            0,
+            1,
+            7,
+            8,
+            39,
+            40,
+            55,
+            56,
+            103,
+            104,
+            105,
+            136,
+            137,
+            176,
+            177,
+            bytes.len() - 33,
+            bytes.len() - 32,
+            bytes.len() - 1,
         ] {
             assert!(decode(&bytes[..length]).is_err(), "truncation {length}");
         }
@@ -183,9 +214,16 @@ fn full_semantics_and_bindings_cannot_be_rewritten_under_an_original_key_or_ack(
         assert_ne!(next.key, original.key);
         assert_ne!(next.tx_id, original.tx_id);
         assert_ne!(next.semantic, original.semantic);
-        assert!(Attempt::decode(
-            &node, refresher, identity, &original.name(), &next.bytes().unwrap(),
-        ).is_err());
+        assert!(
+            Attempt::decode(
+                &node,
+                refresher,
+                identity,
+                &original.name(),
+                &next.bytes().unwrap(),
+            )
+            .is_err()
+        );
     }
     for (actor, scope, observed) in [
         (PrincipalId::from_bytes([0xff; 16]), identity, basis),
@@ -196,8 +234,10 @@ fn full_semantics_and_bindings_cannot_be_rewritten_under_an_original_key_or_ack(
         assert_ne!(next.key, original.key);
         assert_ne!(next.tx_id, original.tx_id);
         if actor == refresher {
-            assert_eq!(next.semantic, original.semantic,
-                "basis or custody identity must not create a new native intent");
+            assert_eq!(
+                next.semantic, original.semantic,
+                "basis or custody identity must not create a new native intent"
+            );
         } else {
             assert_ne!(next.semantic, original.semantic);
         }
@@ -207,24 +247,42 @@ fn full_semantics_and_bindings_cannot_be_rewritten_under_an_original_key_or_ack(
     // Even recomputing the non-authoritative local checksum cannot keep the
     // original key/TxId when title, body or context bytes were substituted.
     let title = command.pull_request.data.title.as_bytes();
-    let title_offset = bytes.windows(title.len()).position(|window| window == title).unwrap();
+    let title_offset = bytes
+        .windows(title.len())
+        .position(|window| window == title)
+        .unwrap();
     let body = command.pull_request.data.body.as_bytes();
-    let body_offset = bytes.windows(body.len()).position(|window| window == body).unwrap();
+    let body_offset = bytes
+        .windows(body.len())
+        .position(|window| window == body)
+        .unwrap();
     let key_offset = bytes.len() - 32 - 4 - original.tx_id.to_string().len() - 32;
-    for offset in [8, 40, 56, 72, 88, 104, 105, 137, title_offset, body_offset, key_offset] {
+    for offset in [
+        8,
+        40,
+        56,
+        72,
+        88,
+        104,
+        105,
+        137,
+        title_offset,
+        body_offset,
+        key_offset,
+    ] {
         let mut corrupt = bytes.clone();
         corrupt[offset] ^= 1;
         repair_checksum(&mut corrupt);
-        assert!(Attempt::decode(&node, refresher, identity, &original.name(), &corrupt).is_err(),
-            "rechecksummed byte {offset}");
+        assert!(
+            Attempt::decode(&node, refresher, identity, &original.name(), &corrupt).is_err(),
+            "rechecksummed byte {offset}"
+        );
     }
     let mut length_bomb = bytes.clone();
     let first_field = 8 + 32 + 16 * 4 + 1 + 32 + 8 * 5 + 3 * 32;
     length_bomb[first_field..first_field + 4].fill(0xff);
     repair_checksum(&mut length_bomb);
-    assert!(Attempt::decode(
-        &node, refresher, identity, &original.name(), &length_bomb,
-    ).is_err());
+    assert!(Attempt::decode(&node, refresher, identity, &original.name(), &length_bomb,).is_err());
     let mut trailing = bytes.clone();
     trailing.insert(trailing.len() - 32, 0);
     repair_checksum(&mut trailing);
@@ -262,12 +320,19 @@ fn scope_retains_1024_attempts_without_buffering_payloads_and_refuses_orphans_or
     assert_eq!(before.len(), MAX_ATTEMPTS);
     assert!(before.windows(2).all(|pair| pair[0] < pair[1]));
     retain(&root, &first).unwrap();
-    assert_eq!(read_record(&root, &first.name()).unwrap(), first.bytes().unwrap());
+    assert_eq!(
+        read_record(&root, &first.name()).unwrap(),
+        first.bytes().unwrap()
+    );
     let extra = Attempt::from_basis(&node, refresher, &command, [1; 32], [0xff; 32]).unwrap();
     assert!(retain(&root, &extra).is_err());
     assert_eq!(records(&root).unwrap(), before);
     // The cap counts attempts, allowing an additional matching ACK per attempt.
-    write_new(&directory.join(first.outcome_name()), &acknowledgement_vector(&first, 1, 1)).unwrap();
+    write_new(
+        &directory.join(first.outcome_name()),
+        &acknowledgement_vector(&first, 1, 1),
+    )
+    .unwrap();
     assert_eq!(records(&root).unwrap(), before);
     let orphan = directory.join(extra.outcome_name());
     write_new(&orphan, &[0; ACK_BYTES]).unwrap();
@@ -325,7 +390,10 @@ fn private_records_and_local_acknowledgements_fail_closed_without_becoming_autho
     let valid = acknowledgement_vector(&attempt, 1, 7);
     assert_eq!(valid.len(), ACK_BYTES);
     write_new(&receipt, &valid).unwrap();
-    assert_eq!(acknowledged(&root, &attempt).unwrap(), Some((Acknowledgement::Committed, 7)));
+    assert_eq!(
+        acknowledged(&root, &attempt).unwrap(),
+        Some((Acknowledgement::Committed, 7))
+    );
     for offset in [0, 8, 40, 41, ACK_BYTES - 1] {
         let mut corrupt = valid.clone();
         corrupt[offset] ^= 1;
@@ -340,7 +408,10 @@ fn private_records_and_local_acknowledgements_fail_closed_without_becoming_autho
     fs::write(&receipt, acknowledgement_vector(&other, 1, 1)).unwrap();
     assert!(acknowledged(&root, &attempt).is_err());
     fs::write(&receipt, acknowledgement_vector(&attempt, 2, 9)).unwrap();
-    assert_eq!(acknowledged(&root, &attempt).unwrap(), Some((Acknowledgement::Refused, 9)));
+    assert_eq!(
+        acknowledged(&root, &attempt).unwrap(),
+        Some((Acknowledgement::Refused, 9))
+    );
     let alias = elsewhere.join("receipt-link");
     fs::hard_link(&receipt, &alias).unwrap();
     assert!(records(&root).is_err());
@@ -357,11 +428,13 @@ fn private_records_and_local_acknowledgements_fail_closed_without_becoming_autho
     node.shutdown().unwrap();
 }
 
-
 #[test]
-fn retained_undecided_intent_without_principal_marker_recovers_only_under_explicit_original_grant() {
+fn retained_undecided_intent_without_principal_marker_recovers_only_under_explicit_original_grant()
+{
+    use super::super::super::{
+        Owner, merge_queue, pull_request_merge::PullRequestMergeWatchConfig,
+    };
     use super::super::{QueueRefreshMode, identity};
-    use super::super::super::{Owner, merge_queue, pull_request_merge::PullRequestMergeWatchConfig};
     use fgit_forge::preparation::{MergeCommitStyle, MergeMetadata, MergeProfile};
     use fgit_types::HeadGeneration;
 
@@ -380,15 +453,24 @@ fn retained_undecided_intent_without_principal_marker_recovers_only_under_explic
         },
         MergeProfile::PathMergeV1,
         MergeCommitStyle::TwoParent,
-    ).unwrap();
+    )
+    .unwrap();
     let number = command.number.get();
     let scope = merge_queue::scope(&node, &target, b"ci", number);
     let root = parent.join(format!("watch-{}", hex(&scope)));
     let expected_identity = identity(&scope, &merge, refresher);
-    let before = node.runtime().block_on(node.materialize_admission()).unwrap();
+    let before = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
     let original = Attempt::new(
-        &node, refresher, &command, expected_identity, before.basis().id(),
-    ).unwrap();
+        &node,
+        refresher,
+        &command,
+        expected_identity,
+        before.basis().id(),
+    )
+    .unwrap();
     {
         let _owner = Owner::open(&root).unwrap();
         merge.bind(&root).unwrap();
@@ -406,22 +488,51 @@ fn retained_undecided_intent_without_principal_marker_recovers_only_under_explic
             scratch.0.join("node"),
             TenantId::from_bytes([0xb1; 16]),
             RepositoryId::from_bytes([0xb2; 16]),
-        ).with_object_format(GitHashAlgorithm::Sha256).with_worker_threads(1),
-    ).unwrap();
+        )
+        .with_object_format(GitHashAlgorithm::Sha256)
+        .with_worker_threads(1),
+    )
+    .unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     for unauthorized in [None, Some(PrincipalId::from_bytes([0xff; 16]))] {
-        assert!(node.runtime().block_on(node.validate_trusted_queue_head_refresh_custody_in(
-            &node.request_context(), &target, number, b"ci", &parent, &merge, unauthorized,
-        )).is_err());
-        assert!(!marker.exists(), "validation must not repair an absent authority marker");
+        assert!(
+            node.runtime()
+                .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                    &node.request_context(),
+                    &target,
+                    number,
+                    b"ci",
+                    &parent,
+                    &merge,
+                    unauthorized,
+                ))
+                .is_err()
+        );
+        assert!(
+            !marker.exists(),
+            "validation must not repair an absent authority marker"
+        );
     }
-    assert!(node.runtime().block_on(node.validate_trusted_queue_head_refresh_custody_in(
-        &node.request_context(), &target, number, b"ci", &parent, &merge, Some(refresher),
-    )).unwrap());
+    assert!(
+        node.runtime()
+            .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                &node.request_context(),
+                &target,
+                number,
+                b"ci",
+                &parent,
+                &merge,
+                Some(refresher),
+            ))
+            .unwrap()
+    );
     assert!(!marker.exists());
     assert!(acknowledged(&root, &original).unwrap().is_none());
     assert_eq!(
-        node.runtime().block_on(node.materialize_admission()).unwrap().basis(),
+        node.runtime()
+            .block_on(node.materialize_admission())
+            .unwrap()
+            .basis(),
         before.basis(),
     );
     assert_no_submission(&node, &original);
@@ -429,53 +540,111 @@ fn retained_undecided_intent_without_principal_marker_recovers_only_under_explic
     let publisher = PrincipalId::from_bytes([4; 16]);
     let lander = PrincipalId::from_bytes([5; 16]);
     let mut decisions = Vec::new();
-    let recovered = node.runtime().block_on(node.refresh_trusted_queue_head_merge_workflows_in(
-        &node.request_context(), &target, number, b"ci", &parent, &merge,
-        publisher, lander, refresher, QueueRefreshMode::RecoverOnly,
-        |text| { decisions.push(text.to_owned()); Ok(()) },
-    ));
+    let recovered = node
+        .runtime()
+        .block_on(node.refresh_trusted_queue_head_merge_workflows_in(
+            &node.request_context(),
+            &target,
+            number,
+            b"ci",
+            &parent,
+            &merge,
+            publisher,
+            lander,
+            refresher,
+            QueueRefreshMode::RecoverOnly,
+            |text| {
+                decisions.push(text.to_owned());
+                Ok(())
+            },
+        ));
     assert!(recovered.error.is_none(), "{:?}", recovered.error);
     assert!(!recovered.request_stopped && !recovered.pending);
     assert_eq!(recovered.committed, 0);
-    assert_eq!(recovered.refused, 1, "the absent queue must canonically refuse the original command");
+    assert_eq!(
+        recovered.refused, 1,
+        "the absent queue must canonically refuse the original command"
+    );
     assert_eq!(decisions.len(), 1);
     assert!(decisions[0].contains(&original.tx_id.to_string()));
-    assert_eq!(reporting::read_private(&marker, 32).unwrap(), expected_identity.to_vec());
-    let OutcomeLookup::Decided(terminal) = node.runtime().block_on(
-        node.resolve_outcome_checkpointed_in(&node.request_context(), original.tx_id),
-    ).unwrap() else {
+    assert_eq!(
+        reporting::read_private(&marker, 32).unwrap(),
+        expected_identity.to_vec()
+    );
+    let OutcomeLookup::Decided(terminal) = node
+        .runtime()
+        .block_on(node.resolve_outcome_checkpointed_in(&node.request_context(), original.tx_id))
+        .unwrap()
+    else {
         panic!("recovery must resolve the retained original transaction");
     };
     assert!(matches!(terminal.outcome, DecisionOutcome::Refused { .. }));
-    assert_eq!(acknowledged(&root, &original).unwrap(),
-        Some((Acknowledgement::Refused, terminal.decision_sequence.get())));
+    assert_eq!(
+        acknowledged(&root, &original).unwrap(),
+        Some((Acknowledgement::Refused, terminal.decision_sequence.get()))
+    );
     let bytes = read_record(&root, &original.name()).unwrap();
     let retained = Attempt::decode(
-        &node, refresher, expected_identity, &original.name(), &bytes,
-    ).unwrap();
+        &node,
+        refresher,
+        expected_identity,
+        &original.name(),
+        &bytes,
+    )
+    .unwrap();
     assert_eq!(retained.command, command);
     assert_eq!(retained.tx_id, original.tx_id);
-    let after = node.runtime().block_on(node.materialize_admission()).unwrap();
+    let after = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap();
     assert_eq!(after.snapshot().refs, before.snapshot().refs);
     assert_eq!(after.snapshot().outbox, before.snapshot().outbox);
-    assert_eq!(after.basis().body().forge_position_root, before.basis().body().forge_position_root);
+    assert_eq!(
+        after.basis().body().forge_position_root,
+        before.basis().body().forge_position_root
+    );
 
     // Once the ACK has been authenticated against the real terminal, a later
     // read-only fence needs no publication grant and recovery cannot resubmit.
-    assert!(!node.runtime().block_on(node.validate_trusted_queue_head_refresh_custody_in(
-        &node.request_context(), &target, number, b"ci", &parent, &merge, None,
-    )).unwrap());
-    let repeated = node.runtime().block_on(node.refresh_trusted_queue_head_merge_workflows_in(
-        &node.request_context(), &target, number, b"ci", &parent, &merge,
-        publisher, lander, refresher, QueueRefreshMode::RecoverOnly,
-        |_| Err("a verified acknowledgement must suppress duplicate observation".into()),
-    ));
+    assert!(
+        !node
+            .runtime()
+            .block_on(node.validate_trusted_queue_head_refresh_custody_in(
+                &node.request_context(),
+                &target,
+                number,
+                b"ci",
+                &parent,
+                &merge,
+                None,
+            ))
+            .unwrap()
+    );
+    let repeated = node
+        .runtime()
+        .block_on(node.refresh_trusted_queue_head_merge_workflows_in(
+            &node.request_context(),
+            &target,
+            number,
+            b"ci",
+            &parent,
+            &merge,
+            publisher,
+            lander,
+            refresher,
+            QueueRefreshMode::RecoverOnly,
+            |_| Err("a verified acknowledgement must suppress duplicate observation".into()),
+        ));
     assert!(repeated.error.is_none(), "{:?}", repeated.error);
     assert_eq!(repeated.previously_decided, 1);
     assert_eq!(repeated.committed + repeated.refused, 0);
     assert!(!repeated.pending);
     assert_eq!(
-        node.runtime().block_on(node.materialize_admission()).unwrap().basis(),
+        node.runtime()
+            .block_on(node.materialize_admission())
+            .unwrap()
+            .basis(),
         after.basis(),
     );
     node.shutdown().unwrap();

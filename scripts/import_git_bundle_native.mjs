@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // Explicit trusted-local source restoration through fg's existing admission.
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { NATIVE_SOURCE_IMPORT_MAX_REFS, importNativeSource, readNativeImportOutcome, retryNativeSourceImport } from './lib/native-source-import.mjs';
 
 const USAGE = `Usage:
@@ -34,7 +36,7 @@ An error after submission can still mean the import committed. Use status.
 `;
 // Action/path plus every fixed import option, including the complete approval group.
 const MAX_ARGUMENTS = 30 + 2 * NATIVE_SOURCE_IMPORT_MAX_REFS;
-function parse(args) {
+export function parseImportArguments(args) {
   if (args.length < 2 || args.length > MAX_ARGUMENTS || args.some(arg => arg.length > 8300 || arg.includes('\0'))
     || args.reduce((n, arg) => n + Buffer.byteLength(arg), 0) > 1024 * 1024) throw new Error('invalid_import_arguments');
   const [action, path] = args;
@@ -81,25 +83,27 @@ function parse(args) {
   }
   return { action, path, options };
 }
-const controller = new AbortController();
-const stop = () => controller.abort();
-const outputFailure = () => { controller.abort(); process.exitCode = 2; };
-process.once('SIGTERM', stop); process.once('SIGINT', stop);
-process.stdout.on('error', outputFailure); process.stderr.on('error', outputFailure);
-try {
-  const args = process.argv.slice(2);
-  let text;
-  if (args.length === 1 && args[0] === '--help') text = USAGE;
-  else {
-    const { action, path, options } = parse(args);
-    const operation = { import: importNativeSource, status: readNativeImportOutcome, retry: retryNativeSourceImport }[action];
-    const result = await operation(path, { ...options, signal: controller.signal });
-    process.exitCode = !result.node_closed ? 2 : result.outcome === 'committed' ? 0 : result.outcome === 'refused' ? 3 : 4;
-    text = JSON.stringify(result) + '\n';
-  }
-  await new Promise((resolve, reject) => process.stdout.write(text, error => error ? reject(error) : resolve()));
-} catch (error) {
-  const report = { type: 'native_source_import_error', error: error.code ?? error.message,
-    details: error.details ?? null, absence_proves_non_commit: false, automatic_retry: false };
-  process.stderr.write(JSON.stringify(report) + '\n'); process.exitCode = 2;
-} finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  const outputFailure = () => { controller.abort(); process.exitCode = 2; };
+  process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  process.stdout.on('error', outputFailure); process.stderr.on('error', outputFailure);
+  try {
+    const args = process.argv.slice(2);
+    let text;
+    if (args.length === 1 && args[0] === '--help') text = USAGE;
+    else {
+      const { action, path, options } = parseImportArguments(args);
+      const operation = { import: importNativeSource, status: readNativeImportOutcome, retry: retryNativeSourceImport }[action];
+      const result = await operation(path, { ...options, signal: controller.signal });
+      process.exitCode = !result.node_closed ? 2 : result.outcome === 'committed' ? 0 : result.outcome === 'refused' ? 3 : 4;
+      text = JSON.stringify(result) + '\n';
+    }
+    await new Promise((resolve, reject) => process.stdout.write(text, error => error ? reject(error) : resolve()));
+  } catch (error) {
+    const report = { type: 'native_source_import_error', error: error.code ?? error.message,
+      details: error.details ?? null, absence_proves_non_commit: false, automatic_retry: false };
+    process.stderr.write(JSON.stringify(report) + '\n'); process.exitCode = 2;
+  } finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+}

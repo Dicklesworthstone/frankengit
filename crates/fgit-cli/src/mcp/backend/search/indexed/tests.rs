@@ -155,13 +155,36 @@ fn closed_arguments_preserve_native_query_semantics_and_independent_limits() {
     assert_eq!(query.mode, input::Mode::Revalidated);
     assert_eq!(query.query.terms(), &[b"needle".to_vec()]);
     assert_eq!(query.query.prefixes(), &[b"src".to_vec()]);
-    assert_eq!((query.limit, query.max_work, query.max_payload_bytes), (20, MAX_WORK, DEFAULT_PAYLOAD));
-    assert!(query.fields.contains(&("source_mode".into(), "revalidated".into())));
+    assert_eq!(
+        (query.limit, query.max_work, query.max_payload_bytes),
+        (20, MAX_WORK, DEFAULT_PAYLOAD)
+    );
+    assert!(
+        query
+            .fields
+            .contains(&("source_mode".into(), "revalidated".into()))
+    );
     assert!(query.fields.contains(&("channel".into(), "content".into())));
-    assert_eq!(query.fields.iter().filter(|(name, _)| name == "term_hex").count(), 2);
+    assert_eq!(
+        query
+            .fields
+            .iter()
+            .filter(|(name, _)| name == "term_hex")
+            .count(),
+        2
+    );
     assert!(query.fields.iter().all(|(name, _)| name != "object_format"));
 
-    for name in ["object_format", "principal", "storage", "build", "force", "agent_token", "idempotency_key", "needle_hex"] {
+    for name in [
+        "object_format",
+        "principal",
+        "storage",
+        "build",
+        "force",
+        "agent_token",
+        "idempotency_key",
+        "needle_hex",
+    ] {
         let mut args = base();
         args.insert(name.into(), text("forbidden"));
         assert_eq!(parse(&args).unwrap_err().code, "unknown_argument", "{name}");
@@ -169,9 +192,21 @@ fn closed_arguments_preserve_native_query_semantics_and_independent_limits() {
     for (name, value, code) in [
         ("terms_hex", text("aa"), "expected_array"),
         ("terms_hex", Value::Array(vec![]), "invalid_index_query"),
-        ("terms_hex", Value::Array(vec![json::number(1)]), "expected_string"),
-        ("terms_hex", Value::Array(vec![text("abCD")]), "invalid_hex_bytes"),
-        ("terms_hex", Value::Array(vec![text(hex(b"a b"))]), "invalid_index_query"),
+        (
+            "terms_hex",
+            Value::Array(vec![json::number(1)]),
+            "expected_string",
+        ),
+        (
+            "terms_hex",
+            Value::Array(vec![text("abCD")]),
+            "invalid_hex_bytes",
+        ),
+        (
+            "terms_hex",
+            Value::Array(vec![text(hex(b"a b"))]),
+            "invalid_index_query",
+        ),
         ("source_mode", text("fallback"), "invalid_index_source_mode"),
         ("channel", text("semantic"), "unsupported_index_channel"),
         ("reference", text("main"), "invalid_ref"),
@@ -184,13 +219,27 @@ fn closed_arguments_preserve_native_query_semantics_and_independent_limits() {
 
 #[test]
 fn every_page_and_byte_ceiling_has_an_accepted_boundary_twin() {
-    for (name, maximum) in [("limit", MAX_PAGE), ("max_work", MAX_WORK), ("max_payload_bytes", MAX_PAYLOAD)] {
+    for (name, maximum) in [
+        ("limit", MAX_PAGE),
+        ("max_work", MAX_WORK),
+        ("max_payload_bytes", MAX_PAYLOAD),
+    ] {
         let mut args = base();
         args.insert(name.into(), json::number(maximum));
         assert!(parse(&args).is_ok(), "{name}");
-        for value in [json::number(0), json::number(maximum + 1), text("1"), Value::Null, Value::Number("1.0".into())] {
+        for value in [
+            json::number(0),
+            json::number(maximum + 1),
+            text("1"),
+            Value::Null,
+            Value::Number("1.0".into()),
+        ] {
             args.insert(name.into(), value);
-            assert_eq!(parse(&args).unwrap_err().code, "invalid_index_limit", "{name}");
+            assert_eq!(
+                parse(&args).unwrap_err().code,
+                "invalid_index_limit",
+                "{name}"
+            );
         }
     }
     let mut args = base();
@@ -199,7 +248,10 @@ fn every_page_and_byte_ceiling_has_an_accepted_boundary_twin() {
     assert!(parse(&args).is_ok());
     args.insert("terms_hex".into(), Value::Array(vec![text(hex(&word)); 33]));
     assert!(parse(&args).is_err());
-    args.insert("terms_hex".into(), Value::Array(vec![text(hex(&vec![b'x'; 129]))]));
+    args.insert(
+        "terms_hex".into(),
+        Value::Array(vec![text(hex(&vec![b'x'; 129]))]),
+    );
     assert!(parse(&args).is_err());
     let reference = format!("refs/heads/{}", "x".repeat(1024 - "refs/heads/".len()));
     args = base();
@@ -209,7 +261,10 @@ fn every_page_and_byte_ceiling_has_an_accepted_boundary_twin() {
     assert!(parse(&args).is_err());
     args = base();
     let component = vec![b'x'; 64];
-    args.insert("path_prefixes_hex".into(), Value::Array(vec![text(hex(&component)); 128]));
+    args.insert(
+        "path_prefixes_hex".into(),
+        Value::Array(vec![text(hex(&component)); 128]),
+    );
     assert!(parse(&args).is_ok());
     let prefixes = array_mut(args.get_mut("path_prefixes_hex").unwrap());
     prefixes[0] = text(hex(&vec![b'x'; 65]));
@@ -218,7 +273,12 @@ fn every_page_and_byte_ceiling_has_an_accepted_boundary_twin() {
 
 #[test]
 fn continuation_requires_all_original_pins_and_lossless_positive_decimal_positions() {
-    for missing in ["expected_head", "expected_commit", "index_token", "index_number"] {
+    for missing in [
+        "expected_head",
+        "expected_commit",
+        "index_token",
+        "index_number",
+    ] {
         let mut args = base();
         pins(&mut args);
         args.insert("after".into(), text("1"));
@@ -240,11 +300,18 @@ fn continuation_requires_all_original_pins_and_lossless_positive_decimal_positio
         let mut args = base();
         pins(&mut args);
         args.insert("after".into(), text(number));
-        assert_eq!(parse(&args).unwrap_err().code, "invalid_decimal_string", "{number}");
+        assert_eq!(
+            parse(&args).unwrap_err().code,
+            "invalid_decimal_string",
+            "{number}"
+        );
     }
     let mut args = base();
     args.insert("minimum_index_number".into(), text("1"));
-    assert_eq!(parse(&args).unwrap_err().code, "incomplete_index_generation");
+    assert_eq!(
+        parse(&args).unwrap_err().code,
+        "incomplete_index_generation"
+    );
     args = base();
     args.insert("expected_commit".into(), text("0".repeat(40)));
     assert_eq!(parse(&args).unwrap_err().code, "invalid_expected_commit");
@@ -259,15 +326,25 @@ fn output_is_lossless_in_both_native_modes_and_states_coverage_explicitly() {
         let result = decoded(native(mode, u64::MAX), &query).unwrap();
         let doc = result.object().unwrap();
         assert_eq!(doc["index_number"].text(), Some("18446744073709551615"));
-        assert_eq!(doc["selected_index_number"].text(), Some("18446744073709551615"));
+        assert_eq!(
+            doc["selected_index_number"].text(),
+            Some("18446744073709551615")
+        );
         assert_eq!(doc["returned_hits"].text(), Some("1"));
         assert_eq!(doc["coverage_complete"], Value::Bool(true));
         assert_eq!(doc["omitted_files"].text(), Some("0"));
         assert_eq!(doc["counter_encoding"].text(), Some("decimal-strings-v1"));
         assert_eq!(doc["source_mode"].text(), Some(mode.label()));
-        let Value::Array(hits) = &doc["hits"] else { unreachable!() };
-        assert_eq!(hits[0].object().unwrap()["document_id"].text(), Some("18446744073709551615"));
-        let Value::Array(spans) = &hits[0].object().unwrap()["spans"] else { unreachable!() };
+        let Value::Array(hits) = &doc["hits"] else {
+            unreachable!()
+        };
+        assert_eq!(
+            hits[0].object().unwrap()["document_id"].text(),
+            Some("18446744073709551615")
+        );
+        let Value::Array(spans) = &hits[0].object().unwrap()["spans"] else {
+            unreachable!()
+        };
         assert_eq!(spans[0].object().unwrap()["byte_offset"].text(), Some("0"));
     }
 }
@@ -285,20 +362,52 @@ fn output_requires_coherent_full_pages_and_refuses_scope_or_provenance_drift() {
     for variant in 0..12 {
         let mut bad = good.clone();
         match variant {
-            0 => { bad.insert("next_after".into(), Value::Null); }
-            1 => { bad.insert("complete".into(), Value::Bool(true)); }
-            2 => { bad.insert("returned_hits".into(), json::number(0)); }
-            3 => { bad.insert("tenant_id".into(), text("4".repeat(32))); }
-            4 => { bad.insert("object_format".into(), text("sha256")); }
-            5 => { bad.insert("terms_hex".into(), Value::Array(vec![text(hex(b"other"))])); }
-            6 => { bad.insert("payload_bytes_read".into(), json::number(DEFAULT_PAYLOAD + 1)); }
-            7 => { bad.insert("work_units".into(), json::number(MAX_WORK + 1)); }
-            8 => { bad.insert("distinct_provenance".into(), Value::Bool(true)); }
-            9 => { object_mut(bad.get_mut("indexed_source").unwrap()).insert("source_commit".into(), text("f".repeat(40))); }
-            10 => { hit(&mut bad).insert("document_id".into(), text("0")); }
-            _ => { hit(&mut bad).insert("content_bytes".into(), json::number(5)); }
+            0 => {
+                bad.insert("next_after".into(), Value::Null);
+            }
+            1 => {
+                bad.insert("complete".into(), Value::Bool(true));
+            }
+            2 => {
+                bad.insert("returned_hits".into(), json::number(0));
+            }
+            3 => {
+                bad.insert("tenant_id".into(), text("4".repeat(32)));
+            }
+            4 => {
+                bad.insert("object_format".into(), text("sha256"));
+            }
+            5 => {
+                bad.insert("terms_hex".into(), Value::Array(vec![text(hex(b"other"))]));
+            }
+            6 => {
+                bad.insert(
+                    "payload_bytes_read".into(),
+                    json::number(DEFAULT_PAYLOAD + 1),
+                );
+            }
+            7 => {
+                bad.insert("work_units".into(), json::number(MAX_WORK + 1));
+            }
+            8 => {
+                bad.insert("distinct_provenance".into(), Value::Bool(true));
+            }
+            9 => {
+                object_mut(bad.get_mut("indexed_source").unwrap())
+                    .insert("source_commit".into(), text("f".repeat(40)));
+            }
+            10 => {
+                hit(&mut bad).insert("document_id".into(), text("0"));
+            }
+            _ => {
+                hit(&mut bad).insert("content_bytes".into(), json::number(5));
+            }
         }
-        assert_eq!(decoded(bad, &query).unwrap_err().code, "invalid_index_report", "{variant}");
+        assert_eq!(
+            decoded(bad, &query).unwrap_err().code,
+            "invalid_index_report",
+            "{variant}"
+        );
     }
     // A forge-only advance can retain an index without forging its provenance.
     let mut moved = good;
@@ -313,7 +422,12 @@ fn output_requires_coherent_full_pages_and_refuses_scope_or_provenance_drift() {
 
 fn omission(index: usize) -> Value {
     object([
-        ("path_hex", text(hex(format!("vendor/{index:06}-{}", "x".repeat(64)).as_bytes()))),
+        (
+            "path_hex",
+            text(hex(
+                format!("vendor/{index:06}-{}", "x".repeat(64)).as_bytes()
+            )),
+        ),
         ("blob", text("f".repeat(40))),
         ("source_bytes", json::number(129)),
         ("reason", text("file_bytes")),
@@ -323,10 +437,16 @@ fn omission(index: usize) -> Value {
 fn partial(rows: Vec<Value>) -> Object {
     let mut doc = native(input::Mode::Revalidated, 1);
     doc.insert("schema_version".into(), json::number(2));
-    doc.insert("index_profile".into(), text("ascii-word-postings-omissions-v1"));
+    doc.insert(
+        "index_profile".into(),
+        text("ascii-word-postings-omissions-v1"),
+    );
     doc.insert("coverage_complete".into(), Value::Bool(false));
     doc.insert("omitted_files".into(), json::number(rows.len() as u64));
-    doc.insert("omitted_source_bytes".into(), json::number(rows.len() as u64 * 129));
+    doc.insert(
+        "omitted_source_bytes".into(),
+        json::number(rows.len() as u64 * 129),
+    );
     doc.insert("omissions".into(), Value::Array(rows));
     doc
 }
@@ -346,10 +466,18 @@ fn pagination_completion_never_erases_whole_corpus_omissions() {
     for change in 0..4 {
         let mut bad = doc.clone();
         match change {
-            0 => { bad.insert("coverage_complete".into(), Value::Bool(true)); }
-            1 => { bad.insert("omissions".into(), Value::Array(vec![])); }
-            2 => { bad.insert("omitted_source_bytes".into(), json::number(128)); }
-            _ => { bad.insert("schema_version".into(), json::number(1)); }
+            0 => {
+                bad.insert("coverage_complete".into(), Value::Bool(true));
+            }
+            1 => {
+                bad.insert("omissions".into(), Value::Array(vec![]));
+            }
+            2 => {
+                bad.insert("omitted_source_bytes".into(), json::number(128));
+            }
+            _ => {
+                bad.insert("schema_version".into(), json::number(1));
+            }
         }
         assert!(decoded(bad, &query).is_err(), "{change}");
     }
@@ -358,7 +486,10 @@ fn pagination_completion_never_erases_whole_corpus_omissions() {
 #[test]
 fn normalization_has_its_own_one_mib_output_bound_and_never_truncates_coverage() {
     let query = parse(&base()).unwrap();
-    let overhead = Value::Object(partial(vec![])).encode(MAX_RESULT_BYTES).unwrap().len();
+    let overhead = Value::Object(partial(vec![]))
+        .encode(MAX_RESULT_BYTES)
+        .unwrap()
+        .len();
     let row_bytes = omission(0).encode(MAX_RESULT_BYTES).unwrap().len() + 1;
     // Leave enough room for the decimal row count, but less than the expansion
     // caused by quoting two exact counters in every retained omission.
@@ -382,11 +513,20 @@ fn served_schema_registry_and_actual_output_keys_remain_in_parity() {
     assert_eq!(contract.budget.max_output_bytes, MAX_RESULT_BYTES as u32);
     let schema = served.schema.object().unwrap();
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
-    let declared: BTreeSet<_> = contract.input_fields.iter().map(|field| field.name).collect();
+    let declared: BTreeSet<_> = contract
+        .input_fields
+        .iter()
+        .map(|field| field.name)
+        .collect();
     let properties = schema["properties"].object().unwrap();
     assert_eq!(declared, properties.keys().map(String::as_str).collect());
     assert_eq!(declared, input::FIELDS.iter().copied().collect());
-    let required: BTreeSet<_> = contract.input_fields.iter().filter(|field| field.required).map(|field| field.name).collect();
+    let required: BTreeSet<_> = contract
+        .input_fields
+        .iter()
+        .filter(|field| field.required)
+        .map(|field| field.name)
+        .collect();
     assert_eq!(required, ["reference", "terms_hex"].into_iter().collect());
 
     for mode in [input::Mode::Exact, input::Mode::Revalidated] {
@@ -395,17 +535,35 @@ fn served_schema_registry_and_actual_output_keys_remain_in_parity() {
         let query = parse(&args).unwrap();
         let result = decoded(native(mode, 1), &query).unwrap();
         let fields = result.object().unwrap();
-        let output_keys: BTreeSet<_> = contract.output_fields.iter().filter(|field| field.required || mode == input::Mode::Revalidated).map(|field| field.name).collect();
+        let output_keys: BTreeSet<_> = contract
+            .output_fields
+            .iter()
+            .filter(|field| field.required || mode == input::Mode::Revalidated)
+            .map(|field| field.name)
+            .collect();
         assert_eq!(output_keys, fields.keys().map(String::as_str).collect());
     }
 }
 
 #[test]
 fn request_errors_remain_distinct_from_missing_stale_and_over_budget_indexes() {
-    for code in ["invalid_index_limit", "unknown_index_field", "unsupported_index_channel", "incomplete_index_generation", "index_continuation_requires_pins"] {
+    for code in [
+        "invalid_index_limit",
+        "unknown_index_field",
+        "unsupported_index_channel",
+        "incomplete_index_generation",
+        "index_continuation_requires_pins",
+    ] {
         assert!(refusal(code).invalid, "{code}");
     }
-    for code in ["source_index_uninitialized", "source_index_stale", "index_checkpoint_unavailable", "resource_limit", "request_timeout", "repository_unavailable"] {
+    for code in [
+        "source_index_uninitialized",
+        "source_index_stale",
+        "index_checkpoint_unavailable",
+        "resource_limit",
+        "request_timeout",
+        "repository_unavailable",
+    ] {
         assert!(!refusal(code).invalid, "{code}");
     }
 }

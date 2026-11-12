@@ -29,7 +29,7 @@ fn artifact_registry_runtime_shapes_and_read_only_catalog_agree() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn artifact_arguments_cannot_select_paths_scope_identity_or_unbounded_ranges() {
     let valid = args([("artifact_id", text("ab".repeat(32)))]);
@@ -96,5 +96,5 @@ fn artifact_arguments_cannot_select_paths_scope_identity_or_unbounded_ranges() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod persisted;

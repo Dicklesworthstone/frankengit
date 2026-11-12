@@ -34,11 +34,12 @@
     <form id="discussion-change">
       <label>Discussion number <input id="change-number" inputmode="numeric" required></label>
       <label>Action <select id="change-action">
-        <option value="open">Open</option><option value="comment">Comment</option><option value="edit">Edit</option>
+        <option value="open">Open</option><option value="comment">Comment at exact version</option><option value="append-comment">Append comment</option><option value="edit">Edit</option>
         <option value="close">Close</option><option value="reopen">Reopen</option><option value="lock">Lock comments</option><option value="unlock">Unlock comments</option>
       </select></label>
-      <label>Expected version <input id="change-version" inputmode="numeric" value="0" required></label>
-      <p>Opening uses version 0 and an unused number. Other changes use the version you read. A conflict keeps the original result; review the latest discussion before preparing a new change.</p>
+      <label id="version-field">Expected version <input id="change-version" inputmode="numeric" value="0" required></label>
+      <p>Opening uses version 0 and an unused number. Exact-version changes use the version you read. A conflict keeps the original result; review the latest discussion before preparing a new change.</p>
+      <p id="append-comment-hint" hidden>Append a reply even if others comment or edit the discussion first. The server still checks the current lock and your access. Retrying the original request keeps one comment.</p>
       <div id="title-field"><label>Title <input id="change-title-text" maxlength="256"></label><label id="replace-title-label"><input id="replace-title" type="checkbox" checked>Replace title</label></div>
       <div id="body-field"><label>Body <textarea id="change-body" rows="8"></textarea></label><label id="replace-body-label"><input id="replace-body" type="checkbox" checked>Replace body</label></div>
       <button id="prepare-change" type="submit">Prepare change</button>

@@ -13,7 +13,6 @@ mod fsck;
 mod guarded_git_server;
 mod import_command;
 mod issues;
-mod mcp;
 mod merge_apply;
 mod milestones;
 mod notification_commands;
@@ -62,7 +61,7 @@ fn main() -> ExitCode {
 
 fn run_subcommand(arguments: &[String]) -> ExitCode {
     if arguments.first().is_some_and(|argument| argument == "lfs") {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             use fgit_node::source_retrieval::lfs_transfer;
             return match lfs_transfer::run_with_timeout(
@@ -77,9 +76,9 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
                 }
             };
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
-            eprintln!("LFS custody portability requires the Linux artifact storage profile");
+            eprintln!("LFS custody portability requires the Unix artifact storage profile");
             return ExitCode::from(2);
         }
     }
@@ -105,8 +104,16 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         return match checkpoint::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
+                let error_type = if arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "repository")
+                {
+                    "repository_checkpoint_error"
+                } else {
+                    "outcome_checkpoint_error"
+                };
                 eprintln!(
-                    "{{\"type\":\"outcome_checkpoint_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    "{{\"type\":\"{error_type}\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
                     publication_support::quote(&error)
                 );
                 ExitCode::from(2)
@@ -117,7 +124,10 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         .first()
         .is_some_and(|argument| argument == "agent")
     {
-        if arguments.get(1).is_some_and(|argument| argument == "settle") {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == "settle")
+        {
             return match fgit_cli::agent_settle::run(&arguments[2..]) {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
@@ -126,7 +136,10 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
                 }
             };
         }
-        if arguments.get(1).is_some_and(|argument| argument == "recover") {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == "recover")
+        {
             return match fgit_cli::agent_recover::run(&arguments[2..]) {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
@@ -421,7 +434,7 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         };
     }
     if arguments.first().is_some_and(|argument| argument == "mcp") {
-        return match mcp::run(&arguments[1..]) {
+        return match fgit_cli::mcp::run(&arguments[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("fg: {error}");
@@ -903,6 +916,7 @@ mod operator_subcommand_dispatch_tests {
         for items in [
             vec!["checkpoint", "--help"],
             vec!["checkpoint", "outcomes", "--help"],
+            vec!["checkpoint", "repository", "--help"],
         ] {
             assert_eq!(run_subcommand(&vec_args(&items)), ExitCode::SUCCESS);
         }
@@ -911,7 +925,7 @@ mod operator_subcommand_dispatch_tests {
             ExitCode::from(2)
         );
         assert_eq!(
-            run_subcommand(&vec_args(&["checkpoint", "repository", "--help"])),
+            run_subcommand(&vec_args(&["checkpoint", "unknown", "--help"])),
             ExitCode::from(2)
         );
     }

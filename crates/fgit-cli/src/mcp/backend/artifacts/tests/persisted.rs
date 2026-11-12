@@ -23,7 +23,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new(format: GitHashAlgorithm) -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let root = base.join(format!(
             "fg-mcp-artifacts-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -359,7 +360,7 @@ fn startup_checks_exact_incarnation_existing_private_root_and_independent_grant(
         .unwrap_err();
     assert_eq!(
         refusal,
-        "writes, recovery and agent context require --principal and --expected-incarnation"
+        "writes, recovery, agent context and personal inbox reads require --principal and --expected-incarnation"
     );
     let mut sponsored_context = fixture.options.clone();
     sponsored_context.agent_context = true;

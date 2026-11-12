@@ -8,13 +8,14 @@ import { localCapture } from './pull_candidate_package_fixture.mjs';
 import { candidatePeer, TOKEN, REVIEWER } from './pull_candidate_fixture.mjs';
 
 const ACTOR = 'e'.repeat(32);
+const LINUX_ORACLE = { skip: process.platform !== 'linux' && 'requires Linux Bubblewrap Git 2.54.0 sandbox oracle' };
 function choice(value, action = 'approve', actor = REVIEWER) {
   const raw = value.capture.preparation.candidate?.commit?.split(':')[1] ?? 'a'.repeat(40);
   return { action, principal_id: actor, candidate_commit: raw, ...(action === 'merge'
     ? { method: value.capture.request.method, required_reviewers: [REVIEWER] } : { reason: 'Inspect this exact candidate.\n🦀' }) };
 }
 for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit', 'squash']) for (const action of ['approve', 'request-changes', 'merge']) {
-  test(`${algorithm} ${method} ${action}: exact inspected coordinates enter the unchanged preparer`, async () => {
+  test(`${algorithm} ${method} ${action}: exact inspected coordinates enter the unchanged preparer`, LINUX_ORACLE, async () => {
     const value = await localCapture(algorithm, method), selected = choice(value, action, action === 'merge' ? ACTOR : REVIEWER);
     const draft = await draftCandidateReview(value.capture, value.bundle, selected);
     assert.equal(draft.fields.candidate_commit, selected.candidate_commit); assert.equal(draft.fields.pull_request_version, '9');
@@ -30,7 +31,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const method of ['merge-commit'
     assert.equal(JSON.stringify(intent), original);
   });
 }
-for (const row of ['second-page', 'absent', 'stale']) test(`review predecessor selection: ${row}`, async t => {
+for (const row of ['second-page', 'absent', 'stale']) test(`review predecessor selection: ${row}`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t, { reviewCount: 51 });
   const actor = row === 'absent' ? ACTOR : (51).toString(16).padStart(32, '0');
   if (row === 'stale') { p.reviews[50].freshness = 'source_moved'; p.reviews[50].subject.source_tip = 'sha1:' + '1'.repeat(40); p.reviews[50].version = 17; }
@@ -39,7 +40,7 @@ for (const row of ['second-page', 'absent', 'stale']) test(`review predecessor s
   assert.equal(result.fields.expected_version, row === 'absent' ? '0' : row === 'stale' ? '17' : '2');
   assert.equal(result.fields.source_tip, p.fixture.source); assert.equal(p.requests.length, count);
 });
-for (const state of ['conflicted', 'already_up_to_date']) test(`${state} cannot become a draft`, async () => {
+for (const state of ['conflicted', 'already_up_to_date']) test(`${state} cannot become a draft`, LINUX_ORACLE, async () => {
   const value = await localCapture('sha1', 'merge-commit', state);
   await assert.rejects(draftCandidateReview(value.capture, value.bundle, choice(value)), { code: 'candidate_draft_requires_clean_inspection' });
 });
@@ -50,17 +51,17 @@ const corrupt = [
   c => c.endpoint = 'https://foreign.invalid/repo.git', c => c.expected_version = '99', c => c.policy_epoch = '99',
   c => c.method = 'squash', c => c.required_reviewers = [REVIEWER], c => delete c.candidate_commit,
 ];
-for (const edit of corrupt) test(`closed review choices refuse: ${edit}`, async () => {
+for (const edit of corrupt) test(`closed review choices refuse: ${edit}`, LINUX_ORACLE, async () => {
   const v = await localCapture(), c = choice(v); edit(c);
   await assert.rejects(draftCandidateReview(v.capture, v.bundle, c));
 });
 for (const edit of [c => c.method = 'squash', c => c.required_reviewers = [], c => c.required_reviewers = [ACTOR],
   c => c.required_reviewers = [REVIEWER, REVIEWER], c => c.required_reviewers = ['bad'], c => c.required_reviewers = Array(33).fill(REVIEWER),
-  c => c.reason = 'not applicable', c => delete c.method]) test(`explicit merge requirements refuse: ${edit}`, async () => {
+  c => c.reason = 'not applicable', c => delete c.method]) test(`explicit merge requirements refuse: ${edit}`, LINUX_ORACLE, async () => {
   const v = await localCapture(), c = choice(v, 'merge', ACTOR); edit(c);
   await assert.rejects(draftCandidateReview(v.capture, v.bundle, c));
 });
-test('merge requirements are explicit, not inferred from current approval labels', async () => {
+test('merge requirements are explicit, not inferred from current approval labels', LINUX_ORACLE, async () => {
   const v = await localCapture(), c = choice(v, 'merge', ACTOR);
   c.required_reviewers = ['d'.repeat(32), REVIEWER];
   const d = await draftCandidateReview(v.capture, v.bundle, c);
@@ -68,7 +69,7 @@ test('merge requirements are explicit, not inferred from current approval labels
   assert.equal(v.capture.review_pages[0].reviews[0].decision, 'request-changes');
   assert.equal(Object.hasOwn(d, 'merge_authorized'), false);
 });
-test('corrupt bundle, incomplete reviewers and altered inspection refuse even for valid choices', async () => {
+test('corrupt bundle, incomplete reviewers and altered inspection refuse even for valid choices', LINUX_ORACLE, async () => {
   const v = await localCapture(), c = choice(v), bytes = Buffer.from(v.bundle); bytes[0] ^= 1;
   await assert.rejects(draftCandidateReview(v.capture, bytes, c));
   await assert.rejects(draftCandidateReview(v.capture, null, c));
@@ -77,7 +78,7 @@ test('corrupt bundle, incomplete reviewers and altered inspection refuse even fo
     const copy = structuredClone(v.capture); edit(copy); await assert.rejects(draftCandidateReview(copy, v.bundle, c));
   }
 });
-test('choice, reports, and bundle mutations during the first digest do not change a draft', async () => {
+test('choice, reports, and bundle mutations during the first digest do not change a draft', LINUX_ORACLE, async () => {
   const v = await localCapture(), c = choice(v), candidate = c.candidate_commit;
   const promise = draftCandidateReview(v.capture, v.bundle, c);
   c.reason = 'replaced'; c.candidate_commit = '0'.repeat(40); v.capture.request.number = '8'; v.bundle.fill(0);
@@ -85,7 +86,7 @@ test('choice, reports, and bundle mutations during the first digest do not chang
   assert.equal(result.fields.candidate_commit, candidate); assert.equal(result.number, '7');
   assert.equal(result.fields.reason, 'Inspect this exact candidate.\n🦀');
 });
-test('cancellation, unknown options, and shared mutable bundle bytes refuse', async () => {
+test('cancellation, unknown options, and shared mutable bundle bytes refuse', LINUX_ORACLE, async () => {
   const v = await localCapture(), c = choice(v), controller = new AbortController(); controller.abort();
   await assert.rejects(draftCandidateReview(v.capture, v.bundle, c, { signal: controller.signal }), { code: 'candidate_cancelled' });
   await assert.rejects(draftCandidateReview(v.capture, v.bundle, c, { force: true }));

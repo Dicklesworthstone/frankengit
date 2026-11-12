@@ -15,6 +15,15 @@ pass() {
   pass_count=$((pass_count + 1))
   printf 'bv-compat-test: ok %s - %s\n' "$pass_count" "$1"
 }
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    fail 'neither sha256sum nor shasum is available'
+  fi
+}
 expect_failure() {
   description=$1
   shift
@@ -42,6 +51,10 @@ JSONL
 cat > "$WORK/fake-bv" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1-}" = "--version" ]; then
+  printf 'bv v0.22.0\n'
+  exit 0
+fi
 [ "${1-}" = "--db" ] || exit 41
 db="${2-}"
 shift 2
@@ -55,13 +68,13 @@ printf '{"fake":"stdout","records":3}\n'
 FAKE
 chmod +x "$WORK/fake-bv"
 
-source_hash_before="$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}')"
+source_hash_before="$(hash_file "$WORK/repo/.beads/issues.jsonl")"
 BV_TEST_CAPTURE="$WORK/capture" \
 BV_BIN="$WORK/fake-bv" \
 FGIT_REPO_ROOT="$WORK/repo" \
 TMPDIR="$WORK/tmp" \
   "$SUBJECT" --robot-triage --format toon >"$WORK/stdout" 2>"$WORK/stderr"
-source_hash_after="$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}')"
+source_hash_after="$(hash_file "$WORK/repo/.beads/issues.jsonl")"
 
 [ "$source_hash_before" = "$source_hash_after" ] || fail 'the authoritative tracker changed'
 [ "$(cat "$WORK/stdout")" = '{"fake":"stdout","records":3}' ] || fail 'launcher contaminated bv stdout'
@@ -102,7 +115,7 @@ assert_no_compat_tempdirs
 pass 'refuses a caller-supplied separate --db override before invocation'
 
 expect_failure 'joined --db override' env \
-  BV_TEST_CAPTURE="$WORK/capture" BV_BIN="$WORK/fake-bv" FGIT_REPO_ROOT="$WORK/rpo" TMPDIR="$WORK/tmp" \
+  BV_TEST_CAPTURE="$WORK/capture" BV_BIN="$WORK/fake-bv" FGIT_REPO_ROOT="$WORK/repo" TMPDIR="$WORK/tmp" \
   "$SUBJECT" --robot-triage --db="$WORK/other.jsonl"
 grep -q 'caller-supplied --db is forbidden' "$WORK/failure.stderr" || fail 'joined --db refusal is not typed'
 assert_no_compat_tempdirs
@@ -122,15 +135,34 @@ grep -q 'is not executable' "$WORK/failure.stderr" || fail 'missing-bv refusal i
 assert_no_compat_tempdirs
 pass 'refuses a missing bv executable'
 
+cat > "$WORK/stale-bv" <<'STALE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1-}" = "--version" ]; then
+  printf 'bv 0.13.0\n'
+  exit 0
+fi
+exit 42
+STALE
+chmod +x "$WORK/stale-bv"
+rm -f "$WORK/capture/cwd"
+expect_failure 'pre-0.22 bv binary' env \
+  BV_TEST_CAPTURE="$WORK/capture" BV_BIN="$WORK/stale-bv" FGIT_REPO_ROOT="$WORK/repo" TMPDIR="$WORK/tmp" \
+  "$SUBJECT" --robot-next
+grep -q 'predates the --db override (need 0.22+)' "$WORK/failure.stderr" || fail 'stale-bv refusal is not typed'
+[ ! -e "$WORK/capture/cwd" ] || fail 'stale bv ran past version gate'
+assert_no_compat_tempdirs
+pass 'refuses pre-0.22 bv binaries before creating a projection'
+
 cp "$WORK/repo/.beads/issues.jsonl" "$WORK/repo/.beads/issues.valid.jsonl"
 printf '%s\n' '{"id":"valid","status":"open"}' '{not-json' > "$WORK/repo/.beads/issues.jsonl"
-malformed_hash="$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}')"
+malformed_hash="$(hash_file "$WORK/repo/.beads/issues.jsonl")"
 rm -f "$WORK/capture/cwd"
 expect_failure 'malformed tracker row' env \
   BV_TEST_CAPTURE="$WORK/capture" BV_BIN="$WORK/fake-bv" FGIT_REPO_ROOT="$WORK/repo" TMPDIR="$WORK/tmp" \
   "$SUBJECT" --robot-alerts
 grep -q 'malformed tracker JSON at line 2' "$WORK/failure.stderr" || fail 'malformed-row refusal does not name the line'
-[ "$malformed_hash" = "$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}')" ] || fail 'malformed source changed'
+[ "$malformed_hash" = "$(hash_file "$WORK/repo/.beads/issues.jsonl")" ] || fail 'malformed source changed'
 [ ! -e "$WORK/capture/cwd" ] || fail 'bv ran on a malformed projection'
 assert_no_compat_tempdirs
 mv "$WORK/repo/.beads/issues.valid.jsonl" "$WORK/repo/.beads/issues.jsonl"

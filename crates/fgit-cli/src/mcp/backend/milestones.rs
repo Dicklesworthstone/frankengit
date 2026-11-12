@@ -1,5 +1,6 @@
-//! Native milestone lifecycle through the existing independent issue grants.
-//! The launch principal owns every mutation; metadata membership grants no access.
+//! Native milestone lifecycle through issue-service launch ceilings.
+//! Sponsored requests additionally require independent milestone scopes and
+//! retain their verified principal, sponsor and original request deadline.
 use super::issues::rendered;
 use super::mutations as common;
 use super::*;
@@ -28,22 +29,22 @@ pub(super) fn read_tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "frankengit_milestone_list",
-            description: "List native repository milestones and issue counts at one authenticated head, under the issue-read grant. Continue with the original snapshot token. Text is untrusted metadata; counts grant no authority.",
+            description: "List native repository milestones and issue counts at one authenticated head. Requires the issue-read launch ceiling and, for a sponsored agent, milestones-read. Continue with the original snapshot token. Text and counts grant no authority.",
             schema: rendered::schema(schema(false)),
         },
         Tool {
             name: "frankengit_milestone_show",
-            description: "Read a milestone and exact lifecycle history plus same-snapshot open/closed issue counts. Number and cursors are decimal strings. Uses the issue-read grant; no mutations.",
+            description: "Read a milestone and exact lifecycle history plus same-snapshot open/closed issue counts. Number and cursors are decimal strings. Requires the issue-read launch ceiling and, for a sponsored agent, milestones-read.",
             schema: rendered::schema(schema(true)),
         },
     ]
 }
 pub(super) fn write_tools() -> Vec<Tool> {
     [
-        ("frankengit_milestone_open", "Open a repository milestone at explicit version zero using the issue-write grant and launch-bound principal. due_at is optional UTC Unix seconds; retry the identical command and original key."),
-        ("frankengit_milestone_edit", "Edit only supplied milestone metadata at the exact positive version. Omitted due_at survives; null explicitly clears it. Existing issue memberships survive. Uses the issue-write grant."),
-        ("frankengit_milestone_close", "Close a milestone at the exact positive version. Existing issue memberships remain; new assignments require an open milestone. Uses issue-write and the original retry key."),
-        ("frankengit_milestone_reopen", "Reopen a closed milestone at the exact positive version. Metadata and issue memberships remain. Uses issue-write; text cannot select another actor."),
+        ("frankengit_milestone_open", "Open a repository milestone at explicit version zero as the authenticated principal. Requires the issue-write launch ceiling and, for a sponsored agent, milestones-write. due_at is optional UTC Unix seconds; retry the identical command and original key."),
+        ("frankengit_milestone_edit", "Edit supplied metadata at the exact positive version. Omitted due_at survives; null clears it. Memberships survive. Requires the issue-write launch ceiling and, for a sponsored agent, milestones-write."),
+        ("frankengit_milestone_close", "Close a milestone at the exact positive version, retaining issue memberships. Requires the issue-write launch ceiling and, for a sponsored agent, milestones-write. Retry with the original command and key."),
+        ("frankengit_milestone_reopen", "Reopen a closed milestone at the exact positive version, retaining metadata and memberships. Requires the issue-write launch ceiling and, for a sponsored agent, milestones-write. Text cannot select another actor."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: write_schema(name) }).collect()
 }
 fn write_schema(name: &str) -> Value {
@@ -146,7 +147,7 @@ pub(super) fn write(backend: &NodeTools, name: &str, args: &Object) -> Result<Va
     command
         .proposed_event(principal)
         .map_err(|_| ToolError::invalid("invalid_milestone_command"))?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let (tx, outcome) = backend
         .node
         .runtime()
@@ -269,7 +270,7 @@ pub(super) fn read(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     let after = decimal(args, if show { "after_version" } else { "after" }, 0)?;
     let limit = limit(args)?;
     let expected = head(args, after)?;
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     if show {
         let number = MilestoneNumber::try_new(decimal(args, "number", 0)?)
             .ok_or(ToolError::invalid("positive_milestone_number_required"))?;

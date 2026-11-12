@@ -1010,6 +1010,26 @@ fn distinct_bases() -> Vec<(PathBuf, u64)> {
         if seen.iter().any(|(_, known)| *known == device) {
             continue;
         }
+        if declared.is_empty() {
+            let probe = base.join(format!(
+                ".fg005b-write-probe-{}-{}",
+                std::process::id(),
+                seen.len()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe)
+            {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&probe);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    continue;
+                }
+                Err(_) => {}
+            }
+        }
         seen.push((base, device));
     }
     seen

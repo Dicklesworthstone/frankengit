@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use fgit_authority::AsyncAuthorityStore;
-use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
+use fgit_chronicle::{HistoryStep, HistoryStepRefusal, PublicationBasis, read_history_step_async};
 use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::protection::RequiredWorkflowCheck;
 use fgit_forge::event::workflow_check::WorkflowCheckConclusion;
@@ -19,6 +19,49 @@ const MAX_HISTORY_STEPS: usize = 4096;
 const MAX_SCAN_BATCHES: usize = 65_536;
 const MAX_SCAN_EVENTS: usize = 65_536;
 const MAX_SCAN_BYTES: usize = 128 * 1024 * 1024;
+
+mod frontier;
+
+#[derive(Default)]
+struct ScanBudget {
+    batches: usize,
+    events: usize,
+    bytes: usize,
+}
+
+impl ScanBudget {
+    fn charge_bytes(&mut self, bytes: usize) -> Result<(), ProjectionFailure> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|count| *count <= MAX_SCAN_BYTES)
+            .ok_or_else(exhausted)?;
+        Ok(())
+    }
+
+    fn reserve_batch(&mut self) -> Result<(), ProjectionFailure> {
+        self.batches = self
+            .batches
+            .checked_add(1)
+            .filter(|count| *count <= MAX_SCAN_BATCHES)
+            .ok_or_else(exhausted)?;
+        Ok(())
+    }
+
+    fn charge_batch(&mut self, bytes: usize, events: usize) -> Result<(), ProjectionFailure> {
+        self.charge_bytes(bytes)?;
+        self.events = self
+            .events
+            .checked_add(events)
+            .filter(|count| *count <= MAX_SCAN_EVENTS)
+            .ok_or_else(exhausted)?;
+        Ok(())
+    }
+}
+
+const fn exhausted() -> ProjectionFailure {
+    ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
+}
 
 const fn denied() -> ProjectionFailure {
     ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
@@ -55,7 +98,7 @@ where
         store,
         cx,
         basis,
-        |payload| {
+        move |payload| {
             let ForgeEventPayload::WorkflowCheckObservedNative(observation) = payload else {
                 return Ok(false);
             };
@@ -85,6 +128,9 @@ where
 /// Walk one authenticated history with the existing cumulative resource limits.
 /// A predicate can resolve several independently mandatory observation profiles
 /// without performing a second history scan or accepting an older failed check.
+/// When the predecessor-edge bound is reached, an exact canonical frontier may
+/// establish that every remaining matching observation succeeded. Mixed results
+/// retain the bound refusal because the frontier does not encode their order.
 pub(super) async fn verify_observations_at<S, C, F>(
     store: &S,
     cx: &S::Context,
@@ -95,13 +141,11 @@ pub(super) async fn verify_observations_at<S, C, F>(
 where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
-    F: FnMut(&ForgeEventPayload) -> Result<bool, ProjectionFailure> + Send,
+    F: FnMut(&ForgeEventPayload) -> Result<bool, ProjectionFailure> + Clone + Send,
 {
     let mut successor = basis.body().clone();
     let mut walked = 0;
-    let mut batches_seen = 0usize;
-    let mut events_seen = 0usize;
-    let mut bytes_seen = 0usize;
+    let mut scan = ScanBudget::default();
     loop {
         live(cancelled).map_err(infrastructure)?;
         let (predecessor, batch) = match read_history_step_async(
@@ -113,24 +157,29 @@ where
             cancelled,
         )
         .await
-        .map_err(storage::history_step_refusal)
-        .map_err(infrastructure)?
         {
-            HistoryStep::Genesis => return Err(denied()),
-            HistoryStep::Checkpoint { predecessor, .. } => {
+            Err(HistoryStepRefusal::BoundExceeded { .. }) => {
+                return if frontier::verify_unanimous_at(
+                    store, cx, basis, observe, &mut scan, cancelled,
+                )
+                .await?
+                {
+                    Ok(())
+                } else {
+                    Err(exhausted())
+                };
+            }
+            Err(error) => return Err(infrastructure(storage::history_step_refusal(error))),
+            Ok(HistoryStep::Genesis) => return Err(denied()),
+            Ok(HistoryStep::Checkpoint { predecessor, .. }) => {
                 successor = predecessor.body().clone();
                 continue;
             }
-            HistoryStep::Decision { predecessor, batch } => (predecessor, batch),
+            Ok(HistoryStep::Decision { predecessor, batch }) => (predecessor, batch),
         };
         for record in batch.committed_rcrs.iter().rev() {
             live(cancelled).map_err(infrastructure)?;
-            batches_seen = batches_seen
-                .checked_add(1)
-                .filter(|n| *n <= MAX_SCAN_BATCHES)
-                .ok_or(ProjectionFailure::Unavailable(
-                    RefusalCode::ResourceBudgetExceeded,
-                ))?;
+            scan.reserve_batch()?;
             let (events, bytes) = storage::read_events_with_size(
                 store,
                 cx,
@@ -140,18 +189,7 @@ where
             .await
             .map_err(infrastructure)?;
             live(cancelled).map_err(infrastructure)?;
-            bytes_seen = bytes_seen
-                .checked_add(bytes)
-                .filter(|n| *n <= MAX_SCAN_BYTES)
-                .ok_or(ProjectionFailure::Unavailable(
-                    RefusalCode::ResourceBudgetExceeded,
-                ))?;
-            events_seen = events_seen
-                .checked_add(events.events.len())
-                .filter(|n| *n <= MAX_SCAN_EVENTS)
-                .ok_or(ProjectionFailure::Unavailable(
-                    RefusalCode::ResourceBudgetExceeded,
-                ))?;
+            scan.charge_batch(bytes, events.events.len())?;
             for event in events.events.iter().rev() {
                 live(cancelled).map_err(infrastructure)?;
                 if observe(&event.payload)? {

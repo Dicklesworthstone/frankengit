@@ -278,10 +278,31 @@ fn sponsored_source_tools_read_real_objects_and_indexes_in_both_formats() {
             .unwrap();
         let names: std::collections::BTreeSet<_> =
             backend.tools().into_iter().map(|tool| tool.name).collect();
-        assert_eq!(names, SOURCE_TOOLS.into_iter().chain([CONTEXT]).collect());
+        assert_eq!(
+            names,
+            SOURCE_TOOLS
+                .into_iter()
+                .chain([
+                    CONTEXT,
+                    "frankengit_source_candidate",
+                    "frankengit_source_log",
+                    "frankengit_source_blame",
+                    "frankengit_source_historical_tree",
+                    "frankengit_source_historical_blob",
+                    "frankengit_source_compare",
+                ])
+                .collect()
+        );
         for name in names {
             assert!(!backend.is_mutation(name), "{name}");
         }
+        assert_eq!(
+            backend
+                .call("frankengit_source_log", &Object::new())
+                .unwrap_err()
+                .code,
+            "agent_operation_not_granted"
+        );
         let tree = backend
             .call(SOURCE_TOOLS[0], &query(SOURCE_TOOLS[0]))
             .unwrap();
@@ -433,7 +454,7 @@ fn sponsored_source_tools_read_real_objects_and_indexes_in_both_formats() {
 #[test]
 fn source_and_agent_context_launch_grants_are_independent() {
     let fixture = SourceFixture::new(GitHashAlgorithm::Sha256, true);
-    for (source, context, count) in [(true, false, 14), (false, true, 1)] {
+    for (source, context, count) in [(true, false, 15), (false, true, 1)] {
         let mut options = fixture.options.clone();
         options.source = source;
         options.agent_context = context;
@@ -516,7 +537,6 @@ fn source_read_and_metadata_scopes_never_authorize_each_other() {
     }
     for name in [
         "frankengit_source_publish",
-        "frankengit_source_candidate",
         "frankengit_branch_transaction",
         "frankengit_pull_merge",
         "frankengit_protection_set",
@@ -527,6 +547,18 @@ fn source_read_and_metadata_scopes_never_authorize_each_other() {
             "tool_not_granted"
         );
     }
+    assert_eq!(
+        source
+            .call(
+                "frankengit_source_candidate",
+                object([("operation", text("prepare_patch"))])
+                    .object()
+                    .unwrap(),
+            )
+            .unwrap_err()
+            .code,
+        "agent_operation_not_granted"
+    );
     assert_sponsorship(
         &source.call(CONTEXT, &query(CONTEXT)).unwrap(),
         fixture.credential_id,

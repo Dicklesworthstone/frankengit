@@ -1,11 +1,99 @@
 use super::*;
 use fgit_identity::agent::{
-    ISSUES_READ, ISSUES_WRITE, PULLS_WRITE, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
+    ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
 };
 use std::path::PathBuf;
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).into()).collect()
+}
+
+#[test]
+fn milestone_credential_scopes_require_explicit_nonduplicated_permissions() {
+    for (scopes, expected) in [
+        ("milestones-read", MILESTONES_READ),
+        ("milestones-write", MILESTONES_WRITE),
+        (
+            "milestones-read,milestones-write",
+            MILESTONES_READ | MILESTONES_WRITE,
+        ),
+        (
+            "issues-read,milestones-write",
+            ISSUES_READ | MILESTONES_WRITE,
+        ),
+        (
+            "issues-write,milestones-read",
+            ISSUES_WRITE | MILESTONES_READ,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!("repository issuance expected")
+        };
+        let Operation::Issue { grant, .. } = parsed.operation else {
+            panic!("issuance expected")
+        };
+        assert_eq!(grant.operations, expected);
+        for scope in [ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE] {
+            assert_eq!(grant.permits(scope), expected & scope != 0);
+        }
+        assert!(!grant.permits(SOURCE_READ));
+        assert!(!grant.permits(PULLS_WRITE));
+    }
+    for scopes in [
+        "milestones-read,milestones-read",
+        "milestones-write,milestones-write",
+        "milestones",
+        "milestone-read",
+        "milestones-write,receive",
+        "milestones-read,",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err(), "{scopes}");
+    }
+}
+
+#[test]
+fn candidate_scope_is_explicit_and_does_not_imply_source_or_publication() {
+    for (scopes, expected) in [
+        ("source-candidates", SOURCE_CANDIDATES),
+        (
+            "source-read,source-candidates",
+            SOURCE_READ | SOURCE_CANDIDATES,
+        ),
+        (
+            "source-history-read,source-candidates",
+            SOURCE_HISTORY_READ | SOURCE_CANDIDATES,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue { grant, .. } = parsed.operation else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        assert_eq!(grant.permits(SOURCE_READ), expected & SOURCE_READ != 0);
+        assert_eq!(
+            grant.permits(SOURCE_HISTORY_READ),
+            expected & SOURCE_HISTORY_READ != 0
+        );
+        assert!(!grant.permits(ISSUES_WRITE | PULLS_WRITE));
+    }
+    for scopes in [
+        "source-candidates,source-candidates",
+        "source-candidates,receive",
+        "source-candidates,source-write",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err());
+    }
 }
 
 #[test]

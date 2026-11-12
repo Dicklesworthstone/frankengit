@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { main as watcherMain } from '../../scripts/fg_workflow_watch.mjs';
 import { Writable } from 'node:stream';
 import { configuration, dispatchReport, once, reconcile, serve, status } from '../../scripts/operator/workflow_watch.mjs';
+const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explicit trusted-local Linux workflow profile' };
 
 const peer = await readFile(new URL('./fixtures/workflow_watch_native.mjs', import.meta.url), 'utf8');
 const moduleUrl = new URL('../../scripts/operator/workflow_watch.mjs', import.meta.url).href;
@@ -74,7 +75,7 @@ async function newReader(config) {
 }
 
 for (const format of ['sha1', 'sha256']) {
-  test(`${format}: conditional success reaches durable watcher completion without changing legacy evidence`, async t => {
+  test(`${format}: conditional success reaches durable watcher completion without changing legacy evidence`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), true));
     const result = await once(f.config);
     assert.equal(result.outcome, 'observed_succeeded');
@@ -97,7 +98,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await status(f.config)).owner_present, false);
   });
 
-  test(`${format}: historical mixed-job failure retains its exact outcome, hash and execution identity`, async t => {
+  test(`${format}: historical mixed-job failure retains its exact outcome, hash and execution identity`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), false));
     const result = await once(f.config), saved = await f.saved(), originalResult = await readFile(saved.resultPath);
     assert.equal(result.outcome, 'observed_failed');
@@ -112,7 +113,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.deepEqual(await readFile(saved.resultPath), originalResult);
   });
 
-  test(`${format}: previously stranded conditional success reconciles without native execution or source access`, async t => {
+  test(`${format}: previously stranded conditional success reconciles without native execution or source access`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, { ...reportPatch(mixedJobs(), true), drop_stdout: true });
     await assert.rejects(once(f.config), /Dispatch unresolved/);
     assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
@@ -127,7 +128,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await newReader(f.config)).records[0].state, 'observed_succeeded');
   });
 
-  test(`${format}: service accounts conditional success once, including after observer failure`, async t => {
+  test(`${format}: service accounts conditional success once, including after observer failure`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), true));
     const events = [];
     const summary = await serve(f.config, { maxPolls: 2, pollMs: 100, onObservation: value => events.push(value) });
@@ -142,7 +143,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await failure.lines('effects.ndjson')).length, 1);
   });
 
-  test(`${format}: operator CLI returns success for conditional completion and preserves non-authority flags`, async t => {
+  test(`${format}: operator CLI returns success for conditional completion and preserves non-authority flags`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), true));
     const configFile = join(f.root, 'config.json');
     await writeFile(configFile, encode(f.config), { mode: 0o600 });
@@ -157,7 +158,7 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await f.lines('effects.ndjson')).length, 1);
   });
 
-  test(`${format}: every terminal pair keeps failure, all-skipped and interruption non-success`, async t => {
+  test(`${format}: every terminal pair keeps failure, all-skipped and interruption non-success`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format); await once(f.config);
     const saved = await f.saved();
     const good = new Set(['succeeded:succeeded', 'succeeded:skipped', 'skipped:succeeded']);
@@ -182,7 +183,7 @@ for (const format of ['sha1', 'sha256']) {
     }
   });
 
-  test(`${format}: malformed conditional summaries cannot hide failed cleanup, executed skips or mismatched graphs`, async t => {
+  test(`${format}: malformed conditional summaries cannot hide failed cleanup, executed skips or mismatched graphs`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), true)); await once(f.config);
     const saved = await f.saved();
     const cases = [
@@ -214,7 +215,7 @@ for (const format of ['sha1', 'sha256']) {
     }
   });
 
-  test(`${format}: job and aggregate-step limits still apply to conditionally completed runs`, async t => {
+  test(`${format}: job and aggregate-step limits still apply to conditionally completed runs`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), true)); await once(f.config);
     const saved = await f.saved(), report = structuredClone(saved.report);
     report.runs[0].execution.jobs = [...Array.from({ length: 127 }, (_, i) => job(`build-${i}`)), job('skipped', 'skipped')];

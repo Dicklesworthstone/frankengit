@@ -33,6 +33,7 @@ pub use blocking::{
 pub mod delivery;
 pub mod discussions;
 pub mod dispatch;
+mod event_history;
 pub mod feed;
 pub mod history;
 pub mod issues;
@@ -309,6 +310,25 @@ where
     /// Unbound requests do not call this hook.
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
         Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))
+    }
+
+    /// Explicit object-owner opt-in for selecting an existing default branch.
+    /// The driver has already checked repository-administrator authority and
+    /// exact HEAD/tip preconditions at this basis. The owner must independently
+    /// read the selected admitted native object and validate it as a Commit
+    /// through the original request context. No new object is admitted here.
+    fn validate_default_branch_target_async<'a>(
+        &'a self,
+        _authority: &'a S,
+        _cx: &'a S::Context,
+        _basis: &'a PublicationBasis,
+        _authenticated: &'a AuthenticatedHead,
+        _target: &'a RefName,
+        _expected_tip: GitOid,
+    ) -> impl Future<Output = Result<(), ProjectionFailure>> + Send + 'a {
+        std::future::ready(Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        )))
     }
 
     /// Explicit object-owner opt-in for exact-source conversation comments.

@@ -1,9 +1,9 @@
 //! Complete, pinned pages over existing immutable lexical/path index owners.
 //! Every host retains its independently checked source-read authority.
 mod input;
-mod output;
 #[cfg(test)]
 mod integration_tests;
+mod output;
 #[cfg(test)]
 mod tests;
 

@@ -69,10 +69,10 @@ export function writeRecord(stream, value, timeoutMs = 30_000) {
     const cleanup = () => {
       stream.removeListener('close', closed); stream.removeListener('error', failed);
     };
-    const finish = error => {
+    const finish = (error, didFail = true) => {
       if (settled) return;
       settled = true; clearTimeout(timer);
-      if (error) {
+      if (didFail) {
         // Release ordinary writable streams. Node deliberately keeps stdout's
         // descriptor open; the CLI error boundary exits after main has drained.
         // An asynchronous _destroy can still fail later: observe errors until
@@ -92,7 +92,10 @@ export function writeRecord(stream, value, timeoutMs = 30_000) {
     };
     const timer = setTimeout(() => finish(new Error('Supervisor report deadline exceeded.')), timeoutMs);
     stream.on('error', failed); stream.once('close', closed);
-    try { stream.write(bytes, error => finish(error)); } catch (error) { finish(error); }
+    // Only a callback's null/undefined means success. A caught or emitted
+    // failure must reject even when JavaScript's thrown value is falsy.
+    try { stream.write(bytes, error => finish(error, error !== null && error !== undefined)); }
+    catch (error) { finish(error); }
   });
 }
 export async function main(argv = process.argv.slice(2)) {
