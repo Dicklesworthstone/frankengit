@@ -43,6 +43,15 @@ The file contains digests, not plaintext bearer secrets. Files must be stable,
 private regular files on Unix (0600 or stricter), not symlinks. Store credentials
 outside repository content and never commit them or put them in URLs.
 
+On Unix, the server opens credential files without following final-component
+symlinks or waiting for a FIFO writer, then validates the opened descriptor's
+type, permissions, size and identity. This also applies if the file is replaced
+after its initial metadata check. The startup-only `--token-file` reader uses
+the same protections. Parent directories remain operator-owned; this is not
+filesystem containment or a deadline guarantee for an unavailable filesystem.
+Atomic replacement leaves an already opened request snapshot intact, while
+subsequent requests select the replacement file.
+
 Scope names, when combined, appear once in this order:
 
 ```text

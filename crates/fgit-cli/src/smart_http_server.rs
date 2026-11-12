@@ -26,6 +26,9 @@ use crate::service_stop as stop_file;
 #[cfg(target_os = "linux")]
 mod workflow;
 
+#[cfg(all(test, unix))]
+mod token_file_tests;
+
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-discussions] [--allow-outcomes] [--allow-pulls] [--allow-source]
@@ -830,12 +833,36 @@ fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
 }
 
 fn read_token(path: &Path) -> Result<[u8; 32], String> {
-    let metadata =
+    let before =
         fs::symlink_metadata(path).map_err(|e| format!("cannot inspect token file: {e}"))?;
-    if !metadata.is_file() || metadata.len() > 66 {
+    if !before.is_file() || before.len() > 66 {
         return Err("token must be a bounded regular file, not a symlink or device".into());
     }
-    let mut file = File::open(path).map_err(|e| format!("cannot open token file: {e}"))?;
+    let mut file = open_token_file(path, &before)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(67)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read token file: {e}"))?;
+    token_digest(&bytes)
+}
+
+fn open_token_file(path: &Path, before: &fs::Metadata) -> Result<File, String> {
+    // The path can change after symlink_metadata. Refuse a substituted symlink
+    // during open and do not wait for a writer if it has become a FIFO.
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|e| format!("cannot open token file: {e}"))?;
+        File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path).map_err(|e| format!("cannot open token file: {e}"))?;
     let opened = file
         .metadata()
         .map_err(|e| format!("cannot inspect opened token file: {e}"))?;
@@ -845,9 +872,9 @@ fn read_token(path: &Path) -> Result<[u8; 32], String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.dev() != opened.dev()
-            || metadata.ino() != opened.ino()
-            || metadata.mode() & 0o077 != 0
+        if before.dev() != opened.dev()
+            || before.ino() != opened.ino()
+            || before.mode() & 0o077 != 0
             || opened.mode() & 0o077 != 0
         {
             return Err(
@@ -855,12 +882,9 @@ fn read_token(path: &Path) -> Result<[u8; 32], String> {
             );
         }
     }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(67)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read token file: {e}"))?;
-    token_digest(&bytes)
+    #[cfg(not(unix))]
+    let _ = before;
+    Ok(file)
 }
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {

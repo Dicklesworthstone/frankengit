@@ -755,6 +755,7 @@ dependencies = [
  "fgit-types",
  "fgit-verified-read",
  "fgit-wire",
+ "rustix",
 ]
 
 [[package]]

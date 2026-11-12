@@ -30,6 +30,9 @@ const MAX_GRANTS: usize = 256;
 const HEADER: &str = "frankengit-http-credentials-v1";
 const HEADER_V2: &str = "frankengit-http-credentials-v2";
 
+#[cfg(all(test, unix))]
+mod file_open_tests;
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct Binding {
     pub tenant: TenantId,
@@ -515,13 +518,27 @@ fn safe_metadata(metadata: &Metadata) -> Result<(), CredentialFailure> {
     Ok(())
 }
 
-fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> {
-    // Operator-controlled local path, not a hostile-filesystem containment API.
-    // Update it with atomic rename, not in-place edits. The opened file owns
-    // this request's snapshot; a later replacement applies to the next request.
-    let before = fs::symlink_metadata(path).map_err(|_| CredentialFailure::Unavailable)?;
-    safe_metadata(&before)?;
-    let mut file = File::open(path).map_err(|_| CredentialFailure::Unavailable)?;
+fn open_credential_file(
+    path: &Path,
+    before: &Metadata,
+) -> Result<(File, Metadata), CredentialFailure> {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        // The entry can change after lstat. Refuse a substituted symlink and
+        // never wait for a substituted FIFO's writer before checking fstat.
+        // Parent directories remain operator-owned; these flags do not impose
+        // a kernel-level deadline on an unavailable filesystem.
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| CredentialFailure::Unavailable)?;
+        File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path).map_err(|_| CredentialFailure::Unavailable)?;
     let opened = file
         .metadata()
         .map_err(|_| CredentialFailure::Unavailable)?;
@@ -533,6 +550,18 @@ fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> 
             return Err(CredentialFailure::UnsafeFile);
         }
     }
+    #[cfg(not(unix))]
+    let _ = before;
+    Ok((file, opened))
+}
+
+fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> {
+    // Operator-controlled local path, not a hostile-filesystem containment API.
+    // Update it with atomic rename, not in-place edits. The opened file owns
+    // this request's snapshot; a later replacement applies to the next request.
+    let before = fs::symlink_metadata(path).map_err(|_| CredentialFailure::Unavailable)?;
+    safe_metadata(&before)?;
+    let (mut file, opened) = open_credential_file(path, &before)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(MAX_FILE_BYTES + 1)
