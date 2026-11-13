@@ -237,6 +237,19 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Native workflow shells and monorepo defaults
+
+Trusted-local workflows accept explicit `shell: bash` and `shell: sh`, plus
+workflow and job `defaults.run` for the shell and working directory. Each step
+inherits those fields independently and can override either; a matrix job can
+select its default directory from a whole-value matrix input. Bash runs with
+pipeline failure detection, while workflows with no shell selection preserve
+the original native shell behavior. The selected interpreter and directory bind
+the execution graph and remain recoverable through saved check evidence. See
+[shell selection](docs/NATIVE_WORKFLOW_SHELLS.md) and
+[run defaults](docs/NATIVE_WORKFLOW_STEP_CONTEXT.md#workflow-and-job-run-defaults)
+for examples, precedence and supported limits.
+
 ### Automatic native PR checks
 
 On Linux, `fg serve-http --workflow-pull-requests` discovers visible open

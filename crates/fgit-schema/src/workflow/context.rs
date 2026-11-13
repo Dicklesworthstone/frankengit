@@ -1,6 +1,6 @@
 //! Literal process inputs, with explicit workflow/job/step inheritance.
 //! No host environment, secret lookup or executable interpolation participates.
-use super::{Node, Span, WorkflowRefusal};
+use super::{Node, Span, WorkflowRefusal, defaults::RunDefaults};
 use std::collections::BTreeMap;
 
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 64;
@@ -206,6 +206,10 @@ fn validate_entry(key: &str, value: &str) -> Result<(), ContextRefusal> {
     Ok(())
 }
 fn normalize_directory(value: &str) -> Result<Option<String>, ContextRefusal> {
+    normalize_directory_ref(value).map(|directory| directory.map(str::to_owned))
+}
+
+pub(super) fn normalize_directory_ref(value: &str) -> Result<Option<&str>, ContextRefusal> {
     if value.is_empty()
         || value.len() > MAX_WORKING_DIRECTORY_BYTES
         || value.starts_with('/')
@@ -225,7 +229,7 @@ fn normalize_directory(value: &str) -> Result<Option<String>, ContextRefusal> {
     {
         return Err(ContextRefusal::WorkingDirectory);
     }
-    Ok(Some(path.to_owned()))
+    Ok(Some(path))
 }
 
 /// Validate one source map before any child can override it. In particular,
@@ -341,6 +345,7 @@ pub(super) fn inherit_environment(
 pub(super) fn lower(
     node: &Node,
     inherited: &Environment,
+    defaults: RunDefaults<'_>,
     expanded_bytes: &mut usize,
 ) -> Result<StepContext, WorkflowRefusal> {
     let explicit = lower_environment(node, EnvironmentScope::Step)?;
@@ -356,7 +361,7 @@ pub(super) fn lower(
         };
         normalize_directory(value).map_err(|error| invalid(error, cwd.span()))?
     } else {
-        None
+        defaults.copy_directory(expanded_bytes, node.span())?
     };
     let shell = if let Some(selected) = node.get("shell") {
         let Node::Scalar { value, .. } = selected else {
@@ -369,7 +374,7 @@ pub(super) fn lower(
         };
         Some(StepShell::parse(value).map_err(|error| invalid(error, selected.span()))?)
     } else {
-        None
+        defaults.shell()
     };
     Ok(StepContext {
         environment,

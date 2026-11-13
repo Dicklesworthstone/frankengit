@@ -76,6 +76,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "turns a failed job into a passing one, which is gate self-weakening expressed as configuration",
     },
     Construct {
+        key: "job.defaults",
+        status: ConstructStatus::Normalized,
+        reason: "closed run defaults select literal sh/bash and workspace-relative working-directory per field; whole-value matrix directory inputs resolve before validation; every source layer validates before overrides and inherited path copies are bounded",
+    },
+    Construct {
         key: "job.env",
         status: ConstructStatus::Normalized,
         reason: "validated literal job values override workflow defaults and lower into each effective step environment; whole-value matrix inputs are resolved before validation and inherited copies are bounded",
@@ -209,6 +214,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         key: "workflow.concurrency",
         status: ConstructStatus::Unsupported,
         reason: "a concurrency group cancels in-flight runs, and cancellation semantics are request-drain-finalize rather than a YAML string",
+    },
+    Construct {
+        key: "workflow.defaults",
+        status: ConstructStatus::Normalized,
+        reason: "closed literal run shell and working-directory defaults lower into effective step context with job then step precedence; expressions and unknown fields refuse, and explicit dot resets an inherited directory to the workspace root",
     },
     Construct {
         key: "workflow.env",

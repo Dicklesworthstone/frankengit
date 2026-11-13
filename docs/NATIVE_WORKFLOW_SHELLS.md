@@ -1,6 +1,7 @@
 # Native workflow shell selection
 
-Trusted-local workflows can select `shell: bash` or `shell: sh` for a run step.
+Trusted-local workflows can select `shell: bash` or `shell: sh` for a run step,
+or inherit that selection from workflow or job `defaults.run.shell`.
 This lets scripts use Bash arrays and pipeline failure handling without embedding
 another shell invocation inside the script. Canonical-source, candidate,
 dispatch and watched workflows use the same compiler and process adapter.
@@ -29,6 +30,10 @@ with its explicit trust, source input, private run-directory and run-ID options.
 The native runner executes the workflow; this feature does not contact the
 GitHub Actions service.
 
+For shared shell and directory settings, see
+[workflow and job run defaults](NATIVE_WORKFLOW_STEP_CONTEXT.md#workflow-and-job-run-defaults).
+Step settings override each inherited field independently.
+
 ## Interpreter and failure semantics
 
 | Step selection | Fixed interpreter and arguments before the script |
@@ -37,7 +42,7 @@ GitHub Actions service.
 | `shell: sh` | `/bin/sh -e -c` |
 | `shell: bash` | `/bin/bash --noprofile --norc -e -o pipefail -c` |
 
-Omitting the field preserves the original native runner behavior, including
+Omitting the field at every scope preserves the original native runner behavior, including
 failure on an unset variable. Explicit `sh` and `bash` do not enable `nounset`;
 scripts can request `set -u` themselves. Bash's `pipefail` makes a failed
 pipeline component fail the step even when its final command succeeds.

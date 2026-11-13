@@ -4,7 +4,7 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 18,
-  "count_normalized": 15,
+  "count_normalized": 17,
   "count_unsupported": 16,
   "count_ambiguous": 0,
   "constructs": [
@@ -19,6 +19,12 @@
       "status": "unsupported",
       "refuses": true,
       "reason": "turns a failed job into a passing one, which is gate self-weakening expressed as configuration"
+    },
+    {
+      "key": "job.defaults",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "closed run defaults select literal sh/bash and workspace-relative working-directory per field; whole-value matrix directory inputs resolve before validation; every source layer validates before overrides and inherited path copies are bounded"
     },
     {
       "key": "job.env",
@@ -181,6 +187,12 @@
       "status": "unsupported",
       "refuses": true,
       "reason": "a concurrency group cancels in-flight runs, and cancellation semantics are request-drain-finalize rather than a YAML string"
+    },
+    {
+      "key": "workflow.defaults",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "closed literal run shell and working-directory defaults lower into effective step context with job then step precedence; expressions and unknown fields refuse, and explicit dot resets an inherited directory to the workspace root"
     },
     {
       "key": "workflow.env",

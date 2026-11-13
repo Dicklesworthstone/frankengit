@@ -261,3 +261,64 @@ fn environment_aware_adapters_must_opt_in_before_any_shell_job_can_start() {
         assert_eq!(adapter.calls, 0);
     }
 }
+
+#[test]
+fn inherited_run_defaults_execute_real_interpreters_and_select_only_effective_directories() {
+    const SOURCE: &str = r#"name: inherited execution
+on: push
+defaults:
+  run:
+    shell: bash
+    working-directory: base
+jobs:
+  build:
+    runs-on: fgit-trusted-local
+    defaults:
+      run:
+        working-directory: job
+    steps:
+      - run: values=(first inherited); printf '%s' "${values[1]}" > selected; printf inherited-bash
+      - shell: sh
+        working-directory: .
+        run: test -z "$FGIT_SHELL_TEST_UNSET"; printf root > selected; printf explicit-sh
+      - working-directory: step
+        run: values=(step local); printf '%s' "${values[0]}" > selected; printf step-bash
+  other:
+    runs-on: fgit-trusted-local
+    steps:
+      - run: values=(root inherited); printf '%s' "${values[0]}" > selected; printf workflow-bash
+"#;
+    let plan = WorkflowPlan::compile(SOURCE).unwrap();
+    let workspace = Workspace::new();
+    for directory in ["base", "job", "step"] {
+        fs::create_dir(workspace.0.join(directory)).unwrap();
+    }
+    let mut observed = Vec::new();
+    for job in &plan.graph().jobs {
+        for step in &job.steps {
+            let result = workspace.run(&step.run, &step.context);
+            assert_eq!(result.outcome, StepOutcome::Succeeded);
+            assert!(result.stderr.is_empty());
+            assert!(result.output_complete);
+            assert!(!result.retain_workspace);
+            observed.push(result.stdout);
+        }
+    }
+    assert_eq!(
+        observed,
+        [
+            b"inherited-bash".to_vec(),
+            b"explicit-sh".to_vec(),
+            b"step-bash".to_vec(),
+            b"workflow-bash".to_vec(),
+        ]
+    );
+    for (path, value) in [
+        ("job/selected", "inherited"),
+        ("selected", "root"),
+        ("step/selected", "step"),
+        ("base/selected", "root"),
+    ] {
+        assert_eq!(fs::read_to_string(workspace.0.join(path)).unwrap(), value);
+    }
+}

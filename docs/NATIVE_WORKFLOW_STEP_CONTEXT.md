@@ -1,9 +1,10 @@
-# Native workflow environment and step working directory
+# Native workflow environment and run defaults
 
 The trusted-local workflow runner accepts literal `env` defaults at workflow and
-job level, explicit `env` overrides on individual steps, and step-local
-`working-directory`. The schema compiler lowers the three environment levels to
-each step's complete effective map. The graph identity binds those inputs, and
+job level, explicit `env` overrides on individual steps, and `defaults.run`
+settings for the shell and working directory. Individual steps can override
+either run setting. The schema compiler lowers these declarations to each
+step's complete effective context. The graph identity binds those inputs, and
 the native process adapter applies them without rewriting the shell script. The
 durable coordinator forwards the same validated context.
 
@@ -100,10 +101,77 @@ inherited strings are copied. An explicitly overridden parent value is not
 copied into the child. These are bounded-workload rules, not measured peak-memory
 claims; YAML parser limits remain independent.
 
+## Workflow and job run defaults
+
+`defaults.run` accepts `shell` and `working-directory` at workflow and job level.
+Each field inherits independently: workflow setting, then job setting, then
+step setting. Overriding a job's directory retains its inherited shell, and
+overriding one step's shell retains its inherited directory.
+
+```yaml
+name: monorepo build
+on: workflow_dispatch
+defaults:
+  run:
+    shell: bash
+    working-directory: packages/core
+jobs:
+  core:
+    runs-on: fgit-trusted-local
+    steps:
+      - run: targets=(debug release); printf '%s\n' "${targets[@]}"
+      - shell: sh
+        run: test -f Cargo.toml
+      - working-directory: .
+        run: test -f packages/core/Cargo.toml
+  api:
+    runs-on: fgit-trusted-local
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - run: targets=(server); printf '%s\n' "${targets[@]}"
+```
+
+The selected source inputs must include these package directories and their
+files. The `core` job uses Bash by default and `sh` for its second step.
+Its first two steps run in `packages/core`; the third explicitly returns to the
+job workspace root. The `api` job inherits Bash and runs in `services/api`.
+Job and step overrides do not affect their siblings.
+
+| Most specific declaration for a field | Effective value |
+| --- | --- |
+| Step `shell` or `working-directory` | That step's value |
+| Job `defaults.run` | That job's value |
+| Workflow `defaults.run` | The workflow's value |
+| No declaration | Legacy `/bin/sh -eu -c` and the job workspace root |
+
+An empty mapping is a no-op. `working-directory: .` or `./` explicitly clears an
+inherited directory. An omitted directory inherits; it does not clear. Shell
+names remain the closed literal choices `sh` and `bash` described in
+[native shell selection](NATIVE_WORKFLOW_SHELLS.md).
+
+Every declared default map is validated even if all children override it.
+Unknown keys, duplicate keys, invalid shapes, arbitrary shells and unsafe paths
+refuse during compilation. `defaults` admits only `run`, and `defaults.run`
+admits only `shell` and `working-directory`. Workflow defaults are literal. A
+matrix job may use a whole-value `${{ matrix.name }}` in its
+`defaults.run.working-directory`; each selected value is validated as a relative
+path before inheritance. Partial interpolation, matrix shell selection and
+other expression contexts remain unsupported.
+
+Inherited directories consume the same 8 MiB expanded-workflow allocation
+allowance as inherited environment values. The compiler validates and charges
+the selected directory before copying it into a step; an overridden directory
+is not copied. Defaults normalize into the existing step context, so moving
+identical effective settings between declarations does not invent another graph
+or report format.
+
 ## Workspace-relative working directory
 
-The default is the current job workspace root. `.` and `./` explicitly select
-that same default. A leading `./` is normalized; `./src/tools` and `src/tools`
+Without a declared or inherited directory, a step starts at the job workspace
+root. `.` and `./` explicitly select that root even when a parent declares a
+different default. A leading `./` is normalized; `./src/tools` and `src/tools`
 have the same graph representation. Other paths are nonempty, at most 1,024 bytes,
 and contain only nonempty relative components. Parent traversal, absolute paths,
 embedded `.` components, control characters, backslashes, colons and expressions
@@ -116,10 +184,10 @@ also checks that the canonical result remains inside the workspace. These checks
 are not atomic containment against concurrent mutation by another host process;
 this profile assumes operator-owned trusted workspace storage.
 
-A directory selection applies only to its step. Subsequent steps without the
-field start at the workspace root. Jobs continue to have independent working
-copies. Existing cancellation, timeout, output limits and workspace cleanup
-remain in force.
+A step's directory override applies only to that step. Subsequent steps without
+the field use their job's effective default, or the workspace root when none is
+declared. Jobs continue to have independent working copies. Existing
+cancellation, timeout, output limits and workspace cleanup remain in force.
 
 ## Identity, older adapters and saved results
 
@@ -129,7 +197,9 @@ Sorted, escaped `step-env` records and normalized `step-cwd` records bind the co
 execution inputs into the graph commitment. Source order of environment entries
 does not change that commitment; changing a name, value or directory does.
 Moving the same effective literal from a step to a job or workflow default keeps
-that graph representation. The exact workflow source is separately bound by the
+that graph representation. An effective explicit shell uses graph version eight
+and the same `step-shell` records whether selected directly or inherited. The
+exact workflow source is separately bound by the
 run and durable attempt, so a changed source cannot adopt an old attempt merely
 because its effective execution graph matches.
 
@@ -148,8 +218,8 @@ a local report into a required-check approval.
 
 ## Reproduction
 
-Focused schema tests live in `crates/fgit-schema/tests/workflow_context.rs` and
-`workflow_environment.rs`. Runner coverage includes
+Focused schema tests live in `crates/fgit-schema/tests/workflow_context.rs`,
+`workflow_environment.rs` and `workflow_defaults.rs`. Runner coverage includes
 `crates/fgit-runner/src/workflow/context_tests.rs`, the command-only adapter's
 `step_context_tests`, and the durable attempt test
 `durable_execution_forwards_inherited_context_and_reopens_exactly_without_execution`.

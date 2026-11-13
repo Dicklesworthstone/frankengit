@@ -17,6 +17,7 @@
 //! bytes so a future change to any of these rules is a visible version bump
 //! rather than a silent reordering of everyone's goldens.
 
+use crate::workflow::defaults::{DefaultsScope, RunDefaults};
 use crate::workflow::registry;
 use crate::workflow::yaml::{Node, Span};
 use crate::workflow::{StepContext, TimeoutMinutes, WorkflowRefusal, context, deadline, matrix};
@@ -429,6 +430,7 @@ fn check_keys(
 fn lower_step(
     node: &Node,
     environment: &context::Environment,
+    defaults: RunDefaults<'_>,
     expanded_bytes: &mut usize,
 ) -> Result<Step, WorkflowRefusal> {
     check_keys(
@@ -470,7 +472,7 @@ fn lower_step(
         run,
         condition: condition(node.get("if"), "step.if", node.span())?,
         span: node.span(),
-        context: context::lower(node, environment, expanded_bytes)?,
+        context: context::lower(node, environment, defaults, expanded_bytes)?,
         timeout_minutes: deadline::lower(node.get("timeout-minutes"), "step.timeout-minutes")?,
     })
 }
@@ -481,12 +483,21 @@ pub(super) fn lower_job(
     node: &Node,
     span: Span,
     workflow_environment: &context::Environment,
+    workflow_defaults: RunDefaults<'_>,
     expanded_bytes: &mut usize,
 ) -> Result<Job, WorkflowRefusal> {
     check_keys(
         node,
         "a job",
-        &["runs-on", "needs", "steps", "if", "timeout-minutes", "env"],
+        &[
+            "runs-on",
+            "needs",
+            "steps",
+            "if",
+            "timeout-minutes",
+            "env",
+            "defaults",
+        ],
         &[
             ("strategy", "job.strategy"),
             ("permissions", "job.permissions"),
@@ -533,9 +544,10 @@ pub(super) fn lower_job(
     let explicit = context::lower_environment(node, context::EnvironmentScope::Job)?;
     let environment =
         context::inherit_environment(workflow_environment, explicit, expanded_bytes, node.span())?;
+    let defaults = RunDefaults::lower(node, DefaultsScope::Job)?.inherit(workflow_defaults);
     let steps = items
         .iter()
-        .map(|step| lower_step(step, &environment, expanded_bytes))
+        .map(|step| lower_step(step, &environment, defaults, expanded_bytes))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Job {
@@ -604,7 +616,7 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
     check_keys(
         document,
         "a workflow",
-        &["name", "on", "jobs", "env"],
+        &["name", "on", "jobs", "env", "defaults"],
         &[
             ("concurrency", "workflow.concurrency"),
             ("permissions", "job.permissions"),
@@ -643,7 +655,8 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
         });
     };
     let environment = context::lower_environment(document, context::EnvironmentScope::Workflow)?;
-    let jobs = matrix::lower_jobs(entries, span, &environment)?;
+    let defaults = RunDefaults::lower(document, DefaultsScope::Workflow)?;
+    let jobs = matrix::lower_jobs(entries, span, &environment, defaults)?;
 
     Ok(WorkflowGraph {
         name,
