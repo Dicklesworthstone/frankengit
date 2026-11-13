@@ -247,10 +247,12 @@ unlinked file. The existing buffered library read API retains its separate
 64 MiB ceiling; the HTTP adapter uses the verified streaming API.
 
 Payload retention is permanent. Pointer-aware garbage collection,
-LFS locking, remote object-store backends, and
-pointer-availability checks during Git receive are outside this profile. A
-client can publish an LFS pointer whose payload has not been uploaded; the
-normal Git LFS pre-push hook is responsible for uploading its objects first.
+LFS locking and remote object-store backends remain outside this profile.
+The optional [receive-side payload policy](RECEIVE_LFS_PAYLOAD_POLICY.md),
+`--require-lfs-payloads <absolute-private-directory>`, verifies pointers in the
+complete proposed history before a Git push can publish. Without that explicit
+option, a client can still publish an LFS pointer whose payload has not been
+uploaded; the normal Git LFS pre-push hook uploads its objects first.
 This implementation is a bounded part of `frankengit-fg053-lfs-i3h`, not closure
 of that bead's complete acceptance criteria.
 

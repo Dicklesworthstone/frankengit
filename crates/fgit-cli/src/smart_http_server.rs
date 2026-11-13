@@ -34,6 +34,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--allow-receive] [--allow-issues] [--allow-discussions] [--allow-outcomes] [--allow-pulls] [--allow-source]
   [--allow-protection] [--allow-queues] [--allow-queue-landings]
   [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
+  [--require-lfs-payloads <absolute-private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
@@ -193,16 +194,20 @@ regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
 table to rotate/revoke credentials without restarting. Already authenticated
 in-flight requests retain their bounded grant.
 
-On Linux, --lfs-root enables the Git LFS basic transfer API in an existing
+On Unix, --lfs-root enables Git LFS basic and resumable Tus transfers in an existing
 private (0700) artifact-fabric directory. It requires --credentials-file and
 independent lfs-read/lfs-write grants; neither grants Git reads or pushes.
 Stock Git LFS uses <repository-url>/info/lfs with Basic token-as-password or
 Bearer credentials. Payloads are SHA-256 verified before immutable publication
-and before download; interrupted uploads can be retried under the same identity.
-The bounded profile accepts objects up to 64 MiB, at most 100 objects per batch,
-and at most 64 MiB total declared payload bytes per batch. Payloads are retained
-permanently: pointer-aware collection, partial-upload resume and LFS locking are
-outside this profile. Git pointer files are never rewritten by the service.
+and before download; interrupted Tus uploads resume from verified checkpoints.
+The bounded profile accepts objects up to 512 MiB, at most 100 objects per batch,
+and at most 512 MiB total declared payload bytes per batch. Payloads are retained
+permanently; pointer-aware collection and LFS locking remain outside this profile.
+--require-lfs-payloads <absolute-private-directory> independently requires complete
+payload custody for supported pointers in proposed Git history before receive
+publication. Use the same root as --lfs-root when this listener also accepts LFS
+uploads. It grants no credential scope or receive access. Git pointer files are
+never rewritten. See docs/RECEIVE_LFS_PAYLOAD_POLICY.md for bounds and refusals.
 See docs/GIT_LFS_BASIC_TRANSFER.md for provisioning and custody/backup limits.
 
 On Linux, --artifact-root enables read-only workflow artifact metadata/downloads
@@ -442,6 +447,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--principal"
                     | "--credentials-file"
                     | "--lfs-root"
+                    | "--require-lfs-payloads"
                     | "--artifact-root"
                     | "--expected-incarnation"
                     | "--stop-file"
@@ -779,6 +785,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if let Some(root) = flags.get("--lfs-root") {
         config = config.with_http_lfs_root(PathBuf::from(*root));
     }
+    config = crate::guarded_git_server::apply_receive_lfs_flag(config, &flags)?;
     if let Some(root) = flags.get("--artifact-root") {
         config = config.with_workflow_artifact_root(PathBuf::from(*root));
     }
@@ -904,6 +911,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         _ => None,
     };
     let lfs_enabled = options.config.http_lfs_root().is_some();
+    let lfs_payloads_required = options.config.receive_lfs_root().is_some();
     let artifacts_enabled = options.config.workflow_artifact_root().is_some();
     #[cfg(target_os = "linux")]
     let workflow_enabled = options.workflow_service.is_some();
@@ -938,6 +946,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         }
         node.validate_smart_http_lfs_storage()
             .map_err(|e| e.to_string())?;
+        node.validate_receive_lfs_storage()
+            .map_err(|code| format!("cannot open required LFS custody: {code:?}"))?;
         #[cfg(unix)]
         if artifacts_enabled {
             node.validate_workflow_artifact_storage()
@@ -962,7 +972,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"discussions_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"queue_landings_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"discussions_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"queue_landings_enabled\":{},\"lfs_enabled\":{},\"lfs_payloads_required\":{lfs_payloads_required},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_discussions, options.allow_outcomes, options.allow_pulls,
             options.allow_source, options.allow_protection, options.allow_queues, options.allow_queue_landings, lfs_enabled, artifacts_enabled, workflow_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
@@ -1161,6 +1171,40 @@ mod tests {
         .collect()
     }
     #[test]
+    fn required_lfs_custody_neither_enables_transfers_nor_grants_receive() {
+        #[cfg(unix)]
+        {
+            let mut args = arguments();
+            args.extend([
+                "--require-lfs-payloads".into(),
+                "/operator/lfs-custody".into(),
+            ]);
+            let selected = parse(&args).unwrap();
+            assert!(!selected.allow_receive);
+            assert!(selected.config.http_lfs_root().is_none());
+            assert_eq!(
+                selected.config.receive_lfs_root(),
+                Some(Path::new("/operator/lfs-custody"))
+            );
+        }
+        for extra in [
+            vec!["--require-lfs-payloads"],
+            vec!["--require-lfs-payloads", ""],
+            vec!["--require-lfs-payloads", "relative-custody"],
+            vec![
+                "--require-lfs-payloads",
+                "/one",
+                "--require-lfs-payloads",
+                "/two",
+            ],
+        ] {
+            let mut args = arguments();
+            args.extend(extra.iter().map(|value| (*value).to_owned()));
+            assert!(parse(&args).is_err(), "{extra:?}");
+        }
+    }
+
+    #[test]
     fn safe_defaults_require_credentials_and_do_not_enable_receive() {
         let options = parse(&arguments()).unwrap();
         assert!(!options.allow_receive);
@@ -1180,6 +1224,7 @@ mod tests {
         assert!(!options.config.http_protection_admin_enabled());
         assert!(!options.config.http_discussions_enabled());
         assert!(options.config.http_lfs_root().is_none());
+        assert!(options.config.receive_lfs_root().is_none());
         assert!(options.config.workflow_artifact_root().is_none());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);

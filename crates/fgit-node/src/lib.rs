@@ -7768,6 +7768,10 @@ pub struct NodeConfig {
     /// transfer profile. Disabled unless an operator selects a private root;
     /// per-request LFS credentials remain independently required.
     http_lfs_root: Option<PathBuf>,
+    /// Optional receive-validation requirement for complete LFS payload custody.
+    /// This applies independently of the HTTP transfer endpoint and grants no
+    /// publication or payload-read authority to a transport credential.
+    receive_lfs_root: Option<PathBuf>,
     /// Opt-in workflow artifact custody reads; transport grants remain separate.
     workflow_artifact_root: Option<PathBuf>,
     /// Which cell this process is, for answers it serves.
@@ -7840,6 +7844,7 @@ impl NodeConfig {
             http_queue_landings: false,
             http_discussions: false,
             http_lfs_root: None,
+            receive_lfs_root: None,
             workflow_artifact_root: None,
         }
     }
@@ -8078,6 +8083,27 @@ impl NodeConfig {
     #[must_use]
     pub fn http_lfs_root(&self) -> Option<&Path> {
         self.http_lfs_root.as_deref()
+    }
+
+    /// Requires supported LFS pointers reachable from proposed receive roots
+    /// to name fully verified payloads in this private artifact directory.
+    ///
+    /// The namespace binds this node's authenticated tenant, repository and
+    /// incarnation. The bounded check runs before object promotion and ref
+    /// admission on every transport using the production quarantine validator.
+    /// It does not enable HTTP transfers, grant credential scopes, rewrite
+    /// pointers, or change canonical transaction identities. Omission preserves
+    /// the existing Git-only receive profile. Unsupported hosts fail closed.
+    #[must_use]
+    pub fn with_receive_lfs_root(mut self, root: PathBuf) -> Self {
+        self.receive_lfs_root = Some(root);
+        self
+    }
+
+    /// The independently selected LFS custody requirement for receive validation.
+    #[must_use]
+    pub fn receive_lfs_root(&self) -> Option<&Path> {
+        self.receive_lfs_root.as_deref()
     }
 
     /// Selects the existing private trusted-workflow artifact custody root.
@@ -8900,6 +8926,31 @@ impl OneNode {
                 Ok(node)
             }
             Err(opening) => Err(close_after_existing_open_failure(node, opening)),
+        }
+    }
+
+    /// Checks the optional receive-side LFS custody configuration before a
+    /// listener reports readiness. Each receive still verifies its own exact
+    /// payloads under its original deadline; this check caches no availability.
+    pub fn validate_receive_lfs_storage(&self) -> Result<(), RefusalCode> {
+        let Some(root) = self.service_config.receive_lfs_root() else {
+            return Ok(());
+        };
+        #[cfg(unix)]
+        {
+            fgit_object_fabric::artifact::storage::lfs::LfsStore::open(
+                root,
+                self.tenant_id,
+                self.repository_id,
+                self.repository_incarnation_id(),
+            )
+            .map(|_| ())
+            .map_err(|_| RefusalCode::DurabilityProfileUnavailable)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = root;
+            Err(RefusalCode::DurabilityProfileUnavailable)
         }
     }
 
