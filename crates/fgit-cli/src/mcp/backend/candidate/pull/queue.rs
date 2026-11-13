@@ -132,6 +132,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             text(match preparation.profile {
                 MergeProfile::PathMergeV1 => "path-merge-v1",
                 MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+                MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
             }),
         ),
         ("method".into(), text("merge-commit")),

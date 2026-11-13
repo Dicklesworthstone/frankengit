@@ -51,7 +51,8 @@ usage: fg queue prepare <storage-root> <tenant-id> <repository-id> <queue-number
   --expected-policy-epoch <positive-epoch> --pull-request <number> --expected-pull-version <version>
   --source-ref <refs/heads/source> --target-ref <refs/heads/target>
   --expected-source-tip <oid> --expected-target-tip <oid>
-  --profile path-v1|exact-renames-v1 --author <name-and-email> [--committer <name-and-email>]
+  --profile path-v1|exact-renames-v1|builtin-attributes-v1
+  --author <name-and-email> [--committer <name-and-email>]
   --timestamp <unix-seconds> --message <message> --output-bundle <new-file>
   [--object-format sha1|sha256]
 

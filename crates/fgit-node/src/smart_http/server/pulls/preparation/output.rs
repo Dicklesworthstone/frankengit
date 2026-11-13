@@ -360,6 +360,7 @@ fn build_inner(
         quote(match profile {
             MergeProfile::PathMergeV1 => "path-merge-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+            MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
         }),
         quote(match style {
             MergeCommitStyle::TwoParent => "merge-commit",

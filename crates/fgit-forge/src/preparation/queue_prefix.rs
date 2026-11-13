@@ -106,6 +106,8 @@ pub fn prepare_queue_prefix<S: MergeObjectSource>(
         .map_err(|_| PreparationError::Budget("queue prefix steps"))?;
     let mut target = initial_target;
     let mut work = AncestryQueryWork::default();
+    // One shared attribute cache/work envelope spans the complete prefix.
+    let attributes = super::attributes::Context::builtin();
     for (index, input) in inputs.iter().enumerate() {
         source.checkpoint()?;
         let overlay = CommitOverlay {
@@ -163,6 +165,14 @@ pub fn prepare_queue_prefix<S: MergeObjectSource>(
                 let retained = planner.objects.keys().copied().collect();
                 renames::merge_retaining(&mut planner, base_tree, our_tree, their_tree, &retained)?
             }
+            MergeProfile::BuiltinAttributesV1 => planner.directory_context(
+                Some(base_tree),
+                our_tree,
+                their_tree,
+                &[],
+                0,
+                &attributes,
+            )?,
         };
         source.checkpoint()?;
         if !planner.conflicts.is_empty() {

@@ -39,8 +39,10 @@ nor the current wall clock supplies hidden metadata.
 
 `--trusted-local` acknowledges the local operator's authority to read the
 repository and create the artifact. It is not a remote authentication service
-or a hostile-filesystem sandbox. `--profile path-v1` is mandatory: this command
-does not imply another merge engine's rename, attribute or virtual-base rules.
+or a hostile-filesystem sandbox. An explicit `--profile` is mandatory. Select
+`path-v1` for the legacy path merge, `exact-renames-v1` for unique content-identical
+moves, or [`builtin-attributes-v1`](NATIVE_BUILTIN_ATTRIBUTES_MERGE.md) for bounded
+path-specific attribute rules. None implies another engine's virtual-base rules.
 
 The target and source must be distinct fully qualified branch names. Missing
 and hidden refs share one refusal, and caller visibility can only narrow the
@@ -86,7 +88,7 @@ A successful clean result writes one JSON object containing:
 - `expected_source`, `expected_target`, `merge_base`, `candidate_commit` and
   `root_tree` as native Git identities;
 - bundle path, byte count and constructed-object count;
-- `profile: "path-v1"`, `outcome: "prepared"`, `node_closed: true`, and
+- the selected `profile` (`"path-v1"` in the example), `outcome: "prepared"`, `node_closed: true`, and
   `published_to_repository: false`.
 
 SHA-1 repositories produce a v2 Git bundle. SHA-256 repositories produce a v3

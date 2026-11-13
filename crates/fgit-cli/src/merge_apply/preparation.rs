@@ -1,4 +1,4 @@
-//! Explicit PathMergeV1 preparation. This command never publishes repository
+//! Explicit native merge preparation. This command never publishes repository
 //! authority; a saved candidate must be independently reviewed and applied.
 
 mod resolution;
@@ -18,7 +18,7 @@ use fgit_types::{GitHashAlgorithm, HeadGeneration, RefName, RepositoryId, Tenant
 
 use super::super::publication_support::{quote, set_once};
 
-pub(super) const USAGE: &str = "usage: fg merge prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle> --trusted-local --profile path-v1 --source-ref <branch> --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message> [--method merge-commit|squash] [--object-format sha1|sha256]";
+pub(super) const USAGE: &str = "usage: fg merge prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle> --trusted-local --profile path-v1|exact-renames-v1|builtin-attributes-v1 --source-ref <branch> --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message> [--method merge-commit|squash] [--object-format sha1|sha256]";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct Options {
@@ -30,6 +30,7 @@ struct Options {
     output: PathBuf,
     metadata: MergeMetadata,
     method: NativeMergeMethod,
+    profile: MergeProfile,
     format: GitHashAlgorithm,
 }
 
@@ -39,7 +40,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     }
     if arguments == ["prepare", "--help"] {
         println!(
-            "{USAGE}\n\npath-v1 is an explicit bounded path-based merge, not a claim of Git ort equivalence. No rename heuristics, virtual bases, external merge drivers or hooks are run. Conflicts produce JSON and no bundle. Repository state is never changed."
+            "{USAGE}\n\nSelect path-v1 for the legacy path merge, exact-renames-v1 for unique content-identical moves, or builtin-attributes-v1 for path merging with stable, bounded built-in .gitattributes rules. Applicable external drivers and unsupported attribute syntax refuse. No Git ort equivalence, rename heuristics, virtual bases, external programs or hooks are implied. Conflicts produce JSON and no bundle. Repository state is never changed."
         );
         return Ok(());
     }
@@ -62,7 +63,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
                 &Default::default(),
                 &options.metadata,
                 PreparationLimits::default(),
-                MergeProfile::PathMergeV1,
+                options.profile,
                 match options.method {
                     NativeMergeMethod::Squash => MergeCommitStyle::Squash,
                     NativeMergeMethod::MergeCommit => MergeCommitStyle::TwoParent,
@@ -90,7 +91,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     };
     let mut fields = vec![
         "\"type\":\"merge_preparation\"".to_owned(),
-        "\"profile\":\"path-v1\"".to_owned(),
+        format!("\"profile\":{}", quote(profile_name(options.profile))),
         format!("\"method\":{}", quote(super::method_name(options.method))),
         "\"published_to_repository\":false".to_owned(),
         "\"node_closed\":true".to_owned(),
@@ -188,6 +189,14 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+const fn profile_name(profile: MergeProfile) -> &'static str {
+    match profile {
+        MergeProfile::PathMergeV1 => "path-v1",
+        MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+        MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+    }
+}
 fn render_entry(entry: Option<&MergeEntry>) -> String {
     entry.map_or_else(
         || "null".to_owned(),
@@ -244,13 +253,17 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 flag,
             )?,
             "--profile" => {
-                if value != "path-v1" {
-                    return Err(
-                        "only the explicitly selected path-v1 merge profile is supported"
-                            .to_owned(),
-                    );
-                }
-                set_once(&mut profile, (), flag)?;
+                let selected =
+                    match value.as_str() {
+                        "path-v1" => MergeProfile::PathMergeV1,
+                        "exact-renames-v1" => MergeProfile::ExactRenamesV1,
+                        "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+                        _ => return Err(
+                            "--profile must be path-v1, exact-renames-v1 or builtin-attributes-v1"
+                                .to_owned(),
+                        ),
+                    };
+                set_once(&mut profile, selected, flag)?;
             }
             "--method" => set_once(&mut method, super::parse_method(value)?, flag)?,
             "--object-format" => {
@@ -292,8 +305,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 .to_owned(),
         );
     }
-    profile.ok_or(
-        "--profile path-v1 is required; rename/driver/virtual-base semantics are not implied",
+    let profile = profile.ok_or(
+        "--profile is required; select path-v1, exact-renames-v1 or builtin-attributes-v1 explicitly",
     )?;
     let incoming = incoming.ok_or("--source-ref is required")?;
     if target == incoming
@@ -323,6 +336,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         output,
         metadata,
         method: method.unwrap_or(NativeMergeMethod::MergeCommit),
+        profile,
         format: format.unwrap_or(GitHashAlgorithm::Sha1),
     })
 }
@@ -442,6 +456,7 @@ mod tests {
     fn parsing_requires_explicit_profile_time_identity_and_trust() {
         let parsed = parse(&args()).unwrap();
         assert_eq!(parsed.metadata.author, parsed.metadata.committer);
+        assert_eq!(parsed.profile, MergeProfile::PathMergeV1);
         for flag in [
             "--profile",
             "--source-ref",
@@ -471,6 +486,38 @@ mod tests {
         let at = injection.iter().position(|arg| arg == "--author").unwrap();
         injection[at + 1] = "Test <test@example.invalid>\nparent bad".into();
         assert!(parse(&injection).is_err());
+    }
+
+    #[test]
+    fn merge_profiles_are_explicit_and_preserved_in_receipts() {
+        for (token, profile) in [
+            ("path-v1", MergeProfile::PathMergeV1),
+            ("exact-renames-v1", MergeProfile::ExactRenamesV1),
+            ("builtin-attributes-v1", MergeProfile::BuiltinAttributesV1),
+        ] {
+            let mut selected = args();
+            let at = selected.iter().position(|arg| arg == "--profile").unwrap();
+            selected[at + 1] = token.into();
+            let parsed = parse(&selected).unwrap();
+            assert_eq!(parsed.profile, profile);
+            assert_eq!(profile_name(parsed.profile), token);
+            selected.extend(["--method".into(), "squash".into()]);
+            let parsed = parse(&selected).unwrap();
+            assert_eq!(parsed.profile, profile);
+            assert_eq!(parsed.method, NativeMergeMethod::Squash);
+        }
+        for token in [
+            "auto",
+            "ort",
+            "attributes",
+            "builtin-attributes-v2",
+            "builtin-attributes-v1 ",
+        ] {
+            let mut invalid = args();
+            let at = invalid.iter().position(|arg| arg == "--profile").unwrap();
+            invalid[at + 1] = token.into();
+            assert!(parse(&invalid).is_err(), "{token}");
+        }
     }
     #[test]
     fn method_and_object_format_are_explicit_bounded_choices() {

@@ -6,7 +6,10 @@ pack handling and coupled Ref + Forge + Outbox publication path. The source
 branch remains at its original tip.
 
 Commit style is separate from tree semantics. The native options APIs support
-both `PathMergeV1` and `ExactRenamesV1` with `MergeCommitStyle::Squash`.
+`PathMergeV1`, `ExactRenamesV1` and `BuiltinAttributesV1` with
+`MergeCommitStyle::Squash`. The corresponding explicit CLI profiles are
+`path-v1`, `exact-renames-v1` and
+[`builtin-attributes-v1`](NATIVE_BUILTIN_ATTRIBUTES_MERGE.md).
 The local command below selects the existing bounded `path-v1` profile.
 Existing preparation and publication entry points default to two-parent merges.
 

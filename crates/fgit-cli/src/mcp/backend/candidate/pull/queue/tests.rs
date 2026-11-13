@@ -84,6 +84,40 @@ fn queue_preparation_closes_the_subject_and_two_parent_method_before_io() {
 }
 
 #[test]
+fn builtin_attributes_queue_selection_keeps_the_shared_schema_and_original_guards() {
+    let schema = schema();
+    let properties = schema.object().unwrap()["properties"].object().unwrap();
+    let profile = properties["merge_profile"].object().unwrap();
+    let Value::Array(choices) = &profile["enum"] else {
+        panic!("merge profile schema must enumerate supported versions")
+    };
+    assert!(choices.contains(&text("builtin-attributes-v1")));
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut args = input(format);
+        let baseline = parse(&args, format).unwrap();
+        args.insert("merge_profile".into(), text("builtin-attributes-v1"));
+        let selected = parse(&args, format).unwrap();
+        assert_eq!(
+            selected.preparation.profile,
+            MergeProfile::BuiltinAttributesV1
+        );
+        assert_eq!(selected.number, baseline.number);
+        assert_eq!(selected.expected_version, baseline.expected_version);
+        assert_eq!(
+            selected.preparation.selection.subject,
+            baseline.preparation.selection.subject
+        );
+        assert_eq!(selected.preparation.metadata, baseline.preparation.metadata);
+        assert_eq!(selected.preparation.style, MergeCommitStyle::TwoParent);
+        args.insert("method".into(), text("squash"));
+        assert_eq!(
+            parse(&args, format).unwrap_err().code,
+            "queue_requires_merge_commit"
+        );
+    }
+}
+
+#[test]
 fn generated_landing_arguments_preserve_distinct_queue_pr_and_candidate_coordinates() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut original = input(format);

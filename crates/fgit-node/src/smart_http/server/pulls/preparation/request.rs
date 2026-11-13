@@ -123,6 +123,7 @@ impl<'a> Request<'a> {
         let profile = match fields.remove("profile").as_deref() {
             None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
             Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
+            Some("builtin-attributes-v1") => MergeProfile::BuiltinAttributesV1,
             Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
         };
         let style = match fields.remove("method").as_deref() {
@@ -672,6 +673,28 @@ mod tests {
                     "{}",
                     error.code
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_attributes_selection_preserves_subject_metadata_and_commit_style() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let baseline = request(false)
+                .command(form(format).as_bytes(), format)
+                .unwrap();
+            for (method, style) in [
+                ("merge-commit", MergeCommitStyle::TwoParent),
+                ("squash", MergeCommitStyle::Squash),
+            ] {
+                let bytes =
+                    form(format) + &format!("&profile=builtin-attributes-v1&method={method}");
+                let selected = request(false).command(bytes.as_bytes(), format).unwrap();
+                assert_eq!(selected.profile, MergeProfile::BuiltinAttributesV1);
+                assert_eq!(selected.subject, baseline.subject);
+                assert_eq!(selected.metadata, baseline.metadata);
+                assert_eq!(selected.style, style);
+                assert!(request(true).command(bytes.as_bytes(), format).is_err());
             }
         }
     }

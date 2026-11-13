@@ -115,6 +115,7 @@ fn build_bound(
         quote(match profile {
             MergeProfile::PathMergeV1 => "path-merge-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+            MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
         }),
         number.get(),
         expected_version.get(),

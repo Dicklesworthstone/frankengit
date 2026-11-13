@@ -106,7 +106,12 @@ pub(crate) fn parse(fields: &BTreeMap<&str, &str>) -> Result<Option<Options>, St
     let profile = match fields.get("--merge-profile").copied().unwrap_or("path") {
         "path" => MergeProfile::PathMergeV1,
         "exact-renames" => MergeProfile::ExactRenamesV1,
-        _ => return Err("--merge-profile must be path or exact-renames".into()),
+        "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+        _ => {
+            return Err(
+                "--merge-profile must be path, exact-renames or builtin-attributes-v1".into(),
+            );
+        }
     };
     let style = match fields
         .get("--merge-method")
@@ -230,6 +235,21 @@ mod tests {
             parse(&selected).unwrap().unwrap().metadata.message,
             b"--merge-method"
         );
+    }
+
+    #[test]
+    fn builtin_attributes_selection_preserves_explicit_watch_policy() {
+        let baseline = parse(&fields()).unwrap().unwrap();
+        let mut selected = fields();
+        selected.insert("--merge-profile", "builtin-attributes-v1");
+        let parsed = parse(&selected).unwrap().unwrap();
+        assert_eq!(parsed.profile, MergeProfile::BuiltinAttributesV1);
+        assert_eq!(parsed.reference, baseline.reference);
+        assert_eq!(parsed.principal, baseline.principal);
+        assert_eq!(parsed.metadata, baseline.metadata);
+        assert_eq!(parsed.style, baseline.style);
+        #[cfg(target_os = "linux")]
+        assert_eq!(parsed.node_config().unwrap().profile(), parsed.profile);
     }
 
     #[test]

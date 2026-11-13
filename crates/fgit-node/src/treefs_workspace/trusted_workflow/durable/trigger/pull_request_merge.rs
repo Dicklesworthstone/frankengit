@@ -79,6 +79,7 @@ impl PullRequestMergeWatchConfig {
         match self.profile {
             MergeProfile::PathMergeV1 => "path",
             MergeProfile::ExactRenamesV1 => "exact-renames",
+            MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
         }
     }
     pub(super) const fn style_name(&self) -> &'static str {
@@ -560,4 +561,40 @@ fn rebind_bundle(
     )
     .and_then(|bundle| bundle.into_vec(live))
     .map_err(|error| invalid_owned(error.to_string()))
+}
+
+#[cfg(test)]
+mod profile_binding_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_attributes_has_a_distinct_durable_config_identity() {
+        let config = |profile| {
+            PullRequestMergeWatchConfig::try_new(
+                RefName::try_new(b"refs/heads/ci/pr-1").unwrap(),
+                PrincipalId::from_bytes([0x73; 16]),
+                MergeMetadata {
+                    author: "CI <ci@example.invalid>".into(),
+                    committer: "CI <ci@example.invalid>".into(),
+                    timestamp: 1,
+                    message: b"check the exact candidate\n".to_vec(),
+                },
+                profile,
+                MergeCommitStyle::TwoParent,
+            )
+            .unwrap()
+        };
+        let path = config(MergeProfile::PathMergeV1);
+        let renames = config(MergeProfile::ExactRenamesV1);
+        let attributes = config(MergeProfile::BuiltinAttributesV1);
+        assert_eq!(path.profile_name(), "path");
+        assert_eq!(renames.profile_name(), "exact-renames");
+        assert_eq!(attributes.profile_name(), "builtin-attributes-v1");
+        assert_ne!(attributes.identity(), path.identity());
+        assert_ne!(attributes.identity(), renames.identity());
+        assert_eq!(
+            attributes.identity(),
+            config(MergeProfile::BuiltinAttributesV1).identity()
+        );
+    }
 }

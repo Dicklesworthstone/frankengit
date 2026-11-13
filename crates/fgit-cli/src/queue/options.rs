@@ -533,7 +533,12 @@ fn preparation(
     let profile = match required(flags, "--profile")? {
         "path-v1" => MergeProfile::PathMergeV1,
         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
-        _ => return Err("--profile must be path-v1 or exact-renames-v1".into()),
+        "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+        _ => {
+            return Err(
+                "--profile must be path-v1, exact-renames-v1 or builtin-attributes-v1".into(),
+            );
+        }
     };
     let author = required(flags, "--author")?;
     let metadata = MergeMetadata {
