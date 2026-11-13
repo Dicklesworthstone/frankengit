@@ -54,6 +54,7 @@ mod tests {
                             index: 0,
                             name: None,
                             script: Commitment::of_bytes(b"true"),
+                            shell: None,
                             observation: StepObservation {
                                 outcome: if *outcome == JobOutcome::Succeeded {
                                     StepOutcome::Succeeded

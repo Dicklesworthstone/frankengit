@@ -629,6 +629,9 @@ where
     fn supports_step_context(&self) -> bool {
         self.inner.supports_step_context()
     }
+    fn supports_step_shell(&self) -> bool {
+        self.inner.supports_step_shell()
+    }
     fn execute_step_with_context(
         &mut self,
         index: usize,

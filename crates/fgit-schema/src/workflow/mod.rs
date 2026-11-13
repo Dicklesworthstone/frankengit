@@ -34,7 +34,7 @@ pub mod registry;
 pub mod triggers;
 pub mod yaml;
 
-pub use context::{ContextRefusal, StepContext};
+pub use context::{ContextRefusal, StepContext, StepShell};
 pub use deadline::TimeoutMinutes;
 pub use graph::{Condition, Job, Step, Trigger, WorkflowGraph};
 pub use registry::{CONSTRUCTS, ConstructStatus};

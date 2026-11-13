@@ -10,6 +10,7 @@ const CHECK_FIELDS = ['id', 'publisher', 'run_id', 'attempt_id', 'graph_root', '
 const REPORT_FIELDS = ['schema_version', 'profile', 'authoritative_check', 'workflow_source', 'workflow_graph',
   'shell', 'shell_flags', 'environment', 'step_timeout_millis', 'run_timeout_millis', 'stream_bytes', 'total_output_bytes', 'succeeded', 'jobs'];
 const STEP_FIELDS = ['index', 'name', 'script', 'outcome', 'exit_code', 'stdout_hex', 'stderr_hex', 'elapsed_millis', 'output_complete', 'workspace_retained'];
+const STEP_SHELL_FIELDS = ['index', 'name', 'script', 'shell', 'shell_flags', ...STEP_FIELDS.slice(3)];
 const STEP_OUTCOMES = ['succeeded', 'failed', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'];
 const JOB_CONCLUSIONS = { succeeded: 'success', failed: 'failure', refused: 'failure', output_limit: 'failure',
   skipped: 'action_required', cancelled: 'cancelled', timed_out: 'timed_out' };
@@ -24,16 +25,28 @@ function commitment(value) {
   if (typeof value !== 'string' || !/^alg:2:[0-9a-f]{64}$/.test(value)) fail('Invalid workflow report commitment.');
 }
 function boolean(value) { if (typeof value !== 'boolean') fail('Invalid workflow report flag.'); }
+function shellSelection(value) {
+  const flags = value.shell_flags;
+  if (!Array.isArray(flags)) return null;
+  if (value.shell === '/bin/sh' && flags.length === 2 && flags[1] === '-c') {
+    if (flags[0] === '-eu') return 'legacy';
+    if (flags[0] === '-e') return 'explicit';
+  }
+  const bashFlags = ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c'];
+  return value.shell === '/bin/bash' && flags.length === bashFlags.length &&
+    bashFlags.every((flag, index) => flags[index] === flag) ? 'explicit' : null;
+}
 
 // The native decoder owns the binary grammar. This consumer admits only the
-// known single-job report schema, after matching its exact span in hashed bytes.
+// known single-job report versions, after matching their exact span in hashed bytes.
 function workflowReport(serialized, check) {
   let report;
   try { report = JSON.parse(serialized); } catch { fail('Invalid workflow report JSON.'); }
   exact(report, REPORT_FIELDS);
-  if (report.schema_version !== 1 || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false ||
-      report.shell !== '/bin/sh' || !Array.isArray(report.shell_flags) || report.shell_flags.length !== 2 ||
-      report.shell_flags[0] !== '-eu' || report.shell_flags[1] !== '-c') fail('Unsupported workflow report profile.');
+  const perStepShells = report.schema_version === 2;
+  const supportedShell = perStepShells ? report.shell === null && report.shell_flags === null
+    : report.schema_version === 1 && shellSelection(report) === 'legacy';
+  if (!supportedShell || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false) fail('Unsupported workflow report profile.');
   exact(report.environment, ['PATH', 'LANG']);
   if (report.environment.PATH !== '/usr/bin:/bin' || report.environment.LANG !== 'C') fail('Unsupported workflow report environment.');
   commitment(report.workflow_source); commitment(report.workflow_graph);
@@ -52,9 +65,14 @@ function workflowReport(serialized, check) {
   if (job.failure !== null) {
     exact(job.failure, ['detail', 'workspace_retained']); reportText(job.failure.detail, 4096); boolean(job.failure.workspace_retained);
   }
-  let previous = -1, output = 0;
+  let previous = -1, output = 0, explicitShell = false;
   for (const step of job.steps) {
-    exact(step, STEP_FIELDS); integer(step.index, 'step index', 0, 511);
+    exact(step, perStepShells ? STEP_SHELL_FIELDS : STEP_FIELDS); integer(step.index, 'step index', 0, 511);
+    if (perStepShells) {
+      const selection = shellSelection(step);
+      if (selection === null) fail('Unsupported workflow step shell profile.');
+      explicitShell ||= selection === 'explicit';
+    }
     if (step.index <= previous || !STEP_OUTCOMES.includes(step.outcome)) fail('Invalid workflow step order or outcome.');
     previous = step.index;
     if (step.name !== null) reportText(step.name, 8192);
@@ -65,6 +83,7 @@ function workflowReport(serialized, check) {
     if (output > report.total_output_bytes) fail('Workflow output exceeds its recorded budget.');
     if (step.outcome === 'succeeded' && (step.exit_code !== 0 || !step.output_complete || step.workspace_retained)) fail('Successful step has inconsistent completion facts.');
   }
+  if (perStepShells && !explicitShell) fail('Workflow report schema two requires an explicit step shell.');
   if (job.outcome === 'succeeded' && (job.failure !== null || job.steps.some(step => step.outcome !== 'succeeded'))) fail('Successful job has inconsistent step facts.');
   return report;
 }

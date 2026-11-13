@@ -3,7 +3,7 @@
 //! timeout, signal or cancellation the caller must retain the workspace: direct
 //! child reaping does not prove that escaped descendants relinquished access.
 
-use super::{StepContext, StepLimits, StepObservation, StepOutcome, WorkerFailure};
+use super::{StepContext, StepLimits, StepObservation, StepOutcome, WorkerFailure, shell_command};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -16,7 +16,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Runs exactly `/bin/sh -eu -c <script>` in the named disposable working copy.
+/// Runs one closed shell profile in the named disposable working copy. Without
+/// an explicit shell it retains `/bin/sh -eu -c`; `sh` selects `/bin/sh -e -c`,
+/// and `bash` selects `/bin/bash --noprofile --norc -e -o pipefail -c`.
 /// `stdout` and `stderr` must be distinct, empty, private regular files opened
 /// read/write by the owner. The surrounding Asupersync request owns `live`.
 /// The script is explicitly trusted to join its children before normal exit.
@@ -80,8 +82,13 @@ pub fn run_trusted_step_with_context(
     if !live() {
         return Ok(result);
     }
-    let child = Command::new("/bin/sh")
-        .args(["-eu", "-c", script])
+    // Interpreter paths and flags belong to the native adapter. Workflow text
+    // selects only a closed enum; it can never supply an executable or template.
+    // The no-selection branch must preserve the original nounset behavior.
+    let (interpreter, arguments) = shell_command(context.shell());
+    let child = Command::new(interpreter)
+        .args(arguments)
+        .arg(script)
         .current_dir(&selected_directory)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -245,3 +252,7 @@ fn select_directory(
 #[cfg(test)]
 #[path = "context_tests.rs"]
 mod context_tests;
+
+#[cfg(test)]
+#[path = "shell_tests.rs"]
+mod shell_tests;

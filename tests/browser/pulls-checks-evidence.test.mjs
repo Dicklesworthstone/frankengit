@@ -8,6 +8,16 @@ import { observation, checkLabel } from './pulls-checks-fixtures.mjs';
 import { evidenceFixture, evidenceToken, report, step } from './pulls-checks-evidence-fixtures.mjs';
 
 const validate = (fixture, reply = fixture.reply) => checkEvidenceReply(reply, 1, fixture.selected, fixture.check, webcrypto);
+const LEGACY_SHELL = { shell: '/bin/sh', shell_flags: ['-eu', '-c'] };
+const SH = { shell: '/bin/sh', shell_flags: ['-e', '-c'] };
+const BASH = { shell: '/bin/bash', shell_flags: ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c'] };
+function shellReport(selections = [LEGACY_SHELL, SH, BASH]) {
+  const recorded = report({ schema_version: 2, shell: null, shell_flags: null });
+  const { index: _index, name, script, ...completion } = step();
+  recorded.jobs[0].steps = selections.map((selection, index) => ({ index, name, script, ...structuredClone(selection), ...completion,
+    outcome: index === selections.length - 1 ? 'failed' : 'succeeded', exit_code: index === selections.length - 1 ? 1 : 0 }));
+  return recorded;
+}
 async function connected(fixture = evidenceFixture(), respond = () => json(fixture.reply), extra = {}) {
   const calls = [], client = new CheckEvidenceClient({ ...options(async (url, init) => {
     calls.push({ url: String(url), ...init }); return respond(calls.at(-1));
@@ -24,6 +34,56 @@ test('canonical evidence consumer verifies exact bytes and the native report in 
     const fixture = evidenceFixture({ selected }), result = await validate(fixture);
     assert.deepEqual(Buffer.from(result.bytes), fixture.bytes); assert.deepEqual(result.report, fixture.report);
     assert.equal(result.head, selected.head); assert.equal(result.binding.format, format);
+  }
+});
+
+test('shell schema two verifies explicit sh, bash and mixed legacy steps without changing evidence', async () => {
+  for (const selections of [[SH], [BASH], [LEGACY_SHELL, SH, BASH]]) {
+    const fixture = evidenceFixture({ report: shellReport(selections) }), before = structuredClone(fixture.reply);
+    const result = await validate(fixture);
+    assert.deepEqual(result.report, fixture.report); assert.deepEqual(Buffer.from(result.bytes), fixture.bytes);
+    assert.equal(result.check.conclusion, 'failure'); assert.equal(result.report.authoritative_check, false);
+    assert.deepEqual(fixture.reply, before, 'shell validation must not rewrite hash-bound report bytes');
+  }
+});
+
+test('shell report versions reject unknown, missing and substituted execution selections', async () => {
+  const mutations = [
+    r => { r.schema_version = 3; }, r => { r.schema_version = '2'; },
+    r => { r.shell = '/bin/sh'; }, r => { r.shell_flags = ['-eu', '-c']; },
+    r => { delete r.shell; }, r => { delete r.shell_flags; },
+    r => { delete r.jobs[0].steps[0].shell; }, r => { delete r.jobs[0].steps[0].shell_flags; },
+    r => { r.jobs[0].steps[1].shell = '/usr/bin/sh'; },
+    r => { r.jobs[0].steps[1].shell = '/bin/bash'; },
+    r => { r.jobs[0].steps[1].shell_flags = ['-ec']; },
+    r => { r.jobs[0].steps[2].shell_flags = ['-e', '-o', 'pipefail', '-c']; },
+    r => { r.jobs[0].steps[2].shell_flags.reverse(); },
+    r => { r.jobs[0].steps[2].shell_flags.push('--login'); },
+    r => { r.jobs[0].steps[2].shell_flags = null; },
+    r => { r.jobs[0].steps[2].shell_flags = '--noprofile --norc -e -o pipefail -c'; },
+    r => { r.jobs[0].steps = [step(LEGACY_SHELL)]; },
+    r => { r.jobs[0].steps = []; },
+    r => { r.schema_version = 1; Object.assign(r, structuredClone(LEGACY_SHELL)); },
+  ];
+  for (const mutate of mutations) {
+    const recorded = shellReport(); mutate(recorded);
+    await assert.rejects(validate(evidenceFixture({ report: recorded })), undefined, mutate.toString());
+  }
+  for (const selection of [{ shell: SH.shell }, { shell_flags: SH.shell_flags }, SH, BASH, LEGACY_SHELL]) {
+    const recorded = report(); Object.assign(recorded.jobs[0].steps[0], structuredClone(selection));
+    await assert.rejects(validate(evidenceFixture({ report: recorded })), undefined, 'schema one cannot carry per-step shell fields');
+  }
+});
+
+test('shell schema two retains identity, budgets and success validation', async () => {
+  for (const mutate of [r => { r.authoritative_check = true; },
+    r => { r.workflow_graph = `alg:2:${'f'.repeat(64)}`; },
+    r => { r.environment.PATH = '/tmp'; }, r => { r.total_output_bytes = 2; },
+    r => { r.jobs[0].steps[1].stdout_hex = '00'.repeat(r.stream_bytes + 1); },
+    r => { r.jobs[0].steps[2].outcome = 'succeeded'; },
+    r => { r.jobs[0].steps[1].unknown = true; }]) {
+    const recorded = shellReport(); mutate(recorded);
+    await assert.rejects(validate(evidenceFixture({ report: recorded })), undefined, mutate.toString());
   }
 });
 

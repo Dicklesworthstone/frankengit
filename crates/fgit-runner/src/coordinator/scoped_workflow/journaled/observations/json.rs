@@ -1,9 +1,9 @@
-//! Decoder for the exact version-one WorkflowReport emitter, not general JSON.
+//! Decoder for the exact versioned WorkflowReport emitter, not general JSON.
 use super::{MAX_JOB_BYTES, ObservationRefusal, checkpoint, commitment, valid_job};
 use crate::Commitment;
 use crate::workflow::{
     JobOutcome, JobReport, MAX_JOBS, MAX_STEPS, StepObservation, StepOutcome, StepReport,
-    WorkerFailure, WorkflowLimits, WorkflowReport,
+    StepShell, WorkerFailure, WorkflowLimits, WorkflowReport, shell_fields,
 };
 use std::time::Duration;
 
@@ -21,12 +21,26 @@ pub(super) fn report(
         bytes,
         position: 0,
         live,
+        per_step_shells: false,
     };
-    input.literal(br#"{"schema_version":1,"profile":"trusted-local-foreground-v1","authoritative_check":false,"workflow_source":"#)?;
+    input.literal(br#"{"schema_version":"#)?;
+    input.per_step_shells = match input.number()? {
+        1 => false,
+        2 => true,
+        _ => return Err(BAD),
+    };
+    input.literal(br#","profile":"trusted-local-foreground-v1","authoritative_check":false,"workflow_source":"#)?;
     let source = input.root()?;
     input.literal(b",\"workflow_graph\":")?;
     let graph = input.root()?;
-    input.literal(b",\"shell\":\"/bin/sh\",\"shell_flags\":[\"-eu\",\"-c\"],\"environment\":{\"PATH\":\"/usr/bin:/bin\",\"LANG\":\"C\"},\"step_timeout_millis\":")?;
+    if input.per_step_shells {
+        input.literal(b",\"shell\":null,\"shell_flags\":null")?;
+    } else {
+        input.literal(shell_fields(None).as_bytes())?;
+    }
+    input.literal(
+        b",\"environment\":{\"PATH\":\"/usr/bin:/bin\",\"LANG\":\"C\"},\"step_timeout_millis\":",
+    )?;
     if u128::from(input.number()?) != step_timeout.as_millis() {
         return Err(BAD);
     }
@@ -73,7 +87,10 @@ pub(super) fn report(
         limits,
         jobs,
     };
-    if input.position != bytes.len() || report.succeeded() != succeeded {
+    if input.position != bytes.len()
+        || report.succeeded() != succeeded
+        || report.has_step_shells() != input.per_step_shells
+    {
         return Err(BAD);
     }
     Ok(report)
@@ -83,6 +100,7 @@ struct Json<'a> {
     bytes: &'a [u8],
     position: usize,
     live: &'a dyn Fn() -> bool,
+    per_step_shells: bool,
 }
 impl Json<'_> {
     fn peek(&self) -> Option<u8> {
@@ -345,6 +363,11 @@ impl Json<'_> {
         let name = self.optional_text(MAX_NAME_BYTES)?;
         self.literal(b",\"script\":")?;
         let script = self.root()?;
+        let shell = if self.per_step_shells {
+            self.shell()?
+        } else {
+            None
+        };
         self.literal(b",\"outcome\":")?;
         let outcome = match self.text(32)?.as_str() {
             "succeeded" => StepOutcome::Succeeded,
@@ -377,6 +400,7 @@ impl Json<'_> {
             index,
             name,
             script,
+            shell,
             observation: StepObservation {
                 outcome,
                 exit_code,
@@ -387,6 +411,17 @@ impl Json<'_> {
                 retain_workspace,
             },
         })
+    }
+
+    fn shell(&mut self) -> Result<Option<StepShell>> {
+        for selected in [None, Some(StepShell::Sh), Some(StepShell::Bash)] {
+            let fields = shell_fields(selected);
+            if self.bytes[self.position..].starts_with(fields.as_bytes()) {
+                self.literal(fields.as_bytes())?;
+                return Ok(selected);
+            }
+        }
+        Err(BAD)
     }
 }
 const fn nibble(byte: u8) -> Result<u8> {

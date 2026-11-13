@@ -7,6 +7,10 @@ each step's complete effective map. The graph identity binds those inputs, and
 the native process adapter applies them without rewriting the shell script. The
 durable coordinator forwards the same validated context.
 
+Steps can also select the closed `sh` or `bash` interpreter profile. See
+[native shell selection](NATIVE_WORKFLOW_SHELLS.md) for the exact flags,
+legacy-default behavior, graph identity and versioned execution reports.
+
 ```yaml
 name: explicit build context
 on: workflow_dispatch

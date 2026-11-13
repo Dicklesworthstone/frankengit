@@ -4,7 +4,7 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 18,
-  "count_normalized": 14,
+  "count_normalized": 15,
   "count_unsupported": 16,
   "count_ambiguous": 0,
   "constructs": [
@@ -109,6 +109,12 @@
       "status": "accepted",
       "refuses": false,
       "reason": "the command line, preserved verbatim; the lowering does not interpret shell syntax"
+    },
+    {
+      "key": "step.shell",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "closed literal sh or bash profiles select fixed native interpreter arguments; bash enables pipefail, the absent field retains the original sh/nounset profile, and paths, custom templates and expressions refuse"
     },
     {
       "key": "step.timeout-minutes",

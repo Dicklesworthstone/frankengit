@@ -1030,6 +1030,9 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
     fn supports_step_context(&self) -> bool {
         true
     }
+    fn supports_step_shell(&self) -> bool {
+        true
+    }
     fn execute_step_with_context(
         &mut self,
         index: usize,

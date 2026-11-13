@@ -572,6 +572,7 @@ fn log_job() -> fgit_runner::workflow::JobReport {
             index: 2,
             name: Some("binary diagnostic".into()),
             script: fgit_runner::Commitment::of_bytes(b"printf output; exit 7"),
+            shell: None,
             observation: StepObservation {
                 outcome: StepOutcome::Failed,
                 exit_code: Some(7),

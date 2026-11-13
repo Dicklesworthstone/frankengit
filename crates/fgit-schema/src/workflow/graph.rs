@@ -42,6 +42,8 @@ pub const TRIGGER_CANONICAL_VERSION: &str = "fgit-workflow/v5";
 pub const PATH_CANONICAL_VERSION: &str = "fgit-workflow/v6";
 /// Explicit tag filters select the tag namespace without changing old graph bytes.
 pub const TAG_CANONICAL_VERSION: &str = "fgit-workflow/v7";
+/// Explicit closed shell profiles bind interpreter semantics without changing old graphs.
+pub const SHELL_CANONICAL_VERSION: &str = "fgit-workflow/v8";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,7 +186,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_tag_filters() {
+        let version = if self.has_explicit_shells() {
+            SHELL_CANONICAL_VERSION
+        } else if self.has_tag_filters() {
             TAG_CANONICAL_VERSION
         } else if self.has_path_filters() {
             PATH_CANONICAL_VERSION
@@ -294,6 +298,13 @@ impl WorkflowGraph {
                         escape(directory)
                     ));
                 }
+                if let Some(shell) = step.context.shell() {
+                    lines.push(format!(
+                        "step-shell\t{}\t{index}\t{}",
+                        escape(&job.id),
+                        shell.token()
+                    ));
+                }
                 if step.condition != Condition::Success {
                     lines.push(format!(
                         "step-if\t{}\t{index}\t{}",
@@ -326,6 +337,14 @@ impl WorkflowGraph {
             job.timeout_minutes.is_some()
                 || job.steps.iter().any(|step| step.timeout_minutes.is_some())
         })
+    }
+
+    /// Whether an execution adapter must implement explicit interpreter selection.
+    #[must_use]
+    pub fn has_explicit_shells(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| step.context.shell().is_some()))
     }
 }
 
@@ -421,6 +440,7 @@ fn lower_step(
             "if",
             "env",
             "working-directory",
+            "shell",
             "timeout-minutes",
         ],
         &[("uses", "step.uses"), ("with", "step.with")],

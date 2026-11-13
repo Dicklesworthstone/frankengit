@@ -151,6 +151,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "the command line, preserved verbatim; the lowering does not interpret shell syntax",
     },
     Construct {
+        key: "step.shell",
+        status: ConstructStatus::Normalized,
+        reason: "closed literal sh or bash profiles select fixed native interpreter arguments; bash enables pipefail, the absent field retains the original sh/nounset profile, and paths, custom templates and expressions refuse",
+    },
+    Construct {
         key: "step.timeout-minutes",
         status: ConstructStatus::Normalized,
         reason: "a literal integer from 1 through 60 only tightens operator step, job and remaining run limits; command-only adapters refuse time caps before admission",

@@ -218,17 +218,30 @@ function childId(batch, event, path) {
   return digest(Buffer.concat([Buffer.from('frankengit/workflow-dispatch-child/v1\0'), Buffer.from(batch, 'hex'),
     frame(Buffer.from(event)), frame(Buffer.from(path, 'hex'))])).slice(0, 32);
 }
+function shellSelection(value) {
+  const flags = value.shell_flags;
+  if (!Array.isArray(flags)) return null;
+  if (value.shell === '/bin/sh' && flags.length === 2 && flags[1] === '-c') {
+    if (flags[0] === '-eu') return 'legacy';
+    if (flags[0] === '-e') return 'explicit';
+  }
+  const bashFlags = ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c'];
+  return value.shell === '/bin/bash' && flags.length === bashFlags.length &&
+    bashFlags.every((flag, index) => flags[index] === flag) ? 'explicit' : null;
+}
 function executionReport(run, plan, totals, graph) {
   const report = object(run.execution);
-  if (report.schema_version !== 1 || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false ||
-      report.shell !== '/bin/sh' || JSON.stringify(report.shell_flags) !== JSON.stringify(['-eu', '-c']) ||
+  const perStepShells = report.schema_version === 2;
+  const supportedShell = perStepShells ? report.shell === null && report.shell_flags === null
+    : report.schema_version === 1 && shellSelection(report) === 'legacy';
+  if (!supportedShell || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false ||
       report.environment?.PATH !== '/usr/bin:/bin' || report.environment?.LANG !== 'C' ||
       Object.keys(report.environment).length !== 2 || !Array.isArray(report.jobs) || !report.jobs.length || report.jobs.length > 128) fail('Unsupported native execution report.');
   bounded(report.workflow_source, 256, 'workflow commitment');
   if (report.workflow_graph !== `alg:2:${graph}`) fail('Native execution changed the selected workflow graph.');
   number(report.run_timeout_millis, 1, plan.run_timeout_ms); number(report.step_timeout_millis, 1, report.run_timeout_millis);
   number(report.stream_bytes, 1, 2 * 1024 * 1024); number(report.total_output_bytes, 2, plan.total_output_bytes);
-  const ids = new Set(); let output = 0;
+  const ids = new Set(); let output = 0, explicitShell = false;
   for (const job of report.jobs) {
     object(job); bounded(job.id, 1024, 'workflow job');
     if (ids.has(job.id) || !['succeeded', 'failed', 'skipped', 'cancelled', 'timed_out', 'output_limit', 'refused'].includes(job.outcome) ||
@@ -245,6 +258,13 @@ function executionReport(run, plan, totals, graph) {
     let previous = -1;
     for (const step of job.steps) {
       object(step); number(step.index, previous + 1, 511); previous = step.index;
+      if (perStepShells) {
+        const selection = shellSelection(step);
+        if (selection === null) fail('Unsupported native step shell profile.');
+        explicitShell ||= selection === 'explicit';
+      } else if (Object.hasOwn(step, 'shell') || Object.hasOwn(step, 'shell_flags')) {
+        fail('Per-step shell selections require native report schema two.');
+      }
       if (++totals.steps > 512 || !['succeeded', 'failed', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'].includes(step.outcome) ||
           step.workspace_retained !== false || step.outcome === 'containment_failure') fail('Native step containment remains unproved.');
       if (step.name !== null && (typeof step.name !== 'string' || Buffer.byteLength(step.name) > 4096)) fail('Invalid native step name.');
@@ -260,6 +280,8 @@ function executionReport(run, plan, totals, graph) {
       }
     }
   }
+  // An all-legacy report retains its original version and exact evidence bytes.
+  if (perStepShells && !explicitShell) fail('Native shell report schema two requires an explicit step shell.');
   // WorkflowReport's legacy evidence bit still means EVERY job succeeded.
   // Since 41102c6, the node's whole-run bit also permits genuinely unexecuted
   // conditional skips. Neither encoding carries a new version: accept exactly

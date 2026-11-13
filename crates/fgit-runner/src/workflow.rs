@@ -8,7 +8,7 @@
 use crate::Commitment;
 pub use fgit_schema::workflow::triggers::TriggerSelectionError;
 use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
-pub use fgit_schema::workflow::{Job as WorkflowJob, StepContext};
+pub use fgit_schema::workflow::{Job as WorkflowJob, StepContext, StepShell};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -30,6 +30,21 @@ pub const MAX_REPORT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 /// Cumulative time reserved for persisting already captured logs after job close.
 /// This drain allowance never restarts execution or grants another job a scope.
 pub const LOG_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Native execution arguments shared by process launch and receipt validation.
+/// No workflow value can become an interpreter path or argument template.
+pub(crate) const fn shell_command(
+    shell: Option<StepShell>,
+) -> (&'static str, &'static [&'static str]) {
+    match shell {
+        None => ("/bin/sh", &["-eu", "-c"]),
+        Some(StepShell::Sh) => ("/bin/sh", &["-e", "-c"]),
+        Some(StepShell::Bash) => (
+            "/bin/bash",
+            &["--noprofile", "--norc", "-e", "-o", "pipefail", "-c"],
+        ),
+    }
+}
 
 /// Finite limits; output bounds describe retained bytes, not an OS disk quota.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +87,7 @@ pub enum WorkflowError {
     InvalidLimits,
     InvalidScript,
     UnsupportedStepContext,
+    UnsupportedStepShell,
     UnsupportedRunner(String),
     ExecutionLimit,
 }
@@ -161,6 +177,9 @@ impl WorkflowPlan {
         elapsed: &dyn Fn() -> Duration,
     ) -> Result<WorkflowReport, WorkflowError> {
         limits.validate()?;
+        if self.graph.has_explicit_shells() && !executor.supports_step_shell() {
+            return Err(WorkflowError::UnsupportedStepShell);
+        }
         if self
             .graph
             .jobs
@@ -366,6 +385,7 @@ impl WorkflowPlan {
                                         index: step_index,
                                         name: step.name.clone(),
                                         script: Commitment::of_bytes(step.run.as_bytes()),
+                                        shell: step.context.shell(),
                                         observation: observed,
                                     });
                                     if outcome != StepOutcome::Succeeded {
@@ -575,6 +595,13 @@ pub trait WorkflowExecutor {
         false
     }
 
+    /// Whether this adapter honors both closed explicit shell profiles. This
+    /// separate opt-in prevents older environment-aware adapters losing shell
+    /// selection while still claiming to support the original step context.
+    fn supports_step_shell(&self) -> bool {
+        false
+    }
+
     /// Default adapters refuse new inputs rather than ignoring them.
     fn execute_step_with_context(
         &mut self,
@@ -738,6 +765,8 @@ pub struct StepReport {
     pub index: usize,
     pub name: Option<String>,
     pub script: Commitment,
+    /// Exact selected native shell; `None` retains the legacy sh -eu profile.
+    pub shell: Option<StepShell>,
     pub observation: StepObservation,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -770,6 +799,14 @@ pub struct WorkflowReport {
     pub jobs: Vec<JobReport>,
 }
 impl WorkflowReport {
+    /// Whether observed steps require the per-step shell report grammar.
+    #[must_use]
+    pub fn has_step_shells(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| step.shell.is_some()))
+    }
+
     #[must_use]
     pub fn succeeded(&self) -> bool {
         !self.jobs.is_empty()
@@ -782,10 +819,12 @@ impl WorkflowReport {
     /// forge event or an independently authorized required-check result.
     #[must_use]
     pub fn to_json(&self) -> String {
+        let per_step_shells = self.has_step_shells();
         let jobs = self.jobs.iter().map(|job| {
             let steps = job.steps.iter().map(|step| {
                 let o = &step.observation;
-                format!("{{\"index\":{},\"name\":{},\"script\":\"{}\",\"outcome\":\"{}\",\"exit_code\":{},\"stdout_hex\":\"{}\",\"stderr_hex\":\"{}\",\"elapsed_millis\":{},\"output_complete\":{},\"workspace_retained\":{}}}",
+                let shell = if per_step_shells { shell_fields(step.shell) } else { String::new() };
+                format!("{{\"index\":{},\"name\":{},\"script\":\"{}\"{shell},\"outcome\":\"{}\",\"exit_code\":{},\"stdout_hex\":\"{}\",\"stderr_hex\":\"{}\",\"elapsed_millis\":{},\"output_complete\":{},\"workspace_retained\":{}}}",
                     step.index, step.name.as_ref().map_or_else(|| "null".to_owned(), |name| quote(name)),
                     step.script, o.outcome.token(), o.exit_code.map_or_else(|| "null".to_owned(), |code| code.to_string()),
                     hex(&o.stdout), hex(&o.stderr), o.elapsed_millis, o.output_complete, o.retain_workspace)
@@ -794,8 +833,13 @@ impl WorkflowReport {
                 format!("{{\"detail\":{},\"workspace_retained\":{}}}", quote(&failure.detail), failure.retain_workspace));
             format!("{{\"id\":{},\"outcome\":\"{}\",\"steps\":[{steps}],\"failure\":{failure}}}", quote(&job.id), job.outcome.token())
         }).collect::<Vec<_>>().join(",");
+        let (version, shell) = if per_step_shells {
+            (2, ",\"shell\":null,\"shell_flags\":null".to_owned())
+        } else {
+            (1, shell_fields(None))
+        };
         format!(
-            "{{\"schema_version\":1,\"profile\":\"{PROFILE}\",\"authoritative_check\":false,\"workflow_source\":\"{}\",\"workflow_graph\":\"{}\",\"shell\":\"/bin/sh\",\"shell_flags\":[\"-eu\",\"-c\"],\"environment\":{{\"PATH\":\"/usr/bin:/bin\",\"LANG\":\"C\"}},\"step_timeout_millis\":{},\"run_timeout_millis\":{},\"stream_bytes\":{},\"total_output_bytes\":{},\"succeeded\":{},\"jobs\":[{jobs}]}}",
+            "{{\"schema_version\":{version},\"profile\":\"{PROFILE}\",\"authoritative_check\":false,\"workflow_source\":\"{}\",\"workflow_graph\":\"{}\"{shell},\"environment\":{{\"PATH\":\"/usr/bin:/bin\",\"LANG\":\"C\"}},\"step_timeout_millis\":{},\"run_timeout_millis\":{},\"stream_bytes\":{},\"total_output_bytes\":{},\"succeeded\":{},\"jobs\":[{jobs}]}}",
             self.source,
             self.graph,
             self.limits.step_timeout.as_millis(),
@@ -806,6 +850,17 @@ impl WorkflowReport {
         )
     }
 }
+
+pub(crate) fn shell_fields(shell: Option<StepShell>) -> String {
+    let (program, flags) = shell_command(shell);
+    let flags = flags
+        .iter()
+        .map(|flag| quote(flag))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(",\"shell\":{},\"shell_flags\":[{flags}]", quote(program))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
