@@ -1,7 +1,7 @@
-# Git LFS basic transfer
+# Git LFS basic and resumable transfer
 
 `fg serve-http --lfs-root <private-directory>` exposes Git LFS basic upload,
-download, and verification through FrankenGit's existing immutable artifact
+resumable Tus upload, download, and verification through the existing immutable artifact
 store. This Linux-only profile is opt-in. A Git remote at
 `http://127.0.0.1:8080/<repository-id>.git` uses the standard LFS endpoint
 `http://127.0.0.1:8080/<repository-id>.git/info/lfs`.
@@ -77,7 +77,7 @@ action destination, and action responses do not echo credentials.
 | `read` | Git discovery and fetch; no LFS access |
 | `receive` | Git receive, subject to the receive enablement and publication policy; no LFS access |
 | `lfs-read` | LFS download batches and verified object downloads |
-| `lfs-write` | LFS upload batches, immutable uploads, and upload verification |
+| `lfs-write` | LFS upload batches, immutable uploads, resumable upload status/append, and upload verification |
 
 No scope implies another. `--allow-receive` does not enable LFS, and LFS uploads
 remain possible with Git receive disabled. Every batch, object, and verification
@@ -142,9 +142,94 @@ the same identity and complete payload. A successful upload repeated under the
 same identity is idempotent. An upload batch omits upload actions for objects
 already present in verified custody.
 
+### Resume an upload with Tus
+
+Enable the Git LFS client's existing resumable upload adapter in the client
+repository:
+
+```sh
+git config --local lfs.tustransfers true
+git push origin HEAD:refs/heads/main
+```
+
+The client must also allow advanced transfers (`lfs.basictransfersonly` must not
+be true). See the upstream [Git LFS configuration reference](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-config.adoc)
+and [Tus upload adapter](https://github.com/git-lfs/git-lfs/blob/main/tq/tus_upload.go).
+When an upload Batch request offers `tus`, the server selects it and returns an
+authenticated `/info/lfs/objects/<oid>/<size>/tus` action. Repeating Batch resumes
+the same principal's existing session without discarding its acknowledged
+prefix. An omitted transfer list still selects `basic`; downloads continue to
+select `basic` and retain their range support.
+
+The adapter implements the [Tus 1.0 core protocol](https://tus.io/protocols/resumable-upload).
+Batch creates the upload resource, as expected by Git LFS; a separate creation
+request is unnecessary.
+
+| Request to the upload action | Result |
+| --- | --- |
+| `HEAD` with `Tus-Resumable: 1.0.0` | `200`, durable `Upload-Offset`, fixed `Upload-Length`, no body, and `Cache-Control: no-store` |
+| `PATCH` with version, exact `Upload-Offset`, and `Content-Type: application/offset+octet-stream` | Streams fixed-length or chunked bytes; `204` and the new durable offset on success |
+| `OPTIONS` | `204`, `Tus-Version: 1.0.0`, `Tus-Max-Size`, and the supported methods; ignores the request's Tus version |
+| Missing/unsupported version on HEAD or PATCH | `412` and the supported Tus version |
+| A stale PATCH offset | `409`, without consuming its body or modifying the upload |
+
+All three methods require a current `lfs-write` grant. Unfinished sessions bind
+the exact principal, object digest, length, tenant, repository and incarnation;
+another principal cannot inspect or append their prefixes. Credential rotation
+that preserves the principal can resume; revoking the grant prevents subsequent
+status and append requests. `X-HTTP-Method-Override` is supported, and an override
+to PATCH remains subject to the listener's cross-site mutation guard. Version,
+scope, size, session existence and offset checks precede `100 Continue`.
+No Tus extensions are advertised. Creation, concatenation, deferred length,
+metadata, per-request checksum and termination requests are refused. Whole-object
+SHA-256 verification is mandatory regardless of the transfer mode.
+
+An interrupted PATCH retains a synced, checked prefix. Reissue HEAD before
+retrying, because a failed response does not establish how many bytes became
+durable. A process restart may lose only bytes beyond the retained checkpoint;
+an acknowledged offset is never inferred from the staging file's length. Every
+reopen verifies the checkpoint's prefix digest. A complete offset is reported
+only after valid request framing, exact whole-object length and SHA-256,
+immutable publication, and canonical readback have all succeeded. HEAD can
+finish publication from an already verified final checkpoint after a crash.
+Malformed final framing cannot produce a full offset, and a wrong final digest
+poisons the session instead of silently resetting or publishing it. Empty objects
+complete during Batch only when their digest is SHA-256 of the empty payload.
+
+#### Durable staging and recovery
+
+Staging is derived transfer custody, separate from the immutable artifact
+namespace and from Git authority. A private scope directory contains a bounded
+catalog and one locked directory per session. Session names are SHA-256 over the
+`frankengit/lfs-upload-session/v1` domain separator (including its terminating NUL),
+the existing artifact-scope commitment, and the identity record. Files are private
+regular files with one link; unexpected entries, symlinks and inconsistent
+records fail closed. Locks are nonblocking and shared across service processes.
+
+The versioned identity record is exactly 64 bytes: `FGLFID01`, the 16-byte
+principal, the 32-byte LFS SHA-256, and an 8-byte big-endian length. The checkpoint
+is exactly 81 bytes: `FGLFCP01`, the 32-byte session-name digest, an 8-byte
+big-endian offset, the 32-byte prefix SHA-256, and one state byte (`0` active,
+`1` verified and ready for immutable publication, `2` poisoned). Active offsets
+must be smaller than the object length; ready offsets equal it and carry the
+expected object digest. Poisoned or unknown states refuse further progress.
+Payload sync precedes atomic checkpoint replacement and directory sync.
+
+Each scope permits at most 64 unfinished sessions and reserves at most 4 GiB
+of their declared lengths, including bytes not yet received. The object limit
+remains 512 MiB. A reservation failure produces an individual Batch `429` error;
+an occupied lock produces a retryable `503`. Successful completion removes that
+principal's staging under the catalog lock and returns its reservation. Crash
+residue stays charged until an exact retry completes cleanup. Abandoned or
+poisoned sessions do not expire automatically: operator inspection and cleanup
+requires stopping writers first. Deleting staging loses resumable progress;
+it does not delete immutable payloads or change Git refs. Older basic-only
+servers cannot resume these sessions, but already published payloads retain the
+same storage identity and remain readable.
+
 ## Current bounds and recovery limits
 
-This profile supports `basic` transfers and SHA-256 LFS object IDs for both
+This profile supports `basic` transfers, `tus` uploads, and SHA-256 LFS object IDs for both
 SHA-1 and SHA-256 Git repositories. It accepts at most 100 objects per batch,
 64 KiB of batch/verification JSON, 512 MiB per object, and 512 MiB of aggregate
 declared payload bytes for verification within one batch. Objects outside the
@@ -161,8 +246,8 @@ I/O under that same deadline. A dropped reader or failed request closes the
 unlinked file. The existing buffered library read API retains its separate
 64 MiB ceiling; the HTTP adapter uses the verified streaming API.
 
-Payload retention is permanent. Pointer-aware garbage collection, resumable
-partial-byte uploads, LFS locking, remote object-store backends, and
+Payload retention is permanent. Pointer-aware garbage collection,
+LFS locking, remote object-store backends, and
 pointer-availability checks during Git receive are outside this profile. A
 client can publish an LFS pointer whose payload has not been uploaded; the
 normal Git LFS pre-push hook is responsible for uploading its objects first.
@@ -187,7 +272,13 @@ batch parsing. Range tests reconstruct a payload from two separately verified
 responses, check exact offsets and lengths, exercise conditional/full fallback,
 empty and missing objects, oversized/duplicate fields, corruption outside the
 selected slice, bounded streaming, and cancellation before headers and at
-response/flush boundaries. These adapter tests are separate from the real-client
+response/flush boundaries. Tus storage and adapter tests cover partial and
+interrupted uploads, cold reopen, exact offsets, authenticated session isolation,
+durable prefix verification, final framing and digest failures, publication
+recovery, staging quotas, checked paths and method overrides. The native TCP
+test shuts down and reopens the node between an interrupted PATCH and its resume,
+then verifies exact downloaded bytes and unchanged repository authority.
+These adapter tests are separate from the real-client
 campaign, which uses a prebuilt binary and an installed
 Git LFS client:
 

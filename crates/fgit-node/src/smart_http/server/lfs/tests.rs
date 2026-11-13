@@ -23,6 +23,7 @@ use crate::{
 
 mod range;
 mod streaming;
+mod tus;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const TENANT: TenantId = TenantId::from_bytes([1; 16]);

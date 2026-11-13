@@ -899,12 +899,14 @@ const fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRe
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
     Success,
+    NoContent,
     PartialContent,
     BadRequest,
     Unauthorized,
     Forbidden,
     NotFound,
     Conflict,
+    Precondition,
     TooLarge,
     HeaderTooLarge,
     MediaType,
@@ -921,12 +923,14 @@ impl Status {
     const fn line(self) -> &'static str {
         match self {
             Self::Success => "200 OK",
+            Self::NoContent => "204 No Content",
             Self::PartialContent => "206 Partial Content",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
             Self::Conflict => "409 Conflict",
+            Self::Precondition => "412 Precondition Failed",
             Self::TooLarge => "413 Content Too Large",
             Self::HeaderTooLarge => "431 Request Header Fields Too Large",
             Self::MediaType => "415 Unsupported Media Type",
@@ -1236,7 +1240,11 @@ fn refuses_cross_site(
     local: Option<SocketAddr>,
     trusted: Option<&HttpTrustedOrigin>,
 ) -> bool {
-    if matches!(envelope.method, "GET" | "HEAD") {
+    #[cfg(unix)]
+    let overridden_upload = lfs::overrides_read_method(envelope);
+    #[cfg(not(unix))]
+    let overridden_upload = false;
+    if matches!(envelope.method, "GET" | "HEAD") && !overridden_upload {
         return false;
     }
     let site = envelope.sec_fetch_site;
@@ -2446,6 +2454,49 @@ mod tests {
             "Origin: http://127.0.0.1:8123\r\n"
         ));
         assert!(!refuses(None, "POST", own, ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tus_method_override_cannot_bypass_the_cross_site_upload_guard() {
+        let local = Some(SocketAddr::from(([127, 0, 0, 1], 8123)));
+        let refuses = |method: &str, target: &str, overrides: &str, origin: &str| {
+            let bytes = format!(
+                "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:8123\r\nOrigin: {origin}\r\n{overrides}\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            refuses_cross_site(&envelope, local, None)
+        };
+        let tus = format!("/repo.git/info/lfs/objects/{}/12/tus", "a".repeat(64));
+        for method in ["GET", "HEAD", "POST", "PATCH"] {
+            assert!(refuses(
+                method,
+                &tus,
+                "X-HTTP-Method-Override: PATCH\r\n",
+                "https://evil.example",
+            ));
+            assert!(!refuses(
+                method,
+                &tus,
+                "X-HTTP-Method-Override: PATCH\r\n",
+                "http://127.0.0.1:8123",
+            ));
+        }
+        assert!(refuses(
+            "HEAD",
+            &tus,
+            "X-HTTP-Method-Override: HEAD\r\nX-HTTP-Method-Override: PATCH\r\n",
+            "https://evil.example",
+        ));
+        assert!(!refuses("HEAD", &tus, "", "https://evil.example"));
+        assert!(!refuses(
+            "GET",
+            "/repo.git/info/refs?service=git-upload-pack",
+            "X-HTTP-Method-Override: PATCH\r\n",
+            "https://evil.example",
+        ));
     }
 
     /// An external TLS terminator's public origin is accepted only when the

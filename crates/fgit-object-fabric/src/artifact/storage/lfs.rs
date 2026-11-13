@@ -15,6 +15,8 @@ use std::io::Read;
 use std::path::Path;
 
 pub mod transfer;
+mod upload;
+pub use upload::{MAX_ACTIVE_UPLOADS, MAX_RESERVED_UPLOAD_BYTES, UploadError, UploadState};
 
 pub const TRUST_DOMAIN: &str = "git-lfs-basic-v1";
 /// Streaming LFS custody uses the existing artifact payload envelope.
