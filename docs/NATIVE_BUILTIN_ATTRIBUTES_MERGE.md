@@ -49,6 +49,13 @@ not change. Receipts preserve the selected token, and queue-prefix artifacts and
 durable watcher configuration identities bind it distinctly from the older
 profiles. Queue preparation retains its existing two-parent-only restriction.
 
+The browser pull-request and merge-queue preparation forms offer the same
+explicit profiles. A preparation response must report the profile requested
+before its candidate can enter inspection. Changing the selection invalidates
+prepared work and any pending inspection. Conflicts from the attributes or
+exact-rename profiles remain visible, but cannot enter the direct-path resolver;
+revise the source or explicitly prepare again with the direct-path profile.
+
 ## Attribute selection
 
 Only repository-native, identity-verified blobs participate. For each ancestor

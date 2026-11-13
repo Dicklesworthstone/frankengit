@@ -223,18 +223,18 @@ export class PullClient {
   #check(epoch, serial = null) {
     if (!this.connected || epoch !== this.#transport.epoch || (serial !== null && serial !== this.#candidateSerial)) fail('Operation superseded; stale work was not selected.');
   }
-  async prepareAndInspect(number, fields, metadata, method = 'merge-commit') {
+  async prepareAndInspect(number, fields, metadata, method = 'merge-commit', profile = 'path-merge-v1') {
     const scope = this.#selected(); integer(number, 'PR number', 1);
-    const normalized = preparationCommand(fields, metadata, method), selected = subject(fields);
+    const normalized = preparationCommand(fields, metadata, method, profile), selected = subject(fields);
     if (scope.format !== selected.object_format) fail('Candidate hash domain differs from the repository.');
     this.invalidateCandidate(); const serial = this.#candidateSerial, epoch = this.#transport.epoch;
     const response = await this.#transport.request(`pulls/${number}/prepare`, {
       method: 'POST', body: form(normalized), statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
     });
-    const result = await preparationReply(response, number, selected, scope, this.#transport.crypto, false, method);
+    const result = await preparationReply(response, number, selected, scope, this.#transport.crypto, false, method, profile);
     this.#check(epoch, serial);
     if (!result.artifact) {
-      if (result.metadata.state === 'conflicted') {
+      if (result.metadata.state === 'conflicted' && profile === 'path-merge-v1') {
         const commitMetadata = Object.fromEntries(['author', 'committer', 'timestamp', 'message'].map(name => [name, normalized[name]]));
         this.#conflict = { number, scope, method, fields: selected, metadata: commitMetadata, report: copy(result.metadata) };
       }

@@ -44,6 +44,10 @@ export function mergeMethod(value) {
   if (!['merge-commit', 'squash'].includes(value)) fail('Choose merge-commit or squash explicitly.');
   return value;
 }
+export function mergeProfile(value) {
+  if (!['path-merge-v1', 'exact-renames-v1', 'builtin-attributes-v1'].includes(value)) fail('Choose a supported native merge profile.');
+  return value;
+}
 export function candidateMethod(artifact) {
   if (!artifact) return null;
   // Legacy source-tip receipts retain their fast-forward meaning. An explicitly
@@ -67,7 +71,7 @@ export function makeBoundary(command, bundle, crypto) {
   }
   fail('Could not allocate a collision-free upload boundary.');
 }
-export function preparationCommand(fields, metadata, method = 'merge-commit') {
+export function preparationCommand(fields, metadata, method = 'merge-commit', profile = 'path-merge-v1') {
   keys(fields, SUBJECT_FIELDS); keys(metadata, ['author', 'committer', 'timestamp', 'message']);
   const result = subject(fields);
   for (const name of ['author', 'committer']) {
@@ -78,6 +82,7 @@ export function preparationCommand(fields, metadata, method = 'merge-commit') {
   result.message = text(metadata.message, 64 * 1024, 'commit message');
   if (!result.message.trim()) fail('A nonempty explicit commit message is required.');
   if (mergeMethod(method) === 'squash') result.method = method;
+  if (mergeProfile(profile) !== 'path-merge-v1') result.profile = profile;
   form(result); return result;
 }
 function noEffects(reply) {
@@ -121,10 +126,12 @@ export function preparationEnvelope(response) {
   }
   return { metadata, bundle };
 }
-export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit') {
+export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit', profile = 'path-merge-v1') {
   const { metadata, bundle } = preparationEnvelope(response);
   const selected = pinned(metadata, scope); noEffects(metadata);
-  if (metadata.type !== 'merge_preparation' || metadata.profile !== 'path-merge-v1' || !Array.isArray(metadata.conflicts)) fail('Unsupported merge preparation.');
+  if (metadata.type !== 'merge_preparation' || !Array.isArray(metadata.conflicts)) fail('Unsupported merge preparation.');
+  if (metadata.profile !== mergeProfile(profile)) fail('Preparation profile changed.');
+  if (expectResolved && profile !== 'path-merge-v1') fail('Explicit conflict resolution requires the direct path merge profile.');
   if (mergeMethod(metadata.method === undefined ? 'merge-commit' : metadata.method) !== mergeMethod(method)) fail('Preparation method changed.');
   matchSubject(metadata.subject, expected, number, selected.binding.format, 'pull_request');
   if ((metadata.state === 'resolved') !== expectResolved) fail('Preparation and explicit resolution cannot substitute for one another.');

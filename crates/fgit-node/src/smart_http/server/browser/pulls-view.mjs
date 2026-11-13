@@ -145,7 +145,7 @@ const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'conn
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
-  'prepare', 'candidate-method', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
+  'prepare', 'candidate-method', 'candidate-profile', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
   'candidate-import', 'candidate-import-file', 'candidate-import-submit', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
   'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
 
@@ -154,6 +154,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const nodes = Object.fromEntries(IDS.map(id => { const el = doc.getElementById(id); if (!el) fail(`Missing UI element: ${id}`); return [id, el]; }));
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   nodes['candidate-method'].value ||= 'merge-commit';
+  nodes['candidate-profile'].value ||= 'path-merge-v1';
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   let inlineSelection = null, inlineButtons = [];
@@ -239,6 +240,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
       'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers']) nodes[id].value = '';
     nodes['candidate-method'].value = 'merge-commit';
+    nodes['candidate-profile'].value = 'path-merge-v1';
     nodes.confirm.checked = false;
   }
   function disconnect() {
@@ -538,16 +540,18 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       ...subjectReferences(data), source_tip: data.source_tip, target_tip: data.target_tip };
     const metadata = { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value };
     nodes.candidate.replaceChildren(); resolution.clear();
-    const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value); guard();
+    const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value, nodes['candidate-profile'].value); guard();
     if (result.inspection) {
       const rendered = renderInspection(doc, nodes.candidate, result.inspection);
       status(`Candidate prepared and inspected, without publication.${rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''}`);
     } else {
       item(doc, nodes.candidate, 'h3', `Preparation: ${result.metadata.state}`);
       for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
-      if (result.metadata.state === 'conflicted') {
+      if (result.metadata.state === 'conflicted' && client.conflict) {
         resolution.show(result.metadata);
         status(`Choose every conflict explicitly below. Resolution constructs and inspects a new ${result.metadata.method === 'squash' ? 'squash' : 'merge'} candidate; it does not record approval or publish.`);
+      } else if (result.metadata.state === 'conflicted') {
+        status('This profile produced conflicts. Revise the source or explicitly prepare with another profile; direct-path resolution is unavailable for these conflict coordinates.');
       } else status('Already up to date. No candidate, transaction or approval was produced.');
     }
   }));
@@ -559,6 +563,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   }));
   for (const id of ['metadata', 'prepare']) nodes[id].addEventListener('input', invalidateCandidate);
   on('candidate-method', 'change', invalidateCandidate);
+  on('candidate-profile', 'change', invalidateCandidate);
   on('candidate-download', 'click', () => run('export', async () => { downloadText('frankengit-candidate.json', client.exportCandidate()); status('Candidate receipt exported without credentials. Its bytes must be inspected before another reviewer can act.'); }));
   on('inspection-download', 'click', () => run('export', async () => {
     const candidate = client.candidate; if (!candidate) fail('No inspected candidate.');

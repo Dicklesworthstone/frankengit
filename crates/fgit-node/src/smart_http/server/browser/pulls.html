@@ -83,6 +83,7 @@
     <p>Uses the selected open PR’s exact version and tips. Git-read and PR-read grants are required on the same token. This operation does not stage objects, record a vote, or move a ref.</p>
     <form id="prepare">
       <label>Merge method <select id="candidate-method"><option value="merge-commit">Merge commit (two parents)</option><option value="squash">Squash (one target parent)</option></select></label>
+      <label>Native merge profile <select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option><option value="builtin-attributes-v1">Built-in attribute drivers</option></select></label>
       <div class="fields">
         <label>Explicit policy epoch <input id="policy-epoch" inputmode="numeric" required></label>
         <label>Author <input id="author" placeholder="Name &lt;email@example.org&gt;" required></label>
@@ -96,7 +97,7 @@
       <label>Or import a shared candidate receipt (up to 24 MiB) <input id="candidate-import-file" type="file" accept="application/json,.json" required></label>
       <button id="candidate-import-submit" type="submit">Reinspect imported candidate — read only</button>
     </form>
-    <p>Browser candidate bundles are capped at 16 MiB. Merge-commit and squash conflicts offer explicit per-path resolution below. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
+    <p>Browser candidate bundles are capped at 16 MiB. Direct path merge conflicts offer explicit per-path resolution for both merge commits and squash. Conflicts under other profiles remain diagnostics; revise the source or explicitly prepare again with a different profile. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
     <button id="candidate-download" type="button">Download candidate receipt</button>
     <button id="inspection-download" type="button">Download full inspection JSON</button>
     <div id="candidate"></div>
