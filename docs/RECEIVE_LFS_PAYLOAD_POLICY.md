@@ -25,8 +25,10 @@ fg serve-http /srv/frankengit-state "$TENANT_ID" "$REPOSITORY_ID" 127.0.0.1:8080
   --continuous --stop-file /srv/frankengit-stop
 ```
 
-For SSH or raw Git, add the same `--require-lfs-payloads` argument to the
-existing service command. Payloads can be uploaded through a separately
+For single-repository SSH or raw Git, add the same `--require-lfs-payloads`
+argument to the existing service command. The
+[multi-repository SSH catalog](MULTI_REPOSITORY_SSH.md) selects this requirement
+with each row's final LFS-root field. Payloads can be uploaded through a separately
 configured HTTP listener or imported with the [LFS portability commands](GIT_LFS_PORTABILITY.md).
 Their namespace must match the exact tenant, repository, and authenticated
 incarnation served by the Git listener.
@@ -34,7 +36,8 @@ incarnation served by the Git listener.
 The requirement is independent of `--lfs-root`, receive enablement and transport
 credential grants. It neither enables an LFS endpoint nor gives a writer LFS
 download access. HTTP transfer still requires its own `lfs-read` or `lfs-write`
-grant. Each listener's readiness record includes `lfs_payloads_required`.
+grant. Single-repository listener readiness includes `lfs_payloads_required`;
+catalog-mode SSH instead reports its routing profile and repository count.
 Omitting the new option preserves the previous Git-only validation behavior.
 Deployments must select the requirement on every receive listener that should
 enforce it; this option is not a persisted repository-wide policy.

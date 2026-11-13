@@ -425,6 +425,8 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - service or agent uses sponsor/admin ambient token;
 - weak auth used for high-impact override;
 - replayed signed request;
+- SSH route substitution across tenants, path aliases selecting a different
+  repository, or a recreated storage root inheriting an old route's grants;
 - capability serialized into logs/context/cache;
 - cross-site request forgery: a page in the operator's browser sends a
   state-changing request that rides an ambient, browser-cached credential.
@@ -437,6 +439,17 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - brokered secrets/effects; no ambient sponsor token/cloud metadata;
 - idempotency/nonces according to protocol;
 - redaction and secret-taint tests;
+- explicit multi-repository SSH catalogs bind exact parsed paths to one
+  authenticated tenant/repository/incarnation and live deploy-key source.
+  Authorization and dispatch share the immutable route entry; no repository
+  node is leased before the route's command grant. Duplicate identities and
+  overlapping canonical roots refuse startup, while cold opens recheck the
+  expected incarnation. Unknown routes, denied services and source failures
+  share one refusal. Global, route and credential write ceilings all apply.
+  This operator-controlled profile does not provide canonical account/key
+  administration, constant-time route secrecy, or protection from replacement
+  of all authority inputs by a privileged operator
+  ([deployment contract](docs/MULTI_REPOSITORY_SSH.md));
 - stock HTTP attempt aliases preserve ordinary routing and authentication
   error ordering: malformed aliases are not rejected based on the configured
   repository prefix, and recognized aliases authenticate before retry-header

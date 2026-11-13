@@ -22,7 +22,9 @@ use asupersync::util::EntropySource;
 use ed25519_dalek::SigningKey;
 use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::DeployKeyBinding;
-use fgit_types::{PrincipalId, RepositoryId};
+use fgit_types::PrincipalId;
+#[cfg(test)]
+use fgit_types::RepositoryId;
 
 use crate::auth::{
     AuthRefusal, SshCommandAuthorizer, SshCommandGrant, StaticDeployKeyAuthorizer,
@@ -880,29 +882,10 @@ impl SshServerSession {
                         }
                     };
 
-                    let clean_path = parsed_command
-                        .repository_path()
-                        .trim_start_matches('/')
-                        .strip_suffix(".git")
-                        .unwrap_or_else(|| {
-                            parsed_command.repository_path().trim_start_matches('/')
-                        });
-
-                    let repo_id =
-                        if let Ok(id) = RepositoryId::from_hex(&clean_path.to_ascii_lowercase()) {
-                            id
-                        } else {
-                            let digest = sha256_digest(parsed_command.repository_path().as_bytes());
-                            let mut repo_bytes = [0u8; 16];
-                            repo_bytes.copy_from_slice(&digest[..16]);
-                            RepositoryId::from_bytes(repo_bytes)
-                        };
-
-                    match self.authorizer.authorize_command_grant(
-                        pub_key,
-                        repo_id,
-                        parsed_command.service(),
-                    ) {
+                    match self
+                        .authorizer
+                        .authorize_repository_command(pub_key, &parsed_command)
+                    {
                         Ok(grant) => {
                             self.authenticated_grant = Some(grant);
                             self.active_command = Some(parsed_command);

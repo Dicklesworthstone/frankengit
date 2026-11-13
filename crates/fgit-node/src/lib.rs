@@ -223,8 +223,8 @@ mod verified_reads;
 pub mod webhook;
 
 pub use ssh::{
-    FileDeployKeyAuthorizer, FileDeployKeyRefusal, NodeSshRefusal, SshServerLimits,
-    SshServerReceipt,
+    FileDeployKeyAuthorizer, FileDeployKeyRefusal, MAX_SSH_REPOSITORY_ROUTES, NodeSshRefusal,
+    SshRepositoryRoute, SshServerLimits, SshServerReceipt,
 };
 pub use webhook::{DeadLetterQueue, WebhookDeliveryDestination};
 
@@ -8443,6 +8443,8 @@ pub enum NodeInitialization {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
     authority_head: AuthenticatedHead,
+    repository_incarnation_id: RepositoryIncarnationId,
+    object_format: GitHashAlgorithm,
     sampled_object: Option<GitOid>,
 }
 
@@ -8492,6 +8494,19 @@ impl DoctorReport {
     #[must_use]
     pub const fn authority_head(&self) -> &AuthenticatedHead {
         &self.authority_head
+    }
+
+    /// Canonical identity resolved when this existing repository was opened.
+    /// Operators can retain this value as an explicit deployment expectation.
+    #[must_use]
+    pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId {
+        self.repository_incarnation_id
+    }
+
+    /// The repository's permanent, canonically resolved Git hash domain.
+    #[must_use]
+    pub const fn object_format(&self) -> GitHashAlgorithm {
+        self.object_format
     }
 
     /// The exact object independently re-verified by this invocation, if any.
@@ -11688,6 +11703,8 @@ impl OneNode {
         }
         Ok(DoctorReport {
             authority_head,
+            repository_incarnation_id: self.repository_incarnation_id(),
+            object_format: self.object_format(),
             sampled_object,
         })
     }

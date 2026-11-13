@@ -52,6 +52,14 @@ Atomically replace the private regular file to revoke, rotate or narrow grants
 for later commands. A malformed or unavailable replacement grants nothing.
 An already admitted bounded command keeps its selected grant.
 
+The [multi-repository listener](MULTI_REPOSITORY_SSH.md) binds an exact
+`tenant/repository` path to a canonical repository incarnation and its own live
+deploy-key source. That source receives the selected repository's actual ID;
+principal and ref ceiling stay attached to the same route through dispatch.
+Writes additionally require both the listener's receive flag and the catalog
+row's `read-write` ceiling. The route catalog is fixed until restart while key
+files retain their command-time replacement behavior.
+
 A legacy principal-only authorization consumer refuses scoped receive grants;
 it cannot silently strip the ceiling. SSH receive also refuses a missing grant
 without substituting the raw Git daemon's operator principal.

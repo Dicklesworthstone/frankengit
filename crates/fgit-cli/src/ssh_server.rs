@@ -21,6 +21,8 @@ use fgit_node::{
 use fgit_ssh::{SigningKey, SshCommandAuthorizer, StaticDeployKeyAuthorizer};
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
+mod repositories;
+
 const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-id> <listen-address>
   --host-key-file <path>
   (--deploy-key <pubkey-hex> --principal <principal-id-hex> --scopes <read|write|read,write> | --deploy-keys-file <path>)
@@ -37,7 +39,11 @@ Deploy-key files retain the three-column legacy format. To limit native ref writ
 start the file with frankengit-ssh-deploy-keys-v2 and give every row a fourth field:
 all | none | exact:<lowercase-ref-hex> | prefix:<lowercase-namespace-hex>.
 Separate multiple selectors with commas; prefix namespaces must end in a slash.
-The complete file is reloaded at each command; see docs/SSH_REF_WRITE_SCOPES.md.";
+The complete file is reloaded at each command; see docs/SSH_REF_WRITE_SCOPES.md.
+
+For multiple repositories on one listener, use:
+  fg serve-ssh <listen-address> --repositories-file <absolute-private-file> --host-key-file <path>
+See docs/MULTI_REPOSITORY_SSH.md for the bounded, incarnation-pinned route table.";
 
 struct Prepared {
     configuration: NodeConfig,
@@ -273,6 +279,12 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 }
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
+    if arguments
+        .iter()
+        .any(|argument| argument == "--repositories-file")
+    {
+        return repositories::run(arguments);
+    }
     let prepared = parse(arguments)?;
     let lfs_payloads_required = prepared.configuration.receive_lfs_root().is_some();
     let stop = prepared

@@ -198,6 +198,11 @@ clone, fetch and push:
   session budget (`--session-timeout-secs`, default 300 s, plus the configured
   allowance for admitted Git bytes), so a client still compressing a large
   pack is not subject to the pre-command 60 s idle cutoff.
+  Its [multi-repository mode](docs/MULTI_REPOSITORY_SSH.md) uses a private
+  `--repositories-file` to serve up to 64 exact `tenant/repository` routes on
+  one listener, with separate live key grants, incarnation checks, writer
+  gates and cache domains. Each row selects read-only or read-write service
+  and optional LFS payload enforcement.
 - `fg serve` and `fg serve-ssh` support `--continuous --stop-file <path>`, with
   SIGTERM/SIGINT requesting the same drain. The owned listener closes before
   accepted sessions settle; [service lifetime controls](docs/GIT_SERVICE_LIFETIME.md)
