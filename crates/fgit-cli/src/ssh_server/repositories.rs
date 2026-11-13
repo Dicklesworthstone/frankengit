@@ -479,4 +479,5 @@ pub(super) fn run(arguments: &[String]) -> Result<CliOutcome, String> {
 }
 
 #[cfg(test)]
+#[path = "repositories/tests.rs"]
 mod tests;

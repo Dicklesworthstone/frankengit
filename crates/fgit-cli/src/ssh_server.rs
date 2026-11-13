@@ -21,6 +21,7 @@ use fgit_node::{
 use fgit_ssh::{SigningKey, SshCommandAuthorizer, StaticDeployKeyAuthorizer};
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
+#[path = "ssh_server/repositories.rs"]
 mod repositories;
 
 const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-id> <listen-address>

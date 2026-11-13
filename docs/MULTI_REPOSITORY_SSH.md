@@ -175,8 +175,9 @@ client test, not an upstream Git/OpenSSH differential qualification.
 
 ```sh
 cargo test --locked -p fgit-ssh --test ssh_session_security
+cargo test --locked -p fgit-node --test ssh_repository_routes -- --test-threads=1
 cargo test --locked -p fgit-node --lib ssh::routing::tests -- --test-threads=1
-cargo test --locked -p fgit-cli --bin fg ssh_server::repositories::tests -- --test-threads=1
+cargo test --locked -p fgit-cli --test git_server_options ssh_server::repositories::tests -- --test-threads=1
 ```
 
 This delivers the explicit deployment-routing part of NB-08

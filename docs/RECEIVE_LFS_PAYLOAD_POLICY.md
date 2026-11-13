@@ -110,6 +110,12 @@ Cancellation preserves the existing typed receive refusal. Diagnostics do not
 disclose the payload identity or filesystem path. A failing check precedes
 staging and admission, including all siblings of a non-atomic push.
 
+The existing receive verdict classification controls wire reporting. With
+`report-status` negotiated, missing or corrupt payload custody produces a Git
+`ng` verdict for every command. Malformed pointer syntax uses the existing fatal
+`ObjectHeaderInvalid` path: Smart HTTP returns HTTP 400 and its generic refusal
+body. It does not manufacture a per-ref outcome for that classification.
+
 After uploading a missing payload, retry the original Git push. The check does
 not change transaction identities or overwrite historical decisions. Ordinary
 receive validation still precedes outcome recovery: subsequent custody damage
@@ -127,8 +133,12 @@ add its own canonical retention integration before that contract changes.
 The native validator tests cover both Git hash formats, missing/uploaded/corrupt
 payloads, existing history and empty packs, unrelated pack extras, gitlinks,
 namespace isolation, deletion, cancellation, budgets and malformed pointers.
-The HTTP integration test drives persisted receive and LFS upload over real
+The HTTP integration tests drive persisted receive and LFS upload over real
 loopback connections, including restart and unchanged authority on refusal.
+They also corrupt completed custody, reject unsupported pointer syntax, and
+verify that one missing payload prevents an otherwise valid sibling of a
+non-atomic push from publishing or promoting its native objects. A matching
+successful multi-ref request exercises the permitted path.
 These are native integration tests, not a pinned stock-client qualification.
 
 ```sh

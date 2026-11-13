@@ -1,8 +1,11 @@
+#![forbid(unsafe_code)]
+
 //! Real encrypted TCP requests through one listener and two canonical nodes.
 //! This is native transport integration, not an upstream-client differential.
 
-use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest, sha256_digest};
+use fgit_identity::deploy_key::{DeployKeyBinding, DeployKeyScope};
+use fgit_node::{NodeConfig, OneNode, SshRepositoryRoute, SshServerLimits};
 use fgit_ssh::auth::build_userauth_signature_preimage;
 use fgit_ssh::crypto::{
     Curve25519Kex, OpenSshChaCha20Poly1305, derive_key, encode_ed25519_public_key, sign_ed25519,
@@ -10,10 +13,85 @@ use fgit_ssh::crypto::{
 };
 use fgit_ssh::session::{DEFAULT_MAX_PACKET_SIZE, KEX_STRICT_CLIENT, SERVER_IDENTIFICATION, msg};
 use fgit_ssh::wire::{WireReader, WireWriter, decode_cleartext_packet, encode_cleartext_packet};
-use fgit_types::{GitOid, RefName};
+use fgit_ssh::{SigningKey, SshCommandAuthorizer, SshGitService, StaticDeployKeyAuthorizer};
+use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryId, TenantId};
 use fgit_wire::{Packet, WireLimits, encode_packets};
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        for _ in 0..128 {
+            let root = std::env::temp_dir().join(format!(
+                "fg-ssh-route-transport-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            match std::fs::create_dir(&root) {
+                Ok(()) => return Self(root),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("cannot create SSH route fixture: {error}"),
+            }
+        }
+        panic!("SSH route fixture collision budget exhausted")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn node(root: PathBuf, tenant: u8, format: GitHashAlgorithm) -> OneNode {
+    let configuration = NodeConfig::new(
+        root,
+        TenantId::from_bytes([tenant; 16]),
+        RepositoryId::from_bytes([0x72; 16]),
+    )
+    .with_object_format(format)
+    .with_worker_threads(2);
+    let (mut node, _) = OneNode::init(configuration).unwrap();
+    let generation = node
+        .runtime()
+        .block_on(node.authenticate_authority_head())
+        .unwrap()
+        .receipt()
+        .generation();
+    node.bring_into_service(generation).unwrap();
+    node
+}
+
+fn route(node: &OneNode, path: &str, principal: u8, seed: u8) -> SshRepositoryRoute {
+    let key = SigningKey::from_bytes(&[seed; 32])
+        .verifying_key()
+        .to_bytes();
+    let source: Arc<dyn SshCommandAuthorizer> = Arc::new(StaticDeployKeyAuthorizer::new(vec![
+        DeployKeyBinding::register(
+            node.repository_id(),
+            PrincipalId::from_bytes([principal; 16]),
+            fgit_crypto::VerifyingKey::from_bytes(key),
+            &[DeployKeyScope::Read, DeployKeyScope::Write],
+        )
+        .unwrap(),
+    ]));
+    SshRepositoryRoute::try_new(path.into(), node, source, true).unwrap()
+}
+
+fn reopen_configuration(root: PathBuf, node: &OneNode) -> NodeConfig {
+    NodeConfig::new(root, node.tenant_id(), node.repository_id())
+        .with_object_format(node.object_format())
+        .with_expected_repository_incarnation(node.repository_incarnation_id())
+        .with_worker_threads(2)
+}
 
 const CLIENT_IDENT: &[u8] = b"SSH-2.0-FrankenGit-Route-Test\r\n";
 const CLIENT_CHANNEL: u32 = 37;
@@ -319,12 +397,12 @@ fn one_encrypted_listener_isolates_pushes_and_advertisements_across_tenants_and_
     let first = node(scratch.0.join("first"), 0x71, GitHashAlgorithm::Sha1);
     let second = node(scratch.0.join("second"), 0x81, GitHashAlgorithm::Sha256);
     let routes = vec![
-        route(&first, "alpha/repo.git", 1, 2, true),
-        route(&second, "beta/repo.git", 3, 4, true),
+        route(&first, "alpha/repo.git", 1, 2),
+        route(&second, "beta/repo.git", 3, 4),
     ];
     let configurations = [
-        routes[0].configuration.clone(),
-        routes[1].configuration.clone(),
+        reopen_configuration(scratch.0.join("first"), &first),
+        reopen_configuration(scratch.0.join("second"), &second),
     ];
     second.shutdown().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -332,7 +410,7 @@ fn one_encrypted_listener_isolates_pushes_and_advertisements_across_tenants_and_
     let worker = std::thread::spawn(move || {
         let result = first.serve_ssh_routes_bounded(
             &listener,
-            crate::ssh::SshServerLimits::try_new(6, 2).unwrap(),
+            SshServerLimits::try_new(6, 2).unwrap(),
             SigningKey::from_bytes(&[9; 32]),
             routes,
         );
@@ -389,9 +467,9 @@ fn one_encrypted_listener_isolates_pushes_and_advertisements_across_tenants_and_
         assert_eq!(receipt.exit, 0);
     }
     let receipt = worker.join().unwrap();
-    assert_eq!(receipt.accepted_sessions, 6);
-    assert_eq!(receipt.completed_sessions, 4);
-    assert_eq!(receipt.refused_sessions, 2);
+    assert_eq!(receipt.accepted_sessions(), 6);
+    assert_eq!(receipt.completed_sessions(), 4);
+    assert_eq!(receipt.refused_sessions(), 2);
     for (index, configuration) in configurations.into_iter().enumerate() {
         let reopened = OneNode::open_existing(configuration).unwrap();
         let snapshot = reopened

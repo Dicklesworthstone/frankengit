@@ -6,7 +6,8 @@
 use super::*;
 use fgit_ssh::{SigningKey, SshCommandAuthorizer, SshGitService};
 use fgit_types::{CellState, GitHashAlgorithm, PrincipalId};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt, symlink};
+#[cfg(not(target_os = "linux"))]
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -451,8 +452,23 @@ fn table_reads_require_private_unlinked_regular_files_and_validate_every_row() {
     assert!(read_table(&alias).is_err());
     assert!(read_table(&scratch.0).is_err());
     let socket = scratch.0.join("socket");
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{CWD, FileType, Mode};
+
+        // File-type rejection needs a genuine socket inode, not a listener.
+        rustix::fs::mknodat(CWD, &socket, FileType::Socket, Mode::RUSR | Mode::WUSR, 0).unwrap();
+    }
+    #[cfg(not(target_os = "linux"))]
     let listener = UnixListener::bind(&socket).unwrap();
+    assert!(
+        fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
     assert!(read_table(&socket).is_err());
+    #[cfg(not(target_os = "linux"))]
     drop(listener);
 
     fs::write(&path, padded_table(MAX_TABLE_BYTES)).unwrap();

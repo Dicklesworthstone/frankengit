@@ -12,8 +12,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-mod transport;
-
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Scratch(PathBuf);

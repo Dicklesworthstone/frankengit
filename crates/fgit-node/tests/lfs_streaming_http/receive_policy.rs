@@ -1,5 +1,6 @@
 //! The real authenticated listener composes LFS custody with ordinary receive.
 use std::collections::BTreeMap;
+use std::io::{Seek, SeekFrom};
 
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_git_object::ObjectType;
@@ -70,6 +71,21 @@ impl Objects {
         );
         id
     }
+    fn graph(
+        &mut self,
+        format: GitHashAlgorithm,
+        body: Vec<u8>,
+        message: &str,
+    ) -> (GitOid, GitOid) {
+        let blob = self.add(format, ObjectType::Blob, body);
+        let mut tree = b"100644 asset.bin\0".to_vec();
+        tree.extend_from_slice(blob.as_bytes());
+        let tree = self.add(format, ObjectType::Tree, tree);
+        let commit = self.add(format, ObjectType::Commit, format!(
+            "tree {tree}\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 +0000\n\n{message}\n",
+        ).into_bytes());
+        (commit, blob)
+    }
     fn pack(&self, format: GitHashAlgorithm) -> Vec<u8> {
         let limits = PackLimits::default();
         let ids: Vec<_> = self.0.keys().copied().collect();
@@ -103,26 +119,17 @@ fn push(
     pack: &[u8],
     key: &str,
 ) -> String {
-    let zero = "0".repeat(format.digest_len() * 2);
-    let mut body = encode_packets(
-        &[
-            Packet::Data(
-                format!(
-                    "{zero} {commit} {reference}\0report-status object-format={}",
-                    format.as_str()
-                )
-                .into_bytes(),
-            ),
-            Packet::Flush,
-        ],
-        &WireLimits::default(),
-    )
-    .unwrap();
-    body.extend_from_slice(pack);
-    let mut stream = server.request("POST", "/git-receive-pack", 'a', &format!(
-        "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\nIdempotency-Key: {key}\r\n", body.len(),
-    ));
-    stream.write_all(&body).unwrap();
+    push_commands(server, format, &[(reference, commit)], pack, key)
+}
+
+fn push_commands(
+    server: &Server,
+    format: GitHashAlgorithm,
+    commands: &[(&str, GitOid)],
+    pack: &[u8],
+    key: &str,
+) -> String {
+    let mut stream = receive_request(server, format, commands, pack, key);
     let head = head(&mut stream, 200);
     let mut wire = Vec::new();
     (&mut stream)
@@ -146,6 +153,68 @@ fn push(
         wire
     };
     String::from_utf8(body).unwrap()
+}
+
+fn receive_request(
+    server: &Server,
+    format: GitHashAlgorithm,
+    commands: &[(&str, GitOid)],
+    pack: &[u8],
+    key: &str,
+) -> TcpStream {
+    assert!(!commands.is_empty());
+    let zero = "0".repeat(format.digest_len() * 2);
+    let mut packets = Vec::with_capacity(commands.len() + 1);
+    for (index, (reference, commit)) in commands.iter().enumerate() {
+        let mut command = format!("{zero} {commit} {reference}");
+        if index == 0 {
+            // Deliberately omit `atomic`: quarantine validation must finish
+            // before even the first otherwise-valid sibling can publish.
+            command.push_str(&format!(
+                "\0report-status object-format={}",
+                format.as_str()
+            ));
+        }
+        packets.push(Packet::Data(command.into_bytes()));
+    }
+    packets.push(Packet::Flush);
+    let mut body = encode_packets(&packets, &WireLimits::default()).unwrap();
+    body.extend_from_slice(pack);
+    let mut stream = server.request("POST", "/git-receive-pack", 'a', &format!(
+        "Content-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\nIdempotency-Key: {key}\r\n", body.len(),
+    ));
+    stream.write_all(&body).unwrap();
+    stream
+}
+
+fn assert_malformed_pointer_refused(
+    server: &Server,
+    format: GitHashAlgorithm,
+    reference: &str,
+    commit: GitOid,
+    pack: &[u8],
+    key: &str,
+) {
+    let mut stream = receive_request(server, format, &[(reference, commit)], pack, key);
+    // ObjectHeaderInvalid follows the transport's fatal receive path, with
+    // its exact HTTP 400 plain-text refusal and no per-command report-status.
+    let header = head(&mut stream, 400);
+    assert!(
+        header
+            .lines()
+            .any(|line| line == "Content-Type: text/plain; charset=utf-8"),
+        "{header}"
+    );
+    let expected = b"Smart HTTP request refused\n";
+    assert_eq!(content_length(&header), expected.len() as u64);
+    let mut body = vec![0; expected.len()];
+    stream.read_exact(&mut body).unwrap();
+    assert_eq!(body.as_slice(), expected);
+    assert_eq!(
+        stream.read(&mut [0; 1]).unwrap(),
+        0,
+        "exact fatal response EOF"
+    );
 }
 
 fn upload(server: &Server, object: LfsObject, payload: &[u8]) {
@@ -200,6 +269,30 @@ fn custody_files(path: &Path) -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+fn assert_unpublished(
+    config: &NodeConfig,
+    generation: HeadGeneration,
+    objects: &Objects,
+) -> OneNode {
+    let node = reopened(config);
+    assert_eq!(assert_refs(&node, &[]), generation);
+    for id in objects.0.keys() {
+        assert!(
+            node.read_git_object(*id).is_err(),
+            "refused receive must not promote native object {id}"
+        );
+    }
+    node
+}
+
+fn assert_refused(response: &str, references: &[&str], code: &str) {
+    for reference in references {
+        assert!(response.contains(&format!("ng {reference} ")), "{response}");
+    }
+    assert!(response.contains(&format!("({code})")), "{response}");
+    assert!(!response.contains("ok refs/"), "{response}");
 }
 
 #[test]
@@ -282,6 +375,180 @@ fn authenticated_http_push_requires_lfs_payloads_and_keeps_policy_after_cold_reo
             node.read_git_object(blob).unwrap().payload(),
             object.pointer().as_bytes()
         );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn corrupt_or_unsupported_lfs_refuses_the_entire_receive_before_any_promotion() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let config = scratch
+            .config()
+            .with_object_format(format)
+            .with_receive_lfs_root(scratch.0.join("lfs"));
+        let (mut node, _) = OneNode::init(config.clone()).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let initial = assert_refs(&node, &[]);
+        let grants = scratch.0.join("credentials");
+        policy_credentials(&grants, node.repository_incarnation_id());
+
+        let payload = b"uploaded custody must verify its actual retained payload bytes";
+        let object = LfsObject {
+            oid: LfsOid::of_payload(payload),
+            size: payload.len() as u64,
+        };
+        let server = receive_server(node, grants.clone(), 1);
+        upload(&server, object, payload);
+        assert_eq!(server.finish().completed_sessions(), 1);
+
+        // The upload completed and its listener shut down. Preserve the
+        // immutable file's length and header while corrupting one payload byte.
+        let files = custody_files(&scratch.0.join("lfs"));
+        assert_eq!(files.len(), 1, "one completed immutable LFS object");
+        let mut retained = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&files[0])
+            .unwrap();
+        let length = retained.metadata().unwrap().len();
+        assert!(length >= payload.len() as u64);
+        retained.seek(SeekFrom::End(-1)).unwrap();
+        let mut byte = [0_u8];
+        retained.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0x40;
+        retained.seek(SeekFrom::End(-1)).unwrap();
+        retained.write_all(&byte).unwrap();
+        retained.sync_all().unwrap();
+        assert_eq!(retained.metadata().unwrap().len(), length);
+        drop(retained);
+
+        let mut corrupt = Objects::default();
+        let (commit, _) = corrupt.graph(format, object.pointer().into_bytes(), "corrupt custody");
+        let pack = corrupt.pack(format);
+        let node = reopened(&config);
+        assert_eq!(assert_refs(&node, &[]), initial);
+        let server = receive_server(node, grants.clone(), 1);
+        let rejected = push(
+            &server,
+            format,
+            "refs/heads/corrupt",
+            commit,
+            &pack,
+            "corrupt-lfs-custody",
+        );
+        assert_refused(&rejected, &["refs/heads/corrupt"], "EvidenceInvalid");
+        assert_eq!(server.finish().refused_sessions(), 1);
+        let mut node = assert_unpublished(&config, initial, &corrupt);
+
+        // These are recognizable pointers, including historical and extension
+        // spellings. Unsupported forms must not become ordinary Git blobs.
+        let pointer = object.pointer();
+        for (case, body) in [
+            ("unsupported-version", pointer.replace("/v1", "/v2")),
+            (
+                "noncanonical-size",
+                pointer.replace(
+                    &format!("size {}", object.size),
+                    &format!("size 0{}", object.size),
+                ),
+            ),
+            (
+                "legacy-pointer",
+                pointer.replace(
+                    "https://git-lfs.github.com/spec/v1",
+                    "http://git-media.io/v/2",
+                ),
+            ),
+            (
+                "extension-pointer",
+                format!("ext-0-transform sha256:{}\n{pointer}", object.oid),
+            ),
+        ] {
+            let mut unsupported = Objects::default();
+            let (commit, _) = unsupported.graph(format, body.into_bytes(), case);
+            let pack = unsupported.pack(format);
+            let server = receive_server(node, grants.clone(), 1);
+            assert_malformed_pointer_refused(
+                &server,
+                format,
+                "refs/heads/unsupported",
+                commit,
+                &pack,
+                case,
+            );
+            assert_eq!(server.finish().refused_sessions(), 1);
+            node = assert_unpublished(&config, initial, &unsupported);
+        }
+
+        let valid_ref = "refs/heads/valid";
+        let blocked_ref = "refs/heads/blocked";
+        let valid_body = b"ordinary Git sibling must wait for the complete quarantine verdict\n";
+        let missing_payload = b"this distinct LFS object has never been uploaded";
+        let missing = LfsObject {
+            oid: LfsOid::of_payload(missing_payload),
+            size: missing_payload.len() as u64,
+        };
+        let mut mixed = Objects::default();
+        let (valid_commit, _) = mixed.graph(format, valid_body.to_vec(), "valid sibling");
+        let (blocked_commit, _) =
+            mixed.graph(format, missing.pointer().into_bytes(), "missing sibling");
+        let pack = mixed.pack(format);
+        let server = receive_server(node, grants.clone(), 1);
+        let rejected = push_commands(
+            &server,
+            format,
+            &[(valid_ref, valid_commit), (blocked_ref, blocked_commit)],
+            &pack,
+            "non-atomic-mixed-lfs",
+        );
+        assert_refused(
+            &rejected,
+            &[valid_ref, blocked_ref],
+            "ObjectClosureIncomplete",
+        );
+        assert_eq!(server.finish().refused_sessions(), 1);
+        let node = assert_unpublished(&config, initial, &mixed);
+
+        // A near-identical non-atomic request succeeds when both graphs are
+        // ordinary content. The first sibling is byte-identical to the one
+        // above, and unrelated corrupt LFS custody cannot block normal Git.
+        let mut permitted = Objects::default();
+        let (same_valid_commit, _) = permitted.graph(format, valid_body.to_vec(), "valid sibling");
+        assert_eq!(same_valid_commit, valid_commit);
+        let (other_commit, _) = permitted.graph(
+            format,
+            b"ordinary replacement for the absent LFS pointer\n".to_vec(),
+            "permitted sibling",
+        );
+        let pack = permitted.pack(format);
+        let server = receive_server(node, grants, 1);
+        let accepted = push_commands(
+            &server,
+            format,
+            &[(valid_ref, valid_commit), (blocked_ref, other_commit)],
+            &pack,
+            "non-atomic-permitted-lfs",
+        );
+        for reference in [valid_ref, blocked_ref] {
+            assert!(
+                accepted.contains(&format!("ok {reference}\n")),
+                "{accepted}"
+            );
+        }
+        assert!(!accepted.contains("ng refs/"), "{accepted}");
+        assert_eq!(server.finish().completed_sessions(), 1);
+        let node = reopened(&config);
+        assert_ne!(
+            assert_refs(
+                &node,
+                &[(valid_ref, valid_commit), (blocked_ref, other_commit)]
+            ),
+            initial
+        );
+        for (id, object) in &permitted.0 {
+            assert_eq!(node.read_git_object(*id).unwrap().payload(), object.body());
+        }
         node.shutdown().unwrap();
     }
 }

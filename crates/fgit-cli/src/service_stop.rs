@@ -276,7 +276,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinks_and_socket_stop_entries_fail_closed_without_touching_targets() {
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{FileTypeExt, symlink};
+        #[cfg(not(target_os = "linux"))]
         use std::os::unix::net::UnixListener;
         // Unix socket names have a small kernel byte limit. A worker's TMPDIR
         // can exceed it before our fixture name is appended. Keep the actual
@@ -297,8 +298,18 @@ mod tests {
             fs::remove_file(&path).unwrap();
         }
         assert_eq!(fs::read(&target).unwrap(), b"untouched");
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{CWD, FileType, Mode};
+
+            // File-type rejection needs a genuine socket inode, not a listener.
+            rustix::fs::mknodat(CWD, &path, FileType::Socket, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        }
+        #[cfg(not(target_os = "linux"))]
         let listener = UnixListener::bind(&path).unwrap();
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
         assert!(control.inspect().is_err());
+        #[cfg(not(target_os = "linux"))]
         drop(listener);
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"").unwrap();
