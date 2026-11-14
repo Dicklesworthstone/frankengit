@@ -1,8 +1,8 @@
 # Repository source browsing and literal search over HTTP
 
 The bounded repository gateway exposes the selected current commit, tree
-listing, file byte ranges and literal-byte code search through the native source
-readers. A client can search a repository, open a matching path and acquire the
+listing, file byte ranges, complete source directory archives and literal-byte
+code search through the native source readers. A client can search a repository, open a matching path and acquire the
 commit bytes needed to verify source membership, without opening local node
 storage.
 
@@ -53,7 +53,8 @@ Sponsored tokens have the form `fgagent_` followed by 64 lowercase hexadecimal
 characters. Their grants, expiry and revocation are authenticated from canonical
 repository state on every request. Source work and response disclosure retain
 the original bounded request lifetime and byte reservation. These tokens permit
-the closed current-source read routes, including `commit`, `tree` and `blob`;
+the closed current-source read routes, including `commit`, `tree`, `blob` and
+`archive`;
 they do not permit `source/log`, historical browsing, Git transport or
 `verified-blob`. A missing or invalid canonical grant cannot fall back to an
 ordinary token with a matching digest.
@@ -71,6 +72,7 @@ gateway that preserves real authentication rather than trusting client headers.
 POST {REPO_URL}/api/v1/source/commit
 POST {REPO_URL}/api/v1/source/tree
 POST {REPO_URL}/api/v1/source/blob
+POST {REPO_URL}/api/v1/source/archive
 POST {REPO_URL}/api/v1/source/search
 ```
 
@@ -97,7 +99,7 @@ There is no `object_id` request field. Annotated tags are not silently peeled;
 a ref that does not select a commit returns a typed error. Use a commit-valued
 branch or lightweight tag under the supported native reader profile.
 
-A successful response includes tenant, repository, incarnation, object format,
+A successful JSON response includes tenant, repository, incarnation, object format,
 ref, exact `source_head`, algorithm-qualified `snapshot_token`, `source_rcr`,
 `source_commit`, root-tree OID and explicit read-only/non-publication flags.
 Search's snapshot token is taken from the same native materialization that
@@ -207,6 +209,32 @@ Symlink payloads are link-text data, never followed into the repository or host
 filesystem. Traversing through a symlink is refused. Gitlinks remain opaque
 identities and cannot be read as files. Returned source text is not safe to
 insert into HTML or terminals without the consumer's proper data rendering.
+
+## Complete source archives
+
+`POST /api/v1/source/archive` exports the complete current directory under the
+same source-read grant. It accepts the common ref, format and snapshot fields
+plus optional lowercase `path_hex` for a selected subtree. Pagination, ranges,
+caller-supplied limits and arbitrary object selectors are refused.
+
+Success is a binary `application/x-tar` attachment named `source.tar`, with exact
+`Content-Length` and no-store headers. The `ustar-source-v1` profile preserves raw
+source names and bytes, executable modes, safe relative symlinks and opaque
+gitlink directories. Every page and file range must retain one authority head,
+RCR, commit and root tree. Output is assembled completely within the smaller of
+128 MiB and the configured response ceiling before success headers are sent.
+The original HTTP request lifetime also bounds assembly and delivery.
+
+`X-FrankenGit-Snapshot-Token`, `X-FrankenGit-Source-Head`,
+`X-FrankenGit-Source-Rcr`, `X-FrankenGit-Source-Commit`,
+`X-FrankenGit-Root-Tree` and `X-FrankenGit-Selected-Tree` identify the selection.
+These are source comparisons, not independent authority proofs. A truncated
+transfer is not a complete archive: clients must check the full response length
+before exposing a download. The source browser does this for its **Download
+directory** action.
+
+See [source tree archives](SOURCE_TREE_ARCHIVES.md) for an HTTP example, exact
+encoding rules, bounded refusals and the CLI export interface.
 
 ## Literal-byte code search
 

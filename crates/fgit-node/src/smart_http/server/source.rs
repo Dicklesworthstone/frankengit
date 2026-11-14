@@ -2,6 +2,7 @@
 //! Read grants never imply publication. Branch/tag mutation and bundle
 //! application require receive scope and the explicit Git-write switch.
 
+mod archive;
 mod artifact;
 mod bundles;
 mod changes;
@@ -108,6 +109,14 @@ impl<'a> Request<'a> {
         }
         request::Request::parse(envelope).map(|request| Self(RequestKind::Read(request)))
     }
+    /// Archive intake, collection and delivery share the connection's original
+    /// lifetime. No later phase may mint a fresh budget for this complete read.
+    pub(super) fn is_archive(&self) -> bool {
+        matches!(
+            &self.0,
+            RequestKind::Read(request) if request.operation == request::Operation::Archive
+        )
+    }
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
             RequestKind::Read(_)
@@ -200,6 +209,7 @@ enum ReplyBody {
     Candidate(artifact::PreparedReply),
     BundleExport(bundles::Export),
     VerifiedBlob(verified_blob::Reply),
+    Archive(archive::Reply),
 }
 impl Reply {
     const fn json(reply: JsonReply) -> Self {
@@ -225,6 +235,7 @@ impl Reply {
             ReplyBody::Candidate(reply) => reply.send(writer, version),
             ReplyBody::BundleExport(reply) => reply.send(writer, version),
             ReplyBody::VerifiedBlob(reply) => reply.send(writer, version),
+            ReplyBody::Archive(reply) => reply.send(writer, version),
         }
     }
 }
@@ -332,6 +343,28 @@ pub(super) fn authenticate(
     Ok((session, read))
 }
 
+// The normal source phase helper gives operator requests a fresh work budget.
+// Archives instead keep the remaining connection lifetime inside awaited
+// authority work too, so cancellation does not depend on another poll of the
+// transport's liveness closure. Sponsored requests retain their earlier ceiling.
+fn archive_request_context(
+    node: &OneNode,
+    deadline: &GitDaemonSessionDeadline,
+    session: &LoopbackReceiveSession,
+) -> crate::NodeRequestContext {
+    if session
+        .authenticated_session()
+        .is_some_and(|session| session.authentication().agent_provenance().is_some())
+    {
+        // This helper already intersects the remaining transport clock with
+        // the verifier-owned agent deadline, and fails closed if it is absent.
+        return node.authenticated_session_request_context(deadline, session);
+    }
+    node.session_request_context_with_timeout(
+        deadline.remaining().unwrap_or(std::time::Duration::ZERO),
+    )
+}
+
 pub(super) fn execute(
     node: &OneNode,
     request: &Request<'_>,
@@ -342,6 +375,7 @@ pub(super) fn execute(
     reader: &mut impl Read,
     http: HttpLimits,
     maximum_response: u64,
+    admission_deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
         RequestKind::VerifiedBlob(request) => {
@@ -523,11 +557,21 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let command = request.command(&read_form(reader, framing, http)?, node.object_format)?;
-    let deadline = GitDaemonSessionDeadline::new(
-        node.git_daemon_session_timeout,
-        GitDaemonSessionWorkScaling::FLAT,
-    );
-    let context = node.authenticated_session_request_context(&deadline, session);
+    let deadline = if request.operation == request::Operation::Archive {
+        // Body intake already used this connection clock. The original
+        // remaining budget also bounds all collection reads and encoding.
+        admission_deadline.clone()
+    } else {
+        GitDaemonSessionDeadline::new(
+            node.git_daemon_session_timeout,
+            GitDaemonSessionWorkScaling::FLAT,
+        )
+    };
+    let context = if request.operation == request::Operation::Archive {
+        archive_request_context(node, &deadline, session)
+    } else {
+        node.authenticated_session_request_context(&deadline, session)
+    };
     let mut live = || !deadline.expired() && context.is_live();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
@@ -537,6 +581,17 @@ pub(super) fn execute(
     // repository boundary; query paths only narrow selection. Current canonical
     // hidden refs remain undisclosable.
     let body = match &command {
+        Command::Archive { selection, query } => {
+            return archive::produce(
+                node,
+                &context,
+                selection,
+                query,
+                maximum_response,
+                &mut live,
+            )
+            .map(|reply| Reply(ReplyBody::Archive(reply)));
+        }
         Command::Commit { selection } => {
             let report = drive_request_while(
                 node,

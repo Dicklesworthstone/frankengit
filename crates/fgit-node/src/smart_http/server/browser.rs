@@ -28,6 +28,7 @@ use std::io::Write;
 
 const HTML: &str = include_str!("browser/index.html");
 const SCRIPT: &str = include_str!("browser/browser.mjs");
+const SOURCE_ARCHIVE: &str = include_str!("browser/source-archive.mjs");
 const STYLE: &str = include_str!("browser/browser.css");
 const ISSUES_HTML: &str = include_str!("browser/issues.html");
 const ISSUES_CLIENT: &str = include_str!("browser/issues.mjs");
@@ -56,6 +57,11 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str, Asse
     match target.split('?').next()?.as_bytes().strip_prefix(route)? {
         b"/ui/" => Some(("text/html; charset=utf-8", HTML, AssetScope::Source)),
         b"/ui/browser.mjs" => Some(("text/javascript; charset=utf-8", SCRIPT, AssetScope::Source)),
+        b"/ui/source-archive.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            SOURCE_ARCHIVE,
+            AssetScope::Source,
+        )),
         b"/ui/browser.css" => Some(("text/css; charset=utf-8", STYLE, AssetScope::Shared)),
         b"/ui/issues/" => Some(("text/html; charset=utf-8", ISSUES_HTML, AssetScope::Issues)),
         b"/ui/notifications/" => Some((
@@ -216,6 +222,7 @@ mod tests {
         for suffix in [
             "/ui/",
             "/ui/browser.mjs",
+            "/ui/source-archive.mjs",
             "/ui/browser.css",
             "/ui/issues/",
             "/ui/issues.mjs",
@@ -243,7 +250,7 @@ mod tests {
         assert!(!SCRIPT.contains("innerHTML"));
         assert!(!SCRIPT.contains("localStorage"));
         assert!(!SCRIPT.contains("sessionStorage"));
-        for script in [ISSUES_CLIENT, ISSUES_VIEW] {
+        for script in [ISSUES_CLIENT, ISSUES_VIEW, SOURCE_ARCHIVE] {
             assert!(!script.contains("innerHTML"));
             assert!(!script.contains("localStorage"));
             assert!(!script.contains("sessionStorage"));
@@ -325,6 +332,7 @@ mod tests {
                 for (suffix, allowed) in [
                     ("/ui/", source),
                     ("/ui/browser.mjs", source),
+                    ("/ui/source-archive.mjs", source),
                     ("/ui/issues/", issues),
                     ("/ui/issues.mjs", issues),
                     ("/ui/issues-view.mjs", issues),

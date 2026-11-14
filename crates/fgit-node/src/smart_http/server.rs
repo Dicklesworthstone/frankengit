@@ -1570,6 +1570,11 @@ fn serve_connection_with_routes(
             };
         if let Some(request) = &source_request {
             native_mutation = request.is_mutation();
+            // A complete archive may spend most of its lifetime collecting
+            // source. Starting its binary response cannot renew that budget.
+            if request.is_archive() {
+                writer.preserve_request_deadline = true;
+            }
         }
         let pull_request = if protection_request.is_none()
             && queue_request.is_none()
@@ -1814,6 +1819,7 @@ fn serve_connection_with_routes(
                     &mut body,
                     profile.http,
                     profile.maximum_response_bytes,
+                    &admission_deadline,
                 )
                 .map_err(|error| {
                     api_error = Some(error);

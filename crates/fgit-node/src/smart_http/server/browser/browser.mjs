@@ -1,4 +1,6 @@
 // No framework, remote dependencies, HTML interpolation, or persistent credentials.
+import { collectSourceArchive } from './source-archive.mjs';
+
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const PAGE_BYTES = 64 * 1024;
@@ -466,11 +468,12 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
   let boundSource = null;
   let controller = null;
   let generation = 0;
-  let downloadUrl = null, verifiedDownload = null;
+  let downloadUrl = null, verifiedDownload = null, archiveDownload = null, archiveUrlTimer = null;
   const cancelControl = byId('cancel-read');
   const clearDownload = () => {
+    if (archiveUrlTimer !== null) { clearTimeout(archiveUrlTimer); archiveUrlTimer = null; }
     if (downloadUrl !== null) { urlApi.revokeObjectURL(downloadUrl); downloadUrl = null; }
-    verifiedDownload = null;
+    verifiedDownload = null; archiveDownload = null;
   };
   const clear = () => { clearDownload(); ['content', 'paging', 'breadcrumbs', 'snapshot'].forEach(id => byId(id).replaceChildren()); };
   const node = (tag, text = '') => { const element = document.createElement(tag); element.textContent = text; return element; };
@@ -486,12 +489,13 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
   }
   async function request(operation, fields, signal) {
     // This is an intentionally closed read-only operation set, despite POST framing.
-    if (!['tree', 'blob', 'search', 'log'].includes(operation)) throw new Error('Unsupported browser operation.');
+    if (!['tree', 'blob', 'search', 'log', 'archive'].includes(operation)) throw new Error('Unsupported browser operation.');
     signal.throwIfAborted();
     const url = new URL(operation, apiRoot);
     const response = await fetcher(url, {
       method: 'POST', mode: 'same-origin', credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', signal,
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: operation === 'archive' ? 'application/x-tar' : 'application/json' },
       body: new URLSearchParams(fields),
     });
     if (signal.aborted || response.redirected || (response.url && response.url !== url.href)) {
@@ -506,9 +510,11 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       if (response.status === 409) throw new Error('The selected snapshot moved or this entry cannot be read. Reopen the reference.');
       if (response.status === 403) throw new Error('This token lacks read scope, or source browsing is disabled.');
       if (response.status === 404) throw new Error('Reference or path unavailable. Hidden refs are not disclosed.');
+      if (operation === 'archive' && response.status === 413) throw new Error('Source archive exceeds the server limits. Choose a smaller directory.');
       if (response.status === 429) throw new Error('Read quota exceeded. Retry after the server’s quota window.');
       throw new Error(`Repository read failed (HTTP ${response.status}). No write was attempted.`);
     }
+    if (operation === 'archive') return response;
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
       await response.body?.cancel(); throw new Error('Unexpected API content type.');
     }
@@ -611,14 +617,60 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       }
     }
   }
+  function archive(path, selectedTree) {
+    const version = generation;
+    void runRead(async (selected, pinned, binding, signal, checkpoint) => {
+      if (version + 1 !== generation || !pinned || !binding) throw new Error('Open a directory before downloading its source archive.');
+      if (path) checkedPath(path);
+      status('Reading the complete source archive. No download starts until the selected directory and response length are checked.');
+      const response = await request('archive', sourceFields(selected, pinned, path), signal);
+      const result = await collectSourceArchive(response, { format: selected.format, head: pinned.head,
+        commit: pinned.commit, rootTree: binding.tree, selectedTree }, { signal, checkpoint });
+      checkpoint();
+      const view = generation;
+      archiveDownload = result;
+      const download = (check = () => {}) => {
+        if (generation !== view || archiveDownload !== result || !token) return false;
+        check();
+        try {
+          if (downloadUrl === null) downloadUrl = urlApi.createObjectURL(new Blob([result.bytes], { type: 'application/x-tar' }));
+          check();
+          const anchor = node('a'); anchor.href = downloadUrl; anchor.download = 'source.tar'; anchor.rel = 'noopener';
+          byId('content').append(anchor);
+          try { check(); anchor.click(); } finally { anchor.remove(); }
+          if (archiveUrlTimer !== null) clearTimeout(archiveUrlTimer);
+          const url = downloadUrl;
+          archiveUrlTimer = setTimeout(() => {
+            if (downloadUrl === url) { urlApi.revokeObjectURL(url); downloadUrl = null; }
+            archiveUrlTimer = null;
+          }, 1000);
+          return true;
+        } catch (error) {
+          clearDownload(); throw error;
+        }
+      };
+      breadcrumbs(path);
+      byId('content').append(node('h2', path ? 'Source archive: ' + displayBytes(path) : 'Repository source archive'),
+        node('p', result.length + ' bytes · ' + result.entries + ' archive entries · ' + result.gitlinks + ' gitlinks'),
+        node('p', 'Directory ' + result.selectedTree + ' at commit ' + result.commit + '.'),
+        node('p', 'The server validated this source archive. The browser checked its selected snapshot and complete response length; it did not cryptographically verify the tar contents. No entries are extracted by this page.'),
+        node('p', 'Gitlinks do not include submodule contents.'), button('Download source.tar again', () => {
+          try { download(); } catch { status('Cannot create a source archive download.'); }
+        }));
+      if (!download(checkpoint)) throw new Error('Cannot create a source archive download.');
+      return { snapshot: pinned, binding, message: 'Source archive ready. The complete download was started; no repository state was changed.' };
+    });
+  }
   function tree(path, after = null) {
     if (!selection) return;
     const fields = { ...sourceFields(selection, snapshot, path), limit: '100' };
     if (after !== null) { unhex(after, 4096); fields.after_hex = after; }
-    void run('tree', fields, reply => {
+    void run('tree', fields, (reply, binding) => {
       if (reply.type !== 'source_tree' || (reply.path_hex ?? '') !== path || !Array.isArray(reply.entries) || reply.entries.length > 100) {
         throw new Error('Invalid directory response.');
       }
+      const selectedTree = commitHex(reply.object_id, selection.format);
+      if (!path && selectedTree !== binding.tree) throw new Error('Root directory identity changed. Reopen the reference.');
       const table = node('table');
       const header = node('tr'); header.append(node('th', 'Name'), node('th', 'Kind')); table.append(header);
       let previousName = after;
@@ -642,6 +694,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
         byId('paging').append(button('Next directory page', () => tree(path, reply.next_after_hex)));
       }
       breadcrumbs(path);
+      byId('breadcrumbs').append(button('Download directory', () => archive(path, selectedTree)));
       byId('content').append(table);
       if (!reply.entries.length) byId('content').append(node('p', 'This directory is empty.'));
     });

@@ -476,6 +476,10 @@ fn candidate_execution_requires_the_original_reservation_and_cannot_refresh_expi
         source::authenticate(&selected, &envelope, raw.as_bytes(), &granted).unwrap();
     assert!(current_source.is_none());
     let session = request.authenticated_session();
+    let admission_deadline = crate::GitDaemonSessionDeadline::new(
+        node.git_daemon_session_timeout,
+        crate::GitDaemonSessionWorkScaling::FLAT,
+    );
     let execute = |session: &LoopbackReceiveSession,
                    agent: Option<&crate::agent_credentials::AgentRequest>| {
         source::execute(
@@ -488,6 +492,7 @@ fn candidate_execution_requires_the_original_reservation_and_cannot_refresh_expi
             &mut bytes.as_slice(),
             HttpLimits::default(),
             RESPONSE_LIMIT as u64,
+            &admission_deadline,
         )
     };
     assert_eq!(

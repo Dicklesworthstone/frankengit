@@ -245,6 +245,10 @@ fn sponsored_http_history_output_limits_and_original_request_deadlines_are_retai
             source::authenticate(&selected, &envelope, raw.as_bytes(), &granted).unwrap();
         assert!(current_source.is_none());
         let session = request.authenticated_session();
+        let admission_deadline = crate::GitDaemonSessionDeadline::new(
+            node.git_daemon_session_timeout,
+            crate::GitDaemonSessionWorkScaling::FLAT,
+        );
         let execute = |session: &LoopbackReceiveSession, maximum| {
             source::execute(
                 &node,
@@ -256,6 +260,7 @@ fn sponsored_http_history_output_limits_and_original_request_deadlines_are_retai
                 &mut body.as_bytes(),
                 HttpLimits::default(),
                 maximum,
+                &admission_deadline,
             )
         };
         let success = execute(&session, MAXIMUM as u64).unwrap();

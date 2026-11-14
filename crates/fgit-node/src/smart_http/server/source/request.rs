@@ -14,6 +14,7 @@ pub enum Operation {
     Commit,
     Tree,
     Blob,
+    Archive,
     Search,
     SearchBatch,
 }
@@ -47,6 +48,7 @@ impl<'a> Request<'a> {
             "commit" => Operation::Commit,
             "tree" => Operation::Tree,
             "blob" => Operation::Blob,
+            "archive" => Operation::Archive,
             "search" => Operation::Search,
             "search-batch" => Operation::SearchBatch,
             _ => return Err(ApiError::not_found()),
@@ -108,6 +110,7 @@ impl<'a> Request<'a> {
                 Operation::Commit => false,
                 Operation::Tree => matches!(name.as_str(), "path_hex" | "after_hex" | "limit"),
                 Operation::Blob => matches!(name.as_str(), "path_hex" | "offset" | "limit"),
+                Operation::Archive => name == "path_hex",
                 Operation::Search | Operation::SearchBatch => matches!(
                     name.as_str(),
                     "needle_hex" | "case" | "max_matches" | "max_bytes" | "max_file_bytes"
@@ -197,6 +200,10 @@ impl<'a> Request<'a> {
             .map(|text| unhex(&text, 4096))
             .transpose()?;
         let action = match self.operation {
+            Operation::Archive => SourceBrowseAction::List {
+                after: None,
+                limit: 1000,
+            },
             Operation::Tree => SourceBrowseAction::List {
                 after: fields
                     .remove("after_hex")
@@ -225,7 +232,11 @@ impl<'a> Request<'a> {
         query
             .validate(format)
             .map_err(|_| ApiError::bad("invalid_browse_query"))?;
-        Ok(Command::Browse { selection, query })
+        if self.operation == Operation::Archive {
+            Ok(Command::Archive { selection, query })
+        } else {
+            Ok(Command::Browse { selection, query })
+        }
     }
 }
 
@@ -241,6 +252,10 @@ pub(super) enum Command {
         selection: Selection,
     },
     Browse {
+        selection: Selection,
+        query: SourceBrowseQuery,
+    },
+    Archive {
         selection: Selection,
         query: SourceBrowseQuery,
     },

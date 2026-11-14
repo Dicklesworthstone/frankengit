@@ -297,6 +297,18 @@ are unchanged. Durable custody supports revalidation after restart. See
 commands, output limits, incremental bases and the remaining cold-validation
 cost.
 
+### Complete source directory downloads
+
+The source browser's **Download directory** action exports the whole selected
+directory through `POST /api/v1/source/archive`, including entries beyond the
+visible listing page. HTTP and `fg tree --output` share the same pure-Rust,
+snapshot-pinned ustar collector. Downloads preserve binary and raw-name bytes,
+executable modes, safe symlinks and opaque gitlink directories. Output is bounded
+before assembly, and the browser offers a download only after receiving the
+complete response with matching source identities. See
+[source tree archives](docs/SOURCE_TREE_ARCHIVES.md) for API fields, limits,
+refusal behavior and the current validation boundary.
+
 ### Native milestone planning
 
 `fg milestone` now opens, edits, closes and reopens repository milestones with

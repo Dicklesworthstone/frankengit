@@ -9,8 +9,8 @@ complete forge UI, hosted IAM, a new authority, or a proof-verified client.
 
 Open the repository's `/ui/` URL, supply an operator-provisioned read token,
 select a full reference such as `refs/heads/main`, and select SHA-1 or SHA-256.
-The public static shell contains no repository data. Every tree, blob and
-search request goes through the existing authenticated source API, canonical
+The public static shell contains no repository data. Every tree, blob, archive
+and search request goes through the existing authenticated source API, canonical
 hidden-ref policy and independent read quota. Source reads use POST framing but
 create no transaction or idempotency binding. The browser has no write actions.
 
@@ -19,6 +19,16 @@ show bounded byte ranges, not rendered HTML/SVG. Symlinks show target bytes and
 are not followed. Binary or split UTF-8 ranges use hex. Literal search supports
 exact bytes or ASCII-insensitive matching; match-limit results are visibly
 partial, and a result opens the corresponding file range.
+
+**Download directory** requests the complete currently selected directory through
+the [authenticated archive endpoint](SOURCE_TREE_ARCHIVES.md#authenticated-http-downloads),
+including entries beyond the visible listing page. It carries the current
+snapshot and commit comparisons and checks the returned root and selected-tree
+identities. The browser verifies the archive profile, exact bounded response
+length and attachment metadata before creating a download link. Cancellation,
+truncation, a changed selection or a stale response cannot publish a partial
+download. Download URLs are revoked on replacement, disconnect and page exit.
+The metadata comparisons are not independent cryptographic archive verification.
 
 After the first read, subsequent requests carry both the authority snapshot
 and selected commit comparisons. A moved snapshot is an error; reopen the
@@ -35,14 +45,16 @@ external TLS requirements are unchanged. Use HTTPS beyond trusted loopback.
 
 ## Verification
 
-Run `node --test tests/browser/*.test.mjs` with Node 22 or newer. The initial
-browser slice has 24 passing JavaScript tests at delivery, including DOM/fetch
-contract tests using test doubles. Three Rust route/security regression tests
-are included in `smart_http::server::browser::tests`.
+Run `node --test tests/browser/*.test.mjs` with the version pinned in
+`tests/node-version`. The source archive tests include metadata and body bounds,
+snapshot mismatches, cancellation, truncated transfers and stale responses.
+DOM and fetch contract tests use doubles; they are not live-browser evidence.
+The Rust static-route tests remain in `smart_http::server::browser::tests`,
+with archive parsing and real TCP/node tests described in
+[source tree archives](SOURCE_TREE_ARCHIVES.md#bounds-and-tests).
 
-Rust/Cargo, real Chromium rendering, live-node interoperability and full
-workspace verification were not available in the implementation environment.
-These test doubles are not browser E2E or upstream Git conformance evidence.
-Run the repository-owned Rust lanes and a real source-enabled listener/browser
-scenario before advancing the release or compatibility claim. No historical
-README test result establishes a gate for this revision.
+The implementation's native build lost its execution host before completion.
+Current Rust, live Chromium interoperability and full-workspace gates remain
+pending. Run the repository-owned lanes and a real source-enabled listener/browser
+scenario before advancing a release or compatibility claim. Historical test
+results do not establish a gate for this revision.
