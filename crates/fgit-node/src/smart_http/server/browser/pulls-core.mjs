@@ -217,7 +217,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/', '/ui/artifacts/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/default-branch/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/', '/ui/artifacts/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -296,7 +296,7 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #defaultBranch; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
@@ -304,6 +304,7 @@ export class Transport {
     this.#checkEvidence = checkEvidenceOnly;
     this.#queues = pageSuffix === '/ui/queues/';
     this.#artifacts = pageSuffix === '/ui/artifacts/';
+    this.#defaultBranch = pageSuffix === '/ui/default-branch/';
     this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#rebase = pageSuffix === '/ui/rebase/'; this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
@@ -348,6 +349,46 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#defaultBranch) {
+      const observation = /^default-branch(?:\?[^#]+)?$/.test(path) && method === 'GET';
+      const listing = path === 'source/refs';
+      const publication = path === 'default-branch' && method === 'POST';
+      const outcome = path === 'outcomes';
+      if (!(observation || listing || publication || outcome) || binary || headerNames.length ||
+          contentType !== 'application/x-www-form-urlencoded') fail('Invalid default-branch profile route.');
+      integer(maximum, 'default-branch response limit', 1, listing ? 1024 * 1024 : 32 * 1024);
+      if (observation || listing) {
+        if (key !== undefined || !read || statuses.length !== 1 || statuses[0] !== 200 ||
+            (observation ? body !== undefined : method !== 'POST')) fail('Default-branch observations are read-only.');
+      } else if (method !== 'POST' || read || typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key) ||
+          (outcome ? (body !== undefined || statuses.length !== 1 || statuses[0] !== 200)
+            : (statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Default-branch publication requires the original key and non-read lifecycle.');
+      if (observation) {
+        const entries = [...url.searchParams];
+        if (entries.length > 1 || entries.some(([name, value]) => name !== 'expected_head' || !/^alg:[12]:[0-9a-f]{64}$/.test(value))) fail('Invalid default-branch snapshot query.');
+      }
+      if (listing || publication) {
+        if (typeof body !== 'string' || utf8.encode(body).length > 8192) fail('Invalid default-branch form.');
+        const values = new URLSearchParams(body), seen = new Set();
+        const allowed = listing ? ['object_format', 'namespace', 'limit', 'cursor_encoding', 'expected_head', 'after']
+          : ['expected_default_hex', 'expect_no_default', 'reference_hex', 'expected_tip'];
+        for (const [name] of values) { if (seen.has(name) || !allowed.includes(name)) fail('Unknown or repeated default-branch field.'); seen.add(name); }
+        if (listing) {
+          if (values.get('namespace') !== 'branches' || values.get('cursor_encoding') !== 'hex' ||
+              !/^alg:[12]:[0-9a-f]{64}$/.test(values.get('expected_head') ?? '') || seen.size !== (values.has('after') ? 6 : 5)) fail('Default-branch candidates require the exact observed snapshot.');
+          format(values.get('object_format')); integer(decimal(values.get('limit'), 'reference page size', 1), 'reference page size', 1, 100);
+          if (values.has('after')) branchBytes(values.get('after'));
+        } else {
+          if (seen.size !== 3 || values.has('expected_default_hex') === values.has('expect_no_default')) fail('One exact old default expectation is required.');
+          if (values.has('expected_default_hex')) branchBytes(values.get('expected_default_hex'));
+          else if (values.get('expect_no_default') !== 'true') fail('Absent default requires an explicit true expectation.');
+          branchBytes(values.get('reference_hex'));
+          const tip = values.get('expected_tip');
+          if (typeof tip !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tip)) fail('Native hexadecimal default-branch tip required.');
+          oid(tip, tip.length === 40 ? 'sha1' : 'sha256');
+        }
+      }
+    }
     if (this.#artifacts) {
       const content = /^artifacts\/[0-9a-f]{64}\/content$/.test(path);
       if (!/^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path) || method !== 'GET' ||
@@ -443,7 +484,9 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#artifacts
+    const allowed = this.#defaultBranch
+      ? /^(?:default-branch(?:\?[^#]+)?|source\/refs|outcomes)$/.test(path)
+      : this.#artifacts
       ? /^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path)
       : this.#queues
       ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land|prepare|land-candidate))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\/inspect)?(?:\?[^#]*)?|outcomes)$/.test(path)

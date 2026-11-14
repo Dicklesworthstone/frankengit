@@ -28,6 +28,20 @@ use crate::{
     PermittedObjectClosure, ProjectionFailure, permitted_object_closure_root, ref_state_root,
 };
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AdministrationProfile {
+    TrustedLocal,
+    HttpAdministrator,
+}
+impl AdministrationProfile {
+    const fn authentication(self) -> AdmissionAuthentication {
+        match self {
+            Self::TrustedLocal => AdmissionAuthentication::OperatorAssertion,
+            Self::HttpAdministrator => AdmissionAuthentication::HttpToken,
+        }
+    }
+}
+
 /// Publish an existing branch as the canonical default through one ordinary
 /// sealed outcome and authority-head CAS. Trusted-local OperatorAssertion is
 /// required. With no installed protection policy it permits bootstrap; once a
@@ -41,6 +55,61 @@ pub async fn admit_async<S, P>(
     command: &DefaultBranchCommand,
     limits: AdmissionLimits,
     projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    admit_with_profile(
+        store,
+        cx,
+        context,
+        command,
+        limits,
+        projection,
+        AdministrationProfile::TrustedLocal,
+    )
+    .await
+}
+
+/// Publish HEAD for an independently authorized HTTP administrator. The host
+/// must require its dedicated administration grant, not a Git receive or source
+/// publication grant. HttpToken provenance is retained in canonical evidence.
+/// Every preparation requires an already installed protection policy and its
+/// current administrator set; remote bootstrap and agent principals refuse.
+/// Exact historical terminals still precede current-policy and target checks.
+pub async fn admit_http_admin_async<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    command: &DefaultBranchCommand,
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    admit_with_profile(
+        store,
+        cx,
+        context,
+        command,
+        limits,
+        projection,
+        AdministrationProfile::HttpAdministrator,
+    )
+    .await
+}
+
+async fn admit_with_profile<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    command: &DefaultBranchCommand,
+    limits: AdmissionLimits,
+    projection: &P,
+    profile: AdministrationProfile,
 ) -> Result<TerminalOutcome, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -106,6 +175,7 @@ where
             &basis,
             &authenticated,
             projection,
+            profile,
         )
         .await;
         let prepared = match prepared {
@@ -205,6 +275,7 @@ async fn prepare<S, P>(
     basis: &PublicationBasis,
     authenticated: &AuthenticatedHead,
     projection: &P,
+    profile: AdministrationProfile,
 ) -> Result<PreparedHeadChange, PreparationFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -216,18 +287,21 @@ where
     if basis.body().repository_id != context.repository_id {
         return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid).into());
     }
-    let authentication = projection.admission_authentication();
-    if authentication != Some(AdmissionAuthentication::OperatorAssertion) {
-        return Err(ProjectionFailure::Refuse(RefusalCode::CapabilityScopeViolation).into());
-    }
+    let authentication = projection
+        .admission_authentication()
+        .filter(|method| *method == profile.authentication())
+        .ok_or(ProjectionFailure::Refuse(
+            RefusalCode::CapabilityScopeViolation,
+        ))?;
     // This precedes the snapshot/native object read. A credential or projection
-    // claiming OperatorAssertion cannot turn a declared agent into an admin.
+    // claiming operator or HTTP provenance cannot turn a declared agent into
+    // an administrator.
     let non_agent = protection::require_non_agent_publication_at(
         store,
         cx,
         basis,
         Some(context.principal_id),
-        authentication,
+        Some(authentication),
         &|| projection.merge_checkpoint(cx).is_err(),
     )
     .await;
@@ -243,10 +317,11 @@ where
         .merge_checkpoint(cx)
         .map_err(ProjectionFailure::Unavailable)?;
     let protection = protection?;
-    if protection
-        .protection()
-        .is_some_and(|policy| !policy.administrators.contains(&context.principal_id))
-    {
+    let permitted = match protection.protection() {
+        Some(policy) => policy.administrators.contains(&context.principal_id),
+        None => profile == AdministrationProfile::TrustedLocal,
+    };
+    if !permitted {
         return Err(ProjectionFailure::Refuse(RefusalCode::PublicationPolicyRefused).into());
     }
     let layout = fgit_authority::root_layout_for_verification_async(
@@ -345,8 +420,14 @@ where
         )
         .map_err(ProjectionFailure::Unavailable)?;
     let delta_root = evidence_root(&delta).map_err(ProjectionFailure::Unavailable)?;
-    let evidence = HeadChangeEvidence::derive(context, basis, tx_id, seal.canonical_request_digest)
-        .map_err(ProjectionFailure::Unavailable)?;
+    let evidence = HeadChangeEvidence::derive(
+        context,
+        basis,
+        tx_id,
+        seal.canonical_request_digest,
+        authentication,
+    )
+    .map_err(ProjectionFailure::Unavailable)?;
     let closure = PermittedObjectClosure::default();
     let roots = ResultingRoots {
         ref_root: resulting_ref_root,

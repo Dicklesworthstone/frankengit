@@ -660,16 +660,31 @@ request identity; a losing CAS revalidates the same command against a new basis.
 Key reuse with different command semantics MUST fail closed.
 
 The trusted-local operation requires operator-asserted authentication and no
-narrowed ref-write credential scope. Canonically declared agent principals MUST
-be refused even when presented with operator provenance. With no installed
-review-protection policy, the explicitly authorized local operator may establish
-the default. With an installed policy, the actor MUST be one of its current
-canonical administrators. Proposed or historical administrators cannot authorize
-a new request. This authority does not follow from remote Git push permission,
-source publication grants, agent sponsorship, branch review approval or a model
-recommendation. Each CAS preparation checks the currently selected policy before
-reading target objects. Canonical visibility of HEAD, its old target and the new
-target applies independently of administrator status.
+narrowed ref-write credential scope. With no installed review-protection policy,
+the explicitly authorized local operator may establish the default. With an
+installed policy, the actor MUST be one of its current canonical administrators.
+The trusted-local entry point MUST continue to refuse HTTP-token, SSH and
+sponsored-agent provenance.
+
+The separate HTTP administrator profile requires host-verified `HttpToken`
+authentication, an independently enabled administration surface and a dedicated
+`default-branch-write` grant. The grant MUST NOT be inferred from Git receive,
+source publication or protection-edit permission. A narrowed ref-write credential
+MUST be refused. An installed canonical review-protection policy is mandatory;
+the remote profile MUST NOT bootstrap administrator authority from its absence.
+At every CAS preparation, the authenticated principal MUST be one of the selected
+policy's current administrators. Its canonical principal snapshot MUST retain
+the actual HTTP-token provenance, never relabel it as an operator assertion.
+The command, request-identity schema and HEAD-transition schema remain the same
+across these profiles; credential fields are not client-supplied command data.
+
+Both profiles MUST refuse canonically declared agent principals, including agents
+presented with operator or ordinary HTTP-token provenance. Proposed or historical
+administrators cannot authorize a new decision. This authority does not follow
+from agent sponsorship, branch review approval or a model recommendation. Each
+CAS preparation checks the currently selected policy before reading target
+objects. Canonical visibility of HEAD, its old target and the new target applies
+independently of administrator status.
 
 The canonical symbolic-ref delta has domain
 `frankengit/admission-head-delta/v1`, schema family `admission-head-delta`, version
@@ -702,11 +717,14 @@ new canonical HEAD, and advertisements and historical reads select that same
 authenticated state.
 
 Exact historical terminal recovery MUST precede current administrator, quota,
-readiness and target-existence checks once original operator provenance and
-request identity are established. Later policy rotation, branch deletion or
-default selection cannot rewrite an earlier decision. A cancellation, failed
-receipt write or disconnect cannot establish non-commit. The caller recovers the
-original scoped TxId or retries the exact command and key, without refreshing
+readiness and target-existence checks once authentication for the selected entry
+point and the original scoped principal, key and request identity are established.
+Recovery preserves the original decision's recorded provenance and does not
+claim that a new decision was authorized by the current policy. Later policy
+rotation, branch deletion or default selection cannot rewrite an earlier
+decision. A cancellation, failed receipt write or disconnect cannot establish
+non-commit. The caller recovers the original scoped TxId or retries the exact
+command and key, without refreshing
 either expectation. Reads report absent, unborn and resolved states distinctly,
 bound to one authenticated head, and authorize disclosure of both HEAD and its
 target.

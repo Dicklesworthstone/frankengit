@@ -34,7 +34,7 @@ mod token_file_tests;
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-discussions] [--allow-outcomes] [--allow-pulls] [--allow-source]
-  [--allow-protection] [--allow-queues] [--allow-queue-landings]
+  [--allow-protection] [--enable-default-branch-admin] [--allow-queues] [--allow-queue-landings]
   [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
   [--require-lfs-payloads <absolute-private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
@@ -175,6 +175,12 @@ appropriate scopes. No switch enables another service. --allow-source exposes
 read-only source queries to read-scoped tokens; it grants no mutation permission.
 --allow-discussions enables the independent discussions-read/discussions-write
 scopes for native repository discussions, including their browser workspace.
+--enable-default-branch-admin independently enables canonical default-branch
+changes for default-branch-write tokens. It requires --credentials-file and an
+already installed canonical administrator policy; it cannot bootstrap ownership.
+Reads and the browser selector additionally require --allow-source and read scope.
+Ordinary receive, protection-write and narrowed ref-write grants do not authorize
+this operation. See docs/HTTP_DEFAULT_BRANCH_API.md for exact expectations/retry.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
@@ -188,7 +194,7 @@ At most 64 selectors / 4096 decoded bytes per row restrict every Git and native
 source/merge ref write, including deletes and both ends of renames. They do not
 filter reads or grant a service. See docs/HTTP_REF_WRITE_SCOPES.md.
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write,queues-land,notifications-read,notifications-write,discussions-read,discussions-write
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write,queues-land,notifications-read,notifications-write,discussions-read,discussions-write,default-branch-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -431,6 +437,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--allow-pulls"
                 | "--allow-source"
                 | "--allow-protection"
+                | "--enable-default-branch-admin"
                 | "--allow-queues"
                 | "--allow-queue-landings"
                 | "--print-credentials-header"
@@ -609,6 +616,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let allow_pulls = flags.contains_key("--allow-pulls");
     let allow_source = flags.contains_key("--allow-source");
     let allow_protection = flags.contains_key("--allow-protection");
+    let default_branch_admin = flags.contains_key("--enable-default-branch-admin");
     let allow_queues = flags.contains_key("--allow-queues");
     let allow_queue_landings = flags.contains_key("--allow-queue-landings");
     if flags.contains_key("--lfs-root") {
@@ -636,12 +644,13 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         || allow_pulls
         || allow_source
         || allow_protection
+        || default_branch_admin
         || allow_queues
         || allow_queue_landings)
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
         return Err(
-            "issue/discussion/PR/source/protection/queue/outcome endpoints require explicit scopes in --credentials-file"
+            "issue/discussion/PR/source/protection/default-branch/queue/outcome endpoints require explicit scopes in --credentials-file"
                 .into(),
         );
     }
@@ -777,6 +786,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     }
     if allow_protection {
         config = config.with_http_protection_admin();
+    }
+    if default_branch_admin {
+        config = config.with_http_default_branch_admin();
     }
     if allow_queues {
         config = config.with_http_queue_management();
@@ -1928,6 +1940,28 @@ mod tests {
         args.push("--allow-source".into());
         assert!(parse(&args).is_err());
     }
+    #[test]
+    fn default_branch_admin_requires_scoped_credentials_and_is_independently_enabled() {
+        let mut static_args = arguments();
+        static_args.push("--enable-default-branch-admin".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(
+            !parse(&args)
+                .unwrap()
+                .config
+                .http_default_branch_admin_enabled()
+        );
+        args.push("--enable-default-branch-admin".into());
+        let options = parse(&args).unwrap();
+        assert!(options.config.http_default_branch_admin_enabled());
+        assert!(!options.allow_receive && !options.allow_source && !options.allow_protection);
+        assert!(!options.config.http_protection_admin_enabled());
+        args.push("--enable-default-branch-admin".into());
+        assert!(parse(&args).is_err());
+    }
+
     #[test]
     fn protection_requires_scoped_credentials_and_never_enables_other_services() {
         let mut static_args = arguments();

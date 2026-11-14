@@ -1,4 +1,4 @@
-//! Trusted-local default-branch administration through the ordinary decision
+//! Default-branch administration through the ordinary decision
 //! stream. HEAD stays in canonical ref state; no transport-local default or
 //! fake Git object identity represents its symbolic target.
 
@@ -35,6 +35,20 @@ fn checkpoint(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> 
             Err(NodeWorkspaceRefusal::Cancelled {
                 exhaustion: budget_exhaustion,
             })
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AdministrationProfile {
+    TrustedLocal,
+    HttpAdministrator,
+}
+impl AdministrationProfile {
+    const fn authentication(self) -> AdmissionAuthentication {
+        match self {
+            Self::TrustedLocal => AdmissionAuthentication::OperatorAssertion,
+            Self::HttpAdministrator => AdmissionAuthentication::HttpToken,
         }
     }
 }
@@ -94,10 +108,56 @@ impl OneNode {
         command: &DefaultBranchCommand,
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_default_branch_profile_in(
+            request,
+            session,
+            command,
+            limits,
+            AdministrationProfile::TrustedLocal,
+        )
+        .await
+    }
+
+    /// Select HEAD for a host-authenticated HTTP administrator. The host must
+    /// independently enable this administration surface and verify its dedicated
+    /// grant before calling. Git receive, source publication and protection
+    /// grants alone do not authorize it. Only HttpToken provenance without a
+    /// narrowed ref-write scope can reach this profile.
+    ///
+    /// New decisions require an installed canonical protection policy and its
+    /// current administrator set at every CAS preparation. No remote bootstrap,
+    /// declared agent, sponsored credential or SSH key can select HEAD. Original
+    /// terminal retries retain their result before current policy, readiness,
+    /// quota and target reads; the supplied key and expectations never change.
+    pub async fn admit_default_branch_http_admin_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &DefaultBranchCommand,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_default_branch_profile_in(
+            request,
+            session,
+            command,
+            limits,
+            AdministrationProfile::HttpAdministrator,
+        )
+        .await
+    }
+
+    async fn admit_default_branch_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &DefaultBranchCommand,
+        limits: AdmissionLimits,
+        profile: AdministrationProfile,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
-        if authenticated.authentication() != AdmissionAuthentication::OperatorAssertion
+        if authenticated.authentication() != profile.authentication()
             || authenticated.ref_write_scope.is_some()
         {
             return Err(admission_error(AdmissionError::AsyncProjectionUnavailable(
@@ -134,15 +194,30 @@ impl OneNode {
         }
         self.receive_publication_admitted()?;
         self.push_quota.evaluate(&context.principal_id)?;
-        let terminal = Box::pin(default_branch::admit_async(
-            &self.authority,
-            request.authority(),
-            &context,
-            command,
-            limits,
-            &projection,
-        ))
-        .await
+        let terminal = match profile {
+            AdministrationProfile::TrustedLocal => {
+                Box::pin(default_branch::admit_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+            AdministrationProfile::HttpAdministrator => {
+                Box::pin(default_branch::admit_http_admin_async(
+                    &self.authority,
+                    request.authority(),
+                    &context,
+                    command,
+                    limits,
+                    &projection,
+                ))
+                .await
+            }
+        }
         .map_err(admission_error)?;
         Ok((tx_id, terminal))
     }

@@ -7771,6 +7771,9 @@ pub struct NodeConfig {
     /// Explicit runtime-only ceiling for the scoped HTTP review-protection API.
     /// Disabled by default; token scopes and current administrators still apply.
     http_protection_admin: bool,
+    /// Independent HTTP symbolic-HEAD administration ceiling. Every write
+    /// still needs its own credential grant and current canonical administrator.
+    http_default_branch_admin: bool,
     /// Independent HTTP queue-management ceiling; token scopes remain required.
     http_queue_management: bool,
     /// Independent HTTP queue-head landing ceiling; grants and ref scope still apply.
@@ -7853,6 +7856,7 @@ impl NodeConfig {
             git_daemon_receive_principal: None,
             http_trusted_origin: None,
             http_protection_admin: false,
+            http_default_branch_admin: false,
             http_queue_management: false,
             http_queue_landings: false,
             http_discussions: false,
@@ -8036,6 +8040,20 @@ impl NodeConfig {
     #[must_use]
     pub const fn http_protection_admin_enabled(&self) -> bool {
         self.http_protection_admin
+    }
+
+    /// Enables explicit HTTP default-branch administration. This grants no
+    /// credential scope or administrator status and cannot bootstrap a policy.
+    #[must_use]
+    pub const fn with_http_default_branch_admin(mut self) -> Self {
+        self.http_default_branch_admin = true;
+        self
+    }
+
+    /// Whether HTTP default-branch changes were independently enabled.
+    #[must_use]
+    pub const fn http_default_branch_admin_enabled(&self) -> bool {
+        self.http_default_branch_admin
     }
 
     /// Enables independently scoped HTTP queue reads and membership management.

@@ -86,6 +86,7 @@ enum Scope {
     SourceRead,
     SourceHistoryRead,
     SourceCandidates,
+    DefaultBranchWrite,
 }
 
 impl Scope {
@@ -112,6 +113,7 @@ impl Scope {
             "notifications-write" => Ok(Self::NotificationsWrite),
             "discussions-read" => Ok(Self::DiscussionsRead),
             "discussions-write" => Ok(Self::DiscussionsWrite),
+            "default-branch-write" => Ok(Self::DefaultBranchWrite),
             _ => Err(CredentialFailure::InvalidFile),
         }
     }
@@ -288,6 +290,14 @@ impl Grant {
         } else {
             self.scopes.contains(Scope::ProtectionRead)
         }
+    }
+    /// Canonical symbolic HEAD is repository administration, not a ref write
+    /// or a side effect of policy editing. Only an explicit, unscoped operator
+    /// HTTP grant may enter the separate native administrator profile.
+    pub const fn permits_default_branch_write(&self) -> bool {
+        self.scopes.contains(Scope::DefaultBranchWrite)
+            && self.ref_write_scope.is_none()
+            && matches!(self.authentication, AdmissionAuthentication::HttpToken)
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
@@ -1653,6 +1663,40 @@ mod tests {
         .unwrap();
         assert!(!legacy.permits_protection(false) && !legacy.permits_protection(true));
     }
+    #[test]
+    fn default_branch_grant_is_independent_and_never_widens_ref_scoped_credentials() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        for old in [
+            "read",
+            "receive",
+            "protection-write",
+            "merges-write",
+            "outcomes-read",
+        ] {
+            assert!(
+                !grant(principal, old)
+                    .unwrap()
+                    .permits_default_branch_write()
+            );
+        }
+        let selected = grant(principal, "default-branch-write").unwrap();
+        assert!(selected.permits_default_branch_write());
+        assert!(!selected.permits_source_read() && !selected.permits_outcomes());
+        assert!(!selected.permits(Service::ReceivePack) && !selected.permits_protection(true));
+        assert!(grant(principal, "read,outcomes-read,default-branch-write").is_ok());
+        assert!(grant(principal, "default-branch-write,read").is_err());
+        assert!(grant(principal, "default-branch-write,default-branch-write").is_err());
+        for references in ["all", "none", "exact:726566732f68656164732f6d61696e"] {
+            let text =
+                scoped_header() + &scoped_row(&"a".repeat(64), "default-branch-write", references);
+            let entries = parse(text.as_bytes(), binding()).unwrap();
+            assert_eq!(
+                entries[0].grant.permits_default_branch_write(),
+                references == "all"
+            );
+        }
+    }
+
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
         let row = row(&"a".repeat(64), 4, "read");

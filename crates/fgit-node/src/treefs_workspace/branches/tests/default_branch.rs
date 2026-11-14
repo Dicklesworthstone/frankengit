@@ -31,6 +31,30 @@ fn set_default(
         ))
 }
 
+fn http_session(key: &str, actor: PrincipalId) -> LoopbackReceiveSession {
+    LoopbackReceiveSession::Authenticated(
+        AuthenticatedReceiveSession::new(
+            actor,
+            IdempotencyKey::new(key.as_bytes().to_vec()).unwrap(),
+        )
+        .with_authentication(AdmissionAuthentication::HttpToken),
+    )
+}
+
+fn set_default_http(
+    node: &OneNode,
+    command: &DefaultBranchCommand,
+    key: &str,
+) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+    node.runtime()
+        .block_on(node.admit_default_branch_http_admin_in(
+            &node.request_context(),
+            &http_session(key, principal()),
+            command,
+            AdmissionLimits::default(),
+        ))
+}
+
 fn committed(
     result: Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal>,
 ) -> (TxId, TerminalOutcome) {
@@ -450,6 +474,247 @@ fn local_operator_scope_and_original_context_are_required_before_any_publication
         assert_eq!(read_default(&node).1, Some(reference("refs/heads/topic")));
         node.shutdown().unwrap();
     }
+}
+
+#[test]
+fn http_default_requires_its_own_provenance_policy_and_original_request_context() {
+    use fgit_forge::ExpectedVersion;
+    use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
+    use fgit_types::PolicyEpoch;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, _, _) = fixture(&scratch, format);
+        accepted(apply(
+            &node,
+            &[create("refs/heads/topic", base)],
+            "http-create-topic",
+        ));
+        let change = command(Some("refs/heads/main"), "refs/heads/topic", base);
+        let before = snapshot(&node);
+        for authentication in [
+            AdmissionAuthentication::OperatorAssertion,
+            AdmissionAuthentication::SshDeployKey,
+        ] {
+            let wrong = LoopbackReceiveSession::Authenticated(
+                AuthenticatedReceiveSession::new(
+                    principal(),
+                    IdempotencyKey::new(b"wrong-http-admin".to_vec()).unwrap(),
+                )
+                .with_authentication(authentication),
+            );
+            assert!(
+                node.runtime()
+                    .block_on(node.admit_default_branch_http_admin_in(
+                        &node.request_context(),
+                        &wrong,
+                        &change,
+                        AdmissionLimits::default(),
+                    ))
+                    .is_err()
+            );
+            assert_eq!(snapshot(&node).basis(), before.basis());
+        }
+        let scoped = LoopbackReceiveSession::Authenticated(
+            AuthenticatedReceiveSession::new(
+                principal(),
+                IdempotencyKey::new(b"scoped-http-admin".to_vec()).unwrap(),
+            )
+            .with_authentication(AdmissionAuthentication::HttpToken)
+            .with_ref_write_scope(
+                fgit_types::ref_write_scope::RefWriteScope::parse("none")
+                    .unwrap()
+                    .map(std::sync::Arc::new),
+            ),
+        );
+        assert!(
+            node.runtime()
+                .block_on(node.admit_default_branch_http_admin_in(
+                    &node.request_context(),
+                    &scoped,
+                    &change,
+                    AdmissionLimits::default(),
+                ))
+                .is_err()
+        );
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.admit_default_branch_http_admin_in(
+                    &node.request_context(),
+                    &LoopbackReceiveSession::Anonymous,
+                    &change,
+                    AdmissionLimits::default(),
+                )),
+            Err(NodeReceiveTransportRefusal::Unauthenticated)
+        ));
+        assert_eq!(snapshot(&node).basis(), before.basis());
+        let absent = set_default_http(&node, &change, "http-no-policy").unwrap();
+        assert!(matches!(
+            absent.1.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::PublicationPolicyRefused,
+                ..
+            }
+        ));
+        assert_eq!(read_default(&node).1, Some(reference("refs/heads/main")));
+        let protection = ProtectionCommand {
+            expected_version: ExpectedVersion::NewStream,
+            expected_epoch: PolicyEpoch::FIRST,
+            protection: ReviewProtection {
+                administrators: vec![principal()],
+                branches: Vec::new(),
+                ref_policy: None,
+            },
+        };
+        committed(
+            node.runtime()
+                .block_on(node.admit_review_protection_durable_in(
+                    &node.request_context(),
+                    &session("http-install-policy"),
+                    &protection,
+                    AdmissionLimits::default(),
+                )),
+        );
+        assert_eq!(
+            set_default_http(&node, &change, "http-no-policy").unwrap(),
+            absent
+        );
+        let unauthorized = node
+            .runtime()
+            .block_on(node.admit_default_branch_http_admin_in(
+                &node.request_context(),
+                &http_session("http-non-admin", PrincipalId::from_bytes([0xc4; 16])),
+                &change,
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            unauthorized.1.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::PublicationPolicyRefused,
+                ..
+            }
+        ));
+        let before_change = snapshot(&node);
+        let cancelled = node.request_context();
+        cancelled.cancel();
+        assert!(
+            node.runtime()
+                .block_on(node.admit_default_branch_http_admin_in(
+                    &cancelled,
+                    &http_session("http-cancelled", principal()),
+                    &change,
+                    AdmissionLimits::default(),
+                ))
+                .is_err()
+        );
+        assert_eq!(snapshot(&node).basis(), before_change.basis());
+        let outcome = committed(set_default_http(&node, &change, "http-cancelled"));
+        let after = snapshot(&node);
+        unrelated_state_unchanged(&before_change, &after);
+        assert_eq!(read_default(&node).1, Some(reference("refs/heads/topic")));
+        assert_eq!(
+            set_default_http(&node, &change, "http-cancelled").unwrap(),
+            outcome
+        );
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        // Historical retry remains available before serving resumes.
+        assert_eq!(
+            set_default_http(&reopened, &change, "http-cancelled").unwrap(),
+            outcome
+        );
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert_eq!(
+            read_default(&reopened).1,
+            Some(reference("refs/heads/topic"))
+        );
+        reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn http_default_retry_survives_admin_rotation_target_deletion_and_new_quota() {
+    use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
+    use fgit_forge::{AggregateVersion, ExpectedVersion};
+    use fgit_types::PolicyEpoch;
+    let scratch = Scratch::new();
+    let (mut node, base, child, _) = fixture(&scratch, GitHashAlgorithm::Sha256);
+    accepted(apply(
+        &node,
+        &[create("refs/heads/topic", base)],
+        "http-topic",
+    ));
+    let first = ProtectionCommand {
+        expected_version: ExpectedVersion::NewStream,
+        expected_epoch: PolicyEpoch::FIRST,
+        protection: ReviewProtection {
+            administrators: vec![principal()],
+            branches: Vec::new(),
+            ref_policy: None,
+        },
+    };
+    committed(
+        node.runtime()
+            .block_on(node.admit_review_protection_durable_in(
+                &node.request_context(),
+                &session("http-first-policy"),
+                &first,
+                AdmissionLimits::default(),
+            )),
+    );
+    let original = command(Some("refs/heads/main"), "refs/heads/topic", base);
+    let outcome = committed(set_default_http(&node, &original, "http-original"));
+    let next_administrator = PrincipalId::from_bytes([0xc4; 16]);
+    let replacement = ProtectionCommand {
+        expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+        expected_epoch: snapshot(&node).basis().body().policy_epoch,
+        protection: ReviewProtection {
+            administrators: vec![next_administrator],
+            branches: Vec::new(),
+            ref_policy: None,
+        },
+    };
+    committed(
+        node.runtime()
+            .block_on(node.admit_review_protection_durable_in(
+                &node.request_context(),
+                &session("http-rotate-policy"),
+                &replacement,
+                AdmissionLimits::default(),
+            )),
+    );
+    let select_main = command(Some("refs/heads/topic"), "refs/heads/main", child);
+    let refused = set_default_http(&node, &select_main, "http-removed-admin").unwrap();
+    assert!(matches!(
+        refused.1.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::PublicationPolicyRefused,
+            ..
+        }
+    ));
+    committed(
+        node.runtime()
+            .block_on(node.admit_default_branch_http_admin_in(
+                &node.request_context(),
+                &http_session("http-current-admin", next_administrator),
+                &select_main,
+                AdmissionLimits::default(),
+            )),
+    );
+    accepted(apply(
+        &node,
+        &[delete("refs/heads/topic", base)],
+        "http-delete-former",
+    ));
+    let final_state = snapshot(&node);
+    node.push_quota.limit.max_events = 0;
+    assert_eq!(
+        set_default_http(&node, &original, "http-original").unwrap(),
+        outcome
+    );
+    assert_eq!(snapshot(&node).basis(), final_state.basis());
+    assert_eq!(read_default(&node).1, Some(reference("refs/heads/main")));
+    node.shutdown().unwrap();
 }
 
 #[test]

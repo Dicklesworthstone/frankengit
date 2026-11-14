@@ -67,6 +67,15 @@ outcome after later branch or policy changes. See the
 [default-branch guide](docs/NATIVE_DEFAULT_BRANCH.md) for the trusted-local CLI,
 raw-byte names, recovery and supported authenticated layouts.
 
+Remote administrators can inspect and select the same canonical default at
+`/ui/default-branch/` or `/api/v1/default-branch`. Writes require the explicit
+`--enable-default-branch-admin` flag, a `default-branch-write` credential and an
+administrator in an already installed canonical policy. The browser selects
+branches from the same authenticated snapshot and retains the original command
+for retry or outcome recovery. See the
+[HTTP default-branch API](docs/HTTP_DEFAULT_BRANCH_API.md) for enablement,
+byte-preserving requests and terminal receipts.
+
 `import` verifies a bounded local object source composed of loose objects and
 checksum-bound idx-v2/pack-v2 pairs, then publishes its source refs through the
 sealed admission/RCR/head-CAS path. Sources include bare repositories, ordinary

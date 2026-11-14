@@ -14,6 +14,7 @@ mod agent;
 mod artifacts;
 mod browser;
 mod credentials;
+mod default_branch;
 mod discussions;
 mod events;
 mod issues;
@@ -1399,6 +1400,7 @@ fn serve_connection_with_routes(
     let mut native = false;
     let mut native_mutation = false;
     let mut protection_api = false;
+    let mut default_branch_api = false;
     let mut pull_api = false;
     let mut milestone_api = false;
     let mut discussion_api = false;
@@ -1427,6 +1429,7 @@ fn serve_connection_with_routes(
             .next()
             .is_some_and(|path| path.contains("/api/v1/outcomes"));
         protection_api = protection::is_route(envelope.target);
+        default_branch_api = default_branch::is_route(envelope.target);
         queue_api = queues::is_route(envelope.target);
         discussion_api = discussions::is_route(envelope.target);
         source_api = envelope
@@ -1445,6 +1448,7 @@ fn serve_connection_with_routes(
             .next()
             .is_some_and(|path| path.contains("/api/v1/milestones"));
         native = protection_api
+            || default_branch_api
             || queue_api
             || discussion_api
             || source_api
@@ -1537,7 +1541,21 @@ fn serve_connection_with_routes(
                 error.status
             });
         }
-        let protection_request = if protection_api {
+        let default_branch_request = if default_branch_api {
+            Some(default_branch::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?)
+        } else {
+            None
+        };
+        if let Some(request) = &default_branch_request {
+            native_mutation = request.is_mutation();
+            if !request.is_mutation() {
+                writer.preserve_request_deadline = true;
+            }
+        }
+        let protection_request = if default_branch_request.is_none() && protection_api {
             Some(protection::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
                 error.status
@@ -1548,26 +1566,30 @@ fn serve_connection_with_routes(
         if let Some(request) = &protection_request {
             native_mutation = request.is_mutation();
         }
-        let queue_request = if protection_request.is_none() && queue_api {
-            Some(queues::Request::parse(&envelope).map_err(|error| {
-                api_error = Some(error);
-                error.status
-            })?)
-        } else {
-            None
-        };
-        if let Some(request) = &queue_request {
-            native_mutation = request.is_mutation();
-        }
-        let source_request =
-            if protection_request.is_none() && queue_request.is_none() && source_api {
-                Some(source::Request::parse(&envelope).map_err(|error| {
+        let queue_request =
+            if default_branch_request.is_none() && protection_request.is_none() && queue_api {
+                Some(queues::Request::parse(&envelope).map_err(|error| {
                     api_error = Some(error);
                     error.status
                 })?)
             } else {
                 None
             };
+        if let Some(request) = &queue_request {
+            native_mutation = request.is_mutation();
+        }
+        let source_request = if default_branch_request.is_none()
+            && protection_request.is_none()
+            && queue_request.is_none()
+            && source_api
+        {
+            Some(source::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?)
+        } else {
+            None
+        };
         if let Some(request) = &source_request {
             native_mutation = request.is_mutation();
             // A complete archive may spend most of its lifetime collecting
@@ -1576,7 +1598,8 @@ fn serve_connection_with_routes(
                 writer.preserve_request_deadline = true;
             }
         }
-        let pull_request = if protection_request.is_none()
+        let pull_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
         {
@@ -1590,7 +1613,8 @@ fn serve_connection_with_routes(
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
         }
-        let discussion_request = if protection_request.is_none()
+        let discussion_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && pull_request.is_none()
@@ -1606,7 +1630,8 @@ fn serve_connection_with_routes(
         if let Some(request) = &discussion_request {
             native_mutation = request.is_mutation();
         }
-        let issue_request = if protection_request.is_none()
+        let issue_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && pull_request.is_none()
@@ -1622,7 +1647,8 @@ fn serve_connection_with_routes(
         if let Some(request) = &issue_request {
             native_mutation = request.is_mutation();
         }
-        let git_request = if protection_request.is_none()
+        let git_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && discussion_request.is_none()
@@ -1634,59 +1660,68 @@ fn serve_connection_with_routes(
             None
         };
         let mut source_read_grant = None;
-        let session =
-            if let Some(request) = &protection_request {
-                protection::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
+        let session = if let Some(request) = &default_branch_request {
+            default_branch::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?
+        } else if let Some(request) = &protection_request {
+            protection::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| {
                     api_error = Some(error);
                     error.status
                 })?
-            } else if let Some(request) = &queue_request {
-                queues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &source_request {
-                source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map(|(session, read)| {
-                        source_read_grant = read;
-                        session
-                    })
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &pull_request {
-                pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &discussion_request {
-                discussions::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &issue_request {
-                issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else {
-                authenticated_session(
-                    git_request.as_ref().ok_or(Status::BadRequest)?,
-                    &bytes[..envelope.consumed],
-                    profile,
-                )?
-            };
+        } else if let Some(request) = &queue_request {
+            queues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile).map_err(
+                |error| {
+                    api_error = Some(error);
+                    error.status
+                },
+            )?
+        } else if let Some(request) = &source_request {
+            source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map(|(session, read)| {
+                    source_read_grant = read;
+                    session
+                })
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?
+        } else if let Some(request) = &pull_request {
+            pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile).map_err(
+                |error| {
+                    api_error = Some(error);
+                    error.status
+                },
+            )?
+        } else if let Some(request) = &discussion_request {
+            discussions::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?
+        } else if let Some(request) = &issue_request {
+            issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile).map_err(
+                |error| {
+                    api_error = Some(error);
+                    error.status
+                },
+            )?
+        } else {
+            authenticated_session(
+                git_request.as_ref().ok_or(Status::BadRequest)?,
+                &bytes[..envelope.consumed],
+                profile,
+            )?
+        };
         let mutation = native_mutation
             || git_request
                 .as_ref()
                 .is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        if (protection_request.is_some()
+        if (default_branch_request.is_some()
+            || protection_request.is_some()
             || queue_request.is_some()
             || source_request.is_some()
             || discussion_request.is_some()
@@ -1744,9 +1779,12 @@ fn serve_connection_with_routes(
             None
         };
         let initial = &bytes[envelope.consumed..];
-        let body_not_allowed = protection_request
+        let body_not_allowed = default_branch_request
             .as_ref()
             .is_some_and(|request| !request.is_mutation())
+            || protection_request
+                .as_ref()
+                .is_some_and(|request| !request.is_mutation())
             || queue_request
                 .as_ref()
                 .is_some_and(|request| !request.accepts_body())
@@ -1774,7 +1812,25 @@ fn serve_connection_with_routes(
                 writer.inner.flush()?;
             }
             let mut body = io::Cursor::new(initial).chain(&mut reader);
-            if let Some(request) = &protection_request {
+            if let Some(request) = &default_branch_request {
+                let reply = default_branch::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                    &admission_deadline,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
+            } else if let Some(request) = &protection_request {
                 let reply = protection::execute(
                     &node,
                     request,
@@ -1981,7 +2037,9 @@ fn serve_connection_with_routes(
             } else if native {
                 let error = api_error
                     .unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
-                if protection_api {
+                if default_branch_api {
+                    let _ = error.send_named(&mut writer, version, "default_branch_error");
+                } else if protection_api {
                     let _ = error.send_named(&mut writer, version, "protection_error");
                 } else if queue_api {
                     let _ = error.send_named(&mut writer, version, "merge_queue_error");

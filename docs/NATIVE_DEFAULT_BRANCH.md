@@ -68,6 +68,59 @@ sessions cannot use this path. Administrator status does not disclose hidden
 HEAD or branch names. The read also checks caller and canonical visibility of
 HEAD and its target before returning either the name or tip.
 
+## HTTP administrators and browser selection
+
+An independently enabled HTTP administration profile exposes the same canonical
+operation at `<repository-url>/api/v1/default-branch`. It uses a bearer token
+authenticated as the administrator's principal. The token must have the explicit
+`default-branch-write` scope, and `fg serve-http` must have
+`--enable-default-branch-admin --credentials-file <private-file>`. Git receive,
+source publication and `protection-write` grants do not imply this permission.
+The static Git-only `--token-file` profile does not enable it.
+
+Install the repository's canonical review-protection administrator policy before
+using this remote operation. It deliberately has no remote bootstrap: absence of
+that policy produces a canonical `PublicationPolicyRefused` decision. The actor
+must be a current administrator at every publication attempt, including after a
+lost CAS. Canonically declared agents, SSH credentials and any narrowed ref-write
+credential are refused. The native trusted-local entry point retains its existing
+operator-only boundary and its local bootstrap behavior. A successful remote
+decision records genuine `HttpToken` authentication in its canonical principal
+evidence.
+
+Read current state with `GET /api/v1/default-branch`. This read requires
+`--allow-source` and the token's `read` scope, independently of the administration
+switch and write grant. Its receipt binds the exact optional raw-byte target and
+tip to one `source_head` and `snapshot_token`. Use that snapshot token when reading
+the source branch list so the selected destination tip and the old HEAD come
+from the same authenticated state.
+
+Submit a URL-encoded `POST /api/v1/default-branch` with an `Idempotency-Key`
+header and these fields:
+
+| Field | Exact value |
+| --- | --- |
+| `expected_default_hex` | Hex bytes of the current symbolic target, including a named unborn target. |
+| `expect_no_default=true` | Use instead of `expected_default_hex` only when the target is absent. |
+| `reference_hex` | Hex bytes of the full destination `refs/heads/*` name. |
+| `expected_tip` | The destination's exact native OID as 40 lowercase hex digits for SHA-1 or 64 for SHA-256, without an algorithm prefix. The repository's object format supplies the native type. |
+
+The form cannot choose a principal or authentication method. The native admission
+driver preserves both expectations across replans, verifies the destination
+Commit, applies canonical visibility and publishes through the same sealed
+transaction as the CLI. HTTP 200 reports a committed terminal; HTTP 409 with a
+terminal receipt reports a canonical refusal. After an ambiguous disconnect,
+retry the original exact form and key. The receipt's original result remains
+recoverable after administrator rotation, target deletion or later HEAD changes,
+provided the host still authenticates the request under the required HTTP grant.
+
+The browser selector at `<repository-url>/ui/default-branch/` reads this API and
+the pinned branch listing, displays the old and new targets with the exact tip,
+and asks for explicit confirmation before publication. It needs the read and
+administration grants described above. See
+[HTTP default-branch API](HTTP_DEFAULT_BRANCH_API.md) for listener setup, request
+examples, bounded intake and recovery details.
+
 ## Terminal receipts and recovery
 
 A successful `default_branch_publication` document includes the stable `tx_id`,
@@ -108,8 +161,12 @@ objects admitted. The normative schema and verification obligations are in
 
 Focused admission tests cover canonical bytes, stale expectations, administrator
 and agent restrictions, policy/CAS races, cancellation, staged-body failures and
-original-key recovery. Native tests exercise real imported objects, all three
-live layouts, advertisements, history, cold reopen and deletion protection.
+original-key recovery. The HTTP profile's focused cases check the absence of an
+installed policy, genuine recorded authentication, administrator rotation during
+a CAS race and recovery of an earlier terminal after that rotation. Native tests
+exercise real imported objects, all three live layouts, advertisements, history,
+cold reopen and deletion protection, plus HTTP provenance, ref-scope restrictions,
+cancelled request contexts and retries after administrator/target/quota changes.
 `scripts/e2e/default_branch_smoke.py --fg /absolute/path/to/fg` drives fresh CLI
 processes through SHA-1/whole-body and SHA-256/V2 repositories, including policy
 rotation, raw-byte targets and a failed stdout write. The same campaign is wired

@@ -11,6 +11,7 @@ mod activity;
 #[cfg(unix)]
 mod artifacts;
 mod branches;
+mod default_branch;
 mod export_verify;
 mod history;
 mod initial;
@@ -175,6 +176,9 @@ pub(super) fn serve(
         return Ok(true);
     }
     if branches::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
+    if default_branch::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }
     if history::serve(profile, request, trailing, writer)? {
