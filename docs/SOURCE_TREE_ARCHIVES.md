@@ -1,7 +1,9 @@
 # Source tree archives
 
-`fg tree --output` and the authenticated HTTP source archive endpoint export a
-complete, authority-selected source directory as a POSIX ustar file. It is the bounded source-archive slice of the archive
+`fg tree --output` exports a complete, authority-selected source directory as a
+new POSIX ustar or stored-ZIP file. The authenticated HTTP source archive
+endpoint exports the same selected source using ustar. These implement the
+bounded source-archive slice of the archive
 creation target in [the compatibility matrix](GIT_COMPATIBILITY_MATRIX.md), not
 a Git bundle, repository capsule, backup, or canonical repository mutation.
 
@@ -9,13 +11,20 @@ a Git bundle, repository capsule, backup, or canonical repository mutation.
 fg tree ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
   --ref refs/heads/main --output ./source.tar
 
+# ZIP is an explicit CLI format choice; extensions never select a format.
+fg tree ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
+  --ref refs/heads/main --archive-format zip --output ./source.zip
+
 # Export only this directory, with independently reviewed native identity.
 fg tree ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
   --ref refs/heads/main --path crates --expected-commit NATIVE_OID \
   --object-format sha256 --output ./crates.tar
 ```
 
-The output path must not exist. Directory pagination follows `--limit` (1–1000,
+The CLI output path must not exist. The default format remains tar; explicit
+`--archive-format tar|zip` is accepted only with `tree --output`, never on
+`fg show` or a paged listing. Unknown and duplicate format options refuse
+before source I/O. Directory pagination follows `--limit` (1–1000,
 100 by default); changing that limit does not change the resulting archive.
 `--after-hex` is not accepted with an archive because it would silently omit part
 of a directory. Existing tree-page and `fg show --output` behavior remains
@@ -106,7 +115,8 @@ unsupported archive names or links return 409 `source_archive_profile_refused`;
 resource ceilings return 413. Native source-read failures retain their existing
 typed mappings rather than becoming a successful empty archive.
 
-The CLI JSON receipt is `source_tree_export`, schema 1, profile `ustar-source-v1`.
+The CLI JSON receipt is `source_tree_export`, schema 1. Tar retains profile
+`ustar-source-v1`; ZIP selects `zip-store-source-v1`.
 It includes source pins, selected subtree, original path bytes, counts and the
 archive size. `repository_changed:false` distinguishes creating the operator's
 local output file from publishing repository authority.
@@ -116,13 +126,19 @@ local output file from publishing repository authority.
 Every archive has one `source/` prefix. Directories precede their children in
 raw-name depth-first order. Regular files retain exact bytes, including binary
 and empty payloads. Git executables use mode 0755; other regular files use 0644,
-directories 0755, and symlinks 0777. UID, GID and timestamps are zero, owner names
-are empty, and the archive ends with two zero blocks. There is no dependence on
-the exporting host's clock, ownership, locale or filesystem ordering.
+directories 0755, and symlinks 0777. There is no dependence on the exporting
+host's clock, ownership, locale or filesystem ordering.
+
+Tar retains zero UID, GID and modification time, empty owner names, and its two
+zero end blocks. ZIP uses the existing TreeFS `ZipStoreV1` byte encoder:
+uncompressed entries, per-member CRC-32, Unix type/mode bits, explicit UTF-8
+names, and the fixed DOS epoch 1980-01-01 00:00:00. It carries no extra fields,
+comments, encryption or ZIP64 records. Its local records, central directory and
+end record all count against the complete output budget.
 
 Symlinks are encoded as links and are never followed by the exporter. This
-closed profile accepts only nonempty relative link targets of at most 100 bytes,
-without NUL, backslash, colon or any `..` component. Parent traversal is refused
+closed profile accepts only nonempty relative link targets of at most 100 bytes
+in tar or 4096 bytes in ZIP, without NUL, backslash, colon or any `..` component. Parent traversal is refused
 even when lexical normalization appears contained: preceding symlinks could
 change its meaning. Unsupported links refuse the whole archive rather than
 being silently dereferenced, rewritten or omitted. Treat extraction of untrusted
@@ -134,34 +150,54 @@ repository and are never fetched. The receipt reports `gitlink_directories` and
 original gitlink OIDs. There is no `.git` metadata, Git history, forge state,
 credential delegation, or submodule working tree in this source archive.
 
-Names retain raw bytes, including non-UTF-8 bytes, within the exact ustar
-100-byte name / 155-byte prefix fields. Directory headers include a trailing
-slash. Paths that cannot be represented without truncation refuse. Empty, dot,
-parent, `.git` (case-insensitive), NUL, backslash, colon and slash-containing
-individual components refuse. No GNU long-name or PAX fallback changes encoding.
+Tar names retain raw bytes, including non-UTF-8 bytes, within the exact ustar
+100-byte name / 155-byte prefix fields. ZIP names must already be valid UTF-8;
+there is no lossy recoding, normalization or false UTF-8 flag. ZIP permits up to
+255 bytes per component and 4096 bytes per complete archive path, including
+`source/`, and rejects ASCII control bytes below 0x20 through TreeFS path
+validation. This supports names that exceed ustar's split fields.
+
+Directory names include a trailing slash in both formats. Paths that cannot be
+represented exactly refuse. Empty, dot, parent, `.git` (case-insensitive), NUL,
+backslash, colon and slash-containing individual components refuse. No GNU
+long-name, PAX, encoding or ZIP64 fallback silently changes the profile.
 
 This is an exact source-tree export, **not full `git archive` compatibility**.
 `export-ignore`, `export-subst`, pathspec rewriting, timestamps from commit
-metadata, compression, ZIP and the Git `upload-archive` protocol are not
-implemented by this profile. Git attributes are included as ordinary source bytes, not executed.
+metadata, compression and the Git `upload-archive` protocol are not implemented
+by these profiles. ZIP is currently selected through the CLI and shared collector;
+the authenticated HTTP endpoint and browser retain their ustar response profile.
+Git attributes are included as ordinary source bytes, not executed.
 
 ## Bounds and tests
 
-The whole artifact, including tar framing, is limited to 128 MiB. HTTP further
-intersects this with the configured response ceiling before collecting file
-contents. Even an empty directory requires 1,536 bytes; smaller response ceilings
-refuse before source reads. The walk is
-limited to 100,000 entries including the prefix, 64 relative levels, 16 MiB of
-cumulative traversal-path bytes, and 200,000 source reads. File reads use 1 MiB
-ranges and the existing per-file range bound. Node object-read and command-time
+The whole artifact, including all format framing, is limited to 128 MiB. HTTP
+further intersects this with its configured response ceiling. The shared
+collector's `collect_with_format_and_limit` applies the same complete-response
+ceiling to either encoding; its existing `collect` and `collect_with_limit`
+entrypoints retain ustar. Empty source directories require 1,536 bytes in tar
+or 112 bytes in ZIP. Smaller ceilings refuse before source reads. Tar
+admits 100,000 entries and ZIP admits 65,535, including the prefix. Both walks
+are limited to 64 relative levels, 16 MiB of cumulative traversal-path bytes,
+and 200,000 source reads. File reads use at most 1 MiB ranges, narrowed by the
+remaining complete-output budget, with the existing per-file range bound.
+Node object-read and command-time
 limits also apply; archive limits do not override them. A declared file size is
 checked against the remaining output allowance before assembling that file.
+The shared ZIP builder reserves both copies of each name, the entire central
+directory and the end record before accepting payload bytes. Duplicate names,
+directory payloads and unrepresentable fields refuse before appending that
+member. Finishing returns only a complete stream; the low-level builder grants
+no source authority or host-write permission. The CLI rechecks its original
+request lifetime after encoding, before the shutdown/publication barrier.
 
 Focused native selectors are:
 
 ```sh
+cargo test -p fgit-treefs --test archive
 cargo test -p fgit-forge source_archive
 cargo test -p fgit-cli --bin fg source_browse
+cargo test -p fgit-cli --test native_source_browse_smoke
 cargo test -p fgit-node --lib smart_http::server::source::archive
 cargo test -p fgit-node --test source_archive_http
 ```
@@ -185,7 +221,21 @@ Browser tests under `tests/browser/source-archive*.test.mjs` cover bounded binar
 collection, metadata/pin mismatches, aborts, truncation and stale-response
 suppression. Their DOM and fetch doubles are not live-browser evidence.
 
-The implementation's pinned native build was interrupted by an unavailable
+ZIP assembly tests exercise both object formats, exact Unicode/binary payloads,
+executable and symlink modes, gitlink directories, deterministic pagination,
+subtree pins, unsafe/non-UTF-8 names, longer representable paths and links,
+source movement, cancellation, byte bounds and the shutdown barrier. TreeFS
+builder tests cover exact whole-stream limits, entry limits, empty ZIPs and
+refused appends without corrupting accepted members.
+
+The existing fresh-process native source-browse campaign additionally imports
+real SHA-1/SHA-256 objects, exports ZIPs through `fg`, and checks them with
+Python's independent `zipfile` reader, including CRCs, payloads, modes, fixed
+timestamps, repeatability, no-overwrite behavior and stale-source refusal. Its
+tar twin checks that an output extension does not change the default format.
+
+The ZIP tests and expanded CLI campaign are authored but have not been executed
+in this session. The implementation's pinned native build was interrupted by an unavailable
 execution host before a test result could be observed. Central Rust verification
 and live-browser interoperability remain pending. Included tests, source review
 and an independently parseable fixture do not establish a passing runtime gate,

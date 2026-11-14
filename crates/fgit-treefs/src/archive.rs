@@ -1,4 +1,4 @@
-//! Bounded, deterministic USTAR materialization from an authenticated `TreeFS` base.
+//! Bounded, deterministic USTAR and stored-ZIP materialization from a `TreeFS` base.
 //!
 //! This is a derived-output adapter, never an authority surface.  It reads only
 //! objects selected by a [`TreeCapability`], rechecks every payload identity
@@ -6,10 +6,10 @@
 //! from.  Nothing here writes a host path, changes a ref, or publishes a
 //! repository decision.
 //!
-//! The supported format is deliberately the portable USTAR subset.  Paths that
-//! need a PAX extension, submodules, and symlink targets USTAR cannot encode are
-//! typed refusals rather than a lossy best effort.  That keeps the first archive
-//! materializer byte-stable and makes its compatibility surface explicit.
+//! USTAR retains its portable bounded subset; stored ZIP requires exact UTF-8
+//! names and represents symlink bodies as data. Neither silently introduces
+//! compression, PAX or ZIP64. The shared ZIP byte builder grants no source
+//! authority: verified renderers and paged native callers own that boundary.
 
 use crate::base::{BaseError, BaseView, ObjectSource, ObjectSourceError};
 use crate::capability::{CapabilityRefusal, TreeCapability};
@@ -17,7 +17,7 @@ use crate::path::TreePath;
 use core::fmt::{self, Display, Formatter};
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, sha256_digest};
 use fgit_types::{RepositoryCommitId, RepositoryId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_END_BYTES: usize = TAR_BLOCK_BYTES * 2;
@@ -373,13 +373,7 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
         for (path, entry) in &entries {
             validate_zip_member_name(path, zip_entry_kind(entry))?;
         }
-        let mut bytes = Vec::new();
-        let mut central = Vec::new();
-        central
-            .try_reserve_exact(entry_count)
-            .map_err(|_| ArchiveRefusal::AllocationFailed {
-                requested: entry_count,
-            })?;
+        let mut output = StoredZipBuilder::new(limits);
         let mut regular_file_bytes = 0_usize;
         for (path, entry) in entries {
             let (kind, mode, body) = match entry {
@@ -398,17 +392,9 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
                     (ZipEntryKind::Symlink, 0o777, body)
                 }
             };
-            let name = zip_member_name(&path, kind)?;
-            central.push(append_zip_local(
-                &mut bytes,
-                name,
-                kind,
-                mode,
-                &body,
-                limits.max_output_bytes,
-            )?);
+            output.append(&path, kind, mode, &body)?;
         }
-        append_zip_central_directory(&mut bytes, &central, limits.max_output_bytes)?;
+        let bytes = output.finish()?;
 
         let receipt = ArchiveReceipt {
             repository_id: base.repository_id(),
@@ -440,11 +426,163 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
     }
 }
 
+/// The Unix type represented by a stored-ZIP member.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ZipEntryKind {
+pub enum ZipEntryKind {
+    /// Regular file; executable bits are supplied separately as its mode.
     File,
+    /// Directory; its archive name ends in a slash and its body must be empty.
     Directory,
+    /// Symlink; the body is link-text data and is never followed by the encoder.
     Symlink,
+}
+
+/// Bounded encoding of already-selected members in the `ZipStoreV1` profile.
+///
+/// This is the shared byte encoder used by [`ZipArchive`] and by paged native
+/// source exports. It authenticates no source and grants no capability: callers
+/// retain their own verified source selection and receipt. Member order is the
+/// caller's order; paths retain exact UTF-8 bytes and duplicates refuse. Symlink
+/// targets remain data; a host-facing caller must apply its extraction policy.
+///
+/// Every append reserves room for the complete central directory and trailer
+/// before retaining its payload. A refused member leaves the previously accepted
+/// stream intact. Nothing is exposed until the consuming `finish` succeeds.
+#[derive(Debug)]
+pub struct StoredZipBuilder {
+    limits: ZipLimits,
+    bytes: Vec<u8>,
+    central: Vec<ZipCentralEntry>,
+    paths: BTreeSet<TreePath>,
+    central_bytes: usize,
+}
+
+impl StoredZipBuilder {
+    /// Starts an empty derived archive under explicit byte and member bounds.
+    #[must_use]
+    pub fn new(limits: ZipLimits) -> Self {
+        Self {
+            limits,
+            bytes: Vec::new(),
+            central: Vec::new(),
+            paths: BTreeSet::new(),
+            central_bytes: 0,
+        }
+    }
+
+    /// Largest next payload after accounting for both name copies, all retained
+    /// central records, the next header, and the final end record.
+    ///
+    /// Paged callers can reject an oversized declared body before assembling it.
+    /// This does not reserve a member; `append` repeats every bound.
+    pub fn remaining_payload(
+        &self,
+        path: &TreePath,
+        kind: ZipEntryKind,
+    ) -> Result<usize, ArchiveRefusal> {
+        validate_zip_member_name(path, kind)?;
+        if self.paths.contains(path) {
+            return Err(ArchiveRefusal::DuplicatePath { path: path.clone() });
+        }
+        let count = self
+            .central
+            .len()
+            .checked_add(1)
+            .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+        if count > self.limits.max_entries {
+            return Err(ArchiveRefusal::EntryLimitExceeded {
+                observed: count,
+                limit: self.limits.max_entries,
+            });
+        }
+        let _ = zip_u16(count, "archive entry count")?;
+        let name_bytes = path
+            .as_bytes()
+            .len()
+            .checked_add(usize::from(kind == ZipEntryKind::Directory))
+            .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+        let required = self
+            .bytes
+            .len()
+            .checked_add(self.central_bytes)
+            .and_then(|size| size.checked_add(ZIP_LOCAL_HEADER_BYTES))
+            .and_then(|size| size.checked_add(ZIP_CENTRAL_HEADER_BYTES))
+            .and_then(|size| size.checked_add(name_bytes.checked_mul(2)?))
+            .and_then(|size| size.checked_add(ZIP_END_BYTES))
+            .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+        let remaining = self.limits.max_output_bytes.checked_sub(required).ok_or(
+            ArchiveRefusal::OutputBytesExceeded {
+                observed: required,
+                limit: self.limits.max_output_bytes,
+            },
+        )?;
+        Ok(remaining.min(self.limits.max_entry_bytes))
+    }
+
+    /// Appends exact member bytes with fixed metadata and a Unix permission mode.
+    /// Directory bodies and modes wider than the permission bits refuse.
+    pub fn append(
+        &mut self,
+        path: &TreePath,
+        kind: ZipEntryKind,
+        mode: u64,
+        body: &[u8],
+    ) -> Result<(), ArchiveRefusal> {
+        let remaining = self.remaining_payload(path, kind)?;
+        if mode > 0o7777 {
+            return Err(ArchiveRefusal::ZipFieldOverflow {
+                field: "Unix permission mode",
+                observed: mode,
+                limit: 0o7777,
+            });
+        }
+        if kind == ZipEntryKind::Directory && !body.is_empty() {
+            return Err(ArchiveRefusal::ZipDirectoryPayload { path: path.clone() });
+        }
+        ensure_zip_entry_bytes(path, body.len(), self.limits.max_entry_bytes)?;
+        if body.len() > remaining {
+            return Err(ArchiveRefusal::OutputBytesExceeded {
+                observed: self
+                    .limits
+                    .max_output_bytes
+                    .checked_add(body.len() - remaining)
+                    .ok_or(ArchiveRefusal::OutputSizeOverflow)?,
+                limit: self.limits.max_output_bytes,
+            });
+        }
+        self.central
+            .try_reserve(1)
+            .map_err(|_| ArchiveRefusal::AllocationFailed { requested: 1 })?;
+        let name = zip_member_name(path, kind)?;
+        let central_bytes = self
+            .central_bytes
+            .checked_add(ZIP_CENTRAL_HEADER_BYTES)
+            .and_then(|size| size.checked_add(name.len()))
+            .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+        let entry = append_zip_local(
+            &mut self.bytes,
+            name,
+            kind,
+            mode,
+            body,
+            self.limits.max_output_bytes,
+        )?;
+        self.central.push(entry);
+        self.paths.insert(path.clone());
+        self.central_bytes = central_bytes;
+        Ok(())
+    }
+
+    /// Completes the central directory and returns only the complete ZIP stream.
+    pub fn finish(mut self) -> Result<Vec<u8>, ArchiveRefusal> {
+        let additional = self
+            .central_bytes
+            .checked_add(ZIP_END_BYTES)
+            .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+        reserve_append_capacity(&mut self.bytes, additional, self.limits.max_output_bytes)?;
+        append_zip_central_directory(&mut self.bytes, &self.central, self.limits.max_output_bytes)?;
+        Ok(self.bytes)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -711,6 +849,11 @@ pub enum ArchiveRefusal {
         /// The path whose raw bytes are not UTF-8.
         path: TreePath,
     },
+    /// A directory member cannot truthfully carry regular-file payload bytes.
+    ZipDirectoryPayload {
+        /// The directory path whose body was nonempty.
+        path: TreePath,
+    },
     /// A value would need ZIP64 or another unsupported ZIP extension.
     ZipFieldOverflow {
         /// The ZIP field that could not represent the value.
@@ -802,6 +945,12 @@ impl Display for ArchiveRefusal {
                 formatter,
                 "path {path} is not UTF-8 and cannot enter the stored-ZIP profile"
             ),
+            Self::ZipDirectoryPayload { path } => {
+                write!(
+                    formatter,
+                    "ZIP directory {path} cannot contain payload bytes"
+                )
+            }
             Self::ZipFieldOverflow {
                 field,
                 observed,

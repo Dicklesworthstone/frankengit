@@ -20,7 +20,8 @@ const MAX_EXPORT_PAGES: usize = fgit_forge::source_archive::MAX_FILE_READS;
 const USAGE: &str = "usage: fg tree <storage-root> <tenant-id> <repository-id> --trusted-local
   (--ref <full-ref> | --ref-hex <bytes>) [--path <path> | --path-hex <bytes>]
   [--limit <1..1000>] [--after-hex <child-name> --expected-head <snapshot-token>]
-  [--expected-commit <native-oid>] [--object-format sha1|sha256] [--output <new.tar>]
+  [--expected-commit <native-oid>] [--object-format sha1|sha256]
+  [--output <new-archive> [--archive-format tar|zip]]
 usage: fg show <storage-root> <tenant-id> <repository-id> --trusted-local
   (--ref <full-ref> | --ref-hex <bytes>) (--path <path> | --path-hex <bytes>)
   [--max-bytes <1..1048576>] [--offset <byte-offset> --expected-head <snapshot-token>]
@@ -35,14 +36,20 @@ Use snapshot_token from the first page for every continuation. If authority move
 restart instead of combining pages. --expected-commit pins independently reviewed
 source identity; it does not select historical state or reveal hidden references.
 
-tree --output exports the COMPLETE selected directory as a deterministic ustar
-archive under source/, following all pages and file ranges under one source pin.
+tree --output exports the COMPLETE selected directory as a deterministic archive
+under source/, following all pages and file ranges under one source pin. The
+default format is tar (ustar); explicit --archive-format zip uses stored ZIP.
+The filename extension never selects the format. --archive-format requires a
+tree output and is not a show option.
 It preserves regular/executable bytes and contained symlinks, never follows links,
-and represents gitlinks as empty directories without fetching submodules. Ustar
-name/prefix limits and relative link targets of at most 100 bytes apply; absolute
-links and parent traversal refuse. --after-hex is not allowed for a full archive.
-The archive is bounded to 128 MiB, 100000 entries, 64 levels and 200000 reads.
-Owner IDs and timestamps are zero; Git attributes and substitutions are not run.
+and represents gitlinks as empty directories without fetching submodules. Tar
+preserves raw byte names within ustar name/prefix limits and relative link targets
+of at most 100 bytes. ZIP requires exact UTF-8 names, at most 255 bytes per
+component and 4096 bytes per path, and allows relative link data up to 4096 bytes.
+Absolute links and parent traversal refuse in both formats. --after-hex is not
+allowed for a full archive. Both are bounded to 128 MiB, 64 levels and 200000
+reads; tar admits 100000 entries, ZIP 65535 including source/. Metadata is fixed
+(tar time zero; ZIP 1980-01-01). No compression, ZIP64 or Git substitutions run.
 See docs/SOURCE_TREE_ARCHIVES.md for the precise profile and refusal boundaries.
 
 show --output exports the COMPLETE verified file as a new regular file, preserving
@@ -62,13 +69,13 @@ pub fn run(args: &[String], file: bool) -> Result<u8, String> {
         emit(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
     }
-    let (args, destination) = export_arguments(args, file)?;
+    let (args, destination, format) = export_arguments(args, file)?;
     let options = options::parse(&args, file)?;
     if let Some(destination) = destination {
         return if file {
             export_file(&options, &destination)
         } else {
-            archive::export_tree(&options, &destination)
+            archive::export_tree(&options, &destination, format)
         };
     }
     let mut node = OneNode::open_existing(
@@ -90,9 +97,12 @@ pub fn run(args: &[String], file: bool) -> Result<u8, String> {
 
 /// Consume option values as values: a file literally named --output must not
 /// accidentally become an output option. The existing parser owns all other grammar.
-fn export_arguments(args: &[String], file: bool) -> Result<(Vec<String>, Option<PathBuf>), String> {
+fn export_arguments(
+    args: &[String],
+    file: bool,
+) -> Result<(Vec<String>, Option<PathBuf>, archive::Format), String> {
     if args.len() < 3
-        || args.len() > 26
+        || args.len() > 28
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -100,6 +110,7 @@ fn export_arguments(args: &[String], file: bool) -> Result<(Vec<String>, Option<
     }
     let mut remaining = args[..3].to_vec();
     let mut destination = None;
+    let mut format = None;
     let mut cursor = 3;
     while cursor < args.len() {
         let flag = &args[cursor];
@@ -116,6 +127,17 @@ fn export_arguments(args: &[String], file: bool) -> Result<(Vec<String>, Option<
                 return Err("--output must name a new regular file".into());
             }
             destination = Some(path);
+        } else if flag == "--archive-format" {
+            if file || format.is_some() {
+                return Err("--archive-format is accepted exactly once by tree --output".into());
+            }
+            let value = args.get(cursor).ok_or("missing --archive-format value")?;
+            cursor += 1;
+            format = Some(match value.as_str() {
+                "tar" => archive::Format::Tar,
+                "zip" => archive::Format::Zip,
+                _ => return Err("archive format must be tar or zip".into()),
+            });
         } else {
             remaining.push(flag.clone());
             if flag != "--trusted-local" {
@@ -127,7 +149,10 @@ fn export_arguments(args: &[String], file: bool) -> Result<(Vec<String>, Option<
             }
         }
     }
-    Ok((remaining, destination))
+    if format.is_some() && destination.is_none() {
+        return Err("--archive-format requires --output".into());
+    }
+    Ok((remaining, destination, format.unwrap_or_default()))
 }
 
 use fgit_forge::source_archive::SourceFileExport as FileExport;
@@ -136,8 +161,13 @@ fn collect_file(
     options: &Options,
     read: impl FnMut(&SourceBrowseQuery) -> Result<SourceBrowseReport, String>,
 ) -> Result<FileExport, String> {
-    fgit_forge::source_archive::collect_file(options.repository, options.format, &options.query, read)
-        .map_err(|error| error.to_string())
+    fgit_forge::source_archive::collect_file(
+        options.repository,
+        options.format,
+        &options.query,
+        read,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn export_file(options: &Options, destination: &std::path::Path) -> Result<u8, String> {
@@ -383,14 +413,14 @@ mod export_tests {
     fn export_option_is_not_confused_with_an_option_value() {
         let mut input = args();
         input[7] = "--output".into();
-        let (ordinary, target) = export_arguments(&input, true).unwrap();
+        let (ordinary, target, _) = export_arguments(&input, true).unwrap();
         assert_eq!(ordinary, input);
         assert!(target.is_none());
         input.extend(["--output".into(), "new.bin".into()]);
-        let (ordinary, target) = export_arguments(&input, true).unwrap();
+        let (ordinary, target, _) = export_arguments(&input, true).unwrap();
         assert_eq!(ordinary[7], "--output");
         assert_eq!(target, Some(PathBuf::from("new.bin")));
-        let (tree_args, tree_target) = export_arguments(&input, false).unwrap();
+        let (tree_args, tree_target, _) = export_arguments(&input, false).unwrap();
         assert_eq!(tree_target, Some(PathBuf::from("new.bin")));
         assert!(
             options::parse(&tree_args, false).is_err(),
@@ -399,6 +429,50 @@ mod export_tests {
         input.extend(["--output".into(), "other.bin".into()]);
         assert!(export_arguments(&input, true).is_err());
     }
+    #[test]
+    fn archive_format_is_explicit_and_requires_one_tree_output() {
+        let base = vec!["store".into(), "tenant".into(), "repository".into()];
+        let mut input = base.clone();
+        input.extend(["--output".into(), "source.zip".into()]);
+        assert_eq!(
+            export_arguments(&input, false).unwrap().2,
+            archive::Format::Tar
+        );
+        input.extend(["--archive-format".into(), "zip".into()]);
+        let (remaining, output, format) = export_arguments(&input, false).unwrap();
+        assert_eq!(remaining, base);
+        assert_eq!(output, Some(PathBuf::from("source.zip")));
+        assert_eq!(format, archive::Format::Zip);
+        assert!(export_arguments(&input, true).is_err());
+        for suffix in [
+            vec!["--archive-format", "zip"],
+            vec!["--output", "new", "--archive-format"],
+            vec!["--output", "new", "--archive-format", "gzip"],
+            vec![
+                "--output",
+                "new",
+                "--archive-format",
+                "zip",
+                "--archive-format",
+                "tar",
+            ],
+        ] {
+            let mut refused = base.clone();
+            refused.extend(suffix.into_iter().map(str::to_owned));
+            assert!(export_arguments(&refused, false).is_err());
+        }
+        let mut named_like_flag = base;
+        named_like_flag.extend([
+            "--path".into(),
+            "--archive-format".into(),
+            "--output".into(),
+            "new.tar".into(),
+        ]);
+        let (ordinary, _, format) = export_arguments(&named_like_flag, false).unwrap();
+        assert_eq!(ordinary.last().unwrap(), "--archive-format");
+        assert_eq!(format, archive::Format::Tar);
+    }
+
     #[test]
     fn complete_binary_export_pins_every_continuation() {
         let initial = page(&[0, 255], 4, 0, Some(2));

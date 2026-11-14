@@ -7,6 +7,7 @@
 //! These bytes are a derived export, never a capsule or publication authority.
 
 mod tar;
+mod zip;
 use crate::source_browse::{
     SourceBrowseAction, SourceBrowseContent, SourceBrowseQuery, SourceBrowseReport, SourceEntryKind,
 };
@@ -14,7 +15,51 @@ use fgit_types::{
     GitHashAlgorithm, GitOid, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId,
 };
 
+/// Existing callers retain the default ustar profile.
 pub const PROFILE: &str = "ustar-source-v1";
+
+/// Explicit source archive encoding; extensions never select this profile.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SourceArchiveFormat {
+    /// Exact POSIX ustar fields and the existing raw-byte path profile.
+    #[default]
+    Tar,
+    /// Deterministic stored ZIP with exact UTF-8 names and Unix metadata.
+    Zip,
+}
+
+impl SourceArchiveFormat {
+    /// Stable receipt profile for the selected encoding.
+    #[must_use]
+    pub const fn profile(self) -> &'static str {
+        match self {
+            Self::Tar => PROFILE,
+            Self::Zip => "zip-store-source-v1",
+        }
+    }
+
+    const fn max_entries(self) -> usize {
+        match self {
+            Self::Tar => MAX_ENTRIES,
+            Self::Zip => u16::MAX as usize,
+        }
+    }
+
+    const fn max_path_bytes(self) -> usize {
+        match self {
+            Self::Tar => 256,
+            Self::Zip => 4096,
+        }
+    }
+
+    const fn max_link_bytes(self) -> u64 {
+        match self {
+            Self::Tar => 100,
+            Self::Zip => 4096,
+        }
+    }
+}
+
 pub const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 pub const MIN_ARCHIVE_BYTES: usize = 3 * 512;
 pub const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
@@ -118,7 +163,99 @@ pub fn collect_with_limit<E>(
         format,
         query,
     };
-    collect_inner(&options, max_bytes.min(MAX_ARCHIVE_BYTES), reader)
+    collect_inner(
+        &options,
+        SourceArchiveFormat::Tar,
+        max_bytes.min(MAX_ARCHIVE_BYTES),
+        reader,
+    )
+}
+
+/// Collect a complete source archive in an explicitly selected format.
+/// The verified-read and request-lifetime obligations are identical to `collect`.
+pub fn collect_with_format<E>(
+    repository: RepositoryId,
+    format: GitHashAlgorithm,
+    query: &SourceBrowseQuery,
+    archive_format: SourceArchiveFormat,
+    reader: impl FnMut(&SourceBrowseQuery) -> Result<SourceBrowseReport, E>,
+) -> Result<SourceArchive, SourceArchiveError<E>> {
+    collect_with_format_and_limit(
+        repository,
+        format,
+        query,
+        archive_format,
+        MAX_ARCHIVE_BYTES,
+        reader,
+    )
+}
+
+/// Apply a transport's complete-response ceiling to either encoding.
+/// All local records, names, payloads and end records count against the limit.
+/// Impossible prefix/framing limits refuse before any verified source read.
+pub fn collect_with_format_and_limit<E>(
+    repository: RepositoryId,
+    format: GitHashAlgorithm,
+    query: &SourceBrowseQuery,
+    archive_format: SourceArchiveFormat,
+    max_bytes: usize,
+    reader: impl FnMut(&SourceBrowseQuery) -> Result<SourceBrowseReport, E>,
+) -> Result<SourceArchive, SourceArchiveError<E>> {
+    let options = SelectionQuery {
+        repository,
+        format,
+        query,
+    };
+    collect_inner(
+        &options,
+        archive_format,
+        max_bytes.min(MAX_ARCHIVE_BYTES),
+        reader,
+    )
+}
+
+enum Encoder {
+    Tar(tar::Tar),
+    Zip(zip::Zip),
+}
+
+impl Encoder {
+    fn new(format: SourceArchiveFormat, max_bytes: usize) -> Result<Self, AssemblyRefusal> {
+        match format {
+            SourceArchiveFormat::Tar => tar::Tar::new(max_bytes).map(Self::Tar),
+            SourceArchiveFormat::Zip => zip::Zip::new(max_bytes).map(Self::Zip),
+        }
+    }
+
+    fn remaining_payload(
+        &self,
+        path: &[u8],
+        kind: SourceEntryKind,
+    ) -> Result<usize, AssemblyRefusal> {
+        match self {
+            Self::Tar(output) => output.remaining_payload(kind),
+            Self::Zip(output) => output.remaining_payload(path, kind),
+        }
+    }
+
+    fn append(
+        &mut self,
+        path: &[u8],
+        kind: SourceEntryKind,
+        payload: &[u8],
+    ) -> Result<(), AssemblyRefusal> {
+        match self {
+            Self::Tar(output) => output.append(path, kind, payload),
+            Self::Zip(output) => output.append(path, kind, payload),
+        }
+    }
+
+    fn finish(self) -> Result<Vec<u8>, AssemblyRefusal> {
+        match self {
+            Self::Tar(output) => output.finish(),
+            Self::Zip(output) => output.finish(),
+        }
+    }
 }
 
 const MAX_ENTRIES: usize = 100_000;
@@ -230,6 +367,7 @@ fn complete_query(options: &SelectionQuery) -> Result<u16, &'static str> {
 
 fn collect_inner<E>(
     options: &SelectionQuery,
+    archive_format: SourceArchiveFormat,
     max_bytes: usize,
     mut reader: impl FnMut(&SourceBrowseQuery) -> Result<SourceBrowseReport, E>,
 ) -> Result<SourceArchive, SourceArchiveError<E>> {
@@ -246,7 +384,7 @@ fn collect_inner<E>(
         kind: SourceEntryKind::Directory,
         depth: 0,
     }];
-    let mut output = tar::Tar::new(max_bytes)?;
+    let mut output = Encoder::new(archive_format, max_bytes)?;
     let mut entries = 1_usize;
     let mut path_bytes = 0_usize;
     let mut gitlinks = 0_usize;
@@ -302,17 +440,21 @@ fn collect_inner<E>(
                             source.push(b'/');
                         }
                         source.extend_from_slice(&child.name);
-                        if path.len() > 256 || source.len() > 4096 || task.depth >= MAX_DEPTH {
+                        if path.len() > archive_format.max_path_bytes()
+                            || source.len() > 4096
+                            || task.depth >= MAX_DEPTH
+                        {
                             return Err(SourceArchiveError::Budget(
                                 "source archive path or depth exceeds the bounded profile",
                             ));
                         }
                         entries = entries
                             .checked_add(1)
-                            .filter(|count| *count <= MAX_ENTRIES)
-                            .ok_or(SourceArchiveError::Budget(
-                                "source archive exceeds 100000 entries",
-                            ))?;
+                            .filter(|count| *count <= archive_format.max_entries())
+                            .ok_or(SourceArchiveError::Budget(match archive_format {
+                                SourceArchiveFormat::Tar => "source archive exceeds 100000 entries",
+                                SourceArchiveFormat::Zip => "source archive exceeds 65535 entries",
+                            }))?;
                         path_bytes = path_bytes
                             .checked_add(path.len())
                             .and_then(|n| n.checked_add(source.len()))
@@ -320,11 +462,9 @@ fn collect_inner<E>(
                             .ok_or(SourceArchiveError::Budget(
                                 "source archive exceeds its path-byte budget",
                             ))?;
-                        children
-                            .try_reserve(1)
-                            .map_err(|_| {
-                                SourceArchiveError::Budget("cannot allocate archive traversal")
-                            })?;
+                        children.try_reserve(1).map_err(|_| {
+                            SourceArchiveError::Budget("cannot allocate archive traversal")
+                        })?;
                         children.push(Task {
                             source: Some(source),
                             path,
@@ -352,9 +492,7 @@ fn collect_inner<E>(
                 // directory precedes its children; raw names retain byte order.
                 stack
                     .try_reserve(children.len())
-                    .map_err(|_| {
-                                SourceArchiveError::Budget("cannot allocate archive traversal")
-                            })?;
+                    .map_err(|_| SourceArchiveError::Budget("cannot allocate archive traversal"))?;
                 stack.extend(children.into_iter().rev());
             }
             SourceEntryKind::Gitlink => {
@@ -364,7 +502,7 @@ fn collect_inner<E>(
                 gitlinks += 1;
             }
             kind => {
-                let remaining = output.remaining_payload(kind)? as u64;
+                let remaining = output.remaining_payload(&task.path, kind)? as u64;
                 let query = selection.query(
                     options,
                     task.source,
@@ -386,10 +524,17 @@ fn collect_inner<E>(
                             total_bytes,
                             ..
                         } if *observed == kind => {
-                            if kind == SourceEntryKind::Symlink && *total_bytes > 100 {
-                                return Err(SourceArchiveError::Invalid(
-                                    "ustar symlink requires at most 100 relative bytes without parent traversal",
-                                ));
+                            if kind == SourceEntryKind::Symlink
+                                && *total_bytes > archive_format.max_link_bytes()
+                            {
+                                return Err(SourceArchiveError::Invalid(match archive_format {
+                                    SourceArchiveFormat::Tar => {
+                                        "ustar symlink requires at most 100 relative bytes without parent traversal"
+                                    }
+                                    SourceArchiveFormat::Zip => {
+                                        "ZIP symlink requires at most 4096 relative bytes without parent traversal"
+                                    }
+                                }));
                             }
                             if *total_bytes > remaining {
                                 return Err(SourceArchiveError::Budget(
@@ -557,7 +702,6 @@ fn collect_file_inner<E>(
         "source export exceeds the 4096-read limit; increase --max-bytes",
     ))
 }
-
 
 #[cfg(test)]
 mod tests;

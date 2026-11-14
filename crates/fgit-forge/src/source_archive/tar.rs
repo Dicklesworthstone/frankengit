@@ -65,7 +65,7 @@ impl Tar {
                 (0o755, b'5', b"", b"")
             }
             SourceEntryKind::Symlink => {
-                validate_link(payload)?;
+                validate_link(payload, 100)?;
                 (0o777, b'2', b"", payload)
             }
             _ => return Err("archive directory cannot contain file payload bytes".into()),
@@ -142,19 +142,22 @@ fn validate_path(path: &[u8]) -> Result<(), AssemblyRefusal> {
     Ok(())
 }
 
-fn validate_link(target: &[u8]) -> Result<(), AssemblyRefusal> {
+pub(super) fn validate_link(target: &[u8], max_bytes: usize) -> Result<(), AssemblyRefusal> {
     // No parent components, even when a lexical normalization would appear
     // contained: another symlink can change what a preceding component means.
     // Refusing such links also prevents chained links from escaping the prefix.
     if target.is_empty()
-        || target.len() > 100
+        || target.len() > max_bytes
         || target.starts_with(b"/")
         || target.iter().any(|byte| matches!(*byte, 0 | b'\\' | b':'))
         || target.split(|byte| *byte == b'/').any(|part| part == b"..")
     {
-        return Err(
-            "ustar symlink requires at most 100 relative bytes without parent traversal".into(),
-        );
+        return Err(if max_bytes == 100 {
+            "ustar symlink requires at most 100 relative bytes without parent traversal"
+        } else {
+            "ZIP symlink requires at most 4096 relative bytes without parent traversal"
+        }
+        .into());
     }
     Ok(())
 }

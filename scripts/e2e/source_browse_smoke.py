@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import zipfile
+import tarfile
 import zlib
 
 
@@ -43,6 +45,17 @@ def campaign(binary, fmt):
             (b"dir.c", b"100644", old), (b"empty", b"100644", blank), (b"link", b"120000", symlink), (b"\xff", b"100644", blob)]))
         base = loose(source, fmt, "commit", f"tree {root_tree}\nauthor T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\nbase\n".encode())
         (source / "refs/heads/main").write_text(base + "\n")
+        # A separate visible branch exercises archive metadata and payloads
+        # without changing the deliberately hostile main-branch read fixture.
+        archive_link = loose(source, fmt, "blob", b"dir/file")
+        archive_tree = loose(source, fmt, "tree", tree([
+            (b"bin", b"100755", blob), (b"dir", b"40000", nested),
+            (b"empty", b"100644", blank), (b"link", b"120000", archive_link),
+            (b"submodule", b"160000", base), ("\u00e9".encode(), b"100644", old),
+        ]))
+        archive_commit = loose(source, fmt, "commit",
+            f"tree {archive_tree}\nparent {base}\nauthor T <t@example.invalid> 1 +0000\ncommitter T <t@example.invalid> 1 +0000\n\narchive\n".encode())
+        (source / "refs/heads/archive").write_text(archive_commit + "\n")
         tenant, repo, principal = "a7" * 16, "a8" * 16, "a9" * 16
         def run(args, code=0, receipt=False):
             result = subprocess.run([str(binary), *map(str, args)], capture_output=True, timeout=120)
@@ -95,6 +108,65 @@ def campaign(binary, fmt):
             (["--path", "bin", "--offset", str(2**64 - 1), "--expected-head", token], "show")]:
             run([mode, *common, *extra], code=2)
         assert run(["tree", *common, "--limit", "2"], receipt=True) == first
+
+        archive_common = [node, tenant, repo, "--trusted-local", "--ref",
+                          "refs/heads/archive", "--object-format", fmt]
+        archive_path = root / "source.zip"
+        archived = run(["tree", *archive_common, "--limit", "1",
+                        "--expected-head", token, "--expected-commit", archive_commit,
+                        "--output", archive_path, "--archive-format", "zip"], receipt=True)
+        assert archived["profile"] == "zip-store-source-v1"
+        assert archived["source_commit"] == archive_commit
+        assert archived["root_tree"] == archive_tree
+        assert archived["selected_tree"] == archive_tree
+        assert archived["entries"] == 8 and archived["gitlink_directories"] == 1
+        assert archived["repository_changed"] is False and archived["node_closed"] is True
+        expected_names = ["source/", "source/bin", "source/dir/", "source/dir/file",
+                          "source/empty", "source/link", "source/submodule/", "source/\u00e9"]
+        # Independent standard-library ZIP reader checks CRCs and directory
+        # references against bytes emitted by the real native CLI.
+        with zipfile.ZipFile(archive_path) as zipped:
+            assert zipped.testzip() is None
+            assert zipped.namelist() == expected_names
+            assert zipped.read("source/bin") == binary_bytes
+            assert zipped.read("source/dir/file") == text
+            assert zipped.read("source/empty") == b""
+            assert zipped.read("source/link") == b"dir/file"
+            assert zipped.read("source/submodule/") == b""
+            assert zipped.read("source/\u00e9") == text
+            assert zipped.getinfo("source/bin").external_attr >> 16 == 0o100755
+            assert zipped.getinfo("source/link").external_attr >> 16 == 0o120777
+            assert zipped.getinfo("source/submodule/").is_dir()
+            for member in zipped.infolist():
+                assert member.date_time == (1980, 1, 1, 0, 0, 0)
+                assert member.compress_type == zipfile.ZIP_STORED
+                assert member.flag_bits == 0x800
+                assert member.create_system == 3
+                assert not member.extra and not member.comment
+        assert archive_path.stat().st_size == archived["bytes_written"]
+        repeated_path = root / "repeated.zip"
+        run(["tree", *archive_common, "--limit", "1000", "--output", repeated_path,
+             "--archive-format", "zip"], receipt=True)
+        original_archive = archive_path.read_bytes()
+        assert repeated_path.read_bytes() == original_archive
+        run(["tree", *archive_common, "--output", archive_path,
+             "--archive-format", "zip"], code=2)
+        assert archive_path.read_bytes() == original_archive
+
+        # Explicit formats, not filename guessing. The preexisting tar profile
+        # remains the default even for an output whose extension is ".zip".
+        tar_path = root / "default-format.zip"
+        tar_receipt = run(["tree", *archive_common, "--output", tar_path], receipt=True)
+        assert tar_receipt["profile"] == "ustar-source-v1"
+        with tarfile.open(tar_path) as tarred:
+            assert tarred.extractfile("source/bin").read() == binary_bytes
+            assert tarred.getmember("source/link").issym()
+            assert tarred.getmember("source/link").linkname == "dir/file"
+        bad_archive = root / "refused.zip"
+        run(["tree", *common, "--output", bad_archive, "--archive-format", "zip"], code=2)
+        assert not bad_archive.exists(), "unsafe source exported a partial archive"
+        assert run(["tree", *common, "--limit", "2"], receipt=True) == first
+
         # Use the observed exact bytes and native source identity to prepare a patch.
         patch = root / "change.patch"
         patch.write_bytes(b"diff --git a/dir/file b/dir/file\n--- a/dir/file\n+++ b/dir/file\n@@ -1,2 +1,2 @@\n-before\r\n+after\r\n without-final\n\\ No newline at end of file\n")
@@ -110,10 +182,14 @@ def campaign(binary, fmt):
         assert applied["outcome"] == "committed"
         run(["tree", *common, "--limit", "2", "--after-hex", first["next_after_hex"], "--expected-head", token], code=2)
         run(["show", *common, "--path", "dir/file", "--expected-commit", base], code=2)
+        stale_archive = root / "stale.zip"
+        run(["tree", *archive_common, "--expected-head", token,
+             "--output", stale_archive, "--archive-format", "zip"], code=2)
+        assert not stale_archive.exists(), "stale authority exported an archive"
         changed = run(["show", *common, "--path", "dir/file"], receipt=True)
         assert changed["source_commit"] == prepared["candidate_commit"]
         assert bytes.fromhex(changed["bytes_hex"]) == b"after\r\nwithout-final"
-        print(f"SOURCE_BROWSE_CLI format={fmt} directory_entries={len(rows)} binary_exact=true read_patch_apply=true stale_snapshot_refused=true")
+        print(f"SOURCE_BROWSE_CLI format={fmt} directory_entries={len(rows)} binary_exact=true read_patch_apply=true stale_snapshot_refused=true zip_exact=true zip_repeatable=true")
 
 
 def main():

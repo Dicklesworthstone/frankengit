@@ -3,6 +3,7 @@
 use super::{NodeConfig, OneNode, SourceBrowseAction};
 use super::{Options, emit, head_token, hex, optional_hex, quote};
 use super::{publish_new_bundle, require_absent};
+pub(super) use fgit_forge::source_archive::SourceArchiveFormat as Format;
 use fgit_forge::source_archive::{self, SourceArchive};
 use fgit_types::HeadGeneration;
 use std::path::Path;
@@ -36,7 +37,11 @@ fn after_shutdown(
     }
 }
 
-pub(super) fn export_tree(options: &Options, destination: &Path) -> Result<u8, String> {
+pub(super) fn export_tree(
+    options: &Options,
+    destination: &Path,
+    format: Format,
+) -> Result<u8, String> {
     complete_query(options)?;
     require_absent(destination)?;
     let mut node = OneNode::open_existing(
@@ -50,23 +55,31 @@ pub(super) fn export_tree(options: &Options, destination: &Path) -> Result<u8, S
         // One request owns the complete traversal, rather than resetting its
         // budget for every directory or file range.
         let request = fgit_cli::command_request_context(&node);
-        source_archive::collect(
+        let archive = source_archive::collect_with_format(
             options.repository,
             options.format,
             &options.query,
+            format,
             |query| {
-                node.runtime()
-                    .block_on(node.browse_source_local_in(&request, &options.reference, query))
+                node.runtime().block_on(node.browse_source_local_in(
+                    &request,
+                    &options.reference,
+                    query,
+                ))
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        if !request.is_live() {
+            return Err("source archive command cancelled or expired before completion".into());
+        }
+        Ok(archive)
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     let archive = after_shutdown(result, cleanup)?;
     publish_new_bundle(destination, &archive.bytes)?;
     let receipt = format!(
         concat!(
-            "{{\"type\":\"source_tree_export\",\"schema_version\":1,\"profile\":\"ustar-source-v1\",",
+            "{{\"type\":\"source_tree_export\",\"schema_version\":1,\"profile\":{},",
             "\"tenant_id\":{},\"repository_id\":{},\"reference_hex\":{},\"object_format\":{},",
             "\"source_head\":{},\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},",
             "\"root_tree\":{},\"selected_tree\":{},\"path_hex\":{},\"archive_prefix\":\"source/\",",
@@ -74,6 +87,7 @@ pub(super) fn export_tree(options: &Options, destination: &Path) -> Result<u8, S
             "\"output_created\":true,\"node_closed\":true,\"repository_changed\":false,",
             "\"symlink_followed\":false,\"submodules_materialized\":false,\"git_attributes_applied\":false}}"
         ),
+        quote(format.profile()),
         quote(&options.tenant.to_string()),
         quote(&options.repository.to_string()),
         quote(&hex(options.reference.as_bytes())),

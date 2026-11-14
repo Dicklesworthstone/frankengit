@@ -313,6 +313,13 @@ complete response with matching source identities. See
 [source tree archives](docs/SOURCE_TREE_ARCHIVES.md) for API fields, limits,
 refusal behavior and the current validation boundary.
 
+CLI directory exports also accept `--output source.zip --archive-format zip`.
+The `zip-store-source-v1` profile uses the same pinned traversal and safe-Rust
+byte encoder as TreeFS, with exact UTF-8 names, executable modes and safe relative
+symlink data. Its complete-output budget includes the central directory. Tar
+remains the default; filenames do not select the encoding, and existing files
+are never replaced.
+
 ### Native milestone planning
 
 `fg milestone` now opens, edits, closes and reopens repository milestones with

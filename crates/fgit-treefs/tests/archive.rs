@@ -8,8 +8,8 @@
 use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, sha256_digest};
 use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
 use fgit_treefs::archive::{
-    ArchiveCompleteness, ArchiveProfile, ArchiveRefusal, ArchiveVerification, TarLimits,
-    UstarArchive, ZipArchive,
+    ArchiveCompleteness, ArchiveProfile, ArchiveRefusal, ArchiveVerification, StoredZipBuilder,
+    TarLimits, UstarArchive, ZipArchive, ZipEntryKind,
 };
 use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId};
@@ -640,4 +640,104 @@ fn wrong_blob_bytes_are_refused_by_the_base_identity_check() {
             ObjectSourceError::IdentityMismatch { .. }
         ))
     ));
+}
+
+#[test]
+fn stored_zip_builder_reserves_the_complete_directory_before_accepting_payloads() {
+    // A three-byte file named "file": local header/name/body, central
+    // header/name, and the final 22-byte record. A local-record-only bound
+    // would incorrectly accept the fourth byte and fail only at finish.
+    let limits = TarLimits {
+        max_entries: 1,
+        max_entry_bytes: 10,
+        max_output_bytes: 30 + 4 + 3 + 46 + 4 + 22,
+    };
+    let name = path(b"file");
+    let mut output = StoredZipBuilder::new(limits);
+    assert_eq!(output.remaining_payload(&name, ZipEntryKind::File), Ok(3));
+    assert!(matches!(
+        output.append(&name, ZipEntryKind::File, 0o644, b"four"),
+        Err(ArchiveRefusal::OutputBytesExceeded { .. })
+    ));
+    output
+        .append(&name, ZipEntryKind::File, 0o755, b"abc")
+        .unwrap();
+    assert!(matches!(
+        output.append(&path(b"other"), ZipEntryKind::File, 0o644, b""),
+        Err(ArchiveRefusal::EntryLimitExceeded {
+            observed: 2,
+            limit: 1
+        })
+    ));
+    let bytes = output.finish().unwrap();
+    assert_eq!(bytes.len(), limits.max_output_bytes);
+    let entries = zip_members(&bytes);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, b"file");
+    assert_eq!(entries[0].body, b"abc");
+    assert_eq!(entries[0].external_attributes >> 16, 0o100755);
+}
+
+#[test]
+fn stored_zip_builder_refusals_do_not_change_retained_members() {
+    let limits = TarLimits {
+        max_entry_bytes: 3,
+        ..TarLimits::default()
+    };
+    let mut output = StoredZipBuilder::new(limits);
+    assert!(matches!(
+        output.append(&path(b"raw-\xff"), ZipEntryKind::File, 0o644, b"ok"),
+        Err(ArchiveRefusal::ZipPathNotUtf8 { .. })
+    ));
+    assert!(matches!(
+        output.append(&path(b"dir"), ZipEntryKind::Directory, 0o755, b"x"),
+        Err(ArchiveRefusal::ZipDirectoryPayload { .. })
+    ));
+    assert!(matches!(
+        output.append(&path(b"file"), ZipEntryKind::File, 0o100644, b"ok"),
+        Err(ArchiveRefusal::ZipFieldOverflow { .. })
+    ));
+    assert!(matches!(
+        output.append(&path(b"file"), ZipEntryKind::File, 0o644, b"four"),
+        Err(ArchiveRefusal::EntryBytesExceeded { .. })
+    ));
+    output
+        .append(&path(b"dir"), ZipEntryKind::Directory, 0o755, b"")
+        .unwrap();
+    assert!(matches!(
+        output.append(&path(b"dir"), ZipEntryKind::File, 0o644, b"x"),
+        Err(ArchiveRefusal::DuplicatePath { .. })
+    ));
+    output
+        .append(&path(b"file"), ZipEntryKind::File, 0o644, b"ok")
+        .unwrap();
+    let entries = zip_members(&output.finish().unwrap());
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, b"dir/");
+    assert!(entries[0].body.is_empty());
+    assert_eq!(entries[1].name, b"file");
+    assert_eq!(entries[1].body, b"ok");
+}
+
+#[test]
+fn empty_stored_zip_still_obeys_the_complete_output_limit() {
+    let limits = TarLimits {
+        max_output_bytes: 21,
+        ..TarLimits::default()
+    };
+    assert!(matches!(
+        StoredZipBuilder::new(limits).finish(),
+        Err(ArchiveRefusal::OutputBytesExceeded {
+            observed: 22,
+            limit: 21
+        })
+    ));
+    let bytes = StoredZipBuilder::new(TarLimits {
+        max_output_bytes: 22,
+        ..limits
+    })
+    .finish()
+    .unwrap();
+    assert_eq!(bytes.len(), 22);
+    assert!(zip_members(&bytes).is_empty());
 }
