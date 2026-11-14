@@ -9,7 +9,8 @@ URL nor the catalog publishes repository state.
 
 The single-repository command retains its existing syntax and behavior. This
 catalog profile is an operator-owned deployment configuration, not an account
-directory, automatic repository discovery, or a TLS service.
+directory or a TLS service. Authenticated discovery exposes only the configured
+routes for which the supplied credential has a read grant.
 
 ## Configure the catalog
 
@@ -143,6 +144,90 @@ before any listener opens. Existing single-repository deployments keep those
 features. The global `--require-lfs-payloads` option is refused here; use each
 row's final field instead.
 
+## Discover repositories and open the browser
+
+Open `/ui/` on the listener to use the repository home page. The public page
+contains no repository names or credentials. Enter an operator bearer credential
+and select **Connect** to request the readable catalog. **Disconnect** clears
+the list and cancels outstanding work; a late response cannot restore it. The
+page makes no automatic discovery request, stores no credential in browser
+storage, and sends no ambient cookie credentials. Navigating away also cancels
+the connection. Source-enabled entries link to their existing repository browser;
+Git-only entries display their exact clone path.
+
+Credential entry is enabled only on the exact `/ui/` page, with no query,
+fragment or embedded URL credentials, over HTTPS or loopback HTTP. The browser
+enforces its own finite request deadline and a 128 KiB decoded response limit,
+including when a reverse proxy compresses the response.
+
+Native clients can make the same read request:
+
+```http
+GET /api/v1/repositories HTTP/1.1
+Host: localhost:8080
+Authorization: Bearer <64-character-lowercase-hex-operator-token>
+```
+
+The endpoint accepts `GET` with no query or body. It does not accept Basic
+credentials, `Expect: 100-continue`, or Git protocol negotiation. A successful
+response has this shape:
+
+```json
+{
+  "type": "repository_catalog",
+  "schema_version": 1,
+  "complete": true,
+  "repositories": [
+    {"path": "/team/core.git", "source_url": "/team/core.git/ui/"},
+    {"path": "/team/mirror.git", "source_url": null}
+  ]
+}
+```
+
+Rows use sorted, unique literal paths. `source_url` is the same-origin source
+browser path when that listener service is enabled, otherwise `null`. Git read
+grants remain discoverable on Git-only routes. Receive-only, metadata-only and
+unknown grants reveal no row. The same supplied token is independently checked
+against each route's complete current credential file and exact
+tenant/repository/incarnation binding; a matching principal or token on one
+route never authorizes another. Canonical sponsored `fgagent_` credentials are
+refused here: their authorization requires an explicit repository and remains
+available through the existing repository-specific APIs.
+
+`complete` means every configured entry was checked for this request. It is
+not a canonical repository registry, a source snapshot, a global credential
+epoch, or proof that a later repository request will succeed. Each credential
+file owns its independently opened snapshot. Rotation applies on subsequent
+authentication, and the chosen repository endpoint authenticates again. For a
+single-repository listener, discovery also supports its existing literal path
+when it is at most 512 bytes and consists of safe ASCII slug components; an
+unsupported lookup key is refused without normalization or an alias.
+
+The server buffers the complete authorized response before writing success.
+There is no partial catalog on a broken binding, invalid later credential row,
+unavailable credential file, exhausted read quota, timeout or response limit.
+These failures expose no affected route, credential material or hidden-entry
+count. Error responses use `type: "repository_discovery_error"`,
+`schema_version: 1`, a stable `code`, and `outcome_unknown: false`:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 401 | `authentication_required` | Missing, malformed or unrecognized operator bearer credential. |
+| 403 | `read_scope_required` | The credential matched a table but has no readable route. |
+| 400 | `invalid_request` | Unsupported query, body or request framing. |
+| 405 | `method_not_allowed` | Only `GET` is supported. |
+| 408 | `request_timeout` | The original connection deadline expired. |
+| 413 | `response_too_large` | The complete response exceeds its byte envelope. |
+| 429 | `rate_limited` | A selected principal exhausted that repository's read quota. |
+| 503 | `catalog_unavailable` | The complete catalog could not be authenticated safely. |
+
+Both the catalog and its static browser assets use `Cache-Control: no-store`,
+`Vary: Authorization`, `nosniff`, and a strict same-origin content security
+policy. API responses are capped at 128 KiB and the ingress response ceiling.
+Discovery keeps the accepted connection's original deadline through credential
+reads and response delivery, uses only matched repositories' read quotas, and
+never opens a repository node, takes a writer slot, or changes canonical state.
+
 ## Live credentials and isolation
 
 Each credential file uses the existing incarnation-bound
@@ -155,7 +240,7 @@ table revokes every token. Missing or invalid replacements fail closed without
 a last-good-table fallback. Already authenticated requests retain their captured
 bounded grant.
 
-Request routing selects one immutable entry before authentication. Its credential
+Repository-specific routing selects one immutable entry before authentication. Its credential
 source and node configuration stay together through dispatch. No other route's
 token, writer gate, push quota or cached node can satisfy that selection. Stock
 Git's attempt-scoped push URLs remain under the selected route; retry IDs do not
@@ -195,6 +280,8 @@ refused transport counts. Those counters are not canonical transaction receipts.
 
 ```sh
 cargo test --locked -p fgit-cli --test http_repository_options -- --test-threads=1
+cargo test --locked -p fgit-node --lib smart_http::server::discovery::tests -- --test-threads=1
+node --test tests/browser/repository-discovery.test.mjs
 ```
 
 The focused target includes production catalog parsing and private-file reads,
@@ -208,5 +295,9 @@ refuses startup before readiness and releases previously prepared nodes.
 
 These are native implementation and executable tests. Their presence is not a
 completed verification gate or a pinned upstream Git differential qualification.
-Canonical account/team lifecycle, automatic route discovery, dynamic catalog
-reload and multi-repository workflow/index controllers remain separate work.
+Discovery tests cover full credential-file checks, cross-tenant and incarnation
+isolation, live rotation and revocation, exact root routing, complete failures,
+bounded responses, read quota separation, public static shells, and browser
+disconnect/deadline races. Canonical account/team lifecycle, discovering routes
+outside the configured catalog, dynamic catalog reload and multi-repository
+workflow/index controllers remain separate work.

@@ -15,6 +15,7 @@ mod artifacts;
 mod browser;
 mod credentials;
 mod default_branch;
+mod discovery;
 mod discussions;
 mod events;
 mod issues;
@@ -1419,6 +1420,20 @@ fn serve_connection_with_routes(
         version = envelope.version;
         if refuses_cross_site(&envelope, local, ingress.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
+        }
+        // The deployment home is outside any individual repository route.
+        // Discovery authenticates every catalog member independently and does
+        // not lease a node or grant publication. Keep the original read deadline.
+        if discovery::is_route(envelope.target) {
+            writer.preserve_request_deadline = true;
+            return discovery::serve(
+                ingress,
+                routes,
+                &envelope,
+                &bytes[envelope.consumed..],
+                &mut writer,
+                &admission_deadline,
+            );
         }
         // Select the response contracts handled below before route lookup or
         // authentication. Unknown catalog routes preserve these typed native

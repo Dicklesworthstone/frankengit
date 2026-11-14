@@ -203,6 +203,12 @@ clone, fetch and push:
   one loopback listener, with independent live credentials and pinned
   incarnations. Optional services require both their catalog selection and
   listener flag, in addition to the requesting token's scope.
+  Open the listener's `/ui/` home or query `GET /api/v1/repositories` to
+  discover the routes readable by your bearer credential. Each repository's
+  current credential file is checked independently; receive-only grants reveal
+  no repository, and a failed credential-source check refuses the complete
+  listing. The home links to enabled source browsers and keeps credentials in
+  memory only.
 - `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. Its
   private `--deploy-keys-file` is reloaded before each Git command, so key
   revocation, rotation and scope changes take effect without restarting the
