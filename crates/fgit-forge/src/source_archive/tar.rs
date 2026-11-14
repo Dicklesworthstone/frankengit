@@ -1,18 +1,54 @@
 //! Deterministic, bounded POSIX ustar bytes. This never touches the host tree.
-use fgit_forge::source_browse::SourceEntryKind;
+use super::{AssemblyRefusal, MAX_ARCHIVE_BYTES, MIN_ARCHIVE_BYTES};
+use crate::source_browse::SourceEntryKind;
 
-pub(super) const MAX_BYTES: usize = 128 * 1024 * 1024;
 const BLOCK: usize = 512;
 
-#[derive(Default)]
 pub(super) struct Tar {
     bytes: Vec<u8>,
+    max_bytes: usize,
+}
+
+#[cfg(test)]
+impl Default for Tar {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes: MAX_ARCHIVE_BYTES,
+        }
+    }
 }
 
 impl Tar {
-    pub(super) fn remaining_payload(&self) -> usize {
-        // Reserve an entry header, worst-case padding and the two end blocks.
-        MAX_BYTES.saturating_sub(self.bytes.len().saturating_add(4 * BLOCK))
+    pub(super) fn new(max_bytes: usize) -> Result<Self, AssemblyRefusal> {
+        if max_bytes < MIN_ARCHIVE_BYTES {
+            return Err(AssemblyRefusal::Budget(
+                "source archive byte limit cannot hold its prefix and end blocks",
+            ));
+        }
+        Ok(Self {
+            bytes: Vec::new(),
+            max_bytes: max_bytes.min(MAX_ARCHIVE_BYTES),
+        })
+    }
+
+    pub(super) fn remaining_payload(
+        &self,
+        kind: SourceEntryKind,
+    ) -> Result<usize, AssemblyRefusal> {
+        // Account for one entry header and the two end blocks BEFORE reading.
+        // Payloads use whole blocks; link bytes live entirely in the header.
+        let available = self
+            .max_bytes
+            .checked_sub(self.bytes.len().saturating_add(3 * BLOCK))
+            .ok_or(AssemblyRefusal::Budget(
+                "source archive cannot fit another entry header",
+            ))?;
+        Ok(if kind == SourceEntryKind::Symlink {
+            100
+        } else {
+            available / BLOCK * BLOCK
+        })
     }
 
     pub(super) fn append(
@@ -20,7 +56,7 @@ impl Tar {
         path: &[u8],
         kind: SourceEntryKind,
         payload: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<(), AssemblyRefusal> {
         validate_path(path)?;
         let (mode, flag, data, link): (u64, u8, &[u8], &[u8]) = match kind {
             SourceEntryKind::File => (0o644, b'0', payload, b""),
@@ -60,27 +96,29 @@ impl Tar {
             .checked_add(BLOCK)
             .and_then(|size| size.checked_add(data.len()))
             .and_then(|size| size.checked_add(padding))
-            .filter(|size| *size <= MAX_BYTES - 2 * BLOCK)
-            .ok_or("source archive exceeds 128 MiB including tar framing")?;
+            .filter(|size| *size <= self.max_bytes - 2 * BLOCK)
+            .ok_or(AssemblyRefusal::Budget(
+                "source archive exceeds its byte limit including tar framing",
+            ))?;
         self.bytes
             .try_reserve(end - self.bytes.len())
-            .map_err(|_| "cannot allocate bounded source archive")?;
+            .map_err(|_| AssemblyRefusal::Budget("cannot allocate bounded source archive"))?;
         self.bytes.extend_from_slice(&header);
         self.bytes.extend_from_slice(data);
         self.bytes.resize(end, 0);
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> Result<Vec<u8>, String> {
+    pub(super) fn finish(mut self) -> Result<Vec<u8>, AssemblyRefusal> {
         self.bytes
             .try_reserve(2 * BLOCK)
-            .map_err(|_| "cannot allocate archive end markers")?;
+            .map_err(|_| AssemblyRefusal::Budget("cannot allocate archive end markers"))?;
         self.bytes.resize(self.bytes.len() + 2 * BLOCK, 0);
         Ok(self.bytes)
     }
 }
 
-pub(super) fn validate_component(name: &[u8]) -> Result<(), String> {
+pub(super) fn validate_component(name: &[u8]) -> Result<(), AssemblyRefusal> {
     if name.is_empty()
         || name == b"."
         || name == b".."
@@ -94,7 +132,7 @@ pub(super) fn validate_component(name: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_path(path: &[u8]) -> Result<(), String> {
+fn validate_path(path: &[u8]) -> Result<(), AssemblyRefusal> {
     if path.len() > 256 {
         return Err("source archive path exceeds the ustar profile".into());
     }
@@ -104,7 +142,7 @@ fn validate_path(path: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_link(target: &[u8]) -> Result<(), String> {
+fn validate_link(target: &[u8]) -> Result<(), AssemblyRefusal> {
     // No parent components, even when a lexical normalization would appear
     // contained: another symlink can change what a preceding component means.
     // Refusing such links also prevents chained links from escaping the prefix.
@@ -121,7 +159,7 @@ fn validate_link(target: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn write_name(header: &mut [u8; BLOCK], path: &[u8]) -> Result<(), String> {
+fn write_name(header: &mut [u8; BLOCK], path: &[u8]) -> Result<(), AssemblyRefusal> {
     if path.len() <= 100 {
         header[..path.len()].copy_from_slice(path);
         return Ok(());
@@ -147,7 +185,7 @@ fn write_name(header: &mut [u8; BLOCK], path: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn octal(field: &mut [u8], mut value: u64) -> Result<(), String> {
+fn octal(field: &mut [u8], mut value: u64) -> Result<(), AssemblyRefusal> {
     field.fill(b'0');
     let end = field.len() - 1;
     field[end] = 0;
@@ -192,7 +230,7 @@ mod tests {
         // Independently generated with Python tarfile.TarInfo in USTAR_FORMAT,
         // then parsed by tarfile; this is not a regenerated implementation golden.
         let mut expected = vec![0_u8; 3072];
-        for line in include_str!("../../../tests/fixtures/source_archive/ustar_v1.hex").lines() {
+        for line in include_str!("../../tests/fixtures/source_archive/ustar_v1.hex").lines() {
             let (offset, hex) = line.split_once(' ').unwrap();
             let offset = offset.parse::<usize>().unwrap();
             for index in 0..hex.len() / 2 {

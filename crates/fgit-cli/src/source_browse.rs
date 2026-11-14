@@ -12,8 +12,10 @@ use options::Options;
 use std::io::Write;
 use std::path::PathBuf;
 
-const MAX_EXPORT_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_EXPORT_PAGES: usize = 4096;
+#[cfg(test)]
+const MAX_EXPORT_BYTES: u64 = fgit_forge::source_archive::MAX_FILE_BYTES;
+#[cfg(test)]
+const MAX_EXPORT_PAGES: usize = fgit_forge::source_archive::MAX_FILE_READS;
 
 const USAGE: &str = "usage: fg tree <storage-root> <tenant-id> <repository-id> --trusted-local
   (--ref <full-ref> | --ref-hex <bytes>) [--path <path> | --path-hex <bytes>]
@@ -128,110 +130,14 @@ fn export_arguments(args: &[String], file: bool) -> Result<(Vec<String>, Option<
     Ok((remaining, destination))
 }
 
-struct FileExport {
-    first: SourceBrowseReport,
-    bytes: Vec<u8>,
-    pages: usize,
-}
+use fgit_forge::source_archive::SourceFileExport as FileExport;
 
-/// Pages come only from the node's verified source-read boundary in production.
-/// The injected reader lets adversarial tests exercise the same assembly logic.
 fn collect_file(
     options: &Options,
-    mut read: impl FnMut(&SourceBrowseQuery) -> Result<SourceBrowseReport, String>,
+    read: impl FnMut(&SourceBrowseQuery) -> Result<SourceBrowseReport, String>,
 ) -> Result<FileExport, String> {
-    let SourceBrowseAction::Read { offset: 0, limit } = options.query.action else {
-        return Err("complete file export requires a file read at offset zero".into());
-    };
-    let mut query = options.query.clone();
-    let mut first: Option<SourceBrowseReport> = None;
-    let mut output = Vec::new();
-    for pages in 1..=MAX_EXPORT_PAGES {
-        let report = read(&query)?;
-        if report.repository_id != options.repository
-            || report.path != query.path
-            || query
-                .expected_head
-                .is_some_and(|head| head != report.source_head)
-            || query
-                .expected_commit
-                .is_some_and(|commit| commit != report.source_commit)
-        {
-            return Err("source export snapshot or path changed".into());
-        }
-        let SourceBrowseContent::Blob {
-            kind,
-            bytes,
-            total_bytes,
-            offset,
-            next_offset,
-        } = &report.content
-        else {
-            return Err("source export requires a file or symlink payload".into());
-        };
-        if !matches!(
-            kind,
-            SourceEntryKind::File | SourceEntryKind::Executable | SourceEntryKind::Symlink
-        ) {
-            return Err("unsupported source export entry kind".into());
-        }
-        if *total_bytes > MAX_EXPORT_BYTES {
-            return Err("source export exceeds the 128 MiB byte limit".into());
-        }
-        if let Some(initial) = &first {
-            let SourceBrowseContent::Blob {
-                kind: original_kind,
-                total_bytes: original_size,
-                ..
-            } = &initial.content
-            else {
-                return Err("source export lost its initial file identity".into());
-            };
-            if report.source_head != initial.source_head
-                || report.source_commit != initial.source_commit
-                || report.source_rcr != initial.source_rcr
-                || report.root_tree != initial.root_tree
-                || report.object_id != initial.object_id
-                || kind != original_kind
-                || total_bytes != original_size
-            {
-                return Err("source export object identity or size changed".into());
-            }
-        }
-        let end = offset
-            .checked_add(bytes.len() as u64)
-            .ok_or("source export byte offset overflow")?;
-        if *offset != output.len() as u64
-            || bytes.len() > limit as usize
-            || end > *total_bytes
-            || match next_offset {
-                Some(next) => bytes.is_empty() || *next != end || end >= *total_bytes,
-                None => end != *total_bytes,
-            }
-        {
-            return Err("incomplete or inconsistent source export range".into());
-        }
-        output
-            .try_reserve(bytes.len())
-            .map_err(|_| "cannot allocate bounded source export")?;
-        output.extend_from_slice(bytes);
-        let next = *next_offset;
-        query.expected_head = Some(report.source_head);
-        query.expected_commit = Some(report.source_commit);
-        if first.is_none() {
-            first = Some(report);
-        }
-        if let Some(offset) = next {
-            query.action = SourceBrowseAction::Read { offset, limit };
-        } else {
-            return Ok(FileExport {
-                first: first.ok_or("source export has no verified first page")?,
-                bytes: output,
-                pages,
-            });
-        }
-    }
-    Err("source export exceeds the 4096-read limit; increase --max-bytes".into())
+    fgit_forge::source_archive::collect_file(options.repository, options.format, &options.query, read)
+        .map_err(|error| error.to_string())
 }
 
 fn export_file(options: &Options, destination: &std::path::Path) -> Result<u8, String> {
