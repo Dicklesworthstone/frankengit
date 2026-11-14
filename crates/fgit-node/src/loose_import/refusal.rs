@@ -1,7 +1,7 @@
 //! Typed source-import refusals, shared by loose and packed validation.
 use super::{
     Display, Error, Formatter, GitOid, LooseObjectDecodeError, NodeRefusal, ObjectError, PackError,
-    PathBuf, TypeRefusal, fmt, io,
+    PathBuf, RefName, TypeRefusal, fmt, io,
 };
 
 /// Refusal while reading a bounded ordinary local Git directory.
@@ -114,9 +114,15 @@ pub enum LooseGitImportRefusal {
         /// Native-identity refusal.
         source: Box<TypeRefusal>,
     },
-    /// A symbolic source ref would require an additional ref-resolution
-    /// policy, so it is refused rather than guessed.
+    /// A symbolic source ref targets something outside the selected `refs/`
+    /// namespace, such as a pseudoref. It cannot add another source.
     SymbolicRefUnsupported(Box<PathBuf>),
+    /// A symbolic ref names a ref absent from the selected source namespace.
+    SymbolicRefTargetMissing { path: Box<PathBuf>, target: RefName },
+    /// A selected symbolic-ref chain revisits one of its own refs.
+    SymbolicRefCycle(Box<PathBuf>),
+    /// A symbolic-ref chain exceeds the independent alias-hop envelope.
+    SymbolicRefDepthExceeded { path: Box<PathBuf>, limit: usize },
     /// The source repository did not carry the required `HEAD` symbolic-ref
     /// file. Import must not manufacture a default branch target.
     HeadMissing(Box<PathBuf>),
@@ -325,10 +331,25 @@ impl Display for LooseGitImportRefusal {
             Self::SymbolicRefUnsupported(path) => {
                 write!(
                     formatter,
-                    "loose import refuses symbolic ref {}",
+                    "source symbolic ref {} targets outside the selected refs namespace",
                     path.display()
                 )
             }
+            Self::SymbolicRefTargetMissing { path, target } => write!(
+                formatter,
+                "source symbolic ref {} targets missing ref {target}",
+                path.display()
+            ),
+            Self::SymbolicRefCycle(path) => write!(
+                formatter,
+                "source symbolic ref {} belongs to a cycle",
+                path.display()
+            ),
+            Self::SymbolicRefDepthExceeded { path, limit } => write!(
+                formatter,
+                "source symbolic ref {} exceeds the {limit}-hop alias limit",
+                path.display()
+            ),
             Self::HeadMissing(path) => write!(
                 formatter,
                 "loose import requires symbolic HEAD at {}",
@@ -442,6 +463,9 @@ impl Error for LooseGitImportRefusal {
             | Self::RefInputBytesExceeded { .. }
             | Self::ObjectAlternatesUnsupported(_)
             | Self::SymbolicRefUnsupported(_)
+            | Self::SymbolicRefTargetMissing { .. }
+            | Self::SymbolicRefCycle(_)
+            | Self::SymbolicRefDepthExceeded { .. }
             | Self::HeadMissing(_)
             | Self::HeadNotSymbolic(_)
             | Self::HeadContents(_)

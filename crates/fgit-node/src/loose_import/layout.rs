@@ -8,8 +8,8 @@
 use std::path::Component;
 
 use super::source_io::{
-    BoundedInputClass, io_refusal, path_metadata, read_direct_refs, read_head_target,
-    read_regular_bounded, read_worktree_refs, reject_object_alternates, require_directory,
+    BoundedInputClass, io_refusal, path_metadata, read_head_target, read_regular_bounded,
+    read_source_refs, read_worktree_refs, reject_object_alternates, require_directory,
 };
 use super::{
     BTreeMap, GitHashAlgorithm, GitOid, ImportControl, LooseGitImportRefusal, Path, PathBuf,
@@ -135,11 +135,14 @@ impl SourceLayout {
     ) -> Result<BTreeMap<RefName, GitOid>, LooseGitImportRefusal> {
         let shared = self.git_directory != self.common_directory;
         let mut refs =
-            read_direct_refs(self.common_directory(), format, max_refs, shared, control)?;
+            read_source_refs(self.common_directory(), format, max_refs, shared, control)?;
         if shared {
             read_worktree_refs(self.git_directory(), format, max_refs, &mut refs, control)?;
         }
-        Ok(refs)
+        // Alias targets use the complete selected namespace, including loose
+        // overrides and this worktree's private refs, never another filesystem
+        // lookup that could bypass the source-layout boundary.
+        super::refs::resolve(&refs, control)
     }
 
     /// The selected layout must still identify the same source when verified
