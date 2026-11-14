@@ -6,6 +6,8 @@
 
 #[path = "comments.rs"]
 mod comments;
+#[path = "labels.rs"]
+mod labels;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 

@@ -23,6 +23,7 @@ pub mod notification;
 pub mod protection;
 pub mod pull_request;
 pub mod pull_request_comment;
+pub mod pull_request_labels;
 pub mod queue;
 pub mod review;
 pub mod workflow_check;
@@ -57,6 +58,7 @@ const KIND_NATIVE_NOTIFICATION_PREFERENCE_CHANGED: u32 = 23;
 const KIND_NATIVE_DISCUSSION_CHANGED: u32 = 24;
 const KIND_NATIVE_AGENT_CREDENTIAL_CHANGED: u32 = 25;
 const KIND_PATH_REVIEW_PROTECTION_CHANGED: u32 = 26;
+const KIND_NATIVE_PULL_REQUEST_LABELS_CHANGED: u32 = 27;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -187,6 +189,8 @@ pub enum ForgeEventPayload {
     /// Append-only PR conversation text in its independent stream: kind 12 for
     /// plain text, kind 15 when exact immutable source coordinates are included.
     PullRequestCommentedNative(pull_request_comment::NativePullRequestComment),
+    /// Full current labels in a disjoint PR aggregate, required wire kind 27.
+    PullRequestLabelsChangedNative(pull_request_labels::NativePullRequestLabelsEvent),
 }
 
 impl ForgeEventPayload {
@@ -200,6 +204,7 @@ impl ForgeEventPayload {
             Self::PullRequestClosed { .. } => KIND_CLOSED,
             Self::MergeCommittedNative(_) => KIND_NATIVE_MERGE_COMMITTED,
             Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
+            Self::PullRequestLabelsChangedNative(_) => KIND_NATIVE_PULL_REQUEST_LABELS_CHANGED,
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
             Self::MilestoneChangedNative(_) => KIND_NATIVE_MILESTONE_CHANGED,
@@ -298,6 +303,11 @@ fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
         AggregateId::PullRequestConversation(number) => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_CONVERSATION);
+            out.write_scalar(number.get());
+        }
+        AggregateId::PullRequestLabels(number) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_LABELS);
             out.write_scalar(number.get());
         }
         AggregateId::WorkflowCheck(id) => {
@@ -403,6 +413,12 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
             Ok(AggregateId::PullRequestConversation(counter(
                 "aggregate.conversation",
                 input.read_scalar::<u64>("aggregate.conversation")?,
+            )?))
+        }
+        crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_LABELS => {
+            Ok(AggregateId::PullRequestLabels(counter(
+                "aggregate.pull_request_labels",
+                input.read_scalar::<u64>("aggregate.pull_request_labels")?,
             )?))
         }
         crate::aggregate::AGGREGATE_KIND_WORKFLOW_CHECK => {
@@ -517,6 +533,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
     validate_queue(event)?;
     workflow_check::validate_event(event)?;
     pull_request_comment::validate_event(event)?;
+    pull_request_labels::validate_event(event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(
             event.payload,
@@ -579,6 +596,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         ForgeEventPayload::WorkflowCheckObservedNative(change) => change.write(out)?,
         ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => change.write(out)?,
         ForgeEventPayload::PullRequestCommentedNative(comment) => comment.write(out)?,
+        ForgeEventPayload::PullRequestLabelsChangedNative(change) => change.write(out)?,
     }
     Ok(())
 }
@@ -618,6 +636,11 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         }
         KIND_NATIVE_PULL_REQUEST_CHANGED => {
             ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?)
+        }
+        KIND_NATIVE_PULL_REQUEST_LABELS_CHANGED => {
+            ForgeEventPayload::PullRequestLabelsChangedNative(
+                pull_request_labels::NativePullRequestLabelsEvent::read(input)?,
+            )
         }
         KIND_NATIVE_PULL_REQUEST_REVIEWED => {
             ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?)
@@ -703,6 +726,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
     validate_queue(&event)?;
     workflow_check::validate_event(&event)?;
     pull_request_comment::validate_event(&event)?;
+    pull_request_labels::validate_event(&event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(
             event.payload,

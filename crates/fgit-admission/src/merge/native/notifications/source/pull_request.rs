@@ -32,6 +32,7 @@ struct StreamTail {
 fn relevant(aggregate: AggregateId, principal: PrincipalId) -> bool {
     match aggregate {
         AggregateId::PullRequest(_)
+        | AggregateId::PullRequestLabels(_)
         | AggregateId::PullRequestConversation(_)
         | AggregateId::PullRequestReview { .. } => true,
         AggregateId::PullRequestNotificationPreference {
@@ -61,6 +62,8 @@ fn frontiers(
         let aggregate = if let Some(raw) = label.as_str().strip_prefix("pull-request/") {
             subjects += 1;
             AggregateId::PullRequest(number(raw)?)
+        } else if let Some(raw) = label.as_str().strip_prefix("pull-request-labels/") {
+            AggregateId::PullRequestLabels(number(raw)?)
         } else if let Some(raw) = label.as_str().strip_prefix("conversation/") {
             AggregateId::PullRequestConversation(number(raw)?)
         } else if let Some(raw) = label.as_str().strip_prefix("review/") {
@@ -234,6 +237,17 @@ where
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
                 legacy.insert(*number);
+            }
+            (
+                AggregateId::PullRequestLabels(number),
+                ForgeEventPayload::PullRequestLabelsChangedNative(change),
+            ) => {
+                // Label metadata participates in activity ordering, without
+                // changing the content/review subject or inventing an opener.
+                let thread = threads
+                    .get_mut(number)
+                    .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+                activity(thread, change.actor, principal, false)?;
             }
             (
                 AggregateId::PullRequestConversation(number),

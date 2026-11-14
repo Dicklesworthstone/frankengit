@@ -44,6 +44,7 @@ pub enum ForgeOperation {
     WorkflowCheck,
     PullRequestComment,
     PullRequestAppendComment,
+    PullRequestLabelsChange,
     Unknown,
 }
 
@@ -106,6 +107,7 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::MergeQueueChange
         | ForgeOperation::WorkflowCheck
         | ForgeOperation::PullRequestComment
+        | ForgeOperation::PullRequestLabelsChange
         | ForgeOperation::Unknown => ForgeReplanPolicy::PreservePreconditions,
     };
     ForgeAdmissionRule {
@@ -148,6 +150,7 @@ mod tests {
             ForgeOperation::MergeQueueChange,
             ForgeOperation::WorkflowCheck,
             ForgeOperation::PullRequestComment,
+            ForgeOperation::PullRequestLabelsChange,
             ForgeOperation::Unknown,
         ] {
             let rule = forge_admission_rule(operation);

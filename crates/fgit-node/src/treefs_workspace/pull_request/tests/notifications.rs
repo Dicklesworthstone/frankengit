@@ -42,7 +42,7 @@ fn inbox(
 /// Like hidden_ref_policy_end_to_end, stage actual canonical bodies and select
 /// the configuration with an authenticated 1-decision policy-epoch advance.
 /// All existing committed source/forge roots are carried forward unchanged.
-fn hide(node: &OneNode, reference: &RefName) -> RepositoryAuthorityHeadId {
+pub(super) fn hide(node: &OneNode, reference: &RefName) -> RepositoryAuthorityHeadId {
     let request = node.request_context();
     node.runtime().block_on(async {
         let authenticated = node.authenticate_authority_head_in(&request).await.unwrap();

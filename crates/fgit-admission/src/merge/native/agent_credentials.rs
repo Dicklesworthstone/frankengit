@@ -288,6 +288,7 @@ where
         ForgeEventPayload::IssueChangedNative(_) => ISSUES_WRITE,
         ForgeEventPayload::MilestoneChangedNative(_) => MILESTONES_WRITE,
         ForgeEventPayload::PullRequestChangedNative(_)
+        | ForgeEventPayload::PullRequestLabelsChangedNative(_)
         | ForgeEventPayload::PullRequestCommentedNative(_) => PULLS_WRITE,
         ForgeEventPayload::DiscussionChangedNative(_) => DISCUSSIONS_WRITE,
         _ => return Err(denied().into()),

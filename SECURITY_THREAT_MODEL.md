@@ -68,6 +68,15 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
   author bypasses this gate. Edits and close/reopen preserve the independent lock.
   Immutable terminal recovery still returns an earlier comment's original
   committed or refused result; later lock changes cannot reinterpret that result.
+- Native PR labels use a separate exact-version aggregate and the existing
+  repository PR-write grant. Every CAS rechecks current canonical credentials,
+  native PR existence, both branch visibility rules and the labels predecessor.
+  Label changes cannot move refs, refresh PR tips, alter the opener or invalidate
+  code reviews. Full replacement, actor, PR and predecessor are sealed together;
+  a concurrent labels winner makes a stale command refuse, while an exact
+  terminal retry retains its original outcome. Missing or corrupt selected
+  label evidence cannot become an empty label set. Label-filtered reads enforce
+  current visibility, one pinned authority head and finite work before pagination.
 
 ### 1.4 Confidentiality and privacy
 

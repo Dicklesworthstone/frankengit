@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod append_comments;
+mod labels;
 mod notifications;
 mod outbox_history;
 

@@ -3,6 +3,7 @@
 //! are selected together by the same repository authority head as Git refs.
 
 pub mod comments;
+pub mod labels;
 #[path = "reviews.rs"]
 pub mod reviews;
 
@@ -198,6 +199,11 @@ pub struct PullRequestView {
     pub opened_by: Option<PrincipalId>,
     /// Actor of the most recent metadata transition, not the merge principal.
     pub last_metadata_actor: Option<PrincipalId>,
+    /// Full set from the independent label aggregate at this same head.
+    pub labels: Vec<String>,
+    /// None means no label event, distinct from a retained empty replacement.
+    pub labels_version: Option<AggregateVersion>,
+    pub labels_actor: Option<PrincipalId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,6 +240,28 @@ where
     V: Fn(&RefName, &RefName) -> bool + Sync,
     C: Fn() -> bool + Sync,
 {
+    read_page_filtered_at(store, cx, basis, after, limit, &[], visible, cancelled).await
+}
+
+/// Label filters are an AND predicate on the exact full set at this basis.
+/// Filtering precedes numeric page limits and continuation selection.
+pub async fn read_page_filtered_at<S, V, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    after: u64,
+    limit: u16,
+    required_labels: &[String],
+    visible: &V,
+    cancelled: &C,
+) -> Result<PullRequestPage, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    V: Fn(&RefName, &RefName) -> bool + Sync,
+    C: Fn() -> bool + Sync,
+{
+    fgit_forge::event::pull_request_labels::validate_labels(required_labels)
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
     if limit == 0 || limit > MAX_PAGE {
         return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
     }
@@ -261,8 +289,14 @@ where
     let mut selected = Vec::new();
     let mut more = false;
     let mut bytes = 0usize;
+    let mut scanned = 0usize;
+    let mut label_scan_bytes = 0usize;
     for number in numbers {
         checkpoint(cancelled)?;
+        scanned += 1;
+        if scanned > MAX_READ_EVENTS {
+            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+        }
         let event = frontier_event(store, cx, &state.forge, number)
             .await?
             .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
@@ -278,11 +312,38 @@ where
         if !permitted {
             continue;
         }
+        let label_event = labels::frontier(store, cx, &state.forge, number).await?;
+        checkpoint(cancelled)?;
+        let (labels, labels_version, labels_actor) = match label_event {
+            Some((event, loaded)) => {
+                label_scan_bytes = label_scan_bytes
+                    .checked_add(loaded)
+                    .filter(|total| *total <= MAX_SCAN_BYTES)
+                    .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+                let ForgeEventPayload::PullRequestLabelsChangedNative(change) = event.payload
+                else {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                };
+                (change.labels, Some(event.version), Some(change.actor))
+            }
+            None => (Vec::new(), None, None),
+        };
+        if !required_labels
+            .iter()
+            .all(|label| labels.binary_search(label).is_ok())
+        {
+            continue;
+        }
         if selected.len() == usize::from(limit) {
             more = true;
             break;
         }
         charge_event(&event, &mut bytes)?;
+        bytes = labels
+            .iter()
+            .try_fold(bytes, |total, label| total.checked_add(label.len()))
+            .filter(|total| *total <= MAX_READ_BYTES)
+            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         let (data, actor) = match &event.payload {
             ForgeEventPayload::PullRequestChangedNative(change) => {
                 (Some(change.data.clone()), Some(change.actor))
@@ -295,6 +356,9 @@ where
             data,
             opened_by: None,
             last_metadata_actor: actor,
+            labels,
+            labels_version,
+            labels_actor,
         });
     }
     // Retain only the latest full metadata and opener for each selected PR.
@@ -390,6 +454,9 @@ where
             ForgeEventPayload::PullRequestChangedNative(_)
         ) {
             return Err(unavailable(RefusalCode::EvidenceMissing));
+        }
+        if view.data.is_none() && view.labels_version.is_some() {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
     }
     checkpoint(cancelled)?;

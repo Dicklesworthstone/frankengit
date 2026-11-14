@@ -908,6 +908,67 @@ status. A known immutable terminal result is resolved using the original complet
 command before fresh PR-basis validation; retrying after PR changes must not
 refresh an anchor, body, discussion version or idempotency key.
 
+#### 20.1.2 Independent native pull-request labels
+
+Label replacement advances the separate `PullRequestLabels(number)` aggregate.
+It never advances the PR content version, changes its opener or lifecycle,
+refreshes recorded branch tips, invalidates reviews, moves Git refs or changes
+policy. Open, closed and merged PRs with retained native metadata are valid
+subjects; an absent, legacy-only or standalone merge receipt cannot acquire
+invented native PR metadata through this operation.
+
+The canonical owner is `fgit-forge/src/event/pull_request_labels.rs`. Required
+aggregate escape **15**, following the zero `u64` escape, carries the positive
+big-endian `u64` PR number and has stream label `pull-request-labels/N`.
+Required event kind **27** carries the exact 16-byte authenticated actor,
+followed by a big-endian `u32` label count and that many canonical length-prefixed
+UTF-8 byte strings. The count is at most 32, checked before allocation; each
+label is at most 64 UTF-8 bytes, nonblank and contains no control characters.
+Labels MUST be strictly increasing in exact UTF-8 byte order. Duplicates,
+noncanonical order and invalid text refuse. Case, whitespace within nonblank
+labels and Unicode spelling are preserved; no trimming or normalization changes
+identity. The reference trace and transaction normal form use required marker
+**15**, `PullRequestLabelsChanged`, naming only the independent labels entity
+and requiring no ref effect. Existing aggregate/event/normal-form bytes are
+unchanged; older readers refuse unfamiliar required tags.
+
+`PullRequestLabelsCommand` binds the PR number, exact labels predecessor and
+complete replacement set. A never-written stream uses `NewStream`; subsequent
+commands use its exact positive label version. An empty set explicitly clears
+labels and retains its new version. Every accepted replacement advances this
+version, including replacement by an identical set. The actor and complete
+event are bound by the single-event batch root in the `forge` scoped request
+entry `pull-request-labels.event-batch-root.v1`, using the existing receive
+admission schema. Final preparation independently reconstructs and compares the
+complete seal. Neither a PR content command nor a comment seal can substitute
+for the labels profile.
+
+Every authority-head CAS attempt rechecks current authenticated write authority,
+native PR existence, disclosure of both current PR branch identities and the
+exact labels predecessor against one authenticated publication basis. Sponsored
+credentials require current `PULLS_WRITE` authority at that same basis. This
+repository metadata permission is not an opener-only permission and grants no
+ref-write authority. A head-CAS loser retains the same actor, complete label
+set, expected version, seal and transaction identity. Concurrent PR lifecycle
+or content changes are preserved; concurrent labels changes produce a stale
+predecessor refusal. The event and its outbox obligation publish atomically.
+Known terminal retries recover their original decision before fresh intake,
+quota or subject checks, while still verifying the original complete command.
+Unavailable selected evidence and cancellation remain undecided, never a
+fabricated successful clear or permanent business refusal.
+
+Native list/detail projections read metadata and the complete labels frontier
+at the same selected authority head. An absent labels frontier yields an empty
+set and no label version or actor; a retained clear has an explicit version and
+actor. A selected frontier with missing, invalid or mismatched event bytes MUST
+fail rather than become an empty set. Label filters require all supplied exact
+labels and run before pagination and continuation selection. Current disclosure
+policy also applies to retained snapshots. Scans retain the existing 65,536
+candidate/event bound, additionally charge all loaded label-batch bytes against
+a 128 MiB budget, and charge retained label bytes against the 32 MiB page budget.
+Cancellation or exhaustion refuses the whole read rather than returning a
+complete-looking partial result.
+
 ### 20.2 Native issue assignment deltas
 
 The native issue stream uses the same aggregate version for opening, field
@@ -1411,13 +1472,15 @@ match the authenticated principal. Private preferences MUST NOT enter shared
 repository event feeds or webhook batches, including wildcard subscriptions.
 
 The native PR inbox derives an append-stable positive `activity_version` by
-replaying PR lifecycle, conversation and individual-reviewer events in exact
+replaying PR lifecycle, conversation, labels and individual-reviewer events in exact
 authenticated RCR/event order. It MUST NOT sort independent aggregates to assign
 activity ordinals, conflate their aggregate versions, or publish a second
 canonical activity stream. The selected source MUST verify the full history
 and each selected stream's final event root and range against the canonical
 forge frontier. Activity includes native open/update/close/reopen, comments,
-review changes and successful native merges. A merge's actor MUST come from
+review changes, label replacements and successful native merges. Label events
+advance this activity prefix without changing the PR content version, and a
+label writer alone does not acquire a participant subscription. A merge's actor MUST come from
 its RCR-bound principal snapshot with verified identity and repository binding.
 The current reader and current credentials MUST NOT substitute for that actor.
 

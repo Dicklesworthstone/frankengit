@@ -102,6 +102,31 @@ fn merge(format: GitHashAlgorithm, v: u64) -> ForgeEvent {
 }
 
 #[test]
+fn independent_labels_count_activity_without_changing_the_reviewed_content_subject() {
+    let mut f = Fixture::new();
+    let format = GitHashAlgorithm::Sha256;
+    f.append(vec![lifecycle(format, 1, 1, PullRequestAction::Open)], 1);
+    f.append(vec![review(format, 2, 1, 1)], 2);
+    let original = f.source(1).unwrap().remove(0);
+    let labels = fgit_forge::event::pull_request_labels::PullRequestLabelsCommand {
+        number: PullRequestNumber::FIRST,
+        expected_version: ExpectedVersion::NewStream,
+        labels: vec!["urgent".into()],
+    }
+    .proposed_event(actor(2))
+    .unwrap();
+    f.append(vec![labels], 2);
+    let current = f.source(1).unwrap().remove(0);
+    assert_eq!(current.subject.version(), version(3));
+    assert_eq!(current.latest_other_version, Some(version(3)));
+    let old = pull(&original).unwrap();
+    let selected = pull(&current).unwrap();
+    assert_eq!(selected.lifecycle_version, old.lifecycle_version);
+    assert_eq!(selected.data, old.data);
+    assert_eq!(selected.opened_by, old.opened_by);
+}
+
+#[test]
 fn independent_streams_form_one_append_stable_activity_prefix_in_repository_order() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut f = Fixture::new();

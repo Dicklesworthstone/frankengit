@@ -137,6 +137,12 @@ pub fn prepare_event(
                 fgit_forge::AggregateId::PullRequestConversation(_)
             )
         }
+        ForgeEventPayload::PullRequestLabelsChangedNative(_) => {
+            matches!(
+                event.aggregate,
+                fgit_forge::AggregateId::PullRequestLabels(_)
+            )
+        }
         ForgeEventPayload::MergeQueueChangedNative(change) => {
             event.aggregate == fgit_forge::AggregateId::MergeQueue(change.queue_number)
         }
@@ -167,6 +173,20 @@ pub fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::PullRequestLabelsChangedNative(change) => {
+            if change.actor != context.principal_id
+                || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            super::native::pull_request::labels::verify_event_seal(context, event, attempt)?;
+            (
+                ForgeEventKind::PullRequestLabelsChanged { labels: entity },
+                Vec::new(),
+                None,
+            )
+        }
         ForgeEventPayload::AgentCredentialChangedNative(change) => {
             if change.actor != context.principal_id
                 || !attempt.request.ref_commands().is_empty()

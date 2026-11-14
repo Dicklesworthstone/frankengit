@@ -8,6 +8,7 @@ mod conversation;
 mod diff;
 mod fast_forward;
 mod inspection;
+mod labels;
 mod output;
 mod preparation;
 mod request;
@@ -82,9 +83,7 @@ use fgit_wire::visibility::RefVisibility;
 use super::super::drive_request_while;
 use super::issues::{ApiError, Reply as JsonReply, admission_error, read_form};
 use super::{Profile, Status, retry_key};
-use crate::{
-    GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
-};
+use crate::{GitDaemonSessionDeadline, LoopbackReceiveSession, OneNode};
 use request::Operation;
 
 #[derive(Debug)]
@@ -92,6 +91,7 @@ pub(super) enum Request<'a> {
     Metadata(request::Request<'a>),
     Collaboration(collaboration::Request<'a>),
     Conversation(conversation::Request<'a>),
+    Labels(labels::Request<'a>),
     Preparation(preparation::Request<'a>),
     Inspection(inspection::Request<'a>),
     Diff(diff::Request<'a>),
@@ -99,18 +99,34 @@ pub(super) enum Request<'a> {
     FastForward(fast_forward::Request<'a>),
 }
 impl<'a> Request<'a> {
+    pub(super) fn reads_label_state(&self) -> bool {
+        matches!(self, Self::Labels(request) if !request.is_mutation())
+            || matches!(self, Self::Metadata(request::Request {
+                operation: Operation::List { labels, .. }, ..
+            }) if !labels.is_empty())
+    }
+
+    pub(super) const fn preserves_deadline(&self) -> bool {
+        matches!(self, Self::Labels(_) | Self::Metadata(_))
+    }
+
     pub(super) fn agent_operation(&self) -> Option<u16> {
         use fgit_identity::agent::{PULLS_READ, PULLS_WRITE};
         match self {
-            Self::Metadata(_) | Self::Conversation(_) => Some(if self.is_mutation() {
-                PULLS_WRITE
-            } else {
-                PULLS_READ
-            }),
+            Self::Metadata(_) | Self::Conversation(_) | Self::Labels(_) => {
+                Some(if self.is_mutation() {
+                    PULLS_WRITE
+                } else {
+                    PULLS_READ
+                })
+            }
             _ => None,
         }
     }
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = labels::Request::parse(envelope)? {
+            return Ok(Some(Self::Labels(request)));
+        }
         if let Some(request) = conversation::Request::parse(envelope)? {
             return Ok(Some(Self::Conversation(request)));
         }
@@ -140,6 +156,7 @@ impl<'a> Request<'a> {
             Self::Metadata(request) => request.is_mutation(),
             Self::Collaboration(request) => request.is_mutation(),
             Self::Conversation(request) => request.is_mutation(),
+            Self::Labels(request) => request.is_mutation(),
             Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_) | Self::Checks(_) => false,
         }
     }
@@ -174,6 +191,9 @@ pub(super) fn authenticate(
     profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let request = match request {
+        Request::Labels(request) => {
+            return labels::authenticate(request, envelope, raw_head, profile);
+        }
         Request::Conversation(request) => {
             return conversation::authenticate(request, envelope, raw_head, profile);
         }
@@ -224,8 +244,20 @@ pub(super) fn execute(
     reader: &mut impl Read,
     limits: HttpLimits,
     maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     match request {
+        Request::Labels(request) => labels::execute(
+            node,
+            request,
+            session,
+            framing,
+            reader,
+            limits,
+            maximum_response,
+            deadline,
+        )
+        .map(Reply::Json),
         Request::Conversation(request) => conversation::execute(
             node,
             request,
@@ -297,6 +329,7 @@ pub(super) fn execute(
             reader,
             limits,
             maximum_response,
+            deadline,
         )
         .map(Reply::Json),
     }
@@ -312,6 +345,7 @@ fn execute_metadata(
     reader: &mut impl Read,
     limits: HttpLimits,
     maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<JsonReply, ApiError> {
     let principal = session
         .authenticated_session()
@@ -322,27 +356,24 @@ fn execute_metadata(
     } else {
         None
     };
-    let deadline = GitDaemonSessionDeadline::new(
-        node.git_daemon_session_timeout,
-        GitDaemonSessionWorkScaling::FLAT,
-    );
-    let context = node.authenticated_session_request_context(&deadline, session);
+    let context = node.authenticated_session_request_context(deadline, session);
     let mut live = || !deadline.expired();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);
     let visibility = RefVisibility::new();
     match &request.operation {
-        Operation::List(page) => {
+        Operation::List { page, labels } => {
             let result = drive_request_while(
                 node,
                 &context,
-                node.read_pull_requests_in(
+                node.read_pull_requests_filtered_in(
                     &context,
                     &visibility,
                     page.after,
                     page.limit,
                     page.expected_head,
+                    labels,
                 ),
                 &mut live,
             )
@@ -355,7 +386,7 @@ fn execute_metadata(
             })?;
             Ok(JsonReply {
                 status: Status::Success,
-                body: output::list(node, *page, &result, maximum)?,
+                body: output::list(node, *page, labels, &result, maximum)?,
                 terminal: None,
             })
         }
@@ -430,6 +461,30 @@ fn execute_metadata(
 mod routing_tests {
     use super::*;
     use fgit_wire::smart_http::head;
+    #[test]
+    fn labels_have_explicit_read_and_write_grants_without_collaboration_escalation() {
+        for (method, mutation, operation) in [
+            ("GET", false, fgit_identity::agent::PULLS_READ),
+            ("POST", true, fgit_identity::agent::PULLS_WRITE),
+        ] {
+            let headers = if mutation {
+                "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n"
+            } else {
+                ""
+            };
+            let raw = format!(
+                "{method} /repo.git/api/v1/pulls/1/labels HTTP/1.1\r\nHost: local\r\n{headers}\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            let request = Request::parse(&envelope).unwrap().unwrap();
+            assert!(matches!(request, Request::Labels(_)));
+            assert_eq!(request.is_mutation(), mutation);
+            assert_eq!(request.accepts_body(), mutation);
+            assert_eq!(request.agent_operation(), Some(operation));
+        }
+    }
     #[test]
     fn metadata_reviews_and_merges_have_distinct_typed_routes() {
         for (method, path, collaboration, mutation) in [

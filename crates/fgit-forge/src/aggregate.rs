@@ -173,6 +173,8 @@ pub enum AggregateId {
     /// Append-only PR conversation. Discussion never advances the PR content
     /// or reviewer streams, so an ordinary comment cannot invalidate a vote.
     PullRequestConversation(PullRequestNumber),
+    /// Exact full label sets have independent versions and never stale a review.
+    PullRequestLabels(PullRequestNumber),
     /// A repository milestone; issue membership is owned by each issue stream.
     Milestone(MilestoneNumber),
     /// Independent repository discussion and its exact-version conversation.
@@ -221,6 +223,8 @@ pub(crate) const AGGREGATE_KIND_DISCUSSION_NOTIFICATION_PREFERENCE: u32 = 12;
 pub(crate) const AGGREGATE_KIND_AGENT_CREDENTIAL: u32 = 13;
 /// PR activity preferences; all established aggregate encodings are unchanged.
 pub(crate) const AGGREGATE_KIND_PULL_REQUEST_NOTIFICATION_PREFERENCE: u32 = 14;
+/// Label state is disjoint from content, reviews and conversation.
+pub(crate) const AGGREGATE_KIND_PULL_REQUEST_LABELS: u32 = 15;
 impl From<DiscussionNumber> for AggregateId {
     fn from(number: DiscussionNumber) -> Self {
         Self::Discussion(number)
@@ -277,6 +281,7 @@ impl fmt::Display for AggregateId {
             Self::MergeQueue(number) => write!(formatter, "queue/{number}"),
             Self::WorkflowCheck(id) => fmt::Display::fmt(id, formatter),
             Self::PullRequestConversation(number) => write!(formatter, "conversation/{number}"),
+            Self::PullRequestLabels(number) => write!(formatter, "pull-request-labels/{number}"),
             Self::Milestone(number) => write!(formatter, "milestone/{number}"),
             Self::Discussion(number) => write!(formatter, "discussion/{number}"),
             Self::NotificationPreference { principal, issue } => {

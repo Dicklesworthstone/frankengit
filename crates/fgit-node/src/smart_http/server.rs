@@ -1627,6 +1627,9 @@ fn serve_connection_with_routes(
         };
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
+            if request.preserves_deadline() {
+                writer.preserve_request_deadline = true;
+            }
         }
         let discussion_request = if default_branch_request.is_none()
             && protection_request.is_none()
@@ -1739,6 +1742,9 @@ fn serve_connection_with_routes(
             || protection_request.is_some()
             || queue_request.is_some()
             || source_request.is_some()
+            || pull_request
+                .as_ref()
+                .is_some_and(|request| request.reads_label_state())
             || discussion_request.is_some()
             || issue_request
                 .as_ref()
@@ -1908,6 +1914,7 @@ fn serve_connection_with_routes(
                     &mut body,
                     profile.http,
                     profile.maximum_response_bytes,
+                    &admission_deadline,
                 )
                 .map_err(|error| {
                     api_error = Some(error);

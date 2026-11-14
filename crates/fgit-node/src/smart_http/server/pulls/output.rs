@@ -93,7 +93,7 @@ fn view(value: &PullRequestView, rendered: Option<Rendering>) -> Result<String, 
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"state\":{},\"data\":{},",
-            "\"opened_by\":{},\"last_metadata_actor\":{},\"merge_only\":{},\"merge\":{}}}"
+            "\"opened_by\":{},\"last_metadata_actor\":{},\"merge_only\":{},\"merge\":{},{}}}"
         ),
         value.number.get(),
         value.event.version.get(),
@@ -111,10 +111,11 @@ fn view(value: &PullRequestView, rendered: Option<Rendering>) -> Result<String, 
             .last_metadata_actor
             .map_or_else(|| "null".to_owned(), |id| quote(&id.to_string())),
         value.data.is_none(),
-        merge
+        merge,
+        super::labels::fields(value)?,
     ))
 }
-fn header(
+pub(super) fn header(
     node: &OneNode,
     head: RepositoryAuthorityHeadId,
     expected: Option<RepositoryAuthorityHeadId>,
@@ -156,7 +157,7 @@ fn append(out: &mut String, part: &str, maximum: usize) -> Result<(), ApiError> 
     out.push_str(part);
     Ok(())
 }
-fn validate_page(page: Page, result: &PullRequestPage) -> Result<(), ApiError> {
+pub(super) fn validate_page(page: Page, result: &PullRequestPage) -> Result<(), ApiError> {
     let rows = &result.pull_requests;
     if rows.len() > usize::from(page.limit)
         || rows.iter().any(|row| row.number.get() <= page.after)
@@ -174,21 +175,36 @@ fn validate_page(page: Page, result: &PullRequestPage) -> Result<(), ApiError> {
 pub(super) fn list(
     node: &OneNode,
     page: Page,
+    labels: &[String],
     result: &PullRequestPage,
     maximum: usize,
 ) -> Result<String, ApiError> {
     validate_page(page, result)?;
+    fgit_forge::event::pull_request_labels::validate_labels(labels)
+        .map_err(|_| ApiError::unavailable())?;
+    if result.pull_requests.iter().any(|row| {
+        labels
+            .iter()
+            .any(|label| row.labels.binary_search(label).is_err())
+    }) {
+        return Err(ApiError::unavailable());
+    }
     let mut out = String::new();
     append(
         &mut out,
         &format!(
-            "{{\"type\":\"pull_request_page\",{},\"after\":{},\"limit\":{},\"next_after\":{},\"pull_requests\":[",
+            "{{\"type\":\"pull_request_page\",{},\"after\":{},\"limit\":{},\"next_after\":{},\"labels\":[{}],\"pull_requests\":[",
             header(node, result.source_head, page.expected_head)?,
             page.after,
             page.limit,
             result
                 .next_after
-                .map_or_else(|| "null".to_owned(), |number| number.to_string())
+                .map_or_else(|| "null".to_owned(), |number| number.to_string()),
+            labels
+                .iter()
+                .map(|label| quote(label))
+                .collect::<Vec<_>>()
+                .join(","),
         ),
         maximum,
     )?;
@@ -328,6 +344,9 @@ mod tests {
             data: Some(command.data),
             opened_by: Some(actor),
             last_metadata_actor: Some(actor),
+            labels: Vec::new(),
+            labels_version: None,
+            labels_actor: None,
         };
         let encoded = view(&row, None).unwrap();
         assert!(encoded.contains("\"state\":\"open\""));
@@ -388,6 +407,9 @@ mod tests {
             data: Some(command.data),
             opened_by: Some(actor),
             last_metadata_actor: Some(actor),
+            labels: Vec::new(),
+            labels_version: None,
+            labels_actor: None,
         }
     }
 

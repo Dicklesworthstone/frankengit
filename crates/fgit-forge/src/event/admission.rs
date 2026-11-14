@@ -110,6 +110,9 @@ pub const fn classify_event(
                 ForgeOperation::WorkflowCheck
             }
             ForgeEventPayload::PullRequestCommentedNative(_) => ForgeOperation::PullRequestComment,
+            ForgeEventPayload::PullRequestLabelsChangedNative(_) => {
+                ForgeOperation::PullRequestLabelsChange
+            }
         },
     };
     forge_admission_rule(operation)

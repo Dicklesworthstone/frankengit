@@ -4,18 +4,22 @@
 use std::collections::BTreeMap;
 
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
+use fgit_forge::event::pull_request_labels::{MAX_LABEL_BYTES, MAX_LABELS, validate_labels};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
 use super::super::issues::{
-    ApiError, MAX_FORM_BYTES, Page, Rendering, parse_decimal, parse_form, parse_page,
-    parse_snapshot,
+    ApiError, MAX_FORM_BYTES, Page, Rendering, parse_decimal, parse_form,
+    parse_form_with_field_limit, parse_snapshot,
 };
 
 #[derive(Debug)]
 pub(super) enum Operation {
-    List(Page),
+    List {
+        page: Page,
+        labels: Vec<String>,
+    },
     Show {
         number: PullRequestNumber,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -69,7 +73,8 @@ impl<'a> Request<'a> {
                     return Err(ApiError::bad("body_not_allowed"));
                 }
                 if suffix.is_empty() {
-                    Operation::List(parse_page(query, "after")?)
+                    let (page, labels) = list_page(query)?;
+                    Operation::List { page, labels }
                 } else {
                     let number = number(suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?)?;
                     let (mut expected_head, mut render) = (None, None);
@@ -218,6 +223,67 @@ fn number(text: &str) -> Result<PullRequestNumber, ApiError> {
     PullRequestNumber::try_new(parse_decimal(text)?)
         .ok_or_else(|| ApiError::bad("invalid_pull_request_number"))
 }
+
+/// Label predicates are ANDed before native pagination. Repeating one label
+/// is a caller error, and a cursor without an exact snapshot remains refused.
+fn list_page(query: Option<&str>) -> Result<(Page, Vec<String>), ApiError> {
+    let mut fields = BTreeMap::new();
+    let mut labels = Vec::new();
+    for (key, value) in parse_form_with_field_limit(
+        query.unwrap_or("").as_bytes(),
+        MAX_LABELS + 4,
+        "label",
+        MAX_LABEL_BYTES,
+    )? {
+        if key == "label" {
+            if labels.len() == MAX_LABELS {
+                return Err(ApiError::too_large());
+            }
+            labels.push(value);
+        } else if !matches!(key.as_str(), "after" | "limit" | "expected_head" | "render") {
+            return Err(ApiError::bad("unknown_query_field"));
+        } else if fields.insert(key, value).is_some() {
+            return Err(ApiError::bad("duplicate_field"));
+        }
+    }
+    labels.sort();
+    validate_labels(&labels).map_err(|_| ApiError::bad("invalid_labels"))?;
+    let after = fields
+        .remove("after")
+        .map(|value| parse_decimal(&value))
+        .transpose()?
+        .unwrap_or(0);
+    let limit = fields
+        .remove("limit")
+        .map(|value| parse_decimal(&value))
+        .transpose()?
+        .unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad("invalid_page_limit"));
+    }
+    let expected_head = fields
+        .remove("expected_head")
+        .map(|value| parse_snapshot(&value))
+        .transpose()?;
+    if after != 0 && expected_head.is_none() {
+        return Err(ApiError::bad("snapshot_required"));
+    }
+    let render = fields
+        .remove("render")
+        .map(|value| {
+            Rendering::from_query(&value).ok_or_else(|| ApiError::bad("unsupported_rendering"))
+        })
+        .transpose()?;
+    Ok((
+        Page {
+            after,
+            limit: limit as u16,
+            expected_head,
+            render,
+        },
+        labels,
+    ))
+}
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
     fields
         .remove(name)
@@ -242,6 +308,36 @@ fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
 mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
+
+    #[test]
+    fn label_list_queries_keep_exact_spelling_and_require_pinned_continuations() {
+        let pin = format!("alg:1:{}", "ab".repeat(32));
+        let (page, labels) = list_page(Some(&format!(
+            "label=triage&label=bug&after=7&limit=1&expected_head={pin}&render=html_safe"
+        )))
+        .unwrap();
+        assert_eq!(labels, ["bug", "triage"]);
+        assert_eq!((page.after, page.limit), (7, 1));
+        assert_eq!(page.render, Some(Rendering::HtmlSafe));
+        assert!(page.expected_head.is_some());
+        for invalid in [
+            "label=",
+            "label=+",
+            "label=bug&label=bug",
+            "label=x%00y",
+            "label=bug&after=1",
+            "label=bug&limit=0",
+            "label=bug&limit=101",
+            "label=bug&limit=1&limit=2",
+            "label=bug&actor=trusted",
+            "label=%FF",
+        ] {
+            assert!(list_page(Some(invalid)).is_err(), "{invalid}");
+        }
+        assert!(list_page(Some(&format!("label={}", "é".repeat(33)))).is_err());
+        assert!(list_page(Some(&format!("label={}", "é".repeat(32)))).is_ok());
+        assert_eq!(list_page(None).unwrap().1, Vec::<String>::new());
+    }
 
     fn fields(format: GitHashAlgorithm) -> String {
         format!(
@@ -463,7 +559,7 @@ mod tests {
                     panic!("rendering must stay on the authorized metadata route");
                 };
                 match request.operation {
-                    Operation::List(page) => assert_eq!(page.render, requested),
+                    Operation::List { page, .. } => assert_eq!(page.render, requested),
                     Operation::Show { render, .. } => assert_eq!(render, requested),
                     Operation::Mutate { .. } => panic!("rendering is not publication"),
                 }
