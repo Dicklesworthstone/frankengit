@@ -6,6 +6,7 @@ mod checks;
 mod conversation;
 mod fast_forward;
 mod labels;
+mod search;
 pub use checks::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,
@@ -13,6 +14,7 @@ pub use checks::{
 pub use conversation::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use search::{PullRequestSearchPage, PullRequestSearchRefusal};
 mod preparation;
 #[path = "reviews.rs"]
 mod reviews;

@@ -285,6 +285,17 @@ a failed variant completes its cleanup before later unstarted variants of that
 matrix are skipped; explicit `false` continues them. Independent jobs continue,
 and cancellation or lost containment retains its existing global stop behavior.
 
+### Find native pull requests
+
+`fg pr search`, authenticated `GET /api/v1/pulls/search`, and the
+`frankengit_pull_search` MCP tool search native PRs by literal title/body text,
+open/closed/merged state, opener and exact source or target branch. The PR browser
+provides the same filters. Search scans one retained snapshot under current ref
+visibility, with independent result and scan limits; an empty partial page keeps
+its continuation rather than claiming there are no matches. See
+[pull-request search](docs/PULL_REQUEST_SEARCH.md) for commands, permissions and
+pagination.
+
 ### Automatic native PR checks
 
 On Linux, `fg serve-http --workflow-pull-requests` discovers visible open

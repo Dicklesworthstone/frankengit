@@ -653,6 +653,9 @@ mod snapshot_tests;
 #[path = "metadata_read_tests.rs"]
 mod metadata_read_tests;
 
+#[path = "search_tests.rs"]
+mod search_tests;
+
 #[test]
 fn named_object_closure_commits_only_selected_named_objects() {
     use fgit_admission::{

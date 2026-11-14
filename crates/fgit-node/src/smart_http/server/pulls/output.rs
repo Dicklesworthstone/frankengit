@@ -218,6 +218,40 @@ pub(super) fn list(
     Ok(out)
 }
 
+pub(super) fn search(
+    node: &OneNode,
+    search: &super::search::Search,
+    result: &crate::PullRequestSearchPage,
+    maximum: usize,
+) -> Result<String, ApiError> {
+    let request = search.request;
+    let query = search.query.query();
+    let ref_hex = |reference: &fgit_types::RefName| {
+        quote(&reference.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>())
+    };
+    let mut out = String::new();
+    append(&mut out, &format!(concat!(
+        "{{\"type\":\"pull_request_search\",{},\"after\":{},\"limit\":{},\"max_scan\":{},",
+        "\"scanned\":{},\"count\":{},\"complete\":{},\"stop_reason\":{},\"next_after\":{},",
+        "\"filters\":{{\"state\":{},\"opened_by\":{},\"source_ref_hex\":{},\"target_ref_hex\":{},\"query\":{},\"case_sensitive\":{}}},",
+        "\"pull_requests\":["),
+        header(node, result.source_head, request.expected_head)?, request.after, request.limit, request.max_scan,
+        result.scanned, result.pull_requests.len(), result.is_complete(), quote(result.stop.as_str()),
+        result.next_after.map_or_else(|| "null".into(), |n| n.to_string()),
+        quote(query.state.map_or("all", |state| state.as_str())),
+        query.opened_by.map_or_else(|| "null".into(), |id| quote(&id.to_string())),
+        query.source_ref.as_ref().map_or_else(|| "null".into(), ref_hex),
+        query.target_ref.as_ref().map_or_else(|| "null".into(), ref_hex),
+        query.text.as_deref().map_or_else(|| "null".into(), quote), query.case_sensitive,
+    ), maximum)?;
+    for (index, row) in result.pull_requests.iter().enumerate() {
+        if index != 0 { append(&mut out, ",", maximum)?; }
+        append(&mut out, &view(row, search.render)?, maximum)?;
+    }
+    append(&mut out, "]}", maximum)?;
+    Ok(out)
+}
+
 pub(super) fn show(
     node: &OneNode,
     number: PullRequestNumber,

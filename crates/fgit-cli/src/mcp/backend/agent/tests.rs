@@ -33,7 +33,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 60);
+    assert_eq!(tools.len(), 61);
     assert!(
         tools
             .iter()

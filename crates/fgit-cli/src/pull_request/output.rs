@@ -9,7 +9,7 @@ use fgit_forge::event::pull_request::{PullRequestAction, PullRequestData};
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload, NativeMerge};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 
-const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
+pub(super) const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
 
 /// Borrowed rendering inputs only, not a second PR state or admission proof.
 /// The node owns the actual read model; this view keeps the CLI coupled to
@@ -192,7 +192,7 @@ pub(super) fn read_receipt(
     }
 }
 
-fn render_view(view: &Row<'_>) -> Result<String, String> {
+pub(super) fn render_view(view: &Row<'_>) -> Result<String, String> {
     validate_labels(view.labels).map_err(|_| "PR row labels are invalid")?;
     if view.labels_version.is_some() != view.labels_actor.is_some()
         || (view.labels_version.is_none() && !view.labels.is_empty())

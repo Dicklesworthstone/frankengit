@@ -1,5 +1,5 @@
 // Native PR client. Views are immutable observations, never merge permission.
-import { Transport, integer, principal, snapshot, listReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
+import { Transport, integer, principal, snapshot, listReply, pullSearchQuery, pullSearchParameters, pullSearchReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
   hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record, pullLabels, pullLabelState, pullLabelsReply } from './pulls-core.mjs';
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, candidateMethod, mergeMethod, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
@@ -140,6 +140,18 @@ export class PullClient {
     if (head) query.set('expected_head', head);
     const raw = await this.#transport.request(`pulls?${query}`);
     const checked = listReply(raw.value, { after, limit, head, scope: this.#scope, labels: wanted });
+    this.#scope = checked.binding; return checked;
+  }
+  async search(input = {}, options = {}) {
+    this.#ordinary();
+    const filters = pullSearchQuery(input), parameters = pullSearchParameters(options);
+    const { after, limit, maxScan, head, render } = parameters;
+    const query = new URLSearchParams({ after: String(after), limit: String(limit), max_scan: String(maxScan) });
+    for (const [name, value] of Object.entries(filters)) if (value !== null) query.set(name, String(value));
+    if (head !== null) query.set('expected_head', head);
+    if (render) query.set('render', 'html_safe');
+    const raw = await this.#transport.request(`pulls/search?${query}`);
+    const checked = pullSearchReply(raw.value, filters, { ...parameters, scope: this.#scope });
     this.#scope = checked.binding; return checked;
   }
   async show(number, head = null, { render = false } = {}) {

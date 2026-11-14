@@ -188,6 +188,73 @@ export function listReply(reply, { after = 0, limit = 20, head = null, scope = n
   if (reply.next_after !== null && (reply.pull_requests.length !== limit || reply.next_after !== previous)) fail('Invalid PR continuation.');
   return { ...selected, reply };
 }
+// A search is one immutable predicate over a selected authority snapshot. Raw
+// reference aliases normalize to native bytes; display labels are never refs.
+export function pullSearchQuery(input = {}) {
+  keys(input, ['state', 'opened_by', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'query', 'case_sensitive']);
+  const result = { state: input.state === undefined ? 'all' : input.state, opened_by: input.opened_by ?? null,
+    source_ref_hex: null, target_ref_hex: null, query: input.query ?? null,
+    case_sensitive: input.case_sensitive === undefined ? false : input.case_sensitive };
+  if (!['all', 'open', 'closed', 'merged'].includes(result.state)) fail('Choose a valid PR search state.');
+  if (result.opened_by !== null) principal(result.opened_by);
+  for (const name of ['source_ref', 'target_ref']) {
+    const encoded = `${name}_hex`, hasText = input[name] !== undefined && input[name] !== null,
+      hasHex = input[encoded] !== undefined && input[encoded] !== null;
+    if (hasText && hasHex) fail(`Supply exactly one ${name} search encoding.`);
+    if (hasText || hasHex) result[encoded] = commandReference({ [hasText ? name : encoded]: input[hasText ? name : encoded] }, name).hex;
+  }
+  if (result.query !== null && !text(result.query, 256, 'PR search query').length) fail('An explicit PR search query cannot be empty.');
+  if (typeof result.case_sensitive !== 'boolean' || (result.case_sensitive && result.query === null)) fail('Case-sensitive search requires a literal query.');
+  return Object.freeze(result);
+}
+export function pullSearchParameters(input = {}) {
+  keys(input, ['after', 'limit', 'maxScan', 'head', 'render']);
+  const { after = 0, limit = 20, maxScan = 200, head = null, render = false } = input;
+  integer(after, 'PR search cursor'); integer(limit, 'PR search page size', 1, 100);
+  integer(maxScan, 'PR search scan limit', 1, 1000);
+  if (head !== null) snapshot(head);
+  if (after && head === null) fail('PR search continuation requires its original snapshot.');
+  if (typeof render !== 'boolean') fail('Invalid Markdown presentation choice.');
+  return Object.freeze({ after, limit, maxScan, head, render });
+}
+function matchesPullSearch(row, query) {
+  if (query.state !== 'all' && row.state !== query.state) return false;
+  if (query.opened_by !== null && (row.data === null || row.opened_by !== query.opened_by)) return false;
+  const references = row.data ?? row.merge;
+  for (const name of ['source_ref_hex', 'target_ref_hex']) if (query[name] !== null && references[name] !== query[name]) return false;
+  if (query.query === null) return true;
+  if (row.data === null) return false;
+  const fold = value => query.case_sensitive ? value : value.replace(/[A-Z]/g, letter => letter.toLowerCase());
+  const literal = fold(query.query);
+  return fold(row.data.title).includes(literal) || fold(row.data.body).includes(literal);
+}
+export function pullSearchReply(reply, input = {}, options = {}) {
+  const { scope = null, ...page } = options, parameters = pullSearchParameters(page), query = pullSearchQuery(input);
+  const { after, limit, maxScan, head } = parameters, selected = pinned(reply, scope, head);
+  keys(reply.filters, Object.keys(query));
+  if (Object.keys(query).some(name => reply.filters[name] !== query[name])) fail('PR search filters changed. Restart explicitly.');
+  if (reply.type !== 'pull_request_search' || reply.after !== after || reply.limit !== limit || reply.max_scan !== maxScan ||
+      !Array.isArray(reply.pull_requests) || reply.pull_requests.length > limit || reply.count !== reply.pull_requests.length) fail('Invalid PR search page.');
+  integer(reply.scanned, 'scanned PR count', reply.count, maxScan);
+  let previous = after;
+  for (const row of reply.pull_requests) {
+    prRow(row, selected.binding.format);
+    if (row.number <= previous || !matchesPullSearch(row, query)) fail('Invalid or nonmatching PR search result.');
+    previous = row.number;
+  }
+  if (reply.stop_reason === 'exhausted') {
+    if (reply.complete !== true || reply.next_after !== null) fail('Invalid exhausted PR search.');
+  } else {
+    integer(reply.next_after, 'PR search continuation', after + 1);
+    if (reply.complete !== false || reply.scanned === 0 || reply.next_after < previous || reply.next_after - after < reply.scanned) fail('Invalid PR search continuation.');
+    if (reply.stop_reason === 'result_limit') {
+      if (reply.count !== limit) fail('Invalid PR search result limit.');
+    } else if (reply.stop_reason === 'scan_limit') {
+      if (reply.scanned !== maxScan || reply.count >= limit) fail('Invalid PR search scan limit.');
+    } else fail('Unknown PR search stopping reason.');
+  }
+  return { ...selected, reply, query, parameters };
+}
 export function showReply(reply, number, { head = null, scope = null } = {}) {
   const selected = pinned(reply, scope, head);
   if (reply.type !== 'pull_request' || reply.number !== number || typeof reply.found !== 'boolean') fail('Invalid PR response.');
@@ -543,6 +610,11 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
+    if (/^pulls\/search(?:\?|$)/.test(path)) {
+      if (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
+          statuses.length !== 1 || statuses[0] !== 200) fail('PR search is a bodyless read at one snapshot.');
+      integer(maximum, 'PR search response limit', 1, REPLY_LIMIT);
+    }
     const allowed = this.#defaultBranch
       ? /^(?:default-branch(?:\?[^#]+)?|source\/refs|outcomes)$/.test(path)
       : this.#artifacts
@@ -567,7 +639,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|labels|comments(?:\/append)?|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/search|\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|labels|comments(?:\/append)?|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);

@@ -118,6 +118,7 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use treefs_workspace::{PullRequestSearchPage, PullRequestSearchRefusal};
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
     StreamBundleExportRefusal, StreamBundleImportQuery, StreamBundleImportRefusal,

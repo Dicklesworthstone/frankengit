@@ -334,7 +334,7 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.validate_access().unwrap();
     // Full issue, pull and source groups, including independent PR labels,
     // without queues, context, artifacts, protection or discussion grants.
-    assert_eq!(backend.tools().len(), 70);
+    assert_eq!(backend.tools().len(), 71);
     assert!(
         backend
             .tools()

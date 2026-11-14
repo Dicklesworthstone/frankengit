@@ -475,7 +475,7 @@ impl NodeTools {
         if self.options.discussions && discussions::is_read(name) {
             return discussions::read(self, name, args);
         }
-        if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
+        if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_search") {
             return pulls::call(self, name, args);
         }
         if self.options.pulls && self.options.artifacts && name == check_evidence::NAME {
@@ -727,9 +727,10 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 99);
+        assert_eq!(server_names.len(), 100);
         assert!(server_names.contains(&pull_labels::READ));
         assert!(server_names.contains(&pull_labels::WRITE));
+        assert!(server_names.contains(&"frankengit_pull_search"));
         assert!(server_names.contains(&pull_writes::REOPEN));
         assert!(server_names.contains(&source::HISTORICAL_TREE));
         assert!(server_names.contains(&source::HISTORICAL_BLOB));

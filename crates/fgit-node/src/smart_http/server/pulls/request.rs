@@ -20,6 +20,7 @@ pub(super) enum Operation {
         page: Page,
         labels: Vec<String>,
     },
+    Search(super::search::Search),
     Show {
         number: PullRequestNumber,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -75,6 +76,8 @@ impl<'a> Request<'a> {
                 if suffix.is_empty() {
                     let (page, labels) = list_page(query)?;
                     Operation::List { page, labels }
+                } else if suffix == "/search" {
+                    Operation::Search(super::search::parse(query.unwrap_or("").as_bytes())?)
                 } else {
                     let number = number(suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?)?;
                     let (mut expected_head, mut render) = (None, None);
@@ -339,6 +342,31 @@ mod tests {
         assert_eq!(list_page(None).unwrap().1, Vec::<String>::new());
     }
 
+    #[test]
+    fn label_list_and_search_routes_preserve_their_explicit_filter_grammars() {
+        let bytes =
+            b"GET /repo.git/api/v1/pulls?label=triage&label=bug HTTP/1.1\r\nHost: local\r\n\r\n";
+        let envelope = head::parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        let request = Request::parse(&envelope).unwrap().unwrap();
+        let Operation::List { labels, .. } = request.operation else {
+            panic!("label filters must remain on the native list route")
+        };
+        assert_eq!(labels, ["bug", "triage"]);
+        for target in [
+            "/repo.git/api/v1/pulls/search?label=bug",
+            "/repo.git/api/v1/pulls?query=needle",
+        ] {
+            let bytes = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(
+                Request::parse(&envelope).is_err(),
+                "a filter must never be silently discarded"
+            );
+        }
+    }
+
     fn fields(format: GitHashAlgorithm) -> String {
         format!(
             "expected_version=0&object_format={}&source_ref=refs%2Fheads%2Ftopic&target_ref=refs%2Fheads%2Fmain&source_tip={}&target_tip={}&title=Review+%F0%9F%A6%80&body=%252f%0A%22",
@@ -539,8 +567,8 @@ mod tests {
     }
 
     #[test]
-    fn rendering_is_explicit_and_consistent_on_list_and_detail_routes() {
-        for suffix in ["", "/7"] {
+    fn rendering_is_explicit_and_consistent_on_list_detail_and_search_routes() {
+        for suffix in ["", "/7", "/search"] {
             for (query, requested) in [
                 ("", None),
                 ("?render=html_safe", Some(Rendering::HtmlSafe)),
@@ -560,6 +588,7 @@ mod tests {
                 };
                 match request.operation {
                     Operation::List { page, .. } => assert_eq!(page.render, requested),
+                    Operation::Search(search) => assert_eq!(search.render, requested),
                     Operation::Show { render, .. } => assert_eq!(render, requested),
                     Operation::Mutate { .. } => panic!("rendering is not publication"),
                 }

@@ -29,10 +29,33 @@
   <div class="columns">
     <section aria-labelledby="list-heading">
       <h2 id="list-heading">Find a pull request</h2>
+      <p>Choose a label-filtered list or a metadata search. Each form replaces the results below; filters from the two forms are independent.</p>
       <form id="label-filter">
         <label>Required labels, one per line <textarea id="label-filter-values" rows="3" maxlength="2079" spellcheck="false"></textarea></label>
-        <p>Match every label exactly, including case and spaces. Leave empty to show all visible PRs.</p>
+        <p>Apply this filter to list PRs that match every label exactly, including case and spaces. Leave empty to show all visible PRs.</p>
         <button id="label-filter-apply" type="submit">Apply label filter</button>
+      </form>
+      <form id="pr-search" autocomplete="off">
+        <label>Words or literal text in title or body <input id="search-query" maxlength="256" aria-describedby="search-help"></label>
+        <div class="fields">
+          <label>State <select id="search-state"><option value="all">All states</option><option value="open">Open</option><option value="closed">Closed</option><option value="merged">Merged</option></select></label>
+          <label>Opened by principal ID <input id="search-opened-by" maxlength="32" pattern="[0-9a-f]{32}" spellcheck="false" placeholder="Any opener"></label>
+        </div>
+        <label class="confirmation"><input id="search-case-sensitive" type="checkbox"> Match letter case exactly</label>
+        <details>
+          <summary>Exact branches and page limits</summary>
+          <label>Source branch <input id="search-source-ref" maxlength="2048" spellcheck="false" placeholder="Any source branch"></label>
+          <label>Source encoding <select id="search-source-encoding"><option value="text">Branch name, including refs/heads/</option><option value="hex">Native branch bytes in lowercase hex</option></select></label>
+          <label>Target branch <input id="search-target-ref" maxlength="2048" spellcheck="false" placeholder="Any target branch"></label>
+          <label>Target encoding <select id="search-target-encoding"><option value="text">Branch name, including refs/heads/</option><option value="hex">Native branch bytes in lowercase hex</option></select></label>
+          <div class="fields">
+            <label>Results per page <input id="search-limit" type="number" min="1" max="100" step="1" value="20" required></label>
+            <label>PRs scanned per page <input id="search-max-scan" type="number" min="1" max="1000" step="1" value="200" required></label>
+          </div>
+        </details>
+        <p id="search-help">All selected filters must match. Text is a literal substring of either the title or body, up to 256 UTF-8 bytes; comments are not searched. By default only A–Z ignore case. A scan can return no matches and still have more PRs to examine. Editing filters takes effect when you select Search.</p>
+        <button id="search-submit" type="submit">Search pull requests</button>
+        <button id="search-clear" type="button">Clear search and show all PRs</button>
       </form>
       <button id="refresh" type="button">Refresh PR list</button>
       <div id="pr-list"></div><div id="list-paging"></div>

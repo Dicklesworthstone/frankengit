@@ -1744,7 +1744,7 @@ fn serve_connection_with_routes(
             || source_request.is_some()
             || pull_request
                 .as_ref()
-                .is_some_and(|request| request.reads_label_state())
+                .is_some_and(|request| request.uses_read_quota())
             || discussion_request.is_some()
             || issue_request
                 .as_ref()
@@ -2108,6 +2108,7 @@ fn log_cleanup(error: &NodeRefusal) {
 mod tests {
     mod agent_credentials;
     mod issue_search;
+    mod pull_search;
     mod queue_preparation;
 
     #[test]

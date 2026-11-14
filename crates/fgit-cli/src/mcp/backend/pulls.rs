@@ -7,6 +7,7 @@ use fgit_forge::event::{
 };
 use fgit_forge::{AggregateId, ForgeEvent, ForgeEventPayload, PullRequestNumber};
 use fgit_types::PrincipalId;
+mod search;
 
 pub(super) fn tools() -> Vec<Tool> {
     let mut list_schema = rendered::schema(schema(false));
@@ -35,9 +36,13 @@ pub(super) fn tools() -> Vec<Tool> {
             description: "Read one visible PR's exact metadata or merge receipt. Current hidden-ref policy still applies; missing and hidden PRs are not distinguished.",
             schema: show_schema,
         },
+        search::tool(),
     ]
 }
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
+    if name == "frankengit_pull_search" {
+        return search::call(backend, args);
+    }
     let show = name == "frankengit_pull_show";
     require_fields(
         args,

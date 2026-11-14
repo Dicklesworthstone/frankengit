@@ -12,6 +12,7 @@ mod labels;
 mod output;
 mod preparation;
 mod request;
+mod search;
 mod subject;
 
 // Queue preparation shares only the bounded artifact formatter and native
@@ -99,11 +100,18 @@ pub(super) enum Request<'a> {
     FastForward(fast_forward::Request<'a>),
 }
 impl<'a> Request<'a> {
-    pub(super) fn reads_label_state(&self) -> bool {
+    pub(super) fn uses_read_quota(&self) -> bool {
         matches!(self, Self::Labels(request) if !request.is_mutation())
             || matches!(self, Self::Metadata(request::Request {
                 operation: Operation::List { labels, .. }, ..
             }) if !labels.is_empty())
+            || matches!(
+                self,
+                Self::Metadata(request::Request {
+                    operation: Operation::Search(_),
+                    ..
+                })
+            )
     }
 
     pub(super) const fn preserves_deadline(&self) -> bool {
@@ -363,6 +371,20 @@ fn execute_metadata(
         .min(output::MAX_REPLY_BYTES);
     let visibility = RefVisibility::new();
     match &request.operation {
+        Operation::Search(search) => {
+            let result = drive_request_while(
+                node,
+                &context,
+                node.search_pull_requests_in(&context, &visibility, &search.query, search.request),
+                &mut live,
+            )
+            .map_err(search::error)?;
+            Ok(JsonReply {
+                status: Status::Success,
+                body: output::search(node, search, &result, maximum)?,
+                terminal: None,
+            })
+        }
         Operation::List { page, labels } => {
             let result = drive_request_while(
                 node,

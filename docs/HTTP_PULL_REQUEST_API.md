@@ -43,7 +43,7 @@ not contain a plaintext bearer secret. Combined scopes appear once in this order
 read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write
 ```
 
-`pulls-read` permits PR list and individual reads. `pulls-write` permits open,
+`pulls-read` permits PR list, search and individual reads. `pulls-write` permits open,
 update and close. Write does not imply read. Neither PR scope grants Git fetch,
 Git push, issue access, recovery, reviews, or merge publication. Conversely, no
 existing scope implicitly grants PR access. The deployment ceiling and the
@@ -66,6 +66,11 @@ headers into authority. Keep credentials outside repository content and URLs.
 
 Use the repository URL from the readiness record as `REPO_URL`. All requests
 require `Authorization: Bearer <token>`.
+
+`GET /api/v1/pulls/search` provides literal text, state, opener and exact branch
+filters at one retained snapshot. It uses the same read grant and has no request
+body or mutation key. See [pull-request search](PULL_REQUEST_SEARCH.md) for query
+fields, independent scan limits and continuations that can contain zero matches.
 
 ```text
 GET  {REPO_URL}/api/v1/pulls

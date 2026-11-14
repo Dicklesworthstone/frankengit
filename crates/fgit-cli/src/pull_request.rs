@@ -8,6 +8,7 @@ mod fast_forward;
 mod labels;
 mod options;
 mod output;
+mod search;
 #[cfg(test)]
 mod tests;
 
@@ -37,6 +38,8 @@ usage: fg pr list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--object-format sha1|sha256]
 usage: fg pr show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--expected-head <snapshot-token>] [--object-format sha1|sha256]
+usage: fg pr search --help
+  Search visible PR metadata with state, author, branch and literal text filters.
 
 usage: fg pr fast-forward --help
   Fast-forward an existing PR with exact version/tips, without a new commit.
@@ -64,6 +67,9 @@ This is a trusted local-operator interface, not a remote authorization service."
 pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments.first().is_some_and(|argument| matches!(argument.as_str(), "labels" | "set-labels")) {
         return labels::run(arguments, &mut std::io::stdout().lock());
+    }
+    if arguments.first().is_some_and(|argument| argument == "search") {
+        return search::run(&arguments[1..], &mut std::io::stdout().lock());
     }
     if arguments.first().is_some_and(|argument| {
         matches!(argument.as_str(), "comment" | "append-comment" | "comments")

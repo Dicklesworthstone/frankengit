@@ -277,7 +277,7 @@ fn required<'a>(flags: &BTreeMap<&str, &'a str>, flag: &str) -> Result<&'a str, 
         .copied()
         .ok_or_else(|| format!("{flag} is required"))
 }
-fn reference(flags: &BTreeMap<&str, &str>, plain: &str, encoded: &str) -> Result<RefName, String> {
+pub(super) fn reference(flags: &BTreeMap<&str, &str>, plain: &str, encoded: &str) -> Result<RefName, String> {
     let bytes = match (flags.get(plain), flags.get(encoded)) {
         (Some(value), None) if value.len() <= 4096 => value.as_bytes().to_vec(),
         (None, Some(value)) => unhex(value, 4096)?,

@@ -40,6 +40,7 @@ pub mod issue_search;
 pub mod merge;
 pub mod merge_queue;
 pub mod preparation;
+pub mod pull_request_search;
 pub mod review;
 pub mod snapshot;
 pub mod source_archive;

@@ -145,7 +145,9 @@ async function fileText(input) {
   if (bytes.length > RECEIPT_LIMIT || bytes.length !== file.size) fail('Invalid receipt size.');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
-const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load',
+const SEARCH_IDS = ['search-query', 'search-state', 'search-opened-by', 'search-case-sensitive',
+  'search-source-ref', 'search-source-encoding', 'search-target-ref', 'search-target-encoding', 'search-limit', 'search-max-scan', 'search-submit', 'search-clear'];
+const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load', 'pr-search', ...SEARCH_IDS,
   'label-filter', 'label-filter-values', 'label-filter-apply',
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
@@ -160,6 +162,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   nodes['candidate-method'].value ||= 'merge-commit';
   nodes['candidate-profile'].value ||= 'path-merge-v1';
+  function resetSearch() {
+    for (const id of ['search-query', 'search-opened-by', 'search-source-ref', 'search-target-ref']) nodes[id].value = '';
+    nodes['search-state'].value = 'all'; nodes['search-case-sensitive'].checked = false;
+    nodes['search-source-encoding'].value = 'text'; nodes['search-target-encoding'].value = 'text';
+    nodes['search-limit'].value = '20'; nodes['search-max-scan'].value = '200';
+  }
+  resetSearch();
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   let inlineSelection = null, inlineButtons = [];
@@ -180,7 +189,8 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
       ? 'RECOVERY ONLY: the selected original principal must match the authenticated outcome response. No PR reads or mutation sends are permitted. Reconnect explicitly for ordinary work.'
       : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is submitted.';
-    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit', 'label-filter-values', 'label-filter-apply']) nodes[id].disabled = !connected || busy;
+    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit', 'label-filter-values', 'label-filter-apply', ...SEARCH_IDS]) nodes[id].disabled = !connected || busy;
+    nodes.refresh.textContent = listPage?.query ? 'Refresh current search' : 'Refresh PR list';
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open';
     nodes['reviews-load'].disabled = !connected || busy || !selected;
@@ -249,6 +259,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     clearComments();
     inlineButtons = [];
     selected = null; listPage = null; reviewPage = null; fastForward = null; labelsPanel = null; resolution.clear();
+    resetSearch();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
       'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers', 'label-filter-values']) nodes[id].value = '';
@@ -288,17 +299,54 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     item(doc, nodes['pr-list'], 'p', `Snapshot: ${result.head}`);
     const labels = result.reply.labels ?? [];
     if (labels.length) item(doc, nodes['pr-list'], 'p', `Required labels: ${labelNames(labels)}`);
-    if (!result.reply.pull_requests.length) item(doc, nodes['pr-list'], 'p', 'No PRs on this visible page.');
+    if (result.query) {
+      const filters = [`state ${result.query.state}`];
+      if (result.query.query !== null) filters.push(`literal ${JSON.stringify(result.query.query)} (${result.query.case_sensitive ? 'exact case' : 'ASCII case ignored'})`);
+      if (result.query.opened_by !== null) filters.push(`opener ${result.query.opened_by}`);
+      for (const name of ['source', 'target']) if (result.query[`${name}_ref_hex`] !== null) filters.push(`${name} branch ${displayBytes(result.query[`${name}_ref_hex`])}`);
+      item(doc, nodes['pr-list'], 'p', `Applied filters: ${displayText(filters.join('; '))}`);
+      item(doc, nodes['pr-list'], 'p', `${result.reply.count} matches; ${result.reply.scanned} PRs examined on this page. ${result.reply.complete
+        ? 'Search complete for the remaining snapshot range.' : result.reply.stop_reason === 'scan_limit'
+        ? 'Scan limit reached. More PRs remain at this snapshot.' : 'Result limit reached. More PRs remain at this snapshot.'}`);
+    }
+    if (!result.reply.pull_requests.length) item(doc, nodes['pr-list'], 'p', result.query
+      ? result.reply.complete ? 'No matching PRs in the remaining snapshot range.' : 'No matches on this page. Continue searching the same snapshot.'
+      : 'No PRs on this visible page.');
     for (const row of result.reply.pull_requests) button(nodes['pr-list'], `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}` +
       (Array.isArray(row.labels) ? ` · labels: ${labelNames(row.labels)}` : ''), () => loadPr(row.number, result.head));
-    if (result.reply.next_after !== null) button(nodes['list-paging'], 'Next PR page', () => loadList(result.reply.next_after, result.head, labels));
+    if (result.reply.next_after !== null) {
+      if (result.query) button(nodes['list-paging'], 'Continue PR search', () => loadSearch(result.query,
+        { after: result.reply.next_after, head: result.head, limit: result.reply.limit, maxScan: result.reply.max_scan }));
+      else button(nodes['list-paging'], 'Next PR page', () => loadList(result.reply.next_after, result.head, labels));
+    }
   }
   function loadList(after = 0, head = null, labels = null) {
     return run('read', async guard => {
       const wanted = labels === null ? labelsFromLines(nodes['label-filter-values'].value) : pullLabels(labels);
-      client.cancelReads(); nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
+      client.cancelReads(); listPage = null; nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
       const result = await client.list({ after, head, labels: wanted }); guard(); renderList(result);
       status('PR page loaded at one snapshot. Opening a row retains that snapshot.');
+    });
+  }
+  function searchFields() {
+    const query = { state: nodes['search-state'].value, case_sensitive: nodes['search-case-sensitive'].checked };
+    if (nodes['search-query'].value !== '') query.query = nodes['search-query'].value;
+    if (nodes['search-opened-by'].value !== '') query.opened_by = nodes['search-opened-by'].value;
+    for (const side of ['source', 'target']) {
+      const encoding = nodes[`search-${side}-encoding`].value;
+      if (!['text', 'hex'].includes(encoding)) fail('Choose a valid branch search encoding.');
+      if (nodes[`search-${side}-ref`].value !== '') query[`${side}_ref${encoding === 'hex' ? '_hex' : ''}`] = nodes[`search-${side}-ref`].value;
+    }
+    return query;
+  }
+  function loadSearch(query = null, options = null) {
+    return run('read', async guard => {
+      const filters = query ?? searchFields(), parameters = options ?? {
+        limit: number('search-limit', 1), maxScan: number('search-max-scan', 1) };
+      client.cancelReads(); listPage = null; nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
+      const result = await client.search(filters, parameters); guard(); renderList(result);
+      status(result.reply.complete ? 'PR search complete at this snapshot. Opening a result retains that snapshot.'
+        : 'PR search page loaded. Continue to examine more PRs at the same snapshot with these applied filters.');
     });
   }
   function fieldsFromRow(row, format) {
@@ -574,8 +622,11 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   });
   nodes['recovery-only'].addEventListener('change', controls);
   on('disconnect', 'click', disconnect);
-  on('refresh', 'click', () => loadList());
   on('label-filter', 'submit', () => loadList());
+  on('pr-search', 'submit', () => loadSearch());
+  on('search-clear', 'click', () => { resetSearch(); nodes['label-filter-values'].value = ''; loadList(0, null, []); });
+  on('refresh', 'click', () => listPage?.query
+    ? loadSearch(listPage.query, { limit: listPage.reply.limit, maxScan: listPage.reply.max_scan }) : loadList());
   on('select-pr', 'submit', () => run('read', async guard => {
     const requested = number('select-number', 1); clearChecks(); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null;
     nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
@@ -689,7 +740,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   });
   doc.defaultView.addEventListener('pagehide', disconnect);
   status('Connect with a repository token. Credentials remain only in page memory.'); controls();
-  return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
+  return { client, disconnect, loadPr, loadList, loadSearch, loadReviews, loadComments };
 }
 
 // Review-protection administration has its own connection and native client.

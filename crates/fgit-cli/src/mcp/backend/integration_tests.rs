@@ -385,6 +385,32 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
             result(&pr)["pull_request"].object().unwrap()["merge_permission"],
             Value::Null
         );
+        let search = invoke(
+            &mut server,
+            &mut backend,
+            23,
+            "frankengit_pull_search",
+            object([
+                ("query", text("READ ME")),
+                ("state", text("open")),
+                ("target_ref", text("refs/heads/main")),
+            ]),
+        );
+        assert_eq!(result(&search)["count"], json::number(1));
+        assert_eq!(result(&search)["complete"], Value::Bool(true));
+        assert_eq!(result(&search)["snapshot_token"], result(&pr)["snapshot_token"]);
+        let Value::Array(found) = &result(&search)["pull_requests"] else { panic!("search rows") };
+        assert_eq!(found[0], result(&pr)["pull_request"]);
+        let no_match = invoke(
+            &mut server,
+            &mut backend,
+            24,
+            "frankengit_pull_search",
+            object([("state", text("closed"))]),
+        );
+        assert_eq!(result(&no_match)["count"], json::number(0));
+        assert_eq!(result(&no_match)["scanned"], json::number(1));
+        assert_eq!(result(&no_match)["complete"], Value::Bool(true));
         let checks = invoke(
             &mut server,
             &mut backend,
@@ -492,6 +518,19 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
             result(&retained)["snapshot_token"],
             result(&pr)["snapshot_token"]
         );
+        let retained_search = invoke(
+            &mut server,
+            &mut backend,
+            25,
+            "frankengit_pull_search",
+            object([
+                ("query", text("READ ME")),
+                ("state", text("open")),
+                ("target_ref", text("refs/heads/main")),
+                ("expected_head", result(&search)["snapshot_token"].clone()),
+            ]),
+        );
+        assert_eq!(result(&retained_search), result(&search));
         backend.close().unwrap();
     }
 }
