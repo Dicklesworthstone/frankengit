@@ -32,6 +32,11 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Native Git object identity and format are preserved exactly.
 - SHA-1 and SHA-256 are separate typed domains.
 - Pack/delta/DEFLATE/wire parsing is bounded and rejects ambiguity, overflow, recursion, expansion, and malformed structure.
+- Hybrid served packs may reuse only a dependency-closed subset of the exact
+  authorized selection, with independently proven held bases where negotiated.
+  Newly encoded entries cannot depend on retained entries or vice versa.
+  Both source frames/checksums and combined count, output and expansion limits
+  must verify before the joined private spool becomes consumable.
 - Internal objects, segments, manifests, evidence, generations, and capsules verify canonical identity/length/structure.
 - Repair reproduces exact committed bytes or fails closed.
 

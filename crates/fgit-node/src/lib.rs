@@ -216,7 +216,7 @@ mod receive_refusal;
 mod receive_staging;
 mod received_pack;
 mod received_pack_restore;
-pub use received_pack::ReceivedPackReceipt;
+pub use received_pack::{HybridPackReceipt, ReceivedPackReceipt};
 mod ssh;
 mod upload_visibility;
 mod verified_reads;
@@ -1016,8 +1016,9 @@ impl MaterializedAdmission {
 /// A bounded Git pack derived from one authority-selected object closure.
 ///
 /// The payload is consumable only after the `fgit-pack` writer finished its
-/// temporary artifact and checksum, or a native-verified received pack matched
-/// the complete current authorized selection. Its evidence retains both the exact
+/// temporary artifact and checksum, a native-verified received pack matched
+/// the complete current authorized selection, or both paths were joined into
+/// one verified hybrid pack. Its evidence retains both the exact
 /// authority head basis and the RCR/genesis source that selected the objects.
 /// Written packs live in private scratch custody (frankengit-8xyq); received
 /// packs share bounded immutable cache custody. Each session reads bounded
@@ -1040,6 +1041,9 @@ pub enum PackMaterializationReceipt {
     /// A fully native-verified sender pack, exact disjoint composition, or
     /// selective entry representation identified by its explicit profile.
     Received(ReceivedPackReceipt),
+    /// Verified retained entries plus newly written objects, joined under one
+    /// native checksum without changing the authorized selection.
+    Hybrid(HybridPackReceipt),
 }
 
 impl PackMaterializationReceipt {
@@ -1048,7 +1052,7 @@ impl PackMaterializationReceipt {
     pub const fn writer(&self) -> Option<&PackWriteReceipt> {
         match self {
             Self::Written(receipt) => Some(receipt),
-            Self::Received(_) => None,
+            Self::Received(_) | Self::Hybrid(_) => None,
         }
     }
 
@@ -1056,8 +1060,17 @@ impl PackMaterializationReceipt {
     #[must_use]
     pub const fn received(&self) -> Option<&ReceivedPackReceipt> {
         match self {
-            Self::Written(_) => None,
+            Self::Written(_) | Self::Hybrid(_) => None,
             Self::Received(receipt) => Some(receipt),
+        }
+    }
+
+    /// Separate retained-entry and native-writer evidence for a hybrid pack.
+    #[must_use]
+    pub const fn hybrid(&self) -> Option<&HybridPackReceipt> {
+        match self {
+            Self::Hybrid(receipt) => Some(receipt),
+            Self::Written(_) | Self::Received(_) => None,
         }
     }
 }
@@ -10586,6 +10599,63 @@ impl OneNode {
             inner: &source,
             ceiling: ceiling.as_ref(),
         };
+        // A native merge or workspace publication can add only a few objects
+        // to a large retained history. Reuse its closed, verified delta graph
+        // and encode only the uncovered identities. The native run is always
+        // self-contained: neither graph can acquire a dependency on the other.
+        // Both consume the original selection's aggregate envelope and request
+        // lifetime; no second graph walk or wider disclosure is introduced.
+        let held = if prepared.write_profile.thin {
+            prepared.held_bases.as_slice()
+        } else {
+            &[]
+        };
+        if let Some(partial) = self.received_pack_cache().try_reuse_partial(
+            &prepared.keys,
+            &prepared.limits,
+            held,
+            live,
+        )? {
+            let native_profile = if prepared.write_profile == PackWriteProfile::COMPRESSED_V5_THIN {
+                PackWriteProfile::COMPRESSED_V5
+            } else if prepared.write_profile == PackWriteProfile::COMPRESSED_V6_THIN {
+                PackWriteProfile::COMPRESSED_V6
+            } else {
+                prepared.write_profile
+            };
+            let native = self.stream_pack_entries(
+                &served,
+                partial.missing_keys(),
+                &[],
+                native_profile,
+                partial.native_limits(),
+                live,
+            );
+            match native {
+                Ok((pack, receipt)) => {
+                    let (pack, receipt) =
+                        partial.finish(pack, receipt, self.storage_root(), live)?;
+                    return Ok(AuthoritySelectedPackPayload {
+                        basis: materialized.basis().clone(),
+                        closure: materialized.selected_closure().clone(),
+                        receipt: PackMaterializationReceipt::Hybrid(receipt),
+                        pack: SelectedPackData::Written(pack),
+                    });
+                }
+                // Retained compressed bytes can require more space than a
+                // fresh encoding. A representation-only limit may therefore
+                // miss the accelerator; retry the ordinary writer under the
+                // SAME live request and full selected envelope. Cancellation,
+                // failed identity checks and I/O errors never take this path.
+                Err(NodePackMaterializationRefusal::Pack(error))
+                    if matches!(
+                        error.as_ref(),
+                        PackWriteError::OutputLimit { .. }
+                            | PackWriteError::Pack(PackError::TotalExpandedLimit { .. })
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let thin_bases = if prepared.write_profile.thin && !prepared.held.is_empty() {
             let sent = prepared.keys.iter().map(|key| key.id).collect();
             served.thin_base_hints(
@@ -10771,6 +10841,33 @@ impl OneNode {
         limits: &PackLimits,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        let (pack, receipt) = self.stream_pack_entries(
+            source,
+            keys,
+            thin_bases,
+            write_profile,
+            limits,
+            is_live,
+        )?;
+        Ok(AuthoritySelectedPackPayload {
+            basis: materialized.basis().clone(),
+            closure: materialized.selected_closure().clone(),
+            receipt: PackMaterializationReceipt::Written(receipt),
+            pack: SelectedPackData::Written(pack),
+        })
+    }
+
+    /// One native entry run in private scratch custody. Only its caller can
+    /// attach the authenticated selection or join it to verified retained data.
+    fn stream_pack_entries(
+        &self,
+        source: &impl CanonicalObjectSource,
+        keys: &[PackOrderKey],
+        thin_bases: &[ThinBase],
+        write_profile: PackWriteProfile,
+        limits: &PackLimits,
+        is_live: &mut impl FnMut() -> bool,
+    ) -> Result<(pack_spool::SpooledPack, PackWriteReceipt), NodePackMaterializationRefusal> {
         // Both preparation paths keep identity-sorted keys. Overlay only the
         // exact selection's verified metadata; the adapter preserves native
         // identity, kind, owned bodies and streamed readers. Client-held thin
@@ -10804,12 +10901,7 @@ impl OneNode {
         let pack = spool.into_promoted().ok_or_else(|| {
             NodePackMaterializationRefusal::from(PackWriteError::PromotionRefused)
         })?;
-        Ok(AuthoritySelectedPackPayload {
-            basis: materialized.basis().clone(),
-            closure: materialized.selected_closure().clone(),
-            receipt: PackMaterializationReceipt::Written(receipt),
-            pack: SelectedPackData::Written(pack),
-        })
+        Ok((pack, receipt))
     }
 
     /// Returns the read-only canonical admission projection backed by this

@@ -181,17 +181,20 @@ fn selected_ids(selection: &PreparedUploadPack) -> BTreeSet<GitOid> {
     selection.keys.iter().map(|key| key.id).collect()
 }
 
-fn assert_written_subset(
+fn assert_hybrid_subset(
     node: &OneNode,
     head: &MaterializedAdmission,
     selection: &PreparedUploadPack,
 ) {
     let payload = materialize(node, head, selection);
     assert!(payload.receipt().received().is_none());
-    assert_eq!(
-        payload.receipt().writer().unwrap().object_count as usize,
-        selection.keys.len()
-    );
+    assert!(payload.receipt().writer().is_none());
+    let receipt = payload.receipt().hybrid().expect("reuse the two independent metadata entries");
+    assert_eq!(receipt.reused().object_count(), 2);
+    assert_eq!(receipt.reused().external_base_count(), 0);
+    assert!(!receipt.written().profile.thin);
+    assert_eq!(receipt.written().object_count as usize, selection.keys.len() - 2);
+    assert_eq!(receipt.object_count() as usize, selection.keys.len());
     let bytes = payload.into_bytes().unwrap();
     let parsed = read_verified_pack(
         &bytes,
@@ -303,8 +306,9 @@ fn partial_fetches_do_not_import_unselected_bases_or_whole_pack_extras() {
             }
             if case == 0 || case == 2 {
                 // The incremental blob still depends on a base omitted from
-                // these non-thin requests. Cached custody cannot supply it.
-                assert_written_subset(&fixture.node, &head, &selection);
+                // these non-thin requests. Encode that blob natively while
+                // reusing the independently complete tree and commit entries.
+                assert_hybrid_subset(&fixture.node, &head, &selection);
             } else {
                 super::selective::assert_exact_selected_subset(&fixture.node, &head, &selection);
             }
@@ -366,7 +370,7 @@ fn unreachable_and_deleted_branch_objects_are_omitted_from_selected_composition(
 }
 
 #[test]
-fn a_thin_pack_without_retained_base_history_falls_back_to_native_materialization() {
+fn a_thin_pack_without_retained_base_history_reuses_only_dependency_closed_entries() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let ReceivedFixture {
             scratch,
@@ -405,6 +409,6 @@ fn a_thin_pack_without_retained_base_history_falls_back_to_native_materializatio
             selected_ids(&selection),
             public_objects.union(&increment.objects).copied().collect()
         );
-        assert_written_subset(&reopened, &head, &selection);
+        assert_hybrid_subset(&reopened, &head, &selection);
     }
 }

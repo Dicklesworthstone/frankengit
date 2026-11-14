@@ -28,12 +28,15 @@ use fgit_pack::{
 use fgit_types::GitOid;
 
 mod composition;
+mod hybrid;
 pub(crate) mod persistence;
 pub(crate) mod placement;
 mod selective;
 mod spans;
 
 use spans::WireEntry;
+pub use hybrid::HybridPackReceipt;
+pub(crate) use hybrid::PartialReceivedPack;
 
 const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 64;
@@ -487,6 +490,19 @@ impl ReceivedPackCache {
             return Ok(Some(pack));
         }
         selective::select(self, keys, limits, held, live).map_err(Into::into)
+    }
+
+    /// Preserve a non-empty, closed retained subset while the native writer
+    /// encodes only the uncovered selected identities. The held proof has the
+    /// same current-basis and thin-negotiation requirements as complete reuse.
+    pub(crate) fn try_reuse_partial(
+        &self,
+        keys: &[PackOrderKey],
+        limits: &PackLimits,
+        held: &[(GitOid, ObjectType)],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Option<PartialReceivedPack>, PackWriteError> {
+        hybrid::prepare(self, keys, limits, held, live)
     }
 
     /// Candidate base identities only: these grant no authority or kind proof.

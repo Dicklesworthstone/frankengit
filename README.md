@@ -112,7 +112,11 @@ omit unrelated objects, and convert offset deltas to identity references while
 preserving their compressed data. This supports narrower branches and filtered
 or have-reduced selections when their selected or proven held bases suffice.
 The combined graph and aggregate limits are rechecked, and receipts distinguish
-whole-run, selective, self-contained and thin responses. Reuse begins only after immutable
+whole-run, selective, self-contained and thin responses. If native merges or
+workspace changes add uncached objects, a hybrid pack can retain the reusable
+closed subset and encode only its exact complement. Both parts share the same
+selection and aggregate limits, and the joined pack receives a new checksum and
+separate construction evidence. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
 its own representation receipt. Native idx/pack directory imports can retain
 eligible source packs through the same contract, including several packs per

@@ -7,6 +7,7 @@ use fgit_pack::{
 use fgit_wire::ObjectFilter;
 
 mod composition;
+mod hybrid;
 #[cfg(unix)]
 mod restart;
 mod selective;

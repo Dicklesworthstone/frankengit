@@ -580,7 +580,7 @@ fn client_haves_authorize_an_omitted_internal_ofs_base_for_selective_thin_fetch(
 }
 
 #[test]
-fn omitting_an_internal_base_without_thin_negotiation_keeps_the_native_writer_fallback() {
+fn omitting_an_internal_base_without_thin_negotiation_encodes_only_the_dependent_blob() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = fixture(format, ExtraObject::Unreachable);
         let (head, selection) = prepare(&fixture.node, fixture.tip, true, |request| {
@@ -600,7 +600,13 @@ fn omitting_an_internal_base_without_thin_negotiation_keeps_the_native_writer_fa
         );
         let payload = materialize(&fixture.node, &head, &selection);
         assert!(payload.receipt().received().is_none());
-        assert_eq!(payload.receipt().writer().unwrap().object_count, 3);
+        assert!(payload.receipt().writer().is_none());
+        let receipt = payload.receipt().hybrid().expect("metadata reuse with a native blob");
+        assert_eq!(receipt.reused().object_count(), 2);
+        assert_eq!(receipt.reused().external_base_count(), 0);
+        assert_eq!(receipt.written().object_count, 1);
+        assert!(!receipt.written().profile.thin);
+        assert_eq!(receipt.object_count(), 3);
         let bytes = payload.into_bytes().unwrap();
         assert_eq!(
             decoded_objects(&bytes, format, &BTreeMap::new()),
@@ -613,10 +619,6 @@ fn omitting_an_internal_base_without_thin_negotiation_keeps_the_native_writer_fa
 fn absent_or_wrong_kind_held_base_proofs_cannot_bless_cached_internal_deltas() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = fixture(format, ExtraObject::Unreachable);
-        let held = expected(
-            &fixture,
-            &BTreeSet::from([fixture.old_blob, fixture.old_tree, fixture.ancestor]),
-        );
         for wrong_kind in [false, true] {
             let (head, mut selection) = prepare_thin(&fixture);
             selection.held_bases.clear();
@@ -627,8 +629,19 @@ fn absent_or_wrong_kind_held_base_proofs_cannot_bless_cached_internal_deltas() {
             }
             let payload = materialize(&fixture.node, &head, &selection);
             assert!(payload.receipt().received().is_none());
-            assert_eq!(payload.receipt().writer().unwrap().object_count, 3);
-            assert_exact_selected_bytes(&payload.into_bytes().unwrap(), format, &selection, &held);
+            assert!(payload.receipt().writer().is_none());
+            let receipt = payload.receipt().hybrid().expect("invalid held proof never blesses the delta");
+            assert_eq!(receipt.reused().object_count(), 2);
+            assert_eq!(receipt.reused().external_base_count(), 0);
+            assert_eq!(receipt.written().object_count, 1);
+            assert!(!receipt.written().profile.thin);
+            assert_eq!(receipt.object_count(), 3);
+            assert_exact_selected_bytes(
+                &payload.into_bytes().unwrap(),
+                format,
+                &selection,
+                &BTreeMap::new(),
+            );
         }
     }
 }

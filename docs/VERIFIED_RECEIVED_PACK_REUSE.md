@@ -241,6 +241,51 @@ once per source within each selection pass.
 Incompatible or unavailable entries use the existing native writer. Cancelled
 work remains cancelled.
 
+### Hybrid reuse after native changes
+
+A native merge or TreeFS publication can add objects absent from every retained
+sender representation. After complete reuse misses, the serving path partitions
+the already authorized, identity-sorted selection into a reusable subset and
+its exact complement. It does not change the selected authority head or walk a
+broader object graph.
+
+The reusable subset is closed under its delta dependencies, except for the same
+independently proven client-held bases allowed by the negotiated thin profile.
+An entry whose selected parent cannot be reused goes into the native subset
+with that parent. A redundant held proof for a selected but unavailable parent
+cannot join the two graphs. Selection uses the existing depth/fanout checks,
+deterministic representation preferences and full retained-source integrity
+checks; it does not claim to find an optimal partition.
+
+Only the complement is read from the canonical object fabric and encoded.
+It uses the existing native streaming writer with a self-contained frozen
+profile and no external base offers. The native and retained delta graphs are
+therefore disjoint. Their entries are joined under one new pack header and
+native checksum; the native run remains contiguous, preserving its internal
+OFS distances. A client without OFS capability keeps the native no-delta
+profile, while reused OFS entries are converted to REF entries as before.
+
+Retained entry count, output bytes and both native-body and inflated-entry
+totals are reserved from the original aggregate envelope before encoding the
+complement. The joined result rechecks those totals and the actual native
+compression receipts. A representation-only output or expansion limit during
+native generation may fall back to the ordinary full writer under the same
+request deadline and unchanged original limits. Cancellation, source identity
+failure and I/O failure do not trigger a fresh attempt.
+
+Joining uses bounded reads and private scratch custody. Both source headers,
+counts and native trailers are checked while copying; the retained subset's
+full-byte SHA-256 is checked too. The final pack is promoted only after both
+source runs and the new trailer finish. Failure drops its temporary custody;
+it never publishes a partial response. The final receipt retains separate
+reused and written evidence rather than claiming a single native encoding
+profile.
+
+This avoids recompressing cached history when only a few native objects are
+new. It does not remove cold custody revalidation, make object storage
+authoritative through a cache, or establish a measured whole-clone speedup.
+Zero received-pack cache capacity still selects the ordinary writer.
+
 ## Operator control and custody
 
 `fg serve`, `fg serve-http`, and `fg serve-ssh` accept:
@@ -400,6 +445,15 @@ writer; request cancellation still stops the request.
   `source_pack_count()` counts the distinct retained source allocations used,
   even when only part of each source is emitted.
 
+- `Hybrid(HybridPackReceipt)` records `received-pack-hybrid-v1` or
+  `received-pack-hybrid-thin-v1`, the combined checksum, full-byte SHA-256,
+  object count, expanded native bytes and output bytes. `reused()` and
+  `written()` expose the separate source receipts. The outer
+  `PackMaterializationReceipt::writer()` and `received()` accessors remain
+  exclusive; use `hybrid()` for this representation. The written component
+  is always self-contained. External bases, if any, belong to the retained
+  component and still require the current held proof.
+
 The singleton received profile preserves the sender's bytes and ordering; the
 composed profile preserves the constituent entry runs and replaces their outer
 framing. Selective profiles preserve compressed data while explicitly recording
@@ -409,6 +463,18 @@ authorized native object set. Local exports continue to use their explicit
 deterministic writer profile.
 
 ## Regression coverage and execution status
+
+The hybrid component and native-selection regressions are authored coverage.
+They exercise both hash domains, exact complements, retained dependencies,
+typed held proofs, combined envelopes, checksum failure and cancellation.
+Native cases make retained historical object files unavailable after selection
+and require materialization to read only new objects; they decode the complete
+result and re-admit it into an empty node. These tests have **not been executed
+in this implementation session**: the build environment disconnected during
+the pinned Cargo check and then became unavailable. No compiler, runtime,
+transport or performance pass is claimed for the hybrid changes.
+
+
 
 Parser and wire regressions cover shared ownership without copying, original
 metadata binding, retention limits, SHA-1/SHA-256, corrupted input, cancellation,
