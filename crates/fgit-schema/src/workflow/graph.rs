@@ -45,6 +45,9 @@ pub const PATH_CANONICAL_VERSION: &str = "fgit-workflow/v6";
 pub const TAG_CANONICAL_VERSION: &str = "fgit-workflow/v7";
 /// Explicit closed shell profiles bind interpreter semantics without changing old graphs.
 pub const SHELL_CANONICAL_VERSION: &str = "fgit-workflow/v8";
+/// Default/explicit fail-fast matrix groups bind their execution policy.
+/// Explicit fail-fast:false graphs retain their existing canonical version.
+pub const MATRIX_FAIL_FAST_CANONICAL_VERSION: &str = "fgit-workflow/v9";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -187,7 +190,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_explicit_shells() {
+        let version = if self.has_matrix_fail_fast() {
+            MATRIX_FAIL_FAST_CANONICAL_VERSION
+        } else if self.has_explicit_shells() {
             SHELL_CANONICAL_VERSION
         } else if self.has_tag_filters() {
             TAG_CANONICAL_VERSION
@@ -251,6 +256,9 @@ impl WorkflowGraph {
                     escape(&job.id),
                     escape(binding.source_job())
                 ));
+                if binding.fail_fast() {
+                    lines.push(format!("matrix-fail-fast\t{}\ttrue", escape(&job.id)));
+                }
                 for (key, value) in binding.values() {
                     lines.push(format!(
                         "matrix-value\t{}\t{}\t{}",
@@ -346,6 +354,16 @@ impl WorkflowGraph {
         self.jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| step.context.shell().is_some()))
+    }
+
+    /// Whether an execution adapter must preserve matrix-local fail-fast.
+    #[must_use]
+    pub fn has_matrix_fail_fast(&self) -> bool {
+        self.jobs.iter().any(|job| {
+            job.matrix
+                .as_ref()
+                .is_some_and(matrix::MatrixBinding::fail_fast)
+        })
     }
 }
 

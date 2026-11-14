@@ -84,7 +84,7 @@
       "key": "job.strategy",
       "status": "normalized",
       "refuses": false,
-      "reason": "bounded static matrices require explicit fail-fast: false; literal axes and include/exclude records become native jobs; other strategy forms remain refused"
+      "reason": "bounded static matrices lower literal axes and include/exclude records to native jobs; omitted or true fail-fast skips unstarted siblings after a group failure, false continues them, and other strategy forms refuse"
     },
     {
       "key": "job.timeout-minutes",

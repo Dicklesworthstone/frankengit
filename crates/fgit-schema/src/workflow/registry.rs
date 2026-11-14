@@ -128,7 +128,7 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "job.strategy",
         status: ConstructStatus::Normalized,
-        reason: "bounded static matrices require explicit fail-fast: false; literal axes and include/exclude records become native jobs; other strategy forms remain refused",
+        reason: "bounded static matrices lower literal axes and include/exclude records to native jobs; omitted or true fail-fast skips unstarted siblings after a group failure, false continues them, and other strategy forms refuse",
     },
     Construct {
         key: "job.timeout-minutes",

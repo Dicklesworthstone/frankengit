@@ -41,10 +41,28 @@ jobs:
 
 ## Selected semantics
 
-An explicit `fail-fast: false` is required. The native scheduler runs variants
-serially and continues independent work after ordinary failure; it does not
-pretend to implement implicit fail-fast cancellation or `max-parallel`.
-Unknown strategy fields, dynamic matrices, and general expressions refuse.
+The native scheduler runs variants serially. Omitted `fail-fast` and explicit
+`fail-fast: true` stop the remaining unstarted variants of that source job after
+the first failed, timed-out, output-limited or refused variant. The failed job
+finishes its eligible diagnostic/cleanup steps, artifact/log custody and workspace
+closure first, and keeps its exact failure outcome. Later variants receive native
+`skipped` observations with zero attempts, no workspace and no execution receipt;
+they never become successful checks. This is the serial native normalization of
+fail-fast, not a claim about cancelling concurrent matrix processes.
+
+Explicit `fail-fast: false` continues the remaining variants. Independent jobs
+and other matrices continue in either mode. Ordinary `needs` dependents remain
+blocked by the real failed variant; `failure()` and `always()` diagnostics can
+inspect a clean failure and the skipped siblings. Caller cancellation and lost
+containment retain their global stop behavior and cannot be downgraded to a
+matrix-local skip. A source-job `if: always()` does not override its fail-fast
+policy. The legacy command-only coordinator refuses fail-fast matrices before
+admission; the job-scoped trusted workflow path owns this behavior.
+
+Only literal `true` and `false` policies are accepted. `max-parallel`, unknown
+strategy fields, dynamic matrices and general expressions still refuse. All
+variants are validated and charged against expansion bounds before execution;
+fail-fast never licenses a partial preflight or a fresh run/output budget.
 
 Axis names are sorted lexicographically. Values within each axis preserve their
 source sequence order. The Cartesian product is formed in that deterministic
@@ -85,8 +103,12 @@ this is not a hostile-code isolation claim.
 Each job retains its exact source-job name and all selected variable values,
 including unused variables. These produce `matrix-origin` and `matrix-value`
 records in the `fgit-workflow/v3` canonical graph. The graph commitment therefore
-changes when a matrix input changes. Context-free v1 graph bytes and pre-existing
-step-context v2 graph bytes are unchanged.
+changes when a matrix input changes. A graph using fail-fast selects
+`fgit-workflow/v9` and adds one `matrix-fail-fast` record per selected variant;
+omitted and explicit `true` have identical graph bytes. Explicit `false` preserves
+the previous canonical bytes and selected version, including later context,
+deadline, trigger and shell extensions. Context-free v1 graph bytes and
+pre-existing step-context v2 graph bytes are unchanged.
 
 ## Bounded expansion
 
@@ -108,7 +130,7 @@ claims. Existing YAML byte/node/depth limits remain independent safeguards.
 ## Validation entry points
 
 ```sh
-cargo test -p fgit-schema --test workflow_matrix --test workflow --test workflow_context --test workflow_environment --test workflow_spans --locked
+cargo test -p fgit-schema --test workflow_matrix --test workflow_matrix_fail_fast --test workflow --test workflow_context --test workflow_environment --test workflow_spans --locked
 cargo test -p fgit-runner --test workflow_matrix --lib --locked
 cargo check -p fgit-cli --all-targets --locked
 ```
@@ -123,6 +145,16 @@ cancellation, and shared output limits. The actual-binary suite lives at
 matrix workflows, inspects durable results, publishes distinct per-variant
 observations, retries exact publication identities, and recovers without the
 original source directory. No external Git engine is used by these fixtures.
+
+Fail-fast regressions cover live foreground shell execution, failure/always
+diagnostics, independent matrix continuation, clean timeout/output/refusal twins,
+caller cancellation and unresolved containment. Journal tests reopen the exact
+failed and skipped observations, preserve zero attempts for unstarted variants,
+and verify that receipt lookup does not execute them. The binary matrix campaign
+also selects default and explicit fail-fast in both hash formats, publishes the
+original failed and skipped results, retries the same publication, and recovers
+after removing the source repository. These entry points establish no pass until
+executed at the selected revision.
 
 ## Conditional completion and saved observations
 

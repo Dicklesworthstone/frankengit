@@ -181,6 +181,88 @@ fn real_matrix_processes_isolate_workspaces_and_join_before_failure_conditions()
 }
 
 #[test]
+fn native_fail_fast_skips_only_unstarted_siblings_and_preserves_failure_diagnostics() {
+    for policy in ["", "      fail-fast: true\n"] {
+        let source = format!(
+            "{}{}",
+            SOURCE.replace("      fail-fast: false\n", policy),
+            "  zother:\n    runs-on: fgit-trusted-local\n    strategy:\n      matrix:\n        value: [one, two]\n    steps:\n      - run: echo independent\n"
+        );
+        let plan = WorkflowPlan::compile(&source).unwrap();
+        let mut worker = Worker::new();
+        let report = plan
+            .execute(WorkflowLimits::default(), &mut worker, &|| true)
+            .unwrap();
+        assert_eq!(
+            report
+                .jobs
+                .iter()
+                .map(|j| (j.id.as_str(), j.outcome))
+                .collect::<Vec<_>>(),
+            [
+                ("build__matrix_000", JobOutcome::Succeeded),
+                ("build__matrix_001", JobOutcome::Failed),
+                ("build__matrix_002", JobOutcome::Skipped),
+                ("diagnose", JobOutcome::Succeeded),
+                ("package", JobOutcome::Skipped),
+                ("zother__matrix_000", JobOutcome::Succeeded),
+                ("zother__matrix_001", JobOutcome::Succeeded),
+            ]
+        );
+        assert_eq!(worker.finished, 5);
+        assert!(!worker.started.iter().any(|id| id == "build__matrix_002"));
+        let skipped = &report.jobs[2];
+        assert!(skipped.steps.is_empty() && skipped.failure.is_none());
+        assert!(!skipped.requires_containment());
+        assert_eq!(report.jobs[1].steps[0].observation.exit_code, Some(1));
+        assert!(!report.succeeded());
+    }
+}
+
+#[test]
+fn fail_fast_waits_for_same_job_failure_and_always_steps_before_suppressing_variants() {
+    let source = SOURCE
+        .replace("      fail-fast: false\n", "")
+        .replace("  build:\n", "  build:\n    if: always()\n")
+        .replace(
+            "      - run: test -f state; test -z \"${MODE+x}\"",
+            "      - if: failure()\n        run: printf 'diagnostic'\n      - if: always()\n        run: test -f state; printf 'closed-step'",
+        );
+    let mut worker = Worker::new();
+    let report = WorkflowPlan::compile(&source)
+        .unwrap()
+        .execute(WorkflowLimits::default(), &mut worker, &|| true)
+        .unwrap();
+    assert_eq!(report.jobs[1].outcome, JobOutcome::Failed);
+    assert_eq!(report.jobs[1].steps.len(), 3);
+    assert_eq!(report.jobs[1].steps[1].observation.stdout, b"diagnostic");
+    assert_eq!(report.jobs[1].steps[2].observation.stdout, b"closed-step");
+    assert_eq!(report.jobs[2].outcome, JobOutcome::Skipped);
+    assert_eq!(worker.finished, 3); // first, failing variant, dependent diagnostic
+    assert!(!report.succeeded());
+}
+
+#[test]
+fn fail_fast_all_success_runs_every_variant_and_releases_the_complete_group() {
+    let source = SOURCE
+        .replace("      fail-fast: false\n", "")
+        .replace("- bad", "- good");
+    let mut worker = Worker::new();
+    let report = WorkflowPlan::compile(&source)
+        .unwrap()
+        .execute(WorkflowLimits::default(), &mut worker, &|| true)
+        .unwrap();
+    assert!(
+        report.jobs[..3]
+            .iter()
+            .all(|job| job.outcome == JobOutcome::Succeeded)
+    );
+    assert_eq!(report.jobs[3].outcome, JobOutcome::Skipped);
+    assert_eq!(report.jobs[4].outcome, JobOutcome::Succeeded);
+    assert_eq!(worker.finished, 4);
+}
+
+#[test]
 fn successful_variants_release_one_dependent_and_literals_are_not_shell_programs() {
     let source = SOURCE
         .replace("- bad", "- literal")
@@ -217,22 +299,25 @@ fn successful_variants_release_one_dependent_and_literals_are_not_shell_programs
 
 #[test]
 fn cancellation_between_variants_starts_no_later_process() {
-    let plan = WorkflowPlan::compile(SOURCE).unwrap();
-    let live = Arc::new(AtomicBool::new(true));
-    let mut worker = Worker::new();
-    worker.stop_after_first = Some(Arc::clone(&live));
-    let report = plan
-        .execute(WorkflowLimits::default(), &mut worker, &|| {
-            live.load(Ordering::SeqCst)
-        })
-        .unwrap();
-    assert_eq!(worker.started, ["build__matrix_000"]);
-    assert_eq!(worker.finished, 1);
-    assert!(
-        report.jobs[1..]
-            .iter()
-            .all(|j| j.outcome == JobOutcome::Cancelled)
-    );
+    for policy in ["false", "true"] {
+        let source = SOURCE.replace("fail-fast: false", &format!("fail-fast: {policy}"));
+        let plan = WorkflowPlan::compile(&source).unwrap();
+        let live = Arc::new(AtomicBool::new(true));
+        let mut worker = Worker::new();
+        worker.stop_after_first = Some(Arc::clone(&live));
+        let report = plan
+            .execute(WorkflowLimits::default(), &mut worker, &|| {
+                live.load(Ordering::SeqCst)
+            })
+            .unwrap();
+        assert_eq!(worker.started, ["build__matrix_000"]);
+        assert_eq!(worker.finished, 1);
+        assert!(
+            report.jobs[1..]
+                .iter()
+                .all(|j| j.outcome == JobOutcome::Cancelled)
+        );
+    }
 }
 
 #[test]

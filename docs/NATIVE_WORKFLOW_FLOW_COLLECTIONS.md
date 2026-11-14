@@ -26,7 +26,7 @@ jobs:
 
 This example produces three build variants and a package job that depends on
 all three. The existing [matrix profile](NATIVE_WORKFLOW_MATRICES.md) still
-requires `fail-fast: false`, bounds expansion and restricts expressions to its
+supports explicit or default fail-fast, bounds expansion and restricts expressions to its
 whole-value input forms. The [environment profile](NATIVE_WORKFLOW_STEP_CONTEXT.md)
 still validates every layer before applying workflow, job and step precedence.
 

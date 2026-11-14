@@ -10,7 +10,7 @@ pub use fgit_schema::workflow::triggers::TriggerSelectionError;
 use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
 pub use fgit_schema::workflow::{Job as WorkflowJob, StepContext, StepShell};
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
@@ -217,6 +217,10 @@ impl WorkflowPlan {
         let mut log_finalization_left = LOG_FINALIZATION_TIMEOUT;
         let mut containment_lost = false;
         let mut cancelled = false;
+        // Native execution is serial, so no sibling is live when a group
+        // fails. Suppressed variants are skipped without starting a workspace
+        // or borrowing global cancellation authority from the workflow text.
+        let mut stopped_matrices = BTreeSet::new();
         for (index, job) in self.graph.jobs.iter().enumerate() {
             let mut result = JobReport {
                 id: job.id.clone(),
@@ -230,7 +234,12 @@ impl WorkflowPlan {
                 } else {
                     stopped()
                 };
-            } else if !job_condition(job.condition, &job.needs, &completed) {
+            } else if job
+                .matrix
+                .as_ref()
+                .is_some_and(|binding| stopped_matrices.contains(binding.source_job()))
+                || !job_condition(job.condition, &job.needs, &completed)
+            {
                 result.outcome = JobOutcome::Skipped;
             } else {
                 // Workspace/custody startup consumes the same absolute job
@@ -520,6 +529,19 @@ impl WorkflowPlan {
                         }
                     }
                 }
+            }
+            if matches!(
+                result.outcome,
+                JobOutcome::Failed
+                    | JobOutcome::TimedOut
+                    | JobOutcome::OutputLimit
+                    | JobOutcome::Refused
+            ) && let Some(binding) = job.matrix.as_ref().filter(|binding| binding.fail_fast())
+            {
+                // Record only the final result, after diagnostics, artifact/log
+                // custody and workspace close. Nothing erases the failed job;
+                // ordinary needs joins still see it beside the skipped siblings.
+                stopped_matrices.insert(binding.source_job());
             }
             cancelled |= result.outcome == JobOutcome::Cancelled;
             completed.insert(job.id.as_str(), result.outcome);
@@ -888,3 +910,6 @@ mod log_settlement_tests;
 
 #[cfg(test)]
 mod deadline_tests;
+
+#[cfg(test)]
+mod matrix_fail_fast_tests;

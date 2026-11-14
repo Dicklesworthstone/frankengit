@@ -35,6 +35,16 @@ pub(super) fn lower_command(
             WorkflowError::UnsupportedRunner(job.runs_on.clone()),
         ));
     }
+    if job
+        .matrix
+        .as_ref()
+        .is_some_and(|binding| binding.fail_fast())
+    {
+        return Err(unsupported(
+            job,
+            "matrix fail-fast requires the job-scoped workflow executor",
+        ));
+    }
     if job.timeout_minutes.is_some() || job.steps.iter().any(|step| step.timeout_minutes.is_some())
     {
         return Err(unsupported(
