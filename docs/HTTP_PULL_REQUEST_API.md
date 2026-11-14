@@ -7,6 +7,10 @@ publication point, or another runtime. PR events and their outbox obligations
 are admitted together by the existing sealed transaction and authority-head CAS.
 These metadata commands do not move Git refs or import candidate objects.
 
+PR label reads, full replacement and list filtering are specified in
+[Native pull-request labels](NATIVE_PULL_REQUEST_LABELS.md). Labels have their
+own exact version and do not advance the PR content version or review subject.
+
 This describes implementation interfaces, not a passing build, live-client
 acceptance result, completed FG-048 REST/OpenAPI surface, or production security
 certification. The settled fastapi_rust/schema/projection integration remains a

@@ -29,6 +29,11 @@
   <div class="columns">
     <section aria-labelledby="list-heading">
       <h2 id="list-heading">Find a pull request</h2>
+      <form id="label-filter">
+        <label>Required labels, one per line <textarea id="label-filter-values" rows="3" maxlength="2079" spellcheck="false"></textarea></label>
+        <p>Match every label exactly, including case and spaces. Leave empty to show all visible PRs.</p>
+        <button id="label-filter-apply" type="submit">Apply label filter</button>
+      </form>
       <button id="refresh" type="button">Refresh PR list</button>
       <div id="pr-list"></div><div id="list-paging"></div>
       <form id="select-pr">

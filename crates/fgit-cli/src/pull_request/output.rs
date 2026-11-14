@@ -3,7 +3,8 @@
 use super::options::{Mutation, Options, ReadOptions, Selection, head_token, hex};
 use crate::publication_support::quote;
 use fgit_authority::TerminalOutcome;
-use fgit_forge::aggregate::{AggregateId, ExpectedVersion, PullRequestNumber};
+use fgit_forge::aggregate::{AggregateId, AggregateVersion, ExpectedVersion, PullRequestNumber};
+use fgit_forge::event::pull_request_labels::validate_labels;
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestData};
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload, NativeMerge};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
@@ -19,6 +20,9 @@ pub(super) struct Row<'a> {
     pub data: Option<&'a PullRequestData>,
     pub opened_by: Option<PrincipalId>,
     pub last_metadata_actor: Option<PrincipalId>,
+    pub labels: &'a [String],
+    pub labels_version: Option<AggregateVersion>,
+    pub labels_actor: Option<PrincipalId>,
 }
 
 pub(super) const fn action_name(action: PullRequestAction) -> &'static str {
@@ -126,6 +130,7 @@ pub(super) fn read_receipt(
         .is_some_and(|expected| expected != source_head)
         || rows.len() > usize::from(read.limit())
         || rows.iter().any(|view| view.number.get() <= read.after())
+        || rows.iter().any(|view| read.labels.iter().any(|label| view.labels.binary_search(label).is_err()))
         || !rows.windows(2).all(|pair| pair[0].number < pair[1].number)
         || next_after.is_some_and(|next| rows.last().map(|view| view.number.get()) != Some(next))
     {
@@ -163,10 +168,11 @@ pub(super) fn read_receipt(
         }
         Selection::List { after, limit } => {
             let mut out = format!(
-                "{{\"type\":\"pull_request_page\",{header},\"after\":{after},\"limit\":{limit},\"count\":{},\"has_more\":{},\"next_after\":{},\"pull_requests\":[",
+                "{{\"type\":\"pull_request_page\",{header},\"after\":{after},\"limit\":{limit},\"count\":{},\"has_more\":{},\"next_after\":{},\"label_filter\":{},\"pull_requests\":[",
                 rows.len(),
                 next_after.is_some(),
-                next_after.map_or_else(|| "null".to_owned(), |value| value.to_string())
+                next_after.map_or_else(|| "null".to_owned(), |value| value.to_string()),
+                super::labels::labels_json(&read.labels)
             );
             for (index, view) in rows.iter().enumerate() {
                 let row = render_view(view)?;
@@ -187,6 +193,12 @@ pub(super) fn read_receipt(
 }
 
 fn render_view(view: &Row<'_>) -> Result<String, String> {
+    validate_labels(view.labels).map_err(|_| "PR row labels are invalid")?;
+    if view.labels_version.is_some() != view.labels_actor.is_some()
+        || (view.labels_version.is_none() && !view.labels.is_empty())
+        || (view.data.is_none() && view.labels_version.is_some()) {
+        return Err("PR row label stream is invalid".into());
+    }
     if view.event.aggregate != AggregateId::PullRequest(view.number) {
         return Err("PR row aggregate binding is invalid".to_owned());
     }
@@ -227,7 +239,7 @@ fn render_view(view: &Row<'_>) -> Result<String, String> {
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"kind\":{},\"state\":{},\"last_action\":{},",
-            "\"data\":{},\"opened_by\":{},\"last_metadata_actor\":{},\"merge\":{}}}"
+            "\"data\":{},\"opened_by\":{},\"last_metadata_actor\":{},\"merge\":{},\"labels\":{},\"labels_version\":{},\"labels_actor\":{}}}"
         ),
         view.number.get(),
         view.event.version.get(),
@@ -243,6 +255,9 @@ fn render_view(view: &Row<'_>) -> Result<String, String> {
             .map_or_else(|| "null".to_owned(), |actor| quote(&actor.to_string())),
         view.last_metadata_actor
             .map_or_else(|| "null".to_owned(), |actor| quote(&actor.to_string())),
-        merge
+        merge,
+        super::labels::labels_json(view.labels),
+        quote(&view.labels_version.map_or(0, |version| version.get()).to_string()),
+        view.labels_actor.map_or_else(|| "null".into(), |actor| quote(&actor.to_string()))
     ))
 }

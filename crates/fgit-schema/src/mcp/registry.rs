@@ -15,6 +15,7 @@ mod locking;
 mod milestones;
 mod notifications;
 mod pull_append;
+mod pull_labels;
 mod pull_reopen;
 mod queues;
 mod rebase;
@@ -119,7 +120,9 @@ const ADDITIONS: &[McpToolEntry] = &[
     milestones::SHOW,
     pull_append::ENTRY,
     check_evidence::READ,
+    pull_labels::READ,
     pull_reopen::ENTRY,
+    pull_labels::WRITE,
     queues::DEQUEUE,
     queues::ENQUEUE,
     queues::LAND,

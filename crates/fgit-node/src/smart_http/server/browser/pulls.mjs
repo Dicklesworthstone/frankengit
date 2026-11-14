@@ -1,6 +1,6 @@
 // Native PR client. Views are immutable observations, never merge permission.
 import { Transport, integer, principal, snapshot, listReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
-  hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record } from './pulls-core.mjs';
+  hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record, pullLabels, pullLabelState, pullLabelsReply } from './pulls-core.mjs';
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, candidateMethod, mergeMethod, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
@@ -130,14 +130,16 @@ export class PullClient {
   }
   invalidateCandidate() { this.#candidateSerial += 1; this.#artifact = null; this.#conflict = null; }
   cancelReads() { this.#transport.cancelReads(); }
-  async list({ after = 0, limit = 20, head = null } = {}) {
+  async list({ after = 0, limit = 20, head = null, labels = [] } = {}) {
     this.#ordinary();
     integer(after, 'PR cursor'); integer(limit, 'page size', 1, 100);
     if (head !== null) snapshot(head); if (after && !head) fail('Continuation requires its original snapshot.');
     const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+    const wanted = pullLabels(labels);
+    for (const label of wanted) query.append('label', label);
     if (head) query.set('expected_head', head);
     const raw = await this.#transport.request(`pulls?${query}`);
-    const checked = listReply(raw.value, { after, limit, head, scope: this.#scope });
+    const checked = listReply(raw.value, { after, limit, head, scope: this.#scope, labels: wanted });
     this.#scope = checked.binding; return checked;
   }
   async show(number, head = null, { render = false } = {}) {
@@ -150,6 +152,22 @@ export class PullClient {
     const checked = showReply(raw.value, number, { head, scope: this.#scope });
     if (checked.reply.found !== (raw.status === 200)) fail('PR presence and HTTP status disagree.');
     this.#scope = checked.binding; return checked;
+  }
+  // The labels stream has its own version. Its read must still describe the
+  // exact selected PR and authority snapshot, never an implicit refreshed tip.
+  async labels(number, observed) {
+    const scope = this.#selected(), epoch = this.#transport.epoch;
+    integer(number, 'PR number', 1);
+    const saved = copy(observed);
+    snapshot(saved.head);
+    const selected = showReply(saved.reply, number, { head: saved.head, scope });
+    if (!selected.reply.pull_request?.data) fail('Select a native PR with recorded metadata before loading its labels.');
+    const query = new URLSearchParams({ expected_head: selected.head });
+    const raw = await this.#transport.request(`pulls/${number}/labels?${query}`, { statuses: [200, 404], maximum: 32 * 1024 });
+    this.#check(epoch);
+    const checked = pullLabelsReply(raw.value, number, selected, scope);
+    if (checked.reply.found !== (raw.status === 200)) fail('PR labels presence and HTTP status disagree.');
+    return checked;
   }
   async reviews(number, { after = null, limit = 20, head = null } = {}) {
     this.#ordinary();
@@ -303,6 +321,19 @@ export class PullClient {
     return this.inspect(number, fields, bytes, Object.hasOwn(receipt, 'method') ? mergeMethod(receipt.method) : undefined);
   }
   async stageMetadata(number, action, fields) { return this.#stage(number, action, fields, null); }
+  async stageLabels(number, observed, labels) {
+    const scope = this.#selected(), saved = copy(observed);
+    const selected = pinned(saved.reply, scope, saved.head);
+    const reply = saved.reply;
+    if (reply.type !== 'pull_request_labels' || reply.number !== number || reply.found !== true ||
+        reply.read_only !== true || reply.transaction_created !== false) fail('Load the selected PR labels before preparing a replacement.');
+    integer(reply.pull_request_version, 'PR version', 1);
+    // Reuse the canonical row validator without inventing a metadata version.
+    pullLabelState(reply);
+    integer(reply.labels_version, 'PR labels version', 0, Number.MAX_SAFE_INTEGER - 1);
+    return this.#stage(number, 'set-labels', { object_format: selected.binding.format,
+      expected_version: reply.labels_version, labels }, null);
+  }
   async stageComment(number, version, body, anchor = undefined) {
     return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body,
       ...(anchor === undefined ? {} : { anchor }) }, null);
@@ -414,8 +445,9 @@ export class PullClient {
       });
       const result = publication(response.value, p, response.status);
       this.#pending = null;
-      if (!['comment', 'append-comment'].includes(p.action)) this.invalidateCandidate();
-      return ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
+      if (!['comment', 'append-comment', 'set-labels'].includes(p.action)) this.invalidateCandidate();
+      return p.action === 'set-labels' ? { ...result, action: p.action, number: p.number }
+        : ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } catch (error) { error.outcomeUnknown = true; throw error; }
     finally { this.#busy = false; }
   }
@@ -425,9 +457,10 @@ export class PullClient {
     try {
       const response = await this.#transport.request('outcomes', { method: 'POST', key: p.key, read: false, maximum: 32 * 1024 });
       const result = recovery(response.value, p);
-      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment'].includes(p.action)) this.invalidateCandidate(); }
+      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment', 'set-labels'].includes(p.action)) this.invalidateCandidate(); }
       else { p.observedTx = result.tx; p.observedPrincipal = result.principal; if (result.tx) p.sent = true; }
-      return ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
+      return p.action === 'set-labels' ? { ...result, action: p.action, number: p.number }
+        : ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } finally { this.#busy = false; }
   }
 }

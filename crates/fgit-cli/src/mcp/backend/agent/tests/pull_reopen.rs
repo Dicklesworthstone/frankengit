@@ -71,7 +71,7 @@ fn sponsored_reopen_needs_both_the_pull_write_scope_and_launch_ceiling_and_recov
         writer_options.writes.issues = false;
         writer_options.writes.discussions = false;
         let mut writer = NodeTools::open(writer_options).unwrap();
-        assert_eq!(writer.tools().len(), 6);
+        assert_eq!(writer.tools().len(), 7);
         assert!(
             writer
                 .tools()

@@ -2,7 +2,7 @@
 // preparing, inspecting and displaying approvals never submits a mutation.
 import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
-import { decimal, oid, unhex, fail, showReply, subjectReferences } from './pulls-core.mjs';
+import { decimal, oid, unhex, fail, showReply, subjectReferences, pullLabels, pullLabelState } from './pulls-core.mjs';
 import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, protectionChanges } from './pulls-actions.mjs';
 import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
@@ -28,6 +28,10 @@ function element(doc, tag, value = '') {
 function item(doc, parent, tag, value) { const el = element(doc, tag, value); parent.append(el); return el; }
 function nativeRef(data, name) { return data[name] === null ? `byte ref: ${data[`${name}_hex`]}` : data[name]; }
 function identity(entry) { return entry === null ? '(absent)' : `${entry.mode.toString(8)} ${entry.oid}`; }
+function labelsFromLines(value) {
+  return pullLabels(value === '' ? [] : value.split(/\r?\n/u).filter(line => line.length));
+}
+function labelNames(labels) { return labels.length ? labels.map(label => JSON.stringify(label)).join(', ') : '(none)'; }
 
 export function renderCommentAnchor(doc, parent, anchor, status = null) {
   item(doc, parent, 'p', `Source comment · ${anchor.side === 'before' ? 'Before' : 'After'} · ${displayBytes(anchor.path_hex)} · ` +
@@ -142,6 +146,7 @@ async function fileText(input) {
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load',
+  'label-filter', 'label-filter-values', 'label-filter-apply',
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
@@ -158,6 +163,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   let inlineSelection = null, inlineButtons = [];
+  let labelsPanel = null;
   let closeChecks = null;
   function clearChecks() { closeChecks?.(); closeChecks = null; }
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
@@ -174,7 +180,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
       ? 'RECOVERY ONLY: the selected original principal must match the authenticated outcome response. No PR reads or mutation sends are permitted. Reconnect explicitly for ordinary work.'
       : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is submitted.';
-    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit']) nodes[id].disabled = !connected || busy;
+    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit', 'label-filter-values', 'label-filter-apply']) nodes[id].disabled = !connected || busy;
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open';
     nodes['reviews-load'].disabled = !connected || busy || !selected;
@@ -185,6 +191,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['comment-stage'].disabled = !canComment || !sourceCurrent || busy || Boolean(pending);
     nodes['comment-body'].disabled = !canComment || busy;
     nodes['comment-general'].disabled = !connected || busy || Boolean(pending) || !inlineSelection;
+    if (labelsPanel) {
+      const current = connected && selected?.row === labelsPanel.row && !selected.stale && !labelsPanel.stale;
+      labelsPanel.load.disabled = !current || busy || !labelsPanel.row.data;
+      const editable = current && labelsPanel.observed?.reply.found;
+      labelsPanel.input.disabled = labelsPanel.clear.disabled = !editable || busy || Boolean(pending);
+      labelsPanel.stage.disabled = !editable || busy || Boolean(pending);
+    }
     for (const control of inlineButtons) control.disabled = !connected || busy || Boolean(pending) || !selected || Boolean(selected.stale);
     nodes['comment-location'].replaceChildren();
     if (inlineSelection) {
@@ -235,10 +248,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     clearChecks();
     clearComments();
     inlineButtons = [];
-    selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
+    selected = null; listPage = null; reviewPage = null; fastForward = null; labelsPanel = null; resolution.clear();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
-      'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers']) nodes[id].value = '';
+      'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers', 'label-filter-values']) nodes[id].value = '';
     nodes['candidate-method'].value = 'merge-commit';
     nodes['candidate-profile'].value = 'path-merge-v1';
     nodes.confirm.checked = false;
@@ -273,15 +286,18 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   function renderList(result) {
     listPage = result; nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
     item(doc, nodes['pr-list'], 'p', `Snapshot: ${result.head}`);
+    const labels = result.reply.labels ?? [];
+    if (labels.length) item(doc, nodes['pr-list'], 'p', `Required labels: ${labelNames(labels)}`);
     if (!result.reply.pull_requests.length) item(doc, nodes['pr-list'], 'p', 'No PRs on this visible page.');
-    for (const row of result.reply.pull_requests) button(nodes['pr-list'], `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}`,
-      () => loadPr(row.number, result.head));
-    if (result.reply.next_after !== null) button(nodes['list-paging'], 'Next PR page', () => loadList(result.reply.next_after, result.head));
+    for (const row of result.reply.pull_requests) button(nodes['pr-list'], `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}` +
+      (Array.isArray(row.labels) ? ` · labels: ${labelNames(row.labels)}` : ''), () => loadPr(row.number, result.head));
+    if (result.reply.next_after !== null) button(nodes['list-paging'], 'Next PR page', () => loadList(result.reply.next_after, result.head, labels));
   }
-  function loadList(after = 0, head = null) {
+  function loadList(after = 0, head = null, labels = null) {
     return run('read', async guard => {
+      const wanted = labels === null ? labelsFromLines(nodes['label-filter-values'].value) : pullLabels(labels);
       client.cancelReads(); nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
-      const result = await client.list({ after, head }); guard(); renderList(result);
+      const result = await client.list({ after, head, labels: wanted }); guard(); renderList(result);
       status('PR page loaded at one snapshot. Opening a row retains that snapshot.');
     });
   }
@@ -303,13 +319,64 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     if (!keepDraft) { nodes['comment-body'].value = ''; inlineSelection = null; }
   }
   function renderSelected(result) {
-    clearChecks(); clearProposal(); fastForward = null; inlineButtons = [];
+    clearChecks(); clearProposal(); fastForward = null; labelsPanel = null; inlineButtons = [];
     const row = result.reply.pull_request; nodes.selected.replaceChildren(); nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren(); reviewPage = null;
     nodes.snapshot.textContent = `Selected snapshot: ${result.head}`;
     if (!row) { selected = null; item(doc, nodes.selected, 'p', 'This PR was not found or is not disclosed.'); return; }
     selected = { row, head: result.head, format: result.binding.format };
     item(doc, nodes.selected, 'h2', `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}`);
     item(doc, nodes.selected, 'p', `PR version ${row.version}. Opener: ${row.opened_by ?? '(not recorded)'}`);
+    const labelSection = element(doc, 'section'); labelSection.id = 'pr-labels';
+    item(doc, labelSection, 'h3', 'Labels');
+    const initialLabels = pullLabelState(row, { optional: true });
+    const labelStatus = item(doc, labelSection, 'p', initialLabels
+      ? `Labels at this snapshot: ${labelNames(initialLabels.labels)} · labels version ${initialLabels.version}`
+      : 'This PR response does not include labels. Load labels to check whether this server supports them.');
+    labelStatus.id = 'pr-labels-status';
+    item(doc, labelSection, 'p', 'Labels organize open, closed, and merged PRs. Replacing them preserves PR metadata, branch tips, and existing approvals. Load this selected snapshot before editing; a concurrent label replacement refuses the saved version.');
+    const panel = { row, observed: null, stale: false };
+    panel.load = button(labelSection, 'Load labels at this snapshot', () => run('read', async guard => {
+      if (labelsPanel !== panel || selected?.row !== row || selected.stale || panel.stale) fail('Reload and select the intended PR before loading labels.');
+      panel.observed = null; panel.input.value = ''; panel.clear.checked = false;
+      labelStatus.textContent = 'Loading selected PR labels…';
+      try {
+        const loaded = await client.labels(row.number, result); guard();
+        if (labelsPanel !== panel || selected?.row !== row) fail('The selected PR changed.');
+        panel.observed = loaded;
+        if (!loaded.reply.found) {
+          labelStatus.textContent = 'PR labels are unavailable or not disclosed.';
+          status('No editable labels were inferred.'); return;
+        }
+        panel.input.value = loaded.reply.labels.join('\n');
+        labelStatus.textContent = displayText(`PR #${row.number} · labels version ${loaded.reply.labels_version} · metadata version ${loaded.reply.pull_request_version}\n` +
+          `Labels: ${labelNames(loaded.reply.labels)}\nLast label editor: ${loaded.reply.labels_actor ?? '(no published labels)'}`);
+        status('Labels loaded at the selected PR snapshot. Edit the full set, then prepare it for explicit confirmation.');
+      } catch (error) {
+        guard();
+        if (error.status === 409) panel.stale = true;
+        labelStatus.textContent = displayText(`Labels unavailable: ${error.message || 'read failed'}. Reload the PR explicitly before trying a fresh observation.`);
+        throw error;
+      }
+    }));
+    panel.load.id = 'pr-labels-load';
+    const labelsForm = element(doc, 'form'); labelsForm.id = 'pr-labels-form';
+    const inputLabel = item(doc, labelsForm, 'label', 'Replacement labels, one per line');
+    panel.input = element(doc, 'textarea'); panel.input.id = 'pr-labels-values'; panel.input.rows = 4; panel.input.maxLength = 2079; panel.input.spellcheck = false;
+    inputLabel.append(panel.input);
+    const clearLabel = item(doc, labelsForm, 'label', 'Clear all labels (requires an empty replacement)');
+    panel.clear = element(doc, 'input'); panel.clear.id = 'pr-labels-clear'; panel.clear.type = 'checkbox'; clearLabel.append(panel.clear);
+    panel.stage = item(doc, labelsForm, 'button', 'Prepare labels — do not send'); panel.stage.id = 'pr-labels-stage'; panel.stage.type = 'submit';
+    labelsForm.addEventListener('submit', event => {
+      event.preventDefault();
+      void run('stage', async guard => {
+        if (labelsPanel !== panel || selected?.row !== row || selected.stale || panel.stale || !panel.observed?.reply.found) fail('Load the selected PR labels before preparing a replacement.');
+        const wanted = labelsFromLines(panel.input.value);
+        if (wanted.length ? panel.clear.checked : !panel.clear.checked) fail('To clear all labels, leave the replacement empty and explicitly select Clear all labels.');
+        await client.stageLabels(row.number, panel.observed, wanted); guard(); nodes.confirm.checked = false;
+        status(`Labels replacement prepared for PR #${row.number} at labels version ${panel.observed.reply.labels_version}. Nothing sent. Review the exact set below, then explicitly confirm Send/Retry.`);
+      });
+    });
+    labelSection.append(labelsForm); nodes.selected.append(labelSection); labelsPanel = panel;
     const mergePanel = element(doc, 'section'); mergePanel.id = 'fast-forward-panel';
     item(doc, mergePanel, 'h3', 'Fast-forward merge');
     item(doc, mergePanel, 'p', 'Publish the recorded source tip and mark this PR merged together, without creating a new commit. The node must verify ancestry, the exact PR version and both live branch tips, and current branch protection. No force or alternative merge method is attempted.');
@@ -468,6 +535,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       } else status(`Comment outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
       return;
     }
+    if (result.action === 'set-labels') {
+      nodes.confirm.checked = false;
+      if (result.terminal) {
+        if (labelsPanel?.row.number === result.number) { labelsPanel.observed = null; labelsPanel.stale = true; }
+        status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. ` +
+          'Reload the PR to observe its current labels before editing again. PR metadata, branch tips and existing approvals are unchanged; external delivery is not established.');
+      } else status(`Labels outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
+      return;
+    }
     nodes.confirm.checked = false; nodes.candidate.replaceChildren();
     if (result.terminal) {
       resolution.clear();
@@ -499,6 +575,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   nodes['recovery-only'].addEventListener('change', controls);
   on('disconnect', 'click', disconnect);
   on('refresh', 'click', () => loadList());
+  on('label-filter', 'submit', () => loadList());
   on('select-pr', 'submit', () => run('read', async guard => {
     const requested = number('select-number', 1); clearChecks(); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null;
     nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
@@ -523,7 +600,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     if (operation || !client.connected || client.recoveryOnly) return;
     clearChecks();
     clearComments();
-    invalidateCandidate(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
+    invalidateCandidate(); selected = null; labelsPanel = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
     nodes['expected-version'].value = '0'; nodes['object-format'].value = client.binding?.format ?? 'sha1'; nodes['metadata-action'].value = 'open';
     status('New PR proposal. Choose an explicit unused number and both exact tips; nothing has been submitted.'); controls();

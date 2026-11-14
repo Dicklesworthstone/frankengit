@@ -84,7 +84,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         {
             Some(ISSUES_WRITE)
         }
-        "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_comments"
+        "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_comments" | "frankengit_pull_labels"
             if options.pulls =>
         {
             Some(PULLS_READ)
@@ -95,6 +95,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         | "frankengit_pull_reopen"
         | "frankengit_pull_comment"
         | "frankengit_pull_append_comment"
+        | "frankengit_pull_set_labels"
             if options.writes.pulls =>
         {
             Some(PULLS_WRITE)

@@ -103,6 +103,51 @@ export function pinned(reply, previous = null, expected = null) {
   if (expected !== null && expected !== head) fail('Snapshot moved. Reload explicitly rather than combining views.');
   return { binding: scope, head };
 }
+// Label identity is the exact UTF-8 string. Native ordering compares encoded
+// bytes, which differs from JavaScript's default UTF-16 order for some names.
+export function pullLabels(values, canonical = false) {
+  if (!Array.isArray(values) || values.length > 32) fail('Choose at most 32 distinct PR labels.');
+  const ordered = values.map(value => {
+    text(value, 64, 'PR label');
+    // Rust str::trim uses Unicode White_Space. JavaScript trim also removes
+    // U+FEFF, which is a valid literal label byte sequence in the native model.
+    if (/^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/u.test(value) ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value)) fail('Invalid blank or control-containing PR label.');
+    return value;
+  });
+  ordered.sort((a, b) => {
+    const left = hex(utf8.encode(a)), right = hex(utf8.encode(b));
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  if (new Set(ordered).size !== ordered.length) fail('Duplicate PR label.');
+  if (canonical && ordered.some((value, index) => value !== values[index])) fail('PR labels are not canonically ordered.');
+  return ordered;
+}
+export function pullLabelState(row, { optional = false } = {}) {
+  record(row);
+  const names = ['labels', 'labels_version', 'labels_actor'];
+  if (optional && names.every(name => !Object.hasOwn(row, name))) return null;
+  const labels = pullLabels(row.labels, true), version = integer(row.labels_version, 'PR labels version');
+  if (version === 0) {
+    if (labels.length || row.labels_actor !== null) fail('Uninitialized PR labels contain published state.');
+  } else principal(row.labels_actor);
+  return { labels, version, actor: row.labels_actor };
+}
+export function pullLabelsReply(reply, number, observed, scope) {
+  const selected = pinned(reply, scope, observed.head), row = observed.reply.pull_request;
+  if (reply.type !== 'pull_request_labels' || reply.number !== number || typeof reply.found !== 'boolean' ||
+      reply.read_only !== true || reply.transaction_created !== false ||
+      reply.source_head !== observed.reply.source_head) fail('Invalid or unpinned PR labels observation.');
+  if (reply.found) {
+    if (!row?.data || row.number !== number || reply.pull_request_version !== row.version) fail('PR labels refer to another metadata observation.');
+    pullLabelState(reply);
+    const existing = pullLabelState(row, { optional: true });
+    if (existing && (existing.version !== reply.labels_version || existing.actor !== reply.labels_actor ||
+        JSON.stringify(existing.labels) !== JSON.stringify(reply.labels))) fail('PR labels changed within the selected snapshot.');
+  } else if (reply.pull_request_version !== null || reply.labels_version !== null ||
+      reply.labels_actor !== null || reply.labels !== null) fail('Missing PR labels disclosed another record.');
+  return { ...selected, reply };
+}
 export function prData(row, algorithm) {
   record(row);
   if (format(row.object_format) !== algorithm) fail('PR object format changed.');
@@ -114,6 +159,7 @@ export function prData(row, algorithm) {
 }
 export function prRow(row, algorithm) {
   record(row); integer(row.number, 'PR number', 1); integer(row.version, 'PR version', 1);
+  pullLabelState(row, { optional: true });
   if (!['open', 'closed', 'merged'].includes(row.state) || typeof row.merge_only !== 'boolean') fail('Invalid PR lifecycle.');
   if (row.data === null) { if (!row.merge_only || row.state !== 'merged') fail('Missing PR metadata.'); }
   else { prData(row.data, algorithm); if (row.merge_only) fail('Inconsistent PR metadata.'); }
@@ -128,11 +174,17 @@ export function prRow(row, algorithm) {
   } else if (row.merge !== null) fail('Unmerged PR has a merge record.');
   return row;
 }
-export function listReply(reply, { after = 0, limit = 20, head = null, scope = null } = {}) {
+export function listReply(reply, { after = 0, limit = 20, head = null, scope = null, labels = [] } = {}) {
   const selected = pinned(reply, scope, head);
+  const wanted = pullLabels(labels, true);
+  if (Object.hasOwn(reply, 'labels') ? JSON.stringify(pullLabels(reply.labels, true)) !== JSON.stringify(wanted) : wanted.length) fail('PR label filters changed.');
   if (reply.type !== 'pull_request_page' || reply.after !== after || reply.limit !== limit || !Array.isArray(reply.pull_requests) || reply.pull_requests.length > limit) fail('Invalid PR page.');
   let previous = after;
-  for (const row of reply.pull_requests) { prRow(row, selected.binding.format); if (row.number <= previous) fail('Invalid PR ordering.'); previous = row.number; }
+  for (const row of reply.pull_requests) {
+    prRow(row, selected.binding.format);
+    if (wanted.length && (!Array.isArray(row.labels) || wanted.some(label => !row.labels.includes(label)))) fail('PR row does not match every selected label.');
+    if (row.number <= previous) fail('Invalid PR ordering.'); previous = row.number;
+  }
   if (reply.next_after !== null && (reply.pull_requests.length !== limit || reply.next_after !== previous)) fail('Invalid PR continuation.');
   return { ...selected, reply };
 }
@@ -277,7 +329,7 @@ function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
   const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
     /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land|land-candidate)$/.test(route) ||
-    (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments(?:\/append)?$/.test(route)) ||
+    (method !== 'GET' && /^pulls\/[1-9][0-9]*\/(?:comments(?:\/append)?|labels)$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename|transaction)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
@@ -477,6 +529,13 @@ export class Transport {
     if (/^pulls\/[1-9][0-9]*\/checks(?:\?|$)/.test(path) &&
         (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
          statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)) fail('PR checks are a closed read-only profile.');
+    if (/^pulls\/[1-9][0-9]*\/labels(?:\?|$)/.test(path)) {
+      const reading = method === 'GET';
+      if (binary || headerNames.length || contentType !== 'application/x-www-form-urlencoded' ||
+          (reading ? (body !== undefined || key !== undefined || !read || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)
+            : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR labels request.');
+      integer(maximum, 'PR labels response limit', 1, 32 * 1024);
+    }
     if (/^pulls\/[1-9][0-9]*\/comments(?:\/append)?(?:\?|$)/.test(path)) {
       const reading = method === 'GET';
       if ((reading && path.split('?', 1)[0].endsWith('/append')) || binary || contentType !== 'application/x-www-form-urlencoded' ||
@@ -508,7 +567,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|comments(?:\/append)?|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|labels|comments(?:\/append)?|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
