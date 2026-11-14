@@ -234,9 +234,23 @@ Python's independent `zipfile` reader, including CRCs, payloads, modes, fixed
 timestamps, repeatability, no-overwrite behavior and stale-source refusal. Its
 tar twin checks that an output extension does not change the default format.
 
-The ZIP tests and expanded CLI campaign are authored but have not been executed
-in this session. The implementation's pinned native build was interrupted by an unavailable
-execution host before a test result could be observed. Central Rust verification
-and live-browser interoperability remain pending. Included tests, source review
-and an independently parseable fixture do not establish a passing runtime gate,
-full Git archive compatibility or roadmap closure.
+At source revision
+[`71c994b`](https://github.com/Dicklesworthstone/frankengit/commit/71c994b9abfb74addd8056636890519dbbca6efe),
+the actual TreeFS archive integration target passed **10 tests**, including all
+three new builder cases. An isolated production-source harness passed **22 archive
+component tests**, including all five new ZIP collector cases and the existing
+ustar fixture, source-pin, range and typed-error checks. Both runs had no failures.
+
+The archive harness used the original source-browse types, collector, encoders,
+checked-in tests and fixture in their normal module layout, without replacement
+DTOs or rewritten logic. Its 36 registry dependencies matched the repository
+lockfile's versions and checksums. The toolchain was the pinned
+`nightly-2026-08-31`; first-party and external optimization settings matched the
+workspace. This is component evidence, not a full forge-crate test result.
+
+The native CLI campaign, CLI argument tests and OneNode/HTTP/browser campaigns
+were not executed in this session. A production CLI check was interrupted and
+reaped with exit 130 after progress stalled under host memory pressure, before
+any source compiler diagnostic arrived. Full node/CLI compilation and native
+interoperability therefore remain unqualified. The component results establish
+neither full Git archive compatibility nor roadmap closure.

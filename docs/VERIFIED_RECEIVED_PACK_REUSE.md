@@ -464,15 +464,29 @@ deterministic writer profile.
 
 ## Regression coverage and execution status
 
-The hybrid component and native-selection regressions are authored coverage.
-They exercise both hash domains, exact complements, retained dependencies,
-typed held proofs, combined envelopes, checksum failure and cancellation.
-Native cases make retained historical object files unavailable after selection
-and require materialization to read only new objects; they decode the complete
-result and re-admit it into an empty node. These tests have **not been executed
-in this implementation session**: the build environment disconnected during
-the pinned Cargo check and then became unavailable. No compiler, runtime,
-transport or performance pass is claimed for the hybrid changes.
+At source revision
+[`71c994b`](https://github.com/Dicklesworthstone/frankengit/commit/71c994b9abfb74addd8056636890519dbbca6efe),
+an isolated production-source harness passed **99 received-pack and pack-spool
+component tests**, including all **eight new hybrid tests**, with no failures.
+The original modules and checked-in tests were linked into their normal module
+layout without replacement implementations. The pinned nightly toolchain and
+workspace optimization settings were used, and all 42 selected registry
+dependencies matched the repository lockfile's versions and checksums.
+
+These executed cases cover both hash domains, exact complements, retained
+dependencies, typed held proofs, combined envelopes, corruption and cancellation.
+The new OFS case uses the real native planner/writer, preserves an entire shifted
+entry run byte-for-byte across the 64 KiB copy boundary, and independently checks
+the emitted identities and bodies.
+
+The four native-selection integration regressions remain authored, unexecuted
+coverage. They make historical object files unavailable after selection, require
+materialization to read only new objects, and re-admit the complete output into
+an empty node. A later production CLI check, which would also type-check the
+OneNode integration, was interrupted and reaped with exit 130 after progress
+stalled under host memory pressure; it produced no source compiler diagnostic.
+No complete node/CLI check, native transport campaign or performance result is
+claimed by the component run.
 
 
 
