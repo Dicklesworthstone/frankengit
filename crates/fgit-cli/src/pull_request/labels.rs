@@ -143,10 +143,11 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
     let incarnation = node.repository_incarnation_id().to_string();
     let operation = (|| -> Result<Completed, String> {
         let authority = node.runtime().block_on(node.authenticate_authority_head()).map_err(|error| error.to_string())?;
-        if let Err(error) = node.bring_into_service(authority.receipt().generation())
-            && matches!(options.operation, Operation::Read { .. }) {
-            return Err(error.to_string());
-        }
+        // Both observations and publications require a successfully activated node.
+        // A failed authority/service transition must never fall through to the
+        // durable write path, even if a later admission check would also refuse.
+        node.bring_into_service(authority.receipt().generation())
+            .map_err(|error| error.to_string())?;
         let context = fgit_cli::command_request_context(&node);
         match &options.operation {
             Operation::Read { expected_head } => {
