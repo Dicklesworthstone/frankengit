@@ -23,6 +23,8 @@ use crate::workflow_command::artifacts as workflow_artifacts;
 
 use crate::service_stop as stop_file;
 
+mod repositories;
+
 #[cfg(target_os = "linux")]
 mod workflow;
 
@@ -896,8 +898,14 @@ fn open_token_file(path: &Path, before: &fs::Metadata) -> Result<File, String> {
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments == ["--help"] {
-        println!("{USAGE}");
+        println!("{USAGE}\n{}", repositories::USAGE);
         return Ok(0);
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--repositories-file")
+    {
+        return repositories::run(arguments);
     }
     let options = parse(arguments)?;
     let stop = options

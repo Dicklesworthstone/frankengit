@@ -185,6 +185,11 @@ clone, fetch and push:
   can restrict each token to exact refs or slash-terminated namespaces across
   Git pushes and native code publication routes. It has a `--continuous` mode
   that drains on a stop file, SIGTERM or SIGINT.
+  Its [multi-repository mode](docs/MULTI_REPOSITORY_HTTP.md) uses a private
+  `--repositories-file` to serve up to 64 exact `/tenant/repository` routes on
+  one loopback listener, with independent live credentials and pinned
+  incarnations. Optional services require both their catalog selection and
+  listener flag, in addition to the requesting token's scope.
 - `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. Its
   private `--deploy-keys-file` is reloaded before each Git command, so key
   revocation, rotation and scope changes take effect without restarting the
@@ -254,6 +259,12 @@ the execution graph and remain recoverable through saved check evidence. See
 [shell selection](docs/NATIVE_WORKFLOW_SHELLS.md) and
 [run defaults](docs/NATIVE_WORKFLOW_STEP_CONTEXT.md#workflow-and-job-run-defaults)
 for examples, precedence and supported limits.
+
+[Native workflow matrices](docs/NATIVE_WORKFLOW_MATRICES.md) accept literal
+`fail-fast: true` or `false`, defaulting to `true`. In the serial native scheduler,
+a failed variant completes its cleanup before later unstarted variants of that
+matrix are skipped; explicit `false` continues them. Independent jobs continue,
+and cancellation or lost containment retains its existing global stop behavior.
 
 ### Automatic native PR checks
 

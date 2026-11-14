@@ -1,4 +1,4 @@
-//! Bounded, single-repository HTTP gateway (frankengit-asa3).
+//! Bounded HTTP gateway with explicit, incarnation-bound repository routes.
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
 //! Operators grant principals independent Git, issue, PR and outcome scopes
@@ -29,6 +29,8 @@ mod source;
 #[cfg(target_os = "linux")]
 mod workflow;
 pub use source::{source_agent_context_json, source_index_json, source_retrieval_json};
+mod routing;
+pub use routing::{HttpRepositoryRoute, HttpRepositoryServices, MAX_HTTP_REPOSITORY_ROUTES};
 mod stock_receive;
 mod upload_liveness;
 
@@ -561,22 +563,22 @@ impl OneNode {
                 "invalid bounded Smart HTTP service limits",
             ));
         }
-        let controller_count = controllers
-            .maintenance
-            .as_ref()
-            .map_or(0, |group| group.configs().len());
-        #[cfg(target_os = "linux")]
-        let controller_count = controller_count + usize::from(controllers.workflow.is_some());
-        validate_controller_capacity(
-            self.runtime().identity().blocking_max_threads,
-            controller_count,
-        )?;
-        #[cfg(target_os = "linux")]
-        if controllers.workflow.is_some() && controllers.on_workflow_drained.is_none() {
-            return Err(invalid_configuration(
-                "workflow service requires a terminal observation callback",
-            ));
-        }
+        let profile = self.smart_http_profile(credentials, services, max_in_flight)?;
+        self.serve_smart_http_profiles_lifetime(
+            listener,
+            max_in_flight,
+            routing::Profiles::single(profile),
+            acceptance,
+            controllers,
+        )
+    }
+
+    fn smart_http_profile(
+        &self,
+        credentials: CredentialSource,
+        services: RepositoryHttpServices,
+        idle_capacity: usize,
+    ) -> Result<Profile, NodeSmartHttpRefusal> {
         credentials.validate().map_err(credential_error)?;
         self.validate_smart_http_lfs_storage()?;
         #[cfg(unix)]
@@ -625,8 +627,8 @@ impl OneNode {
             .service_config
             .clone()
             .with_expected_repository_incarnation(self.repository_incarnation_id());
-        let profile = Arc::new(Profile {
-            nodes: Arc::new(NodeLanes::new(config.clone(), max_in_flight, "Smart HTTP")),
+        Ok(Profile {
+            nodes: Arc::new(NodeLanes::new(config.clone(), idle_capacity, "Smart HTTP")),
             config,
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
@@ -640,7 +642,52 @@ impl OneNode {
             outcome_quota: Arc::new(PushQuota::default()),
             source_quota: Arc::new(PushQuota::default()),
             writers: Arc::new(WriterGate::new(MAX_CONCURRENT_WRITERS)),
-        });
+        })
+    }
+
+    fn serve_smart_http_profiles_lifetime(
+        &self,
+        listener: &TcpListener,
+        max_in_flight: usize,
+        profiles: routing::Profiles,
+        acceptance: lifetime::Acceptance<'_>,
+        controllers: Controllers<'_>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        let address = listener
+            .local_addr()
+            .map_err(|source| io_error("inspect HTTP listener", source))?;
+        if !address.ip().is_loopback() {
+            return Err(invalid_configuration(
+                "Smart HTTP requires a loopback listener",
+            ));
+        }
+        if self.cell_state() != CellState::Serving {
+            return Err(invalid_configuration(
+                "bring the HTTP node into service before listening",
+            ));
+        }
+        if !(1..=MAX_IN_FLIGHT).contains(&max_in_flight) || !acceptance.valid() {
+            return Err(invalid_configuration(
+                "invalid bounded Smart HTTP service limits",
+            ));
+        }
+        let controller_count = controllers
+            .maintenance
+            .as_ref()
+            .map_or(0, |group| group.configs().len());
+        #[cfg(target_os = "linux")]
+        let controller_count = controller_count + usize::from(controllers.workflow.is_some());
+        validate_controller_capacity(
+            self.runtime().identity().blocking_max_threads,
+            controller_count,
+        )?;
+        #[cfg(target_os = "linux")]
+        if controllers.workflow.is_some() && controllers.on_workflow_drained.is_none() {
+            return Err(invalid_configuration(
+                "workflow service requires a terminal observation callback",
+            ));
+        }
+        let profiles = Arc::new(profiles);
         listener
             .set_nonblocking(true)
             .map_err(|source| io_error("configure HTTP listener", source))?;
@@ -784,8 +831,10 @@ impl OneNode {
             last_activity = Instant::now();
             // Queue time counts against ingress: a queued peer does not acquire
             // a new wall-clock allowance when a blocking worker becomes free.
-            let deadline =
-                GitDaemonSessionDeadline::new(profile.timeout, GitDaemonSessionWorkScaling::FLAT);
+            let deadline = GitDaemonSessionDeadline::new(
+                profiles.first().timeout,
+                GitDaemonSessionWorkScaling::FLAT,
+            );
             let finished = Arc::new(AtomicBool::new(false));
             let completion = Completion {
                 finished: Arc::clone(&finished),
@@ -793,10 +842,15 @@ impl OneNode {
                 refused: Arc::clone(&refused),
                 success: false,
             };
-            let child_profile = Arc::clone(&profile);
+            let child_profiles = Arc::clone(&profiles);
             match self.runtime.submit_blocking(move || {
                 let mut completion = completion;
-                completion.success = serve_connection(stream, deadline, &child_profile);
+                completion.success = serve_connection_with_routes(
+                    stream,
+                    deadline,
+                    child_profiles.first(),
+                    Some(&child_profiles),
+                );
             }) {
                 Ok(task) => pending.push(PendingSession {
                     finished,
@@ -846,7 +900,7 @@ impl OneNode {
                 None => error,
             });
         }
-        if let Err(error) = profile.nodes.close() {
+        if let Err(error) = profiles.close() {
             log_cleanup(&error);
             failure.get_or_insert_with(|| {
                 io_error(
@@ -1309,10 +1363,20 @@ pub(super) fn bearer_only(authorization: Option<&str>) -> Option<&str> {
     })
 }
 
+#[cfg(test)]
 fn serve_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     deadline: GitDaemonSessionDeadline,
     profile: &Profile,
+) -> bool {
+    serve_connection_with_routes(stream, deadline, profile, None)
+}
+
+fn serve_connection_with_routes(
+    mut stream: TcpStream,
+    deadline: GitDaemonSessionDeadline,
+    ingress: &Profile,
+    routes: Option<&routing::Profiles>,
 ) -> bool {
     if stream.set_nonblocking(false).is_err() {
         return false;
@@ -1325,7 +1389,7 @@ fn serve_connection(
     let mut reader = DeadlineTcpStream::new(&mut stream, deadline.clone());
     let mut writer = ResponseWriter {
         inner: DeadlineTcpStream::new(&mut output, deadline),
-        timeout: profile.timeout,
+        timeout: ingress.timeout,
         started: false,
         preserve_request_deadline: false,
         agent: None,
@@ -1344,23 +1408,19 @@ fn serve_connection(
     let mut recovery = false;
     let mut recovery_error = None;
     let served = (|| -> Result<(), Status> {
-        let bytes = read_head(&mut reader, profile.http)?;
+        let limits = routes.map_or(ingress.http, routing::Profiles::http_limits);
+        let bytes = read_head(&mut reader, limits)?;
         // This shared policy precedes every adapter return, including an
         // authentication/key refusal or a discovery redirect. Otherwise an
         // adapter can reveal whether the configured repository route matched.
-        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        let envelope = head::parse(&bytes, limits)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
-        if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
+        if refuses_cross_site(&envelope, local, ingress.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
         }
-        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
-            return Ok(());
-        };
-        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
-        version = envelope.version;
-        // Select the response contract before canonical bearer verification.
-        // Rejected agent credentials must preserve native JSON errors and the
-        // Bearer-only challenge, including outcome-recovery uncertainty.
+        // Select the response contracts handled below before route lookup or
+        // authentication. Unknown catalog routes preserve these typed native
+        // refusals, including canonical agent outcome-recovery uncertainty.
         recovery = envelope
             .target
             .split('?')
@@ -1401,6 +1461,19 @@ fn serve_connection(
                 .next()
                 .is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST" && !source_api;
+        let profile = match routes {
+            Some(routes) => routes.select(envelope.target).ok_or(Status::Unauthorized)?,
+            None => ingress,
+        };
+        // The catalog's header parser admits the largest configured body
+        // envelope only for routing. The selected repository's own tighter
+        // limits apply before any authentication, redirect, or body read.
+        head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
+            return Ok(());
+        };
+        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        version = envelope.version;
         let agent_profile = agent::authenticate(
             profile,
             &envelope,
