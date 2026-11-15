@@ -14,11 +14,11 @@ and `--allow-source`, using a canonical credential explicitly issued with
 also needs those independent source APIs. Existing grants, including masks
 `0x007f`, `0x00ff` and `0x01ff`, gain no candidate authority after an upgrade.
 
-Sponsored discovery exposes only `prepare_patch` with omitted profile or
-`exact-tree-v1`, and `inspect` for an uploaded single-parent candidate. Initial
-history, symlink preparation, replay, rebase, PR and queue operations are refused
-before authentication or native dispatch. The trusted-local schema retains its
-existing operations.
+Sponsored discovery exposes only `prepare_patch` with omitted profile,
+`exact-tree-v1` or explicit `exact-tree-binary-v1`, and `inspect` for an uploaded
+single-parent candidate. Initial history, symlink preparation, replay, rebase,
+PR and queue operations are refused before authentication or native dispatch.
+The trusted-local schema retains its existing operations.
 
 Every call authenticates the current grant and borrows its opaque candidate
 capability. Native construction and inspection retain the original agent,
@@ -65,6 +65,26 @@ subprocess, object-fabric staging, seal, ref update, or approval. Native patch
 semantics and refusals apply, including regular-file creation/deletion/modes,
 explicit supported renames and binary patch records. No fuzzy application or
 unsupported fallback is introduced by MCP.
+
+Both trusted-local and sponsored callers may explicitly select
+`"profile": "exact-tree-binary-v1"` to rename and edit a regular binary file in
+one candidate. This uses the existing [native binary-refactoring
+profile](NATIVE_BINARY_REFACTORING.md): the patch must name both original
+endpoints, provide full nonzero old/new blob identities in the repository's
+hash domain, and carry verified forward and reverse Git binary members.
+The destination must be absent in the original tree. Regular executable-mode
+changes are preserved. A corrupt member, wrong identity, occupied destination,
+overlapping rename or failure in any later patch section refuses the whole
+candidate. This profile does not permit symlinks or gitlinks.
+
+An omitted profile or explicit `"exact-tree-v1"` keeps the previous grammar,
+including its refusal of edited binary renames. The new selector works with
+either `patch` or `patch_hex_chunks` and does not enlarge their byte limits.
+Preparation reports `"profile": "exact-tree-binary-v1"` and exact removal and
+creation receipts. Pass its unchanged `publication_arguments` to `inspect` to
+review the complete resulting tree; binary entries expose blob identity, mode
+and byte count without decoding the payload as text. Publication continues to
+require the independent publisher and its original retry key.
 
 In the trusted-local profile, `prepare_patch` may explicitly select
 `"profile": "exact-symlink-v1"` to

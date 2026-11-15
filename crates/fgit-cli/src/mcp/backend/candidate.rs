@@ -24,7 +24,7 @@ const MAX_BUNDLE_BYTES: usize = CHUNK_BYTES * MAX_CHUNKS;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare an exact patch into a bounded native Git bundle; prepare_patch optionally selects exact-symlink-v1 for inert Git symlink bytes, while omission retains regular-file behavior. prepare_initial creates zero-parent history at an absent branch, prepare_pull_merge constructs a PR candidate, prepare_queue_merge constructs the exact canonical queue-head candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result. prepare_replay applies one historical cherry-pick or revert and resolve_replay resolves every conflict at the original snapshot, using explicit path-v1 profile. prepare_rebase and resolve_rebase reconstruct the complete linear-v1 source suffix onto a distinct visible branch with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded whole series and net change. Replay and rebase require source read and remain outside the sponsored-agent profile. PR operations additionally require PR read; queue preparation also requires queue read. Or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Read-only: no object import, checkout, shell, approval or publication. Publication requires its independent source-, rebase-, merge-, or queue-landing tool and an original retry key.",
+        description: "Prepare an exact patch into a bounded native Git bundle; prepare_patch optionally selects exact-tree-binary-v1 for edited binary renames or exact-symlink-v1 for inert Git symlink bytes, while omission retains regular-file behavior. prepare_initial creates zero-parent history at an absent branch, prepare_pull_merge constructs a PR candidate, prepare_queue_merge constructs the exact canonical queue-head candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result. prepare_replay applies one historical cherry-pick or revert and resolve_replay resolves every conflict at the original snapshot, using explicit path-v1 profile. prepare_rebase and resolve_rebase reconstruct the complete linear-v1 source suffix onto a distinct visible branch with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded whole series and net change. Replay and rebase require source read and remain outside the sponsored-agent profile. PR operations additionally require PR read; queue preparation also requires queue read. Or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Read-only: no object import, checkout, shell, approval or publication. Publication requires its independent source-, rebase-, merge-, or queue-landing tool and an original retry key.",
         schema: object([
             ("type", text("object")),
             (
@@ -54,7 +54,7 @@ pub(super) fn tool() -> Tool {
 pub(super) fn agent_tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1) or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
+        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1), explicitly select exact-tree-binary-v1 for edited binary renames, or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
         schema: object([
             ("type", text("object")),
             (
@@ -71,7 +71,7 @@ pub(super) fn agent_tool() -> Tool {
 pub(super) fn agent_operation(args: &Object) -> Result<(), ToolError> {
     match required(args, "operation")? {
         "prepare_patch" => match string(args, "profile")? {
-            None | Some("exact-tree-v1") => Ok(()),
+            None | Some("exact-tree-v1" | "exact-tree-binary-v1") => Ok(()),
             Some(_) => Err(ToolError::invalid("unsupported_patch_profile")),
         },
         "inspect" => Ok(()),
@@ -272,6 +272,8 @@ fn binding(backend: &NodeTools) -> Object {
     fields
 }
 
+#[cfg(test)]
+pub(super) mod binary_test_support;
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]

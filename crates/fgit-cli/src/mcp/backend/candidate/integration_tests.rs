@@ -1,4 +1,6 @@
 //! Real persisted-node calls through the MCP protocol, not a fake Git engine.
+mod binary_refactor;
+
 use super::super::super::protocol::{ReadTools, Server};
 use super::super::Options;
 use super::*;

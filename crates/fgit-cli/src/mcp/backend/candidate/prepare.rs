@@ -10,12 +10,29 @@ const MAX_TEXT_PATCH: usize = 16 * 1024;
 const MAX_MESSAGE: usize = 4096;
 const MAX_PATHS: usize = 64;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PatchProfile {
+    Regular,
+    BinaryRefactor,
+    Symlinks,
+}
+
+impl PatchProfile {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Regular => "exact-tree-v1",
+            Self::BinaryRefactor => "exact-tree-binary-v1",
+            Self::Symlinks => "exact-symlink-v1",
+        }
+    }
+}
+
 pub(super) struct Input {
     pub reference: RefName,
     pub base: GitOid,
     pub patch: Vec<u8>,
     pub metadata: MergeMetadata,
-    pub symlinks: bool,
+    pub profile: PatchProfile,
 }
 
 pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
@@ -39,9 +56,10 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         return Err(ToolError::invalid("unsupported_candidate_operation"));
     }
     let reference = branch(args, "reference", "reference_hex")?;
-    let symlinks = match string(args, "profile")? {
-        None | Some("exact-tree-v1") => false,
-        Some("exact-symlink-v1") => true,
+    let profile = match string(args, "profile")? {
+        None | Some("exact-tree-v1") => PatchProfile::Regular,
+        Some("exact-tree-binary-v1") => PatchProfile::BinaryRefactor,
+        Some("exact-symlink-v1") => PatchProfile::Symlinks,
         Some(_) => return Err(ToolError::invalid("unsupported_patch_profile")),
     };
     let base = oid(args, "expected_base", format)?;
@@ -51,7 +69,7 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         base,
         patch,
         metadata,
-        symlinks,
+        profile,
     })
 }
 
@@ -106,14 +124,14 @@ fn schema_for_profile(agent: bool) -> Value {
     properties.insert("profile".into(), object([
         ("type", text("string")),
         ("enum", Value::Array(if agent {
-            vec![text("exact-tree-v1")]
+            vec![text("exact-tree-v1"), text("exact-tree-binary-v1")]
         } else {
-            vec![text("exact-tree-v1"), text("exact-symlink-v1")]
+            vec![text("exact-tree-v1"), text("exact-tree-binary-v1"), text("exact-symlink-v1")]
         })),
         ("description", text(if agent {
-            "Omit or select exact-tree-v1 for regular-file patches; sponsored preparation does not permit symlink edits."
+            "Omit or select exact-tree-v1 for regular-file patches; exact-tree-binary-v1 explicitly permits edited binary renames with full old/new blob identities and verified forward/reverse members. Sponsored preparation does not permit symlink edits."
         } else {
-            "Omit for existing regular-file behavior; exact-symlink-v1 explicitly permits inert Git symlink blobs without following targets."
+            "Omit for existing regular-file behavior; exact-tree-binary-v1 explicitly permits edited binary renames with full old/new blob identities and verified forward/reverse members. exact-symlink-v1 explicitly permits inert Git symlink blobs without following targets."
         })),
     ]));
     payload_properties(&mut properties);
@@ -149,49 +167,64 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     // admission identity, persistent workspace handle or caller-selected grant.
     let mut workspace = [0_u8; 16];
     workspace.copy_from_slice(&digest[..16]);
-    let candidate = if let Some(candidate_request) = candidate_request.as_ref() {
-        backend
-            .node
-            .runtime()
-            .block_on(backend.node.prepare_agent_source_patch_in(
-                candidate_request,
-                &input.reference,
-                input.base,
-                &input.patch,
-                &input.metadata,
-                false,
-            ))
-    } else {
-        let request = backend.command_context();
-        if input.symlinks {
+    let candidate =
+        if let Some(candidate_request) = candidate_request.as_ref() {
             backend
                 .node
                 .runtime()
-                .block_on(backend.node.prepare_trusted_symlink_patch_in(
-                    &request,
+                .block_on(backend.node.prepare_agent_source_patch_in(
+                    candidate_request,
                     &input.reference,
                     input.base,
-                    workspace,
                     &input.patch,
                     &input.metadata,
-                    Default::default(),
+                    input.profile == PatchProfile::BinaryRefactor,
                 ))
         } else {
-            backend
-                .node
-                .runtime()
-                .block_on(backend.node.prepare_trusted_patch_in(
-                    &request,
-                    &input.reference,
-                    input.base,
-                    workspace,
-                    &input.patch,
-                    &input.metadata,
-                    Default::default(),
-                ))
+            let request = backend.command_context();
+            match input.profile {
+                PatchProfile::Symlinks => {
+                    backend
+                        .node
+                        .runtime()
+                        .block_on(backend.node.prepare_trusted_symlink_patch_in(
+                            &request,
+                            &input.reference,
+                            input.base,
+                            workspace,
+                            &input.patch,
+                            &input.metadata,
+                            Default::default(),
+                        ))
+                }
+                PatchProfile::BinaryRefactor => backend.node.runtime().block_on(
+                    backend.node.prepare_trusted_binary_refactor_in(
+                        &request,
+                        &input.reference,
+                        input.base,
+                        workspace,
+                        &input.patch,
+                        &input.metadata,
+                        Default::default(),
+                    ),
+                ),
+                PatchProfile::Regular => {
+                    backend
+                        .node
+                        .runtime()
+                        .block_on(backend.node.prepare_trusted_patch_in(
+                            &request,
+                            &input.reference,
+                            input.base,
+                            workspace,
+                            &input.patch,
+                            &input.metadata,
+                            Default::default(),
+                        ))
+                }
+            }
         }
-    }
-    .map_err(preparation_error)?;
+        .map_err(preparation_error)?;
     if candidate.object_format != backend.options.format
         || candidate.source_commit != input.base
         || candidate.patch_sha256 != digest
@@ -228,7 +261,8 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             || (path.old_blob.is_none() && path.new_blob.is_none())
             || path.new_blob.is_some() != path.new_mode.is_some()
             || path.new_mode.is_some_and(|m| {
-                !matches!(m, 0o100644 | 0o100755) && !(input.symlinks && m == 0o120000)
+                !matches!(m, 0o100644 | 0o100755)
+                    && !(input.profile == PatchProfile::Symlinks && m == 0o120000)
             })
             || [path.old_blob, path.new_blob]
                 .into_iter()
@@ -260,14 +294,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         ("type".into(), text("source_patch_candidate")),
         ("schema_version".into(), json::number(1)),
         ("operation".into(), text("prepare_patch")),
-        (
-            "profile".into(),
-            text(if input.symlinks {
-                "exact-symlink-v1"
-            } else {
-                "exact-tree-v1"
-            }),
-        ),
+        ("profile".into(), text(input.profile.name())),
         // The native planner returns an RCR, not a selecting authority head.
         // A separate read cannot safely manufacture a snapshot token for it.
         ("snapshot_token".into(), Value::Null),

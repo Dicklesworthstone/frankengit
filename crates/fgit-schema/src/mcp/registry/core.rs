@@ -1977,7 +1977,15 @@ pub static REGISTRY: &[McpToolEntry] = &[
                 pattern: None,
             },
         ],
-        refusal_codes: &["snapshot_moved", "invalid_cursor", "page_limit_exceeded", "labels_must_be_array", "too_many_labels", "label_must_be_string", "invalid_pull_labels"],
+        refusal_codes: &[
+            "snapshot_moved",
+            "invalid_cursor",
+            "page_limit_exceeded",
+            "labels_must_be_array",
+            "too_many_labels",
+            "label_must_be_string",
+            "invalid_pull_labels",
+        ],
         cli_command: "fg pr list",
         rest_api_path: "GET /repos/{id}/pulls",
     },
@@ -2812,7 +2820,7 @@ pub static REGISTRY: &[McpToolEntry] = &[
         entity_kind: McpEntityKind::Tool,
         owner_subsystem: "git-core",
         support_profile: SupportProfile::Active,
-        description: "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_patch optionally selects exact-symlink-v1 for inert Git symlink blobs; omission retains regular-file behavior. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. prepare_queue_merge requires source, PR and queue read grants with exact queue and PR version guards.",
+        description: "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_patch optionally selects exact-tree-binary-v1 for edited binary renames or exact-symlink-v1 for inert Git symlink blobs; omission retains regular-file behavior. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. prepare_queue_merge requires source, PR and queue read grants with exact queue and PR version guards.",
         read_mutation: ReadMutationClass::ReadOnly,
         capability: CapabilityRequirement::READ_CANONICAL_OBJECT,
         principal: PrincipalRequirement::None,
@@ -2882,10 +2890,12 @@ pub static REGISTRY: &[McpToolEntry] = &[
                 name: "profile",
                 field_type: "string",
                 classification: FieldClassification::SelectorPosition,
-                description: "For prepare_patch, optional exact-tree-v1 retains regular-file behavior and exact-symlink-v1 explicitly permits inert Git symlink blobs; omission keeps the original profile. Required for replay: path-v1. Required for prepare_rebase, resolve_rebase and inspect_rebase: linear-v1.",
+                description: "For prepare_patch, optional exact-tree-v1 retains regular-file behavior, exact-tree-binary-v1 explicitly permits edited binary renames with verified identities and reverse members, and exact-symlink-v1 explicitly permits inert Git symlink blobs; omission keeps the original profile. Required for replay: path-v1. Required for prepare_rebase, resolve_rebase and inspect_rebase: linear-v1.",
                 required: false,
-                max_bytes: Some(16),
-                pattern: Some("^(path-v1|linear-v1|exact-tree-v1|exact-symlink-v1)$"),
+                max_bytes: Some(20),
+                pattern: Some(
+                    "^(path-v1|linear-v1|exact-tree-v1|exact-tree-binary-v1|exact-symlink-v1)$",
+                ),
             },
             McpField {
                 name: "direction",
@@ -3163,10 +3173,12 @@ pub static REGISTRY: &[McpToolEntry] = &[
                 name: "profile",
                 field_type: "string",
                 classification: FieldClassification::SystemMetadata,
-                description: "Effective candidate grammar: exact-tree-v1 or exact-symlink-v1 for prepare_patch, path-v1 for replay, and linear-v1 for rebase. This never grants publication or host filesystem authority.",
+                description: "Effective candidate grammar: exact-tree-v1, exact-tree-binary-v1 or exact-symlink-v1 for prepare_patch, path-v1 for replay, and linear-v1 for rebase. This never grants publication or host filesystem authority.",
                 required: false,
-                max_bytes: Some(16),
-                pattern: Some("^(path-v1|linear-v1|exact-tree-v1|exact-symlink-v1)$"),
+                max_bytes: Some(20),
+                pattern: Some(
+                    "^(path-v1|linear-v1|exact-tree-v1|exact-tree-binary-v1|exact-symlink-v1)$",
+                ),
             },
             McpField {
                 name: "state",
@@ -4744,16 +4756,27 @@ mod tests {
     #[test]
     fn pull_list_labels_are_a_bounded_optional_content_filter() {
         let entry = find_tool("frankengit_pull_list").unwrap();
-        let labels = entry.input_fields.iter().find(|field| field.name == "labels").unwrap();
+        let labels = entry
+            .input_fields
+            .iter()
+            .find(|field| field.name == "labels")
+            .unwrap();
         assert_eq!(labels.field_type, "array");
         assert_eq!(labels.classification, FieldClassification::UntrustedContent);
         assert!(!labels.required);
-        let filter = entry.output_fields.iter().find(|field| field.name == "label_filter").unwrap();
+        let filter = entry
+            .output_fields
+            .iter()
+            .find(|field| field.name == "label_filter")
+            .unwrap();
         assert_eq!(filter.field_type, "array");
         assert_eq!(filter.classification, FieldClassification::UntrustedContent);
         assert!(filter.required);
         assert_eq!(entry.pagination, PaginationRules::SnapshotBoundCursor);
-        assert_eq!(entry.authority_root, InputAuthorityRootRequirement::ExactSnapshotToken);
+        assert_eq!(
+            entry.authority_root,
+            InputAuthorityRootRequirement::ExactSnapshotToken
+        );
     }
 
     #[test]

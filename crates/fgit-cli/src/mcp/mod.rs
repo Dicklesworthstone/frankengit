@@ -47,7 +47,8 @@ independently exposes the authenticated Agent Protocol context document under
 that same canonical scope; neither launch flag grants the other tool group.
 History, blame, historical tree/blob and reference comparison tools independently
 require source-history-read. With source-candidates, --allow-source exposes only
-prepare_patch (regular-file exact-tree-v1) and single-parent inspect operations of
+prepare_patch (regular-file exact-tree-v1 or explicit exact-tree-binary-v1 for
+edited binary renames) and single-parent inspect operations of
 frankengit_source_candidate. Candidate data grants no publication authority.
 Source work preserves the credential's real agent, sponsor and original request
 deadline, and creates no durable execution run. Source writes, initial-history,

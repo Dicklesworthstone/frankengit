@@ -92,7 +92,7 @@ observation schema. This grants no agent source-import capability.
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 | `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
-| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch` and single-parent `inspect`, against an explicit current branch |
+| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch`, explicit `exact-tree-binary-v1` edited binary renames and single-parent `inspect`, against an explicit current branch |
 | `milestones-read` | Native milestone listing, exact lifecycle history and same-snapshot open/closed issue counts |
 | `milestones-write` | Open, edit, close and reopen native milestones at explicit versions |
 
@@ -265,7 +265,12 @@ keys and leave canonical authority unchanged, including on refusals.
 landing remain unavailable. A sponsor or independently authorized operator must
 review and publish the returned artifact through ordinary admission. MCP exposes
 the same request-borrowed capability through `frankengit_source_candidate`, with
-only regular-file `prepare_patch` (`exact-tree-v1`) and single-parent `inspect`.
+regular-file `prepare_patch` (`exact-tree-v1`), explicit
+`exact-tree-binary-v1` edited binary renames, and single-parent `inspect`.
+The binary profile checks both original endpoints, full native blob identities
+and forward/reverse members through the existing native planner. An omitted
+profile retains the original grammar. Binary selection does not permit symlinks,
+change the grant or create a publisher.
 Its discovery schema omits the other candidate engines, and dispatch rejects
 initial-history, symlink/replay/rebase/PR/queue preparation before authentication.
 MCP retains its narrower 16 KiB text-patch / 24 KiB decoded patch-or-bundle bounds,
@@ -348,7 +353,7 @@ fg mcp ./repository TENANT_ID REPOSITORY_ID \
 | --- | --- | --- |
 | `--allow-source` | `source-read` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_search_index`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
 | `--allow-source` | `source-history-read` | `frankengit_source_log`, `frankengit_source_blame`, `frankengit_source_historical_tree`, `frankengit_source_historical_blob`, `frankengit_source_compare` |
-| `--allow-source` | `source-candidates` | `frankengit_source_candidate`, limited to regular-file `prepare_patch` and single-parent `inspect` |
+| `--allow-source` | `source-candidates` | `frankengit_source_candidate`, limited to regular-file `prepare_patch` (including explicit `exact-tree-binary-v1`) and single-parent `inspect` |
 | `--allow-agent-context` | `source-read` | `frankengit_agent_context` |
 
 Each call requires its listed canonical scope. Neither launch flag implies the

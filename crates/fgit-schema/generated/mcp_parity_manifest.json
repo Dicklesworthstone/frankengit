@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 101,
+  "total_tools": 104,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -616,6 +616,16 @@
       "rest_api_path": "POST /repos/{id}/pulls/{number}/fast-forward"
     },
     {
+      "tool": "frankengit_pull_labels",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg pr labels",
+      "rest_api_path": "GET /{repository}/api/v1/pulls/{number}/labels"
+    },
+    {
       "tool": "frankengit_pull_list",
       "version": 1,
       "owner_subsystem": "forge",
@@ -674,6 +684,26 @@
       "capability": "read_canonical_object",
       "cli_command": "fg pr reviews",
       "rest_api_path": "GET /repos/{id}/pulls/{number}/reviews"
+    },
+    {
+      "tool": "frankengit_pull_search",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg pr search",
+      "rest_api_path": "GET /api/v1/pulls/search"
+    },
+    {
+      "tool": "frankengit_pull_set_labels",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "cli_command": "fg pr set-labels",
+      "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/labels"
     },
     {
       "tool": "frankengit_pull_show",
