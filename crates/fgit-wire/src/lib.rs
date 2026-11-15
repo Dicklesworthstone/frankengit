@@ -38,6 +38,7 @@ pub use fgit_crypto::{AnyGitOid, GitObjectFormat};
 pub use fgit_git_object::ObjectType;
 
 use fgit_types::RefName;
+use request_ids::RequestObjectIds;
 
 /// Bounded shallow-history and partial-clone closure computation.
 pub mod closure;
@@ -45,6 +46,7 @@ mod cutoff_ref;
 mod filter_syntax;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
+mod request_ids;
 mod shallow_response;
 /// Bounded smart HTTP discovery, routing, and streaming message framing.
 pub mod smart_http;
@@ -1865,12 +1867,12 @@ pub struct LegacyUploadPack {
     decoder: PktLineDecoder,
     server_capabilities: Capabilities,
     state: LegacyState,
-    wants: Vec<AnyGitOid>,
-    haves: Vec<AnyGitOid>,
-    shallows: Vec<AnyGitOid>,
+    wants: RequestObjectIds,
+    haves: RequestObjectIds,
+    shallows: RequestObjectIds,
     deepen: Option<u32>,
     deepen_since: Option<i64>,
-    deepen_not: Vec<AnyGitOid>,
+    deepen_not: RequestObjectIds,
     filter: Option<ObjectFilter>,
     ack_mode: AckMode,
     options: PackOptions,
@@ -2047,12 +2049,12 @@ impl LegacyUploadPack {
             decoder,
             server_capabilities,
             state: LegacyState::AwaitWant,
-            wants: Vec::new(),
-            haves: Vec::new(),
-            shallows: Vec::new(),
+            wants: RequestObjectIds::default(),
+            haves: RequestObjectIds::default(),
+            shallows: RequestObjectIds::default(),
             deepen: None,
             deepen_since: None,
-            deepen_not: Vec::new(),
+            deepen_not: RequestObjectIds::default(),
             filter: None,
             ack_mode: AckMode::None,
             options: PackOptions::NONE,
@@ -2176,7 +2178,8 @@ impl LegacyUploadPack {
         if let Some(rest) = line.strip_prefix(b"shallow ") {
             self.require_capability(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
+            self.shallows
+                .insert("shallow", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
@@ -2202,12 +2205,8 @@ impl LegacyUploadPack {
         if let Some(rest) = line.strip_prefix(b"deepen-not ") {
             self.require_capability(b"shallow")?;
             let oid = cutoff_ref::resolve(repository, rest, &self.limits)?;
-            push_deduplicated_oid(
-                "deepen-not",
-                oid,
-                &mut self.deepen_not,
-                self.limits.max_shallows,
-            )?;
+            self.deepen_not
+                .insert("deepen-not", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
@@ -2262,7 +2261,7 @@ impl LegacyUploadPack {
             self.accept_request_capabilities(&requested, repository.object_format())?;
             self.saw_want_capabilities = true;
         }
-        push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
+        self.wants.insert("want", oid, self.limits.max_wants)?;
         Ok(Transition::empty())
     }
 
@@ -2310,7 +2309,7 @@ impl LegacyUploadPack {
         let line = request_line(line)?;
         if let Some(rest) = line.strip_prefix(b"have ") {
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
+            self.haves.insert("have", oid, self.limits.max_haves)?;
             if repository.is_common(oid) {
                 let first_common = self.last_common.is_none();
                 self.last_common = Some(oid);
@@ -2349,13 +2348,8 @@ impl LegacyUploadPack {
     ) -> Result<Transition, WireError> {
         // Readiness is conservative: exact wanted tips must be in the client's
         // common have set. A mere unrelated common object never proves ready.
-        // Sorting a bounded vector avoids a wants-times-haves scan.
-        let mut common = Vec::new();
-        common
-            .try_reserve_exact(self.haves.len())
-            .map_err(|_| WireError::AllocationFailure)?;
-        common.extend_from_slice(&self.haves);
-        common.sort_unstable();
+        // The request-local membership index avoids rescanning or sorting the
+        // ordered have list; it cannot replace the repository's common check.
         let ready = self.ack_mode == AckMode::MultiAckDetailed
             && self.last_common.is_some()
             && self.shallows.is_empty()
@@ -2364,8 +2358,9 @@ impl LegacyUploadPack {
             && self.deepen_not.is_empty()
             && self
                 .wants
+                .as_slice()
                 .iter()
-                .all(|oid| common.binary_search(oid).is_ok() && repository.is_common(*oid));
+                .all(|oid| self.haves.contains(oid) && repository.is_common(*oid));
         let mut transition = Transition::empty();
         if ready && let Some(oid) = self.last_common {
             transition
@@ -2494,12 +2489,12 @@ impl LegacyUploadPack {
     fn pack_request(&self) -> PackRequest {
         PackRequest {
             version: self.version,
-            wants: self.wants.clone(),
-            haves: self.haves.clone(),
-            shallows: self.shallows.clone(),
+            wants: self.wants.as_slice().to_vec(),
+            haves: self.haves.as_slice().to_vec(),
+            shallows: self.shallows.as_slice().to_vec(),
             deepen: self.deepen,
             deepen_since: self.deepen_since,
-            deepen_not: self.deepen_not.clone(),
+            deepen_not: self.deepen_not.as_slice().to_vec(),
             filter: self.filter.clone(),
             options: self.options,
         }
@@ -2508,36 +2503,6 @@ impl LegacyUploadPack {
 
 fn line_packet(line: impl Into<Vec<u8>>) -> Packet {
     Packet::Data(line.into())
-}
-
-/// Adds one object id to a request-side collection as a SET member.
-///
-/// A repeated `want`, `have`, or shallow identity is idempotent rather than
-/// fatal: upstream `git upload-pack` treats these collections as sets and
-/// accepts repeated lines (verified differentially against pinned
-/// git-2.54.0, which answers a duplicate-want request with NAK and a pack).
-/// Real clients rely on this -- a branch and a lightweight tag sharing one
-/// tip make `git clone` emit the same want once per advertised ref.
-///
-/// The bound still counts DISTINCT identities only; a repeat neither grows
-/// the collection nor consumes budget.
-fn push_deduplicated_oid(
-    field: &'static str,
-    oid: AnyGitOid,
-    target: &mut Vec<AnyGitOid>,
-    limit: usize,
-) -> Result<(), WireError> {
-    if target.contains(&oid) {
-        return Ok(());
-    }
-    if target.len() == limit {
-        return Err(WireError::TooManyObjectIds { field, limit });
-    }
-    target
-        .try_reserve(1)
-        .map_err(|_| WireError::AllocationFailure)?;
-    target.push(oid);
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2580,12 +2545,12 @@ pub struct V2UploadPack {
     server_capabilities: Capabilities,
     state: V2State,
     request_capabilities: Capabilities,
-    wants: Vec<AnyGitOid>,
-    haves: Vec<AnyGitOid>,
-    shallows: Vec<AnyGitOid>,
+    wants: RequestObjectIds,
+    haves: RequestObjectIds,
+    shallows: RequestObjectIds,
     deepen: Option<u32>,
     deepen_since: Option<i64>,
-    deepen_not: Vec<AnyGitOid>,
+    deepen_not: RequestObjectIds,
     filter: Option<ObjectFilter>,
     options: PackOptions,
     done: bool,
@@ -2631,12 +2596,12 @@ impl V2UploadPack {
             server_capabilities,
             state: V2State::AwaitCommand,
             request_capabilities: Capabilities::default(),
-            wants: Vec::new(),
-            haves: Vec::new(),
-            shallows: Vec::new(),
+            wants: RequestObjectIds::default(),
+            haves: RequestObjectIds::default(),
+            shallows: RequestObjectIds::default(),
             deepen: None,
             deepen_since: None,
-            deepen_not: Vec::new(),
+            deepen_not: RequestObjectIds::default(),
             filter: None,
             options: PackOptions::NONE,
             done: false,
@@ -2844,7 +2809,7 @@ impl V2UploadPack {
             if !repository.contains_want(oid) {
                 return Err(WireError::WantNotReachable { oid });
             }
-            push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
+            self.wants.insert("want", oid, self.limits.max_wants)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"have ") {
@@ -2852,13 +2817,14 @@ impl V2UploadPack {
                 return Err(WireError::MissingWant);
             }
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
+            self.haves.insert("have", oid, self.limits.max_haves)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"shallow ") {
             self.require_fetch_feature(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
+            self.shallows
+                .insert("shallow", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
@@ -2884,12 +2850,8 @@ impl V2UploadPack {
         if let Some(rest) = line.strip_prefix(b"deepen-not ") {
             self.require_fetch_feature(b"shallow")?;
             let oid = cutoff_ref::resolve(repository, rest, &self.limits)?;
-            push_deduplicated_oid(
-                "deepen-not",
-                oid,
-                &mut self.deepen_not,
-                self.limits.max_shallows,
-            )?;
+            self.deepen_not
+                .insert("deepen-not", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
@@ -3110,12 +3072,12 @@ impl V2UploadPack {
         }
         let request = PackRequest {
             version: UploadPackVersion::V2,
-            wants: self.wants.clone(),
-            haves: self.haves.clone(),
-            shallows: self.shallows.clone(),
+            wants: self.wants.as_slice().to_vec(),
+            haves: self.haves.as_slice().to_vec(),
+            shallows: self.shallows.as_slice().to_vec(),
             deepen: self.deepen,
             deepen_since: self.deepen_since,
-            deepen_not: self.deepen_not.clone(),
+            deepen_not: self.deepen_not.as_slice().to_vec(),
             filter: self.filter.clone(),
             options: self.options.with(PackOptions::SIDE_BAND_64K.0),
         };
@@ -3131,7 +3093,7 @@ impl V2UploadPack {
                 &self.limits,
             )?;
             let mut any_common = false;
-            for &have in &self.haves {
+            for &have in self.haves.as_slice() {
                 if repository.is_common(have) {
                     let line = format!("ACK {}\n", oid_hex(have)).into_bytes();
                     let count = line.len() + 4;
@@ -3158,12 +3120,6 @@ impl V2UploadPack {
             // a sufficient cut. Conservatively ask for another round otherwise;
             // the client's explicit `done` can always terminate negotiation.
             let ready = if self.framing.is_stateless_http() {
-                let mut sorted = Vec::new();
-                sorted
-                    .try_reserve_exact(self.haves.len())
-                    .map_err(|_| WireError::AllocationFailure)?;
-                sorted.extend_from_slice(&self.haves);
-                sorted.sort_unstable();
                 !self.wait_for_done
                     && any_common
                     && self.shallows.is_empty()
@@ -3172,8 +3128,9 @@ impl V2UploadPack {
                     && self.deepen_not.is_empty()
                     && self
                         .wants
+                        .as_slice()
                         .iter()
-                        .all(|oid| sorted.binary_search(oid).is_ok() && repository.is_common(*oid))
+                        .all(|oid| self.haves.contains(oid) && repository.is_common(*oid))
             } else {
                 true
             };
