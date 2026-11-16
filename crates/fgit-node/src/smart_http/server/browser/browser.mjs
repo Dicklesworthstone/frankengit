@@ -1,5 +1,5 @@
 // No framework, remote dependencies, HTML interpolation, or persistent credentials.
-import { collectSourceArchive } from './source-archive.mjs';
+import { collectSourceArchive, cancelSourceBody } from './source-archive.mjs';
 
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -405,11 +405,11 @@ export async function boundedJson(response, maximum = MAX_RESPONSE_BYTES, signal
   if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > MAX_RESPONSE_BYTES) throw new Error('Invalid response byte limit.');
   const declared = response.headers.get('Content-Length');
   if (declared !== null && (declared.length > 20 || !/^(0|[1-9][0-9]*)$/.test(declared) || BigInt(declared) > BigInt(maximum))) {
-    await response.body?.cancel(); throw new Error('Invalid or excessive API response length.');
+    cancelSourceBody(response.body); throw new Error('Invalid or excessive API response length.');
   }
   if (!response.body) throw new Error('Empty API response.');
   const reader = response.body.getReader(), chunks = [];
-  const cancel = () => { void reader.cancel().catch(() => {}); };
+  const cancel = () => cancelSourceBody(reader);
   signal?.addEventListener('abort', cancel, { once: true });
   let count = 0;
   try {
@@ -428,7 +428,7 @@ export async function boundedJson(response, maximum = MAX_RESPONSE_BYTES, signal
     return JSON.parse(utf8().decode(bytes));
   } finally {
     signal?.removeEventListener('abort', cancel);
-    await reader.cancel().catch(() => {});
+    cancelSourceBody(reader);
     reader.releaseLock();
   }
 }
@@ -495,14 +495,14 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     const response = await fetcher(url, {
       method: 'POST', mode: 'same-origin', credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', signal,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: operation === 'archive' ? 'application/x-tar' : 'application/json' },
+        Accept: operation === 'archive' ? (fields.archive_format === 'zip' ? 'application/zip' : 'application/x-tar') : 'application/json' },
       body: new URLSearchParams(fields),
     });
     if (signal.aborted || response.redirected || (response.url && response.url !== url.href)) {
-      await response.body?.cancel(); signal.throwIfAborted(); throw new Error('Repository redirect refused.');
+      cancelSourceBody(response.body); signal.throwIfAborted(); throw new Error('Repository redirect refused.');
     }
     if (response.status !== 200) {
-      await response.body?.cancel();
+      cancelSourceBody(response.body);
       if (response.status === 401) {
         const error = new Error('Token rejected or revoked. Enter a valid read token.');
         error.status = 401; throw error;
@@ -516,7 +516,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     }
     if (operation === 'archive') return response;
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
-      await response.body?.cancel(); throw new Error('Unexpected API content type.');
+      cancelSourceBody(response.body); throw new Error('Unexpected API content type.');
     }
     return boundedJson(response, operation === 'blob' ? 3 * PAGE_BYTES : operation === 'log' ? COMMIT_PROOF_LIMITS.maxReplyBytes : MAX_RESPONSE_BYTES, signal);
   }
@@ -617,15 +617,17 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       }
     }
   }
-  function archive(path, selectedTree) {
+  function archive(path, selectedTree, archiveFormat = 'tar') {
     const version = generation;
     void runRead(async (selected, pinned, binding, signal, checkpoint) => {
       if (version + 1 !== generation || !pinned || !binding) throw new Error('Open a directory before downloading its source archive.');
       if (path) checkedPath(path);
       status('Reading the complete source archive. No download starts until the selected directory and response length are checked.');
-      const response = await request('archive', sourceFields(selected, pinned, path), signal);
+      const fields = sourceFields(selected, pinned, path);
+      if (archiveFormat === 'zip') fields.archive_format = 'zip';
+      const response = await request('archive', fields, signal);
       const result = await collectSourceArchive(response, { format: selected.format, head: pinned.head,
-        commit: pinned.commit, rootTree: binding.tree, selectedTree }, { signal, checkpoint });
+        commit: pinned.commit, rootTree: binding.tree, selectedTree, archiveFormat }, { signal, checkpoint });
       checkpoint();
       const view = generation;
       archiveDownload = result;
@@ -633,9 +635,9 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
         if (generation !== view || archiveDownload !== result || !token) return false;
         check();
         try {
-          if (downloadUrl === null) downloadUrl = urlApi.createObjectURL(new Blob([result.bytes], { type: 'application/x-tar' }));
+          if (downloadUrl === null) downloadUrl = urlApi.createObjectURL(new Blob([result.bytes], { type: result.mediaType }));
           check();
-          const anchor = node('a'); anchor.href = downloadUrl; anchor.download = 'source.tar'; anchor.rel = 'noopener';
+          const anchor = node('a'); anchor.href = downloadUrl; anchor.download = result.filename; anchor.rel = 'noopener';
           byId('content').append(anchor);
           try { check(); anchor.click(); } finally { anchor.remove(); }
           if (archiveUrlTimer !== null) clearTimeout(archiveUrlTimer);
@@ -653,8 +655,8 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       byId('content').append(node('h2', path ? 'Source archive: ' + displayBytes(path) : 'Repository source archive'),
         node('p', result.length + ' bytes · ' + result.entries + ' archive entries · ' + result.gitlinks + ' gitlinks'),
         node('p', 'Directory ' + result.selectedTree + ' at commit ' + result.commit + '.'),
-        node('p', 'The server validated this source archive. The browser checked its selected snapshot and complete response length; it did not cryptographically verify the tar contents. No entries are extracted by this page.'),
-        node('p', 'Gitlinks do not include submodule contents.'), button('Download source.tar again', () => {
+        node('p', 'The server validated this source archive. The browser checked its requested format, selected snapshot and complete response length; it did not cryptographically verify the archive contents. No entries are extracted by this page.'),
+        node('p', 'Gitlinks do not include submodule contents.'), button('Download ' + result.filename + ' again', () => {
           try { download(); } catch { status('Cannot create a source archive download.'); }
         }));
       if (!download(checkpoint)) throw new Error('Cannot create a source archive download.');
@@ -695,6 +697,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       }
       breadcrumbs(path);
       byId('breadcrumbs').append(button('Download directory', () => archive(path, selectedTree)));
+      byId('breadcrumbs').append(button('Download directory as ZIP', () => archive(path, selectedTree, 'zip')));
       byId('content').append(table);
       if (!reply.entries.length) byId('content').append(node('p', 'This directory is empty.'));
     });

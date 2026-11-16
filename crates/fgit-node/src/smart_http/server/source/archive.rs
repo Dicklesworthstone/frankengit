@@ -1,5 +1,5 @@
 //! Complete current-source archives under the existing source-read grant.
-//! Collection must succeed within one request before any tar bytes are sent.
+//! Collection must succeed within one request before any archive bytes are sent.
 
 use super::super::issues::ApiError;
 use super::request::Selection;
@@ -7,8 +7,8 @@ use super::{Status, read_error};
 use crate::smart_http::drive_request_while;
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_forge::source_archive::{
-    MAX_ARCHIVE_BYTES, MIN_ARCHIVE_BYTES, PROFILE, SourceArchive, SourceArchiveError,
-    collect_with_limit,
+    MAX_ARCHIVE_BYTES, SourceArchive, SourceArchiveError, SourceArchiveFormat,
+    collect_with_format_and_limit,
 };
 use fgit_forge::source_browse::SourceBrowseQuery;
 use fgit_wire::smart_http::HttpVersion;
@@ -16,6 +16,7 @@ use std::io::{self, Write};
 
 pub(super) struct Reply {
     archive: SourceArchive,
+    format: SourceArchiveFormat,
 }
 
 fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
@@ -42,22 +43,24 @@ pub(super) fn produce(
     context: &NodeRequestContext,
     selection: &Selection,
     query: &SourceBrowseQuery,
+    format: SourceArchiveFormat,
     maximum_response: u64,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(MAX_ARCHIVE_BYTES);
-    // Even an empty directory needs its prefix and the two terminal blocks.
+    // Both encodings include a root directory and their complete framing.
     // Refuse an impossible output ceiling before reading source objects.
-    if maximum < MIN_ARCHIVE_BYTES {
+    if maximum < format.minimum_bytes() {
         return Err(ApiError::too_large());
     }
     checkpoint(live)?;
-    let archive = collect_with_limit(
+    let archive = collect_with_format_and_limit(
         node.repository_id,
         node.object_format,
         query,
+        format,
         maximum,
         |page| {
             checkpoint(live).map_err(|_| NodeWorkspaceRefusal::Cancelled {
@@ -73,7 +76,7 @@ pub(super) fn produce(
     )
     .map_err(archive_error)?;
     checkpoint(live)?;
-    Ok(Reply { archive })
+    Ok(Reply { archive, format })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -87,6 +90,10 @@ impl Reply {
             HttpVersion::Http11 => "HTTP/1.1",
         };
         let pin = &self.archive.pin;
+        let (media_type, filename) = match self.format {
+            SourceArchiveFormat::Tar => ("application/x-tar", "source.tar"),
+            SourceArchiveFormat::Zip => ("application/zip", "source.zip"),
+        };
         let internal = pin.head.as_internal_object_id();
         let snapshot = format!(
             "alg:{}:{}",
@@ -97,8 +104,8 @@ impl Reply {
             writer,
             concat!(
                 "{} 200 OK\r\n",
-                "Content-Type: application/x-tar\r\n",
-                "Content-Disposition: attachment; filename=\"source.tar\"\r\n",
+                "Content-Type: {}\r\n",
+                "Content-Disposition: attachment; filename=\"{}\"\r\n",
                 "Content-Length: {}\r\n",
                 "Cache-Control: no-store\r\nPragma: no-cache\r\n",
                 "Vary: Authorization\r\nX-Content-Type-Options: nosniff\r\n",
@@ -115,8 +122,10 @@ impl Reply {
                 "Connection: close\r\n\r\n"
             ),
             version,
+            media_type,
+            filename,
             self.archive.bytes.len(),
-            PROFILE,
+            self.format.profile(),
             snapshot,
             pin.head,
             pin.rcr,

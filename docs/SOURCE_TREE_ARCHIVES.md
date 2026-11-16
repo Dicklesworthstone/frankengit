@@ -2,7 +2,8 @@
 
 `fg tree --output` exports a complete, authority-selected source directory as a
 new POSIX ustar or stored-ZIP file. The authenticated HTTP source archive
-endpoint exports the same selected source using ustar. These implement the
+endpoint and source browser export the same selected source in either format.
+These implement the
 bounded source-archive slice of the archive
 creation target in [the compatibility matrix](GIT_COMPATIBILITY_MATRIX.md), not
 a Git bundle, repository capsule, backup, or canonical repository mutation.
@@ -47,6 +48,11 @@ using its raw bytes. Optional `expected_head` carries a previous source response
 the `sha1:` or `sha256:` display prefix. These compare the current visible ref;
 they do not select an arbitrary object or historical snapshot.
 
+Optional `archive_format=tar|zip` selects the encoding. Omission preserves ustar;
+unknown, empty, duplicate or case-altered values refuse with HTTP 400 before
+source reads. This field is valid only on the archive endpoint. The format does
+not change authentication, source selection, snapshot checks or request budgets.
+
 ```sh
 curl --fail-with-body --header @/secure/source-reader.headers \
   --data-urlencode 'object_format=sha256' \
@@ -57,6 +63,10 @@ curl --fail-with-body --header @/secure/source-reader.headers \
   "$REPO_URL/api/v1/source/archive"
 ```
 
+To request ZIP, add `--data-urlencode 'archive_format=zip'` and use
+`--output source.zip.part`. The filename or `Accept` header never silently
+selects another format.
+
 Only publish a downloaded file after a successful status and complete body.
 Check failures before treating an output path as an archive: command-line HTTP
 clients can leave a partial file or an error body at that path.
@@ -66,13 +76,19 @@ The closed read envelope rejects URL query parameters, `Git-Protocol`,
 It inherits the existing route, incarnation, hidden-ref and credential checks.
 Source access creates no transaction and grants no repository write capability.
 
-A successful response uses `application/x-tar`,
-`Content-Disposition: attachment; filename="source.tar"`, an exact
-`Content-Length`, `Cache-Control: no-store` and the following metadata:
+A successful response uses the selected format's exact metadata, an exact
+`Content-Length`, `Cache-Control: no-store` and the source pins below:
+
+| Encoding | Content-Type | Content-Disposition filename | Archive profile |
+|---|---|---|---|
+| `tar` (default) | `application/x-tar` | `source.tar` | `ustar-source-v1` |
+| `zip` | `application/zip` | `source.zip` | `zip-store-source-v1` |
+
+Both filenames use `Content-Disposition: attachment`.
 
 | Header | Meaning |
 |---|---|
-| `X-FrankenGit-Archive-Profile` | `ustar-source-v1` |
+| `X-FrankenGit-Archive-Profile` | Exact profile from the selected encoding above |
 | `X-FrankenGit-Snapshot-Token` | Algorithm-qualified current-head comparison token |
 | `X-FrankenGit-Source-Head` / `X-FrankenGit-Source-Rcr` | Exact authority head and RCR |
 | `X-FrankenGit-Source-Commit` | Typed native commit identity |
@@ -80,12 +96,19 @@ A successful response uses `application/x-tar`,
 | `X-FrankenGit-Archive-Entries` | Header count including `source/` and gitlink directories |
 | `X-FrankenGit-Archive-Gitlinks` / `X-FrankenGit-Archive-Reads` | Opaque gitlinks and native source-read count |
 
-The source browser's **Download directory** action exports the full selected
-directory, including entries beyond the visible page. It validates response
-metadata, the retained snapshot and directory identity, and the complete bounded
-body before creating a download link. Cancelled, truncated or superseded
+The source browser's **Download directory** action exports tar; **Download
+directory as ZIP** explicitly selects ZIP. Both export the full selected
+directory, including entries beyond the visible page. The browser validates the
+requested encoding against the returned MIME type, filename and profile, then
+checks the retained snapshot, directory identity and complete bounded body
+before creating a download link. A tar/ZIP substitution is refused. Cancelled, truncated or superseded
 responses never become downloads. Metadata is not an independent cryptographic
 authority proof; the separate verified-read surface retains that boundary.
+
+Cancellation releases browser read ownership immediately. A stalled or rejected
+underlying stream cleanup cannot prolong the request deadline or replace the
+original size, snapshot, header or authentication refusal. The source JSON reader
+uses the same cleanup behavior, including clearing revoked credentials on HTTP 401.
 
 ## Source and publication boundaries
 
@@ -165,8 +188,9 @@ long-name, PAX, encoding or ZIP64 fallback silently changes the profile.
 This is an exact source-tree export, **not full `git archive` compatibility**.
 `export-ignore`, `export-subst`, pathspec rewriting, timestamps from commit
 metadata, compression and the Git `upload-archive` protocol are not implemented
-by these profiles. ZIP is currently selected through the CLI and shared collector;
-the authenticated HTTP endpoint and browser retain their ustar response profile.
+by these profiles. CLI, authenticated HTTP and browser downloads use the same
+verified-read collector and exact format-specific path rules; a ZIP refusal for
+raw non-UTF-8 names never falls back to tar or rewrites those names.
 Git attributes are included as ordinary source bytes, not executed.
 
 ## Bounds and tests
@@ -211,15 +235,26 @@ also compared with an independent 3,072-byte Python `tarfile` reference fixture
 containing executable bytes, a directory and a symlink.
 
 The native HTTP tests exercise actual node imports and TCP requests in both hash
-domains, fixed and chunked framing, source authentication, restart determinism,
+domains and archive formats, fixed and chunked framing, source authentication, restart determinism,
 safe-subtree export beside an unsupported link, stale snapshots, byte ceilings,
 cancellation and no authority mutation. The HTTP tar parser independently checks
 checksums, entry modes, duplicate names, padding and the final zero blocks;
 shared collector tests check raw-name traversal order across page boundaries.
+The independent HTTP ZIP reader checks local and central records, CRC-32,
+exact offsets, UTF-8 names, stored payloads, Unix modes and terminal framing.
+ZIP's longer-name permitted case is paired with the ustar refusal; its raw-name
+refusal is paired with exact tar export and an independently selected safe ZIP
+subtree. Explicit format parsing and response budgets have focused refusal and
+permitted cases.
 
 Browser tests under `tests/browser/source-archive*.test.mjs` cover bounded binary
 collection, metadata/pin mismatches, aborts, truncation and stale-response
-suppression. Their DOM and fetch doubles are not live-browser evidence.
+suppression in both formats, plus tar/ZIP substitution, ZIP entry limits and the
+112-byte ZIP root-only envelope. Their DOM and fetch doubles are not
+live-browser evidence.
+`tests/browser/source-read-cancellation.test.mjs` uses real WHATWG streams with
+held or rejected cancellation promises to check prompt reader release and
+preservation of the original refusal in both archive formats and source JSON.
 
 ZIP assembly tests exercise both object formats, exact Unicode/binary payloads,
 executable and symlink modes, gitlink directories, deterministic pagination,

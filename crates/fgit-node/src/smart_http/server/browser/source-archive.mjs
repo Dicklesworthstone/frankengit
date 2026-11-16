@@ -1,7 +1,14 @@
 // A complete, bounded server-produced source archive. These checks bind the
-// response to the selected directory; they are not cryptographic tar validation.
+// response to the selected directory and requested encoding; they do not
+// cryptographically validate or extract archive entries.
 export const MAX_SOURCE_ARCHIVE_BYTES = 128 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES = 100_000;
+
+// Cancellation closes local reads immediately. Its underlying cleanup promise
+// may never settle, so observe rejection without allowing cleanup to hide the
+// original refusal or extend the request deadline. No server write is involved.
+export function cancelSourceBody(body) {
+  if (body) void body.cancel().catch(() => {});
+}
 
 function integer(value, field, maximum) {
   if (typeof value !== 'string' || value.length > 16 || !/^(0|[1-9][0-9]*)$/.test(value) ||
@@ -19,25 +26,36 @@ function objectId(value, format) {
   return raw;
 }
 export function sourceArchiveMetadata(headers, expected, maximum = MAX_SOURCE_ARCHIVE_BYTES) {
+  const archiveFormat = expected?.archiveFormat ?? 'tar';
   if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > MAX_SOURCE_ARCHIVE_BYTES ||
       !expected || !['sha1', 'sha256'].includes(expected.format) ||
+      !['tar', 'zip'].includes(archiveFormat) ||
       typeof expected.head !== 'string' || !/^alg:[1-9][0-9]{0,4}:(?:[0-9a-f]{2}){16,64}$/.test(expected.head) ||
       Number(expected.head.split(':')[1]) > 65535 || /^0+$/.test(expected.head.split(':')[2])) {
     throw new Error('Source archive requires a selected snapshot and a bounded byte limit.');
   }
-  if (!/^application\/x-tar(?:\s*;|$)/i.test(headers.get('Content-Type') ?? '') ||
-      !/^attachment;\s*filename=(?:"source\.tar"|source\.tar)$/i.test(headers.get('Content-Disposition') ?? '') ||
+  const zip = archiveFormat === 'zip';
+  const profile = zip ? 'zip-store-source-v1' : 'ustar-source-v1';
+  const mediaType = zip ? 'application/zip' : 'application/x-tar';
+  const filename = zip ? 'source.zip' : 'source.tar';
+  const mediaPattern = zip ? /^application\/zip(?:\s*;|$)/i : /^application\/x-tar(?:\s*;|$)/i;
+  const dispositionPattern = zip ? /^attachment;\s*filename=(?:"source\.zip"|source\.zip)$/i
+    : /^attachment;\s*filename=(?:"source\.tar"|source\.tar)$/i;
+  if (!mediaPattern.test(headers.get('Content-Type') ?? '') ||
+      !dispositionPattern.test(headers.get('Content-Disposition') ?? '') ||
       !['', 'identity'].includes((headers.get('Content-Encoding') ?? '').trim().toLowerCase()) ||
       !(headers.get('Cache-Control') ?? '').split(',').some(part => part.trim().toLowerCase() === 'no-store') ||
-      headers.get('X-FrankenGit-Archive-Profile') !== 'ustar-source-v1') {
+      headers.get('X-FrankenGit-Archive-Profile') !== profile) {
     throw new Error('Unsupported source archive response headers or profile.');
   }
   const bytes = integer(headers.get('Content-Length'), 'length', maximum);
-  const entries = integer(headers.get('X-FrankenGit-Archive-Entries'), 'entry count', MAX_ARCHIVE_ENTRIES);
-  const gitlinks = integer(headers.get('X-FrankenGit-Archive-Gitlinks'), 'gitlink count', MAX_ARCHIVE_ENTRIES);
-  // The closed profile always has its root header and two terminal blocks.
-  // This is envelope framing only; it does not authenticate tar entry bytes.
-  if (bytes < 1536 || bytes % 512 !== 0 || entries === 0 || gitlinks >= entries) {
+  const maximumEntries = zip ? 65_535 : 100_000;
+  const entries = integer(headers.get('X-FrankenGit-Archive-Entries'), 'entry count', maximumEntries);
+  const gitlinks = integer(headers.get('X-FrankenGit-Archive-Gitlinks'), 'gitlink count', maximumEntries);
+  // Both profiles include source/. TAR additionally has aligned blocks; ZIP
+  // includes a local header, central header and end record even when empty.
+  // This is envelope framing only, not authentication of member bytes.
+  if (bytes < (zip ? 112 : 1536) || (!zip && bytes % 512 !== 0) || entries === 0 || gitlinks >= entries) {
     throw new Error('Invalid source archive framing or entry counts.');
   }
   const head = headers.get('X-FrankenGit-Snapshot-Token');
@@ -49,7 +67,7 @@ export function sourceArchiveMetadata(headers, expected, maximum = MAX_SOURCE_AR
     throw new Error('Source archive snapshot or selected directory changed. Reopen the reference.');
   }
   return { format: expected.format, head, commit, rootTree, selectedTree, length: bytes, entries, gitlinks,
-    profile: 'ustar-source-v1' };
+    archiveFormat, profile, mediaType, filename };
 }
 
 // Allocate only after validating the declared length. One operation owns the
@@ -65,7 +83,7 @@ export async function collectSourceArchive(response, expected,
     const metadata = sourceArchiveMetadata(response.headers, { ...expected }, maxBytes);
     if (!response.body) throw new Error('Empty source archive response.');
     reader = response.body.getReader();
-    cancel = () => { void reader.cancel().catch(() => {}); };
+    cancel = () => cancelSourceBody(reader);
     signal?.addEventListener('abort', cancel, { once: true });
     check();
     const bytes = new Uint8Array(metadata.length);
@@ -86,10 +104,10 @@ export async function collectSourceArchive(response, expected,
   } finally {
     if (cancel) signal?.removeEventListener('abort', cancel);
     if (reader) {
-      await reader.cancel().catch(() => {});
+      cancelSourceBody(reader);
       reader.releaseLock();
     } else {
-      await response.body?.cancel().catch(() => {});
+      cancelSourceBody(response.body);
     }
   }
 }

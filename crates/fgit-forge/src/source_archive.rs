@@ -38,6 +38,18 @@ impl SourceArchiveFormat {
         }
     }
 
+    /// Complete root-only archive size, including the `source/` member and
+    /// terminal framing. Transports can reject impossible response budgets
+    /// before source I/O without applying one encoding's framing to another.
+    #[must_use]
+    pub const fn minimum_bytes(self) -> usize {
+        match self {
+            Self::Tar => MIN_ARCHIVE_BYTES,
+            // Local header, central header, end record and two source/ names.
+            Self::Zip => 30 + 46 + 22 + 2 * 7,
+        }
+    }
+
     const fn max_entries(self) -> usize {
         match self {
             Self::Tar => MAX_ENTRIES,

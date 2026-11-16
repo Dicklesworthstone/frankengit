@@ -1,18 +1,20 @@
 // Header and stream contract tests against injected responses. The synthetic
-// payloads are not a tar oracle; native source_archive_http tests own tar bytes.
+// payloads are not archive oracles; native source_archive_http tests own bytes.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { collectSourceArchive, sourceArchiveMetadata, MAX_SOURCE_ARCHIVE_BYTES }
   from '../../crates/fgit-node/src/smart_http/server/browser/source-archive.mjs';
 
-function fixture(format = 'sha1', length = 2048) {
+function fixture(format = 'sha1', length = 2048, archiveFormat = 'tar') {
   const width = format === 'sha1' ? 40 : 64;
-  const expected = { format, head: 'alg:2:' + 'a'.repeat(64), commit: 'b'.repeat(width),
+  const expected = { format, archiveFormat, head: 'alg:2:' + 'a'.repeat(64), commit: 'b'.repeat(width),
     rootTree: 'c'.repeat(width), selectedTree: 'd'.repeat(width) };
   const headers = new Headers({
-    'Content-Type': 'application/x-tar', 'Content-Disposition': 'attachment; filename="source.tar"',
+    'Content-Type': archiveFormat === 'zip' ? 'application/zip' : 'application/x-tar',
+    'Content-Disposition': `attachment; filename="source.${archiveFormat}"`,
     'Content-Length': String(length), 'Cache-Control': 'no-store',
-    'X-FrankenGit-Archive-Profile': 'ustar-source-v1', 'X-FrankenGit-Archive-Entries': '3',
+    'X-FrankenGit-Archive-Profile': archiveFormat === 'zip' ? 'zip-store-source-v1' : 'ustar-source-v1',
+    'X-FrankenGit-Archive-Entries': '3',
     'X-FrankenGit-Archive-Gitlinks': '1', 'X-FrankenGit-Snapshot-Token': expected.head,
     'X-FrankenGit-Source-Commit': format + ':' + expected.commit,
     'X-FrankenGit-Root-Tree': format + ':' + expected.rootTree,
@@ -22,28 +24,33 @@ function fixture(format = 'sha1', length = 2048) {
 }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 for (const format of ['sha1', 'sha256']) {
-  test(format + ': irregular chunks produce exactly one complete archive at the selected directory', async () => {
-    const f = fixture(format, 3584), pieces = [f.bytes.slice(0, 19), f.bytes.slice(19, 513), f.bytes.slice(513)];
+  for (const archiveFormat of ['tar', 'zip']) {
+  test(format + '/' + archiveFormat + ': irregular chunks produce exactly one complete archive at the selected directory', async () => {
+    const length = archiveFormat === 'zip' ? 1763 : 3584;
+    const f = fixture(format, length, archiveFormat), pieces = [f.bytes.slice(0, 19), f.bytes.slice(19, 513), f.bytes.slice(513)];
     const stream = new ReadableStream({ pull(controller) {
       if (pieces.length) controller.enqueue(pieces.shift()); else controller.close();
     } }, { highWaterMark: 0 });
     const result = await collectSourceArchive(new Response(stream, { headers: f.headers }), f.expected);
     assert.deepEqual(result.bytes, f.bytes);
-    assert.equal(result.length, 3584); assert.equal(result.entries, 3); assert.equal(result.gitlinks, 1);
-    for (const key of ['format', 'head', 'commit', 'rootTree', 'selectedTree']) assert.equal(result[key], f.expected[key]);
+    assert.equal(result.length, length); assert.equal(result.entries, 3); assert.equal(result.gitlinks, 1);
+    for (const key of ['format', 'archiveFormat', 'head', 'commit', 'rootTree', 'selectedTree']) assert.equal(result[key], f.expected[key]);
+    assert.equal(result.filename, `source.${archiveFormat}`);
+    assert.equal(result.mediaType, f.headers.get('Content-Type'));
     assert.equal(stream.locked, false);
   });
-  test(format + ': the minimum root-only profile is admitted at its exact byte bound', async () => {
-    const f = fixture(format, 1536);
+  test(format + '/' + archiveFormat + ': the minimum root-only profile is admitted at its exact byte bound', async () => {
+    const minimum = archiveFormat === 'zip' ? 112 : 1536;
+    const f = fixture(format, minimum, archiveFormat);
     f.headers.set('X-FrankenGit-Archive-Entries', '1'); f.headers.set('X-FrankenGit-Archive-Gitlinks', '0');
     f.headers.set('X-FrankenGit-Selected-Tree', f.expected.rootTree);
     f.expected.selectedTree = f.expected.rootTree;
-    const result = await collectSourceArchive(new Response(f.bytes, { headers: f.headers }), f.expected, { maxBytes: 1536 });
+    const result = await collectSourceArchive(new Response(f.bytes, { headers: f.headers }), f.expected, { maxBytes: minimum });
     assert.deepEqual(result.bytes, f.bytes); assert.equal(result.entries, 1); assert.equal(result.gitlinks, 0);
-    await assert.rejects(collectSourceArchive(new Response(f.bytes, { headers: f.headers }), f.expected, { maxBytes: 1535 }), /length/);
+    await assert.rejects(collectSourceArchive(new Response(f.bytes, { headers: f.headers }), f.expected, { maxBytes: minimum - 1 }), /length/);
   });
-  test(format + ': independently changed head, commit, root or selected tree never return bytes', async () => {
-    const f = fixture(format);
+  test(format + '/' + archiveFormat + ': independently changed head, commit, root or selected tree never return bytes', async () => {
+    const f = fixture(format, 2048, archiveFormat);
     const fields = ['X-FrankenGit-Snapshot-Token', 'X-FrankenGit-Source-Commit', 'X-FrankenGit-Root-Tree', 'X-FrankenGit-Selected-Tree'];
     for (const field of fields) {
       const headers = new Headers(f.headers);
@@ -51,7 +58,39 @@ for (const format of ['sha1', 'sha256']) {
       await assert.rejects(collectSourceArchive(new Response(f.bytes, { headers }), f.expected), /snapshot or selected directory changed/);
     }
   });
+  }
 }
+
+test('the requested encoding pins all ZIP headers and cannot silently fall back to tar', async () => {
+  const f = fixture('sha256', 112, 'zip');
+  f.headers.set('X-FrankenGit-Archive-Entries', '1');
+  f.headers.set('X-FrankenGit-Archive-Gitlinks', '0');
+  for (const [field, value] of [
+    ['Content-Type', 'application/x-tar'],
+    ['Content-Disposition', 'attachment; filename="source.tar"'],
+    ['Content-Disposition', 'attachment; filename="../source.zip"'],
+    ['X-FrankenGit-Archive-Profile', 'ustar-source-v1'],
+    ['X-FrankenGit-Archive-Profile', 'zip64-source-v1'],
+    ['Content-Length', '111'],
+    ['X-FrankenGit-Archive-Entries', '65536'],
+    ['Content-Encoding', 'gzip'],
+  ]) {
+    const headers = new Headers(f.headers); headers.set(field, value);
+    let reads = 0, cancellations = 0;
+    const body = new ReadableStream({ pull() { reads++; }, cancel() { cancellations++; } }, { highWaterMark: 0 });
+    await assert.rejects(collectSourceArchive(new Response(body, { headers }), f.expected), Error, field);
+    assert.equal(reads, 0); assert.equal(cancellations, 1); assert.equal(body.locked, false);
+  }
+  for (const requested of ['tar', 'zip']) {
+    const sent = fixture('sha1', 2048, requested === 'zip' ? 'tar' : 'zip');
+    await assert.rejects(collectSourceArchive(new Response(sent.bytes, { headers: sent.headers }),
+      { ...sent.expected, archiveFormat: requested }), /headers or profile/);
+  }
+  const tar = fixture(); delete tar.expected.archiveFormat;
+  assert.equal(sourceArchiveMetadata(tar.headers, tar.expected).archiveFormat, 'tar', 'omitted format preserves tar');
+  await assert.rejects(collectSourceArchive(new Response(f.bytes, { headers: f.headers }),
+    { ...f.expected, archiveFormat: undefined }), /headers or profile/);
+});
 
 test('malformed headers and excess lengths refuse before reading any body chunk', async () => {
   const f = fixture(), cases = [
@@ -125,4 +164,7 @@ test('invalid caller budgets and source identities cannot relax the closed archi
     assert.throws(() => sourceArchiveMetadata(f.headers, { ...f.expected, head }));
   }
   assert.throws(() => sourceArchiveMetadata(f.headers, { ...f.expected, format: 'sha512' }));
+  for (const archiveFormat of ['', 'ZIP', 'tar.gz', 'zip64', {}, true]) {
+    assert.throws(() => sourceArchiveMetadata(f.headers, { ...f.expected, archiveFormat }));
+  }
 });

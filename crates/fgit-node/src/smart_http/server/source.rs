@@ -581,12 +581,17 @@ pub(super) fn execute(
     // repository boundary; query paths only narrow selection. Current canonical
     // hidden refs remain undisclosable.
     let body = match &command {
-        Command::Archive { selection, query } => {
+        Command::Archive {
+            selection,
+            query,
+            archive_format,
+        } => {
             return archive::produce(
                 node,
                 &context,
                 selection,
                 query,
+                *archive_format,
                 maximum_response,
                 &mut live,
             )

@@ -2,6 +2,7 @@
 //! expected OIDs are comparisons, never an arbitrary-object lookup capability.
 
 use super::super::issues::{ApiError, MAX_FORM_BYTES, parse_decimal, parse_form, parse_snapshot};
+use fgit_forge::source_archive::SourceArchiveFormat;
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseQuery};
 use fgit_forge::source_search::batch::{MAX_BATCH_QUERIES, SourceQueryBatch};
 use fgit_forge::source_search::{SearchCase, SearchLimits, SourceQuery};
@@ -110,7 +111,7 @@ impl<'a> Request<'a> {
                 Operation::Commit => false,
                 Operation::Tree => matches!(name.as_str(), "path_hex" | "after_hex" | "limit"),
                 Operation::Blob => matches!(name.as_str(), "path_hex" | "offset" | "limit"),
-                Operation::Archive => name == "path_hex",
+                Operation::Archive => matches!(name.as_str(), "path_hex" | "archive_format"),
                 Operation::Search | Operation::SearchBatch => matches!(
                     name.as_str(),
                     "needle_hex" | "case" | "max_matches" | "max_bytes" | "max_file_bytes"
@@ -233,7 +234,16 @@ impl<'a> Request<'a> {
             .validate(format)
             .map_err(|_| ApiError::bad("invalid_browse_query"))?;
         if self.operation == Operation::Archive {
-            Ok(Command::Archive { selection, query })
+            let archive_format = match fields.remove("archive_format").as_deref().unwrap_or("tar") {
+                "tar" => SourceArchiveFormat::Tar,
+                "zip" => SourceArchiveFormat::Zip,
+                _ => return Err(ApiError::bad("unsupported_archive_format")),
+            };
+            Ok(Command::Archive {
+                selection,
+                query,
+                archive_format,
+            })
         } else {
             Ok(Command::Browse { selection, query })
         }
@@ -258,6 +268,7 @@ pub(super) enum Command {
     Archive {
         selection: Selection,
         query: SourceBrowseQuery,
+        archive_format: SourceArchiveFormat,
     },
     Search {
         selection: Selection,

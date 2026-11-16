@@ -1,9 +1,12 @@
 //! Complete source archives through the production TCP listener and authority.
-//! The independent tar reader checks byte paths, metadata and exact framing.
+//! Independent format readers check byte paths, metadata and exact framing.
 #![forbid(unsafe_code)]
 
 #[path = "source_http/support.rs"]
 mod support;
+
+#[path = "source_archive_http/zip_tests.rs"]
+mod zip_tests;
 
 use fgit_authority::{IdempotencyKey, key_recovery::RequestRecovery};
 use fgit_crypto::{GitObjectKind, git_object_id};
@@ -37,6 +40,7 @@ impl BinaryReply {
         let body = std::str::from_utf8(&self.body).unwrap();
         assert!(body.contains(code), "{body}");
         assert!(!self.head.contains("application/x-tar"));
+        assert!(!self.head.contains("application/zip"));
         assert!(!self.head.contains("Content-Disposition:"));
         assert!(!self.head.contains("X-FrankenGit-Source-Commit:"));
     }
@@ -179,6 +183,13 @@ fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, body: &[u8]
     id
 }
 fn safe_fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid, GitOid) {
+    safe_fixture_with_name(root, format, BINARY_PATH)
+}
+fn safe_fixture_with_name(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    binary_name: &[u8],
+) -> (OneNode, GitOid, GitOid) {
     let git = root.0.join("archive-source");
     fs::create_dir_all(git.join("refs/heads")).unwrap();
     fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
@@ -198,7 +209,7 @@ fn safe_fixture(root: &Scratch, format: GitHashAlgorithm) -> (OneNode, GitOid, G
     let missing = GitOid::from_hex(format, &"ab".repeat(format.digest_len())).unwrap();
     let mut entries = Vec::new();
     for (mode, name, oid) in [
-        ("100644", BINARY_PATH, blob(BINARY)),
+        ("100644", binary_name, blob(BINARY)),
         ("40000", b"dir".as_slice(), nested),
         ("100644", b"empty".as_slice(), blob(&[])),
         ("120000", b"link".as_slice(), blob(b"dir/run")),
