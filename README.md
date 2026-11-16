@@ -721,6 +721,16 @@ retain eligible metadata for later queries; cache eviction or restart restores
 that same path. This shares parsing work with merge preparation without
 persisting an ancestry index or making cached entries publication authority.
 
+[Native PR rebase-and-merge](docs/NATIVE_PULL_REQUEST_REBASE.md) adds a separate
+trusted-local prepare → whole-series inspect → exact-candidate review → atomic
+merge workflow. It replays a bounded linear source suffix onto the target,
+preserves original authors/messages, and leaves the source branch unchanged.
+The target ref, PR merge event and delivery obligation publish together. Every
+intermediate commit remains inspectable, and path-specific review rules cover
+temporary changes even when later commits restore the final tree. Conflicts,
+stale subjects, multi-parent steps and entirely dropped series refuse without
+an automatic alternate merge method.
+
 Non-atomic receives now publish independent ref decisions in bounded groups:
 at most 64 decisions and 1 MiB of canonical decision-batch bytes share one
 exact-predecessor authority-head CAS. Every command retains its own seal,

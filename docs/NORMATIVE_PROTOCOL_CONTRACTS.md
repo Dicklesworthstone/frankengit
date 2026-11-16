@@ -969,6 +969,38 @@ a 128 MiB budget, and charge retained label bytes against the 32 MiB page budget
 Cancellation or exhaustion refuses the whole read rather than returning a
 complete-looking partial result.
 
+#### 20.1.3 Native pull-request rebase-and-merge
+
+The explicit `rebase/v1` native merge method applies only to an existing open
+PR with an exact positive content version. Its immutable request binds the
+original source and target refs/tips, original common base, reviewed candidate
+and method. A successful authority-head replacement publishes the target update,
+native PR merge event and delivery obligation together. The source ref MUST NOT
+be rewritten as an implicit part of this operation.
+
+Both the original source-to-base suffix and candidate-to-target series MUST be
+independently checked as nonempty single-parent chains of at most 256 commits.
+The base MUST also be an ancestor of the target. Candidate native identities,
+intermediate trees and all required object edges MUST verify under aggregate
+object, byte, edge and cancellation limits; selected intermediate commits do not
+terminate series validation. Candidate commit bodies admit at most 16 MiB in
+total. An entirely dropped series, a multi-parent step or a stale current PR/ref
+subject refuses rather than selecting another merge method.
+
+The preparation artifact names the target and has the target tip as its sole
+prerequisite. Whole-series inspection MUST expose every rewritten commit and
+parent-to-child difference, including changes absent from the final tree.
+Candidate review remains bound to the exact PR subject, base and final commit
+identity; existing review-event bytes are unchanged. Path-specific protection
+MUST consider the union of changes across all intermediate commits and MUST
+reject substitution of a final-tree-only path witness.
+
+Preparation and inspection grant no publication authority. Current native
+review, check, visibility, quota and ref policy gates remain in force on every
+publication basis. Existing seals and recorded outcomes retain their identity
+and retry semantics. See [the native PR rebase workflow](NATIVE_PULL_REQUEST_REBASE.md)
+for the bounded client and unsupported-surface contract.
+
 ### 20.2 Native issue assignment deltas
 
 The native issue stream uses the same aggregate version for opening, field

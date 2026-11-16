@@ -8,6 +8,7 @@ mod fast_forward;
 mod labels;
 mod options;
 mod output;
+mod rebase;
 mod search;
 #[cfg(test)]
 mod tests;
@@ -43,6 +44,10 @@ usage: fg pr search --help
 
 usage: fg pr fast-forward --help
   Fast-forward an existing PR with exact version/tips, without a new commit.
+usage: fg pr prepare-rebase --help
+  Prepare a target-branch rebase bundle for an exact existing PR subject.
+usage: fg pr inspect-rebase --help
+  Inspect all candidate commit bodies and every rewritten step before review.
 usage: fg pr checks --help
   Read canonical workflow observations for the PR's exact source commit.
 usage: fg pr comment --help
@@ -65,10 +70,22 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 This is a trusted local-operator interface, not a remote authorization service.";
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
-    if arguments.first().is_some_and(|argument| matches!(argument.as_str(), "labels" | "set-labels")) {
+    if arguments
+        .first()
+        .is_some_and(|argument| matches!(argument.as_str(), "prepare-rebase" | "inspect-rebase"))
+    {
+        return rebase::run(arguments, &mut std::io::stdout().lock());
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| matches!(argument.as_str(), "labels" | "set-labels"))
+    {
         return labels::run(arguments, &mut std::io::stdout().lock());
     }
-    if arguments.first().is_some_and(|argument| argument == "search") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "search")
+    {
         return search::run(&arguments[1..], &mut std::io::stdout().lock());
     }
     if arguments.first().is_some_and(|argument| {

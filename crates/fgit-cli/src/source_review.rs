@@ -313,7 +313,7 @@ fn entry_identity(value: Option<EntryIdentity>) -> String {
 fn text(value: &[u8]) -> String {
     std::str::from_utf8(value).map_or_else(|_| "null".into(), quote)
 }
-fn render_entry(entry: &ReviewedEntry) -> String {
+pub(crate) fn render_entry(entry: &ReviewedEntry) -> String {
     let content = match &entry.content {
         ReviewContent::Identical => "{\"kind\":\"identical\"}".to_owned(),
         ReviewContent::ObjectOnly => "{\"kind\":\"object_only\"}".to_owned(),
