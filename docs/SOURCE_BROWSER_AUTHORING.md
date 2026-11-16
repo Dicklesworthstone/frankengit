@@ -11,7 +11,8 @@ static shell includes no repository content or credentials. PR and issue
 profile enablement is not widened by its shared JavaScript helpers.
 
 The implemented workflow is: select an existing branch and immutable native
-commit; load complete files; queue explicit edits or upload a Git patch; prepare
+commit; load complete files; queue explicit edits, import local files or a directory,
+or upload a Git patch; prepare
 and inspect the native candidate; prepare a local publication request; separately
 confirm and send it. Native admission still owns quarantine, object validation,
 policy, sealed request identity and exact-predecessor authority CAS. This is a
@@ -49,6 +50,56 @@ browser is not widened by this change. Existing-branch source authoring still
 requires an existing commit-valued branch and does not initialize a repository,
 rewrite history or implement directory moves. Unsupported work refuses rather
 than calling Git in production or silently changing semantics.
+
+### Import local files or a directory into existing history
+
+After selecting the branch base, use **Import files into this branch** to add or
+update several files in one candidate. Select individual files or one directory,
+optionally enter a destination directory, and import the selection into the queue.
+The destination accepts UTF-8 text or exact lowercase hex path bytes. Individual
+files use their basenames. Directory selection preserves each path inside the
+chosen directory and omits the chosen directory's own name. Empty directories
+have no Git tree entry and are not imported. A browser without directory-path
+metadata must use individual files; the editor refuses to flatten a directory
+selection silently.
+
+The default mode policy preserves each existing regular or executable mode and
+creates new files as `100644`. Explicit `100644` and `100755` policies apply to
+every selected file, including otherwise unchanged files. Local filenames and
+browser file metadata do not infer executable permission. Bytes, including NUL,
+CRLF and missing final newlines, pass through unchanged. Equal bytes and mode
+are skipped and listed as unchanged; the queue displays each resulting path,
+size and before/after mode. Unselected repository files are never deleted.
+
+Before reading local file bytes, the client completes and verifies each required
+native source-tree inventory against the selected immutable tree identity. It
+then checks complete existing-file bytes, blob identities and modes. A missing
+listing row, failed page, HTTP error or stale read cannot become evidence that
+a path is absent. The import refuses symlinks, gitlinks, Git control paths,
+duplicate destinations and ancestor/descendant conflicts. Imported paths cannot
+replace or overlap a previously queued edit or either endpoint of a queued
+rename. Remove the conflicting queued edit explicitly before importing it.
+
+The selected files and retained queue share the existing 64-path limit. Each
+file is bounded to 256 KiB; retained edits, existing file bytes and incoming bytes
+share the 1 MiB combined draft budget, with the same patch and line ceilings.
+Native directory inventory also has a whole-operation 60-second deadline,
+128-page ceiling and 2 MiB metadata ceiling. Hitting any ceiling refuses the
+whole import, without adopting an earlier successful prefix.
+
+Only a completely validated import updates the queue. It preserves prior queued
+edits, rename grouping and the current unqueued file draft. **Cancel import**,
+selection changes and disconnect invalidate outstanding work; a local file read
+that cannot be aborted must drain before another operation starts. Cancellation
+or any read/validation failure preserves the prior queue and draft. Disconnect
+clears source data and local file selections as usual, without allowing late
+results to restore them.
+
+Import itself performs only source reads. Review the queue, prepare and inspect
+the native candidate, then prepare the publication and separately confirm its
+send. A pending original publication disables further imports and retains its
+exact original key, including after a lost reply. Recovery-only connections
+cannot read selected files or start import requests.
 
 ### Explicit file renames in one candidate
 
@@ -188,6 +239,20 @@ Run client/DOM contract tests with:
 ```sh
 node --test tests/browser/*.test.mjs
 ```
+
+The focused existing-history import checks are:
+
+```sh
+node --test tests/browser/source-import.test.mjs tests/browser/source-import-view.test.mjs
+```
+
+They exercise the production client and view together with HTTP/DOM/File doubles,
+real native tree/blob identity hashes, both SHA object formats, atomic queue
+adoption, binary bytes, mode policy, cancellation and retained drafts. The view
+cases also drive imported edits through native preparation/inspection response
+validation, separate confirmed publication and original-key outcome recovery.
+Those responses are fixtures, not execution of a live native server or a real
+browser.
 
 The focused source/initial credential-rotation checks are
 `tests/browser/source-initial-credential-recovery.test.mjs` and
