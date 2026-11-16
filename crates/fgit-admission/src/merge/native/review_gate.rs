@@ -271,6 +271,34 @@ where
             .map_err(ProjectionFailure::Unavailable)?;
         Ok(closure)
     }
+    async fn validate_rebase_async<'a>(
+        &'a self,
+        store: &'a S,
+        cx: &'a S::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        let closure = self
+            .inner
+            .validate_rebase_async(store, cx, basis, authenticated, intent)
+            .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        verify_at(
+            store,
+            cx,
+            basis,
+            intent,
+            self.context.principal_id,
+            self.required,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(closure)
+    }
 }
 
 fn infrastructure(error: AdmissionError) -> ProjectionFailure {

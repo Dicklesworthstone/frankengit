@@ -4,7 +4,7 @@ use crate::{
     AdmissionMaterializationRefusal, NodeRequestContext, OneNode, VerifiedFabricPackSource,
 };
 use fgit_admission::ProjectionFailure;
-use fgit_admission::merge::native::objects::MergeObjectLimits;
+use fgit_admission::merge::native::objects::{MergeObjectLimits, ObjectFrontier};
 use fgit_forge::preparation::rebase::resolutions::{
     RebaseCommitResolution, RebaseResolvedStep, prepare_resolved_rebase,
     validate_rebase_resolutions,
@@ -232,6 +232,41 @@ impl OneNode {
         limits: PreparationLimits,
         resolutions: &[RebaseCommitResolution],
     ) -> Result<(PreparedRebaseBundle, Vec<RebaseResolvedStep>), RebasePreparationRefusal> {
+        self.prepare_resolved_rebase_bundle_for_reference_in(
+            request,
+            source_ref,
+            onto_ref,
+            source_ref,
+            inputs,
+            visibility,
+            expected_head,
+            committer,
+            limits,
+            resolutions,
+        )
+        .await
+    }
+
+    /// The PR profile exports the same immutable series for the target branch.
+    /// This selects an artifact name only; neither profile publishes a ref.
+    pub(in crate::treefs_workspace) async fn prepare_resolved_rebase_bundle_for_reference_in(
+        &self,
+        request: &NodeRequestContext,
+        source_ref: &RefName,
+        onto_ref: &RefName,
+        bundle_ref: &RefName,
+        inputs: RebaseRequest,
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        committer: &RebaseCommitter,
+        limits: PreparationLimits,
+        resolutions: &[RebaseCommitResolution],
+    ) -> Result<(PreparedRebaseBundle, Vec<RebaseResolvedStep>), RebasePreparationRefusal> {
+        if bundle_ref != source_ref && bundle_ref != onto_ref {
+            return Err(RebasePreparationRefusal::InvalidInput(
+                "rebase artifact must name source or target",
+            ));
+        }
         validate_rebase_resolutions(self.object_format, limits, resolutions)
             .map_err(preparation)?;
         committer.validate().map_err(preparation)?;
@@ -313,12 +348,30 @@ impl OneNode {
         let outcome = resolved.preparation;
         let (bundle, pack_objects, borrowed_objects) = match &outcome {
             RebasePreparation::Clean(plan) => {
+                let merge = if bundle_ref == onto_ref {
+                    if plan.commit == inputs.onto {
+                        return Err(RebasePreparationRefusal::InvalidInput(
+                            "an entirely dropped PR rebase cannot publish a merge",
+                        ));
+                    }
+                    Some(fgit_forge::event::NativeMerge {
+                        source_ref: source_ref.clone(),
+                        source_tip: inputs.source_tip,
+                        base_tip: inputs.upstream,
+                        target_ref: onto_ref.clone(),
+                        target_tip_before: inputs.onto,
+                        merge_commit: plan.commit,
+                    })
+                } else {
+                    None
+                };
                 let (bytes, count, borrowed) = rebase_bundle(
                     &original,
-                    source_ref,
+                    bundle_ref,
                     plan,
                     limits,
                     self.reused_merge_blob_limit(),
+                    merge.as_ref(),
                 )?;
                 (Some(bytes), count, borrowed)
             }
@@ -417,6 +470,7 @@ fn rebase_bundle(
     plan: &PreparedRebase,
     limits: PreparationLimits,
     maximum_reused_blob_bytes: usize,
+    pull_request_merge: Option<&fgit_forge::event::NativeMerge>,
 ) -> Result<(Vec<u8>, usize, usize), RebasePreparationRefusal> {
     verify_chain(original, plan)?;
     let candidate = CandidateSource {
@@ -447,6 +501,17 @@ fn rebase_bundle(
         ..MergeObjectLimits::default()
     };
     let mut live = || original.checkpoint().is_ok();
+    if let Some(merge) = pull_request_merge {
+        let verified = fgit_admission::merge::native::objects::validate_rebase_objects_above(
+            &candidate,
+            merge,
+            ObjectFrontier::with_headers(original.selected.closure().objects(), &headers),
+            validation,
+            &mut live,
+        );
+        original.checkpoint()?;
+        verified.map_err(RebasePreparationRefusal::Validation)?;
+    }
     let needed = super::sparse_bundle::objects_above_target(
         &headers,
         plan.request.onto,

@@ -70,6 +70,9 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
                     NativeMergeMethod::FastForwardOnly => {
                         return Err("fast-forward does not construct a candidate".to_owned());
                     }
+                    NativeMergeMethod::Rebase => {
+                        return Err("use fg pr prepare-rebase for a linear PR candidate".to_owned());
+                    }
                 },
             ))
             .map_err(|error| error.to_string())
@@ -323,6 +326,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         message: message.ok_or("--message is required")?,
     };
     metadata.validate().map_err(|error| error.to_string())?;
+    let method = method.unwrap_or(NativeMergeMethod::MergeCommit);
+    if method == NativeMergeMethod::Rebase {
+        return Err("use fg pr prepare-rebase for a linear PR candidate".to_owned());
+    }
     let output = PathBuf::from(&arguments[5]);
     if output.file_name().is_none() {
         return Err("output must name a new regular file".to_owned());
@@ -335,7 +342,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         incoming,
         output,
         metadata,
-        method: method.unwrap_or(NativeMergeMethod::MergeCommit),
+        method,
         profile,
         format: format.unwrap_or(GitHashAlgorithm::Sha1),
     })

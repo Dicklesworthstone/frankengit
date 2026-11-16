@@ -78,6 +78,18 @@ pub trait SyncNativeMergeProjection: Sync {
             RefusalCode::PublicationPolicyRefused,
         ))
     }
+    /// Explicit rebase support, with the same independent native series and
+    /// current-policy validation required by the asynchronous projection.
+    fn validate_rebase(
+        &self,
+        _basis: &PublicationBasis,
+        _authenticated: &AuthenticatedHead,
+        _intent: &NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        ))
+    }
     /// Finish staging the reference partition and its closure before returning.
     fn materialize_commit(
         &self,
@@ -351,5 +363,15 @@ where
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
         ready(self.0.validate_squash(basis, authenticated, intent))
+    }
+    fn validate_rebase_async<'a>(
+        &'a self,
+        _: &'a SyncAuthorityAsAsync<'store, S>,
+        (): &'a (),
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        ready(self.0.validate_rebase(basis, authenticated, intent))
     }
 }

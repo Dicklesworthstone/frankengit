@@ -139,6 +139,9 @@ impl Objects {
             NativeMergeMethod::FastForwardOnly => {
                 validate_fast_forward_objects(self, merge, Default::default(), &mut || true)
             }
+            NativeMergeMethod::Rebase => {
+                panic!("rebase series use the dedicated native_rebase_merge fixture")
+            }
         }
         .expect("fixture candidate must pass full native validation before inspection");
         let selected: Vec<_> = closure.objects.into_iter().collect();
@@ -259,6 +262,9 @@ impl Fixture {
             NativeMergeMethod::FastForwardOnly => {
                 assert!(!matches!(change, Change::CandidateOnly));
                 source
+            }
+            NativeMergeMethod::Rebase => {
+                panic!("rebase series use the dedicated native_rebase_merge fixture")
             }
         };
         let merge = NativeMerge {

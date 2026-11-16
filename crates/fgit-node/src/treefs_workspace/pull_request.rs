@@ -16,6 +16,8 @@ pub use conversation::{
 };
 pub use search::{PullRequestSearchPage, PullRequestSearchRefusal};
 mod preparation;
+mod rebase;
+pub use rebase::PreparedPullRequestRebaseBundle;
 #[path = "reviews.rs"]
 mod reviews;
 

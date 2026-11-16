@@ -7,11 +7,11 @@ use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::{NativeMerge, protection::PathReviewRule};
 use fgit_types::{PolicyEpoch, PrincipalId, RefusalCode};
 
-use super::super::NativeMergeIntent;
+use super::super::{NativeMergeIntent, NativeMergeMethod};
 use crate::ProjectionFailure;
 
 mod objects;
-pub use objects::verify_merge_paths;
+pub use objects::{verify_merge_paths, verify_rebase_paths};
 
 pub const MAX_MERGE_PATH_BYTES: usize = 4096;
 pub const MAX_MERGE_PATH_DEPTH: usize = 64;
@@ -20,11 +20,13 @@ pub const MAX_MERGE_CHANGED_PATH_BYTES: usize = 1024 * 1024;
 
 /// Complete structural change evidence bound to the independently verified
 /// exact merge coordinates. This is content evidence, not publication authority.
-/// Only `verify_merge_paths` can construct a value from canonical Git bytes.
+/// Only the native path verifiers can construct this from canonical Git bytes.
 #[derive(Debug)]
 pub struct VerifiedMergePaths {
     merge: NativeMerge,
     changed_paths: Vec<Vec<u8>>,
+    /// Rebase requires every intermediate delta, never only the final tree.
+    rebase_series: bool,
 }
 impl VerifiedMergePaths {
     #[must_use]
@@ -35,6 +37,13 @@ impl VerifiedMergePaths {
     #[must_use]
     pub fn changed_paths(&self) -> &[Vec<u8>] {
         &self.changed_paths
+    }
+
+    fn verify_method(&self, method: NativeMergeMethod) -> Result<(), ProjectionFailure> {
+        if self.rebase_series != (method == NativeMergeMethod::Rebase) {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+        }
+        Ok(())
     }
 }
 
@@ -84,6 +93,9 @@ where
     C: Fn() -> bool + Sync,
 {
     let merge = intent.merge().map_err(super::infrastructure)?;
+    if let Some(paths) = paths {
+        paths.verify_method(intent.method())?;
+    }
     for rule in matching_rules(merge, rules, paths, cancelled)? {
         // Independent votes retain the exact current PR, base, candidate and
         // policy epoch binding. A matching rule never waives any other rule.

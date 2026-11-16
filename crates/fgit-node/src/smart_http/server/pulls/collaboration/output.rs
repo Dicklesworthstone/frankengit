@@ -243,6 +243,7 @@ pub(super) fn mutation(
                 quote(match method {
                     NativeMergeMethod::MergeCommit => "merge-commit",
                     NativeMergeMethod::Squash => "squash",
+                    NativeMergeMethod::Rebase => "rebase",
                     NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
                 })
             ),

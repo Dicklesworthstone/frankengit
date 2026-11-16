@@ -67,6 +67,9 @@ pub enum NativeMergeMethod {
     /// Independently reviewed commit whose sole parent is target-before, with
     /// the source and common base verified separately from the candidate closure.
     Squash,
+    /// Independently reviewed, nonempty single-parent series ending at the
+    /// original target. Source and target remain exact publication leases.
+    Rebase,
 }
 
 /// A reviewed native merge. A new stream records a merge receipt, not invented
@@ -156,6 +159,33 @@ impl NativeMergeIntent {
         Ok(intent)
     }
 
+    /// Land an independently reviewed linear series for an EXISTING PR. Native
+    /// validation proves the entire candidate chain reaches target-before and
+    /// verifies the original source/base ancestry. This is not an assertion
+    /// that arbitrary supplied commits reproduce a particular replay algorithm.
+    /// The final candidate identity commits to every intermediate commit.
+    pub fn rebase(
+        pull_request: PullRequestNumber,
+        expected_version: AggregateVersion,
+        merge: NativeMerge,
+    ) -> Result<Self, AdmissionError> {
+        if merge.source_tip == merge.target_tip_before
+            || merge.merge_commit == merge.target_tip_before
+            || merge.source_tip == merge.base_tip
+        {
+            return Err(incoherent(
+                "native rebase requires a nonempty candidate series",
+            ));
+        }
+        let mut intent = Self::new(
+            pull_request,
+            ExpectedVersion::Exactly(expected_version),
+            merge,
+        )?;
+        intent.method = NativeMergeMethod::Rebase;
+        Ok(intent)
+    }
+
     #[must_use]
     pub const fn method(&self) -> NativeMergeMethod {
         self.method
@@ -211,6 +241,7 @@ impl NativeMergeIntent {
             NativeMergeMethod::MergeCommit => None,
             NativeMergeMethod::FastForwardOnly => Some(b"fast-forward-only/v1".as_slice()),
             NativeMergeMethod::Squash => Some(b"squash/v1".as_slice()),
+            NativeMergeMethod::Rebase => Some(b"rebase/v1".as_slice()),
         };
         if let Some(method) = method {
             // Old two-parent seals remain byte-identical. Even the same event
@@ -384,9 +415,9 @@ where
                     self.validate_fast_forward_async(authority, cx, basis, authenticated, intent)
                         .await
                 }
-                NativeMergeMethod::Squash => Err(ProjectionFailure::Refuse(
-                    RefusalCode::PublicationPolicyRefused,
-                )),
+                NativeMergeMethod::Squash | NativeMergeMethod::Rebase => Err(
+                    ProjectionFailure::Refuse(RefusalCode::PublicationPolicyRefused),
+                ),
             }
         }
     }
@@ -415,6 +446,23 @@ where
     /// and merge policy. Supporting two-parent validation does not grant this
     /// capability; an adapter that omits this hook remains fail-closed.
     fn validate_squash_async<'a>(
+        &'a self,
+        _authority: &'a S,
+        _cx: &'a S::Context,
+        _basis: &'a PublicationBasis,
+        _authenticated: &'a AuthenticatedHead,
+        _intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        std::future::ready(Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        )))
+    }
+
+    /// Explicit object-owner opt-in for a reviewed rebase series. Validate all
+    /// intermediate commits and their object edges under one bounded request,
+    /// the original source/base ancestry, and current exact-candidate policy.
+    /// Other merge capabilities do not grant this capability implicitly.
+    fn validate_rebase_async<'a>(
         &'a self,
         _authority: &'a S,
         _cx: &'a S::Context,
@@ -863,6 +911,11 @@ where
             NativeMergeMethod::Squash => {
                 projection
                     .validate_squash_async(store, cx, basis, authenticated, intent)
+                    .await?
+            }
+            NativeMergeMethod::Rebase => {
+                projection
+                    .validate_rebase_async(store, cx, basis, authenticated, intent)
                     .await?
             }
         }

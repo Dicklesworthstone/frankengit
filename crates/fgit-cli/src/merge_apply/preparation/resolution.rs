@@ -244,6 +244,9 @@ fn commit_style(method: NativeMergeMethod) -> Result<MergeCommitStyle, String> {
         NativeMergeMethod::FastForwardOnly => {
             Err("fast-forward cannot resolve conflicts into a new candidate".into())
         }
+        NativeMergeMethod::Rebase => {
+            Err("use fg pr prepare-rebase for a linear PR candidate".into())
+        }
     }
 }
 

@@ -28,7 +28,27 @@ fn paths(values: &[&[u8]]) -> VerifiedMergePaths {
     VerifiedMergePaths {
         merge: merge(),
         changed_paths: values.iter().map(|path| path.to_vec()).collect(),
+        rebase_series: false,
     }
+}
+
+#[test]
+fn final_tree_only_witness_cannot_stand_in_for_a_complete_rebase_series() {
+    let mut final_only = paths(&[]);
+    assert!(matches!(
+        final_only.verify_method(NativeMergeMethod::Rebase),
+        Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))
+    ));
+    for method in [
+        NativeMergeMethod::MergeCommit,
+        NativeMergeMethod::Squash,
+        NativeMergeMethod::FastForwardOnly,
+    ] {
+        final_only.verify_method(method).unwrap();
+    }
+    final_only.rebase_series = true;
+    final_only.verify_method(NativeMergeMethod::Rebase).unwrap();
+    assert!(final_only.verify_method(NativeMergeMethod::Squash).is_err());
 }
 
 #[test]

@@ -12,7 +12,10 @@ use super::{
 use crate::treefs_workspace::candidate_inspection::{
     InspectedBundle, InspectedRebaseCommit, RebaseBundleInspection,
 };
-use fgit_admission::merge::native::objects::validate_commit_closure_above;
+use fgit_admission::merge::native::objects::{
+    validate_commit_closure_above, validate_rebase_objects_above,
+};
+use fgit_forge::event::{NativeMerge, review::ReviewSubject};
 use fgit_forge::review::compare_source_series;
 
 const MAX_COMMITS: usize = 256;
@@ -49,6 +52,105 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>,
         options: &ReviewOptions,
     ) -> Result<RebaseBundleInspection, BundleInspectionRefusal> {
+        self.inspect_rebase_bundle_for_reference_in(
+            request,
+            source_ref,
+            onto_ref,
+            source_ref,
+            expected_source,
+            onto,
+            candidate,
+            input,
+            visibility,
+            expected_head,
+            options,
+            None,
+        )
+        .await
+    }
+
+    /// Inspect every rewritten commit of an exact open PR without staging.
+    /// The target-named artifact has the target tip as its sole prerequisite.
+    /// The original source suffix and common base are checked independently;
+    /// all comparisons and native commit bodies remain available to reviewers.
+    pub async fn inspect_pull_request_rebase_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        subject: &ReviewSubject,
+        upstream: GitOid,
+        candidate: GitOid,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        options: &ReviewOptions,
+    ) -> Result<RebaseBundleInspection, BundleInspectionRefusal> {
+        let merge = NativeMerge {
+            source_ref: subject.source_ref.clone(),
+            source_tip: subject.source_tip,
+            base_tip: upstream,
+            target_ref: subject.target_ref.clone(),
+            target_tip_before: subject.target_tip,
+            merge_commit: candidate,
+        };
+        merge
+            .validate()
+            .map_err(|_| invalid("invalid PR rebase coordinates"))?;
+        if upstream == subject.source_tip || candidate == subject.target_tip {
+            return Err(invalid(
+                "PR rebase requires nonempty original and rewritten series",
+            ));
+        }
+        let head = self
+            .validate_pull_request_preparation_in(request, subject, visibility)
+            .await
+            .map_err(|error| {
+                use crate::NodeWorkspaceRefusal as E;
+                match error {
+                    E::RefUnavailable => BundleInspectionRefusal::RefUnavailable,
+                    E::StaleWorkspaceBase => BundleInspectionRefusal::SnapshotMoved,
+                    E::Cell(error) => BundleInspectionRefusal::Cell(error),
+                    E::Authority(error) => BundleInspectionRefusal::Authority(error),
+                    E::Cancelled { .. } => BundleInspectionRefusal::Source(
+                        fgit_forge::preparation::MergeSourceError::Cancelled,
+                    ),
+                    _ => invalid("invalid exact PR rebase subject"),
+                }
+            })?;
+        if expected_head.is_some_and(|expected| expected != head) {
+            return Err(BundleInspectionRefusal::SnapshotMoved);
+        }
+        self.inspect_rebase_bundle_for_reference_in(
+            request,
+            &subject.source_ref,
+            &subject.target_ref,
+            &subject.target_ref,
+            subject.source_tip,
+            subject.target_tip,
+            candidate,
+            input,
+            visibility,
+            Some(head),
+            options,
+            Some(&merge),
+        )
+        .await
+    }
+
+    async fn inspect_rebase_bundle_for_reference_in(
+        &self,
+        request: &NodeRequestContext,
+        source_ref: &RefName,
+        onto_ref: &RefName,
+        artifact_ref: &RefName,
+        expected_source: GitOid,
+        onto: GitOid,
+        candidate: GitOid,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        options: &ReviewOptions,
+        pull_request_merge: Option<&NativeMerge>,
+    ) -> Result<RebaseBundleInspection, BundleInspectionRefusal> {
         options
             .validate()
             .map_err(|error| BundleInspectionRefusal::Review(Box::new(error)))?;
@@ -72,7 +174,7 @@ impl OneNode {
         let envelope = CandidateEnvelope::parse_profile(input, 1, true)
             .map_err(|error| BundleInspectionRefusal::Envelope(Box::new(error)))?;
         envelope
-            .bind(self.object_format, source_ref, onto, candidate)
+            .bind(self.object_format, artifact_ref, onto, candidate)
             .map_err(|error| BundleInspectionRefusal::Envelope(Box::new(error)))?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(BundleInspectionRefusal::Cell)?;
         if [source_ref, onto_ref]
@@ -192,6 +294,22 @@ impl OneNode {
             objects: &unpacked.objects,
             parse_limits: source.parse_limits,
         };
+        if let Some(merge) = pull_request_merge {
+            let verified = validate_rebase_objects_above(
+                &review_source,
+                merge,
+                ObjectFrontier::with_headers(
+                    selected.selected_closure().closure().objects(),
+                    &review_source,
+                ),
+                limits,
+                &mut || review_original.live().is_ok(),
+            );
+            review_original
+                .live()
+                .map_err(BundleInspectionRefusal::Source)?;
+            verified.map_err(BundleInspectionRefusal::Validation)?;
+        }
         let mut pairs = Vec::new();
         pairs
             .try_reserve_exact(commits.len() + 1)

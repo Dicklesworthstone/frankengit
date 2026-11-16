@@ -17,7 +17,7 @@ use super::publication_support::{
 };
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
-const USAGE: &str = "usage: fg merge apply <storage-root> <tenant-id> <repository-id> <target-ref> <bundle-path> --trusted-local --principal <principal-id> --idempotency-key <key> --source-ref <branch> --expected-source <oid> --expected-target <oid> --merge-base <oid> --expected-commit <reviewed-oid> --pull-request <number> --expected-version <version; 0=new stream> [--method merge-commit|squash]";
+const USAGE: &str = "usage: fg merge apply <storage-root> <tenant-id> <repository-id> <target-ref> <bundle-path> --trusted-local --principal <principal-id> --idempotency-key <key> --source-ref <branch> --expected-source <oid> --expected-target <oid> --merge-base <oid> --expected-commit <reviewed-oid> --pull-request <number> --expected-version <version; 0=new merge-commit stream> [--method merge-commit|squash|rebase]";
 
 struct Options {
     storage: PathBuf,
@@ -193,10 +193,15 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         ExpectedVersion::Exactly(version)
     };
     let method = method.unwrap_or(NativeMergeMethod::MergeCommit);
-    if method == NativeMergeMethod::Squash && version == ExpectedVersion::NewStream {
-        return Err(
-            "squash requires an existing pull request and a positive --expected-version".to_owned(),
-        );
+    if matches!(
+        method,
+        NativeMergeMethod::Squash | NativeMergeMethod::Rebase
+    ) && version == ExpectedVersion::NewStream
+    {
+        return Err(format!(
+            "{} requires an existing pull request and a positive --expected-version",
+            method_name(method)
+        ));
     }
     let merge = NativeMerge {
         source_ref: source_ref.ok_or("--source-ref is required")?,
@@ -239,7 +244,8 @@ pub(super) fn parse_method(value: &str) -> Result<NativeMergeMethod, String> {
     match value {
         "merge-commit" => Ok(NativeMergeMethod::MergeCommit),
         "squash" => Ok(NativeMergeMethod::Squash),
-        _ => Err("--method must be merge-commit or squash".to_owned()),
+        "rebase" => Ok(NativeMergeMethod::Rebase),
+        _ => Err("--method must be merge-commit, squash or rebase".to_owned()),
     }
 }
 
@@ -247,6 +253,7 @@ pub(super) const fn method_name(method: NativeMergeMethod) -> &'static str {
     match method {
         NativeMergeMethod::MergeCommit => "merge-commit",
         NativeMergeMethod::Squash => "squash",
+        NativeMergeMethod::Rebase => "rebase",
         NativeMergeMethod::FastForwardOnly => "fast-forward-only",
     }
 }
@@ -456,7 +463,13 @@ mod tests {
             squash.extend(["--method".into(), "squash".into()]);
             assert!(parse(&squash).is_err());
 
-            for method in ["auto", "rebase", "fast-forward-only", "Squash", ""] {
+            for method in [
+                "auto",
+                "rebase-and-merge",
+                "fast-forward-only",
+                "Squash",
+                "",
+            ] {
                 let mut invalid = args(width);
                 replace(&mut invalid, "--expected-version", "4".into());
                 invalid.extend(["--method".into(), method.into()]);
@@ -482,6 +495,27 @@ mod tests {
         // The node still proves the sole target parent from native bytes.
         replace(&mut selected, "--expected-commit", "b".repeat(40));
         assert!(parse(&selected).is_err());
+    }
+
+    #[test]
+    fn rebase_publication_is_explicit_and_requires_an_existing_pr() {
+        for width in [40, 64] {
+            let mut selected = args(width);
+            selected.extend(["--method".into(), "rebase".into()]);
+            assert!(parse(&selected).is_err());
+            replace(&mut selected, "--expected-version", "4".into());
+            let options = parse(&selected).unwrap();
+            assert_eq!(options.method, NativeMergeMethod::Rebase);
+            assert_eq!(method_name(options.method), "rebase");
+            assert_eq!(options.merge.source_tip.to_string(), "a".repeat(width));
+            assert_eq!(
+                options.merge.target_tip_before.to_string(),
+                "b".repeat(width)
+            );
+            assert_eq!(options.merge.merge_commit.to_string(), "d".repeat(width));
+            selected.extend(["--method".into(), "rebase".into()]);
+            assert!(parse(&selected).is_err());
+        }
     }
 
     #[test]
@@ -547,5 +581,12 @@ mod tests {
         assert!(receipt.contains("close\\u000afailed"));
         assert!(!receipt.contains("private-retry-key"));
         assert!(receipt.contains(&format!("\"candidate_commit\":\"{}\"", "d".repeat(40))));
+        let mut rebase = args(40);
+        replace(&mut rebase, "--expected-version", "4".into());
+        rebase.extend(["--method".into(), "rebase".into()]);
+        let receipt = render_receipt(&parse(&rebase).unwrap(), tx, &terminal, None);
+        assert!(receipt.contains("\"method\":\"rebase\""));
+        assert!(receipt.contains("\"published_to_repository\":true"));
+        assert!(!receipt.contains("private-retry-key"));
     }
 }

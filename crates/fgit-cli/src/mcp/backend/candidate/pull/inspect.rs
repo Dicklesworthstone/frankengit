@@ -250,6 +250,11 @@ pub(super) fn call_in(
             fields.remove("policy_epoch");
             Value::Object(fields)
         }
+        NativeMergeMethod::Rebase => {
+            return Err(ToolError::failed(
+                "rebase_requires_complete_series_inspection",
+            ));
+        }
     };
     let mut result = binding(backend);
     result.extend(subject_fields(subject));
@@ -263,6 +268,7 @@ pub(super) fn call_in(
             text(match method {
                 NativeMergeMethod::MergeCommit => "merge-commit",
                 NativeMergeMethod::Squash => "squash",
+                NativeMergeMethod::Rebase => "rebase",
                 NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
             }),
         ),

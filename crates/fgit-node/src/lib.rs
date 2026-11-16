@@ -79,7 +79,8 @@ pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::MilestoneReadRefusal;
 pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
-    BundleInspectionRefusal, PullRequestInspectionRefusal,
+    BundleInspectionRefusal, InspectedBundle, InspectedRebaseCommit, PullRequestInspectionRefusal,
+    RebaseBundleInspection,
 };
 /// Operator-owned native CI, with canonical event custody and explicit drain.
 #[cfg(target_os = "linux")]
@@ -106,6 +107,9 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
+};
+pub use treefs_workspace::{
+    PreparedPullRequestRebaseBundle, PreparedRebaseBundle, RebasePreparationRefusal,
 };
 pub use treefs_workspace::{
     PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
@@ -10860,14 +10864,8 @@ impl OneNode {
         limits: &PackLimits,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
-        let (pack, receipt) = self.stream_pack_entries(
-            source,
-            keys,
-            thin_bases,
-            write_profile,
-            limits,
-            is_live,
-        )?;
+        let (pack, receipt) =
+            self.stream_pack_entries(source, keys, thin_bases, write_profile, limits, is_live)?;
         Ok(AuthoritySelectedPackPayload {
             basis: materialized.basis().clone(),
             closure: materialized.selected_closure().clone(),

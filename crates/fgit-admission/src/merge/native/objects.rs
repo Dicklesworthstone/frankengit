@@ -226,6 +226,11 @@ impl<'a> From<&'a BTreeSet<GitOid>> for ObjectFrontier<'a> {
 /// Largest independently bounded admitted-blob metadata profile (16 GiB).
 pub const MAX_REUSED_BLOB_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+/// The complete reviewed rebase series shares this finite commit ceiling.
+pub const MAX_REBASE_MERGE_COMMITS: usize = 256;
+/// Native commit bodies across the entire reviewed rebase series (16 MiB).
+pub const MAX_REBASE_MERGE_COMMIT_BYTES: usize = 16 * 1024 * 1024;
+
 /// Independent object/work ceilings. A caller also supplies its live deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MergeObjectLimits {
@@ -549,12 +554,94 @@ pub fn validate_squash_objects_above<'a>(
     )
 }
 
+/// Verify a reviewed nonempty, single-parent series and both original branch
+/// histories. Every intermediate candidate commit is independently hashed and
+/// parsed; the chain must end at target-before within 256 commits. All trees,
+/// blobs, commits and original histories share the object/byte/edge budgets.
+/// The original source-to-base suffix must also be nonempty and single-parent,
+/// with at most 256 commits, matching the native linear rebase preparer.
+/// This proves reviewed structure and content, not algorithmic replay equality.
+pub fn validate_rebase_objects(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    validate_rebase_candidate(source, merge, None, limits, deadline)
+}
+
+/// [`validate_rebase_objects`] above an independently admitted frontier.
+/// Original source, base and target must be selected. Candidate-chain commits
+/// always require actual bodies and complete parent validation, even if their
+/// identities are already selected; no frontier shortcut may hide a merge or
+/// wrong stopping boundary. Every intermediate candidate tree remains checked.
+pub fn validate_rebase_objects_above<'a>(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    selected: impl Into<ObjectFrontier<'a>>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    validate_rebase_candidate(source, merge, Some(selected.into()), limits, deadline)
+}
+
+fn validate_rebase_candidate(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    frontier: Option<ObjectFrontier<'_>>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    merge.validate().map_err(|_| invalid())?;
+    if merge.source_tip == merge.target_tip_before
+        || merge.merge_commit == merge.target_tip_before
+        || merge.source_tip == merge.base_tip
+    {
+        return Err(invalid());
+    }
+    checkpoint(deadline)?;
+    if frontier.is_some_and(|selected| {
+        [merge.source_tip, merge.base_tip, merge.target_tip_before]
+            .iter()
+            .any(|id| !selected.objects.contains(id))
+    }) {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::ObjectClosureIncomplete,
+        ));
+    }
+    validate_candidate_objects(
+        source,
+        merge.merge_commit,
+        None,
+        AncestryRequirement::Rebase {
+            base: merge.base_tip,
+            source: merge.source_tip,
+            target: merge.target_tip_before,
+        },
+        frontier,
+        limits,
+        deadline,
+    )
+}
+
 #[derive(Clone, Copy)]
 enum AncestryRequirement {
     None,
-    Merge { base: GitOid },
-    Squash { base: GitOid, source: GitOid },
-    FastForward { base: GitOid },
+    Merge {
+        base: GitOid,
+    },
+    Squash {
+        base: GitOid,
+        source: GitOid,
+    },
+    Rebase {
+        base: GitOid,
+        source: GitOid,
+        target: GitOid,
+    },
+    FastForward {
+        base: GitOid,
+    },
 }
 
 fn validate_candidate_objects(
@@ -589,6 +676,18 @@ fn validate_candidate_objects(
             bad_id(base)
                 || bad_id(source)
                 || expected_parents.is_none_or(|parents| parents.len() != 1)
+        }
+        AncestryRequirement::Rebase {
+            base,
+            source,
+            target,
+        } => {
+            bad_id(base)
+                || bad_id(source)
+                || bad_id(target)
+                || candidate == target
+                || source == target
+                || expected_parents.is_some()
         }
         AncestryRequirement::FastForward { base } => {
             bad_id(base) || base == candidate || expected_parents.is_some()
@@ -636,7 +735,9 @@ fn validate_candidate_objects(
         &mut object_work,
         limits,
     )?;
-    if let AncestryRequirement::Squash { source, .. } = ancestry {
+    if let AncestryRequirement::Squash { source, .. } | AncestryRequirement::Rebase { source, .. } =
+        ancestry
+    {
         require_object(
             source,
             ObjectType::Commit,
@@ -648,11 +749,74 @@ fn validate_candidate_objects(
     }
     let mut total_bytes = 0_usize;
     let mut edges = 0_usize;
-
-    while let Some(id) = pending.pop_first() {
+    // Walk the candidate spine and original suffix before any tree edges. This
+    // makes every intermediate commit strict even when a selected/source root
+    // has the same identity, and avoids loading or charging its body twice.
+    let mut next_rebase =
+        matches!(ancestry, AncestryRequirement::Rebase { .. }).then_some(candidate);
+    let mut rebase_seen = BTreeSet::new();
+    let mut next_original = match ancestry {
+        AncestryRequirement::Rebase { source, .. } => Some(source),
+        _ => None,
+    };
+    let mut original_seen = BTreeSet::new();
+    let mut rebase_bytes = 0usize;
+    loop {
+        let (id, rebase_member, original_member) = match next_rebase.take() {
+            Some(id) => {
+                if rebase_seen.len() >= MAX_REBASE_MERGE_COMMITS {
+                    return Err(budget());
+                }
+                if !rebase_seen.insert(id) || !pending.remove(&id) {
+                    return Err(invalid());
+                }
+                (id, true, false)
+            }
+            None => {
+                if let Some(id) = next_original.take() {
+                    checkpoint(deadline)?;
+                    if original_seen.len() >= MAX_REBASE_MERGE_COMMITS {
+                        return Err(budget());
+                    }
+                    if !original_seen.insert(id) {
+                        return Err(invalid());
+                    }
+                    if frontier.is_some_and(|selected| !selected.objects.contains(&id)) {
+                        return Err(ProjectionFailure::Refuse(
+                            RefusalCode::ObjectClosureIncomplete,
+                        ));
+                    }
+                    if let Some(known) = parents.get(&id) {
+                        // A candidate can be byte-identical to an original
+                        // commit. Reuse its verified parse, never body work.
+                        let AncestryRequirement::Rebase { base, .. } = ancestry else {
+                            return Err(invalid());
+                        };
+                        next_original = linear_rebase_parent(known, base)?;
+                        continue;
+                    }
+                    if !pending.remove(&id) {
+                        return Err(invalid());
+                    }
+                    (id, false, true)
+                } else {
+                    match pending.pop_first() {
+                        Some(id) => (id, false, false),
+                        None => break,
+                    }
+                }
+            }
+        };
         checkpoint(deadline)?;
-        let reused =
-            id != candidate && frontier.is_some_and(|selected| selected.objects.contains(&id));
+        let reused = id != candidate
+            && !rebase_member
+            && !original_member
+            && frontier.is_some_and(|selected| selected.objects.contains(&id));
+        if (rebase_member || original_member) && object_work.uses_header(id) {
+            // Header-only reservation was appropriate when the edge was
+            // enqueued, but a rewritten commit always needs its native body.
+            object_work.reserve_body(limits)?;
+        }
         // A selected immutable frontier has already been admitted. Its metadata
         // must match this edge, but undisclosed payloads are not a new closure
         // or scrub obligation. Candidates and unselected objects NEVER enter
@@ -697,7 +861,13 @@ fn validate_candidate_objects(
             .checked_add(object.body().len())
             .filter(|bytes| *bytes <= limits.max_total_bytes)
             .ok_or_else(budget)?;
-        let profile = if id == candidate && expected_parents.is_some() {
+        if rebase_member {
+            rebase_bytes = rebase_bytes
+                .checked_add(object.body().len())
+                .filter(|bytes| *bytes <= MAX_REBASE_MERGE_COMMIT_BYTES)
+                .ok_or_else(budget)?;
+        }
+        let profile = if (id == candidate && expected_parents.is_some()) || rebase_member {
             AcceptanceProfile::StrictCreate
         } else {
             AcceptanceProfile::GitCompatibleImport
@@ -718,7 +888,9 @@ fn validate_candidate_objects(
         if reused {
             continue;
         }
-        visited.insert(id);
+        if !original_member || frontier.is_none() {
+            visited.insert(id);
+        }
         let mut outgoing = Vec::new();
         match parsed {
             ParsedObject::Commit(commit) => {
@@ -760,6 +932,23 @@ fn validate_candidate_objects(
                     && expected_parents.is_some_and(|expected| parent_ids.as_slice() != expected)
                 {
                     return Err(invalid());
+                }
+                if rebase_member {
+                    let AncestryRequirement::Rebase { target, .. } = ancestry else {
+                        return Err(invalid());
+                    };
+                    next_rebase = linear_rebase_parent(&parent_ids, target)?;
+                    if let Some(parent) = next_rebase {
+                        if rebase_seen.contains(&parent) {
+                            return Err(invalid());
+                        }
+                    }
+                }
+                if original_member {
+                    let AncestryRequirement::Rebase { base, .. } = ancestry else {
+                        return Err(invalid());
+                    };
+                    next_original = linear_rebase_parent(&parent_ids, base)?;
                 }
                 parents.insert(id, parent_ids);
             }
@@ -828,6 +1017,13 @@ fn validate_candidate_objects(
             AncestryRequirement::Squash { base, source } => {
                 visited.extend([base, source]);
             }
+            AncestryRequirement::Rebase {
+                base,
+                source,
+                target,
+            } => {
+                visited.extend([base, source, target]);
+            }
         }
     } else {
         validate_ancestry(
@@ -848,6 +1044,16 @@ fn validate_candidate_objects(
         object_closure_root,
         objects: closure.objects().clone(),
     })
+}
+
+fn linear_rebase_parent(
+    parents: &[GitOid],
+    stop: GitOid,
+) -> Result<Option<GitOid>, ProjectionFailure> {
+    let [parent] = parents else {
+        return Err(invalid());
+    };
+    Ok((*parent != stop).then_some(*parent))
 }
 
 fn charge_edge(edges: &mut usize, limit: usize) -> Result<(), ProjectionFailure> {
@@ -965,6 +1171,11 @@ fn validate_ancestry(
             let expected = expected_parents.ok_or_else(invalid)?;
             (base, source, expected[0])
         }
+        AncestryRequirement::Rebase {
+            base,
+            source,
+            target,
+        } => (base, source, target),
         AncestryRequirement::FastForward { base } => {
             // Cold index construction costs more than this single query.
             // Retain the exact checkpointed walk until an independently
@@ -1197,6 +1408,11 @@ fn validate_ancestry_above<S: CanonicalObjectSource>(
             let expected = expected_parents.ok_or_else(invalid)?;
             (base, vec![source, expected[0]])
         }
+        AncestryRequirement::Rebase {
+            base,
+            source,
+            target,
+        } => (base, vec![source, target]),
         AncestryRequirement::FastForward { base } => {
             return if is_ancestor_above(&graph, base, candidate, graph_limits, deadline)? {
                 Ok(())
