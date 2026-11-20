@@ -357,7 +357,7 @@ fn upload_capabilities(
     } else {
         b"fetch=filter\n".as_slice()
     };
-    let packets = vec![
+    let mut packets = vec![
         Packet::Data(b"version 2\n".to_vec()),
         // Upstream advertises `unborn`: without it a v2 client never asks for
         // an empty repository's HEAD, and its clone falls back to its own default.
@@ -366,6 +366,9 @@ fn upload_capabilities(
         Packet::Data(format!("object-format={object_format}\n").into_bytes()),
         Packet::Flush,
     ];
+    if repository.supports_object_info() {
+        packets.insert(packets.len() - 1, Packet::Data(b"object-info\n".to_vec()));
+    }
     Capabilities::parse_v2_advertisement(&packets, limits).map_err(NodeSmartHttpRefusal::from)
 }
 

@@ -2,6 +2,7 @@ use super::*;
 use std::cell::RefCell;
 mod basename_ordering;
 mod incremental_walk;
+mod object_info;
 mod projection_cache;
 mod received_pack_reuse;
 mod selection_preflight;

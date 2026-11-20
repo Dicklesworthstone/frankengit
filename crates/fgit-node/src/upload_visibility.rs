@@ -30,6 +30,7 @@ use super::{
 use super::{CanonicalBlobReader, PackPayloadSource};
 use fgit_pack::basename_path_hash;
 use std::cell::RefCell;
+pub(crate) mod object_info;
 mod partial_clone;
 pub use partial_clone::unserved_filter_name;
 pub mod shallow;
@@ -501,6 +502,10 @@ impl OneNode {
         let mut repository = repository.with_closure_objects(closure.objects().clone());
         repository.tag_peels = tags.peels.clone();
         let objects = Arc::clone(&projection.objects);
+        repository.object_info_proof = Some(object_info::ObjectInfoProof::new(
+            Arc::clone(&objects),
+            deadline.clone(),
+        ));
         repository.shallow_proof = Some(shallow::ShallowProof::new(
             Arc::clone(&objects),
             self.selected_pack_limits.clone(),

@@ -35,6 +35,63 @@ not the current production capability set. The strict no-capability refusal
 remains covered in wire tests. Current visibility and historical-retention
 boundaries are unchanged.
 
+## Protocol-v2 object-size queries
+
+`serve`, `serve-ssh` and `serve-http` advertise `object-info` after preparing
+their exact authorized visible graph. A v2 client can send
+`command=object-info`, the capability/argument delimiter, `size`, one or more
+`oid <full-native-id>` arguments, and the request flush. It receives the size
+attribute, one size row for each requested identity, and a response flush.
+This metadata-only command does not construct or transmit a pack and can
+precede `ls-refs`, another metadata query or `fetch` on the same connection.
+Each HTTP RPC remains one independent command.
+
+The implemented profile follows Git **2.54.0**
+[`protocol-caps.c`](https://github.com/git/git/blob/v2.54.0/protocol-caps.c) and
+its [`pkt-line.c`](https://github.com/git/git/blob/v2.54.0/pkt-line.c) writer:
+textual response payloads omit the optional terminal LF, duplicate OIDs retain
+their order, repeated `size` arguments are idempotent, and a request with no
+OID arguments returns only the flush. Omitting `size` echoes the requested
+identities without querying metadata. Later Git object-type attributes and
+other unknown arguments return a typed refusal; they are not silently ignored.
+
+Sizes report uncompressed native object-body lengths from the authenticated
+visible projection. Commit, tree and tag lengths come from the verified native
+body walk. Blob lengths come from bounded envelope reads that check the fabric
+namespace and requested OID, and compare the declared payload length with the
+stored file's payload length. Blob payloads are not read or rehashed. A size
+response does not establish that
+a stored blob payload still matches its OID. Body-serving paths retain their
+verification checks and refuse corrupted payloads. The query performs no
+additional graph walk or blob-body read. A visible blob larger than the selected
+pack's per-blob payload ceiling remains queryable, without authorizing a later
+fetch beyond that ceiling.
+
+Hidden-only, deleted-only and unknown objects all receive the same empty size
+value: the supplied OID followed by one space. An empty visible blob instead
+returns numeric `0`. Authorization is checked before metadata lookup; physical
+storage, a historical admission inventory or a prior visibility cache cannot
+disclose size. The generic hidden-ref wrapper also guards its metadata seam.
+Replacing the node view's disclosure closure clears its metadata proof, so a
+caller-supplied object list cannot inherit the capability.
+
+Every OID argument, including repetitions, consumes the existing `max_wants`
+allowance (16,384 by default). Responses retain the existing pkt-line and total
+outbound byte limits. The provider checks the original connection deadline
+before and after response work, including hidden-object and attribute-free
+queries; errors release no partial command response. The operation inherits
+the existing exact-snapshot revocation boundary above and grants no write or
+retention authority.
+
+Regressions live in
+[`fgit-wire/tests/object_info.rs`](../crates/fgit-wire/tests/object_info.rs)
+and
+[`upload_visibility/tests/object_info.rs`](../crates/fgit-node/src/upload_visibility/tests/object_info.rs).
+They cover both native object formats, packet fragmentation, repetitions,
+resource-boundary twins, cancellation, stateless HTTP framing and real native
+TCP disclosure before and after policy changes and reopening. Their existence
+does not imply a current executed compatibility or release gate.
+
 ## Verified basename grouping for served packs
 
 The visible-graph walk retains a deterministic packing hint from each verified

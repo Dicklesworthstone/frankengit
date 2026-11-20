@@ -330,6 +330,7 @@ pub struct AdmissionUploadPackRepository {
     closure_objects: BTreeSet<GitOid>,
     tag_peels: BTreeMap<GitOid, GitOid>,
     shallow_proof: Option<upload_visibility::shallow::ShallowProof>,
+    object_info_proof: Option<upload_visibility::object_info::ObjectInfoProof>,
 }
 
 impl AdmissionUploadPackRepository {
@@ -415,6 +416,7 @@ impl AdmissionUploadPackRepository {
             closure_objects: BTreeSet::new(),
             tag_peels: BTreeMap::new(),
             shallow_proof: None,
+            object_info_proof: None,
         })
     }
 
@@ -427,6 +429,7 @@ impl AdmissionUploadPackRepository {
     pub fn with_closure_objects(mut self, objects: BTreeSet<GitOid>) -> Self {
         self.closure_objects = objects;
         self.shallow_proof = None;
+        self.object_info_proof = None;
         self
     }
 
@@ -464,15 +467,39 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     }
 
     fn contains_want(&self, oid: AnyGitOid) -> bool {
-        self.refs.iter().any(|reference| reference.oid == oid)
-            || match GitOid::try_from(oid) {
-                Ok(oid) => self.closure_objects.contains(&oid),
-                Err(_) => false,
-            }
+        // The private visible-graph proof includes every advertised root.
+        // Avoid scanning all refs for every metadata query (including misses).
+        self.closure_objects.contains(&oid)
+            || (self.object_info_proof.is_none()
+                && self.refs.iter().any(|reference| reference.oid == oid))
     }
 
     fn is_common(&self, oid: AnyGitOid) -> bool {
         self.contains_want(oid)
+    }
+
+    fn supports_object_info(&self) -> bool {
+        self.object_info_proof.is_some()
+    }
+
+    fn object_info_checkpoint(&self) -> Result<(), WireError> {
+        self.object_info_proof
+            .as_ref()
+            .ok_or(WireError::PackSourceRefused)?
+            .checkpoint()
+    }
+
+    fn object_info_size(&self, oid: AnyGitOid) -> Result<Option<u64>, WireError> {
+        let proof = self
+            .object_info_proof
+            .as_ref()
+            .ok_or(WireError::PackSourceRefused)?;
+        proof.checkpoint()?;
+        if self.contains_want(oid) {
+            proof.size(oid)
+        } else {
+            Ok(None)
+        }
     }
 
     fn supports_shallow(&self) -> bool {
@@ -6927,7 +6954,7 @@ where
         fgit_wire::GitObjectFormat::Sha1 => "sha1",
         fgit_wire::GitObjectFormat::Sha256 => "sha256",
     };
-    let advertisement_packets = vec![
+    let mut advertisement_packets = vec![
         Packet::Data(b"version 2\n".to_vec()),
         // Upstream advertises `unborn`: without it a v2 client never asks for
         // an empty repository's HEAD, and its clone falls back to its own default.
@@ -6941,6 +6968,12 @@ where
         Packet::Data(format!("object-format={object_format}\n").into_bytes()),
         Packet::Flush,
     ];
+    if repository.supports_object_info() {
+        advertisement_packets.insert(
+            advertisement_packets.len() - 1,
+            Packet::Data(b"object-info\n".to_vec()),
+        );
+    }
     let server_capabilities = Capabilities::parse_v2_advertisement(&advertisement_packets, &limits)
         .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
     write_packet_group(writer, &advertisement_packets, &limits)
@@ -6952,7 +6985,7 @@ where
             .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))
     };
     let mut machine = fresh_machine()?;
-    let mut ls_refs_completed = false;
+    let mut metadata_completed = false;
     let mut input = [0_u8; 16 * 1024];
     loop {
         let read = reader.read(&mut input).map_err(|source| {
@@ -6965,9 +6998,9 @@ where
             machine.finish().map_err(|error| {
                 GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
             })?;
-            if ls_refs_completed && machine.is_awaiting_command() {
-                // The client obtained everything it needed from ls-refs (the
-                // empty-repository shape) and closed the session cleanly.
+            if metadata_completed && machine.is_awaiting_command() {
+                // A completed metadata-only session needs no pack. This also
+                // covers ls-refs on an empty or already-current repository.
                 return Ok(GitDaemonSessionOutcome::EmptyRepository(
                     GitDaemonAdvertisementReceipt { request },
                 ));
@@ -7001,8 +7034,8 @@ where
 
         for event in transition.events {
             match event {
-                WireEvent::LsRefs { .. } => {
-                    ls_refs_completed = true;
+                WireEvent::LsRefs { .. } | WireEvent::ObjectInfo { .. } => {
+                    metadata_completed = true;
                 }
                 WireEvent::PackRequested(pack_request) => {
                     check_selected_pack_deadline(writer, &limits, session_deadline)
@@ -7540,7 +7573,7 @@ fn refuse_unserved_filter(
             .filter
             .as_ref()
             .and_then(upload_visibility::unserved_filter_name),
-        WireEvent::LsRefs { .. } | WireEvent::Common(_) => None,
+        WireEvent::LsRefs { .. } | WireEvent::ObjectInfo { .. } | WireEvent::Common(_) => None,
     })?;
     // The typed refusal is the outcome; a client that is already gone
     // changes nothing about it.
