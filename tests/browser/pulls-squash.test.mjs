@@ -37,7 +37,7 @@ async function clientWith(sample, handler) {
   const calls = [], client = new PullClient(options((url, init) => {
     const call = { url: String(url), ...init }; calls.push(call);
     if (new URL(url).pathname.endsWith('/api/v1/pulls')) return json(page({ object_format: sample.fields.object_format, pull_requests: [] }));
-    if (String(url).endsWith('/inspect')) return json(sample.inspection);
+    if (String(url).endsWith('/inspect') || String(url).endsWith('/inspect-rebase')) return json(sample.inspection);
     return handler(call, client);
   }));
   await client.connect(token); await client.list(); return { client, calls };
@@ -134,11 +134,14 @@ test('preparation and merge commands accept squash while reviewer coordinates st
   assert.equal(Object.hasOwn(preparationCommand(sample.selected, commitMetadata), 'method'), false);
   assert.equal(preparationCommand(sample.selected, commitMetadata, 'squash').method, 'squash');
   assert.equal(collaborationCommand('merge', { ...sample.fields, required_reviewer: [reviewer], method: 'squash' }).method, 'squash');
-  for (const method of [null, '', 'rebase', 'fast-forward-only']) {
+  for (const method of [null, '', 'fast-forward-only']) {
     assert.throws(() => mergeMethod(method));
     assert.throws(() => preparationCommand(sample.selected, commitMetadata, method));
     assert.throws(() => collaborationCommand('merge', { ...sample.fields, required_reviewer: [reviewer], method }));
   }
+  assert.equal(mergeMethod('rebase'), 'rebase');
+  assert.throws(() => preparationCommand(sample.selected, commitMetadata, 'rebase'), /whole-series/);
+  assert.equal(collaborationCommand('merge', { ...sample.fields, required_reviewer: [reviewer], method: 'rebase' }).method, 'rebase');
   for (const action of ['approve', 'request-changes', 'withdraw']) {
     assert.throws(() => collaborationCommand(action, { ...sample.fields, expected_version: 1, reason: 'Exact candidate', method: 'squash' }));
   }
@@ -181,11 +184,14 @@ test('merge method participates in exact request bytes and the recovery key', as
 
 test('squash candidate import rejects unknown methods and contradictory native parent shapes', async () => {
   const sample = squashFixture(), { client, calls } = await inspected(sample), saved = JSON.parse(client.exportCandidate());
-  for (const method of ['rebase', null, 'fast-forward-only']) {
+  for (const method of [null, 'fast-forward-only']) {
     await assert.rejects(client.importCandidate(JSON.stringify({ ...saved, method })));
     assert.equal(client.candidate, null);
   }
   assert.equal(calls.length, 2, 'unsupported receipt methods never reach native inspection');
+  await assert.rejects(client.importCandidate(JSON.stringify({ ...saved, method: 'rebase' })), /complete series/);
+  assert.ok(calls.at(-1).url.endsWith('/inspect-rebase'), 'a rebase-labelled receipt requires the independent whole-series inspector');
+  assert.equal(client.candidate, null);
   await assert.rejects(client.importCandidate(JSON.stringify({ ...saved, method: 'merge-commit' })), /parent identities/);
   assert.equal(client.candidate, null);
   await client.importCandidate(JSON.stringify(saved)); assert.equal(client.candidate.method, 'squash');

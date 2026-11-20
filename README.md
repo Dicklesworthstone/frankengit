@@ -731,6 +731,14 @@ temporary changes even when later commits restore the final tree. Conflicts,
 stale subjects, multi-parent steps and entirely dropped series refuse without
 an automatic alternate merge method.
 
+The same rebase workflow is available through the authenticated HTTP PR API and
+the browser's **Rebase and merge** selection. Remote reviewers inspect every
+rewritten commit and its changes, including edits removed by later commits.
+Candidate receipts can be shared and reinspected; review and merge remain
+explicit commands with the original retry key retained across lost responses.
+The [rebase guide](docs/NATIVE_PULL_REQUEST_REBASE.md) describes the endpoints,
+required scopes and bounded browser profile.
+
 Non-atomic receives now publish independent ref decisions in bounded groups:
 at most 64 decisions and 1 MiB of canonical decision-batch bytes share one
 exact-predecessor authority-head CAS. Every command retains its own seal,

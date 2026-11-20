@@ -41,7 +41,7 @@ export function isFastForwardCandidate(fields) {
     fields.merge_base === fields.target_tip && fields.source_tip !== fields.target_tip;
 }
 export function mergeMethod(value) {
-  if (!['merge-commit', 'squash'].includes(value)) fail('Choose merge-commit or squash explicitly.');
+  if (!['merge-commit', 'squash', 'rebase'].includes(value)) fail('Choose merge-commit, squash or rebase explicitly.');
   return value;
 }
 export function mergeProfile(value) {
@@ -72,6 +72,7 @@ export function makeBoundary(command, bundle, crypto) {
   fail('Could not allocate a collision-free upload boundary.');
 }
 export function preparationCommand(fields, metadata, method = 'merge-commit', profile = 'path-merge-v1') {
+  if (mergeMethod(method) === 'rebase') fail('Rebase requires its explicit upstream and whole-series preparation.');
   keys(fields, SUBJECT_FIELDS); keys(metadata, ['author', 'committer', 'timestamp', 'message']);
   const result = subject(fields);
   for (const name of ['author', 'committer']) {
@@ -127,6 +128,7 @@ export function preparationEnvelope(response) {
   return { metadata, bundle };
 }
 export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit', profile = 'path-merge-v1') {
+  if (mergeMethod(method) === 'rebase') fail('Rebase requires a complete series preparation response.');
   const { metadata, bundle } = preparationEnvelope(response);
   const selected = pinned(metadata, scope); noEffects(metadata);
   if (metadata.type !== 'merge_preparation' || !Array.isArray(metadata.conflicts)) fail('Unsupported merge preparation.');
@@ -190,6 +192,7 @@ function matchCommitParents(body, parents, algorithm) {
   if (index !== parents.length) fail('Reported parents differ from native candidate commit bytes.');
 }
 export async function inspectionReply(reply, artifact, crypto, checkSubject = matchSubject) {
+  if (candidateMethod(artifact) === 'rebase') fail('Rebase requires inspection of every rewritten commit.');
   const selected = pinned(reply, artifact.scope); noEffects(reply);
   if (reply.type !== 'candidate_inspection' || reply.all_changed_paths !== true || reply.binary_bodies_included !== false ||
       reply.comparison_profile !== 'full-tree-direct-path-myers-v1' || reply.context_lines !== 3) fail('Unsupported or incomplete candidate inspection.');

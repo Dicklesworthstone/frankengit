@@ -116,8 +116,29 @@ this witness with only a final-tree comparison.
 - Queue-required branches continue to refuse this direct path. Native queue
   candidate construction has no rebase profile in this slice.
 
-The delivered clients are the trusted-local CLI and native APIs. Existing HTTP,
-browser and MCP parsers do not advertise a new rebase-and-merge operation.
+The delivered clients include the trusted-local CLI/native APIs and the
+authenticated HTTP workflow. The PR browser offers **Rebase and merge** with an
+explicit upstream and empty-commit policy. It prepares the candidate, sends the
+entire bundle through the separate series inspector, verifies each returned
+native commit identity and parent chain, and displays every intermediate change.
+Original authors/messages are displayed from those exact commit bytes. Display
+clipping is explicit; the complete bounded inspection remains downloadable.
+Imported candidate receipts always undergo native reinspection, and an uncertain
+review or merge retains the original method, command, bundle and recovery key.
+
+HTTP uses `prepare-rebase` and `inspect-rebase` under
+`/api/v1/pulls/{number}/`. Both require Git-read and PR-read on the same token.
+The existing review and merge endpoints require their existing write grants and
+explicit `method=rebase`; merging also enforces the target-ref write ceiling.
+The [preparation](HTTP_CANDIDATE_PREPARATION_API.md),
+[inspection](HTTP_CANDIDATE_INSPECTION_API.md), and
+[review/merge](HTTP_REVIEW_MERGE_API.md) guides specify exact fields and receipts.
+Browser preparation supports the direct path profile; conflicts stop without a
+partial candidate or automatic change of method. The browser retains its
+16 MiB bundle and 8 MiB response limits, and uses one cumulative display budget
+across the series. This does not widen the service's loopback deployment or
+credential model.
+
 The dedicated rebase planner constructs the replay; publication validates the
 independently reviewed series, its content, topology and original ancestry.
 Publication does not claim to reproduce an arbitrary supplied author's replay
@@ -133,6 +154,8 @@ claim promotion. The original bead's remaining acceptance and ownership are
 unchanged.
 
 Regressions live in `fgit-admission/tests/native_rebase_merge.rs`,
-`fgit-node/tests/native_rebase_merge.rs`, the path-review verifier tests and CLI
-parser/receipt tests. They distinguish native validators, file-backed integration
-and client parsing; authored tests alone do not qualify an executed native gate.
+`fgit-node/tests/native_rebase_merge.rs`,
+`fgit-node/tests/native_pull_rebase_http.rs`, the path-review verifier tests,
+CLI parser/receipt tests and `tests/browser/pulls-rebase.test.mjs`. They
+distinguish native validators, file-backed TCP integration and browser
+protocol/DOM peers; authored tests alone do not qualify an executed native gate.

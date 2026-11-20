@@ -27,7 +27,7 @@ export function pullLabelsCommand(fields) {
 }
 export function collaborationCommand(action, fields) {
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unsupported review action.');
-  keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', ...(action === 'merge' ? ['required_reviewer', 'method'] : ['expected_version', 'reason'])]);
+  keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', 'method', ...(action === 'merge' ? ['required_reviewer'] : ['expected_version', 'reason'])]);
   const result = { ...subject(fields), merge_base: oid(fields.merge_base, fields.object_format), candidate_commit: oid(fields.candidate_commit, fields.object_format) };
   if (action === 'merge') {
     if (!Array.isArray(fields.required_reviewer) || !fields.required_reviewer.length || fields.required_reviewer.length > 32) fail('Select 1 through 32 explicit required reviewers.');
@@ -38,6 +38,10 @@ export function collaborationCommand(action, fields) {
     result.expected_version = integer(fields.expected_version, 'reviewer stream version', action === 'withdraw' ? 1 : 0, Number.MAX_SAFE_INTEGER - 1);
     result.reason = text(fields.reason, 4096, 'review reason');
     if (!result.reason.trim()) fail('An explicit nonempty review reason is required.');
+    if (Object.hasOwn(fields, 'method')) {
+      if (fields.method !== 'rebase') fail('Only rebase reviews use an explicit whole-series method.');
+      result.method = 'rebase';
+    }
   }
   form(result); return result;
 }
@@ -132,7 +136,11 @@ export function publication(reply, pending, status) {
       const expectedMethod = Object.hasOwn(fields, 'method') ? mergeMethod(fields.method) : 'merge-commit';
       if (mergeMethod(reply.method === undefined ? 'merge-commit' : reply.method) !== expectedMethod) fail('Terminal merge method changed.');
       if (!Array.isArray(reply.required_reviewers) || JSON.stringify(reply.required_reviewers) !== JSON.stringify(fields.required_reviewer)) fail('Terminal reviewer requirements changed.');
-    } else if (reply.required_reviewers !== null) fail('Review unexpectedly contains merge requirements.');
+    } else {
+      if (reply.required_reviewers !== null) fail('Review unexpectedly contains merge requirements.');
+      if ((fields.method === 'rebase' && reply.method !== 'rebase') ||
+          (fields.method !== 'rebase' && reply.method === 'rebase')) fail('Terminal review method changed.');
+    }
   }
   if (pending.observedTx && pending.observedTx !== reply.tx_id) fail('Transaction identity changed.');
   if (pending.observedPrincipal && pending.observedPrincipal !== reply.principal_id) fail('Recovery principal changed.');

@@ -47,6 +47,7 @@ export function renderCommentAnchor(doc, parent, anchor, status = null) {
 // The validated full report is retained for download; rendering has a separate
 // ceiling. Clipping never changes the comparison receipt or omits a path label.
 export function renderInspection(doc, parent, report) {
+  if (report.type === 'pull_request_rebase_inspection') return renderRebaseInspection(doc, parent, report);
   parent.replaceChildren();
   item(doc, parent, 'h3', `Inspected candidate ${report.candidate_commit}`);
   item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
@@ -56,6 +57,31 @@ export function renderInspection(doc, parent, report) {
     `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
   return renderComparison(doc, parent, report.comparison, 'inspection');
+}
+export function renderRebaseInspection(doc, parent, report) {
+  parent.replaceChildren();
+  item(doc, parent, 'h3', `Inspected rebased series ${report.candidate_commit}`);
+  item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
+    `Source: ${nativeRef(report.subject, 'source_ref')} · ${report.subject.source_tip}\nSource reference bytes: ${report.subject.source_ref_hex}\n` +
+    `Target: ${nativeRef(report.subject, 'target_ref')} · ${report.subject.target_tip}\nTarget reference bytes: ${report.subject.target_ref_hex}\n` +
+    `Upstream: ${report.merge_base}\n${report.commits.length} rewritten commits\n` +
+    `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
+  item(doc, parent, 'p', 'Every rewritten commit is inspected in order, including temporary changes absent from the final tree. Landing advances only the target; the source branch stays unchanged.');
+  const budget = { remaining: DISPLAY_BYTES, shownHunks: 0 }; let clipped = false;
+  for (const [index, step] of report.commits.entries()) {
+    const section = element(doc, 'section'); parent.append(section);
+    item(doc, section, 'h3', `Commit ${index + 1} of ${report.commits.length}: ${step.commit}`);
+    item(doc, section, 'pre', `Parent: ${step.parent}\nTree: ${step.tree}`);
+    const count = Math.min(step.commit_hex.length / 2, budget.remaining); budget.remaining -= count;
+    item(doc, section, 'pre', displayBytes(step.commit_hex.slice(0, count * 2)));
+    if (count * 2 !== step.commit_hex.length) { clipped = true; item(doc, section, 'p', 'Commit body clipped. Download the full inspection JSON.'); }
+    clipped = renderComparison(doc, section, step.comparison, 'inspection', null, budget).clipped || clipped;
+  }
+  item(doc, parent, 'h3', 'Original source compared with the final rebased candidate');
+  clipped = renderComparison(doc, parent, report.source_comparison, 'inspection', null, budget).clipped || clipped;
+  item(doc, parent, 'p', 'Read-only inspection. No objects staged, approval recorded, or merge authorized. Binary bodies are not included.');
+  if (clipped) item(doc, parent, 'p', 'DISPLAY CLIPPED: download the complete series inspection before completing review. Every commit and changed path is still identified above.');
+  return { clipped, shownHunks: budget.shownHunks, commentButtons: [] };
 }
 export function renderPullDiff(doc, parent, result, { onComment = null } = {}) {
   const report = result.reply;
@@ -70,8 +96,8 @@ export function renderPullDiff(doc, parent, result, { onComment = null } = {}) {
   item(doc, parent, 'p', 'Read-only, snapshot-bound source evidence. No candidate, approval, transaction or publication is created. Object identities are server-reported, not independently proven by these hunks.');
   return renderComparison(doc, parent, result.comparison, 'diff', onComment ? { result, onComment } : null);
 }
-function renderComparison(doc, parent, comparison, kind, comments = null) {
-  let remaining = DISPLAY_BYTES, shownHunks = 0, clipped = false;
+function renderComparison(doc, parent, comparison, kind, comments = null, budget = null) {
+  let remaining = budget?.remaining ?? DISPLAY_BYTES, shownHunks = budget?.shownHunks ?? 0, clipped = false;
   const commentButtons = [];
   if (!comparison.entries.length) item(doc, parent, 'p', kind === 'inspection'
     ? 'No changed paths in this exact candidate comparison. The commit identity is still significant.'
@@ -114,6 +140,7 @@ function renderComparison(doc, parent, comparison, kind, comments = null) {
     }
   }
   if (clipped) item(doc, parent, 'p', `DISPLAY CLIPPED: not every hunk or byte is shown. Download the full ${kind} JSON before completing review. All changed path labels remain above.`);
+  if (budget) { budget.remaining = remaining; budget.shownHunks = shownHunks; }
   return { clipped, shownHunks, commentButtons };
 }
 // The selected show() observation, not the editable metadata/candidate forms,
@@ -152,7 +179,7 @@ const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'conn
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
-  'prepare', 'candidate-method', 'candidate-profile', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
+  'prepare', 'candidate-method', 'candidate-profile', 'rebase-fields', 'rebase-upstream', 'rebase-empty', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
   'candidate-import', 'candidate-import-file', 'candidate-import-submit', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
   'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
 
@@ -162,6 +189,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   nodes['candidate-method'].value ||= 'merge-commit';
   nodes['candidate-profile'].value ||= 'path-merge-v1';
+  nodes['rebase-empty'].value ||= 'stop';
   function resetSearch() {
     for (const id of ['search-query', 'search-opened-by', 'search-source-ref', 'search-target-ref']) nodes[id].value = '';
     nodes['search-state'].value = 'all'; nodes['search-case-sensitive'].checked = false;
@@ -193,6 +221,12 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes.refresh.textContent = listPage?.query ? 'Refresh current search' : 'Refresh PR list';
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open';
+    const preparingRebase = nodes['candidate-method'].value === 'rebase';
+    nodes['rebase-fields'].hidden = !preparingRebase;
+    nodes['rebase-upstream'].required = preparingRebase;
+    nodes['rebase-upstream'].disabled = nodes['rebase-empty'].disabled = !preparingRebase || busy;
+    nodes['candidate-profile'].disabled = preparingRebase || busy;
+    for (const id of ['author', 'message']) { nodes[id].required = !preparingRebase; nodes[id].disabled = preparingRebase || busy; }
     nodes['reviews-load'].disabled = !connected || busy || !selected;
     nodes['comments-load'].disabled = !connected || busy || !selected;
     nodes['comments-limit'].disabled = !connected || busy || !selected;
@@ -222,11 +256,11 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
-    const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash';
+    const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash', rebase = method === 'rebase';
     const rawFastForward = inspectedFastForward && (Object.hasOwn(candidate.fields, 'source_ref_hex') || Object.hasOwn(candidate.fields, 'target_ref_hex'));
     if (rawFastForward) nodes['merge-stage'].disabled = true;
-    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : squash ? 'Reviewed squash' : 'Reviewed merge';
-    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
+    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : rebase ? 'Reviewed rebase' : squash ? 'Reviewed squash' : 'Reviewed merge';
+    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : rebase ? 'Prepare rebase merge — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
     nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
     nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
     nodes['required-reviewers'].required = !inspectedFastForward;
@@ -234,6 +268,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       ? 'This source-tip candidate can be reviewed with its exact reference bytes. Fast-forward publication through this form requires text branch references.'
       : inspectedFastForward
       ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
+      : rebase ? 'Publish the complete inspected series on the target while preserving the source branch. Required checks and path-specific reviews cover every rewritten commit, including temporary changes.'
       : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
         : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
     for (const id of ['candidate-download', 'inspection-download']) nodes[id].disabled = !candidate || busy;
@@ -666,18 +701,28 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     const data = selected.row.data;
     const fields = { object_format: selected.format, pull_request_version: selected.row.version, policy_epoch: number('policy-epoch', 1),
       ...subjectReferences(data), source_tip: data.source_tip, target_tip: data.target_tip };
-    const metadata = { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value };
     nodes.candidate.replaceChildren(); resolution.clear();
-    const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value, nodes['candidate-profile'].value); guard();
+    const rebasing = nodes['candidate-method'].value === 'rebase';
+    const result = rebasing
+      ? await client.prepareRebaseAndInspect(selected.row.number, fields, { upstream: nodes['rebase-upstream'].value,
+        committer: nodes.committer.value, timestamp: number('timestamp'), empty: nodes['rebase-empty'].value })
+      : await client.prepareAndInspect(selected.row.number, fields,
+        { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value },
+        nodes['candidate-method'].value, nodes['candidate-profile'].value); guard();
     if (result.inspection) {
       const rendered = renderInspection(doc, nodes.candidate, result.inspection);
       status(`Candidate prepared and inspected, without publication.${rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''}`);
     } else {
       item(doc, nodes.candidate, 'h3', `Preparation: ${result.metadata.state}`);
+      if (rebasing) item(doc, nodes.candidate, 'pre', `Stopped at original commit ${result.metadata.stopped_commit}. No candidate bundle was produced.`);
       for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
       if (result.metadata.state === 'conflicted' && client.conflict) {
         resolution.show(result.metadata);
         status(`Choose every conflict explicitly below. Resolution constructs and inspects a new ${result.metadata.method === 'squash' ? 'squash' : 'merge'} candidate; it does not record approval or publish.`);
+      } else if (rebasing) {
+        status(result.metadata.state === 'became_empty'
+          ? 'Rebase stopped at a newly empty commit. Choose stop, drop or keep explicitly and prepare again. No approval or publication was produced.'
+          : 'Rebase stopped at a conflict. Revise the source before preparing again; no partial series can be reviewed or published.');
       } else if (result.metadata.state === 'conflicted') {
         status('This profile produced conflicts. Revise the source or explicitly prepare with another profile; direct-path resolution is unavailable for these conflict coordinates.');
       } else status('Already up to date. No candidate, transaction or approval was produced.');
@@ -692,6 +737,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   for (const id of ['metadata', 'prepare']) nodes[id].addEventListener('input', invalidateCandidate);
   on('candidate-method', 'change', invalidateCandidate);
   on('candidate-profile', 'change', invalidateCandidate);
+  on('rebase-empty', 'change', invalidateCandidate);
   on('candidate-download', 'click', () => run('export', async () => { downloadText('frankengit-candidate.json', client.exportCandidate()); status('Candidate receipt exported without credentials. Its bytes must be inspected before another reviewer can act.'); }));
   on('inspection-download', 'click', () => run('export', async () => {
     const candidate = client.candidate; if (!candidate) fail('No inspected candidate.');
@@ -713,7 +759,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     } else {
       const method = candidateMethod(client.candidate), reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
       await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
-      status(`${method === 'squash' ? 'Squash' : 'Merge'} request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.`);
+      status(`${method === 'rebase' ? 'Rebase merge' : method === 'squash' ? 'Squash' : 'Merge'} request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.`);
     }
   }));
   nodes.confirm.addEventListener('change', controls);

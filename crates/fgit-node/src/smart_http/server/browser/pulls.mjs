@@ -2,6 +2,7 @@
 import { Transport, integer, principal, snapshot, listReply, pullSearchQuery, pullSearchParameters, pullSearchReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
   hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record, pullLabels, pullLabelState, pullLabelsReply } from './pulls-core.mjs';
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, candidateMethod, mergeMethod, PREPARATION_LIMIT } from './pulls-candidate.mjs';
+import { rebasePreparationCommand, rebasePreparationReply, rebaseInspectionReply } from './pulls-rebase.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
 import { commentsReply } from './pulls-comments.mjs';
@@ -273,6 +274,20 @@ export class PullClient {
     const inspected = await this.#inspect(result.artifact, epoch, serial);
     return { metadata: result.metadata, inspection: inspected.reply };
   }
+  async prepareRebaseAndInspect(number, fields, metadata) {
+    const scope = this.#selected(); integer(number, 'PR number', 1);
+    const command = rebasePreparationCommand(fields, metadata);
+    if (scope.format !== command.object_format) fail('Rebase hash domain differs from the repository.');
+    this.invalidateCandidate(); const serial = this.#candidateSerial, epoch = this.#transport.epoch;
+    const response = await this.#transport.request(`pulls/${number}/prepare-rebase`, {
+      method: 'POST', body: form(command), statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
+    });
+    const result = await rebasePreparationReply(response, number, command, scope, this.#transport.crypto);
+    this.#check(epoch, serial);
+    if (!result.artifact) return { metadata: result.metadata, inspection: null };
+    const inspected = await this.#inspect(result.artifact, epoch, serial);
+    return { metadata: result.metadata, inspection: inspected.reply };
+  }
   async resolveAndInspect(choices) {
     const scope = this.#selected(), conflict = this.#conflict;
     if (!conflict || Object.keys(scope).some(key => scope[key] !== conflict.scope[key])) fail('Prepare conflicts in this repository before resolving them.');
@@ -303,10 +318,11 @@ export class PullClient {
     this.#check(epoch, serial);
     const command = form(artifact.fields);
     const upload = multipart(command, artifact.bundle, makeBoundary(command, artifact.bundle, this.#transport.crypto));
-    const response = await this.#transport.request(`pulls/${artifact.number}/inspect`, {
+    const rebase = candidateMethod(artifact) === 'rebase';
+    const response = await this.#transport.request(`pulls/${artifact.number}/${rebase ? 'inspect-rebase' : 'inspect'}`, {
       method: 'POST', body: new Blob([upload.bytes]), contentType: upload.contentType,
     });
-    const checked = await inspectionReply(response.value, artifact, this.#transport.crypto);
+    const checked = await (rebase ? rebaseInspectionReply : inspectionReply)(response.value, artifact, this.#transport.crypto);
     this.#check(epoch, serial);
     this.#artifact = { ...artifact, inspection: copy(checked.reply) };
     return checked;
@@ -357,7 +373,9 @@ export class PullClient {
   async stageReview(action, version, reason) {
     if (!['approve', 'request-changes', 'withdraw'].includes(action) || !this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a review.');
     const { number, fields, bundle } = this.#artifact;
-    return this.#stage(number, action, { ...fields, expected_version: version, reason }, action === 'withdraw' ? null : bundle);
+    const method = candidateMethod(this.#artifact);
+    return this.#stage(number, action, { ...fields, expected_version: version, reason,
+      ...(method === 'rebase' ? { method } : {}) }, action === 'withdraw' ? null : bundle);
   }
   async stageMerge(requiredReviewers) {
     if (!this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a merge.');
@@ -366,7 +384,8 @@ export class PullClient {
     if (method === 'fast-forward-only') fail('An existing source-tip candidate requires explicit fast-forward publication.');
     // Caller-selected reviewers are explicit requirements, not inferred votes.
     // The node independently enforces opener/submitter and current-policy gates.
-    return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers, ...(method === 'squash' ? { method } : {}) }, bundle);
+    return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers,
+      ...(method === 'squash' || method === 'rebase' ? { method } : {}) }, bundle);
   }
   async stageInspectedFastForward() {
     if (!this.connected || !this.#artifact) fail('Inspect the exact source-tip candidate before preparing a fast-forward.');
