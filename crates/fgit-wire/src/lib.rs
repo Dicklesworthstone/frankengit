@@ -12,7 +12,7 @@
 //!
 //! Matched here: Git pkt-line framing (including flush, delimiter, and
 //! response-end), bounded v0/v1 advertisements and fetch negotiation,
-//! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs` and `fetch` command
+//! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs`, `fetch` and `object-info` command
 //! sections, native SHA-1/SHA-256 object-ID widths, shallow/deepen and the
 //! documented object-filter forms, and side-band-64k packet multiplexing.
 //! V0/v1 wants must be advertised unless the server explicitly enables
@@ -25,7 +25,8 @@
 //! and publication remain outside this crate. Explicitly unsupported, and
 //! refused rather than delegated, are unknown v2 commands/capabilities,
 //! unbounded negotiation sets, malformed `deepen` and filter grammar,
-//! object-info/bundle-uri/server-option commands. The [`smart_http`] module
+//! bundle-uri/server-option commands. `object-info` supports the pinned Git
+//! 2.54 size profile over the same authorized object view as fetch. The [`smart_http`] module
 //! supplies bounded HTTP discovery and RPC framing, not authentication or
 //! sockets. A runtime adapter owns socket cancellation, while a pack
 //! implementation owns pack bytes and the eventual thin-pack or delta
@@ -44,6 +45,7 @@ use request_ids::RequestObjectIds;
 pub mod closure;
 mod cutoff_ref;
 mod filter_syntax;
+mod object_info;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
 mod request_ids;
@@ -78,7 +80,7 @@ pub struct WireLimits {
     pub max_capabilities: usize,
     /// Maximum bytes in one capability token.
     pub max_capability_bytes: usize,
-    /// Maximum `want` object IDs in one fetch request.
+    /// Maximum `want` IDs per fetch, or `oid` arguments per object-info query.
     pub max_wants: usize,
     /// Maximum `have` object IDs in one fetch request.
     pub max_haves: usize,
@@ -1309,6 +1311,24 @@ pub trait UploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Whether this view supplies authorized object-size metadata. A transport
+    /// must not advertise `object-info` from parser support alone.
+    fn supports_object_info(&self) -> bool {
+        false
+    }
+    /// Check the request's live scope without looking up any object. The wire
+    /// machine calls this for hidden/unknown IDs and attribute-free requests
+    /// too, so neither case bypasses cancellation or an expired deadline.
+    fn object_info_checkpoint(&self) -> Result<(), WireError> {
+        Ok(())
+    }
+    /// Exact uncompressed native object size at this immutable authorized view.
+    /// The wire machine checks `contains_want` before this metadata lookup.
+    /// Hidden and unknown objects both produce the protocol's missing value;
+    /// storage/cache presence alone must never authorize disclosure.
+    fn object_info_size(&self, _oid: AnyGitOid) -> Result<Option<u64>, WireError> {
+        Err(WireError::PackSourceRefused)
+    }
     /// Whether this immutable repository view can resolve actual shallow updates.
     /// A transport must not advertise shallow serving from parser support alone.
     fn supports_shallow(&self) -> bool {
@@ -1457,6 +1477,13 @@ pub enum WireEvent {
         peel: bool,
         /// Whether the client requested unborn-head attributes.
         unborn: bool,
+    },
+    /// A complete protocol-v2 metadata query, with no pack-construction handoff.
+    ObjectInfo {
+        /// Number of OID arguments, including repetitions, in the response.
+        object_count: usize,
+        /// Whether the response includes object sizes.
+        size: bool,
     },
     /// A common object was observed during negotiation.
     Common(AnyGitOid),
@@ -2509,6 +2536,7 @@ fn line_packet(line: impl Into<Vec<u8>>) -> Packet {
 enum V2Command {
     LsRefs,
     Fetch,
+    ObjectInfo,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum V2State {
@@ -2537,7 +2565,7 @@ impl LsRefsOptions {
     }
 }
 
-/// SANS-I/O protocol-v2 upload-pack command machine for `ls-refs` and `fetch`.
+/// SANS-I/O protocol-v2 machine for `ls-refs`, `fetch` and `object-info`.
 #[derive(Clone, Debug)]
 pub struct V2UploadPack {
     limits: WireLimits,
@@ -2559,6 +2587,7 @@ pub struct V2UploadPack {
     automatic_shallow_updates: bool,
     framing: RequestFraming,
     wait_for_done: bool,
+    object_info: object_info::ObjectInfoRequest,
 }
 
 impl V2UploadPack {
@@ -2610,6 +2639,7 @@ impl V2UploadPack {
             automatic_shallow_updates: false,
             framing: RequestFraming::Connection,
             wait_for_done: false,
+            object_info: object_info::ObjectInfoRequest::default(),
         })
     }
 
@@ -2694,6 +2724,7 @@ impl V2UploadPack {
         let command = match command {
             b"ls-refs" => V2Command::LsRefs,
             b"fetch" => V2Command::Fetch,
+            b"object-info" => V2Command::ObjectInfo,
             _ => {
                 return Err(WireError::UnsupportedCommand {
                     command: command.to_vec(),
@@ -2703,6 +2734,7 @@ impl V2UploadPack {
         let capability: &[u8] = match command {
             V2Command::LsRefs => b"ls-refs",
             V2Command::Fetch => b"fetch",
+            V2Command::ObjectInfo => b"object-info",
         };
         if !self.server_capabilities.contains(capability) {
             return Err(WireError::UnsupportedCommand {
@@ -2755,17 +2787,34 @@ impl V2UploadPack {
                 match command {
                     V2Command::LsRefs => self.accept_ls_refs_argument(line),
                     V2Command::Fetch => self.accept_fetch_argument(line, repository),
+                    V2Command::ObjectInfo => {
+                        self.object_info
+                            .accept(line, repository.object_format(), &self.limits)?;
+                        Ok(Transition::empty())
+                    }
                 }
             }
             Packet::Flush => match command {
                 V2Command::LsRefs => self.finish_ls_refs(repository),
                 V2Command::Fetch => self.finish_fetch(repository),
+                V2Command::ObjectInfo => self.finish_object_info(repository),
             },
             Packet::Delimiter | Packet::ResponseEnd => Err(WireError::IllegalTransition {
                 state: "v2 argument phase",
                 packet: packet_name(packet),
             }),
         }
+    }
+
+    fn finish_object_info(
+        &mut self,
+        repository: &impl UploadPackRepository,
+    ) -> Result<Transition, WireError> {
+        let response = self.object_info.finish(repository, &self.limits)?;
+        self.object_info = object_info::ObjectInfoRequest::default();
+        self.request_capabilities = Capabilities::default();
+        self.state = V2State::AwaitCommand;
+        Ok(response)
     }
 
     fn accept_ls_refs_argument(&mut self, line: &[u8]) -> Result<Transition, WireError> {
@@ -3181,5 +3230,6 @@ const fn command_name(command: V2Command) -> &'static [u8] {
     match command {
         V2Command::LsRefs => b"ls-refs",
         V2Command::Fetch => b"fetch",
+        V2Command::ObjectInfo => b"object-info",
     }
 }

@@ -276,6 +276,23 @@ impl<R: ?Sized + UploadPackRepository> UploadPackRepository for VisibleUploadPac
         self.disclosable(oid) && self.inner.is_common(oid)
     }
 
+    fn supports_object_info(&self) -> bool {
+        self.inner.supports_object_info()
+    }
+
+    fn object_info_checkpoint(&self) -> Result<(), WireError> {
+        self.inner.object_info_checkpoint()
+    }
+
+    fn object_info_size(&self, oid: AnyGitOid) -> Result<Option<u64>, WireError> {
+        self.object_info_checkpoint()?;
+        if self.contains_want(oid) {
+            self.inner.object_info_size(oid)
+        } else {
+            Ok(None)
+        }
+    }
+
     fn resolve_ref(&self, name: &[u8]) -> Option<AnyGitOid> {
         self.visible_ref(name).map(|reference| reference.oid)
     }
