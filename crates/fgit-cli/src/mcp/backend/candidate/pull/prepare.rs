@@ -393,7 +393,7 @@ pub(super) fn render_with_publication(
     Ok(result)
 }
 
-fn valid_path(path: &[u8]) -> bool {
+pub(super) fn valid_path(path: &[u8]) -> bool {
     path.len() <= 4096
         && !path.contains(&0)
         && (path.is_empty()
@@ -401,7 +401,10 @@ fn valid_path(path: &[u8]) -> bool {
                 .split(|b| *b == b'/')
                 .all(|p| !p.is_empty() && p != b"." && p != b".."))
 }
-fn entry(entry: Option<&MergeEntry>, format: GitHashAlgorithm) -> Result<Value, ToolError> {
+pub(super) fn entry(
+    entry: Option<&MergeEntry>,
+    format: GitHashAlgorithm,
+) -> Result<Value, ToolError> {
     let Some(entry) = entry else {
         return Ok(Value::Null);
     };

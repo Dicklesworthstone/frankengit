@@ -7,7 +7,7 @@ use fgit_forge::review::{ComparisonMode, ReviewOptions};
 use fgit_node::NativeMergeMethod;
 use std::collections::BTreeSet;
 
-const LIMITS: &[(&str, usize, usize, usize)] = &[
+pub(super) const LIMITS: &[(&str, usize, usize, usize)] = &[
     ("context_lines", 3, 0, 20),
     ("max_changes", 64, 1, 64),
     ("max_blob_bytes", 1024 * 1024, 1, 1024 * 1024),
@@ -22,7 +22,7 @@ struct Input {
     options: ReviewOptions,
     style: Option<MergeCommitStyle>,
 }
-fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
+pub(super) fn bound(args: &Object, name: &str) -> Result<usize, ToolError> {
     let &(_, default, minimum, maximum) = LIMITS
         .iter()
         .find(|limit| limit.0 == name)

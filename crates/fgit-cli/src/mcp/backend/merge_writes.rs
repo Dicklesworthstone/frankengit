@@ -54,6 +54,7 @@ fn parse(
         None => NativeMergeMethod::MergeCommit,
         Some(Value::String(value)) if value == "merge-commit" => NativeMergeMethod::MergeCommit,
         Some(Value::String(value)) if value == "squash" => NativeMergeMethod::Squash,
+        Some(Value::String(value)) if value == "rebase" => NativeMergeMethod::Rebase,
         _ => return Err(ToolError::invalid("invalid_merge_method")),
     };
     let (subject, candidate) = candidate::subject(args, format)?;
@@ -309,7 +310,7 @@ fn schema() -> Value {
     let mut properties = candidate::properties();
     properties.insert("method".into(), object([
         ("type", text("string")), ("default", text("merge-commit")),
-        ("enum", Value::Array(vec![text("merge-commit"), text("squash")])),
+        ("enum", Value::Array(vec![text("merge-commit"), text("squash"), text("rebase")])),
         ("description", text("Exact publication method, sealed into retry identity. Must match the inspected candidate parent shape.")),
     ]));
     properties.insert("required_reviewers".into(), object([("type", text("array")),
@@ -521,6 +522,7 @@ mod tests {
             for (name, method) in [
                 ("merge-commit", NativeMergeMethod::MergeCommit),
                 ("squash", NativeMergeMethod::Squash),
+                ("rebase", NativeMergeMethod::Rebase),
             ] {
                 let mut input = good.clone();
                 input.insert("method".into(), text(name));
@@ -538,7 +540,7 @@ mod tests {
                 text(""),
                 text("Squash"),
                 text("fast-forward-only"),
-                text("rebase"),
+                text("Rebase"),
             ] {
                 let mut input = good.clone();
                 input.insert("method".into(), value);

@@ -139,6 +139,18 @@ partial candidate or automatic change of method. The browser retains its
 across the series. This does not widen the service's loopback deployment or
 credential model.
 
+MCP clients use `frankengit_source_candidate` with
+`operation: "prepare_pull_rebase"` or `"inspect_pull_rebase"`. These require
+ordinary source-read and PR-read grants together and return separate explicit
+inspection, review and publication arguments. The existing review and merge
+tools accept `method: "rebase"` with their existing write grants; preparation
+does not grant either permission. The MCP profile deliberately caps bundles
+at 24 KiB and applies its smaller aggregate reply and inspection limits. See
+[MCP preparation](MCP_PULL_CANDIDATES.md),
+[MCP inspection](MCP_PULL_INSPECTION.md), and
+[MCP writes](MCP_PULL_REQUEST_WRITES.md) for schemas and recovery behavior.
+Sponsored read-only agent credentials cannot invoke these operations.
+
 The dedicated rebase planner constructs the replay; publication validates the
 independently reviewed series, its content, topology and original ancestry.
 Publication does not claim to reproduce an arbitrary supplied author's replay

@@ -2,6 +2,7 @@ use super::*;
 mod fast_forward;
 mod inspection;
 mod queue;
+mod rebase;
 mod resolution;
 mod squash;
 mod support;
